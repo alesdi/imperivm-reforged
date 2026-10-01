@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imperivm-reforged"
+version = "0.1.0"
+description = "Tools for reading the data of Imperivm: Great Battles of Rome"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+dependencies = []
+
+# The README tells contributors to run `pip install .[dev]` for the test suite.
+# It said so before this table existed, and the install failed silently enough
+# that the corpus tests simply did not run.
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-xdist>=3"]
+
+[project.urls]
+Homepage = "https://github.com/alesdi/imperivm-reforged"
+
+[project.scripts]
+impk      = "imperivm.cli.impk:main"
+imsprite  = "imperivm.cli.imsprite:main"
+imfs      = "imperivm.cli.imfs:main"
+imterrain = "imperivm.cli.imterrain:main"
+imfont    = "imperivm.cli.imfont:main"
+immask    = "imperivm.cli.immask:main"
+imview    = "imperivm.cli.imview:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

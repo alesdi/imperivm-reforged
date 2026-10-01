@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Imperivm Reforged — asset viewer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%2314161a'/%3E%3Cpath d='M4 3h2v10H4zM7 3h5v2H9v3h3v2H9v3H7z' fill='%23e0a54a'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">IMPERIVM</span>
+    <span class="brand-sub">asset viewer</span>
+  </div>
+  <div class="topbar-meta" id="export-meta">no export loaded</div>
+  <div class="topbar-actions">
+    <label class="field field-search">
+      <span class="field-label">Search</span>
+      <input type="search" id="search" placeholder="name, path or source&hellip;" autocomplete="off" spellcheck="false">
+    </label>
+    <button type="button" id="help-toggle" class="btn" aria-expanded="false" aria-controls="help-panel">Keys</button>
+  </div>
+</header>
+
+<div id="help-panel" class="help-panel" hidden>
+  <dl>
+    <div><dt>/</dt><dd>focus search</dd></div>
+    <div><dt>Space</dt><dd>play / pause</dd></div>
+    <div><dt>&larr; &rarr;</dt><dd>facing (column)</dd></div>
+    <div><dt>&uarr; &darr;</dt><dd>frame (row)</dd></div>
+    <div><dt>j / k</dt><dd>next / previous asset</dd></div>
+    <div><dt>+ / -</dt><dd>zoom</dd></div>
+    <div><dt>Esc</dt><dd>leave search</dd></div>
+  </dl>
+</div>
+
+<main class="layout">
+
+  <nav class="sidebar" aria-label="Asset index">
+    <div class="tabs" role="tablist" id="section-tabs">
+      <button type="button" role="tab" class="tab" data-section="sprites" aria-selected="true">Sprites <span class="tab-count" data-count="sprites">0</span></button>
+      <button type="button" role="tab" class="tab" data-section="terrain" aria-selected="false">Terrain <span class="tab-count" data-count="terrain">0</span></button>
+      <button type="button" role="tab" class="tab" data-section="fonts" aria-selected="false">Fonts <span class="tab-count" data-count="fonts">0</span></button>
+      <button type="button" role="tab" class="tab" data-section="masks" aria-selected="false">Masks <span class="tab-count" data-count="masks">0</span></button>
+    </div>
+
+    <div class="filters" id="filters">
+      <fieldset class="filter-group" id="faction-filter">
+        <legend>Faction</legend>
+        <div class="chips" id="faction-chips"></div>
+      </fieldset>
+      <fieldset class="filter-group" id="kind-filter">
+        <legend>Kind</legend>
+        <div class="chips" id="kind-chips"></div>
+      </fieldset>
+      <fieldset class="filter-group" id="flag-filter">
+        <legend>Flags</legend>
+        <div class="chips" id="flag-chips"></div>
+      </fieldset>
+    </div>
+
+    <div class="list-head">
+      <span id="list-summary">0 items</span>
+      <button type="button" class="btn btn-quiet" id="clear-filters">Reset</button>
+    </div>
+    <ul class="asset-list" id="asset-list" role="listbox" aria-label="Assets" tabindex="-1"></ul>
+    <button type="button" class="btn btn-more" id="load-more" hidden>Show more</button>
+  </nav>
+
+  <section class="detail" id="detail" aria-live="polite">
+    <div class="placeholder" id="placeholder">
+      <h1>Imperivm Reforged asset viewer</h1>
+      <p>Select an asset from the index on the left.</p>
+      <p class="placeholder-note" id="capability-note"></p>
+    </div>
+  </section>
+
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<script id="imview-data" type="application/json">{"assetBase":".","manifest":null,"inlineAssets":{},"exportPath":"","generated":""}</script>
+<script src="pngdec.js"></script>
+<script src="tables.js"></script>
+<script src="viewer.js"></script>
+</body>
+</html>

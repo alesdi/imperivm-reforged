@@ -1,0 +1,51 @@
+# What can be checked without the game. The game's data never reaches CI, so
+# everything that reads an installation (the corpus tests, the sweeps,
+# `verify.py --full`) stays with contributors who own it; those tests skip
+# cleanly here. See CONTRIBUTING.md.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core:
+    name: core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Configure the dependency-free core
+        run: cmake -S . -B build-core -G Ninja -DIMPERIVM_BUILD_APP=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build-core
+      - name: Core tests
+        run: ./build-core/engine/tests/core_tests
+      - name: Net tests
+        run: ./build-core/engine/net/net_tests
+      - name: Sound tests
+        run: ./build-core/engine/sound/sound_tests
+      - name: Core boundary
+        run: python3 tools/check_core_boundary.py
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install ".[dev]"
+      - name: Tests (the corpus half skips without an installation)
+        run: python -m pytest tests -q -n auto --dist loadgroup

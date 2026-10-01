@@ -1,0 +1,53 @@
+# Never commit game data — this project ships no assets.
+*.pak
+*.mmp
+*.bfhp
+*.BFHP
+*.vq
+*.VQ
+*.apf
+*.APF
+*.wav
+*.WAV
+*.ogg
+*.bmp
+*.BMP
+*.exe
+# Extracted game assets, anchored to the repository root. **Not** anchored, this
+# also swallowed `engine/gamedata/`, the installation-loading library -- git
+# added nothing, `git commit` reported success, and the pushed tree was missing
+# `MapContainer` and `Installation` entirely.
+/gamedata/
+/extracted/
+
+# Reverse-engineering *output*. `docs/legal.md` rule 2: the tools in `tools/re/`
+# read the player's own executable and what they print stays on their machine.
+# The tools are committed; nothing they emit ever is.
+*.lst
+*.disasm
+*.orig.cpp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build
+build/
+dist/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Packaging
+*.egg-info/
+corpus.log
+build/
+build-*/
+.claude/
+
+# Verdicts tools/check_fixtures.py keeps between runs, per file content.
+/.cache/
