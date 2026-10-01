@@ -7,7 +7,9 @@
 // `continue`s, a host call that writes through an argument -- because those
 // shapes are what the corpus is made of.
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 

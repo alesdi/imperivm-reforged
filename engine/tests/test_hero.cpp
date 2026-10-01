@@ -25,6 +25,7 @@
 // five-second cadence and draws from the world RNG, so it is the one thing here
 // that could care how the turn length was negotiated. It must not.
 
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <vector>

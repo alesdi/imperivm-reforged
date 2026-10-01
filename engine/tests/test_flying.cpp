@@ -1350,9 +1350,10 @@ TEST(flying_an_eagle_steps_its_class_speed_and_arrives) {
   const ObjectId id = b.spawn(pt(32, 128), b.eagle_class, NativeClass::flying_unit);
   const auto obj = FlightBench::obj(id);
   const auto number = [&](const char* name, std::vector<script::Value> args) {
-    return b.call(script::CallKind::member, name, static_cast<std::uint16_t>(args.size() - 1),
-                  std::move(args))
-        .value.as_integer();
+    // The arity is taken before the call: a call's arguments are evaluated in
+    // no fixed order, and GCC moves `args` away before it is measured.
+    const auto arity = static_cast<std::uint16_t>(args.size() - 1);
+    return b.call(script::CallKind::member, name, arity, std::move(args)).value.as_integer();
   };
 
   // Never walked, and `.speed` is still the class's -- not the parent's 50.
