@@ -26,6 +26,7 @@
 //      they are absent from `data.pak`; a test that only called them through
 //      C++ would not notice if the arity were wrong.
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <span>
