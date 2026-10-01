@@ -1,5 +1,7 @@
 # Imperivm Reforged
 
+<img width="1014" height="579" alt="d9dfa74ac4bf82bf7eb06a58eaec75c1accbcff5eaa740256793354b2230bb66" src="https://github.com/user-attachments/assets/75a0d4e5-dc9e-4d08-b23d-2558a12448c8" />
+
 An open source reimplementation of the game engine behind **Imperivm: Great Battles of Rome**
 (Haemimont Games' `HMMSYS` engine), in the spirit of
 [Julius](https://github.com/bvschaik/julius) for Caesar III.
