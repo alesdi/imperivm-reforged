@@ -185,3 +185,90 @@ def test_an_open_gate_draws_its_portcullis_raised(app, game_dir):
     # And some gate was seen on its way up, not only standing open.
     assert any(0 < rise < 70 for rise in seen), sorted(seen)
 
+
+#: Every layer line with what it takes to put its canvas origin back, both axes.
+ORIGIN = re.compile(
+    r"^id (\d+) sheet -?\d+ grid \d+x\d+ .* lt (-?\d+),(-?\d+) off (-?\d+),(-?\d+) "
+    r"layer \d+ z (-?\d+) at (-?\d+),(-?\d+)$",
+    re.MULTILINE,
+)
+#: The ring of a selected object, centre in window pixels (`world_view.cpp`).
+RING = re.compile(r"^ring id (\d+) at (-?\d+),(-?\d+)$", re.MULTILINE)
+#: The first of Balcans' fifteen eagles, which `initial_z` puts in the air at
+#: spawn and `EAGLE_MOVE.VS` keeps there.
+EAGLE = "class:Eagle@14"
+
+
+def eagle_run(app: Path, game_dir: Path, steps: list[str], frames: int) -> tuple[int, str]:
+    """A traced run of Balcans that looks at the eagle on turn 20; its id and output."""
+    done = subprocess.run(
+        [str(app), "--game", str(game_dir), "--map", BALCANS, "--play", "--no-fog",
+         "--width", "1200", "--height", "900", "--frames", str(frames),
+         "--input", ";".join(["turn:20", *steps])],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "IMPERIVM_DEBUG_VIEW": "1"},
+    )
+    assert done.returncode == 0, (done.stdout + done.stderr)[-2000:]
+    looked = re.search(r"^view:\s+object (\d+) at", done.stdout, re.MULTILINE)
+    assert looked, done.stdout[-2000:]
+    return int(looked.group(1)), done.stdout
+
+
+def layer_origins(out: str, object_id: int, depths: tuple[int, ...]) -> list[tuple[int, int]]:
+    """Where one object's layers at these depths had their canvas origin, in order."""
+    origins = []
+    for match in ORIGIN.finditer(out):
+        found, left, top, off_x, off_y, depth, x, y = map(int, match.groups())
+        if found == object_id and depth in depths:
+            origins.append((x - off_x - left, y - off_y - top))
+    return origins
+
+
+def test_an_airborne_birds_ring_is_drawn_under_its_body(app, game_dir):
+    """Playtest report #10's residue: a flying bird's ring lay on the ground.
+
+    `gbr.exe`'s flying visual update (0x0051b240) stores the body's lift in
+    the visual's own `+0x600` pair as well as in each body layer, and the
+    ring's draw (0x0062b5b0) adds that pair to the anchor, so the ring rises
+    with the bird while the shadow stays down. Every layer of one object is
+    drawn from one canvas origin -- the body's lifted -- so the ring's centre
+    is the body layer's origin, and the shadow's is a hundred pixels or more
+    below it. Before the fix the ring sat on the shadow's.
+    """
+    eagle, out = eagle_run(app, game_dir, [
+        "key:P", "wait:2", f"look:{EAGLE}", "wait:3", f"select:{EAGLE}", "wait:3",
+    ], 400)
+    rings = [(int(x), int(y)) for i, x, y in RING.findall(out) if int(i) == eagle]
+    # The crow's body is at depth 1000 and the eagle's at 1050; both lift.
+    bodies = layer_origins(out, eagle, (1000, 1050))
+    shadows = layer_origins(out, eagle, (800,))
+    assert rings and bodies and shadows, out[-2000:]
+    body, shadow = bodies[-1], shadows[-1]
+    # Up in the air, and the ring with the body, not on the ground below it.
+    assert shadow[1] - body[1] > 60, (body, shadow)
+    assert rings[-1] == body, (rings[-1], body, shadow)
+
+
+def test_a_bird_flies_between_the_ends_of_its_animation(app, game_dir):
+    """Playtest report #10's residue: birds stepped one flight segment at a time.
+
+    `Flying::PlayAnim` hands the animation its destination, and the
+    original's visual (0x0053f4c0 -> 0x0062a0e0) runs its anchor across the
+    screen from the leg's start to its end over the animation's length; the
+    simulation here moves the object to the end at once
+    (`sim::flight_progress`). Followed frame by frame, the eagle's shadow --
+    its anchor, which nothing lifts -- now moves a few pixels on each turn
+    instead of standing still for a whole animation and then jumping the
+    length of its leg.
+    """
+    eagle, out = eagle_run(app, game_dir, [f"look:{EAGLE}", "wait:6"], 700)
+    # The look moves the camera, which moves everything; a few frames on, the
+    # view stands still.
+    anchors = layer_origins(out, eagle, (800,))[10:]
+    assert len(anchors) > 200, len(anchors)
+    steps = [max(abs(a[0] - b[0]), abs(a[1] - b[1])) for a, b in zip(anchors, anchors[1:])]
+    moving = [step for step in steps if step]
+    # A turn's worth at a time: ten to fifteen pixels a turn, never a leg.
+    assert len(moving) > 30, moving
+    assert max(steps) < 30, sorted(steps)[-10:]
+

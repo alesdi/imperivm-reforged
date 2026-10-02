@@ -229,7 +229,18 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
   // only what `.pos` answers *between* two calls, and `CROW_MOVE.VS`'s
   // `while (.DistTo(pt) > 100)` is why the alternative is not an option: a bird
   // that never arrives never leaves that loop.
+  //
+  // What it arrives *along* is the view's: the leg is kept beside the object
+  // for the draw, which runs the bird from one end to the other over the
+  // animation (`flight_progress`, `sim/flying.hpp`). Presentation, and written
+  // only once an animation is playing to carry it.
+  const Point from = world->resolve_position(id);
   (void)world->set_position(id, destination);
+  if (playing_now) {
+    if (WorldObject* moved = world->find(id); moved != nullptr) {
+      moved->flight = FlightLeg{from, world->resolve_position(id), true};
+    }
+  }
 
   HostOutcome out;
   out.status = script::HostStatus::suspend;
