@@ -630,18 +630,22 @@ TEST(flying_lift_raises_a_birds_body_by_its_altitude_above_the_ground) {
   b.call(script::CallKind::member, "PlayAnim", 3,
          {FlightBench::obj(id), script::Value::integer(16), b.point(pt(48, 16)),
           script::Value::integer(80 + ground)});
-  // Mid-climb: what `Flying::z` says, less the ground under the bird.
+  // Mid-climb: what `Flying::z` says, less the ground under the bird -- where
+  // it is drawn along its leg (0x0051b272 asks vtable `+0x40`), which on this
+  // slope is not the ground at the leg's end.
   b.world.advance_turns(1);
   const WorldObject* slot = b.world.find(id);
-  const std::int32_t under = terrain_height(b.world, b.world.resolve_position(id));
+  const std::int32_t under = terrain_height(b.world, flying_position(b.world, *slot));
+  CHECK(under != terrain_height(b.world, b.world.resolve_position(id)));
   const std::int32_t mid = flying_lift(b.world, *slot);
   CHECK(mid == flying_z(b.world, *slot) - under);
   CHECK(mid > 0);
   CHECK(mid < 80 + ground - under);
-  // At the top of the climb.
+  // At the top of the climb, which is the end of the leg.
   b.world.advance_turns(4);
   slot = b.world.find(id);
-  CHECK(flying_lift(b.world, *slot) == 80 + ground - under);
+  const std::int32_t arrived = terrain_height(b.world, b.world.resolve_position(id));
+  CHECK(flying_lift(b.world, *slot) == 80 + ground - arrived);
 
   // Below the ground is drawn on it, not under it.
   b.world.find(id)->state.z_from = under - 20;
@@ -662,6 +666,83 @@ TEST(flying_lift_raises_a_birds_body_by_its_altitude_above_the_ground) {
   CHECK(!flying_lifts_layer(800));
   CHECK(!flying_lifts_layer(1001));
   CHECK(!flying_lifts_layer(0));
+}
+
+/// **A bird is drawn along its leg, not at its end** -- and nothing the
+/// simulation reads changes for it.
+///
+/// `Flying::PlayAnim` moves the object to the destination at once, which is
+/// what the script reads back (`sim/anim.cpp`). The original's
+/// `GetCurrentPosition` (0x0053d830) and its visual both run the bird from the
+/// leg's start to its end over the animation, `from + (to - from) * elapsed /
+/// length`, truncating; `flight_progress` carries the two ends and the clock
+/// to the view. Before it the view had only the end, and a bird stood still
+/// for a whole animation and then jumped the length of its leg.
+TEST(flight_progress_runs_a_bird_along_its_leg_and_is_presentation_only) {
+  FlightBench b;
+  const Point start = pt(16, 16);
+  const Point end = pt(200, 120);
+  const ObjectId id = b.spawn(start, b.crow_class, NativeClass::flying_unit);
+  CHECK(!flight_progress(b.world, *b.world.find(id)).moving());
+  CHECK(flying_position(b.world, *b.world.find(id)) == start);
+
+  const std::uint64_t before = b.world.state_hash();
+  b.call(script::CallKind::member, "PlayAnim", 3,
+         {FlightBench::obj(id), script::Value::integer(16), b.point(end), script::Value::integer(80)});
+  // The simulation's position is the end already; the drawn one is the start.
+  CHECK(b.world.resolve_position(id) == end);
+  FlightProgress leg = flight_progress(b.world, *b.world.find(id));
+  REQUIRE(leg.moving());
+  CHECK(leg.from == start);
+  CHECK(leg.to == end);
+  CHECK(leg.elapsed == 0);
+  CHECK(flying_position(b.world, *b.world.find(id)) == start);
+
+  // One turn in: part of the way, by the clock `Flying::z` climbs on.
+  b.world.advance_turns(1);
+  leg = flight_progress(b.world, *b.world.find(id));
+  REQUIRE(leg.moving());
+  CHECK(leg.elapsed > 0);
+  CHECK(leg.elapsed < leg.cycle);
+  const Point mid = flying_position(b.world, *b.world.find(id));
+  CHECK(mid.x == start.x + (end.x - start.x) * leg.elapsed / leg.cycle);
+  CHECK(mid.y == start.y + (end.y - start.y) * leg.elapsed / leg.cycle);
+  CHECK(mid.x > start.x && mid.x < end.x);
+  CHECK(mid.y > start.y && mid.y < end.y);
+  // Truncating towards zero, as `idiv` does, on a leg that runs backwards.
+  CHECK(leg.along(10, 0) == 10 - 10 * leg.elapsed / leg.cycle);
+  CHECK(leg.along(-7, 7) == -7 + 14 * leg.elapsed / leg.cycle);
+
+  // At the end of the animation, at the end of the leg, and it stays there.
+  b.world.advance_turns(10);
+  CHECK(flying_position(b.world, *b.world.find(id)) == end);
+
+  // Presentation: the leg is in neither the state hash nor anything else the
+  // simulation reads. Wiping it changes no hash.
+  const std::uint64_t flown = b.world.state_hash();
+  CHECK(flown != before);  // the clock and the altitude moved, as before
+  b.world.find(id)->flight = FlightLeg{};
+  CHECK(b.world.state_hash() == flown);
+
+  // Anything else that moves the bird ends its leg where it stands...
+  b.call(script::CallKind::member, "PlayAnim", 3,
+         {FlightBench::obj(id), script::Value::integer(16), b.point(start), script::Value::integer(80)});
+  CHECK(flight_progress(b.world, *b.world.find(id)).moving());
+  (void)b.world.set_position(id, pt(100, 100));
+  CHECK(!flight_progress(b.world, *b.world.find(id)).moving());
+  CHECK(flying_position(b.world, *b.world.find(id)) == pt(100, 100));
+  // ...and so does any other animation it starts.
+  b.call(script::CallKind::member, "PlayAnim", 3,
+         {FlightBench::obj(id), script::Value::integer(16), b.point(end), script::Value::integer(80)});
+  CHECK(flight_progress(b.world, *b.world.find(id)).moving());
+  CHECK(b.world.play_anim(id, 17, AnimRepeat::hold));
+  CHECK(!flight_progress(b.world, *b.world.find(id)).moving());
+  CHECK(flying_position(b.world, *b.world.find(id)) == end);
+
+  // Only a flying unit has a leg to be drawn along.
+  const ObjectId walker = b.spawn(start, b.crow_class);
+  b.world.find(walker)->flight = FlightLeg{pt(0, 0), start, true};
+  CHECK(!flight_progress(b.world, *b.world.find(walker)).moving());
 }
 
 /// **`initial_z` is the one class property that starts an object in the air**,

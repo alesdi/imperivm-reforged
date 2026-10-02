@@ -1757,6 +1757,9 @@ bool World::play_anim(ObjectId id, std::int32_t slot, AnimRepeat repeat) {
   found->timeline = std::move(timeline);
   found->repeat = repeat;
   found->animating = true;
+  // A leg belongs to the animation that flies it; `Flying::PlayAnim` writes
+  // its own after this (`sim/anim.cpp`).
+  found->flight = FlightLeg{};
   AnimCursor& cursor = found->object->anim;
   cursor.anim_slot = slot;
   cursor.elapsed_ms = 0;
@@ -1779,6 +1782,7 @@ bool World::enter_state(ObjectId id, std::int32_t state_idx) {
     found->object->anim.elapsed_ms = 0;
     found->object->anim.step = 0;
     found->timeline = AnimTimeline();
+    found->flight = FlightLeg{};
     return true;
   }
   // The state's own animation loops for as long as the state is held; that is

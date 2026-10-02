@@ -318,6 +318,17 @@ struct BuildingStateRules {
                                                std::int32_t max_health,
                                                const BuildingStateRules& rules) noexcept;
 
+/// The leg a flying unit's `PlayAnim` set it flying: where the animation took
+/// it from and where it put it. `sim/flying.hpp`'s `flight_progress` reads it;
+/// see there for what the original does with the two ends.
+struct FlightLeg {
+  Point from;
+  Point to;
+  /// Written by `Flying::PlayAnim` once its animation has started, cleared by
+  /// every other start.
+  bool valid = false;
+};
+
 /// One object in the world.
 ///
 /// The native object owns the art binding and the animation cursor; this adds
@@ -390,6 +401,13 @@ struct WorldObject {
   /// animation's own step until `CATAPULT_IDLE.VS` sets it again, one 500 ms
   /// cycle on.
   std::int32_t build_frame = -1;
+  /// The leg a bird is flying, which the view draws it along rather than at
+  /// its end (`flight_progress`, `sim/flying.hpp`). Presentation: not hashed,
+  /// not saved, read by nothing in the simulation -- the position the
+  /// simulation reads is already the leg's end. A loaded bird is drawn at the
+  /// end of the leg it was flying until its script's next `PlayAnim`, one
+  /// animation on.
+  FlightLeg flight;
 
   /// Where the world's spatial index has filed this object. Derived: not
   /// hashed, not saved, rebuilt on load. See `sim/spatial_index.hpp`.

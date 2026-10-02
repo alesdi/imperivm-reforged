@@ -419,6 +419,9 @@ class WorldView {
   struct Placed {
     const core::sim::WorldObject* object = nullptr;
     ScreenPoint at;
+    /// How far a bird's body is lifted off the anchor, which its ring
+    /// shares (`sim::flying_lift`).
+    std::int32_t lift = 0;
   };
   std::vector<Placed> placed_;
   const SelectionRings* rings_ = nullptr;

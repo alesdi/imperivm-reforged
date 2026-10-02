@@ -607,10 +607,41 @@ std::int32_t flying_z(const World& world, const WorldObject& slot) noexcept {
   return static_cast<std::int32_t>(slot.state.z_from + span * elapsed / cycle);
 }
 
+std::int32_t FlightProgress::along(std::int32_t a, std::int32_t b) const noexcept {
+  if (cycle <= 0) return b;
+  const std::int64_t span = static_cast<std::int64_t>(b) - a;
+  return static_cast<std::int32_t>(a + span * elapsed / cycle);
+}
+
+FlightProgress flight_progress(const World& world, const WorldObject& slot) noexcept {
+  FlightProgress out;
+  if (!slot.flight.valid || slot.object == nullptr) return out;
+  if (!slot.object->is_a(NativeClass::flying_unit) || !slot.timeline.valid()) return out;
+  // Moved since by anything but its own animation: the leg is over.
+  if (world.resolve_position(slot.id) != slot.flight.to) return out;
+  const std::int32_t cycle = slot.timeline.cycle();
+  if (cycle <= 0) return out;
+  out.from = slot.flight.from;
+  out.to = slot.flight.to;
+  // The same clamp `flying_z` makes, for the same reason: the clock saturates
+  // at the end of a held animation, and the end of the window is `to`.
+  out.elapsed = clamp_to(slot.object->anim.elapsed_ms, 0, cycle);
+  out.cycle = cycle;
+  return out;
+}
+
+Point flying_position(const World& world, const WorldObject& slot) noexcept {
+  const FlightProgress leg = flight_progress(world, slot);
+  if (!leg.moving()) return world.resolve_position(slot.id);
+  return Point{leg.along(leg.from.x, leg.to.x), leg.along(leg.from.y, leg.to.y)};
+}
+
 std::int32_t flying_lift(const World& world, const WorldObject& slot) noexcept {
   if (slot.object == nullptr || !slot.object->is_a(NativeClass::flying_unit)) return 0;
   if (!slot.state.flags.in_air) return 0;
-  const std::int32_t ground = terrain_height(world, world.resolve_position(slot.id));
+  // 0x0051b272 asks the object where it is *now*, vtable `+0x40`: the ground
+  // under the bird as drawn, not under the end of its leg.
+  const std::int32_t ground = terrain_height(world, flying_position(world, slot));
   const std::int32_t lift = flying_z(world, slot) - ground;
   // Below the ground is drawn on it: the original clamps the offset at zero.
   return lift > 0 ? lift : 0;

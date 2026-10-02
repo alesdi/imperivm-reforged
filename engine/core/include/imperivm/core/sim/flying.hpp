@@ -94,7 +94,13 @@
 ///     animation behind. `sim/anim.cpp` moves it at the end of the call
 ///     instead, and says there why: the `in_air` test, the facing and the
 ///     terrain height all still come out at the previous call's destination,
-///     and only what `.pos` answers between two calls differs.
+///     and only what `.pos` answers between two calls differs. The draw path
+///     read since (`FlightProgress`) leans the other way: the visual runs from
+///     `[obj+0x5c]` to `[obj+0x24]` inside the window, so `[obj+0x24]` holds
+///     the destination while the bird flies to it. 0x0053e6c0 arms timer
+///     `0x1b` with no delay to get there; that timer's handler was not read,
+///     so which end `.pos` answers between two calls is still open. What is
+///     drawn is the path either way.
 ///   * **What `Unit::ForceIdle`'s flag does to an idle animation.** See
 ///     `sim/command.cpp`: retail's `[obj+0x1b8]` cuts the idle loop's wait
 ///     short and starts a fresh idle animation, and this engine's `Idle` does
@@ -127,15 +133,75 @@ namespace imperivm::core::sim {
 /// `Flying::z` -- the interpolated altitude of one object.
 [[nodiscard]] std::int32_t flying_z(const World& world, const WorldObject& slot) noexcept;
 
+/// How far along its leg a bird is: the two ends and the animation clock.
+///
+/// **The original draws a flying animation's whole path; the simulation here
+/// keeps only its end.** `Flying::PlayAnim` starts the animation through
+/// 0x0053e6c0 with the destination as its end point, and from then on the
+/// object holds two points: the destination at `[obj+0x24]`, which is what
+/// `GetPosition` (vtable `+0x3c`, 0x0063d900) answers, and the point it left
+/// from at `[obj+0x5c]`. Two readers interpolate between them over the
+/// animation's window, both linearly and both with a truncating divide:
+///
+///   * `GetCurrentPosition` (vtable `+0x40`, 0x0053d830) answers
+///     `from + (to - from) * elapsed / length` while the clock is inside the
+///     window and `to` outside it -- this is `flying_position`;
+///   * the visual (0x0053fe50 -> 0x0053f4c0 -> 0x0062a0e0) projects *each
+///     end* to the screen, terrain height and all, and moves its own anchor
+///     between the two projected points by the same fraction. So the anchor
+///     runs straight across the screen between the two ends' ground, not
+///     over the ground between them. `world_view.cpp` does that with the
+///     projection it already has.
+///
+/// The window is the animation's, on the same clock `flying_z` interpolates
+/// the altitude on, so the bird's ground point and its height arrive
+/// together. **A reading:** the original's window is the animation's own
+/// declared length (`+0x4c` of the animation record, 0x0053e75d); this
+/// engine's clock runs on the frame strip (`AnimTimeline`), which is the one
+/// `PlayAnim` suspends the script for, so the leg ends when the script resumes
+/// and starts the next one.
+///
+/// `cycle` is 0 -- *not moving* -- unless `slot` is a flying unit whose
+/// animation was started by `Flying::PlayAnim` and which still stands at that
+/// leg's end. Anything that moved it since, or started another animation,
+/// ends the leg where the object is.
+struct FlightProgress {
+  Point from;
+  Point to;
+  std::int32_t elapsed = 0;  ///< 0..cycle
+  std::int32_t cycle = 0;
+
+  [[nodiscard]] bool moving() const noexcept { return cycle > 0; }
+  /// One coordinate along the leg, `a` at the start and `b` at the end:
+  /// `a + (b - a) * elapsed / cycle`, truncating towards zero as `idiv` does.
+  /// Taken per axis, so it serves the screen's ends as well as the world's.
+  [[nodiscard]] std::int32_t along(std::int32_t a, std::int32_t b) const noexcept;
+};
+
+[[nodiscard]] FlightProgress flight_progress(const World& world, const WorldObject& slot) noexcept;
+
+/// `GetCurrentPosition` (0x0053d830): where along its leg a bird is now, or
+/// where it stands when it is not flying one. Presentation, like the leg.
+[[nodiscard]] Point flying_position(const World& world, const WorldObject& slot) noexcept;
+
 /// How far above the ground a bird's body is drawn, in screen pixels -- which
 /// are the height layer's own units, one pixel a step (`core::world_to_screen_y`).
 ///
 /// `0x0051b240`, the flying unit's visual update: when the airborne bit is set
-/// it takes `GetTerrainHeight(pos) - Flying::z`, clamps it to no more than 0,
-/// and hands `(0, that)` to the per-layer offset setter (0x0062a4f0) for every
-/// layer whose depth is 1000 or 1050 -- see `flying_lifts_layer`. On the ground
-/// the offset is `(0, 0)`. So the body rises by the altitude above the terrain
-/// under the bird and the shadow, at depth 800, stays on the ground below it.
+/// it takes `GetTerrainHeight(GetCurrentPosition()) - Flying::z`, clamps it to
+/// no more than 0, and hands `(0, that)` to the per-layer offset setter
+/// (0x0062a4f0) for every layer whose depth is 1000 or 1050 -- see
+/// `flying_lifts_layer`. On the ground the offset is `(0, 0)`. So the body
+/// rises by the altitude above the terrain under the bird *where it is drawn*
+/// -- `flying_position`, not the leg's end -- and the shadow, at depth 800,
+/// stays on the ground below it.
+///
+/// **The selection ring rises with the body.** The same function stores the
+/// same `(0, that)` in the visual's own `[+0x600]`/`[+0x604]`, and the ring's
+/// draw (0x0062b5b0) places the ring image at the visual's anchor plus that
+/// pair, less the image's hot spot. Nothing else reads the pair: the health
+/// bar (0x0062ac80) is placed from the anchor and `healthbaroffset` alone, so
+/// it stays over the bird's ground point, as the shadow does.
 ///
 /// Zero for anything that is not a flying unit or not in the air. Nothing in
 /// the simulation reads it: it is what `z_from`, `z_to` and the animation clock

@@ -531,14 +531,23 @@ void WorldView::build(const sim::World& world, const Camera& camera) {
     const Cursor cursor = visible_cursor(object);
     if (cursor.pose == nullptr) continue;
 
-    const ScreenPoint at = camera.project(object.state.position);
+    ScreenPoint at = camera.project(object.state.position);
+    // A bird flying a leg is drawn along it: each end projected, ground and
+    // all, and the anchor run between the two by the animation's clock, as
+    // the original's visual runs it (`sim::flight_progress`). Everything
+    // placed from the anchor follows -- the shadow, the ring, the bar, the
+    // pick -- as it follows the original's.
+    if (const sim::FlightProgress leg = sim::flight_progress(world, object); leg.moving()) {
+      const ScreenPoint from = camera.project(leg.from);
+      const ScreenPoint to = camera.project(leg.to);
+      at = ScreenPoint{leg.along(from.x, to.x), leg.along(from.y, to.y)};
+    }
     if (at.x < -kSpriteMargin || at.x > camera.width + kSpriteMargin ||
         at.y < -kSpriteMargin || at.y > camera.height + kSpriteMargin) {
       ++stats_.culled;
       continue;
     }
     const float shade = shade_ ? static_cast<float>(shade_(object.state.position)) / 32.0F : 1.0F;
-    placed_.push_back(Placed{&object, at});
     // Two per-layer offsets the original's visuals carry and the entity data
     // does not: a gate's portcullis raised by its position (`sim/gate.hpp`),
     // and a bird's body lifted by its altitude above the ground while its
@@ -548,6 +557,7 @@ void WorldView::build(const sim::World& world, const Camera& camera) {
     // its depth sort does with them is not read.
     const std::int32_t raise = sim::gate_raise(object, world.time());
     const std::int32_t lift = sim::flying_lift(world, object);
+    placed_.push_back(Placed{&object, at, lift});
 
     for (const LayerArt& layer : *cursor.pose) {
       Sheet& sheet = sheets_[static_cast<std::size_t>(layer.sheet)];
@@ -694,7 +704,9 @@ std::size_t WorldView::draw(const sim::World& world, const Camera& camera,
 
   // The marks of everything placed, asked once.
   struct Marked {
+    core::ObjectId id = core::kNoObject;
     ScreenPoint at;
+    std::int32_t lift = 0;
     Marks marks;
   };
   std::vector<Marked> marked;
@@ -702,7 +714,7 @@ std::size_t WorldView::draw(const sim::World& world, const Camera& camera,
     for (const Placed& placed : placed_) {
       Marks marks = marks_(*placed.object);
       if (marks.ring < 0 && marks.bar.type <= 0) continue;
-      marked.push_back(Marked{placed.at, marks});
+      marked.push_back(Marked{placed.object->id, placed.at, placed.lift, marks});
     }
   }
   const auto queue_rings = [&] {
@@ -712,10 +724,15 @@ std::size_t WorldView::draw(const sim::World& world, const Camera& camera,
       if (ring == nullptr) continue;
       // Centred on the anchor. A reading: the draw places the image by a
       // point the image reports (0x0062b63a), which has not been read; every
-      // ring is drawn centred in its frame.
+      // ring is drawn centred in its frame. A bird's rises with its body: the
+      // draw adds the offset its visual update stored beside the body's
+      // (`sim::flying_lift`), which the bar below does not.
+      const std::int32_t centre_y = mark.at.y - mark.lift;
       renderer.draw_mask(ring->region, static_cast<float>(mark.at.x - ring->width / 2),
-                         static_cast<float>(mark.at.y - ring->height / 2),
+                         static_cast<float>(centre_y - ring->height / 2),
                          rgb555(static_cast<std::uint16_t>(mark.marks.ring)));
+      static const bool trace = std::getenv("IMPERIVM_DEBUG_VIEW") != nullptr;
+      if (trace) std::printf("ring id %u at %d,%d\n", mark.id, mark.at.x, centre_y);
       ++stats_.rings;
     }
   };
