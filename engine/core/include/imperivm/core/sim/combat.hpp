@@ -1317,6 +1317,9 @@ class CombatSystem final : public System {
   /// later, against a world the battle had moved on from, and
   /// `DRUID_ONDIE.VS`'s mass heal reads `ObjsInCircle(.pos, .sight)`.
   void enter_dying(World& world, Combatant& unit, GameTime now);
+  /// The rest of a siege engine's death, after its hook: built, and every
+  /// crewman inside dies with it. See the definition for the evidence.
+  void die_as_engine(World& world, ObjectId id, GameTime now);
   /// How long `unit`'s dying state lasts: its entity's `die` cycle, or
   /// `death_duration_` when there is none. See `kDefaultDeathDuration`.
   [[nodiscard]] GameTime death_duration_of(const World& world, const Combatant& unit) const;

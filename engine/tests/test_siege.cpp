@@ -699,3 +699,142 @@ TEST(squad_siege_host_writes_the_state_and_moves_its_crews_out) {
   CHECK(c.registry.entry(index).fn(ctx).status == script::HostStatus::ok);
   CHECK(!c.catapults().empty());
 }
+
+namespace {
+
+/// One host member call on `b`'s registry, as a script makes it.
+script::HostOutcome member_call(SiegeBench& b, HostContext& context, const char* name,
+                                std::vector<script::Value> args) {
+  const std::uint32_t index = b.registry.find(script::CallKind::member, name,
+                                              static_cast<std::uint16_t>(args.size() - 1));
+  REQUIRE_RETURN(index != script::kUnresolvedHost, script::HostOutcome::failed("undeclared"));
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &context;
+  ctx.name = name;
+  ctx.kind = script::CallKind::member;
+  return b.registry.entry(index).fn(ctx);
+}
+
+/// Advance `b` a turn at a time until `id` has left the world, for at most
+/// `limit` of game time. Answers whether it left.
+bool runs_until_gone(SiegeBench& b, ObjectId id, GameTime limit) {
+  for (GameTime spent = 0; spent < limit; spent += 100) {
+    b.world.advance(100);
+    if (b.world.find(id) == nullptr) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+/// Playtest #19: **an engine that decays to nothing dies, and leaves the
+/// world**, so its door is no longer there for the builders still on their way.
+///
+/// `CATAPULT_IDLE.VS` decays an uncrewed engine with `.Damage`, and in
+/// `gbr.exe` an engine at no health is dead: `CVXCatapult`'s `vtbl+0x50` is
+/// the unit's `health == 0` (0x004e1f50), not the building's `return 0`. Its
+/// death virtual (0x004e3fd0) marks it built, and the corpse is erased when
+/// its die animation ends (0x005b0f70). Held as a building, it stood at zero
+/// for good, and `UNIT_BUILD_CATAPULT.VS` -- `while (bld.IsValid)` around the
+/// walk, `if (bld.IsValid) building.settlement.AddUnit(this)` after it --
+/// went on putting arrivals inside it.
+TEST(an_engine_that_decays_to_nothing_dies_and_leaves_the_world) {
+  SiegeBench b;
+  const ObjectId engine = place_catapult(b.world, b.graph.find("GCatapult"), Point{5000, 5000}, 2);
+  REQUIRE(engine != kNoObject);
+  b.combat.start(b.world);
+  REQUIRE(b.combat.find(engine) != nullptr);
+  CHECK(!b.world.find(engine)->state.flags.built);
+
+  HostContext context;
+  context.world = &b.world;
+  const script::Value handle = script::Value::object(kTypeObj, engine);
+  // One decay step at one point of health, what `.Damage(damageamount)` does.
+  CHECK(b.combat.apply_damage(b.world, engine, 5) == 1);
+  CHECK(b.combat.is_dying(engine));
+  // On the world at once, so the script's `while (.IsAlive)` ends this turn.
+  CHECK(b.world.find(engine)->state.health == 0);
+  CHECK(!member_call(b, context, "IsAlive", {handle}).value.truthy_scalar());
+  // The death virtual's `SetBuilt`: drawn by its animation, not frozen on a stage.
+  CHECK(b.world.find(engine)->state.flags.built);
+  CHECK(b.world.find(engine)->build_frame == -1);
+  // A corpse takes no further damage.
+  CHECK(b.combat.apply_damage(b.world, engine, 5) == 0);
+
+  CHECK(runs_until_gone(b, engine, 2 * CombatSystem::kDefaultDeathDuration));
+  CHECK(b.combat.find(engine) == nullptr);
+  // What a builder's script asks next: the handle no longer resolves, so it
+  // walks off with a `move` rather than entering.
+  CHECK(!member_call(b, context, "IsValid", {handle}).value.truthy_scalar());
+}
+
+/// **The crew die with their engine**, killed in place by the engine's death
+/// virtual: 0x004e3fd0 copies its holder's roster and calls each member's own
+/// `vtbl+0xb0`, the unit death, `ondie` and all. Nobody is ejected and nobody
+/// is released to idle; a unit outside the engine is untouched.
+TEST(a_crewed_engine_that_is_destroyed_takes_its_crew_with_it) {
+  SiegeBench b;
+  const ObjectId engine = place_catapult(b.world, b.graph.find("GCatapult"), Point{5000, 5000}, 2);
+  REQUIRE(engine != kNoObject);
+  const Settlement* own = b.economy.settlements().for_object(engine);
+  REQUIRE(own != nullptr);
+  const SettlementId settlement = own->id;
+  const std::vector<ObjectId> crew = b.army("GSwordsman", 3, Point{5100, 5000});
+  for (const ObjectId id : crew) REQUIRE(garrison_enter(b.world, settlement, id, false));
+  const ObjectId outsider = b.unit("GSwordsman", Point{5200, 5200});
+  b.combat.start(b.world);
+  for (const ObjectId id : crew) {
+    REQUIRE(b.world.find(id)->state.is_held());
+    REQUIRE(b.combat.find(id) != nullptr);
+  }
+
+  (void)b.combat.apply_damage(b.world, engine, 1000);
+  CHECK(b.combat.is_dying(engine));
+  for (const ObjectId id : crew) {
+    CHECK(b.combat.is_dying(id));
+    CHECK(b.world.find(id)->state.health == 0);
+  }
+  CHECK(!b.combat.is_dying(outsider));
+  CHECK(b.world.find(outsider)->state.health == 100);
+
+  CHECK(runs_until_gone(b, engine, 2 * CombatSystem::kDefaultDeathDuration));
+  for (const ObjectId id : crew) CHECK(b.world.find(id) == nullptr);
+  CHECK(b.world.find(outsider) != nullptr);
+}
+
+/// **A built engine brought down in battle dies the same way.** The blow is
+/// the ordinary one; what it lands on is a combatant that is mortal at zero.
+TEST(a_built_engine_killed_in_combat_dies_and_takes_its_crew) {
+  SiegeBench b;
+  const ObjectId engine = place_catapult(b.world, b.graph.find("GCatapult"), Point{5000, 5000}, 2);
+  REQUIRE(engine != kNoObject);
+  b.world.find(engine)->state.flags.built = true;
+  b.world.set_health(engine, 25);
+  const Settlement* own = b.economy.settlements().for_object(engine);
+  REQUIRE(own != nullptr);
+  const SettlementId settlement = own->id;
+  const ObjectId crewman = b.unit("GSwordsman", Point{5100, 5000});
+  REQUIRE(garrison_enter(b.world, settlement, crewman, false));
+  const ObjectId enemy = b.unit("GSwordsman", Point{5050, 5000}, 2);
+  // The bench's combat reads no class graph; this test needs the swordsman's
+  // 30 slash and the engine's 50 radius.
+  b.combat.set_class_graph(&b.graph);
+  b.combat.start(b.world);
+  REQUIRE(b.combat.order_attack(enemy, engine));
+
+  bool struck = false;
+  bool died = false;
+  for (GameTime spent = 0; spent < 10000 && b.world.find(engine) != nullptr; spent += 100) {
+    b.world.advance(100);
+    for (const CombatEvent& event : b.combat.events()) {
+      if (event.kind == CombatEvent::Kind::strike && event.attacker == enemy) struck = true;
+      if (event.kind == CombatEvent::Kind::death && event.defender == engine) died = true;
+    }
+  }
+  CHECK(struck);
+  CHECK(died);
+  CHECK(b.world.find(engine) == nullptr);
+  CHECK(b.world.find(crewman) == nullptr);
+  CHECK(b.world.find(enemy) != nullptr);
+}
