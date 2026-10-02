@@ -43,8 +43,8 @@ from conftest import requires_game
 pytestmark = requires_game
 
 CROSSROADS = "Scenarios/Crossroads.BFHP"
-#: The turn the two are held at: just past `test_corpus_imrun.py`'s 2,200, and
-#: on purpose not a multiple of eight -- a frame runs up to eight turns, so a
+#: The turn the two are held at: just past the 2,200 `test_corpus_imrun.py`
+#: used to hold its own run at, and on purpose not a multiple of eight -- a frame runs up to eight turns, so a
 #: `turn:N` that did not hold the clock on N would read the world a few turns
 #: late here, where on a multiple of eight it can land on N by luck.
 TURNS = 2_205

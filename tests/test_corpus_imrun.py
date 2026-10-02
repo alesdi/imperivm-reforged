@@ -313,9 +313,15 @@ def test_a_won_conquest_mission_carries_its_reward_to_the_next(imrun, game_dir, 
 #: the town holds: at 12,000 turns the match is undecided, p2's attacks having
 #: lost 54 men to p0's walls. Why the AI's siege does not break a defended
 #: town is an open thread in `docs/plan.html`. The turn is chosen past p0's
-#: first kills (2,046) and kept cheap; `test_corpus_app_match.py` holds the app
-#: to the same world on the same turn.
-CROSSROADS_TURNS = 2_200
+#: first kills and kept as cheap as that allows. It was 2,200, past a first
+#: kill at 2,046, while `Squad::SendTo` walked every member of a squad to its
+#: node's centre itself -- a stand-in that also marched p1's own sentries onto
+#: their town hall. Since an order is carried out by `AIOSendSquad.vs`, as
+#: `gbr.exe` does, the AI moves differently and p0's walls first fire at turn
+#: 5,103 (an ambient p2 villager at the south wall, as before); no army comes
+#: near either way. `test_corpus_app_match.py` holds the app to `imrun` on its
+#: own turn.
+CROSSROADS_TURNS = 5_500
 
 
 def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, game_dir):
