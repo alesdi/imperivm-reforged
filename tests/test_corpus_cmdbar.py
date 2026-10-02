@@ -26,6 +26,8 @@ from conftest import requires_game
 pytestmark = [requires_game]
 
 MAP = "Adventures/GreatBattles/2_Great_Battles_Numantia.bfhp"
+# Balcans' first barracks has 5000 gold to queue with; Numantia's town has none.
+BALCANS = "Scenarios/Balcans.BFHP"
 
 
 @pytest.fixture(scope="module")
@@ -80,11 +82,11 @@ def test_a_broken_fort_offers_repair_lit_and_nothing_else(imconform, game_dir):
     assert buttons == {"repair townhall": "lit"}
 
 
-def presses(imconform: Path, game_dir: Path, klass: str, names: list[str]):
+def presses(imconform: Path, game_dir: Path, klass: str, names: list[str], map_name: str = MAP):
     """[(verdict, [queue entries, running first])] after each press of `names`."""
-    path = game_dir / MAP
+    path = game_dir / map_name
     if not path.is_file():
-        pytest.skip(f"{MAP} is not in this installation")
+        pytest.skip(f"{map_name} is not in this installation")
     command = [str(imconform), "buttons", str(game_dir), str(path), klass]
     for name in names:
         command += ["--press", name]
@@ -106,19 +108,31 @@ def presses(imconform: Path, game_dir: Path, klass: str, names: list[str]):
 def test_a_second_train_press_on_a_barracks_queues_behind_the_first(imconform, game_dir):
     # Playtest #14: the second button cancelled the unit in training. A
     # `traincommand="yes"` row never replaces (0x005e39f0, 0x004efbbb), so each
-    # press adds one, behind what is running.
+    # press adds one, behind what is running. On Balcans, whose barracks can pay:
+    # the hastatus is the one row it has lit at the start.
     first, second, third = presses(imconform, game_dir, "BaseBarracks",
-                                   ["trainIMilitiaman", "trainIArcher", "trainIMilitiaman"])
-    assert first == ("issued", ["trainIMilitiaman"])
-    assert second == ("issued", ["trainIMilitiaman", "trainIArcher"])
-    assert third == ("issued", ["trainIMilitiaman", "trainIArcher", "trainIMilitiaman"])
+                                   ["trainMHastatus"] * 3, BALCANS)
+    assert first == ("issued", ["trainMHastatus"])
+    assert second == ("issued", ["trainMHastatus"] * 2)
+    assert third == ("issued", ["trainMHastatus"] * 3)
+
+
+def test_a_train_press_the_town_cannot_pay_for_queues_nothing(imconform, game_dir):
+    # Playtest #14's residue: queueing below cost and cancelling made gold. The
+    # bar posts the press without asking (0x005e39f0); the insert's accept test
+    # asks the building's payment (0x004df070), which refuses, so the order
+    # executes and nothing is queued. Numantia's town starts with 0 gold.
+    plain, ctrl = presses(imconform, game_dir, "BaseBarracks",
+                          ["trainIMilitiaman", "ctrl+trainIArcher"])
+    assert plain == ("issued", ["idle"])
+    assert ctrl == ("issued", ["idle"])
 
 
 def test_a_research_press_replaces_what_the_barracks_trains(imconform, game_dir):
     # The flag is the row's, and a research row does not carry it: without
     # Shift it replaces the queue as a unit's move would.
     *_, research = presses(imconform, game_dir, "BaseBarracks",
-                           ["trainIMilitiaman", "trainIArcher", "Barrack Level 1"])
+                           ["trainMHastatus", "trainMHastatus", "Barrack Level 1"], BALCANS)
     assert research == ("issued", ["Barrack Level 1"])
 
 
@@ -140,14 +154,12 @@ def test_ctrl_on_a_train_button_queues_train_multiple_count(imconform, game_dir)
     # `[GamePlay] TrainMultipleCount` (5), and its execution runs the row that
     # many times (0x004e5e60). Behind what is training; Shift changes nothing.
     first, ctrl, both, plain = presses(imconform, game_dir, "BaseBarracks", [
-        "trainIMilitiaman", "ctrl+trainIArcher", "shift+ctrl+trainIMilitiaman", "trainIArcher"])
-    assert first == ("issued", ["trainIMilitiaman"])
-    assert ctrl == ("issued", ["trainIMilitiaman"] + ["trainIArcher"] * 5)
-    assert both == ("issued", ["trainIMilitiaman"] + ["trainIArcher"] * 5 + ["trainIMilitiaman"] * 5)
-    assert plain[1] == ["trainIMilitiaman"] + ["trainIArcher"] * 5 + ["trainIMilitiaman"] * 5 + ["trainIArcher"]
-
-
-BALCANS = "Scenarios/Balcans.BFHP"
+        "trainMHastatus", "ctrl+trainMHastatus", "shift+ctrl+trainMHastatus", "trainMHastatus"],
+        BALCANS)
+    assert first == ("issued", ["trainMHastatus"])
+    assert ctrl == ("issued", ["trainMHastatus"] * 6)
+    assert both == ("issued", ["trainMHastatus"] * 11)
+    assert plain == ("issued", ["trainMHastatus"] * 12)
 
 
 def test_a_cancelled_queue_cell_is_taken_out_and_refunded(imconform, game_dir):
