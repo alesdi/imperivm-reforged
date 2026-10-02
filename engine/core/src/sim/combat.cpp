@@ -6,6 +6,7 @@
 
 #include "imperivm/core/sim/combat.hpp"
 
+#include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/player_host.hpp"
 #include "imperivm/core/sim/hooks.hpp"
@@ -1043,6 +1044,14 @@ void start_anim_at(World& world, ObjectId id, std::int32_t slot, GameTime began)
   if (sample.finished) object->animating = false;
 }
 
+/// A siege engine, the one heir of `CVXBuilding` that dies: see
+/// `dies_at_no_health`.
+[[nodiscard]] bool is_siege_engine(const World& world, ObjectId id) noexcept {
+  const WorldObject* slot = world.find(id);
+  return slot != nullptr && slot->object != nullptr && slot->state.flags.is_building &&
+         slot->object->is_a(NativeClass::catapult);
+}
+
 }  // namespace
 
 bool CombatSystem::is_dying(ObjectId id) const noexcept {
@@ -1169,9 +1178,14 @@ void CombatSystem::enter_dying(World& world, Combatant& unit, GameTime now) {
   // Three: `SetHealth(0)`, on the world, now -- not at the end of the turn with
   // everybody else's -- because the hook is about to run and `IsDead`,
   // `IsAlive` and `health` read the world. A unit only: the death virtual is
-  // `CVXUnit`'s, and a building's tier is left to the end-of-turn write.
+  // `CVXUnit`'s, and a building's tier is left to the end-of-turn write. A
+  // siege engine too, the one building that dies: its damage routine stores
+  // the health before it asks whether the engine is dead, so the engine's own
+  // `CATAPULT_IDLE.VS` loop, `while (.IsAlive)`, ends on the turn it dies.
+  const bool engine = is_siege_engine(world, id);
   if (world_bound_) {
-    if (const ObjectState* state = world.state(id); state != nullptr && state->flags.is_unit) {
+    if (const ObjectState* state = world.state(id);
+        state != nullptr && (state->flags.is_unit || engine)) {
       (void)world.set_health(id, unit.health);
     }
   }
@@ -1184,12 +1198,82 @@ void CombatSystem::enter_dying(World& world, Combatant& unit, GameTime now) {
   // `Erase`s the corpse before its death animation ends does not run the hook a
   // second time.
   (void)fire_class_hook(world, ClassHook::on_die, id);
+  // An engine's own death virtual goes on from here; see `die_as_engine`.
+  if (engine) die_as_engine(world, id, now);
   // Six to eight: out of the hero's army and out of the squad, after the hook
   // and not before it -- `CMERCENARY_ONDIE.VS` pays its gold to `.hero`.
   // Five, the held unit's erase, is `on_death`'s exception. `SetPath(null)` is
   // the `movement->stop` above; the census counts and the GAIKA-node removal
   // of the AI unregister are not reproduced (this engine counts on demand).
   if (heroes != nullptr) heroes->on_death(world, id);
+}
+
+/// What `CVXCatapult`'s death virtual (0x004e3fd0) does between the `ondie`
+/// launch it shares with every death (0x005141b0, `enter_dying`'s hook) and
+/// the base death that makes the corpse (0x005b16f0, `enter_dying`'s dying
+/// state), in its order:
+///
+///   1. **`SetBuilt`'s body, inlined** (compare 0x004e2e20): the built flag at
+///      `[cat+0x208]` set, the sprite clock let run, bit 25 of the `+0x2c`
+///      word cleared, the build frame at `[cat+0x20c]` written back to -1, and
+///      the two animation calls. What lands here is what `Catapult::SetBuilt`
+///      lands -- the flag and the frame -- so that the `destroy` animation is
+///      drawn rather than the construction stage the engine had frozen on.
+///      Bit 25 is left out for the reason `SetBuilt` gives.
+///   2. A call on the global at `[0x009c0938]` (0x005e7710), a walk over
+///      lists of its own that this engine has no counterpart for. Not
+///      reproduced.
+///   3. **Every crewman dies.** The roster is copied (0x00438330) from the
+///      engine's settlement (`[cat+0x148]`), its holder (`+0x5e`) and the
+///      holder's member deque (`+0x28`) -- the list `Settlement::Units`
+///      returns -- and each member's own death virtual, `vtbl+0xb0`, is
+///      called on it: for a unit that is 0x005db270, the whole unit death,
+///      `ondie` and all. They are not ejected and not released; nothing in
+///      the handler reads their health or deals them damage first.
+///
+/// A crewman is held, and the unit death erases a held unit on the spot
+/// (0x005db35a tests the holder handle at `[unit+0x154]` and takes
+/// `vtbl+0x94`). This engine defers that erase to the end of the death
+/// animation for every held unit, as `HeroSystem::on_death` records; the
+/// corpse is off the roster when the turn's reap runs (`reap_departed`).
+///
+/// **And then the engine leaves the world.** The corpse lives as a unit's
+/// does: `CVXCatapult`'s animation-finished virtual (0x004e2c00, `vtbl+0x54`)
+/// ends in `Obj`'s (0x005b0f70), which, for an object its `vtbl+0x50` calls
+/// dead, plays the die animation and erases the object (`vtbl+0x94`) once
+/// that has finished. All eight shipped engine entities declare slot 9 --
+/// `destroy`, 385 ms, on the base, Gallic, Carthaginian and Iberian
+/// catapults; 660 ms on the Roman one and 733 ms on the Egyptian ballista;
+/// about 16 s on the British and German rams -- so `death_duration_of` reads
+/// the cycle a unit's `die` gives it, and `advance` despawns the engine at its
+/// end. From then on `bld.IsValid` fails, and `UNIT_BUILD_CATAPULT.VS` sends
+/// a builder still on its way off with a `move` instead of an `AddUnit`.
+///
+/// What the handler does not do is refuse a builder that arrives while the
+/// corpse is still playing: `Settlement::AddUnit` (0x005c1b20 -> 0x005d3e10
+/// -> 0x00532160) tests only that the unit is not already in and the holder
+/// is not full. Nor does it touch the engine's fake towers; what becomes of
+/// them when the corpse is erased is not read here.
+void CombatSystem::die_as_engine(World& world, ObjectId id, GameTime now) {
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr) return;
+  slot->state.flags.built = true;
+  slot->build_frame = -1;
+  EconomySystem* economy = economy_of(world);
+  if (economy == nullptr) return;
+  const Settlement* settlement = economy->settlements().for_object(slot->settlement);
+  if (settlement == nullptr) return;
+  // Copied, as the original copies it: each death runs its own hook, and a
+  // hook can move anything this would otherwise be pointing into.
+  const std::vector<ObjectId> crew = settlement->holder.units;
+  for (const ObjectId member : crew) {
+    Combatant* crewman = mutable_find(member);
+    if (crewman == nullptr || !crewman->alive) continue;
+    // The unit death virtual itself, not a blow: no damage is dealt, nothing
+    // is scored, and nobody is credited with the kill.
+    crewman->health = 0;
+    enter_dying(world, *crewman, now);
+  }
 }
 
 void CombatSystem::award_experience(Combatant& attacker, const Combatant& defender) {
@@ -1230,12 +1314,21 @@ void CombatSystem::award_experience(Combatant& attacker, const Combatant& defend
 /// very broken building unless it is a centre with a garrison. None of that
 /// reads right if the building were gone.
 ///
+/// **A siege engine is the exception** (playtest #19). `CVXCatapult` is a
+/// building heir, but its vtable (0x007baee0) carries the unit's `+0x50`,
+/// 0x004e1f50 -- dead is `health == 0` -- and a death virtual of its own at
+/// `+0xb0`, 0x004e3fd0. So an engine brought to nothing dies like a unit and
+/// leaves the world after its `destroy` animation; see `die_as_engine`. Held
+/// as a building, an uncrewed engine that decayed stood at zero with its door
+/// open, and the builders still on their way walked in.
+///
 /// Unbound, every combatant stays mortal: a synthetic roll has no world
 /// objects to say which of its ids is a building.
 bool dies_at_no_health(const World& world, bool world_bound, ObjectId id) {
   if (!world_bound) return true;
   const WorldObject* slot = world.find(id);
-  return slot == nullptr || !slot->state.flags.is_building;
+  if (slot == nullptr || !slot->state.flags.is_building) return true;
+  return slot->object != nullptr && slot->object->is_a(NativeClass::catapult);
 }
 
 void note_building_damage(World& world, ObjectId victim, std::int32_t removed) {
