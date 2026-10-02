@@ -229,6 +229,10 @@ HostOutcome host_size(CallContext& context) {
 
 HostOutcome host_boom(CallContext&) { return HostOutcome::failed("Boom always refuses"); }
 
+/// `gbr.exe`'s host code 2: the script ends at the call. `GotoEnter` answers
+/// it when it has gone its give-up without a route.
+HostOutcome host_quit(CallContext&) { return HostOutcome::end_script(); }
+
 /// A blocking wait that has to re-poll: it suspends *at* the call and runs
 /// again on resume, which is what `WaitNonEmptyQuery` needs and what `Sleep`
 /// does not.
@@ -275,6 +279,7 @@ HostRegistry make_registry() {
   registry.define(CallKind::free_function, "Split", 2, &host_split);
   registry.define(CallKind::free_function, "Point", 2, &host_point);
   registry.define(CallKind::free_function, "Boom", 0, &host_boom);
+  registry.define(CallKind::free_function, "Quit", 0, &host_quit);
   registry.define(CallKind::free_function, "WaitForTicks", 1, &host_wait_for_ticks);
   registry.define(CallKind::free_function, "WaitUntilTicks", 2, &host_wait_until_ticks);
   registry.define(CallKind::member, "Eval", 2, &host_eval);
@@ -1345,6 +1350,29 @@ TEST(vs_nested_call_writebacks_do_not_leak_into_the_outer_call) {
 // own it has no memory: these cases are about the three fields on `Execution`
 // that give a retrying call one, and about the ways a wrong reading of them
 // would break every timeout in the game rather than one of them.
+
+TEST(vs_a_host_call_can_end_the_script_where_it_stands) {
+  // `UNIT_BUILD_CATAPULT.VS`'s shape: a loop on a call, and the work after it.
+  // A call that ends the script leaves both the loop and the work undone, and
+  // the script has finished rather than trapped.
+  Runner runner;
+  const Program program = build(
+      "// int\n"
+      "while (1) {\n"
+      "  Note(\"before\");\n"
+      "  if (Quit()) break;\n"
+      "}\n"
+      "Note(\"after\");\n"
+      "return 7;\n",
+      "quit.vs", runner.registry);
+  REQUIRE(program.ok);
+
+  VmEnv env = runner.env();
+  Execution execution = start(program.chunk);
+  CHECK(run(execution, program.chunk, env) == ExecStatus::finished);
+  CHECK(runner.world.log == (std::vector<std::string>{"before"}));
+  CHECK(execution.result.is_nil());
+}
 
 TEST(vs_a_blocking_call_is_told_how_long_it_has_been_waiting) {
   Runner runner;

@@ -1655,12 +1655,13 @@ HostOutcome goto_attack_impl(CallContext& ctx) {
 
 /// `GotoEnter(dest, range, slice, flag, give_up)`: `Goto`'s signature exactly,
 /// and `UNIT_ENTER.VS` puts the two in the arms of one `if`. The difference is
-/// that the end of a partial route counts as arrival -- see the header.
+/// what `give_up` means, and that running out of route ends the script -- see
+/// the header and `GotoOrder::enter`.
 HostOutcome goto_enter_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   GotoOrder order;
-  order.accept_partial = true;
+  order.enter = true;
   if (is_point(ctx.arg(1))) {
     order.dest = unpack_point(ctx.arg(1));
   } else if (const ObjectId target = object_of(ctx.arg(1)); target != kNoObject) {

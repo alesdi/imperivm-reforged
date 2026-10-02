@@ -2183,7 +2183,8 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   // every one of those loops on its second call, after one turn of walking.
   // That is decisive, and it is how this reading was caught: the deer walked 23
   // units of a 57-unit route and gave up.
-  if (continuing && order.give_up > 0 && now - move.goto_started >= order.give_up) {
+  if (!order.enter && continuing && order.give_up > 0 &&
+      now - move.goto_started >= order.give_up) {
     // The order timed out. Drop the path so `.HasPath` reports the failure and
     // the shipped `while (!.Goto(...) && .HasPath)` loop leaves.
     movement.stop(world, id);
@@ -2200,18 +2201,20 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
                                          order.lock_destination);
     if (outcome == MoveOutcome::arrived) return HostOutcome::ok_with(Value::boolean(true));
     blocked = outcome == MoveOutcome::blocked;
+    // On the clock the give-up below reads, which is the scheduler's.
+    if (order.enter) move.goto_started = now;
   } else if (!move.has_path) {
     // The route ran out under a live order: either it was partial and has been
-    // walked to its end, or the grid changed and nothing else reaches.
-    if (order.accept_partial) {
-      // `GotoEnter`'s one difference from `Goto`. A doorway can sit in a cell
-      // the building's own footprint blocks, so getting as close as the
-      // obstruction allows *is* arrival, and the shipped
-      // `while (!.GotoEnter(pt, 0, 1000, true, 5000));` leaves on this.
-      movement.stop(world, id);
-      return HostOutcome::ok_with(Value::boolean(true));
-    }
-    const GameTime began = move.goto_started;
+    // walked to its end, or the grid changed and nothing else reaches. Neither
+    // is arrival, for `GotoEnter` either (`GotoOrder::enter`): search again
+    // from here.
+    GameTime began = move.goto_started;
+    // An enter order's clock is its failure stamp, so a route that has just
+    // run out starts it now. One the grid took away between two calls
+    // (`decide`'s re-validation) is stamped from the last call that saw a
+    // route: up to one slice early, where the original stamps at the first
+    // call that fails.
+    if (order.enter && move.last_outcome != MoveOutcome::blocked) began = now;
     blocked =
         (order.target == kNoObject
              ? movement.order_goto(world, id, dest, order.range, order.min_range, kNoObject,
@@ -2223,6 +2226,20 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
     // order the caller issued, and a destination that is only reachable in fits
     // would otherwise never time out.
     move.goto_started = began;
+  }
+
+  if (order.enter) {
+    if (move.has_path) {
+      // A route is laid, so the failure stamp is clear (0x005d698f).
+      move.goto_started = now;
+    } else if (order.give_up >= 0 && now - move.goto_started >= order.give_up) {
+      // No route, for `give_up` or longer: `GotoEnter` returns 2 and the
+      // script ends at the call (0x005d696e). `UNIT_BUILD_CATAPULT.VS` passes
+      // 0, so a builder with no way to the machine's door leaves the job at
+      // once instead of entering from where it stands.
+      movement.stop(world, id);
+      return HostOutcome::end_script();
+    }
   }
 
   // Not there yet. Wait for the lesser of the caller's slice and the time to
@@ -2237,7 +2254,7 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   const std::int64_t eta = blocked ? -1 : movement.eta(id);
   std::int64_t wait = order.slice;
   if (eta >= 0 && (wait <= 0 || eta < wait)) wait = eta;
-  if (order.give_up > 0) {
+  if (!order.enter && order.give_up > 0) {
     const std::int64_t left = order.give_up - (now - move.goto_started);
     if (left <= 0) {
       movement.stop(world, id);

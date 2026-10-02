@@ -353,6 +353,14 @@ void Machine::do_call(const Instruction& instruction) {
   execution.retrying = false;
   execution.retry_since = 0;
 
+  if (outcome.status == HostStatus::finish) {
+    // The original's host code 2: the script stops at this call, with nothing
+    // pushed and nothing after it run. See `script/host.hpp`.
+    execution.result = Value::nil();
+    execution.status = ExecStatus::finished;
+    return;
+  }
+
   // Out-parameters. Everything assignable that was passed in goes back where it
   // came from, whether or not the host touched it; a host that did not write
   // simply put the same value back.
