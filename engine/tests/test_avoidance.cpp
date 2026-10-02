@@ -33,6 +33,7 @@
 #include "imperivm/core/sim/path.hpp"
 #include "imperivm/core/sim/rng.hpp"
 #include "imperivm/core/sim/world.hpp"
+#include "imperivm/core/sim/world_host.hpp"
 #include "builder.hpp"
 #include "test.hpp"
 
@@ -1335,16 +1336,16 @@ TEST(a_band_route_ends_on_its_goal_ring) {
   // the ninth direction's cosine is -0.99999873..., which `_ftol` truncates
   // towards zero, and its sine puts y a sixth of a unit off, truncated away.
   Field field;
-  CHECK(field.movement.ring_goal(field.world, Point{100, 500}, Point{900, 500}, 100, 0) ==
+  CHECK(field.movement.ring_goal(field.world, kNoObject, Point{100, 500}, Point{900, 500}, 100, 0).at ==
         (Point{801, 500}));
   // Due north-east, the third direction: (cos, sin)(0.785) of 99.
-  CHECK(field.movement.ring_goal(field.world, Point{2000, 2000}, Point{900, 500}, 100, 0) ==
+  CHECK(field.movement.ring_goal(field.world, kNoObject, Point{2000, 2000}, Point{900, 500}, 100, 0).at ==
         (Point{970, 569}));
   // A range above 1,000 is 1,000 (`SetDest`).
-  CHECK(field.movement.ring_goal(field.world, Point{100, 500}, Point{1900, 500}, 5000, 0) ==
+  CHECK(field.movement.ring_goal(field.world, kNoObject, Point{100, 500}, Point{1900, 500}, 5000, 0).at ==
         (Point{901, 501}));
   // No range, no ring: the goal itself.
-  CHECK(field.movement.ring_goal(field.world, Point{100, 500}, Point{900, 500}, 0, 0) ==
+  CHECK(field.movement.ring_goal(field.world, kNoObject, Point{100, 500}, Point{900, 500}, 0, 0).at ==
         (Point{900, 500}));
 }
 
@@ -1389,4 +1390,245 @@ TEST(a_route_whose_end_is_taken_on_the_way_is_not_arrived) {
   for (int t = 0; t < 20; ++t) field.world.advance(800);
   CHECK(!field.move(walker).has_path);
   CHECK(field.move(walker).last_outcome != MoveOutcome::arrived);
+}
+
+// ---------------------------------------------------------------------------
+// going round a taken side: the struck goal points and the free-spot search
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// The post every test below attacks, and `GotoAttack`'s band round it:
+/// weapon reach 10 plus both radii. Its goal rings are sixteen points at 39
+/// and the post's own centre (`r = 0`).
+constexpr Point kTarget{900, 900};
+constexpr std::int32_t kBand = 10 + 15 + 15;
+
+/// A post on every second point of the 39 ring: each strikes the points
+/// either side of it, 15.3 away, so none of the band's goal points is left.
+std::vector<ObjectId> ring_of_posts(Field& field) {
+  std::vector<ObjectId> posts;
+  const Point ring[] = {{939, 900}, {927, 927}, {900, 939}, {872, 927},
+                        {861, 900}, {872, 872}, {900, 861}, {927, 872}};
+  for (const Point p : ring) posts.push_back(field.unit("Post", p));
+  return posts;
+}
+
+/// A seed whose first `rand(0, 359)` heads east, away from the column of
+/// posts west of the target: the step is `(r sin a, r cos a)`, mostly `+x`
+/// for `a` in 60..120. Searched for, so the test survives the generator
+/// being replaced.
+std::uint32_t seed_heading_east() {
+  for (std::uint32_t seed = 1;; ++seed) {
+    Rng probe(seed);
+    const std::int32_t heading = probe.between(0, 359);
+    if (heading >= 60 && heading <= 120) return seed;
+  }
+}
+
+}  // namespace
+
+TEST(an_attacker_whose_side_is_taken_goes_round_to_a_free_spot) {
+  // A post stands on the band's west point, and strikes off the goal points
+  // within 30 of it (`0x0040a310`): the search runs to the nearest point
+  // left, round the side, and the attacker arrives there. Before the goal
+  // points were struck it ran to the taken west point, was cut back to the
+  // free spot behind the post, and waited there out of reach.
+  Field field;
+  const ObjectId post = field.unit("Post", kTarget);
+  const ObjectId blocker = field.unit("Post", Point{861, 900});
+  const ObjectId attacker = field.unit("Soldier", Point{100, 900});
+  field.movement.order_goto_object(field.world, attacker, post, kBand, 0, true);
+  REQUIRE(field.move(attacker).has_path);
+  const Point end = field.move(attacker).waypoints.back();
+  CHECK(end.y != 900);
+  CHECK(within(end, kTarget, kBand));
+  for (int t = 0; t < 30; ++t) field.world.advance(800);
+  CHECK(field.move(attacker).last_outcome == MoveOutcome::arrived);
+  CHECK(within(field.at(attacker), kTarget, kBand));
+  CHECK(overlapping_pairs(field, {post, blocker, attacker}) == 0);
+  // No search was short of a goal point, so nothing was drawn for one.
+  CHECK(!field.move(attacker).free_spot_tried);
+}
+
+TEST(a_goal_point_is_struck_by_a_body_at_the_two_radii) {
+  // `0x00409650` strikes a goal point at the summed radii too, where the
+  // free-spot test wants nearer. A post 30 west of the west ring point
+  // (861,900) strikes it, and the route runs elsewhere; one a unit further
+  // does not.
+  Field touching;
+  touching.unit("Post", Point{831, 900});
+  const ObjectId near_asker = touching.unit("Soldier", Point{100, 900});
+  const MovementSystem::RingGoal near =
+      touching.movement.ring_goal(touching.world, near_asker, Point{100, 900}, kTarget, kBand, 0);
+  CHECK(near.free);
+  CHECK(near.at != (Point{861, 900}));
+  Field clear;
+  clear.unit("Post", Point{830, 900});
+  const ObjectId far_asker = clear.unit("Soldier", Point{100, 900});
+  const MovementSystem::RingGoal far =
+      clear.movement.ring_goal(clear.world, far_asker, Point{100, 900}, kTarget, kBand, 0);
+  CHECK(far.free);
+  CHECK(far.at == (Point{861, 900}));
+  // Without an owner -- an order that holds no lock -- nothing is struck.
+  CHECK(touching.movement.ring_goal(touching.world, kNoObject, Point{100, 900}, kTarget, kBand, 0)
+            .at == (Point{861, 900}));
+}
+
+TEST(a_band_with_every_goal_point_taken_heads_for_the_point_nearest_its_centre) {
+  // Status 1: nothing is left. The search still heads somewhere: the goal
+  // point nearest the centre as they were added (`[0x008bfc10]`), which for
+  // a band whose rings reach 0 is the centre itself.
+  Field field;
+  field.unit("Post", kTarget);
+  ring_of_posts(field);
+  const ObjectId attacker = field.unit("Soldier", Point{100, 900});
+  const MovementSystem::RingGoal goal =
+      field.movement.ring_goal(field.world, attacker, Point{100, 900}, kTarget, kBand, 0);
+  CHECK(!goal.free);
+  CHECK(goal.at == kTarget);
+  // A band of 39 has no ring at 0: the nearest of its sixteen points at 38,
+  // which truncation makes the north-east one, 36.8 out where the rest are
+  // 37 or more.
+  const MovementSystem::RingGoal ring =
+      field.movement.ring_goal(field.world, attacker, Point{100, 900}, kTarget, 39, 0);
+  CHECK(!ring.free);
+  CHECK(ring.at == (Point{926, 926}));
+}
+
+TEST(the_free_spot_search_draws_one_heading_and_steps_out_from_the_centre) {
+  // `0x004180b0`: `rand(0, 359)` from the world's generator, the unit's
+  // radius turned along it with `Rot`'s constant, and the first passable free
+  // spot from the centre outward. A post on the centre takes the centre and
+  // every probe nearer to it than 30.
+  Field field;
+  field.unit("Post", kTarget);
+  const ObjectId asker = field.unit("Soldier", Point{100, 100});
+  Rng expected = field.world.rng();
+  const std::int32_t heading = expected.between(0, 359);
+  const Point step = rotate_like_gbr(Point{0, 15}, heading);
+  const std::int64_t stride = static_cast<std::int64_t>(step.x) * step.x +
+                              static_cast<std::int64_t>(step.y) * step.y;
+  REQUIRE(stride > 0);
+  std::int32_t k = 1;
+  while (static_cast<std::int64_t>(k) * k * stride < 30 * 30) ++k;
+  Point spot;
+  REQUIRE(field.movement.free_spot(field.world, asker, kTarget, spot));
+  CHECK(spot == (Point{kTarget.x + k * step.x, kTarget.y + k * step.y}));
+  // Exactly one draw.
+  CHECK(field.world.rng() == expected);
+  // A free centre is the answer, still for one draw.
+  Field open;
+  const ObjectId lone = open.unit("Soldier", Point{100, 100});
+  Rng once = open.world.rng();
+  (void)once.between(0, 359);
+  REQUIRE(open.movement.free_spot(open.world, lone, kTarget, spot));
+  CHECK(spot == kTarget);
+  CHECK(open.world.rng() == once);
+}
+
+TEST(an_attacker_queued_behind_a_full_band_is_re_aimed_round_it_once) {
+  // The band is full and a column of posts stands west of it, out to x = 610.
+  // The attacker from the west is cut back to the column's end; asked again
+  // from there it gets nowhere, with nothing left of the band, so the route
+  // search asks the free-spot search (`0x004191bf`). The heading is east of
+  // the target, where a spot is free some 300 units nearer than the attacker
+  // stands -- more than 200 -- so the route is re-aimed at it, exactly
+  // (`0x00419244`), and the attacker goes round.
+  Field field;
+  const ObjectId post = field.unit("Post", kTarget);
+  std::vector<ObjectId> bodies = ring_of_posts(field);
+  bodies.push_back(post);
+  for (std::int32_t x = 610; x <= 830; x += 20) {
+    for (const std::int32_t y : {870, 900, 930}) bodies.push_back(field.unit("Post", Point{x, y}));
+  }
+  const ObjectId attacker = field.unit("Soldier", Point{100, 900});
+  field.movement.order_goto_object(field.world, attacker, post, kBand, 0, true);
+  CHECK(!field.move(attacker).free_spot_tried);
+  for (int t = 0; t < 30; ++t) field.world.advance(800);
+  const Point queued = field.at(attacker);
+  CHECK(queued.x < 610);
+  CHECK(!field.move(attacker).has_path);
+  CHECK(field.move(attacker).last_outcome != MoveOutcome::arrived);
+
+  // The script's `GotoAttack` asks again: the same target, the same band.
+  field.world.rng() = Rng(seed_heading_east());
+  Rng drawn = field.world.rng();
+  (void)drawn.between(0, 359);
+  field.movement.order_goto_object(field.world, attacker, post, kBand, 0, true);
+  CHECK(field.world.rng() == drawn);
+  CHECK(field.move(attacker).free_spot_tried);
+  CHECK(field.move(attacker).free_spot_aimed);
+  REQUIRE(field.move(attacker).has_path);
+  const Point spot = field.move(attacker).waypoints.back();
+  CHECK(spot.x > kTarget.x);
+  CHECK(isqrt(dist_sq(queued, kTarget)) - isqrt(dist_sq(spot, kTarget)) > 200);
+  // The order's band is still the target's: the spot is not arrival.
+  CHECK(field.move(attacker).target_object == post);
+  CHECK(field.move(attacker).range == kBand);
+  for (int t = 0; t < 40; ++t) field.world.advance(800);
+  CHECK(field.at(attacker) == spot);
+  CHECK(field.move(attacker).last_outcome != MoveOutcome::arrived);
+  CHECK(!field.move(attacker).free_spot_aimed);
+  // The posts of the ring touch one another; the attacker touches none.
+  for (const ObjectId body : bodies) CHECK(dist_sq(field.at(body), spot) >= 30 * 30);
+
+  // Once per destination: asked again, it searches the rings and draws
+  // nothing.
+  const Rng before = field.world.rng();
+  field.movement.order_goto_object(field.world, attacker, post, kBand, 0, true);
+  CHECK(field.world.rng() == before);
+  CHECK(field.move(attacker).free_spot_tried);
+  // An order anywhere else forgets it.
+  field.movement.order_goto(field.world, attacker, Point{1500, 1500}, kBand, 0, kNoObject, true);
+  CHECK(!field.move(attacker).free_spot_tried);
+}
+
+TEST(a_unit_already_at_a_full_band_draws_its_heading_and_stays) {
+  // The spot must be more than 200 units nearer than the unit stands: one
+  // waiting at the edge of a full band runs the search once and is not
+  // re-aimed.
+  Field field;
+  const ObjectId post = field.unit("Post", kTarget);
+  ring_of_posts(field);
+  const ObjectId attacker = field.unit("Soldier", Point{830, 900});
+  const Rng before = field.world.rng();
+  field.movement.order_goto_object(field.world, attacker, post, kBand, 0, true);
+  CHECK(!field.move(attacker).has_path);
+  CHECK(field.move(attacker).free_spot_tried);
+  CHECK(!field.move(attacker).free_spot_aimed);
+  CHECK(!(field.world.rng() == before));
+  CHECK(field.at(attacker) == (Point{830, 900}));
+}
+
+TEST(an_order_without_the_lock_flag_never_runs_the_free_spot_search) {
+  // `0x00419110` asks it only for an owner (`0x004178d0`).
+  Field field;
+  const ObjectId post = field.unit("Post", kTarget);
+  ring_of_posts(field);
+  const ObjectId attacker = field.unit("Soldier", Point{830, 900});
+  const Rng before = field.world.rng();
+  field.movement.order_goto_object(field.world, attacker, post, kBand, 0, false);
+  CHECK(field.world.rng() == before);
+  CHECK(!field.move(attacker).free_spot_tried);
+}
+
+TEST(the_free_spot_flags_survive_a_save_and_are_not_hashed) {
+  Field field;
+  const ObjectId walker = field.unit("Soldier", Point{100, 500});
+  field.movement.order_goto(field.world, walker, Point{900, 500}, 0, 0, kNoObject, true);
+  field.movement.state(walker).free_spot_tried = true;
+  field.movement.state(walker).free_spot_aimed = true;
+  std::uint64_t with = 0;
+  field.movement.hash(with);
+  std::vector<std::byte> bytes;
+  field.movement.serialize(bytes);
+  field.movement.state(walker).free_spot_tried = false;
+  field.movement.state(walker).free_spot_aimed = false;
+  std::uint64_t without = 0;
+  field.movement.hash(without);
+  CHECK(with == without);
+  REQUIRE(field.movement.deserialize(bytes).ok());
+  CHECK(field.move(walker).free_spot_tried);
+  CHECK(field.move(walker).free_spot_aimed);
 }
