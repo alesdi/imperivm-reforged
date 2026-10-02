@@ -638,6 +638,10 @@ namespace {
 /// Population goes the same way, `cost_pop` off the settlement's count, which
 /// `VERIFY_CMDCOST_BUILDING.VS` guards with `cmdcost_pop + MinPopulation >
 /// population`.
+///
+/// The charge is only ever taken through `charge` below, which refuses what
+/// the settlement cannot pay, so a refund always puts back exactly what was
+/// taken.
 void settle(World& world, ObjectId id, const Command& command, bool refund) {
   if (command.cost_gold <= 0 && command.cost_food <= 0 && command.cost_pop <= 0) return;
   Settlement* s = paying_settlement(world, id);
@@ -662,30 +666,77 @@ void settle(World& world, ObjectId id, const Command& command, bool refund) {
   if (command.cost_pop > 0) s->population = std::max(0, s->population - command.cost_pop);
 }
 
+/// Pay for a command about to be queued, or refuse it. False is a refusal, and
+/// then nothing is taken and the command must not be queued.
+///
+/// **Every insert asks this first, on every peer.** The order insert
+/// (`vtbl+0xb8`, 0x005b4e90), `AddCommand`'s (`vtbl+0xbc`, 0x005b5c30) and the
+/// per-object issue's immediate path (0x004ef921) all open with the accept
+/// test (`vtbl+0x8c`, 0x005b1760), which for a row with a `costgold`,
+/// `costfood` or `costpop` calls the object's payment (`vtbl+0x84`); a false
+/// answer returns before anything is inserted, and the per-object issue
+/// deletes the refused command (0x004efbe2). On a building the payment is
+/// 0x004df070: it refuses when the settlement's gold is below `costgold`, its
+/// food below `costfood`, or -- for a row with a population cost --
+/// its population below `costpop + MinPopulation`, tested in that order and
+/// all or nothing, and only then takes the three and moves the spent counters.
+/// The refusal shows its owner a "gold lack", "food lack" or "pop lack"
+/// message, which is not modelled. The bar posts the press without asking
+/// (0x005e39f0), so a training the town cannot afford is turned away where the
+/// order executes, and a Ctrl press's `TrainMultipleCount` repeats, each a
+/// whole execution (0x004e5e60), queue as many as there is money for.
+///
+/// **Two readings, labelled.** Anything that is not a building pays nothing in
+/// the original (its `vtbl+0x84` accepts and takes nothing, 0x00467a30); no
+/// shipped row with a cost is offered to one, and here an object pays through
+/// whatever settlement it resolves to, as before. And an object that resolves
+/// to no settlement is accepted for nothing, as before: the original's
+/// building always has one.
+[[nodiscard]] bool charge(World& world, ObjectId id, const Command& command) {
+  if (command.cost_gold <= 0 && command.cost_food <= 0 && command.cost_pop <= 0) return true;
+  const Settlement* s = paying_settlement(world, id);
+  if (s == nullptr) return true;
+  if (s->warehouse.gold < command.cost_gold) return false;
+  if (s->warehouse.food < command.cost_food) return false;
+  if (command.cost_pop > 0) {
+    const EconomySystem* economy = economy_of(world);
+    const std::int32_t floor = economy == nullptr ? 0 : economy->rules().min_population;
+    if (s->population < command.cost_pop + floor) return false;
+  }
+  settle(world, id, command, /*refund=*/false);
+  return true;
+}
+
 }  // namespace
 
 std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_view verb,
                                          const Command& prototype) {
   if (world.find(id) == nullptr) return 0;
   CommandQueue& q = queue(id);
-  // Aborts what is running, which `AI HELPERS\GUARD.VS` requires: it issues
-  // `SetCommand("move", pt)` to a unit whose running command is `idle`, and
-  // `UNIT_IDLE.VS` is a `while(1)` that never returns on its own. A running
-  // command that is replaced is a cancelled one: its `onfinish` gets `true`
-  // and its cost comes back.
-  for (Command& command : q.entries) {
-    settle(world, id, command, /*refund=*/true);
-    retire(world, id, command, /*canceled=*/true);
-  }
-  q.entries.clear();
 
+  // The command takes its id when it is made, before the insert can refuse it
+  // (0x00599302 in the constructor), so a refused one has used its id.
   Command command = prototype;
   command.id = world.next_command_id();
   command.verb.assign(verb);
   command.script = script::kNoScript;
   command.started = false;
   const std::uint32_t issued = command.id;
-  settle(world, id, command, /*refund=*/false);
+  // Paid for before the queue it replaces is refunded (0x005b4e90 asks the
+  // accept test first), so a replace cannot spend what the commands it
+  // clears are holding, and a refused one leaves them running.
+  if (!charge(world, id, command)) return 0;
+
+  // Aborts what is running, which `AI HELPERS\GUARD.VS` requires: it issues
+  // `SetCommand("move", pt)` to a unit whose running command is `idle`, and
+  // `UNIT_IDLE.VS` is a `while(1)` that never returns on its own. A running
+  // command that is replaced is a cancelled one: its `onfinish` gets `true`
+  // and its cost comes back.
+  for (Command& old : q.entries) {
+    settle(world, id, old, /*refund=*/true);
+    retire(world, id, old, /*canceled=*/true);
+  }
+  q.entries.clear();
   q.entries.push_back(std::move(command));
   return issued;
 }
@@ -701,7 +752,7 @@ std::uint32_t CommandSystem::add_command(World& world, ObjectId id, bool front,
   command.script = script::kNoScript;
   command.started = false;
   const std::uint32_t issued = command.id;
-  settle(world, id, command, /*refund=*/false);
+  if (!charge(world, id, command)) return 0;
 
   // `front` inserts at index 1 -- behind the running command, ahead of the rest
   // -- and never at index 0. See the header: the `AddCommand(true, ...);
@@ -715,14 +766,19 @@ std::uint32_t CommandSystem::append_order(World& world, ObjectId id, std::string
                                           const Command& prototype) {
   // A resting head gives way; anything else keeps running and the order waits
   // its turn behind it, as `ExecCmd`'s five-deep training queue needs. See the
-  // header for why this is here and not in `add_command`.
-  if (CommandQueue* q = find(id);
-      q != nullptr && !q->entries.empty() && equal_fold(q->entries.front().verb, default_verb_)) {
-    settle(world, id, q->entries.front(), /*refund=*/true);
-    retire(world, id, q->entries.front(), /*canceled=*/true);
-    q->entries.erase(q->entries.begin());
-  }
-  return add_command(world, id, /*front=*/false, verb, prototype);
+  // header for why this is here and not in `add_command`. The order is paid for
+  // and pushed first and the head ended after, as 0x005b4e90 does, so an order
+  // the settlement cannot pay for leaves the resting head alone.
+  const CommandQueue* before = find(id);
+  const bool resting = before != nullptr && !before->entries.empty() &&
+                       equal_fold(before->entries.front().verb, default_verb_);
+  const std::uint32_t issued = add_command(world, id, /*front=*/false, verb, prototype);
+  if (issued == 0 || !resting) return issued;
+  CommandQueue& q = queue(id);
+  settle(world, id, q.entries.front(), /*refund=*/true);
+  retire(world, id, q.entries.front(), /*canceled=*/true);
+  q.entries.erase(q.entries.begin());
+  return issued;
 }
 
 bool CommandSystem::kill_command(World& world, ObjectId id) {

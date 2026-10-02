@@ -35,6 +35,7 @@
 #include "imperivm/core/sim/rng.hpp"
 #include "imperivm/core/sim/feeder.hpp"
 #include "imperivm/core/sim/objlist.hpp"
+#include "imperivm/core/sim/orders.hpp"
 #include "imperivm/core/sim/player_host.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/session.hpp"
@@ -3282,6 +3283,116 @@ TEST(upgrade_best_barrack_ends_a_resting_idle_rather_than_waiting_behind_it) {
   CHECK(b.commands.command_count(resting) == 1);
   CHECK(b.verb_at(resting, 0) == "research");
   CHECK(s->warehouse.gold == 100000 - 400);
+}
+
+/// **A building refuses to queue what its settlement cannot pay for, so a
+/// cancel can never give back more than was taken.** Playtest #14's residue:
+/// this engine charged what there was and refunded the full cost, so ordering
+/// a training below its price and cancelling it made gold. Every insert asks
+/// the accept test first (0x005b1760), which on a building is the payment
+/// 0x004df070: gold below `costgold`, food below `costfood`, or population
+/// below `costpop + MinPopulation` refuses, nothing is taken and nothing
+/// queued; the refused command has still used its id.
+TEST(a_building_refuses_to_queue_what_its_settlement_cannot_pay_for) {
+  BarrackBench b;
+  b.set_store(250, 0, 50);
+  const ObjectId barracks = b.add(b.classes.rbarracks);
+  const Settlement* s = b.economy.settlements().find(b.town);
+  REQUIRE(s != nullptr);
+  CommandDef train;
+  train.name = "trainRHastatus";
+  train.method = "train";
+  train.train_command = true;
+  train.cost_gold = 100;
+  train.cost_pop = 1;
+
+  // Two are paid for; the third finds 50 gold and is turned away whole.
+  const std::uint32_t first = issue_order(b.world, barracks, train, OrderTarget{}, OrderMode::replace);
+  const std::uint32_t second = issue_order(b.world, barracks, train, OrderTarget{}, OrderMode::replace);
+  CHECK(first != 0);
+  CHECK(second != 0);
+  const std::uint32_t seed = b.world.command_id_seed();
+  CHECK(issue_order(b.world, barracks, train, OrderTarget{}, OrderMode::replace) == 0);
+  CHECK(b.world.command_id_seed() == seed + 1);  // made, and then refused
+  CHECK(b.commands.command_count(barracks) == 2);
+  CHECK(s->warehouse.gold == 50);
+  CHECK(s->population == 48);
+
+  // Cancelling both gives back exactly what was taken: the town is as it was.
+  CHECK(b.commands.cancel_command(b.world, barracks, second));
+  CHECK(b.commands.cancel_command(b.world, barracks, first));
+  CHECK(b.commands.command_count(barracks) == 0);
+  CHECK(s->warehouse.gold == 250);
+  CHECK(s->population == 50);
+
+  // A Ctrl press's five repeats are five executions, each paid on its own:
+  // two queue and three are refused.
+  std::size_t queued = 0;
+  for (int r = 0; r < 5; ++r) {
+    if (issue_order(b.world, barracks, train, OrderTarget{}, OrderMode::append) != 0) ++queued;
+  }
+  CHECK(queued == 2);
+  CHECK(b.commands.command_count(barracks) == 2);
+  CHECK(s->warehouse.gold == 50);
+  CHECK(b.commands.clear_commands(b.world, barracks) == 1);
+  CHECK(b.commands.kill_command(b.world, barracks));
+  CHECK(s->warehouse.gold == 250);
+
+  // Population: `costpop + MinPopulation` (10) is the floor, and reaching it
+  // exactly is enough.
+  b.set_store(1000, 0, 11);
+  CHECK(issue_order(b.world, barracks, train, OrderTarget{}, OrderMode::append) != 0);
+  CHECK(s->population == 10);
+  CHECK(issue_order(b.world, barracks, train, OrderTarget{}, OrderMode::append) == 0);
+  CHECK(s->warehouse.gold == 900);
+  (void)b.commands.kill_command(b.world, barracks);
+
+  // Food the same way.
+  CommandDef feast = train;
+  feast.cost_gold = 0;
+  feast.cost_pop = 0;
+  feast.cost_food = 400;
+  b.set_store(1000, 399, 50);
+  CHECK(issue_order(b.world, barracks, feast, OrderTarget{}, OrderMode::append) == 0);
+  CHECK(s->warehouse.food == 399);
+  CHECK(b.commands.command_count(barracks) == 0);
+}
+
+/// **A refused order changes nothing it would have replaced or ended.** The
+/// insert pays before it clears a replaced queue or ends a resting `idle`
+/// (0x005b4e90), so a replace cannot spend what the queue it clears is
+/// holding, and a refusal leaves both where they were.
+TEST(a_refused_order_leaves_the_queue_it_would_have_replaced) {
+  BarrackBench b;
+  b.set_store(100, 0, 50);
+  const ObjectId barracks = b.add(b.classes.rbarracks);
+  const Settlement* s = b.economy.settlements().find(b.town);
+  REQUIRE(s != nullptr);
+  Command priced;
+  priced.cost_gold = 100;
+  const std::uint32_t held = b.commands.add_command(b.world, barracks, false, "train", priced);
+  REQUIRE(held != 0);
+  CHECK(s->warehouse.gold == 0);
+  // The refund of the replaced one would have paid for it; it is not counted.
+  CHECK(b.commands.set_command(b.world, barracks, "research", priced) == 0);
+  CHECK(b.commands.command_count(barracks) == 1);
+  CHECK(b.verb_at(barracks, 0) == "train");
+  CHECK(s->warehouse.gold == 0);
+  CHECK(b.commands.add_command(b.world, barracks, true, "train", priced) == 0);
+  CHECK(b.commands.command_count(barracks) == 1);
+
+  // A resting `idle` is ended only for an order that is taken.
+  (void)b.commands.set_command(b.world, barracks, "idle", Command{});
+  CHECK(s->warehouse.gold == 100);
+  b.set_store(99, 0, 50);
+  CHECK(b.commands.append_order(b.world, barracks, "train", priced) == 0);
+  CHECK(b.commands.command_count(barracks) == 1);
+  CHECK(b.verb_at(barracks, 0) == "idle");
+  b.set_store(100, 0, 50);
+  CHECK(b.commands.append_order(b.world, barracks, "train", priced) != 0);
+  CHECK(b.commands.command_count(barracks) == 1);
+  CHECK(b.verb_at(barracks, 0) == "train");
+  CHECK(s->warehouse.gold == 0);
 }
 
 /// **`GetTrainGold` is the row's `costgold`, and nothing for a name no row

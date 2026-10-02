@@ -490,19 +490,30 @@ class CommandSystem final : public System {
 
   /// `SetCommand(verb[, arg])`: abort everything and run this.
   ///
-  /// Returns the id of the command created, or 0 when `id` names no object.
+  /// Returns the id of the command created, or 0 when `id` names no object or
+  /// its settlement cannot pay the command's cost.
+  ///
+  /// **Every insert pays first, and refuses what cannot be paid for.** The
+  /// three below take the cost when the command is queued, not when it starts,
+  /// and refuse it -- nothing taken, nothing queued, the queue as it was --
+  /// when the settlement's gold or food is short of it or its population short
+  /// of `costpop + MinPopulation` (0x005b1760 calling 0x004df070 on a
+  /// building). A refused command has still used its id. So a cancel's refund
+  /// (`cancel_command`) is always exactly what was charged. See `charge` in
+  /// `src/sim/command.cpp`.
   std::uint32_t set_command(World& world, ObjectId id, std::string_view verb,
                             const Command& prototype);
   /// `AddCommand(front, verb[, arg])`. `front` inserts at index 1 -- behind the
   /// running command, ahead of everything else -- and appends when the queue is
-  /// empty. `!front` appends.
+  /// empty. `!front` appends. 0 when refused, as `set_command`.
   std::uint32_t add_command(World& world, ObjectId id, bool front, std::string_view verb,
                             const Command& prototype);
   /// An **order** appended through the order core -- `ExecCmd(..., false)`,
   /// a queued player order, `UpgradeBestBarrack` -- rather than a script's
   /// own `AddCommand`. The one difference: a head that is the default verb
-  /// (`idle`) is ended first, cancelled and refunded as `KillCommand` would,
-  /// so the order runs instead of waiting behind it.
+  /// (`idle`) is ended, cancelled and refunded as `KillCommand` would, so the
+  /// order runs instead of waiting behind it -- once the order is paid for,
+  /// since a refused one (0, as `set_command`) changes nothing.
   ///
   /// **A reading, and labelled as one.** `BARRACK_IDLE.VS` and
   /// `OBJECT_IDLE.VS` are `while (1) Sleep(...)` and never return, so
