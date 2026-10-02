@@ -318,6 +318,17 @@ struct MoveState {
   /// both refuse a lock. **Saved, and not hashed**: path media, like the rest
   /// of this block. See `sim/avoidance.hpp`, "Destination locks".
   bool dest_lock = false;
+  /// `CVXPathRetry`'s flag bit 3 (`[retry+0x20] & 8`): the free-spot search
+  /// (`0x004180b0`) has run for this destination. Set when it runs
+  /// (`0x004191ab`), whether or not it re-aims; cleared only by `SetDest` to
+  /// a different destination (`0x0041a594`) and with the retry, which the
+  /// `Goto` family deletes on arrival. **Saved, and not hashed**.
+  bool free_spot_tried = false;
+  /// Flag bit 6 (`& 0x40`): the route being walked was re-aimed at a free
+  /// spot (`0x00419275`). It too keeps the search from running, and the path
+  /// follower clears it when that route has been walked to its end
+  /// (`0x0041a097`, `0x0041a0ae`). **Saved, and not hashed**.
+  bool free_spot_aimed = false;
   /// The gates the route crosses and where, in route order: `0x00418fb0`'s
   /// list, made when the route is laid (`GateLines::crossings`). The step
   /// stops before the first one not yet passed while that gate bars the
@@ -602,10 +613,26 @@ class MovementSystem : public System {
   [[nodiscard]] bool spot_free(const World& world, ObjectId asker, Point at,
                                std::int32_t radius) const;
 
-  /// Where a route for an arrival band ends: `0x00417830`'s goal rings. See
-  /// the definition.
-  [[nodiscard]] Point ring_goal(const World& world, Point from, Point centre, std::int32_t range,
-                                std::int32_t min_range) const;
+  /// What `ring_goal` aims a search at.
+  struct RingGoal {
+    Point at;
+    /// Whether `at` is a goal point the route may end on. `false` is the
+    /// smart pathfinder's status 1: no goal point is left -- none passable,
+    /// or every one taken -- and `at` is only where the search heads.
+    bool free = true;
+  };
+  /// Where a route for an arrival band ends: `0x00417830`'s goal rings, and
+  /// for an `owner` -- the unit, when its order owns a lock; `kNoObject`
+  /// otherwise -- without the points a standing unit or another's lock
+  /// covers (`0x0040a310`). A `range` of 0 is the centre alone. See the
+  /// definition.
+  [[nodiscard]] RingGoal ring_goal(const World& world, ObjectId owner, Point from, Point centre,
+                                   std::int32_t range, std::int32_t min_range) const;
+
+  /// `0x004180b0`: a free spot for `id` out from `centre`, along one heading
+  /// drawn from the world's generator. Draws whatever it finds. See the
+  /// definition.
+  [[nodiscard]] bool free_spot(World& world, ObjectId id, Point centre, Point& out) const;
 
   /// The owned destination lock `id`'s route holds, if any: its route's last
   /// point, radius the owner's.
@@ -633,6 +660,8 @@ class MovementSystem : public System {
     std::uint64_t sidesteps = 0;  ///< gave way to somewhere that was not the step's end
     std::uint64_t gate_waits = 0; ///< stood before a gate that barred the way
     std::uint64_t gate_searches = 0;  ///< routes searched again with enemy gates laid
+    std::uint64_t free_spot_searches = 0;  ///< full bands that asked `0x004180b0`
+    std::uint64_t free_spot_aims = 0;      ///< and were re-aimed at what it found
   };
   [[nodiscard]] const AvoidanceCounters& avoidance() const noexcept { return counters_; }
 
@@ -773,8 +802,11 @@ class MovementSystem : public System {
   mutable std::vector<ClassTraits> traits_;
   mutable std::vector<std::uint8_t> traits_known_;
   mutable const ClassGraph* traits_graph_ = nullptr;
-  /// `spot_free`'s candidates.
+  /// `spot_free`'s candidates, and `ring_goal`'s.
   mutable std::vector<ObjectId> spot_scratch_;
+  /// `ring_goal`'s goal points and what may cover them.
+  mutable std::vector<Point> ring_points_;
+  mutable std::vector<StaticLock> ring_takers_;
   /// Per entry, how its route is walked this turn: still, step by step, or
   /// the whole turn at once.
   std::vector<std::uint8_t> mode_;

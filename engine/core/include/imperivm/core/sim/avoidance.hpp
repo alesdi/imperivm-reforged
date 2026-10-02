@@ -110,16 +110,16 @@
 //     which cuts a found route back from its end, one cell at a time, to the
 //     first cell whose centre is free, and never tests the start's cell.
 //     Built as `truncate_to_free`, **inferred** onto this engine's smoothed
-//     polyline in steps of a cell's width. What the condition at `0x004141cc`
-//     tests was not decoded; the cut is applied to every route with an owner.
+//     polyline in steps of a cell's width. The condition at `0x004141cc` is
+//     that the search reached no goal point; this engine cuts every route with
+//     an owner, which comes to the same, because a goal point it can reach is
+//     one nothing covered when it searched (below).
 //   * `0x0040b580`'s walk towards an unreachable goal in radius-sized steps,
 //     inside a search this engine does not have. Not built.
-//   * the free-spot search `0x004180b0` -- draw `rand(0, 359)`, turn the
-//     radius into a step along it with `Rot`'s constant (`0x007ac490`), probe
-//     outward from the point itself up to 40 times -- which `0x00419110` uses
-//     when the pathfinder's answer is a status 1, re-aiming only at a spot
-//     more than 200 units nearer the goal than the unit already stands. Not
-//     built: it sits behind a failure of the original's search.
+//   * the free-spot search `0x004180b0`, which the route search `0x00419110`
+//     asks when an owner's search found no goal point left and got nowhere
+//     (`0x00419197`: the path's status 1 and a route of no length). Built:
+//     `MovementSystem::free_spot`, in `lay_path`. See "Going round", below.
 //
 // The lock itself is not a separate table: it is the last point of a route
 // whose `MoveState::dest_lock` is set, for as long as the route exists. The
@@ -129,11 +129,45 @@
 //
 // The search's goal is not the band's centre either. `0x00417830` gives it
 // rings of sixteen points (`0x0040a1e0`, `0x00409cf0`) at `r - 1` for `r` from
-// the range down to the minimum in steps of 40, six at most, and the route
-// ends on the first its search reaches -- **inferred** here as the one
-// nearest the unit in a straight line; `MovementSystem::ring_goal`. A route to the centre
-// stepped straight over a band narrower than a walk step and ended on the
-// target itself, which is where report #13's attackers all stood.
+// the range down to the minimum in steps of 40, six at most -- a ring at 0 is
+// the centre once -- and the route ends on the first its search reaches --
+// **inferred** here as the one nearest the unit in a straight line;
+// `MovementSystem::ring_goal`. A route to the centre stepped straight over a
+// band narrower than a walk step and ended on the target itself, which is
+// where report #13's attackers all stood.
+//
+// ### Going round
+//
+// For an owner, the smart pathfinder strikes goal points off before it
+// searches (`0x0040a310`, at `0x004138fe`): every standing unit and every lock
+// but the owner's own -- the free-spot test's takers, `0x00409650` -- strikes
+// the points within its radius plus the owner's, **that distance included**,
+// among the bodies whose centre lies in the goal set's box widened by twice
+// the margin. So a unit whose nearest side of a target is taken routes to the
+// nearest point that is not, round the target, rather than to the taken one
+// and back to a free spot behind it -- which is where this engine's attackers
+// waited before.
+//
+// With no goal point left (status 1) the search heads for the one nearest the
+// centre, as they were added (`[0x008bfc10]`), and the route is cut back. When
+// that gets the unit nowhere, and the retry has not already (flags 8 and 0x40
+// of `[retry+0x20]`), the route search sets flag 8 and asks `0x004180b0`:
+//
+//   * one heading, `rand(0, 359)` degrees from the synchronised generator --
+//     **a draw, and so state** -- and a step of the unit's radius along it,
+//     `(trunc(r sin a), trunc(r cos a))` with `Rot`'s constant (`0x007ac490`);
+//   * up to forty probes from the band's centre outward, the first passable
+//     free spot (`0x0040a990`) the answer; a probe off the map ends it. Its
+//     opening test, on `[squad+0x7c]`, reads a field nothing sets but to 0
+//     and never refuses.
+//
+// A spot more than 200 units nearer the centre than the unit stands
+// (`0x00419230`, both distances through the integer square root) becomes the
+// route's goal, exactly, and flag 0x40 is set; the order's band stays the
+// target's, so arriving there is not arriving. Flag 8 lasts until `SetDest`
+// names another destination (`0x0041a594`); 0x40 until the route has been
+// walked to its end (`0x0041a097`). So a unit queued behind a full band is
+// sent round it once, and one already at its edge draws and stays.
 //
 // An earlier reading -- re-aim or refuse an order to an occupied point up front
 // -- refused 298 orders in 300 turns on Balcans, almost all deer grazing a few
@@ -180,6 +214,15 @@ inline constexpr std::int32_t kSidestepUnscored = 0xffff;
 /// A formation march's sampled path steps 200 units (`0x0041994c`); every
 /// other route steps its unit's walk stride.
 inline constexpr std::int32_t kFormationStride = 200;
+
+/// The free-spot search (`0x004180b0`) draws its heading as `rand(0, 359)`
+/// degrees (`0x00418100`) and probes at most forty points along it
+/// (`0x004181d0`); the route search re-aims at what it finds only when that
+/// is more than 200 units nearer the goal than the unit stands
+/// (`0x00419230`).
+inline constexpr std::int32_t kFreeSpotHeadings = 360;
+inline constexpr std::int32_t kFreeSpotProbes = 40;
+inline constexpr std::int32_t kFreeSpotGain = 200;
 
 /// The `<point>` types that make ownerless locks, and their radii
 /// (`0x005407d7` .. `0x005407f4`).
