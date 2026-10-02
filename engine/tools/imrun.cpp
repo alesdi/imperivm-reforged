@@ -377,6 +377,7 @@ int main(int argc, char** argv) {
               break;
             case script::HostStatus::retry: text += " -> retry"; break;
             case script::HostStatus::suspend: text += " -> suspend"; break;
+            case script::HostStatus::finish: text += " -> finish"; break;
             case script::HostStatus::error:
               text += std::string(" -> ERROR ") + (outcome.error != nullptr ? outcome.error : "");
               break;

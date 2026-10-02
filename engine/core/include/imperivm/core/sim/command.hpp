@@ -818,12 +818,21 @@ inline constexpr std::int64_t kDefaultIdleSlice = 1000;
 ///     if (bEnterCatapult) while(!.Goto(pt, 0, 1000, true, 5000));
 ///     else                while(!.GotoEnter(pt, 0, 1000, true, 5000));
 ///
-/// The destination is a building's `GetEnterPoint`, which is a doorway -- a cell
-/// the building's own footprint may block. So `GotoEnter` differs from `Goto` in
-/// one respect: **a route that only gets as close as the obstruction allows
-/// counts as arrival**, where `Goto` would keep re-searching. That is inferred
-/// from the pairing, not proven; what would settle it is a retail trace of a
-/// unit entering a building whose door cell is stamped blocked.
+/// The difference is in `gbr.exe` (0x005d6620) rather than in the pairing:
+/// **arrival is the band and nothing else**, and **`give_up` is how long the
+/// call may go without a route before it ends the script** -- `0` at the first
+/// failed search, never when negative. A walk is not timed. The details and
+/// addresses are on `GotoOrder::enter`.
+///
+/// This used to read the pairing as "the end of a partial route counts as
+/// arrival", inferred for a doorway the building's own footprint might block.
+/// It was wrong twice over, and playtest #19 is what it cost: a route that was
+/// never laid counted as arrival on the next call, and so did the end of a
+/// partial one however far short it stopped, so `UNIT_BUILD_CATAPULT.VS`'s
+/// builders called `AddUnit` on a machine from wherever their walk gave out --
+/// across the sea from it, on Mediterranean, 1,900 units away. A door is a
+/// standable point by construction (`sim/entrance.hpp`), so the case the
+/// reading was for does not arise from a door.
 ///
 /// `FormSetupAndMoveTo(dest, range, min_range, flag)` and `FormKeepMoving(ms)`
 /// are the hero's march. `HERO_MOVE.VS` is the whole protocol:

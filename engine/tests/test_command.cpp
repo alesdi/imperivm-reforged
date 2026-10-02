@@ -1717,11 +1717,11 @@ TEST(goto_attack_without_a_combat_system_walks_onto_its_target) {
   CHECK(movement.find(a)->range == 0);
 }
 
-TEST(goto_enter_accepts_the_end_of_a_partial_route) {
-  // `UNIT_ENTER.VS` puts `Goto` and `GotoEnter` in the arms of one `if` with
-  // identical arguments, and the destination is a building's `GetEnterPoint` --
-  // a doorway that the building's own footprint may block. `Goto` keeps
-  // searching; `GotoEnter` takes what it can reach.
+TEST(goto_enter_does_not_call_the_end_of_a_partial_route_arrival) {
+  // Playtest #19: builders entered a siege engine from where their walk gave
+  // out. `GotoEnter` (0x005d6620) answers `IsArrived` (0x00417c10), which for
+  // a point is the band and nothing else, so a unit stopped by a wall has not
+  // arrived; and once no route is left it ends the script after `give_up`.
   Fixture f;
   MovementSystem movement;
   ObstructionGrid grid(64, 64);
@@ -1742,19 +1742,34 @@ TEST(goto_enter_accepts_the_end_of_a_partial_route) {
   movement.state(u).speed = 400;
   const Value door = pack_point(Point{30 * 16 + 8, 30 * 16 + 8});
 
+  // `UNIT_ENTER.VS`'s give-up, 5,000 ms. The unit walks to the wall, which
+  // is not arrival; then it searches from there and finds nothing, and five
+  // seconds of that ends the script. It never says it entered.
   bool entered = false;
-  for (int i = 0; i < 60 && !entered; ++i) {
+  bool ended = false;
+  GameTime last_route = -1;
+  GameTime ended_at = -1;
+  for (int i = 0; i < 100 && !entered && !ended; ++i) {
     HostCall call(f.world, {obj(u), door, Value::integer(0), Value::integer(1000),
-                            Value::boolean(true), Value::integer(20000)});
-    entered = invoke(registry, CallKind::member, "GotoEnter", 5, call).value.as_integer() != 0;
+                            Value::boolean(true), Value::integer(5000)});
+    const HostOutcome out = invoke(registry, CallKind::member, "GotoEnter", 5, call);
+    if (movement.find(u)->has_path) last_route = f.world.time();
+    ended = out.status == HostStatus::finish;
+    if (ended) ended_at = f.world.time();
+    entered = out.status != HostStatus::finish && out.value.as_integer() != 0;
     f.world.advance(500);
   }
-  CHECK(entered);
-  // It stopped outside the wall, which is the whole point: it got as close as
-  // the obstruction allows and called that arrival.
-  CHECK(f.world.resolve_position(u) != (Point{30 * 16 + 8, 30 * 16 + 8}));
+  CHECK(!entered);
+  CHECK(ended);
+  // Timed from the failure, not from the order: the walk to the wall came
+  // first, and the five seconds after the last route was laid.
+  CHECK(last_route > 0);
+  CHECK(ended_at - last_route >= 5000);
+  CHECK(ended_at - last_route <= 5500);
+  CHECK(!movement.find(u)->goto_active);
+  CHECK(distance(f.world.resolve_position(u), Point{30 * 16 + 8, 30 * 16 + 8}) > 32);
 
-  // Plain `Goto` to the same sealed point never reports arrival.
+  // Plain `Goto` to the same sealed point never reports arrival either.
   const ObjectId v = f.spawn(f.unit_class, Point{100, 100});
   movement.state(v).speed = 400;
   bool reached = false;
@@ -1765,6 +1780,33 @@ TEST(goto_enter_accepts_the_end_of_a_partial_route) {
     f.world.advance(500);
   }
   CHECK(!reached);
+
+  // `UNIT_BUILD_CATAPULT.VS` passes 0: the first search that finds nothing
+  // ends it. A unit walled into a single cell has no route anywhere.
+  ObstructionGrid pocket(64, 64);
+  for (std::int32_t dx = -1; dx <= 1; ++dx) {
+    for (std::int32_t dy = -1; dy <= 1; ++dy) {
+      if (dx != 0 || dy != 0) pocket.set_cell(10 + dx, 10 + dy, true);
+    }
+  }
+  movement.set_grid(std::move(pocket));
+  const ObjectId walled = f.spawn(f.unit_class, Point{10 * 16 + 8, 10 * 16 + 8});
+  movement.state(walled).speed = 400;
+  const Value away = pack_point(Point{40 * 16 + 8, 40 * 16 + 8});
+  HostCall at_once(f.world, {obj(walled), away, Value::integer(0), Value::integer(1000),
+                             Value::boolean(false), Value::integer(0)});
+  CHECK(invoke(registry, CallKind::member, "GotoEnter", 5, at_once).status ==
+        HostStatus::finish);
+  // A negative give-up never ends it: the call waits its slice and says no.
+  for (int i = 0; i < 20; ++i) {
+    HostCall never(f.world, {obj(walled), away, Value::integer(0), Value::integer(1000),
+                             Value::boolean(false), Value::integer(-1)});
+    const HostOutcome out = invoke(registry, CallKind::member, "GotoEnter", 5, never);
+    CHECK(out.status == HostStatus::suspend);
+    CHECK(out.suspend_for == 1000);
+    CHECK(out.value.as_integer() == 0);
+    f.world.advance(1000);
+  }
 }
 
 TEST(form_setup_moves_the_hero_and_keep_moving_carries_the_army) {

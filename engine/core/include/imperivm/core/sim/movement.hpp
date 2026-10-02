@@ -829,12 +829,28 @@ struct GotoOrder {
   /// call suspends for the lesser of this and the time to arrival.
   std::int64_t slice = 0;
   /// Total timeout. **Anything non-positive means no limit**; see the note on
-  /// `register_movement_host`.
+  /// `register_movement_host`. For an `enter` order it is something else; see
+  /// there.
   std::int64_t give_up = -1;
-  /// Accept the end of a partial route as arrival, rather than searching again.
-  /// `GotoEnter`'s one difference from `Goto`: a doorway may sit in a cell the
-  /// building's own footprint blocks.
-  bool accept_partial = false;
+  /// `GotoEnter` (0x005d6620), whose give-up `gbr.exe` reads directly:
+  ///
+  ///   * **arrival is the band and nothing else.** On re-entry the call answers
+  ///     `CVXPathRetry::IsArrived` (0x00417c10), and a point route is arrived
+  ///     only within its range. The flag that would call a finished walk
+  ///     arrived (bit 0x80 of `[retry+0x20]`) is set only by the formation
+  ///     march's step (0x00419c4c, 0x00419e19, inside 0x00419b20). So the end
+  ///     of a partial route is not arrival, and neither is a route that was
+  ///     never laid.
+  ///   * **`give_up` times the failure, not the walk.** When `SetDest`
+  ///     (0x0041a4c0) lays no route and the unit is not arrived, the call
+  ///     stamps `[unit+0x150]` with the time if it is clear (0x005d6942),
+  ///     and when `give_up >= 0` and the time since the stamp has reached it
+  ///     (0x005d2e90) it returns 2 -- **the script ends there** (`script/
+  ///     host.hpp`). A laid route or an arrival clears the stamp (0x005d698f,
+  ///     0x005d68e9). So `0` gives up on the first failed search and a
+  ///     negative value never does; a walk, however long, is never timed.
+  ///     Here `goto_started` carries the stamp for such an order.
+  bool enter = false;
   /// `SetDest`'s lock flag: `Goto` (`0x005d645c`) and `GotoAttack`
   /// (`0x005d435b`, `0x005d43a6`) pass 1, `GotoEnter` (`0x005d68c3`) 0.
   bool lock_destination = false;
@@ -842,7 +858,8 @@ struct GotoOrder {
 
 /// The shared body of the `Goto` family. Returns the host outcome the entry
 /// point should return: `true` on arrival, `false` with a suspension while
-/// walking, `false` outright when the order has timed out.
+/// walking, `false` outright when the order has timed out -- and, for an
+/// `enter` order that has gone `give_up` without a route, `finish`.
 [[nodiscard]] script::HostOutcome run_goto(script::CallContext& ctx, World& world,
                                            MovementSystem& movement, ObjectId id,
                                            const GotoOrder& order);

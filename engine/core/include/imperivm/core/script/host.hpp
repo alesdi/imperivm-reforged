@@ -47,6 +47,18 @@
 // dedicated opcode: a host function returns `suspend` (resume after the call,
 // with the result it produced) or `retry` (resume *at* the call and run it
 // again, for a wait that must re-poll a condition).
+//
+// ## Ending the script from inside a call
+//
+// `gbr.exe`'s host bodies return one of three codes to the interpreter: 0
+// (the call is done, its value pushed), 1 (suspend) and 2. The interpreter's
+// answer to a 2 (0x0069d667, 0x0069d92e, and the suspending call's jump table
+// at 0x0069dbc4) is to leave the script there and then, with nothing pushed,
+// in coroutine state 3; state 1 is a script that ran off its end, and the
+// owner's callback is told which of the two it was (0x0069f86c). `finish` is
+// that 2: the script ends as a `return;` would, and no statement after the
+// call runs. **The owner is not told the difference here**; nothing this
+// engine finishes a script for reads it.
 
 #include <cstdint>
 #include <span>
@@ -75,6 +87,7 @@ enum class HostStatus : std::uint8_t {
   suspend,  ///< produced `value`, then suspend for `suspend_for` milliseconds
   retry,    ///< suspend and run this same call again on resume
   error,    ///< `error` names what went wrong; the script traps
+  finish,   ///< the script ends here, as `return;` would; nothing is pushed
 };
 
 struct HostOutcome {
@@ -91,6 +104,7 @@ struct HostOutcome {
   static HostOutcome sleep_for(std::int64_t ms) {
     return {HostStatus::suspend, Value::nil(), ms, nullptr};
   }
+  static HostOutcome end_script() { return {HostStatus::finish, Value::nil(), 0, nullptr}; }
 };
 
 /// Object-model services the interpreter cannot supply for itself.
