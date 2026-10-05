@@ -275,7 +275,7 @@ void EconomySystem::fire(World& world, Settlement& s, SettlementTimer which) {
   switch (which) {
     case SettlementTimer::production: produce(world, s); break;
     case SettlementTimer::growth: grow(s); break;
-    case SettlementTimer::decrease: starve(s); break;
+    case SettlementTimer::decrease: trim_population(s); break;
     case SettlementTimer::burn: burn(s); break;
     case SettlementTimer::repair: repair(world, s); break;
     case SettlementTimer::loyalty: tick_loyalty(s); break;
@@ -294,15 +294,20 @@ void EconomySystem::fire(World& world, Settlement& s, SettlementTimer which) {
 /// every producing class and 0 on outposts, shipyards and ruins, so it reads
 /// as a multiplier and there is nothing in the shipped range to distinguish it
 /// from one.
+///
+/// As gbr.exe's production tick does (0x005c1122): a settlement owned by
+/// player 14 or 15 produces nothing, and food is made only by a population at
+/// `MinPopulation` or above. Gold has no such floor.
 void EconomySystem::produce(World& world, Settlement& s) {
   if (s.efficiency <= 0 || s.population <= 0) return;
+  if (s.owner == kNeutralWildlife || s.owner == kNeutralPassive) return;
   if (s.gold_rate > 0) {
     const std::int32_t got = s.warehouse.store(Resource::gold, percent_of(s.population * s.efficiency, s.gold_rate));
     // The owner's *From taxes* on the end-of-match report; see
     // `PlayerScoreCounters::gold_townhall` for the reading this is.
     if (MatchSystem* match = match_system_of(world); match != nullptr) match->record_gold_produced(s.owner, got);
   }
-  if (s.food_rate > 0) {
+  if (s.food_rate > 0 && s.population >= rules_.min_population) {
     s.warehouse.store(Resource::food, percent_of(s.population * s.efficiency, s.food_rate));
   }
 }
@@ -312,41 +317,37 @@ void EconomySystem::produce(World& world, Settlement& s) {
 // --------------------------------------------------------------------------
 
 /// `PopulationGrowthRate = 1` every `PopulationGrowthInterval = 20000`, up to
-/// `max_population`.
+/// `max_population`, read off gbr.exe's growth tick (0x005c0f60): a
+/// settlement owned by player 14 or 15 never grows, nor does one below
+/// `MinPopulation`, and growth costs nothing.
 ///
-/// The food cost is INFERRED. `foodperpop` is declared by every village and
-/// town hall class and by nothing else, takes two values (45 and 100) that vary
-/// by race, and no shipped script reads it — which is exactly the shape of a
-/// constant the C++ consumes. Reading it as the price of one population point
-/// is the only use that fits its name, and it is what makes a town hall's
-/// stored food matter at all.
+/// This used to charge `foodperpop` per head, an inference from the
+/// property's name. The executable holds no such string, no shipped script
+/// reads it, and the tick reads no food: the property is data nothing
+/// consumes. Charging it starved every town hall the AI fed by wagon alone.
 void EconomySystem::grow(Settlement& s) {
-  if (s.max_population <= 0) return;
+  if (s.owner == kNeutralWildlife || s.owner == kNeutralPassive) return;
   if (s.population >= s.max_population) return;
-  if (s.food_per_pop > 0) {
-    if (s.warehouse.food < s.food_per_pop) return;
-    s.warehouse.take(Resource::food, s.food_per_pop);
-  }
+  if (s.population < rules_.min_population) return;
   s.population = std::min(s.population + rules_.population_growth_rate, s.max_population);
 }
 
 /// `PopulationDecreasePercent = 10` every `PopulationDecreaseInterval = 4000`,
-/// floored at `MinPopulation`.
+/// read off gbr.exe's decrease tick (0x005c0fb0): it trims a population
+/// *above* `max_population` by that percent of the excess, at least one head,
+/// and it reads no food. `max_population` is not a hard ceiling --
+/// `TOWNHALL_ADDPOP.VS` adds past it and a refund puts heads back -- and this
+/// is what brings an overfull settlement back down to it.
 ///
-/// The **trigger is INFERRED**: the constants name the size and the cadence and
-/// nothing else in the shipped data names the condition. An empty store is the
-/// reading taken here, and it is the one the dumps support — a village makes its
-/// own food every two seconds and never starves for long, while a town hall
-/// makes only gold and depends on wagons, and it is the town halls whose
-/// population is far below its start in the late dumps (61 at load against 20,
-/// 33, 38 and 39 at tick 1,392).
-void EconomySystem::starve(Settlement& s) {
-  if (s.max_population <= 0) return;
-  if (s.warehouse.food > 0) return;
-  if (s.population <= rules_.min_population) return;
-  std::int32_t loss = percent_of(s.population, rules_.population_decrease_percent);
+/// This used to be starvation: a tenth of the population every four seconds
+/// while the store was empty, floored at `MinPopulation`. That trigger was
+/// inferred, and it held every computer player's town hall at ten heads
+/// within minutes, which is ten heads' worth of gold and no recruits.
+void EconomySystem::trim_population(Settlement& s) {
+  if (s.population <= s.max_population) return;
+  std::int32_t loss = percent_of(s.population - s.max_population, rules_.population_decrease_percent);
   if (loss < 1) loss = 1;
-  s.population = std::max(s.population - loss, rules_.min_population);
+  s.population -= loss;
 }
 
 // --------------------------------------------------------------------------

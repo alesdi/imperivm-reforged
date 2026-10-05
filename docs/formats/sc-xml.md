@@ -260,7 +260,7 @@ no `Object`-level `health` is such a case, and the engine's own default applies.
 | `damage_type` | 30 | `slash`, `pierce`, `siege`, `none` |
 | `healthbar_type` | 24 | `0`..`3` |
 | `projectile_class` | 21 | a class `id`: `Arrow`, `Javelin`, `Axe`, `Slingstone`, `Big_Arrow`, `Gule`, `CGule`, `IGule` |
-| `foodperpop` | 17 | `100` / `45` |
+| `foodperpop` | 17 | `100` / `45`; read by nothing — `gbr.exe` holds no such string and no script reads it |
 | `settlement_food` / `settlement_gold` | 16 / 16 | int |
 | `description` | 16 | English prose (outpost/teleport tooltips) |
 | `min_range` | 15 | int 0..301 |

@@ -468,7 +468,7 @@ class EconomySystem final : public System {
 
   void produce(World& world, Settlement& s);
   void grow(Settlement& s);
-  void starve(Settlement& s);
+  void trim_population(Settlement& s);
   void burn(Settlement& s);
   void repair(World& world, Settlement& s);
   void tick_loyalty(Settlement& s);

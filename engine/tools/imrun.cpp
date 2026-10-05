@@ -558,8 +558,24 @@ int main(int argc, char** argv) {
   const bool show_gates = std::getenv("IMRUN_GATES") != nullptr;
   std::string watched_crossing;
   std::map<ObjectId, std::pair<bool, bool>> gate_seen;  // target open, lets through
+  // `IMRUN_ECONOMY=<n>`: every n turns, one line per player-owned town and
+  // village -- population, gold, food -- because a stronghold that never
+  // reaches `ESH_BUILDARMY.VS`'s gold floor is a curve, not an end state.
+  std::uint64_t economy_every = 0;
+  if (const char* every = std::getenv("IMRUN_ECONOMY")) economy_every = std::strtoull(every, nullptr, 10);
   for (std::uint64_t turn = 0; turn < turns; ++turn) {
     if (until_over && ended_at != 0) break;
+    if (economy_every != 0 && turn % economy_every == 0) {
+      if (const sim::EconomySystem* economy = sim::economy_of(run.world())) {
+        for (const sim::Settlement& set : economy->settlements().all()) {
+          if (set.owner >= 14 || (set.kind != sim::SettlementKind::stronghold && set.kind != sim::SettlementKind::village)) continue;
+          std::printf("  economy turn %llu #%u p%d kind %d pop %d/%d gold %d food %d loan %d\n",
+                      static_cast<unsigned long long>(turn), set.id, static_cast<int>(set.owner),
+                      static_cast<int>(set.kind), set.population, set.max_population,
+                      set.warehouse.gold, set.warehouse.food, set.loan);
+        }
+      }
+    }
     // A traced run marks its turns, so a burst of calls can be placed in time.
     if (trace.scheduler != nullptr && trace.printed < trace.limit) {
       std::printf("  -- turn %llu\n", static_cast<unsigned long long>(turn + 1));
@@ -758,9 +774,10 @@ int main(int argc, char** argv) {
             if (graph == nullptr || slot.class_index == kNoClass) continue;
             classes[std::string(graph->at(slot.class_index).id)] += 1;
           }
-          std::printf("            #%u p%d kind %d gold %d food %d garrison %d/%d sentries %d/%d"
+          std::printf("            #%u p%d kind %d pop %d/%d gold %d food %d garrison %d/%d sentries %d/%d"
                       " loyalty %d:",
-                      set.id, static_cast<int>(set.owner), static_cast<int>(set.kind),
+                      set.id, static_cast<int>(set.owner), static_cast<int>(set.kind), set.population,
+                      set.max_population,
                       set.warehouse.gold, set.warehouse.food, set.holder.count(),
                       set.holder.max_units, set.sentries, set.max_sentries, set.loyalty);
           for (const auto& [name, count] : classes) std::printf(" %s x%zu", name.c_str(), count);
