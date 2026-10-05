@@ -76,7 +76,9 @@ int main(int argc, char** argv) {
                  "contains any of them;\n"
                  "IMRUN_OVERLAPS=<n> counts standing bodies drawn through each other\n"
                  "every n turns and prints the worst turn, and the melee units in a\n"
-                 "fight that are engaged, closing or waiting out of reach;\n"
+                 "fight that are engaged, closing or waiting out of reach; with\n"
+                 "IMRUN_PILES=1 as well, each sample also lists every 16-unit cell\n"
+                 "three or more standing bodies share, by class, owner and order;\n"
                  "IMRUN_GOTO=<turn>:<id>:<x>,<y> gives that object its owner's\n"
                  "right-click order to the point before that turn, IMRUN_PLACE=<x>,<y>\n"
                  "first stands it there, IMRUN_WATCH=<id>\n"
@@ -531,6 +533,40 @@ int main(int argc, char** argv) {
   if (const char* every = std::getenv("IMRUN_OVERLAPS")) overlap_every = std::strtoull(every, nullptr, 10);
   sim::MovementSystem::OverlapCensus overlap_worst;
   std::uint64_t overlap_worst_turn = 0;
+  // `IMRUN_PILES=1`: with the census, where the bodies are piled -- every
+  // 16-unit cell that three or more standing bodies share (standing as the
+  // census means it: a live unit on the map with no route), with each body's
+  // class, owner and running order.
+  // A pair count says how bad; this says which order, which player and which
+  // spot, which is how the piles at p1's door on Crossroads were found.
+  const bool show_piles = std::getenv("IMRUN_PILES") != nullptr;
+  const auto list_piles = [](sim::World& world, std::uint64_t at) {
+    const ClassGraph* graph = world.class_graph();
+    const sim::CommandSystem* commands = sim::command_system(world);
+    std::map<std::pair<std::int32_t, std::int32_t>, std::vector<ObjectId>> cells;
+    for (const sim::WorldObject& slot : world.objects()) {
+      const sim::ObjectState& s = slot.state;
+      if (!s.flags.is_unit || s.is_held() || s.flags.unspawned || s.flags.in_air) continue;
+      if (s.health == 0 || s.flags.has_active_path || s.position == sim::kHeldPosition) continue;
+      cells[{s.position.x / 16, s.position.y / 16}].push_back(slot.id);
+    }
+    for (const auto& [cell, ids] : cells) {
+      if (ids.size() < 3) continue;
+      std::printf("  pile turn %llu: (%d,%d) x%zu:", static_cast<unsigned long long>(at),
+                  cell.first * 16, cell.second * 16, ids.size());
+      for (const ObjectId id : ids) {
+        const sim::WorldObject* slot = world.find(id);
+        const bool named = graph != nullptr && slot->class_index != kNoClass;
+        std::printf(" %u %s p%d %s", id,
+                    named ? std::string(graph->at(slot->class_index).id).c_str() : "?",
+                    static_cast<int>(slot->state.owner),
+                    commands != nullptr && commands->command_count(id) > 0
+                        ? std::string(commands->command_name(id, 0)).c_str()
+                        : "-");
+      }
+      std::printf("\n");
+    }
+  };
   // With it, the melee census: every live melee unit with a live target no
   // more than `kFightReach` from it -- in the fight, not merely aimed at
   // something across the map -- is engaged (within its reach), closing (on a
@@ -689,6 +725,7 @@ int main(int argc, char** argv) {
     if (overlap_every != 0 && (turn + 1) % overlap_every == 0) {
       if (const sim::MovementSystem* move = sim::movement_system(run.world())) {
         const auto census = move->overlap_census(run.world());
+        if (show_piles) list_piles(run.world(), turn + 1);
         if (census.touching > overlap_worst.touching) {
           overlap_worst = census;
           overlap_worst_turn = turn + 1;
