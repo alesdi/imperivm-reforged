@@ -8,6 +8,7 @@
 
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/game/registry.hpp"
+#include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/path.hpp"
 #include "imperivm/core/sim/world.hpp"
 
@@ -250,6 +251,23 @@ void GateLines::lay_enemy_gates(const World& world, PlayerId owner, Point from, 
     if (gate_fully_open(*gate, now)) continue;
     for (const GateCell& cell : line.cells) out.add(cell.x, cell.y);
   }
+}
+
+bool inside_walls(World& world, ObjectId unit, ObjectId centre) {
+  const WorldObject* slot = world.find(unit);
+  if (slot == nullptr || centre == kNoObject || world.find(centre) == nullptr) return false;
+  if (slot->state.holder != kNoObject) return false;
+  MovementSystem* movement = movement_system(world);
+  if (movement == nullptr) return false;
+  PathRequest request;
+  request.start = world.resolve_position(unit);
+  request.goal = world.resolve_position(centre);
+  request.ignore_passability = movement->ignores_passability(world, unit);
+  const Path path = movement->pathfinder().find(movement->grid(), request);
+  world.gate_lines().refresh(world);
+  std::vector<GateCrossing> crossed;
+  world.gate_lines().crossings(path.waypoints, crossed);
+  return crossed.empty();
 }
 
 }  // namespace imperivm::core::sim

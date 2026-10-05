@@ -327,4 +327,22 @@ class GateLines {
   ObjectId scanned_ = 0;
 };
 
+/// `Gate::Inside`'s predicate (0x005295d0): whether `unit` stands inside the
+/// walls of the settlement whose central building is `centre`.
+///
+/// The original routes the unit to the central building with bit `0x100` set
+/// in the query's options. 0x00419110 reads that bit once, at 0x004192d5,
+/// after the first search has run on the open grid and listed the gates its
+/// route crosses (0x00418fb0): set, it returns that route and lays no gate as
+/// a barrier. The answer is whether that list, `[query+0x30]` -- the list
+/// 0x00418210 walks as gate-and-distance pairs -- is empty. So: **inside when
+/// the route to the town centre, every gate open, crosses no gate.**
+///
+/// A unit in a holder is not inside (`[unit+0x154] != 0xffff`, the first
+/// test): it is in a building, not in the streets. A route that cannot be laid
+/// lists no crossing and answers inside, as the original's empty list does.
+/// A mover that ignores passability routes its straight line, as all its
+/// routes do (0x0040b580). Without a movement system nothing is inside.
+[[nodiscard]] bool inside_walls(World& world, ObjectId unit, ObjectId centre);
+
 }  // namespace imperivm::core::sim
