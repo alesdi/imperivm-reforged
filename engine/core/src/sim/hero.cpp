@@ -227,7 +227,25 @@ HeroRecord& HeroSystem::register_hero(World& world, ObjectId id) {
 
   PlayerId owner = kNoPlayer;
   if (const ObjectState* state = world.state(id)) owner = state->owner;
-  record.squad = squads_.create(owner, id);
+  // A hero is in one squad, the one it leads: there its squad is its army
+  // (`squad_is_the_hero_plus_its_army`). `start` registers only the heroes the
+  // map placed, so one a script placed afterwards -- a tavern's hire -- can be
+  // squadded before it is registered, by `hero_squad` (0x00446ad7's first
+  // half), which mints it a squad it leads. That squad is adopted here rather
+  // than a second one minted beside it: a hero heading two squads had its
+  // army split between them, and `GetSquad`, `EvalAttach` and the recruiter
+  // each judged it by whichever they found first -- the hero alone.
+  SquadKey existing = squads_.squad_of(id);
+  if (Squad* squad = squads_.find(existing); squad != nullptr && squad->members.front() != id) {
+    (void)squads_.leave(existing, id);
+    existing = kNoSquad;
+  }
+  if (existing != kNoSquad) {
+    squads_.find(existing)->leader = id;
+    record.squad = existing;
+  } else {
+    record.squad = squads_.create(owner, id);
+  }
 
   HeroRecord& stored =
       *heroes_.insert(heroes_.begin() + static_cast<std::ptrdiff_t>(at), std::move(record));
@@ -418,6 +436,14 @@ void HeroSystem::detach_for_death(ObjectId id) {
     if (record->squad.valid()) (void)squads_.leave(record->squad, id);
     record->squad = kNoSquad;
   }
+  // And out of whatever squad the table lists it in, which is the squad the
+  // original unregisters it from. The record is not enough: a unit placed
+  // after `start` and squadded by the AI before anything registered it is in
+  // the table with no record, and leaving by the record left it listed -- on
+  // Crossroads, 1,716 dead or erased members in 4,000 turns, squads of
+  // corpses the recruiter and the squad monitor walked for the rest of the
+  // match.
+  if (const SquadKey listed = squads_.squad_of(id); listed.valid()) (void)squads_.leave(listed, id);
   if (HeroRecord* record = hero(id); record != nullptr) record->squad = kNoSquad;
   squads_.prune_empty();
 }

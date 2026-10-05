@@ -3247,6 +3247,79 @@ TEST(an_ai_squad_is_one_smaller_the_moment_a_member_dies) {
   CHECK(b.f.heroes.squads().find(key) == nullptr);
 }
 
+TEST(a_member_with_no_unit_record_leaves_its_squad_when_it_dies_or_is_erased) {
+  // A unit placed after `start` has no record until something asks for one,
+  // and the AI can squad it before anything does. It leaves the squad the
+  // table lists it in, record or not.
+  DeathBench b;
+  const ObjectId dying = b.f.world.spawn(NativeClass::unit, nullptr, b.f.warrior_class);
+  const ObjectId erased = b.f.world.spawn(NativeClass::unit, nullptr, b.f.warrior_class);
+  const ObjectId stays = b.f.spawn_warrior();
+  for (const ObjectId id : {dying, erased}) {
+    b.f.world.set_owner(id, 1);
+    b.f.world.set_health(id, 200);
+  }
+  const SquadKey key = b.f.heroes.squads().create(1);
+  for (const ObjectId id : {dying, erased, stays}) REQUIRE(b.f.heroes.squads().join(key, id));
+  REQUIRE(b.f.heroes.unit(dying) == nullptr);
+  REQUIRE(b.f.heroes.unit(erased) == nullptr);
+  b.enlist();
+
+  b.kill(dying);
+  REQUIRE(b.combat.is_dying(dying));
+  CHECK(b.f.heroes.squads().squad_of(dying) == kNoSquad);
+  CHECK(b.f.heroes.squads().find(key)->size() == 2);
+
+  b.f.heroes.on_erase(b.f.world, erased);
+  CHECK(b.f.heroes.squads().squad_of(erased) == kNoSquad);
+  CHECK(b.f.heroes.squads().find(key)->size() == 1);
+  CHECK(b.f.heroes.squads().squad_of(stays) == key);
+}
+
+TEST(a_hero_squadded_before_it_is_registered_keeps_one_squad) {
+  // `hero_squad` mints a hero it does not know a squad it leads; registering
+  // the hero afterwards adopts that squad instead of minting a second one
+  // beside it, so the hero and its army stay one squad.
+  Fixture f;
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.hero_class);
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 1000);
+  const SquadKey minted = f.heroes.squads().create(1, hero);
+  const ObjectId warrior = f.spawn_warrior();
+
+  f.heroes.register_hero(f.world, hero);
+  CHECK(f.heroes.squad_of(hero) == minted);
+  CHECK(f.heroes.hero(hero)->squad == minted);
+  std::size_t leading = 0;
+  for (const Squad& squad : f.heroes.squads().squads()) {
+    if (squad.contains(hero)) ++leading;
+  }
+  CHECK(leading == 1);
+
+  REQUIRE(f.heroes.attach(f.world, warrior, hero));
+  CHECK(f.heroes.squad_of(warrior) == minted);
+  CHECK(f.heroes.squads().find(minted)->size() == 2);
+}
+
+TEST(a_hero_registered_while_in_another_squad_leaves_it_for_its_own) {
+  // A hero is the front of the squad it is in; one listed behind somebody
+  // else is taken out and given its own.
+  Fixture f;
+  const ObjectId front = f.spawn_warrior();
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.hero_class);
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 1000);
+  const SquadKey band = f.heroes.squads().create(1);
+  REQUIRE(f.heroes.squads().join(band, front));
+  REQUIRE(f.heroes.squads().join(band, hero));
+
+  f.heroes.register_hero(f.world, hero);
+  const SquadKey own = f.heroes.squad_of(hero);
+  CHECK(own.valid() && !(own == band));
+  CHECK(!f.heroes.squads().find(band)->contains(hero));
+  CHECK(f.heroes.squads().find(own)->members.front() == hero);
+}
+
 TEST(egoism_never_drains_a_corpse_in_its_dying_window) {
   // `run_egoism` draws a random member of the army. A corpse still listed there
   // is a draw that drains nobody -- `stolen` comes out at zero on a unit at
