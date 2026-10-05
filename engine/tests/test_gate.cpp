@@ -573,3 +573,56 @@ TEST(a_save_mid_swing_stops_a_route_before_the_same_gate_on_the_same_turn) {
     CHECK(b.at(foe) == a.at(foe));
   }
 }
+
+// --------------------------------------------------------------------------
+// inside the walls
+// --------------------------------------------------------------------------
+
+/// 0x005295d0, `Gate::Inside`'s predicate: a unit is inside when its route to
+/// the town centre, every gate open, crosses no gate. The town centre stands
+/// north of the wall at (1000, 500).
+TEST(a_unit_is_inside_when_its_route_to_the_town_centre_crosses_no_gate) {
+  GateField f;
+  const ObjectId centre = f.world.spawn(NativeClass::town_hall, nullptr, kNoClass);
+  REQUIRE(f.world.set_position(centre, Point{1000, 500}));
+  const ObjectId in_friend = f.unit(0, kNorth);
+  const ObjectId in_enemy = f.unit(1, Point{900, 800});
+  const ObjectId out_friend = f.unit(0, kSouth);
+  const ObjectId out_enemy = f.unit(1, Point{1100, 1400});
+
+  // Shut, as a gate with nobody near it stands. The search behind the
+  // answer lays no gate as a barrier, so an enemy outside is outside
+  // because its way in crosses the gate, not because the gate bars it.
+  f.swing(false);
+  for (int turn = 0; turn < 30; ++turn) f.world.advance(100);
+  CHECK(inside_walls(f.world, in_friend, centre));
+  CHECK(inside_walls(f.world, in_enemy, centre));
+  CHECK(!inside_walls(f.world, out_friend, centre));
+  CHECK(!inside_walls(f.world, out_enemy, centre));
+
+  // Open, the same answers: it is the crossing that decides, not the gate's
+  // state.
+  f.swing(true);
+  for (int turn = 0; turn < 30; ++turn) f.world.advance(100);
+  CHECK(inside_walls(f.world, in_enemy, centre));
+  CHECK(!inside_walls(f.world, out_enemy, centre));
+
+  // In a holder is not inside: in a building, not in the streets.
+  CHECK(f.world.put_in_holder(in_friend, centre));
+  CHECK(!inside_walls(f.world, in_friend, centre));
+}
+
+/// A gap in the wall with no gate in it is no wall at all to this question:
+/// a unit whose shortest way in is through it crosses no gate, and reads as
+/// inside. That is the original's answer, which counts crossings, not walls.
+TEST(a_unit_whose_way_in_is_a_gateless_gap_reads_as_inside) {
+  GateField f(true);
+  const ObjectId centre = f.world.spawn(NativeClass::town_hall, nullptr, kNoClass);
+  REQUIRE(f.world.set_position(centre, Point{1000, 500}));
+  // Through the western gap (x 160..239) is 1,243 or so; through the gate,
+  // 1,354.
+  const ObjectId west = f.unit(1, Point{200, 1300});
+  const ObjectId south = f.unit(1, kSouth);
+  CHECK(inside_walls(f.world, west, centre));
+  CHECK(!inside_walls(f.world, south, centre));
+}

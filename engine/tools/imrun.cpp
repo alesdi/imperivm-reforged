@@ -75,7 +75,8 @@ int main(int argc, char** argv) {
                  "IMRUN_OBJECTS=<text>[,<text>...] lists every object whose class\n"
                  "contains any of them;\n"
                  "IMRUN_OVERLAPS=<n> counts standing bodies drawn through each other\n"
-                 "every n turns and prints the worst turn;\n"
+                 "every n turns and prints the worst turn, and the melee units in a\n"
+                 "fight that are engaged, closing or waiting out of reach;\n"
                  "IMRUN_GOTO=<turn>:<id>:<x>,<y> gives that object its owner's\n"
                  "right-click order to the point before that turn, IMRUN_PLACE=<x>,<y>\n"
                  "first stands it there, IMRUN_WATCH=<id>\n"
@@ -530,6 +531,46 @@ int main(int argc, char** argv) {
   if (const char* every = std::getenv("IMRUN_OVERLAPS")) overlap_every = std::strtoull(every, nullptr, 10);
   sim::MovementSystem::OverlapCensus overlap_worst;
   std::uint64_t overlap_worst_turn = 0;
+  // With it, the melee census: every live melee unit with a live target no
+  // more than `kFightReach` from it -- in the fight, not merely aimed at
+  // something across the map -- is engaged (within its reach), closing (on a
+  // route) or waiting (standing out of reach), summed over the sampled turns
+  // and at the turn with the most.
+  constexpr std::int64_t kFightReach = 400;
+  struct MeleeCensus {
+    std::size_t engaged = 0;
+    std::size_t closing = 0;
+    std::size_t waiting = 0;
+    [[nodiscard]] std::size_t total() const noexcept { return engaged + closing + waiting; }
+  };
+  MeleeCensus melee_sum;
+  MeleeCensus melee_biggest;
+  std::uint64_t melee_biggest_turn = 0;
+  const auto melee_census = [kFightReach](const sim::World& world, const sim::CombatSystem& fight) {
+    MeleeCensus out;
+    for (const sim::Combatant& c : fight.combatants()) {
+      if (c.target == kNoObject || c.health <= 0 || c.action == sim::Action::dying) continue;
+      const sim::ObjectState* self = world.state(c.id);
+      if (self == nullptr || !self->flags.is_unit || self->is_held()) continue;
+      if (fight.profile(c.class_index).is_ranged()) continue;
+      const sim::Combatant* target = fight.find(c.target);
+      const sim::ObjectState* them = world.state(c.target);
+      if (target == nullptr || them == nullptr || them->health <= 0) continue;
+      if (sim::dist_sq(self->position, them->position) > kFightReach * kFightReach) continue;
+      sim::Combatant a = c;
+      sim::Combatant d = *target;
+      a.position = self->position;
+      d.position = them->position;
+      if (fight.in_attack_range(a, d)) {
+        ++out.engaged;
+      } else if (self->flags.has_active_path) {
+        ++out.closing;
+      } else {
+        ++out.waiting;
+      }
+    }
+    return out;
+  };
   // `IMRUN_GOTO=<turn>:<id>:<x>,<y>`: before that turn, the object's owner
   // right-clicks the point with it selected -- the default order, as a click
   // gives it. `IMRUN_WATCH=<id>` prints where that object stands every ten
@@ -651,6 +692,16 @@ int main(int argc, char** argv) {
         if (census.touching > overlap_worst.touching) {
           overlap_worst = census;
           overlap_worst_turn = turn + 1;
+        }
+      }
+      if (const sim::CombatSystem* fight = sim::combat_system_of(run.world())) {
+        const MeleeCensus melee = melee_census(run.world(), *fight);
+        melee_sum.engaged += melee.engaged;
+        melee_sum.closing += melee.closing;
+        melee_sum.waiting += melee.waiting;
+        if (melee.total() > melee_biggest.total()) {
+          melee_biggest = melee;
+          melee_biggest_turn = turn + 1;
         }
       }
     }
@@ -864,6 +915,9 @@ int main(int argc, char** argv) {
     std::printf("  gates     %llu route(s) searched again round a gate, %llu wait(s) before one\n",
                 static_cast<unsigned long long>(a.gate_searches),
                 static_cast<unsigned long long>(a.gate_waits));
+    std::printf("  free spot %llu full band(s) searched out from, %llu route(s) re-aimed\n",
+                static_cast<unsigned long long>(a.free_spot_searches),
+                static_cast<unsigned long long>(a.free_spot_aims));
     // Bodies drawn through each other (playtest report #13), as the run ends
     // and, sampled, at its worst.
     const sim::MovementSystem::OverlapCensus census = move->overlap_census(run.world());
@@ -873,6 +927,11 @@ int main(int argc, char** argv) {
       std::printf("  overlaps  worst at turn %llu: %zu pair(s) of %zu bod(ies), %zu stacked\n",
                   static_cast<unsigned long long>(overlap_worst_turn), overlap_worst.touching,
                   overlap_worst.bodies, overlap_worst.stacked);
+      std::printf("  melee     sampled: %zu engaged, %zu closing, %zu waiting out of reach\n",
+                  melee_sum.engaged, melee_sum.closing, melee_sum.waiting);
+      std::printf("  melee     biggest at turn %llu: %zu engaged, %zu closing, %zu waiting\n",
+                  static_cast<unsigned long long>(melee_biggest_turn), melee_biggest.engaged,
+                  melee_biggest.closing, melee_biggest.waiting);
     }
   }
   if (const sim::CombatSystem* fight = sim::combat_system_of(run.world())) {

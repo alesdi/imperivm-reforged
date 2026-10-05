@@ -2862,84 +2862,144 @@ TEST(send_to_sets_both_destinations_and_refuses_a_squad_no_ai_can_move) {
   CHECK(f.registry.entry(index).fn(ctx).status == script::HostStatus::ok);
 }
 
-/// **`SendTo` carries the order out**: the squad's own destination becomes the
-/// node and every member advances to its centre -- `SQUADMONITOR.VS:77-79`'s
-/// verb and point for the same journey. A stand-in for the original's consumer
-/// of the AI order list (0x004494c0 posts to it), labelled as one; without it a
-/// squad the AI sent anywhere stayed where it stood and no army ever arrived.
-TEST(send_to_walks_every_member_to_the_nodes_centre_and_leaves_the_state_alone) {
+namespace {
+
+/// A world with two settlements, their nodes built, a running AI for player 1
+/// and one squad of three of its soldiers -- the ground `SendTo`'s drain is
+/// tested on.
+struct SendToBench {
   Fixture f;
   CommandSystem commands;
-  REQUIRE(f.world.add_system(&commands));
-  REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);
-  REQUIRE(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  GaikaId home = kNoGaika;
+  GaikaId dest = kNoGaika;
+  Point centre{};
+  SquadKey key{};
+  std::vector<ObjectId> soldiers;
 
-  const SettlementId near = f.make_settlement(1);
-  const SettlementId far = f.make_settlement(2);
-  ObjectId target = kNoObject;
-  {
+  SendToBench() {
+    REQUIRE(f.world.add_system(&commands));
+    REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);
+    REQUIRE(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+    const SettlementId near = f.make_settlement(1);
+    const SettlementId far = f.make_settlement(2);
     const Settlement* a = f.economy.settlements().find(near);
     const Settlement* b = f.economy.settlements().find(far);
     REQUIRE(a != nullptr);
     REQUIRE(b != nullptr);
-    target = b->object;
+    const ObjectId mine = a->object;
+    const ObjectId theirs = b->object;
     CHECK(f.world.set_position(a->anchor, Point{1000, 1000}));
     CHECK(f.world.set_position(b->anchor, Point{6000, 4000}));
-  }
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
-  const GaikaId dest = f.world.gaika().for_settlement(target);
-  REQUIRE(dest != kNoGaika);
-  const Point centre = f.world.gaika().find(dest)->center;
+    f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+    home = f.world.gaika().for_settlement(mine);
+    dest = f.world.gaika().for_settlement(theirs);
+    REQUIRE(home != kNoGaika);
+    REQUIRE(dest != kNoGaika);
+    centre = f.world.gaika().find(dest)->center;
 
-  const SquadKey key = f.heroes.squads().create(1);
-  std::vector<ObjectId> soldiers;
-  for (int i = 0; i < 3; ++i) {
-    const ObjectId id = f.world.spawn(imperivm::core::NativeClass::unit, nullptr);
-    f.world.set_owner(id, 1);
-    f.world.set_health(id, 100);
-    CHECK(f.world.set_position(id, Point{1000 + 30 * i, 1100}));
-    REQUIRE(f.heroes.squads().join(key, id));
-    soldiers.push_back(id);
+    key = f.heroes.squads().create(1);
+    for (int i = 0; i < 3; ++i) {
+      const ObjectId id = f.world.spawn(imperivm::core::NativeClass::unit, nullptr);
+      f.world.set_owner(id, 1);
+      f.world.set_health(id, 100);
+      CHECK(f.world.set_position(id, Point{1000 + 30 * i, 1100}));
+      REQUIRE(f.heroes.squads().join(key, id));
+      soldiers.push_back(id);
+      (void)commands.set_command(f.world, id, "guard", Command{});
+    }
+    Squad* squad = f.heroes.squads().find(key);
+    REQUIRE(squad != nullptr);
+    squad->state = 7;
+    squad->flags = kSquadFlagAdvChooser;
+    squad->gaika_in = home;
   }
-  // One of them was doing something else; the order replaces it, as the
-  // monitor's own `sq.Units.SetCommand("advance", ...)` would.
-  (void)commands.set_command(f.world, soldiers[1], "engage", Command{});
-  Squad* squad = f.heroes.squads().find(key);
-  REQUIRE(squad != nullptr);
-  squad->state = 7;
-  squad->gaika_in = 1;
 
-  const auto send = [&](GaikaId node) {
-    return f.call(script::CallKind::member, "SendTo",
-                  {pack_squad(key), gaika_value(node), script::Value::integer(1)},
-                  script::kNoScript)
-        .status;
-  };
-  CHECK(send(dest) == script::HostStatus::ok);
-  squad = f.heroes.squads().find(key);
-  REQUIRE(squad != nullptr);
-  CHECK(squad->ai_dest == dest);
-  CHECK(squad->order_dest == dest);
-  CHECK(squad->dest_gaika == dest);
-  CHECK(squad->gaika_in == 1);
-  CHECK(squad->state == 7);
-  for (const ObjectId id : soldiers) {
-    const CommandQueue* q = commands.find(id);
+  script::HostStatus send(GaikaId node) {
+    const script::HostOutcome out =
+        f.call(script::CallKind::member, "SendTo",
+               {pack_squad(key), gaika_value(node), script::Value::integer(1)}, script::kNoScript);
+    if (out.status != script::HostStatus::ok && out.error != nullptr) std::printf("  %s\n", out.error);
+    return out.status;
+  }
+  Squad& squad() { return *f.heroes.squads().find(key); }
+};
+
+/// The two branches of the shipped `AIOSENDSQUAD.VS` that decide who moves --
+/// a squad in the node is cleared, one elsewhere approaches -- with the state
+/// and point written as literals, since a core test has no installation.
+constexpr std::string_view kSendSquadStandIn =
+    "// void, SquadList l, GAIKA g\n"
+    "if (!l.Rewind()) return;\n"
+    "l.Lock;\n"
+    "while (true)\n"
+    "{\n"
+    "  if (l.Cur.GAIKAIn == g) l.Cur.ClrCmd(0, 0, 2);\n"
+    "  else l.Cur.SetCmd(1, 0, 2, \"advance\", g.Center);\n"
+    "  if (!l.Next()) break;\n"
+    "}\n"
+    "l.Unlock;\n";
+
+}  // namespace
+
+/// **An order is carried out by `data/ai/AIOSendSquad.vs`**, the file the AI's
+/// order drain (0x00448b60) runs for verb 1 with a `SquadList` of the squad and
+/// the node -- not by `SendTo` walking the members itself. Here the script
+/// sends a squad standing elsewhere: its state and its members' commands are
+/// the script's, and the squad's own `DestGAIKA` is untouched -- the order
+/// carries the destination, and `AIDest` reads it from there.
+TEST(send_to_runs_aio_send_squad_with_the_squad_and_the_node) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  CHECK(bench.send(bench.dest) == script::HostStatus::ok);
+  Squad& squad = bench.squad();
+  CHECK(squad.order_dest == bench.dest);
+  CHECK(squad.ai_dest == bench.dest);
+  CHECK(squad.dest_gaika == kNoGaika);
+  CHECK(squad_ai_dest(squad) == bench.dest);
+  CHECK(squad.state == 1);
+  CHECK((squad.flags & kSquadFlagAdvChooser) == 0);
+  for (const ObjectId id : bench.soldiers) {
+    const CommandQueue* q = bench.commands.find(id);
     REQUIRE(q != nullptr);
     REQUIRE(q->size() == 1);
     CHECK(q->entries[0].verb == "advance");
-    CHECK(q->entries[0].arg_kind == CommandArgKind::point);
-    CHECK(q->entries[0].point == centre);
+    CHECK(q->entries[0].point == bench.centre);
   }
+}
 
-  // A node the table does not have writes the order and moves nobody.
-  (void)commands.set_command(f.world, soldiers[0], "guard", Command{});
-  CHECK(send(dest + 40) == script::HostStatus::ok);
-  squad = f.heroes.squads().find(key);
-  REQUIRE(squad != nullptr);
-  CHECK(squad->ai_dest == dest + 40);
-  CHECK(squad->dest_gaika == dest);
-  CHECK(commands.command_name(soldiers[0]) == "guard");
+/// **A squad sent to the node it already stands in moves nobody**: the script's
+/// first branch is `ClrCmd(SS_IDLE, 0, SF_ADVCHOOSER)`, which ends what every
+/// member is doing. This is the case that put a town's sentries on its town
+/// hall when `SendTo` walked every member to the node's centre itself.
+TEST(send_to_a_squad_already_in_the_node_stops_it_where_it_stands) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  CHECK(bench.send(bench.home) == script::HostStatus::ok);
+  Squad& squad = bench.squad();
+  CHECK(squad.order_dest == bench.home);
+  CHECK(squad.state == 0);
+  CHECK((squad.flags & kSquadFlagAdvChooser) == 0);
+  for (const ObjectId id : bench.soldiers) {
+    CHECK(bench.commands.command_name(id) != "guard");
+    CHECK(bench.commands.command_name(id) != "advance");
+  }
+}
+
+/// **With no such script the order is posted and nobody moves**: the movement
+/// is the script's, so a world without the file has a destination and no
+/// journey -- what `SendTo` did before it carried orders out at all, and not
+/// the stand-in that replaced the script with an `advance` to the centre.
+TEST(send_to_without_the_order_script_posts_the_order_and_moves_nobody) {
+  SendToBench bench;
+  CHECK(bench.send(bench.dest) == script::HostStatus::ok);
+  Squad& squad = bench.squad();
+  CHECK(squad.order_dest == bench.dest);
+  CHECK(squad.ai_dest == bench.dest);
+  CHECK(squad.dest_gaika == kNoGaika);
+  CHECK(squad.state == 7);
+  for (const ObjectId id : bench.soldiers) CHECK(bench.commands.command_name(id) == "guard");
 }
 
 /// `g.MinNeed(...)` and `g.MaxNeed(...)` **run a script** and then divide by

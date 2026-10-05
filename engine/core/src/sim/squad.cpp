@@ -732,16 +732,35 @@ HostOutcome take_nearby_items_impl(CallContext& ctx) {
 
 /// `ClrCmd(nState, nSetFlags, nClrFlags)` -- 13 sites.
 ///
-/// `SetCmd` without the command. `gbr.exe`'s signature table gives the two the
-/// same three leading arguments and gives this one nothing after them, which is
-/// what says the state and the flags are the part they share -- and it is the
-/// evidence `sim/squad.hpp` cites for `SetCmd`'s first two steps, so reading it
-/// the other way round here would be circular.
+/// `SetCmd` without a *new* command -- and **not** without ending the old one.
+/// `gbr.exe`'s signature table gives the two the same three leading arguments
+/// and gives this one nothing after them, which is what says the state and the
+/// flags are the part they share. What the body (0x004271d0) does, in order:
 ///
-/// **It still stamps `state_time`.** The two bodies differ by whether a command
-/// is issued, not by whether entering a state is an event; `EVALRECRUIT.VS`
-/// reads `sq.StateTime` as "how long since anything last happened to this
-/// squad" and would see a squad that was cleared but not commanded as stale.
+///   1. **refuses a squad carrying `SF_NOAI`** (`[squad+0x30] & 1`) outright --
+///      no state, no flags, no clock. A squad a mission has pinned is not the
+///      AI's to stop, which is `SendTo`'s rule one entry point over;
+///   2. writes the state, stamps the clock, and computes the flags
+///      set-then-clear;
+///   3. **walks every member and ends what it is doing** -- `vtbl+0xc0(1)`,
+///      the call `Settlement::IdleAllGates` makes on a gate: the pending tail
+///      dropped and the runner ended, so the queue refills with the class's
+///      default verb. No hero stop, unlike the three walkers that *issue*
+///      orders. Each member also gets `[unit+0x194] |= 0x80000`, the bit the
+///      other walkers name and this engine does not carry;
+///   4. holds `kSquadLocked` over the walk and writes the computed word back
+///      after it, so the lock is invisible afterwards.
+///
+/// Step 3 is what this used to leave out, and it is what the name means: every
+/// shipped site is a squad being *stopped* -- `AIOSENDSQUAD.VS` for a squad
+/// already in the node it was sent to, `GS_SIEGE.VS` and `GS_CAPTURE.VS` for an
+/// approach that has arrived. Without it a squad "cleared" to `SS_IDLE` kept
+/// walking wherever its last order sent it, and a town's own sentries, sent to
+/// the node they stand in, never stopped to be re-posted by `WALL_PATROL.VS`
+/// and `GATE_PATROL.VS`, which re-order only a sentry whose command is `idle`.
+///
+/// **It still stamps `state_time`.** `EVALRECRUIT.VS` reads `sq.StateTime` as
+/// "how long since anything last happened to this squad".
 HostOutcome clr_cmd_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
@@ -749,12 +768,29 @@ HostOutcome clr_cmd_impl(CallContext& ctx) {
       !ctx.arg(3).is_integer()) {
     return HostOutcome::failed("ClrCmd: expected three integers");
   }
+  if ((self.squad->flags & kSquadFlagNoAi) != 0) return HostOutcome::ok_void();
   const GameTime now = ctx.scheduler != nullptr ? ctx.scheduler->now() : self.world->time();
   self.squad->state = ctx.arg(1).as_integer();
   self.squad->state_time = now;
   const auto set_mask = static_cast<std::uint16_t>(ctx.arg(2).as_integer() & 0xFFFF);
   const auto clear_mask = static_cast<std::uint16_t>(ctx.arg(3).as_integer() & 0xFFFF);
-  self.squad->flags = static_cast<std::uint16_t>((self.squad->flags | set_mask) & ~clear_mask);
+  const auto flags = static_cast<std::uint16_t>((self.squad->flags | set_mask) & ~clear_mask);
+  CommandSystem* commands = command_system(*self.world);
+  if (commands == nullptr) {
+    self.squad->flags = flags;
+    return HostOutcome::ok_void();
+  }
+  const SquadKey key = self.squad->key;
+  self.squad->flags = static_cast<std::uint16_t>(flags | kSquadLocked);
+  // Copied out first, as `squad_set_cmd` does: ending a command can spawn the
+  // default verb's script, and a script can leave the squad.
+  const std::vector<ObjectId> members = self.squad->members;
+  for (const ObjectId member : members) {
+    if (self.world->find(member) == nullptr) continue;
+    (void)commands->clear_commands(*self.world, member);
+    (void)commands->kill_command(*self.world, member);
+  }
+  if (Squad* squad = self.heroes->squads().find(key); squad != nullptr) squad->flags = flags;
   return HostOutcome::ok_void();
 }
 
@@ -902,6 +938,20 @@ HostOutcome mil_eval_impl(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(fielded_strength(heroes->squads(), asking)));
 }
 
+/// The file 0x00448b60 runs for an AI order of verb 1 -- a literal path in the
+/// executable (0x007b15ac), so the root profile's copy whatever the player's
+/// profile, and a file `AI.INI`'s `[Scripts]` table does not list. Its shipped
+/// signature is `void, SquadList l, GAIKA g`.
+constexpr std::string_view kSendSquadOrderScript = "data/ai/AIOSendSquad.vs";
+
+/// Owners for the one-squad lists `SendTo` hands that script, one per nesting
+/// depth -- `GAIKA::Recruit` runs `SendSquad.vs` synchronously and that calls
+/// `SendTo`, so two can be live at once. Outside every id `Scheduler` issues
+/// and outside `run_script_now`'s synthetic range, and released before the
+/// call returns, so no list outlives it.
+constexpr script::ScriptId kSendToListOwner = 0x50000000u;
+int g_send_to_depth = 0;
+
 /// `sq.SendTo(g, n)` -- 13 sites, and it is **how a script moves a squad**.
 ///
 /// 0x00421520 refuses three things and then posts an order:
@@ -914,52 +964,60 @@ HostOutcome mil_eval_impl(CallContext& ctx) {
 ///     has pinned is not the AI's to move, which is the rule
 ///     `GetAIControlledUnits` applies to units one level down.
 ///
-/// What it posts is a record on the AI's order list at `[ai+0x28]` carrying the
-/// squad, the node and `n`, through 0x004494c0 -- whose first act is a jump
-/// table on a *verb* that this wrapper always writes in as **1**, so `n` is not
-/// the verb. Nothing in the corpus reads `n` back and nothing recovered here
-/// says what it weights; all 13 shipped sites pass 1.
+/// ## The order
 ///
-/// ## What the order does, which is the part a script can see
-///
-/// This engine has no AI order list, so what matters is the effect, and the
-/// corpus states it. `DATA\AI\GS_SIEGE.VS` line 95:
+/// 0x004494c0 files a 20-byte record on the AI's order list at `[ai+0x28]`:
+/// a verb -- the wrapper always writes **1** -- the squad, the node, and `n`.
+/// For verb 1 it first deletes the squad's previous order (0x00448a80), then
+/// stores the record's index on the squad at `[squad+0x26]`, and re-files the
+/// squad on the node table as heading to the new node rather than to its
+/// `DestGAIKA` (0x0041ea60 into 0x004501a0). `Squad::OrderDest` and
+/// `Squad::AIDest` both read the destination back through that index
+/// (0x00444140), and it stays readable after the order has been carried out:
+/// only `DelOrder` or the next `SendTo` frees the record. So `order_dest` and
+/// `ai_dest` are written here, and `dest_gaika` is not -- the original's
+/// `DestGAIKA` is the squad's own field and this does not touch it.
+/// `GS_SIEGE.VS` line 95 says the same from the script side:
 ///
 ///     if (squad.OrderDest != gaika) { squad.SendTo(gaika, 1); continue; }
 ///     // issue order, to force squad's AIDest to gaika
 ///
-/// -- the author's own comment, and the reason `sim/squad.hpp` has carried
-/// `ai_dest` as a stored field with no writer since it was declared. So
-/// `SendTo` writes it.
+/// ## What carries it out, which is a script
 ///
-/// **It writes `order_dest` too**, and that is the order record rather than the
-/// loop: `Squad::OrderDest` is the destination of the squad's current order,
-/// 0x004494c0 builds an order whose destination is this node, and `DelOrder`
-/// -- which clears `order_dest` alone -- is the other end of the same pair.
-/// The `continue` above is *not* the argument: this VM's `continue` re-enters
-/// the loop body without running the `SL.Next` at its foot, so that walk
-/// re-reads the same squad whatever this does, exactly as its `SF_PEACEFUL`
-/// test three lines earlier already does.
+/// The list is drained by 0x00448b60, from the AI's 500 ms timer (0x0041d790:
+/// timer 1 calls it through 0x00448dd0 and re-arms itself for 500). For verb
+/// 1 it builds a `SquadList` holding the order's squad, adds every other
+/// pending verb-1 order bound for the same node whose squad stands within 240
+/// of it, marks them all taken, and runs **`data/ai/AIOSendSquad.vs`** with
+/// that list and the node. That script, for each squad:
 ///
-/// ## And it carries the order out, which is a stand-in
+///   * already **in** the node: `ClrCmd(SS_IDLE, 0, SF_ADVCHOOSER)` -- it
+///     moves nobody, and `ClrCmd` ends every member's command -- or, a fleeing
+///     squad at a settlement, `SetCmd(SS_Enter, ..., "enter", ...)`;
+///   * elsewhere: `SetCmd(SS_Approach, ...)` -- `move` before minute ten,
+///     `advance` after, `sneak` for a hero's squad, `move` in `SS_Flee` -- to
+///     `g.GetDestPoint(leader)`, through a teleport or onto a transport ship
+///     when the route needs one.
 ///
-/// Posting was all this did, and nothing here consumes an AI order list, so a
-/// squad the AI sent anywhere stayed where it was: `SQUADMONITOR.VS` moves a
-/// squad only once it is *near* a settlement (`:77-79`, `sq.Units.SetCommand(
-/// "advance", pt)` then `AddCommand(false, "advance", sq.AIDest.Center)`), and
-/// every other script waits for the squad to arrive. So `SendTo` now does what
-/// the order evidently leads to: `dest_gaika` becomes the node -- where its own
-/// movement is taking it, which `AIDest` falls back to -- and every member is
-/// given `advance` to the node's centre, the verb and the point
-/// `SQUADMONITOR.VS` itself uses for the same journey.
+/// **This runs that script synchronously, at the post, for the one squad, and
+/// that is the inference -- labelled.** The original's drain is later (up to
+/// half a second, one order per tick of the timer, the larger `n` first
+/// (0x004488e0 compares `n / 5`), and not while the previous drain's script is
+/// still running) and batches
+/// nearby squads bound for the same node into one list. What a squad is told
+/// is the same either way: the script decides per squad, from that squad's
+/// own state, and the batch changes only that a ship-less crossing's early
+/// `return` skips the rest of a list. The alternatives were an order list on
+/// `AiSystem`, saved, with the timer and the batching; it is the next step if
+/// the delay ever shows. What it replaces was a stand-in that walked every
+/// member to the node's centre with `advance` -- including a town's own
+/// sentries, sent to the node they stand in, which ignore passability and
+/// stacked on the town hall.
 ///
-/// **This stands in for the original's consumer of the AI order list
-/// (0x004494c0 posts to it; what drains it was not recovered), and is
-/// labelled as such.** It does not set the squad's state -- not `SS_Approach`,
-/// not anything -- because the scripts write the state they want through
-/// `SetCmd`, and a guess here would be read back by `SQUADMONITOR.VS`'s state
-/// tests. A node the table does not have moves nobody. `gaika_in` is left to
-/// the mover.
+/// `n` is the record's priority for that drain and nothing else; with no list
+/// it is read and dropped. A node the table does not have is still posted --
+/// the record holds any 16-bit value -- and the script decides what to do
+/// with it. With no such script loaded the order is posted and nobody moves.
 HostOutcome send_to_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {
@@ -980,19 +1038,33 @@ HostOutcome send_to_impl(CallContext& ctx) {
   const GaikaId dest = gaika_of(ctx.arg(1));
   self.squad->order_dest = dest;
   self.squad->ai_dest = dest;
-  const GaikaNode* node = self.world->gaika().find(dest);
-  CommandSystem* commands = command_system(*self.world);
-  if (node == nullptr || commands == nullptr) return HostOutcome::ok_void();
-  self.squad->dest_gaika = dest;
-  Command advance;
-  advance.arg_kind = CommandArgKind::point;
-  advance.point = node->center;
-  // Copied out first, as `squad_set_cmd` does: an order can spawn a script,
-  // and a script can leave the squad.
-  const std::vector<ObjectId> members = self.squad->members;
-  for (const ObjectId member : members) {
-    (void)commands->set_command(*self.world, member, "advance", advance);
+
+  // The drain. Compiled on demand, as `RunAIHelper` compiles its file: no
+  // manifest lists this one.
+  if (ctx.scheduler == nullptr) return HostOutcome::ok_void();
+  HostContext* host = host_context_of(ctx);
+  std::uint32_t chunk = script::kNoChunk;
+  if (host != nullptr && host->library != nullptr) {
+    chunk = host->library->chunk_for(kSendSquadOrderScript);
   }
+  if (chunk == script::kNoChunk) chunk = ctx.scheduler->find_chunk_exact(kSendSquadOrderScript);
+  if (chunk == script::kNoChunk) return HostOutcome::ok_void();
+  if (g_send_to_depth >= 8) return HostOutcome::failed("SendTo: orders nested too deep");
+
+  SquadListPool& pool = squadlist_pool_of(*self.world);
+  const script::ScriptId owner = kSendToListOwner + static_cast<script::ScriptId>(g_send_to_depth);
+  const SquadListId list = pool.acquire(owner, 0);
+  if (std::vector<SquadKey>* items = pool.mutable_items(list); items != nullptr) {
+    items->assign(1, self.squad->key);
+  }
+  pool.set_cursor(list, 0);
+  const Value args[2] = {make_squadlist_value(list), gaika_value(dest)};
+  Value ignored = Value::integer(0);
+  ++g_send_to_depth;
+  const HostOutcome ran = run_script_now(ctx, chunk, args, "SendTo: AIOSendSquad.vs failed", ignored);
+  --g_send_to_depth;
+  squadlist_pool_of(*self.world).release_script(owner);
+  if (ran.status != HostStatus::ok) return ran;
   return HostOutcome::ok_void();
 }
 
@@ -1072,15 +1144,18 @@ HostOutcome gaika_in_impl(CallContext& ctx) {
   return HostOutcome::ok_with(gaika_value(self.squad->gaika_in));
 }
 
-/// `sq.DelOrder()` -- 3 sites, all commented out in the shipped scripts.
+/// `sq.DelOrder()` -- 9 sites, six of them commented out (`GS_GUARD.VS` line
+/// 27 is `//if (SL.Cur.OrderDest == gaika) squad.DelOrder();`). The three live
+/// ones are `SQUADMONITOR.VS` lines 128 and 625 and `AIOSENDSQUAD.VS`'s
+/// `ship.GetSquad.DelOrder`, on the transport it is about to board.
 ///
-/// 0x00421670 clears the squad's AI order destination. **The three call sites
-/// are inside `/* */`** -- `GS_GUARD.VS` line 27 is
-/// `//if (SL.Cur.OrderDest == gaika) squad.DelOrder();` -- so nothing shipped
-/// reaches it and the corpus cannot say what else it touches. `order_dest` is
-/// the field the name matches and the one `Squad::Dump` prints as
-/// `AIOrderDest`; clearing it and nothing else is the narrowest reading the
-/// evidence supports.
+/// 0x00421670 hands the squad to 0x00448a80, which frees the squad's record on
+/// the AI order list (0x00448a10) and sets the index at `[squad+0x26]` back to
+/// -1. `OrderDest` and `AIDest` both read the destination through that index
+/// (0x00444140), so **both** lose it: `OrderDest` answers no node and `AIDest`
+/// falls back to `DestGAIKA`. This cleared `order_dest` alone while nothing
+/// reached it; `SendTo` writes the two together, and this undoes the two
+/// together.
 HostOutcome del_order_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {
@@ -1088,6 +1163,7 @@ HostOutcome del_order_impl(CallContext& ctx) {
     return HostOutcome::failed(self.error);
   }
   self.squad->order_dest = kNoGaika;
+  self.squad->ai_dest = kNoGaika;
   return HostOutcome::ok_void();
 }
 
@@ -1209,13 +1285,17 @@ HostOutcome cur_impl(CallContext& ctx) {
   return HostOutcome::ok_with(pack_squad(items[at]));
 }
 
-/// `SL.Next()` -- 32 sites. Advance, and answer whether there was anywhere to
-/// advance to.
+/// `SL.Next()` -- 32 sites. Advance, and answer whether the cursor now stands
+/// on a squad.
 ///
-/// 0x0042bb80 pushes a **bool**, which is worth saying because all 32 shipped
-/// sites are bare statements that discard it: the return exists and nothing
-/// reads it. Advancing off the end leaves the cursor at the end rather than
-/// running it on, which is what makes `EOL` stay true afterwards.
+/// 0x0042bb80 pushes a **bool**, and it is what 0x004201d0 answers: false at
+/// once when the cursor is already at the end; otherwise step, and true only
+/// when the step did not land on the end. So `Next` off the **last** squad
+/// answers false. This answered "did it move" -- true there -- on the grounds
+/// that every shipped site discards the value, and one does not:
+/// `AIOSENDSQUAD.VS` ends its walk with `if (!l.Next()) break;`, and with the
+/// other answer it ran its body once more on no squad at all. Advancing off
+/// the end leaves the cursor at the end, which is what makes `EOL` stay true.
 HostOutcome next_impl(CallContext& ctx) {
   const ListSelf self = resolve_list(ctx);
   if (!self.ok()) {
@@ -1224,15 +1304,9 @@ HostOutcome next_impl(CallContext& ctx) {
   }
   const std::size_t size = self.pool->items(self.id).size();
   const std::size_t at = self.pool->cursor(self.id);
-  // **The bounds half of this test is belt and braces and is kept knowingly.**
-  // `SquadListPool::set_cursor` clamps to the list's length, so writing `at + 1`
-  // past the end moves nothing and a fault injected into this guard survives
-  // the whole suite -- the answer would be the same either way. What the test
-  // is *not* redundant about is the return value: `Next` at the end has to
-  // answer false, and that is the half nothing else holds.
   if (at >= size) return HostOutcome::ok_with(Value::boolean(false));
   self.pool->set_cursor(self.id, at + 1);
-  return HostOutcome::ok_with(Value::boolean(true));
+  return HostOutcome::ok_with(Value::boolean(at + 1 < size));
 }
 
 /// `SL.Rewind()` -- 12 sites. Back to the first squad.
@@ -1395,8 +1469,16 @@ constexpr std::int32_t kAiEnemy = 4;
 /// deque and its numbering is this engine's own approximation rather than the
 /// original's, so membership is still read back from the three GAIKA fields the
 /// squad carries: `gaika_in == g` and going nowhere else is staying,
-/// `dest_gaika == g` from elsewhere is coming, `gaika_in == g` with a
-/// destination elsewhere is leaving. Likely, and unproven.
+/// heading to `g` from elsewhere is coming, `gaika_in == g` with a destination
+/// elsewhere is leaving. Likely, and unproven.
+///
+/// **Where a squad is heading is `AIDest`, not `DestGAIKA`.** Posting an
+/// order re-files the squad on the node table from its `DestGAIKA` to the
+/// order's node (0x004494c0 calls 0x0041ea60, which hands both to 0x004501a0),
+/// and deleting the order files it back -- so what the node deques hold is the
+/// order's destination while there is one, which is `squad_ai_dest`.
+/// `GetAIControlledUnits` below reads it the same way. This read `dest_gaika`
+/// while `SendTo` wrote that field too; it writes the order alone now.
 ///
 /// Kept as one function because `GetSquads` and the census below have to agree:
 /// `GETGAIKASTRAT.VS` calls `Eval` and `Count` on the same node in consecutive
@@ -1405,10 +1487,11 @@ constexpr std::int32_t kAiEnemy = 4;
 /// would make those disagree in a way no test here would catch.
 [[nodiscard]] std::int32_t squad_presence(GaikaId node, const Squad& squad) noexcept {
   if (node == kNoGaika) return 0;
+  const GaikaId heading = squad_ai_dest(squad);
   if (squad.gaika_in == node) {
-    return (squad.dest_gaika == kNoGaika || squad.dest_gaika == node) ? kAiStaying : kAiLeaving;
+    return (heading == kNoGaika || heading == node) ? kAiStaying : kAiLeaving;
   }
-  return squad.dest_gaika == node ? kAiComing : 0;
+  return heading == node ? kAiComing : 0;
 }
 
 /// One player's relation to another as an `AI_*` mask: `AI_OWN` wins over
@@ -3923,7 +4006,7 @@ std::size_t register_squad_host(HostRegistry& registry) {
   free_fn("MilEval", 1, &mil_eval_impl);            //  4
   free_fn("AllyMilEval", 1, &mil_eval_over<false>);  // 2
   free_fn("EnemyMilEval", 1, &mil_eval_over<true>);  // 1
-  member("DelOrder", 0, &del_order_impl);     //  3, all of them commented out
+  member("DelOrder", 0, &del_order_impl);     //  9, six commented out
 
   // The `SquadList` cursor. `sim/objlist.hpp` says why it lives here: every one
   // of the 131 `Cur`/`Next`/`EOL` receivers in the corpus is a `SquadList`.

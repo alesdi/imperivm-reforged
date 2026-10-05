@@ -316,7 +316,8 @@ def test_a_won_conquest_mission_carries_its_reward_to_the_next(imrun, game_dir, 
 #: computer players' armies go after the outposts and nothing reaches p0's
 #: walls; that they shoot what does is held by placement instead, in the test
 #: after this one. Why the AI does not march on a walled town is an open
-#: thread in `docs/plan.html`. The turn is kept cheap;
+#: thread in `docs/plan.html`. The turn is kept cheap: it was once held past
+#: p0's first kill, and nothing here asks for one any more.
 #: `test_corpus_app_match.py` holds the app to the same world on the same turn.
 CROSSROADS_TURNS = 2_200
 
@@ -450,6 +451,14 @@ def test_alesias_armies_do_not_stand_on_one_another(imrun, game_dir):
     reinforcements standing on their spawn point, attackers on their target's
     centre. With them: 52, 18, and a peak of 139 on turn 50. What is left is
     mostly pairs the map places on one point, which nothing moves.
+
+    And they go round. The smart pathfinder strikes off every goal point a
+    standing unit or another's lock covers before it searches (`0x0040a310`),
+    so an attacker whose side of a target is taken routes to a free one round
+    it; a band with nothing left sends a unit queued far behind to a free spot
+    the free-spot search finds (`0x004180b0`). Sampled every ten turns, melee
+    units in a fight stood out of reach 819 times against 288 in reach before;
+    with both, 357 against 417, and 6,523 blows landed rather than 5,117.
     """
     alesia = game_dir / ALESIA
     if not alesia.is_file():
@@ -474,6 +483,14 @@ def test_alesias_armies_do_not_stand_on_one_another(imrun, game_dir):
     strikes = int(re.search(r"^\s+strikes\s+(\d+) blow", output, re.MULTILINE).group(1))
     assert strikes > 2000, output
     assert "no traps." in output, output[output.find("distinct traps"):]
+    melee = re.search(r"^\s+melee\s+sampled: (\d+) engaged, (\d+) closing, (\d+) waiting out of reach$",
+                      output, re.MULTILINE)
+    assert melee, output[-3000:]
+    engaged, _, waiting = map(int, melee.groups())
+    assert engaged > 350 and 2 * waiting < 3 * engaged, melee.group(0)
+    aims = re.search(r"^\s+free spot\s+(\d+) full band\(s\) searched out from, (\d+) route\(s\) re-aimed$",
+                     output, re.MULTILINE)
+    assert aims and int(aims.group(2)) > 0, output[-3000:]
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@
 #include "imperivm/core/sim/boarding.hpp"
 
 #include "imperivm/core/sim/entrance.hpp"
+#include "imperivm/core/sim/gate.hpp"
 #include "imperivm/core/sim/lsa.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/orders.hpp"
@@ -3111,57 +3112,23 @@ void give_object_to(CallContext& ctx, EconomySystem* economy, World& world, Obje
 /// **`Outside` is registered by `gbr.exe` and is not bound here**, on the rule
 /// `ShowNotes` set: no script in the installation calls it, so it is not in the
 /// declared surface and binding it would widen the inventory the corpus asks
-/// for. The predicate below is written once so that the day a caller appears it
-/// is one line.
+/// for. The predicate is shared, so the day a caller appears it is one line.
 ///
 /// A member **inside a holder** answers no (`[unit+0x154] != 0xffff`), before
 /// anything geometric is asked. A garrisoned unit is not standing inside the
 /// walls; it is in a building.
 ///
-/// ## The mechanism, which is the original's and is not reproduced literally
+/// ## The predicate
 ///
-/// 0x005295d0 mints a pathfinder query, sets bit `0x100` in its options word,
-/// asks for a route from the unit to **the gate's settlement's central
-/// building** (`[gate+0x148]` is the object's settlement -- the field
-/// `Building::settlement` reads -- and `[settlement+0x8c]` its central
-/// building, the one `GetCentralBuilding` hands back), and answers **yes when
-/// the route comes back empty**. What bit `0x100` selects is the one thing here
-/// that was not read; without it the polarity would make no sense, and with the
-/// two entry-point names and the call site it can only be "the unit needs no
-/// route to the town centre, because it is already in there with it".
+/// `inside_walls` in `sim/gate.hpp`, read off 0x005295d0: a member is inside
+/// when its route to the town centre, every gate open, crosses no gate.
 ///
-/// **This engine asks the same question of the structure it has for it.** A
-/// unit is inside when it stands in the same `LsaPartition` area as the central
-/// building. That partition is this engine's decomposition of walkable ground
-/// into regions a unit can cross without going through an obstruction, which is
-/// exactly what "needs no route" measures; it is built once from the terrain
-/// and the obstruction grid, and asking it costs a lookup where a pathfinder
-/// query per member would cost a search per member per tick of a 111-site
-/// strategy. The central building's area is `LsaPartition::at_or_near` of its
-/// position -- the nearest labelled cell, since the building stands on its own
-/// footprint and the cell under it is no area; a labelled reading, shared with
-/// the GAIKA table's nodes. An area of `kNoLsa` on the unit's side -- off the
-/// map, or on ground nothing walks -- is not a match, so it answers *not
-/// inside*.
-///
-/// The two readings part company where a settlement's walls do not enclose a
-/// region of their own: with the gates counted as passable ground the partition
-/// merges the inside with the outside, and every besieger reads as inside. That
-/// is a real limitation and it is the partition's rather than this file's --
-/// `sim/lsa.hpp` carries what the obstruction grid does with a gate.
-[[nodiscard]] bool unit_is_inside(const World& world, ObjectId unit, ObjectId centre) {
-  const WorldObject* slot = world.find(unit);
-  if (slot == nullptr || centre == kNoObject) return false;
-  // `[unit+0x154] != 0xffff`: in a building, not in the streets.
-  if (slot->state.holder != kNoObject) return false;
-  const LsaPartition& areas = world.lsa();
-  const LsaId here = areas.at(world.resolve_position(unit));
-  // The central building stands on its own blocked footprint, so the cell
-  // under it is no area and `at` would answer *not inside* for everybody. The
-  // unit's side stays `at`: a unit in the streets stands on open ground.
-  const LsaId there = areas.at_or_near(world.resolve_position(centre));
-  return here != kNoLsa && here == there;
-}
+/// This used to ask whether the member and the central building stand in one
+/// `LsaPartition` area. The partition counts a gate's gap as open ground, so
+/// it merges a walled town's inside with its outside, and every besieger read
+/// as inside: `GS_SIEGE.VS` turned every squad at the walls to `SS_Capture`,
+/// and no gate was ever attacked. (The host body is with the gate members
+/// below.)
 
 [[nodiscard]] std::vector<ObjectId> settlement_gates(const World& world, const Settlement& s) {
   std::vector<ObjectId> buildings;
@@ -4817,7 +4784,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
      }},
     // `Gate::Inside(squad)` -- 1 site, and the receiver is the gate rather than
     // the settlement, which is why it sits with the gate members and not with
-    // the settlement's. See `unit_is_inside`.
+    // the settlement's. See `inside_walls` in `sim/gate.hpp`.
     {CallKind::member, "Inside", 1,  // 1 site
      +[](CallContext& ctx) -> HostOutcome {
        World* world = world_of(ctx);
@@ -4834,7 +4801,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        // empty one gets: every member of nothing is inside.
        if (squad == nullptr) return boolean(true);
        for (const ObjectId member : squad->members) {
-         if (!unit_is_inside(*world, member, set->anchor)) return boolean(false);
+         if (!inside_walls(*world, member, set->anchor)) return boolean(false);
        }
        return boolean(true);
      }},

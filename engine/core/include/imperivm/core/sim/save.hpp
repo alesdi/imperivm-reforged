@@ -263,7 +263,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (0x00418fb0's list), which the step reads to stop before a gate that bars
 /// the mover. Not hashed -- path media -- and a version-24 file would load a
 /// route crossing a closed gate with no crossing to stop it there.
-inline constexpr std::uint32_t kStateVectorVersion = 25;
+/// 26: the movement section's `MoveState` grew the free-spot search's two
+/// `CVXPathRetry` flags, bits 3 and 6 (playtest report #13): whether the
+/// search has run for this destination and whether the route walked was
+/// re-aimed by it. Not hashed -- path media -- but the search draws from the
+/// world's generator, so a version-25 file would load with both clear and
+/// let a unit draw again where the original would not.
+inline constexpr std::uint32_t kStateVectorVersion = 26;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

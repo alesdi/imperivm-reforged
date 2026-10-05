@@ -36,6 +36,7 @@
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/lsa.hpp"
 #include "imperivm/core/sim/match.hpp"
+#include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/player.hpp"
 #include "imperivm/core/sim/settlement.hpp"
@@ -4095,107 +4096,65 @@ struct WallBench : ArmyBench {
 
 }  // namespace
 
+/// `WallBench` with the movement system `Gate::Inside`'s predicate routes on.
+struct InsideBench : WallBench {
+  MovementSystem movement;
+  InsideBench() {
+    movement.set_class_graph(&graph);
+    movement.set_grid(obstruction(pass));
+    REQUIRE(world.add_system(&movement));
+  }
+};
+
 /// `Gate::Inside(squad)` -- **every** member has to be inside, and a member in
 /// a holder is not.
 ///
-/// The original asks its pathfinder for a route from each member to the gate's
-/// settlement's central building and reads an *empty* route as "inside"; this
-/// asks whether the member stands in the same `LsaPartition` area, which is the
-/// same question -- can it get there without crossing an obstruction -- put to
-/// the structure this engine keeps for it. `sim/economy.cpp` carries the whole
-/// argument and what was not read.
-TEST(gate_inside_wants_every_member_of_the_squad_in_the_settlements_own_area) {
-  WallBench b;
-  // The western island holds the town; the eastern one is where a besieger
-  // stands. `lsa().size() == 2` is asserted by the partition's own tests.
+/// The predicate, `inside_walls`, is the original's -- a member is inside when
+/// its route to the town centre, every gate open, crosses no gate -- and
+/// `test_gate.cpp` holds it to a wall and a gate. Here the walk: these gates
+/// have no axis, so no route crosses one and a member in the streets is
+/// inside; a member in a holder is the one that is not.
+TEST(gate_inside_wants_every_member_of_the_squad_inside) {
+  InsideBench b;
   const SettlementId town = b.plant(3, 3);
   const Settlement* set = b.economy.settlements().find(town);
   REQUIRE(set != nullptr);
   const ObjectId gate = b.gate_of(town, 4, 4);
 
-  const auto inside = [&](SquadKey key) {
+  const auto inside = [&](ObjectId at, SquadKey key) {
     return b.call(script::CallKind::member, "Inside", 1,
-                  {script::Value::object(kTypeObj, gate), pack_squad(key)})
+                  {script::Value::object(kTypeObj, at), pack_squad(key)})
         .value.truthy_scalar();
   };
 
   const ObjectId within = b.invader(2, 2);    // western island, with the town
-  const ObjectId beyond = b.invader(10, 10);  // eastern island
-  REQUIRE(b.world.lsa().at(b.world.resolve_position(within)) !=
-          b.world.lsa().at(b.world.resolve_position(beyond)));
-
-  CHECK(inside(b.band(2, 1, {within})));
-  CHECK(!inside(b.band(2, 1, {beyond})));
-  // **Every member**, so one man outside decides for the whole squad.
-  CHECK(!inside(b.band(2, 1, {within, beyond})));
-  // ...and an empty squad is inside, because every member of nothing is.
-  CHECK(inside(b.band(2, 1, {})));
+  const ObjectId garrison = b.invader(2, 2);
+  CHECK(inside(gate, b.band(2, 1, {within})));
+  CHECK(inside(gate, b.band(2, 1, {garrison})));
 
   // A member **in a holder** is not inside: it is in a building, not standing
   // in the streets. `[unit+0x154] != 0xffff` is the original's own first test.
-  const ObjectId garrison = b.invader(2, 2);
-  const SquadKey held = b.band(2, 1, {garrison});
-  CHECK(inside(held));
   CHECK(b.world.put_in_holder(garrison, set->anchor));
-  CHECK(!inside(held));
+  CHECK(!inside(gate, b.band(2, 1, {garrison})));
+  // **Every member**, so one decides for the whole squad.
+  CHECK(!inside(gate, b.band(2, 1, {within, garrison})));
+  // ...and an empty squad is inside, because every member of nothing is.
+  CHECK(inside(gate, b.band(2, 1, {})));
+
+  // A member with no route to the centre at all -- the eastern island, across
+  // water -- lists no crossing, and the original reads an empty list as
+  // inside.
+  const ObjectId beyond = b.invader(10, 10);
+  CHECK(inside(gate, b.band(2, 1, {beyond})));
 
   // A gate that belongs to no settlement answers false rather than guessing.
   const ObjectId stray = b.world.spawn(NativeClass::gate, nullptr, b.graph.find("Gate"));
   CHECK(b.world.set_position(stray, in_cell(2, 2)));
-  CHECK(!b.call(script::CallKind::member, "Inside", 1,
-                {script::Value::object(kTypeObj, stray), pack_squad(b.band(2, 1, {within}))})
-             .value.truthy_scalar());
+  CHECK(!inside(stray, b.band(2, 1, {within})));
 
   // A handle naming no squad walks no members, which is the same answer an
   // empty squad gets and not the opposite one.
-  CHECK(b.call(script::CallKind::member, "Inside", 1,
-               {script::Value::object(kTypeObj, gate), pack_squad(SquadKey{99, 9})})
-            .value.truthy_scalar());
-
-  // **The measurement is against the central building and not against the
-  // gate**, which only shows when the two are in different areas. A gate on
-  // the far island still speaks for the town it belongs to.
-  const ObjectId far_gate = b.gate_of(town, 10, 10);
-  CHECK(b.call(script::CallKind::member, "Inside", 1,
-               {script::Value::object(kTypeObj, far_gate), pack_squad(b.band(2, 1, {within}))})
-            .value.truthy_scalar());
-  CHECK(!b.call(script::CallKind::member, "Inside", 1,
-                {script::Value::object(kTypeObj, far_gate), pack_squad(b.band(2, 1, {beyond}))})
-             .value.truthy_scalar());
-
-  // **A central building stands on its own footprint**, so the cell under it
-  // is no area, and asking `at` of it answered *not inside* for everybody --
-  // a town could never be entered. Its area is the nearest labelled cell's
-  // (`LsaPartition::at_or_near`, a labelled reading shared with the GAIKA
-  // nodes). Planted on the sea one cell off the western island, the town's
-  // area is that island's, and a man standing on it is inside.
-  //
-  // **The unit's own side stays `at`**, and a man on ground nothing walks --
-  // here the sea -- has no area, so he is inside nothing. The guard on that
-  // side cannot be told from `here == there` on this map: the town's side
-  // would have to miss as well, which takes a centre more than 512 units from
-  // any walkable ground, and this map is 1,024 across. It is kept, and this
-  // is why no case here fails without it.
-  {
-    const SettlementId shore = b.plant(0, 1);
-    const ObjectId pier = b.gate_of(shore, 0, 2);
-    const Settlement* wet = b.economy.settlements().find(shore);
-    REQUIRE(wet != nullptr);
-    REQUIRE(b.world.lsa().at(b.world.resolve_position(wet->anchor)) == kNoLsa);
-    CHECK(b.call(script::CallKind::member, "Inside", 1,
-                 {script::Value::object(kTypeObj, pier), pack_squad(b.band(2, 1, {within}))})
-              .value.truthy_scalar());
-    CHECK(!b.call(script::CallKind::member, "Inside", 1,
-                  {script::Value::object(kTypeObj, pier), pack_squad(b.band(2, 1, {beyond}))})
-               .value.truthy_scalar());
-    // In the sea beside the town's own island: `at_or_near` of him would be
-    // the town's area, and he is still not in the streets.
-    const ObjectId swimmer = b.invader(0, 3);
-    REQUIRE(b.world.lsa().at(b.world.resolve_position(swimmer)) == kNoLsa);
-    CHECK(!b.call(script::CallKind::member, "Inside", 1,
-                  {script::Value::object(kTypeObj, pier), pack_squad(b.band(2, 1, {swimmer}))})
-               .value.truthy_scalar());
-  }
+  CHECK(inside(gate, SquadKey{99, 9}));
 }
 
 /// `squad.InvadeThroughGate(gate, nState)` -- five guards, then two orders per
