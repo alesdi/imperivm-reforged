@@ -257,66 +257,111 @@ TEST(economy_growth_stops_at_max_population) {
   CHECK(economy.find(id)->population == 20);
 }
 
-/// INFERRED, and flagged as such in `economy.cpp`: `foodperpop` is the price of
-/// one population point. A settlement that cannot pay does not grow.
-TEST(economy_growth_costs_food_per_head) {
+/// gbr.exe's growth tick (0x005c0f60) reads no food: a town hall with an empty
+/// store grows like a full one, and `foodperpop` is never charged. Charging it
+/// was an inference from the property's name, and it starved every town hall
+/// the AI fed by wagon alone.
+TEST(economy_growth_costs_no_food) {
   World world;
   EconomySystem economy;
   SettlementInit init = town_hall();
-  init.food = 100;  // two heads' worth at foodperpop = 45
-  init.max_food = 100;
-  const SettlementId id = economy.create(init);
-  economy.start(world);
-
-  run(economy, world, 400, 20000);
-  CHECK(economy.find(id)->population == 41);
-  CHECK(economy.resource(id, Resource::food) == 55);
-
-  run(economy, world, 400, 20000);
-  CHECK(economy.find(id)->population == 42);
-  CHECK(economy.resource(id, Resource::food) == 10);
-
-  run(economy, world, 400, 20000);  // 10 food left: cannot pay
-  CHECK(economy.find(id)->population == 42);
-  CHECK(economy.resource(id, Resource::food) == 10);
-}
-
-/// `PopulationDecreasePercent = 10` per `PopulationDecreaseInterval = 4000`,
-/// floored at `MinPopulation = 10`. The trigger -- an empty store -- is
-/// inferred; the arithmetic is not.
-TEST(economy_starvation_takes_a_tenth_and_floors_at_min_population) {
-  World world;
-  EconomySystem economy;
-  SettlementInit init = town_hall();
-  init.population = 100;
   init.food = 0;
-  init.max_food = 1000;
-  init.produces_gold = false;  // nothing to distract the arithmetic
-  const SettlementId id = economy.create(init);
-  economy.start(world);
-
-  run(economy, world, 400, 4000);
-  CHECK(economy.find(id)->population == 90);  // 100 - 100 * 10 / 100
-
-  run(economy, world, 400, 4000);
-  CHECK(economy.find(id)->population == 81);  // 90 - 9
-
-  run(economy, world, 400, 400000);
-  CHECK(economy.find(id)->population == 10);  // MinPopulation, and no lower
-}
-
-/// A settlement with food in the store does not starve, whatever else happens.
-TEST(economy_food_in_the_store_prevents_starvation) {
-  World world;
-  EconomySystem economy;
-  SettlementInit init = town_hall();
-  init.population = 100;
-  init.food = 100000;
   const SettlementId id = economy.create(init);
   economy.start(world);
 
   run(economy, world, 400, 40000);
-  CHECK(economy.find(id)->population >= 100);
+  CHECK(economy.find(id)->population == 42);
+  CHECK(economy.resource(id, Resource::food) == 0);
+}
+
+/// The same tick skips a population below `MinPopulation = 10`, and every
+/// settlement of player 14 or 15.
+TEST(economy_growth_skips_a_population_below_the_floor_and_the_neutral_players) {
+  World world;
+  EconomySystem economy;
+  SettlementInit low = town_hall();
+  low.population = 9;
+  const SettlementId low_id = economy.create(low);
+  SettlementInit wild = town_hall();
+  wild.owner = kNeutralWildlife;
+  const SettlementId wild_id = economy.create(wild);
+  SettlementInit passive = village();
+  passive.owner = kNeutralPassive;
+  const SettlementId passive_id = economy.create(passive);
+  SettlementInit floor = town_hall();
+  floor.population = 10;
+  const SettlementId floor_id = economy.create(floor);
+  economy.start(world);
+
+  run(economy, world, 400, 40000);
+  CHECK(economy.find(low_id)->population == 9);
+  CHECK(economy.find(wild_id)->population == 40);
+  CHECK(economy.find(passive_id)->population == 12);
+  CHECK(economy.find(floor_id)->population == 12);
+}
+
+/// `PopulationDecreasePercent = 10` per `PopulationDecreaseInterval = 4000`,
+/// read off the decrease tick (0x005c0fb0): it trims a tenth of the excess
+/// over `max_population`, at least one head, and stops at the maximum.
+TEST(economy_decrease_trims_the_excess_over_max_population) {
+  World world;
+  EconomySystem economy;
+  SettlementInit init = town_hall();
+  init.population = 200;
+  init.food = 0;
+  init.produces_gold = false;  // nothing to distract the arithmetic
+  const SettlementId id = economy.create(init);
+  SettlementInit dump = town_hall();  // the late dumps' `165 150`
+  dump.population = 165;
+  dump.max_population = 150;
+  const SettlementId dump_id = economy.create(dump);
+  economy.start(world);
+
+  run(economy, world, 400, 4000);
+  CHECK(economy.find(id)->population == 190);       // 200 - (200 - 100) * 10 / 100
+  CHECK(economy.find(dump_id)->population == 164);  // 15 * 10 / 100 = 1, the floor
+
+  run(economy, world, 400, 4000);
+  CHECK(economy.find(id)->population == 181);  // 190 - 9
+
+  run(economy, world, 400, 400000);
+  CHECK(economy.find(id)->population == 100);  // the maximum, and no lower
+  CHECK(economy.find(dump_id)->population == 150);
+}
+
+/// The decrease is not starvation: a town hall at or under its maximum keeps
+/// its people with nothing in the store, for as long as it stands.
+TEST(economy_an_empty_store_costs_no_population) {
+  World world;
+  EconomySystem economy;
+  SettlementInit init = town_hall();
+  init.population = 60;
+  init.food = 0;
+  const SettlementId id = economy.create(init);
+  economy.start(world);
+
+  run(economy, world, 400, 400000);
+  CHECK(economy.find(id)->population == 80);  // twenty growth intervals, no losses
+}
+
+/// The production tick (0x005c1122) gives player 14 and 15 nothing, and makes
+/// food only from a population at `MinPopulation` or above; gold has no floor.
+TEST(economy_production_skips_the_neutral_players_and_food_below_the_floor) {
+  World world;
+  EconomySystem economy;
+  SettlementInit wild = town_hall();
+  wild.owner = kNeutralPassive;
+  wild.gold = 0;
+  const SettlementId wild_id = economy.create(wild);
+  SettlementInit small = village();
+  small.population = 9;
+  small.food = 0;
+  const SettlementId small_id = economy.create(small);
+  economy.start(world);
+
+  run(economy, world, 400, 20000);
+  CHECK(economy.resource(wild_id, Resource::gold) == 0);
+  CHECK(economy.resource(small_id, Resource::food) == 0);
 }
 
 // --------------------------------------------------------------------------

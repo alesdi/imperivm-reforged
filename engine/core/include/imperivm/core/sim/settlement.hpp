@@ -145,7 +145,7 @@ struct Holder {
 /// The order is part of the simulation's definition: when two timers come due at
 /// the same instant they fire in this sequence, every time, on every peer. It is
 /// chosen so that a settlement's inputs land before its outputs — production
-/// before growth spends food, growth before the starvation check, and the
+/// first, then growth, then the trim of a population over its maximum, and the
 /// transport that empties the store last.
 enum class SettlementTimer : std::uint8_t {
   production = 0,  ///< `ProductionInterval`
@@ -225,7 +225,9 @@ struct SettlementInit {
   /// can distinguish.
   std::int32_t efficiency = 0;
   /// `foodperpop`: 45 or 100 depending on race, declared by every village and
-  /// town hall class and by nothing else.
+  /// town hall class and by nothing else. Carried, and read by nothing: gbr.exe
+  /// holds no such string, no shipped script reads it, and its growth tick
+  /// (0x005c0f60) reads no food.
   std::int32_t food_per_pop = 0;
   /// `capture_health_percent`: 100 on `Building`, 50 on `Outpost`.
   std::int32_t capture_health_percent = 100;
@@ -301,7 +303,8 @@ struct Settlement {
   // -- population --------------------------------------------------------
   std::int32_t population = 0;
   /// `maxpop`. Not a hard ceiling: `TOWNHALL_ADDPOP.VS` adds 10 unconditionally
-  /// and the late dumps show `101 100` and `165 150`. It bounds *growth* only.
+  /// and the late dumps show `101 100` and `165 150`. Growth stops at it, and
+  /// the decrease tick trims an excess back down to it (0x005c0fb0).
   std::int32_t max_population = 0;
 
   // -- the sub-objects ---------------------------------------------------

@@ -310,11 +310,14 @@ def test_a_won_conquest_mission_carries_its_reward_to_the_next(imrun, game_dir, 
 #: never reached the guard order that shoots. With the sentries walking their
 #: walls -- straight-line routes for `ignore_passability` (0x0040b580),
 #: 32-bit script points, class freedom keeping them out of the AI's armies --
-#: the town holds: at 12,000 turns the match is undecided, p2's attacks having
-#: lost 54 men to p0's walls. Why the AI's siege does not break a defended
-#: town is an open thread in `docs/plan.html`. The turn is chosen past p0's
-#: first kills (2,046) and kept cheap; `test_corpus_app_match.py` holds the app
-#: to the same world on the same turn.
+#: the town holds: at 12,000 turns the match is undecided. Whether p0's walls
+#: get to fight in that time is the AI's business, and since the town halls
+#: keep their people (the economy's population ticks, read off gbr.exe) the
+#: computer players' armies go after the outposts and nothing reaches p0's
+#: walls; that they shoot what does is held by placement instead, in the test
+#: after this one. Why the AI does not march on a walled town is an open
+#: thread in `docs/plan.html`. The turn is kept cheap;
+#: `test_corpus_app_match.py` holds the app to the same world on the same turn.
 CROSSROADS_TURNS = 2_200
 
 
@@ -345,9 +348,8 @@ def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, g
     assert all("Townhall" in line for line in lines), lines
     assert re.match(r"^\s+#0 p0 kind 1 .* sentries (\d+)/\1 ", lines[0]), lines[0]
 
-    # A war between the players: blows landed, men died, a computer player's
-    # report counts kills of its own -- and so does p0's, whose only soldiers
-    # are its sentries: the walls fought.
+    # A war between the players: blows landed, men died, and a computer
+    # player's report counts kills of its own.
     strikes = int(re.search(r"^\s+strikes\s+(\d+) blow", output, re.MULTILINE).group(1))
     deaths = int(re.search(r"^\s+kills\s+(\d+) death", output, re.MULTILINE).group(1))
     assert strikes > 1000, output
@@ -355,7 +357,6 @@ def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, g
     killed = {int(p): int(k) for p, k in
               re.findall(r"report p(\d+): units \d+ produced (\d+) killed", output)}
     assert max(v for p, v in killed.items() if p != 0) > 0, killed
-    assert killed.get(0, 0) > 0, killed
 
     # Every sentry on the map stands by a wall or gate of its own side, and
     # they are not stacked: none walked off across the map to a point a
@@ -379,6 +380,54 @@ def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, g
     # Nothing the AI or a wall reached on the way traps: no unimplemented entry
     # point, and no script that runs its budget out.
     assert "no traps." in output, output[output.find("distinct traps"):]
+
+
+#: Outside p0's east wall on Crossroads, between its east and south-east
+#: walkways, and p0's town hall inside: where an enemy is stood and where it
+#: is sent.
+P0_OUTSIDE = (3950, 2700)
+P0_TOWNHALL = (2758, 2466)
+
+
+def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
+    """The walls fight, by placement rather than by waiting for the AI to
+    bring a war to them: one of p1's swordsmen, stood outside p0's east wall
+    and sent to p0's town hall, walks along the wall to a gate it cannot pass
+    and is killed there by one of p0's sentries.
+    """
+    crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
+    if not crossroads.is_file():
+        pytest.skip("Crossroads.BFHP is not in this installation")
+    first = subprocess.run(
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "800"],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_OBJECTS": "ESwordsman"},
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    enemies = [int(i) for i in
+               re.findall(r"^\s+(\d+) ESwordsman p1 at \(-?\d+,-?\d+\) holder 0 ",
+                          first.stdout, re.MULTILINE)]
+    assert enemies, first.stdout[-3000:]
+    unit = enemies[0]
+
+    second = subprocess.run(
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "800"],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_DEATHS": "1",
+             "IMRUN_PLACE": f"{P0_OUTSIDE[0]},{P0_OUTSIDE[1]}",
+             "IMRUN_GOTO": f"{ORDER_TURN}:{unit}:{P0_TOWNHALL[0]},{P0_TOWNHALL[1]}"},
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    out = second.stdout
+    assert re.search(rf"^\s+place turn {ORDER_TURN}: {unit} at \(-?\d+,-?\d+\)$", out, re.MULTILINE), \
+        out[-3000:]
+    assert re.search(rf"^\s+goto turn {ORDER_TURN}: {unit} to .*, 1 issued$", out, re.MULTILINE), \
+        out[-3000:]
+    death = re.search(rf"^\s+death turn (\d+): {unit} ESwordsman p1 at .* by \d+ (\S+) p(\d+)$",
+                      out, re.MULTILINE)
+    assert death, out[-3000:]
+    assert death.group(3) == "0" and "Sentry" in death.group(2), death.group(0)
+    assert "no traps." in out, out[out.find("distinct traps"):]
 
 
 # ---------------------------------------------------------------------------
