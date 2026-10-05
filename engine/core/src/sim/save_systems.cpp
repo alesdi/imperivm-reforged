@@ -80,7 +80,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 26;  // 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 27;  // 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -583,6 +583,11 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     // The order's lock flag: the route's last point is this unit's owned
     // destination lock, which other units' free-spot tests read.
     put_bool(out, m.dest_lock);
+    // The free-spot search's two flags: whether it has run for this
+    // destination, and whether the route was re-aimed by it. Either keeps it
+    // from running again, and it draws from the world's generator when it runs.
+    put_bool(out, m.free_spot_tried);
+    put_bool(out, m.free_spot_aimed);
     // The gates the route crosses, listed when it was laid: path media like
     // the route, and not recomputable from it -- a gate spawned since would
     // join a list the original never rebuilds.
@@ -643,7 +648,8 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
         !bytes::get_i64(reader, m.step_start) || !bytes::get_i64(reader, m.step_end) ||
         !get_point(reader, m.offset_from) || !get_point(reader, m.offset_to) ||
         !bytes::get_i32(reader, m.retry_time) || !reader.u32(m.party) ||
-        !get_bool(reader, m.dest_lock)) {
+        !get_bool(reader, m.dest_lock) || !get_bool(reader, m.free_spot_tried) ||
+        !get_bool(reader, m.free_spot_aimed)) {
       return FormatError::truncated;
     }
     std::uint32_t crossings = 0;

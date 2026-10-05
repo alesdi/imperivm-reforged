@@ -925,16 +925,30 @@ TEST(squad_gaika_in_reads_stored_state) {
   CHECK(invoke(registry, CallKind::member, "GAIKAIn", 0, filled).value.as_integer() == 12);
 }
 
-/// `ClrCmd` is `SetCmd` without the command, and it still stamps `state_time`.
-TEST(squad_clr_cmd_sets_state_and_masks_flags_without_ordering_anyone) {
+/// `ClrCmd` is `SetCmd` without a new command: state, clock, flags -- and
+/// **every member's command ended** (0x004271d0 calls `vtbl+0xc0(1)` on each,
+/// the call `IdleAllGates` makes on a gate). That is what stops a squad
+/// `AIOSENDSQUAD.VS` sends to the node it already stands in, and a town's own
+/// sentries are such a squad: left walking, they never went back to `idle`
+/// for `WALL_PATROL.VS` to re-post.
+TEST(squad_clr_cmd_sets_state_and_flags_and_ends_every_members_command) {
   Fixture f;
   HostRegistry registry;
   register_squad_host(registry);
 
   const SquadKey key = f.squad_of(1, 2);
   Squad* squad = f.heroes.squads().find(key);
-  squad->flags = 0x0005;  // SF_NOAI | SF_PEACEFUL
+  squad->flags = 0x0006;  // SF_ADVCHOOSER | SF_PEACEFUL
   squad->state_time = 0;
+  const std::vector<ObjectId> members = squad->members;
+  Command there;
+  there.arg_kind = CommandArgKind::point;
+  there.point = Point{900, 900};
+  for (const ObjectId member : members) {
+    (void)f.commands.set_command(f.world, member, "advance", there);
+    (void)f.commands.add_command(f.world, member, false, "guard", Command{});
+    REQUIRE(f.commands.command_count(member) == 2);
+  }
   f.world.advance_turns(2);
 
   HostCall call(f.world, {pack_squad(key), Value::integer(9), Value::integer(0x0010),
@@ -943,18 +957,46 @@ TEST(squad_clr_cmd_sets_state_and_masks_flags_without_ordering_anyone) {
 
   squad = f.heroes.squads().find(key);
   CHECK(squad->state == 9);
-  CHECK(squad->flags == 0x0011);  // SF_NOAI kept, SF_PEACEFUL cleared, SF_WANTDRUIDS set
+  CHECK(squad->flags == 0x0012);  // SF_PEACEFUL cleared, SF_WANTDRUIDS set, no lock left
   CHECK(squad->state_time == f.world.time());
-
-  // And nobody was commanded: `ClrCmd` has no command argument at all.
-  for (const ObjectId member : squad->members) {
-    CHECK(f.commands.find(member) == nullptr);
+  // The runner ended and the pending tail dropped: nobody is walking anywhere.
+  for (const ObjectId member : members) {
+    CHECK(f.commands.command_name(member) != "advance");
+    CHECK(f.commands.command_name(member, 1) != "guard");
+    CHECK(f.commands.command_count(member) <= 1);
   }
 }
 
-/// `DelOrder` clears the AI order destination and nothing else. All three
-/// shipped call sites are commented out, so this is the narrowest reading the
-/// evidence supports.
+/// **A squad carrying `SF_NOAI` is refused whole** (`[squad+0x30] & 1` is the
+/// first test after the squad resolves): no state, no clock, no flags, and its
+/// members keep what a mission gave them.
+TEST(squad_clr_cmd_refuses_a_squad_no_ai_may_touch) {
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  const SquadKey key = f.squad_of(1, 2);
+  Squad* squad = f.heroes.squads().find(key);
+  squad->flags = 0x0005;  // SF_NOAI | SF_PEACEFUL
+  squad->state = 3;
+  squad->state_time = 0;
+  const std::vector<ObjectId> members = squad->members;
+  for (const ObjectId member : members) {
+    (void)f.commands.set_command(f.world, member, "guard", Command{});
+  }
+  f.world.advance_turns(2);
+
+  HostCall call(f.world, {pack_squad(key), Value::integer(9), Value::integer(0x0010),
+                          Value::integer(0x0004)});
+  CHECK(invoke(registry, CallKind::member, "ClrCmd", 3, call).status == HostStatus::ok);
+
+  squad = f.heroes.squads().find(key);
+  CHECK(squad->state == 3);
+  CHECK(squad->flags == 0x0005);
+  CHECK(squad->state_time == 0);
+  for (const ObjectId member : members) CHECK(f.commands.command_name(member) == "guard");
+}
+
 /// `sq.EvalAttach(leader, min)` -- four refusals, then a standing against
 /// `min` times a level factor.
 TEST(eval_attach_scores_a_heros_squad_by_its_standing_against_min_and_its_level) {
@@ -1228,7 +1270,11 @@ TEST(the_object_readers_answer_a_squad_the_way_the_squad_bodies_do) {
   CHECK(!ask("InHolder", stale).truthy_scalar());
 }
 
-TEST(squad_del_order_clears_only_the_order_destination) {
+/// `DelOrder` frees the squad's order (0x00448a10 resets `[squad+0x26]`), and
+/// `OrderDest` and `AIDest` both read through that index -- so both go, and
+/// `AIDest` falls back to `DestGAIKA`. Where the squad is and its own
+/// destination are not the order's.
+TEST(squad_del_order_clears_the_order_and_the_ai_destination_it_carried) {
   Fixture f;
   HostRegistry registry;
   register_squad_host(registry);
@@ -1245,7 +1291,8 @@ TEST(squad_del_order_clears_only_the_order_destination) {
 
   squad = f.heroes.squads().find(key);
   CHECK(squad->order_dest == kNoGaika);
-  CHECK(squad->ai_dest == 6);
+  CHECK(squad->ai_dest == kNoGaika);
+  CHECK(squad_ai_dest(*squad) == 7);
   CHECK(squad->dest_gaika == 7);
   CHECK(squad->gaika_in == 8);
 }
@@ -1325,10 +1372,14 @@ TEST(squadlist_walks_with_a_cursor_the_list_carries) {
   CHECK(next());
   CHECK(!eol());
   CHECK(cur() == b);
-  CHECK(next());
+  // **Off the last squad `Next` answers false** (0x004201d0: true only when
+  // the step did not land on the end). `AIOSENDSQUAD.VS` stops its walk on
+  // exactly this answer -- `if (!l.Next()) break;` -- and with true it ran its
+  // body once more on no squad.
+  CHECK(!next());
 
   // At the end: `EOL` is true, `Cur` is no squad, and `Next` answers false and
-  // moves nothing -- which is what stops the shipped loop.
+  // moves nothing.
   CHECK(eol());
   CHECK(cur() == kNoSquad);
   CHECK(!next());
@@ -2553,6 +2604,43 @@ TEST(get_squads_and_the_census_agree_about_who_is_in_a_node) {
   CHECK(invoke(registry, CallKind::member, "Count", 6, counted).status == HostStatus::ok);
   CHECK(counted.arguments[3].as_integer() == 2);   // the two members of `mine`
   CHECK(counted.arguments[4].as_integer() == 1);   // and the ally, whom the list omitted
+}
+
+/// **A squad with an order is filed under the order's node**, not under its own
+/// `DestGAIKA`: posting re-files it from the one to the other (0x004494c0 into
+/// 0x0041ea60) and `DelOrder` files it back. So presence reads `AIDest` -- the
+/// order's node while there is one -- which is what lets `SendTo` leave
+/// `DestGAIKA` alone and still have the squad counted as coming.
+TEST(get_squads_files_a_squad_with_an_order_under_the_orders_node) {
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  const SquadKey key = f.squad_of(0, 1);
+  Squad* squad = f.heroes.squads().find(key);
+  REQUIRE(squad != nullptr);
+  squad->eval = 10;
+  squad->gaika_in = 3;
+  squad->dest_gaika = 6;
+  squad->order_dest = 5;
+  squad->ai_dest = 5;
+
+  const auto listed = [&](GaikaId node, std::int32_t presence) {
+    const SquadListId list = make_list(f.world);
+    HostCall call(f.world, {gaika_value(node), make_squadlist_value(list), Value::integer(presence),
+                            Value::integer(1), Value::integer(1 /*AI_OWN*/)});
+    CHECK(invoke(registry, CallKind::member, "GetSquads", 4, call).status == HostStatus::ok);
+    return squadlist_pool_of(f.world).items(list).size();
+  };
+  CHECK(listed(5, 1 /*AI_COMING*/) == 1);
+  CHECK(listed(6, 1 /*AI_COMING*/) == 0);
+  CHECK(listed(3, 2 /*AI_LEAVING*/) == 1);
+
+  // Without the order, `AIDest` falls back to `DestGAIKA`, and so does this.
+  squad->order_dest = kNoGaika;
+  squad->ai_dest = kNoGaika;
+  CHECK(listed(5, 1 /*AI_COMING*/) == 0);
+  CHECK(listed(6, 1 /*AI_COMING*/) == 1);
 }
 
 /// **`Lock` and `Unlock` write bit 3 of the squad flags word**, on either
