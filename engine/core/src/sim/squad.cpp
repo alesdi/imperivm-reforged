@@ -2327,9 +2327,10 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
 /// its whole carried deque into it, and a hero that already has one keeps it and
 /// only learns the new destination.
 ///
-/// Here a hero always has one -- `HeroSystem::register_hero` mints it -- so only
-/// the second half can run, and the first is what a hero this engine has not
-/// registered would get.
+/// Here a registered hero always has one -- `HeroSystem::register_hero` mints
+/// it -- so only the second half runs for it. The first is what a hero a
+/// script placed after `start` gets when it is squadded before anything has
+/// registered it, and `register_hero` adopts that squad when it does.
 SquadKey hero_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest) {
   SquadTable& table = heroes.squads();
   const SquadKey existing = table.squad_of(id);

@@ -4311,8 +4311,12 @@ HostOutcome m_in_ship(CallContext& ctx) {
 /// `gbr.exe` 0x005d8120 pops two `Unit` handles and returns
 /// `a->holder == b->holder` on the raw 16-bit field, so **two units that are
 /// both outside any holder answer true**: `0xffff == 0xffff`. That is not a
-/// tidy answer and it is the one the entry point gives, and both shipped sites
-/// guard with `InHolder` first, so nothing in the corpus observes it.
+/// tidy answer and it is the one the entry point gives. `SQUADMONITOR.VS`
+/// guards with `BestHero.InHolder` first; `UNIT_ATTACH.VS` does not, so a unit
+/// in the open sent to attach to a hero in the open attaches at once, at any
+/// distance, and the script's next test -- both outside, within 1,500 -- is
+/// never reached. On Crossroads every one of 178 attaches in 3,000 turns takes
+/// that first branch.
 ///
 /// A receiver or argument that does not resolve answers false. `kNoObject`
 /// stands in for `0xffff` on the field, so an unresolvable *handle* and a unit
