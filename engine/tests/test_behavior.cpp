@@ -18,6 +18,8 @@
 #include <vector>
 
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/ai.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/save.hpp"
 #include "imperivm/core/sim/session.hpp"
@@ -297,4 +299,43 @@ TEST(a_mutation_swaps_one_classs_behaviours_for_the_others) {
   CHECK(user_of(run, id) % 10 == 3);
   // Nobody else's behaviours were touched.
   CHECK(owned(run, 1).size() == 3);
+}
+
+/// **A session drains the AI's order queue inside the turn** -- after the
+/// systems, before the scripts -- so an order posted before a turn is carried
+/// out by the `AIOSendSquad.vs` that turn's pass runs, and the timer re-arms
+/// half a second after the turn's time. Here, not in `test_ai.cpp`, because
+/// the call that does it is `GameSession::advance`'s.
+TEST(a_session_drains_an_ai_order_between_the_systems_and_the_scripts) {
+  Fixture f;
+  f.scripts.add("DATA/AI/Main.vs", "// void\nSleep(1000000);\n");
+  f.scripts.add("data/ai/AIOSendSquad.vs",
+                "// void, SquadList l, GAIKA g\nif (!l.Rewind()) return;\nl.Cur.SetState(40 + g);\n");
+  constexpr std::string_view kProfile = "[Scripts]\nMain.vs = void\n";
+  f.inputs.ai_profile = bytes_of(kProfile);
+  auto session = GameSession::create(f.registry, f.inputs, /*seed=*/1);
+  REQUIRE(session.ok());
+  GameSession& run = *session.value();
+  const WorldObject* soldier = run.world().find(1);
+  REQUIRE(soldier != nullptr);
+  const PlayerId owner = soldier->state.owner;
+  (void)run.start_ai();  // compiles the profile's scripts; no seat is a computer's
+  REQUIRE(ai_start(run.world(), owner, "", AiDifficulty::normal, run.scheduler()) ==
+          AiStartStatus::ok);
+  HeroSystem* heroes = hero_system_of(run.world());
+  REQUIRE(heroes != nullptr);
+  SquadTable& squads = heroes->squads();
+  const SquadKey key = squads.create(owner);
+  REQUIRE(squads.join(key, 1));
+  REQUIRE(squads.post_order(key, 2, 1));
+
+  run.advance(1, 400);
+  const Squad* squad = squads.find(key);
+  REQUIRE(squad != nullptr);
+  CHECK(squad->state == 42);
+  const AiOrderQueue* queue = squads.orders(owner);
+  REQUIRE(queue != nullptr);
+  REQUIRE(squad->order >= 0);
+  CHECK(queue->todo[static_cast<std::size_t>(squad->order)].priority == 0);
+  CHECK(queue->due == 900);
 }

@@ -45,8 +45,10 @@
 /// 7. **Issues the orders.** Each crew leaves its hero, drops its pending
 ///    commands, queues `build_catapult` at its engine and ends what it was
 ///    doing; the crews are then regrouped into fresh squads carrying the
-///    siege state (0x00447330, `regroup_into_fresh_squads`). Crews that found
-///    no engine rejoin the attackers.
+///    siege state and their old squads' AI orders (0x00447330,
+///    `regroup_into_fresh_squads`) -- so a crew's `OrderDest` is still the
+///    besieged node and `GS_SIEGE.VS` does not send it there again. Crews
+///    that found no engine rejoin the attackers.
 /// 8. **Sends the attackers.** With fewer than ten units crewing (the new
 ///    crews plus whoever was already inside), and either no catapults wanted
 ///    or a majority of melee units among the attackers, everyone attacks --

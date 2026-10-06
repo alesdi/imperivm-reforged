@@ -105,12 +105,16 @@ bool SquadTable::leave(SquadKey key, ObjectId id) {
   // The dumps show no promotion on a leader's departure, and `DetachArmy`
   // disbands rather than reassigning, so a leaderless squad is a real state.
   if (squad->leader == id) squad->leader = kNoObject;
+  // 0x00444803: the squad that loses its last member loses its order there and
+  // then, before whatever the caller does next.
+  if (squad->members.empty()) free_order(*squad);
   return true;
 }
 
 bool SquadTable::destroy(SquadKey key) {
   const std::size_t at = lower_bound(key);
   if (at >= squads_.size() || !(squads_[at].key == key)) return false;
+  free_order(squads_[at]);
   squads_.erase(squads_.begin() + static_cast<std::ptrdiff_t>(at));
   return true;
 }
@@ -135,6 +139,11 @@ SquadKey SquadTable::squad_of(ObjectId id) const {
 }
 
 void SquadTable::prune_empty() {
+  // `leave` has already freed the order of a squad it emptied; this catches a
+  // squad that was made and never joined, which has none to free.
+  for (Squad& squad : squads_) {
+    if (squad.members.empty()) free_order(squad);
+  }
   squads_.erase(std::remove_if(squads_.begin(), squads_.end(),
                                [](const Squad& s) { return s.members.empty(); }),
                 squads_.end());
@@ -147,6 +156,97 @@ void SquadTable::hash(std::uint64_t& accumulator) const noexcept {
     fold(accumulator, squad.leader);
     for (const ObjectId member : squad.members) fold(accumulator, member);
   }
+  // The AI order queues, every field of every record including a free slot's:
+  // the picker reads a free slot's neighbours by index and the ageing writes a
+  // free slot's priority, so a slot is state whether or not it is in use.
+  for (const AiOrderQueue& queue : orders_) {
+    fold(accumulator, queue.todo.size());
+    for (const AiOrder& record : queue.todo) {
+      fold(accumulator, record.verb);
+      fold(accumulator, static_cast<std::uint64_t>(static_cast<std::uint32_t>(record.squad)));
+      fold(accumulator, static_cast<std::uint64_t>(static_cast<std::uint32_t>(record.node)));
+      fold(accumulator, static_cast<std::uint64_t>(static_cast<std::uint16_t>(record.priority)));
+      fold(accumulator, static_cast<std::uint64_t>(static_cast<std::uint32_t>(record.next_free)));
+    }
+    fold(accumulator, static_cast<std::uint64_t>(static_cast<std::uint32_t>(queue.first_free)));
+    fold(accumulator, static_cast<std::uint64_t>(static_cast<std::uint32_t>(queue.view.x)));
+    fold(accumulator, static_cast<std::uint64_t>(static_cast<std::uint32_t>(queue.view.y)));
+    fold(accumulator, static_cast<std::uint64_t>(queue.due));
+    fold(accumulator, queue.runner);
+  }
+}
+
+// -- the AI order queue -------------------------------------------------------
+//
+// `AiOrderQueue` in `sim/squad.hpp` carries the reading; these are its post,
+// its free and its destructor. The drain is `run_ai_orders`, further down.
+
+const AiOrderQueue* SquadTable::orders(PlayerId player) const noexcept {
+  return player < orders_.size() ? &orders_[player] : nullptr;
+}
+
+AiOrderQueue* SquadTable::mutable_orders(PlayerId player) noexcept {
+  return player < orders_.size() ? &orders_[player] : nullptr;
+}
+
+void SquadTable::free_order(Squad& squad) noexcept {
+  const std::int32_t index = squad.order;
+  squad.order = -1;
+  squad.order_dest = kNoGaika;
+  squad.ai_dest = kNoGaika;
+  AiOrderQueue* queue = mutable_orders(squad.key.player);
+  if (queue == nullptr || index < 0 || static_cast<std::size_t>(index) >= queue->todo.size()) {
+    return;
+  }
+  // 0x00448a10: linked in at the head, the verb zeroed. The node and the
+  // priority stay where they were, as they do in the original's slot.
+  AiOrder& record = queue->todo[static_cast<std::size_t>(index)];
+  record.verb = 0;
+  record.squad = 0;
+  record.next_free = queue->first_free;
+  queue->first_free = index;
+}
+
+bool SquadTable::post_order(SquadKey key, GaikaId node, std::int16_t priority) {
+  Squad* squad = find(key);
+  AiOrderQueue* queue = mutable_orders(key.player);
+  if (squad == nullptr || queue == nullptr) return false;
+  // The previous order goes first (0x00449504), so it is the head of the free
+  // chain when the new one is filed: a squad sent again keeps its slot.
+  free_order(*squad);
+  AiOrder record;
+  record.verb = 1;
+  record.squad = key.index;
+  record.node = node;
+  record.priority = priority;
+  std::int32_t index = queue->first_free;
+  if (index >= 0 && static_cast<std::size_t>(index) < queue->todo.size()) {
+    queue->first_free = queue->todo[static_cast<std::size_t>(index)].next_free;
+    queue->todo[static_cast<std::size_t>(index)] = record;
+  } else {
+    index = static_cast<std::int32_t>(queue->todo.size());
+    queue->todo.push_back(record);
+  }
+  squad->order = index;
+  squad->order_dest = node;
+  squad->ai_dest = node;
+  return true;
+}
+
+bool SquadTable::delete_order(SquadKey key) {
+  Squad* squad = find(key);
+  if (squad == nullptr || squad->order < 0) return false;
+  free_order(*squad);
+  return true;
+}
+
+void SquadTable::reset_orders(PlayerId player) {
+  AiOrderQueue* queue = mutable_orders(player);
+  if (queue == nullptr) return;
+  for (Squad& squad : squads_) {
+    if (squad.key.player == player) free_order(squad);
+  }
+  queue->reset();
 }
 
 // See `sim/squad.hpp` for the two chains this reproduces and for what running
@@ -235,6 +335,12 @@ void SquadListPool::release_script(script::ScriptId script) {
     entry.members.clear();
     entry.members.shrink_to_fit();
   }
+}
+
+void SquadListPool::hand_to(SquadListId id, script::ScriptId script, std::uint32_t slot) noexcept {
+  if (!contains(id)) return;
+  entries_[id - 1].script = script;
+  entries_[id - 1].slot = slot;
 }
 
 bool SquadListPool::contains(SquadListId id) const noexcept {
@@ -945,20 +1051,6 @@ HostOutcome mil_eval_impl(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(fielded_strength(heroes->squads(), asking)));
 }
 
-/// The file 0x00448b60 runs for an AI order of verb 1 -- a literal path in the
-/// executable (0x007b15ac), so the root profile's copy whatever the player's
-/// profile, and a file `AI.INI`'s `[Scripts]` table does not list. Its shipped
-/// signature is `void, SquadList l, GAIKA g`.
-constexpr std::string_view kSendSquadOrderScript = "data/ai/AIOSendSquad.vs";
-
-/// Owners for the one-squad lists `SendTo` hands that script, one per nesting
-/// depth -- `GAIKA::Recruit` runs `SendSquad.vs` synchronously and that calls
-/// `SendTo`, so two can be live at once. Outside every id `Scheduler` issues
-/// and outside `run_script_now`'s synthetic range, and released before the
-/// call returns, so no list outlives it.
-constexpr script::ScriptId kSendToListOwner = 0x50000000u;
-int g_send_to_depth = 0;
-
 /// `sq.SendTo(g, n)` -- 13 sites, and it is **how a script moves a squad**.
 ///
 /// 0x00421520 refuses three things and then posts an order:
@@ -971,60 +1063,27 @@ int g_send_to_depth = 0;
 ///     has pinned is not the AI's to move, which is the rule
 ///     `GetAIControlledUnits` applies to units one level down.
 ///
-/// ## The order
-///
-/// 0x004494c0 files a 20-byte record on the AI's order list at `[ai+0x28]`:
-/// a verb -- the wrapper always writes **1** -- the squad, the node, and `n`.
-/// For verb 1 it first deletes the squad's previous order (0x00448a80), then
-/// stores the record's index on the squad at `[squad+0x26]`, and re-files the
-/// squad on the node table as heading to the new node rather than to its
-/// `DestGAIKA` (0x0041ea60 into 0x004501a0). `Squad::OrderDest` and
-/// `Squad::AIDest` both read the destination back through that index
-/// (0x00444140), and it stays readable after the order has been carried out:
-/// only `DelOrder` or the next `SendTo` frees the record. So `order_dest` and
-/// `ai_dest` are written here, and `dest_gaika` is not -- the original's
-/// `DestGAIKA` is the squad's own field and this does not touch it.
-/// `GS_SIEGE.VS` line 95 says the same from the script side:
+/// The post is 0x004494c0 with a literal verb 1, the squad, the node -- its
+/// low sixteen bits -- and `n` as the record's priority, also sixteen bits:
+/// `SquadTable::post_order`. **Nothing moves here.** The order waits on the
+/// player's AI order queue until its timer drains it (`run_ai_orders`), which
+/// spawns `data/ai/AIOSendSquad.vs` with the squad and the node; `n` decides
+/// how soon (the drain takes the largest `n / 5` first). `OrderDest` and
+/// `AIDest` answer the node from the moment of the post, and keep answering it
+/// after the order is carried out: only `DelOrder`, the next `SendTo` or the
+/// squad emptying frees the record. `dest_gaika` is not touched -- the
+/// original's `DestGAIKA` is the squad's own field. `GS_SIEGE.VS` line 95 says
+/// the same from the script side:
 ///
 ///     if (squad.OrderDest != gaika) { squad.SendTo(gaika, 1); continue; }
 ///     // issue order, to force squad's AIDest to gaika
 ///
-/// ## What carries it out, which is a script
-///
-/// The list is drained by 0x00448b60, from the AI's 500 ms timer (0x0041d790:
-/// timer 1 calls it through 0x00448dd0 and re-arms itself for 500). For verb
-/// 1 it builds a `SquadList` holding the order's squad, adds every other
-/// pending verb-1 order bound for the same node whose squad stands within 240
-/// of it, marks them all taken, and runs **`data/ai/AIOSendSquad.vs`** with
-/// that list and the node. That script, for each squad:
-///
-///   * already **in** the node: `ClrCmd(SS_IDLE, 0, SF_ADVCHOOSER)` -- it
-///     moves nobody, and `ClrCmd` ends every member's command -- or, a fleeing
-///     squad at a settlement, `SetCmd(SS_Enter, ..., "enter", ...)`;
-///   * elsewhere: `SetCmd(SS_Approach, ...)` -- `move` before minute ten,
-///     `advance` after, `sneak` for a hero's squad, `move` in `SS_Flee` -- to
-///     `g.GetDestPoint(leader)`, through a teleport or onto a transport ship
-///     when the route needs one.
-///
-/// **This runs that script synchronously, at the post, for the one squad, and
-/// that is the inference -- labelled.** The original's drain is later (up to
-/// half a second, one order per tick of the timer, the larger `n` first
-/// (0x004488e0 compares `n / 5`), and not while the previous drain's script is
-/// still running) and batches
-/// nearby squads bound for the same node into one list. What a squad is told
-/// is the same either way: the script decides per squad, from that squad's
-/// own state, and the batch changes only that a ship-less crossing's early
-/// `return` skips the rest of a list. The alternatives were an order list on
-/// `AiSystem`, saved, with the timer and the batching; it is the next step if
-/// the delay ever shows. What it replaces was a stand-in that walked every
-/// member to the node's centre with `advance` -- including a town's own
-/// sentries, sent to the node they stand in, which ignore passability and
-/// stacked on the town hall.
-///
-/// `n` is the record's priority for that drain and nothing else; with no list
-/// it is read and dropped. A node the table does not have is still posted --
+/// This ran `AIOSendSquad.vs` synchronously, at the post, for the one squad,
+/// until the queue was ported: a squad was moved the instant a script asked,
+/// in the asking script's slice, and two squads bound for one node were two
+/// lists rather than one. A node the table does not have is still posted --
 /// the record holds any 16-bit value -- and the script decides what to do
-/// with it. With no such script loaded the order is posted and nobody moves.
+/// with it.
 HostOutcome send_to_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {
@@ -1042,36 +1101,15 @@ HostOutcome send_to_impl(CallContext& ctx) {
   // `SF_NOAI`: a squad a mission has pinned is not the AI's to move.
   if ((self.squad->flags & kSquadFlagNoAi) != 0) return HostOutcome::ok_void();
   if (ctx.count() < 3) return HostOutcome::ok_void();
-  const GaikaId dest = gaika_of(ctx.arg(1));
-  self.squad->order_dest = dest;
-  self.squad->ai_dest = dest;
-
-  // The drain. Compiled on demand, as `RunAIHelper` compiles its file: no
-  // manifest lists this one.
-  if (ctx.scheduler == nullptr) return HostOutcome::ok_void();
-  HostContext* host = host_context_of(ctx);
-  std::uint32_t chunk = script::kNoChunk;
-  if (host != nullptr && host->library != nullptr) {
-    chunk = host->library->chunk_for(kSendSquadOrderScript);
-  }
-  if (chunk == script::kNoChunk) chunk = ctx.scheduler->find_chunk_exact(kSendSquadOrderScript);
-  if (chunk == script::kNoChunk) return HostOutcome::ok_void();
-  if (g_send_to_depth >= 8) return HostOutcome::failed("SendTo: orders nested too deep");
-
-  SquadListPool& pool = squadlist_pool_of(*self.world);
-  const script::ScriptId owner = kSendToListOwner + static_cast<script::ScriptId>(g_send_to_depth);
-  const SquadListId list = pool.acquire(owner, 0);
-  if (std::vector<SquadKey>* items = pool.mutable_items(list); items != nullptr) {
-    items->assign(1, self.squad->key);
-  }
-  pool.set_cursor(list, 0);
-  const Value args[2] = {make_squadlist_value(list), gaika_value(dest)};
-  Value ignored = Value::integer(0);
-  ++g_send_to_depth;
-  const HostOutcome ran = run_script_now(ctx, chunk, args, "SendTo: AIOSendSquad.vs failed", ignored);
-  --g_send_to_depth;
-  squadlist_pool_of(*self.world).release_script(owner);
-  if (ran.status != HostStatus::ok) return ran;
+  HeroSystem* heroes = hero_system_of(*self.world);
+  if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
+  // `movzx edx, bp` at 0x00421598: the node is a word; so is the priority,
+  // which the post stores as the dword it is handed and every reader reads as
+  // a word (0x004488ea, 0x00448b1b, 0x004474c7).
+  const GaikaId dest = static_cast<GaikaId>(static_cast<std::uint16_t>(gaika_of(ctx.arg(1))));
+  const std::int32_t n = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
+  (void)heroes->squads().post_order(self.squad->key, dest,
+                                    static_cast<std::int16_t>(static_cast<std::uint16_t>(n)));
   return HostOutcome::ok_void();
 }
 
@@ -1160,17 +1198,18 @@ HostOutcome gaika_in_impl(CallContext& ctx) {
 /// the AI order list (0x00448a10) and sets the index at `[squad+0x26]` back to
 /// -1. `OrderDest` and `AIDest` both read the destination through that index
 /// (0x00444140), so **both** lose it: `OrderDest` answers no node and `AIDest`
-/// falls back to `DestGAIKA`. This cleared `order_dest` alone while nothing
-/// reached it; `SendTo` writes the two together, and this undoes the two
-/// together.
+/// falls back to `DestGAIKA`. A record the drain has not reached yet is gone
+/// with it, so the squad is never sent: that is what `AIOSendSquad.vs` wants
+/// of the transport it is about to board. `SquadTable::delete_order`.
 HostOutcome del_order_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {
     if (self.error == kNoSquadFound) return HostOutcome::ok_void();
     return HostOutcome::failed(self.error);
   }
-  self.squad->order_dest = kNoGaika;
-  self.squad->ai_dest = kNoGaika;
+  HeroSystem* heroes = hero_system_of(*self.world);
+  if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
+  (void)heroes->squads().delete_order(self.squad->key);
   return HostOutcome::ok_void();
 }
 
@@ -3684,9 +3723,11 @@ HostOutcome squadize_impl(CallContext& ctx) {
 /// place it ends up. **A hero keeps its own squad and that squad takes the
 /// state** -- the one case the reading does not settle, because the
 /// assignment's leader branch was not followed to its end; it is labelled
-/// rather than guessed. `GAIKAIn`, `OrderDest`, `AIDest` and the last attacker
-/// are left at their defaults on a fresh squad, where the original leaves
-/// whatever the pooled slot held.
+/// rather than guessed. `GAIKAIn` and the last attacker are left at their
+/// defaults on a fresh squad, where the original leaves whatever the pooled
+/// slot held. **The old squad's AI order is re-posted on the fresh one** --
+/// same node, same priority as it stands (0x00447527..0x0044755d); see
+/// `regroup_into_fresh_squads`.
 ///
 /// ## What the answer is not
 ///
@@ -3964,6 +4005,21 @@ void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const
                                         : world.gaika().at(world.lsa(), unit_pos_rh(world, id));
     const GaikaId src = old != nullptr ? old->src_gaika : kNoGaika;
     const GameTime fought = old != nullptr ? old->last_fight_time : 0;
+    // The old squad's order, read before the unit leaves it: the node through
+    // the squad's index (0x00447436, 0x00444140) and the priority off the
+    // record (0x004474ba..0x004474cc) -- whatever it is now, which is 0 for an
+    // order the drain has already carried out.
+    GaikaId order_node = kNoGaika;
+    std::int16_t order_priority = 0;
+    if (old != nullptr && old->order >= 0) {
+      const AiOrderQueue* queue = squads.orders(old->key.player);
+      if (queue != nullptr && static_cast<std::size_t>(old->order) < queue->todo.size()) {
+        order_node = old->order_dest;
+        order_priority = queue->todo[static_cast<std::size_t>(old->order)].priority;
+      }
+    }
+    // Emptying the old squad frees its order here (`SquadTable::leave`), which
+    // is why the post below takes the slot it left, as the original's does.
     if (old != nullptr) (void)squads.leave(old_key, id);
 
     const SquadKey key = squads.create(slot->state.owner);
@@ -3977,8 +4033,195 @@ void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const
     fresh->last_fight_time = fought;
     fresh->state = state;
     fresh->state_time = now;
+    // 0x00447527..0x0044755d: **the order follows the unit** -- re-posted on
+    // the fresh squad through the post, same node and same priority, on the
+    // unit's player's queue. An order already carried out comes back at
+    // priority 0, which the drain never takes again, so the fresh squad keeps
+    // the `OrderDest` and nobody is sent anywhere; one still waiting is
+    // carried out for the fresh squad instead. The original reaches the
+    // player's AI with no test (a player with none would fault); here the
+    // post waits on the AI running, which is the only way the old order could
+    // have been there.
+    if (order_node != kNoGaika) {
+      AiSystem* ai = ai_system_of(world);
+      const AiPlayer* running = ai == nullptr ? nullptr : ai->player_ai(key.player);
+      if (running != nullptr && running->active) {
+        (void)squads.post_order(key, order_node, order_priority);
+      }
+    }
   }
   squads.prune_empty();
+}
+
+// --------------------------------------------------------------------------
+// the AI order drain
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// The file 0x00448b60 spawns for verb 1 -- a literal path in the executable
+/// (0x007b15ac), so the root profile's copy whatever the player's profile,
+/// and a file `AI.INI`'s `[Scripts]` table does not list. Its shipped
+/// signature is `void, SquadList l, GAIKA g`.
+constexpr std::string_view kSendSquadOrderScript = "data/ai/AIOSendSquad.vs";
+
+/// Who holds a runner's list in the moment between building it and spawning
+/// the runner it is for. Outside every id `Scheduler` issues and outside
+/// `run_script_now`'s synthetic range; it owns nothing once `run_ai_orders`
+/// returns.
+constexpr script::ScriptId kOrderListStager = 0x50000000u;
+
+/// The declaration slot a runner's list is filed under. A script's own sites
+/// count up from 0, so this is never the key of a `SquadList` the runner
+/// declares itself.
+constexpr std::uint32_t kOrderListSlot = 0xFFFFFFFFu;
+
+/// 0x00448880: where a record's squad stands -- its front member's `posRH`
+/// (`vtbl+0xc8`) -- or (-1, -1) for a squad that is gone or empty, and for a
+/// verb other than 1.
+[[nodiscard]] Point order_position(World& world, const SquadTable& squads, PlayerId player,
+                                   const AiOrder& record) {
+  constexpr Point kNowhere{-1, -1};
+  if (record.verb != 1) return kNowhere;
+  const Squad* squad = squads.find(SquadKey{record.squad, player});
+  if (squad == nullptr || squad->members.empty()) return kNowhere;
+  if (world.find(squad->members.front()) == nullptr) return kNowhere;
+  return unit_pos_rh(world, squad->members.front());
+}
+
+/// The comparator's squared distance, in the 32 bits it is taken in
+/// (0x00448973..0x0044898e, `imul` and a signed compare): a corner of a map
+/// past 23,170 units wraps, as it does in the original.
+[[nodiscard]] std::int32_t wrapped_distance_squared(Point a, Point b) noexcept {
+  const auto dx = static_cast<std::uint32_t>(a.x) - static_cast<std::uint32_t>(b.x);
+  const auto dy = static_cast<std::uint32_t>(a.y) - static_cast<std::uint32_t>(b.y);
+  return static_cast<std::int32_t>(dx * dx + dy * dy);
+}
+
+/// 0x004488e0: whether `a` should be drained before `b`. A record with no
+/// priority never is; then the larger `priority / 5` (signed, truncating);
+/// within a band, the squad nearer the queue's `View`. Strict, so a tie keeps
+/// the record the walk met first.
+[[nodiscard]] bool order_outranks(World& world, const SquadTable& squads, PlayerId player,
+                                  const AiOrderQueue& queue, const AiOrder& a, const AiOrder& b) {
+  if (a.priority <= 0) return false;
+  const std::int32_t band_a = a.priority / 5;
+  const std::int32_t band_b = b.priority / 5;
+  if (band_a != band_b) return band_a > band_b;
+  return wrapped_distance_squared(order_position(world, squads, player, a), queue.view) <
+         wrapped_distance_squared(order_position(world, squads, player, b), queue.view);
+}
+
+/// 0x00448ad0: the record to drain, or -1. Every slot with a verb and a
+/// priority above 0, in index order.
+[[nodiscard]] std::int32_t pick_order(World& world, const SquadTable& squads, PlayerId player,
+                                      const AiOrderQueue& queue) {
+  std::int32_t best = -1;
+  for (std::size_t i = 0; i < queue.todo.size(); ++i) {
+    const AiOrder& record = queue.todo[i];
+    if (record.verb == 0 || record.priority <= 0) continue;
+    if (best < 0 || order_outranks(world, squads, player, queue, record,
+                                   queue.todo[static_cast<std::size_t>(best)])) {
+      best = static_cast<std::int32_t>(i);
+    }
+  }
+  return best;
+}
+
+/// What the drain does to a squad it takes (0x00448be1, 0x00448caa): into the
+/// list, and its `SrcGAIKA` becomes the node it stands in.
+void take_squad(SquadTable& squads, SquadKey key, std::vector<SquadKey>& list) {
+  list.push_back(key);
+  if (Squad* squad = squads.find(key)) squad->src_gaika = squad->gaika_in;
+}
+
+/// 0x00448b60 for verb 1. Executes nothing while the previous runner is alive;
+/// otherwise takes the record and its batch and spawns `AIOSendSquad.vs`.
+/// Returns whether a runner was spawned.
+bool execute_order(World& world, script::Scheduler& scheduler, ScriptLibrary* library,
+                   AiSystem* ai, SquadTable& squads, PlayerId player, std::size_t index) {
+  AiOrderQueue& queue = *squads.mutable_orders(player);
+  // 0x0069f950: the AI's script slot 2 is still running the last order.
+  if (queue.runner != script::kNoScript && scheduler.alive(queue.runner)) return false;
+
+  AiOrder& order = queue.todo[index];
+  order.priority = 0;
+  const GaikaId node = order.node;
+  std::vector<SquadKey> list;
+  take_squad(squads, SquadKey{order.squad, player}, list);
+  // The batch: every other verb-1 record still waiting for the same node whose
+  // squad stands within 240 of this one's -- the floored root of the squared
+  // distance, compared unsigned (0x00448c68), which is the square under 57,600.
+  const Point here = order_position(world, squads, player, order);
+  for (AiOrder& other : queue.todo) {
+    if (other.priority <= 0 || other.verb != 1 || other.node != node) continue;
+    const Point there = order_position(world, squads, player, other);
+    const std::int64_t dx = static_cast<std::int64_t>(there.x) - here.x;
+    const std::int64_t dy = static_cast<std::int64_t>(there.y) - here.y;
+    if (dx * dx + dy * dy >= kAiOrderBatchRadius * kAiOrderBatchRadius) continue;
+    take_squad(squads, SquadKey{other.squad, player}, list);
+    other.priority = 0;
+  }
+
+  // Into slot 2 (0x00448cdb). Compiled on demand, as `RunAIHelper` compiles
+  // its file: no manifest lists this one. With no such file the records are
+  // taken and nobody moves, which is what a spawn of a missing file does.
+  std::uint32_t chunk =
+      library != nullptr ? library->chunk_for(kSendSquadOrderScript) : script::kNoChunk;
+  if (chunk == script::kNoChunk) chunk = scheduler.find_chunk_exact(kSendSquadOrderScript);
+  if (chunk == script::kNoChunk) return false;
+  SquadListPool& pool = squadlist_pool_of(world);
+  const SquadListId handle = pool.acquire(kOrderListStager, kOrderListSlot);
+  if (std::vector<SquadKey>* items = pool.mutable_items(handle); items != nullptr) {
+    *items = std::move(list);
+  }
+  pool.set_cursor(handle, 0);
+  const script::Value args[2] = {make_squadlist_value(handle), gaika_value(node)};
+  const script::ScriptId runner = scheduler.spawn(chunk, args, script::ObjectRef{});
+  if (runner == script::kNoScript) {
+    pool.release_script(kOrderListStager);
+    return false;
+  }
+  // The list is the runner's from here on, and goes when it ends.
+  pool.hand_to(handle, runner, kOrderListSlot);
+  queue.runner = runner;
+  // A script of the AI object's: `AIGetPlayer` answers its player, and
+  // `AIStop` takes it with the rest.
+  if (ai != nullptr) ai->adopt(runner, player);
+  return true;
+}
+
+}  // namespace
+
+std::size_t run_ai_orders(World& world, script::Scheduler& scheduler, ScriptLibrary* library,
+                          GameTime now) {
+  HeroSystem* heroes = hero_system_of(world);
+  AiSystem* ai = ai_system_of(world);
+  if (heroes == nullptr || ai == nullptr) return 0;
+  SquadTable& squads = heroes->squads();
+  std::size_t spawned = 0;
+  // Ascending player. Each AI object has its own timer in the original, and
+  // the order two of them fire in on one tick was not read.
+  for (PlayerId player = 0; player < kPlayerCount; ++player) {
+    const AiPlayer* running = ai->player_ai(player);
+    if (running == nullptr || !running->active) continue;
+    AiOrderQueue* queue = squads.mutable_orders(player);
+    if (queue == nullptr || queue->due > now) continue;
+    // 0x00448dd0: pick, execute, age.
+    const std::int32_t picked = pick_order(world, squads, player, *queue);
+    if (picked >= 0 && execute_order(world, scheduler, library, ai, squads, player,
+                                     static_cast<std::size_t>(picked))) {
+      ++spawned;
+    }
+    // 0x004489a0 with 0x004487d0: the walk meant to age every record stops
+    // after the first, because the callback answers 0 and 0 means stop. So
+    // record 0 alone loses a point a drain, down to 1 -- free or taken, since
+    // the callback does not look at the verb.
+    if (!queue->todo.empty() && queue->todo.front().priority > 1) --queue->todo.front().priority;
+    // 0x0041d7f6: re-armed from now, not from when it was due.
+    queue->due = now + kAiOrderPeriod;
+  }
+  return spawned;
 }
 
 std::size_t squad_host_entry_count() noexcept { return kEntryCount; }
