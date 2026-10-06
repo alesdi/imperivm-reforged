@@ -62,6 +62,7 @@
 #include "imperivm/core/formats/color.hpp"
 #include "imperivm/core/formats/rle.hpp"
 #include "imperivm/core/game/entity.hpp"
+#include "imperivm/core/sim/glide.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/world/map.hpp"
 #include "imperivm/platform/selection_marks.hpp"
@@ -190,6 +191,27 @@ class WorldView {
   /// the ground has been blitted into the same target.
   std::size_t draw(const core::sim::World& world, const Camera& camera,
                    SpriteRenderer& renderer);
+
+  /// How far the real clock is through the turn the world is waiting for: 0
+  /// the moment a turn has run, 1 when the next one is due -- and 1, the
+  /// default, whenever the clock is not running, so a paused world or one a
+  /// script is holding at a turn is drawn exactly as it stands.
+  ///
+  /// The world is drawn at the game time the original's clock would show
+  /// then, `fraction` of the way from the turn end before to the world's
+  /// (`sim/glide.hpp`): a walking unit runs between the two ends, its
+  /// animation steps on its own clock, a bird flies its leg, a portcullis
+  /// rises -- frame by frame, where they used to move once a turn. The ring,
+  /// the bar, the shadow and both picks are placed from the same anchor, so
+  /// what is clicked is what is drawn. Set it once a frame, before anything
+  /// picks; the world is read, never written.
+  void set_turn_fraction(float fraction) noexcept;
+  /// Forget the turn ends seen: a new match, a load. Harmless to skip -- a
+  /// world whose clock went backwards or jumped is forgotten anyway -- and
+  /// cheap to call.
+  void reset_glide() noexcept { glide_.reset(); }
+  /// The game time the last `prepare`, `draw` or pick placed the world at.
+  [[nodiscard]] core::sim::GameTime drawn_time() const noexcept { return draw_time_; }
 
   /// The fog's darkening of what is drawn: a factor over 32 at a world
   /// point, applied to every sprite at the point it stands on (the
@@ -375,9 +397,13 @@ class WorldView {
   [[nodiscard]] const EntityArt* art_for(const core::Entity* entity);
   [[nodiscard]] PaletteRow palette_for(std::int32_t sheet, core::PlayerId owner,
                                        bool create);
-  /// The pose, row and column an object is holding right now.
+  /// The pose, row and column an object is holding at the drawn time.
   [[nodiscard]] Cursor cursor_for(const core::sim::WorldObject& object,
                                   const EntityArt& art) const;
+  /// Note the world and work out the game time it is drawn at. `prepare`,
+  /// `build` and so `draw` and both picks start here, so all of them stage,
+  /// place and test the same instant.
+  void begin_view(const core::sim::World& world);
   /// The object's art and cursor, or a null pose when it must not be drawn.
   [[nodiscard]] Cursor visible_cursor(const core::sim::WorldObject& object);
   /// A decoration kind's resting art, its entity loaded on first use; null
@@ -389,6 +415,12 @@ class WorldView {
   void build(const core::sim::World& world, const Camera& camera);
 
   Vfs* vfs_ = nullptr;
+  /// The two turn ends last seen and the instant between them the world is
+  /// drawn at. Presentation: derived from the world, written to nothing.
+  core::sim::TurnGlide glide_;
+  float turn_fraction_ = 1.0F;
+  const core::sim::World* view_world_ = nullptr;
+  core::sim::GameTime draw_time_ = 0;
   std::function<bool(const core::sim::WorldObject&)> hidden_;
   bool show_templates_ = false;
   SpriteRenderer* renderer_ = nullptr;

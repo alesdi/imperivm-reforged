@@ -179,10 +179,19 @@ struct FlightProgress {
 };
 
 [[nodiscard]] FlightProgress flight_progress(const World& world, const WorldObject& slot) noexcept;
+/// The same, with the animation's clock at `elapsed_ms` rather than where the
+/// world's cursor stands: where the view draws the bird between two turns
+/// (`sim/glide.hpp`, `TurnGlide::anim_elapsed`). The original reads one clock
+/// for both, and it moves every frame.
+[[nodiscard]] FlightProgress flight_progress(const World& world, const WorldObject& slot,
+                                             std::int32_t elapsed_ms) noexcept;
 
 /// `GetCurrentPosition` (0x0053d830): where along its leg a bird is now, or
 /// where it stands when it is not flying one. Presentation, like the leg.
 [[nodiscard]] Point flying_position(const World& world, const WorldObject& slot) noexcept;
+/// The same at the animation clock `elapsed_ms`; see `flight_progress`.
+[[nodiscard]] Point flying_position(const World& world, const WorldObject& slot,
+                                    std::int32_t elapsed_ms) noexcept;
 
 /// How far above the ground a bird's body is drawn, in screen pixels -- which
 /// are the height layer's own units, one pixel a step (`core::world_to_screen_y`).
@@ -207,6 +216,10 @@ struct FlightProgress {
 /// the simulation reads it: it is what `z_from`, `z_to` and the animation clock
 /// -- all hashed and saved already -- look like.
 [[nodiscard]] std::int32_t flying_lift(const World& world, const WorldObject& slot) noexcept;
+/// The same at the animation clock `elapsed_ms`, for the altitude and for the
+/// ground under the bird alike; see `flight_progress`.
+[[nodiscard]] std::int32_t flying_lift(const World& world, const WorldObject& slot,
+                                       std::int32_t elapsed_ms) noexcept;
 
 /// Whether `flying_lift` moves a layer drawn at depth `z`: the two constants
 /// 0x0051b2b3 and 0x0051b2ba compare against. The crow's and the eagle's
