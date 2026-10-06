@@ -515,7 +515,12 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
 
 @long_net
 def test_netplay_agrees_well_into_the_war(imconform, game_dir):
-    result = run_skirmish(imconform, game_dir, "netplay", "2400", "2", "1", timeout=1800)
+    # With the strike, as the late join below plays: on Crossroads' own setup
+    # the computers' first blow is the AI's to time, and it moved past 2,400
+    # turns once `Unit::Stop` stopped waiting for a standing unit and a hero's
+    # army began to leave its town one exit slot at a time. The strike's two
+    # units walk the map and strike near turn 1,000.
+    result = run_skirmish(imconform, game_dir, "netplay", "2400", "2", "1", *WAR, timeout=1800)
     assert result.returncode == 0, result.stdout + result.stderr
     assert netplay_fields(result.stdout).get("agreed") == 2400, result.stdout
     assert war_fields(result.stdout)["deaths"] > 0, result.stdout
