@@ -868,6 +868,15 @@ CommandSystem* command_system(World& world) noexcept {
   return nullptr;
 }
 
+const CommandSystem* command_system(const World& world) noexcept {
+  for (const System* system : world.systems()) {
+    if (system != nullptr && system->name() == "command") {
+      return static_cast<const CommandSystem*>(system);
+    }
+  }
+  return nullptr;
+}
+
 // --------------------------------------------------------------------------
 // the host slice
 // --------------------------------------------------------------------------
