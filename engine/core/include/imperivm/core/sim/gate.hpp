@@ -111,7 +111,7 @@
 /// (0x004182f6; a radius below zero counts as zero). The mover walks on:
 ///
 ///   * when it is the gate's **friend**, the gate has **no enemies near**
-///     (`[gate+0x210]`, `AreEnemiesAround`) and its current action's name
+///     (`[gate+0x210]`, `AreEnemiesAround`) and its running command's name
 ///     does not begin with `c` (0x00418346) -- **waved through, closed or
 ///     not**;
 ///   * otherwise, when the gate lets units through -- the portcullis above 20
@@ -124,6 +124,19 @@
 /// stops before it closed, and a friend stops at its own closed gate while an
 /// enemy is near it, which is when `GATE_IDLE.VS` closes it.
 ///
+/// **The `c` is the player's Close Gate.** `[gate+0x10c]` is the object's
+/// running command, the string the launch at 0x005b4f20 copies from the head
+/// of its queue (`command()` reads it; `idle` when nothing else runs). A
+/// gate's commands are the three rows of `COMMANDS\GATE.XML` -- `opengate`,
+/// `closegate`, `repair gate` -- and its `idle`, so the one name beginning
+/// with `c` a gate runs on shipped data is `closegate`: `GATE_CLOSE.VS`,
+/// which shuts the gate and holds the slot for ten seconds, keeping
+/// `GATE_IDLE.VS` off it. While it runs, the owner's own units are not waved
+/// through either: they stand before the gate their owner shut until it lets
+/// them through, as an enemy would. The test is the first byte alone, case and all, so a
+/// map script's `close_permanent` would count as well; the one shipped map
+/// that names a permanent verb names `open_permanent`.
+///
 /// **Inferences and what is not reproduced.**
 ///
 ///   * *Which search.* The original has a second, used for a formation's
@@ -133,19 +146,14 @@
 ///     (0x005f4333..0x005f434e). This engine has no shared formation route --
 ///     a march's members each lay their own -- so every route takes the unit's
 ///     rule, and that one is not reproduced.
-///   * *The action name.* `[gate+0x10c]` is the object's current action
-///     (0x005b4f20 writes it, `idle` by default); which action of a gate's
-///     begins with `c` was not traced. A gate here runs only `GATE_IDLE.VS`,
-///     so the test always passes.
 ///   * *A group's floor.* In a formation the reach is the group's radius with
 ///     a floor of 275 (0x00418286..0x004182f6, 0x005f2350); without a group
 ///     route, here it is always the mover's own radius.
 ///   * *Two sides of one gate.* A formation stopped at a gate compares which
 ///     side of it its leader and the member stand (0x00417dc0, 0x005295d0)
 ///     and halts a member on the far side. Not reproduced, for the same reason.
-///   * *Parallel legs.* 0x0040aab0 has a branch of its own for a leg parallel
-///     to the axis; it was not followed, and a parallel leg crosses nothing
-///     here. The arithmetic is 64-bit where the original's products are 32.
+///   * *Thirty-two bits.* The crossing arithmetic (0x0040aab0) is 64-bit here
+///     where the original's products are 32.
 ///   * *Movers that ignore passability* (the sentries) get no crossings and
 ///     no second search: their route is a straight line along the walkway,
 ///     and whether the original holds one at its own gate was not read.
@@ -239,6 +247,11 @@ inline constexpr std::int32_t kGateRubbleReach = 1500;
 /// the gate as the viewer.
 [[nodiscard]] bool gate_bars(const World& world, const WorldObject& gate, PlayerId owner) noexcept;
 
+/// 0x00418346: whether `gate`'s running command begins with `c` -- on shipped
+/// data, whether it is running the player's `closegate`. False without a
+/// command system. See the header, "The step".
+[[nodiscard]] bool gate_closed_by_command(const World& world, const WorldObject& gate) noexcept;
+
 /// 0x00418260 once the mover is within reach: whether a mover of `owner`
 /// walks on past `gate` at `now`. See the header, "The step".
 [[nodiscard]] bool gate_waves_through(const World& world, const WorldObject& gate, PlayerId owner,
@@ -275,6 +288,20 @@ void gate_line_cells(Point a, Point b, std::vector<GateCell>& out);
 /// meets the segment `a`..`b`, ends included -- the legs' lengths before it,
 /// each rounded down, and the rounded-down distance from that leg's start to
 /// the meeting point -- or -1 when it never does.
+///
+/// **A leg parallel to the axis** (the cross product zero) has a branch of its
+/// own, 0x0040abab..0x0040aca1, and it is not an overlap test:
+///
+///   * an upright axis (`a.x == b.x`) with the leg starting on its column, or
+///     else a level one (`a.y == b.y`) with the leg starting on its row, meets
+///     the leg at the leg's **start** when that lies within the axis's span,
+///     else at its **end** when that does, both ends inclusive, and otherwise
+///     not at all -- so a leg running along the axis right across it, both
+///     ends beyond, does not meet it;
+///   * any other parallel leg meets the axis when either of its ends lies on
+///     the axis's **line**, anywhere along it, and the original then writes no
+///     meeting point. **Inference:** what its caller measures to is an
+///     uninitialised local; here it is the leg's start.
 [[nodiscard]] std::int64_t route_crossing(std::span<const Point> route, Point a, Point b) noexcept;
 
 /// One gate a route crosses, and where along it: a `0x00418fb0` entry, kept

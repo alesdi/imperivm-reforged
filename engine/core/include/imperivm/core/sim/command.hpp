@@ -769,6 +769,8 @@ class CommandSystem final : public System {
 /// same reason: a pointer on `HostContext` would have to be added again for
 /// every domain and kept correct across a save.
 [[nodiscard]] CommandSystem* command_system(World& world) noexcept;
+/// The same, read-only, for a reader holding the world `const`.
+[[nodiscard]] const CommandSystem* command_system(const World& world) noexcept;
 
 // --------------------------------------------------------------------------
 // the host slice
