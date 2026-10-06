@@ -614,46 +614,39 @@ TEST(sim_a_rect_query_evaluates_as_a_rectangle_and_not_as_a_circle) {
   CHECK(found[0] != far_off);
 }
 
-TEST(sim_a_garrison_is_found_inside_a_rectangle_too) {
-  // The same rule the circle sweep follows: a held object's own position is
-  // (-1,-1) and its location is its holder's. A rectangle that tested the raw
-  // field would miss every garrison -- and (-1,-1) is *inside* any rectangle
-  // whose corners straddle the origin, so the failure is not even a miss
-  // everywhere; on some maps it would put the garrison in the wrong place.
+TEST(sim_no_area_query_finds_a_garrison) {
+  // A held object's own position is (-1,-1), and in the original that is no
+  // grid cell (0x0053d030): every area sweep walks the cells, so a garrison is
+  // found by none -- not where its building is, and not where its holder is.
+  // These queries once resolved it to its holder, and a settlement's holder
+  // record stands at (0, 0): every garrison on the map was found in the
+  // corner, by `ObjsInCircle`, `ObjsInRect`, `EnemyInRange` and the rest.
   World world;
+  const World::SettlementIds town = world.spawn_settlement(0);
   const ObjectId fort = world.spawn(NativeClass::building, nullptr);
-  const ObjectId holder = world.spawn_internal(InternalKind::holder);
   const ObjectId guard = world.spawn(NativeClass::unit, nullptr);
   world.set_position(fort, pt(5000, 5000));
-  world.put_in_holder(holder, fort);
-  world.put_in_holder(guard, holder);
+  world.set_position(guard, pt(5010, 5000));
+  REQUIRE(world.resolve_position(town.holder) == pt(0, 0));
 
   std::vector<ObjectId> found;
-  CHECK(world.objects_in_rect(4900, 4900, 5100, 5100, ClassFilter{}, found) == 2);
-  CHECK(found[0] == fort);
-  CHECK(found[1] == guard);
-  // And the box around the origin does not collect it.
-  CHECK(world.objects_in_rect(-100, -100, 100, 100, ClassFilter{}, found) == 0);
-}
+  CHECK(world.objects_in_radius(pt(5000, 5000), 20, ClassFilter{}, found) == 2);
+  REQUIRE(world.put_in_holder(guard, town.holder));
+  REQUIRE(world.resolve_position(guard) == pt(0, 0));
 
-TEST(sim_a_garrison_is_found_where_its_building_is) {
-  World world;
-  const ObjectId fort = world.spawn(NativeClass::building, nullptr);
-  const ObjectId holder = world.spawn_internal(InternalKind::holder);
-  const ObjectId guard = world.spawn(NativeClass::unit, nullptr);
-  world.set_position(fort, pt(5000, 5000));
-  world.put_in_holder(holder, fort);
-  world.put_in_holder(guard, holder);
-
-  std::vector<ObjectId> found;
-  // The held object's own position is (-1,-1), which is nowhere near (5000,
-  // 5000) -- so a query that tested the raw field would miss the garrison.
-  CHECK(world.objects_in_radius(pt(5000, 5000), 10, ClassFilter{}, found) == 2);
-  CHECK(found[0] == fort && found[1] == guard);
+  CHECK(world.objects_in_radius(pt(5000, 5000), 20, ClassFilter{}, found) == 1);
+  CHECK(found.size() == 1 && found[0] == fort);
   CHECK(world.objects_in_radius(pt(0, 0), 10, ClassFilter{}, found) == 0);
-
-  CHECK(world.contents_of(holder, found) == 1 && found[0] == guard);
-  CHECK(world.contents_of(fort, found) == 1 && found[0] == holder);
+  CHECK(world.objects_in_rect(4900, 4900, 5100, 5100, ClassFilter{}, found) == 1);
+  CHECK(world.objects_in_rect(-100, -100, 100, 100, ClassFilter{}, found) == 0);
+  CHECK(world.objects_of_class_for_player(ClassFilter{}, kNoPlayer, pt(0, 0), 10, found) == 0);
+  CHECK(world.objects_of_class_for_player_in_rect(ClassFilter{}, kNoPlayer, -100, -100, 100,
+                                                  100, found) == 0);
+  // The raw sweep `EnemyInRange` takes, over a box that covers both the
+  // corner and the `(-1, -1)` marker itself.
+  CHECK(world.objects_located_in_rect(-100, -100, 100, 100, found) == 0);
+  // Still the holder's: what it holds is a different question.
+  CHECK(world.contents_of(town.holder, found) == 1 && found[0] == guard);
 }
 
 TEST(sim_sight_queries_use_the_observers_sight_property) {
@@ -1974,13 +1967,15 @@ TEST(a_right_click_on_a_building_resolves_to_a_verb) {
   }
 }
 
-TEST(pos_rh_answers_exactly_what_pos_answers) {
-  // The claim under test is an equality, not a value: `Obj::posRH` reaches the
-  // stored coordinates through `vtbl+0xC8` -> 0x005a75d0 -> `vtbl+0x3c` ->
-  // 0x0063d900, and 0x0063d900 reads the same `+0x24`/`+0x28` that `Obj::pos`
-  // reads directly. So every receiver has to give the same answer through both
-  // names, including the ones where "the position" is a question with two
-  // plausible answers.
+TEST(pos_is_the_stored_field_and_pos_rh_differs_only_for_a_held_unit) {
+  // `Obj::pos` (0x005add20) copies `[obj+0x24]`/`[obj+0x28]`. `Obj::posRH`
+  // (0x005ad8a0) calls `vtbl+0xC8`, which for every non-unit class reaches the
+  // same two fields (0x005a75d0 -> 0x0063d900) and for a unit is 0x005d3db0:
+  // in a holder that is not a settlement's, the position of the object the
+  // holder belongs to -- the ship, for a passenger. So the two agree on
+  // everything but a held unit, and there `pos` is the `(-1, -1)` the holder
+  // entry wrote. Both answered the holder walk for a while, which a ship's
+  // holder record, an internal object of its own, ends at (0, 0).
   World world;
   script::HostRegistry registry;
   (void)register_all_hosts(registry);
@@ -2003,42 +1998,42 @@ TEST(pos_rh_answers_exactly_what_pos_answers) {
     return entry.fn(ctx);
   };
   const auto obj = [](ObjectId id) { return script::Value::object(kTypeObj, id); };
-  // Asserts the equality and the value in one place, so that a `posRH` which
-  // agreed with a broken `pos` could not pass.
-  const auto agree = [&](script::Value receiver, Point expected) {
+  const auto answers = [&](script::Value receiver, Point pos, Point pos_rh) {
     const script::HostOutcome plain = member("pos", receiver);
     const script::HostOutcome rh = member("posRH", receiver);
     REQUIRE(plain.status == script::HostStatus::ok);
     REQUIRE(rh.status == script::HostStatus::ok);
+    REQUIRE(is_point(plain.value));
     REQUIRE(is_point(rh.value));
-    CHECK(unpack_point(rh.value) == unpack_point(plain.value));
-    CHECK(unpack_point(rh.value) == expected);
+    CHECK(unpack_point(plain.value) == pos);
+    CHECK(unpack_point(rh.value) == pos_rh);
   };
 
   const ObjectId free_standing = world.spawn(NativeClass::unit, nullptr);
   REQUIRE(world.set_position(free_standing, Point{700, 900}));
-  const Point standing{700, 900};
-  agree(obj(free_standing), standing);
+  answers(obj(free_standing), Point{700, 900}, Point{700, 900});
 
-  // A garrisoned object, which is the case where the two names could have come
-  // apart: its own field holds the held marker and its holder is somewhere
-  // else entirely. They do not come apart, because `posRH` is `pos`.
-  const ObjectId building = world.spawn(NativeClass::building, nullptr);
-  REQUIRE(world.set_position(building, Point{1200, 1500}));
-  const ObjectId holder = world.spawn_internal(InternalKind::holder);
-  REQUIRE(world.put_in_holder(holder, building));
-  const ObjectId inside = world.spawn(NativeClass::unit, nullptr);
-  REQUIRE(world.put_in_holder(inside, holder));
-  const Point garrison{1200, 1500};
-  REQUIRE(garrison != standing);
-  agree(obj(inside), garrison);
+  // A passenger: `pos` is the marker, `posRH` the ship.
+  const World::ShipIds ship = world.spawn_ship(nullptr);
+  REQUIRE(world.set_position(ship.ship, Point{1200, 1500}));
+  const ObjectId passenger = world.spawn(NativeClass::unit, nullptr);
+  REQUIRE(world.find(passenger)->state.flags.is_unit);
+  REQUIRE(world.put_in_holder(passenger, ship.holder));
+  REQUIRE(world.resolve_position(passenger) == (Point{0, 0}));
+  answers(obj(passenger), kHeldPosition, Point{1200, 1500});
+  CHECK(unit_pos_rh(world, passenger) == (Point{1200, 1500}));
+
+  // A held object that is not a unit has no override: both are the marker.
+  const ObjectId crate = world.spawn(NativeClass::decor, nullptr);
+  REQUIRE(world.put_in_holder(crate, ship.holder));
+  answers(obj(crate), kHeldPosition, kHeldPosition);
 
   // The invalid receiver, which is the one place the two bodies differ in
   // `gbr.exe` -- `pos` prints a diagnostic first and `posRH` does not -- and
   // the one place they still have to return the same thing.
-  agree(obj(kNoObject), kHeldPosition);
-  agree(obj(static_cast<ObjectId>(9999)), kHeldPosition);
-  agree(script::Value::integer(3), kHeldPosition);
+  answers(obj(kNoObject), kHeldPosition, kHeldPosition);
+  answers(obj(static_cast<ObjectId>(9999)), kHeldPosition, kHeldPosition);
+  answers(script::Value::integer(3), kHeldPosition, kHeldPosition);
 }
 
 TEST(the_building_predicates_answer_what_gbr_exe_answers) {

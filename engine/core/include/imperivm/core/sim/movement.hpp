@@ -98,7 +98,16 @@
 //      `place_army`. So a march's members and its hero carry the hero's id in
 //      `MoveState::party` from the order `place_army` gives them until an
 //      order that is not a march; members step `kFormationStride`, the hero
-//      keeps its own.
+//      keeps its own. The original's record is a slot of the formation
+//      object (written by its slot assignment, 0x005f3115, cleared by a
+//      removal, 0x005f4686), so it may well outlast an order there; that
+//      was not followed. And the original member's route is the
+//      formation's (`SetFormation`, 0x00417790), which has a next point for
+//      as long as the formation's path does; here a member at the end of its
+//      station's route waits on it while its hero still walks the march
+//      (`MovementSystem::marching`), and only then arrives -- on a free spot
+//      when the march's flag was set, which is when `0x004178d0` names the
+//      member an owner (`lock_owner`).
 //   4. **Birds in the air.** A unit with `in_air` set neither tests nor
 //      blocks. The callback asks only for bit 22 and a health; whether an
 //      airborne flyer is linked into the ground buckets at all was not
@@ -139,6 +148,10 @@ inline constexpr std::int32_t kFacingLength = 1024;
 
 /// `SetSpeedFactor`'s neutral value: the class's own `speed`.
 inline constexpr std::int32_t kDefaultSpeedFactor = 100;
+
+/// `MoveState::goto_failed_at` while the unit's `Goto` calls are laying
+/// routes: the original's `-1` in `[unit+0x150]`.
+inline constexpr std::int64_t kNoGotoFailure = -1;
 
 /// Which of an entity's `variations` a heading is drawn as: the sprite sheet
 /// column, which is what `AnimCursor::variation` holds.
@@ -245,11 +258,9 @@ struct MoveState {
   /// exists right now.
   ///
   /// The two differ exactly where it matters. A unit whose destination is walled
-  /// off has an order and no route, and `Goto`'s give-up timeout has to keep
-  /// running for it -- otherwise `while (!.Goto(pt, 0, 1000, true, 5000));`
-  /// (`UNIT_ENTER.VS`, which has no `.HasPath` guard) never times out, because
-  /// keying the continuation test on `has_path` restarts the clock on every
-  /// call. Cleared by `stop`, by arrival, and by a new order to somewhere else.
+  /// off has an order and no route, and the next `Goto` to the same place is
+  /// the same order searching again from where it stands, not a new one.
+  /// Cleared by `stop`, by arrival, and by a new order to somewhere else.
   bool goto_active = false;
 
   /// The exact accumulator described in the file header: the sum over turns of
@@ -259,8 +270,14 @@ struct MoveState {
 
   /// Game time the unit last moved, for `Unit.TimeWithoutWalking`.
   GameTime last_moved = 0;
-  /// Game time the current `Goto` began, for its give-up timeout.
-  GameTime goto_started = 0;
+  /// When the `Goto` family last began failing to lay a route, or
+  /// `kNoGotoFailure` while it has not -- `[unit+0x150]` in `gbr.exe`, which
+  /// keeps `-1` for the same. Stamped by the first call that lays no route and
+  /// is not arrived, and cleared by a call that lays one or arrives and by the
+  /// end of the unit's command; the give-up and the re-search draw both read
+  /// it. **Not hashed**: nothing the original dumps prints it. See
+  /// `GotoOrder::give_up`.
+  GameTime goto_failed_at = kNoGotoFailure;
 
   /// The route. **Not hashed** -- see the file header.
   std::vector<Point> waypoints;
@@ -311,13 +328,29 @@ struct MoveState {
   /// block each other.
   ObjectId party = kNoObject;
   /// `CVXPathRetry`'s flag bit 0 (`[retry+0x20]`), which `Goto` and
-  /// `GotoAttack` set and `GotoEnter` and a formation march do not: the order
-  /// **owns a destination lock** at the end of every route it is laid, and it
-  /// is arrived only on a free spot. Cleared for a class with
+  /// `GotoAttack` set and `GotoEnter` does not: the order **owns a
+  /// destination lock** at the end of every route it is laid, and it is
+  /// arrived only on a free spot. Cleared for a class with
   /// `ignore_passability`, which `0x004178d0` and `SetMedia` (`0x00418770`)
-  /// both refuse a lock. **Saved, and not hashed**: path media, like the rest
-  /// of this block. See `sim/avoidance.hpp`, "Destination locks".
+  /// both refuse a lock. On a march member it carries the formation's own
+  /// flag instead, and owns a lock only once the march is over
+  /// (`MovementSystem::lock_owner`). **Saved, and not hashed**: path media,
+  /// like the rest of this block. See `sim/avoidance.hpp`, "Destination
+  /// locks".
   bool dest_lock = false;
+  /// On the hero leading a march: `FormSetupAndMoveTo`'s fourth argument,
+  /// which `CVXFormObj::SetDest` (0x005f2cc0) stores at `[form+0x8c]` and
+  /// `0x004178d0` reads -- whether the members own a destination lock once
+  /// the formation's path is spent. `place_army` hands it to every member's
+  /// order as `dest_lock`. **Saved, and not hashed**.
+  bool form_lock = false;
+  /// `Unit::Stop` has asked a moving unit to stop: `CVXPathRetry`'s flag bit 1
+  /// (`[retry+0x20] |= 2`, slot 6 at 0x004178b0). The path follower
+  /// (0x00419ee0) then walks on, step by step, until the unit stands on a
+  /// passable free spot or its route runs out (`MovementSystem::decide`).
+  /// Cleared by every new order and by `stop`. **Saved, and not hashed**:
+  /// path media, and what it decides -- where the unit comes to rest -- is.
+  bool stop_requested = false;
   /// `CVXPathRetry`'s flag bit 3 (`[retry+0x20] & 8`): the free-spot search
   /// (`0x004180b0`) has run for this destination. Set when it runs
   /// (`0x004191ab`), whether or not it re-aims; cleared only by `SetDest` to
@@ -572,8 +605,25 @@ class MovementSystem : public System {
   /// moved more than `repath_threshold()` from where it was.
   MoveOutcome order_goto_object(World& world, ObjectId id, ObjectId target, std::int32_t range,
                                 std::int32_t min_range = 0, bool lock_destination = false);
-  /// `Unit.Stop`. Keeps the position, drops the route.
+  /// Keeps the position, drops the route: what `Unit.Stop` does to a unit
+  /// whose route owns no lock, and what every other caller means by stopping.
   void stop(World& world, ObjectId id);
+  /// `Unit.Stop`'s first entry on a unit with a route (0x005d6d4a): ask the
+  /// route to stop. A route whose order owns a lock (`lock_owner`) is walked
+  /// on until the unit stands on a passable free spot or the route runs out;
+  /// any other stops where it is, as `stop`. Returns whether the unit still
+  /// has a route to walk.
+  bool request_stop(World& world, ObjectId id);
+  /// Whether `id`'s route belongs to a formation march that is still on: a
+  /// member (not the hero) whose hero still walks the march's route.
+  /// `0x004178d0` asks the formation object the same thing (0x005f22f0:
+  /// whether its path is spent). **Inferred** onto this engine's march, which
+  /// has no formation path of its own: the hero's route stands for it.
+  [[nodiscard]] bool marching(ObjectId id, const MoveState& move) const noexcept;
+  /// `0x004178d0`: whether `id`'s order owns a destination lock -- the owner
+  /// it names, or none. A march member's does once the march is over and the
+  /// formation's flag was set; any other order's when `dest_lock` is set.
+  [[nodiscard]] bool lock_owner(ObjectId id, const MoveState& move) const noexcept;
   /// `Unit.Face(pt)`: look towards a world point. A point on top of the unit
   /// leaves the facing alone, since it names no direction.
   void face(World& world, ObjectId id, Point towards);
@@ -860,11 +910,13 @@ struct GotoOrder {
   /// How long one call may wait before returning to the caller's loop. The
   /// call suspends for the lesser of this and the time to arrival.
   std::int64_t slice = 0;
-  /// Total timeout. **Anything non-positive means no limit**; see the note on
-  /// `register_movement_host`. For an `enter` order it is something else; see
-  /// there.
-  std::int64_t give_up = -1;
-  /// `GotoEnter` (0x005d6620), whose give-up `gbr.exe` reads directly:
+  /// **How long the call may go without a route before it ends the script.**
+  /// `0` ends it at the first search that lays none, a negative value never
+  /// does, and a walk, however long, is never timed. The four bodies read it
+  /// identically -- `Goto` to a point (0x005d61b0, give-up at 0x005d64db),
+  /// `GotoEnter` (0x005d6620, at 0x005d6942), and `Goto` to an object
+  /// (0x005d6b90) and `GotoAttack` (0x005d6a90) through their shared body
+  /// 0x005d40c0 (at 0x005d4429):
   ///
   ///   * **arrival is the band and nothing else.** On re-entry the call answers
   ///     `CVXPathRetry::IsArrived` (0x00417c10), and a point route is arrived
@@ -873,16 +925,34 @@ struct GotoOrder {
   ///     march's step (0x00419c4c, 0x00419e19, inside 0x00419b20). So the end
   ///     of a partial route is not arrival, and neither is a route that was
   ///     never laid.
-  ///   * **`give_up` times the failure, not the walk.** When `SetDest`
+  ///   * **the failure is stamped, not the order.** When `SetDest`
   ///     (0x0041a4c0) lays no route and the unit is not arrived, the call
-  ///     stamps `[unit+0x150]` with the time if it is clear (0x005d6942),
-  ///     and when `give_up >= 0` and the time since the stamp has reached it
-  ///     (0x005d2e90) it returns 2 -- **the script ends there** (`script/
-  ///     host.hpp`). A laid route or an arrival clears the stamp (0x005d698f,
-  ///     0x005d68e9). So `0` gives up on the first failed search and a
-  ///     negative value never does; a walk, however long, is never timed.
-  ///     Here `goto_started` carries the stamp for such an order.
-  bool enter = false;
+  ///     stamps `[unit+0x150]` with the time if it is clear, and when
+  ///     `give_up >= 0` and the time since the stamp (0x005d2e90) has reached
+  ///     it, it returns 2 -- **the script ends there** (`script/host.hpp`).
+  ///     A laid route or an arrival clears the stamp (0x005d6528, 0x005d6482);
+  ///     a new order does not. Here it is `MoveState::goto_failed_at`.
+  ///   * **a failing unit searches less and less often.** Before `SetDest`,
+  ///     with the stamp set, the call draws `rand(0, 2n)` from the world's
+  ///     generator, `n` being the whole 2,048 ms spans since the stamp, at
+  ///     most 10 (0x005d2eb0); anything but 0 is `SetDest`'s first argument,
+  ///     which for an unchanged goal skips the search and answers from the
+  ///     route the record already has (0x0041a513, 0x0041a53c). A unit five
+  ///     seconds stuck searches one call in five, and one stuck for 21
+  ///     seconds or more one call in twenty-one.
+  ///   * **the end of the unit's command clears the stamp**, inferred: slot 9
+  ///     of the seven unit vtables (0x005d2940) clears it, with the walking
+  ///     flags, before the base (0x005b5160) pops the command queue's head.
+  ///     So each command's give-up starts from its own first failure.
+  ///
+  /// This used to be read as a total timeout in which anything non-positive
+  /// meant no limit, from the shipped loop `while (!.Goto(pt, 0, 2000, true,
+  /// 0) && .HasPath)`: a `0` read as "at once" seemed to stop every such loop
+  /// on its second call. It does not, because a walk is never timed. What the
+  /// misreading cost is the other half: a unit whose route was cut back to
+  /// where it stands never left `UNIT_ADVANCE.VS`'s loop, and searched again
+  /// every two seconds for as long as the match lasted.
+  std::int64_t give_up = -1;
   /// `SetDest`'s lock flag: `Goto` (`0x005d645c`) and `GotoAttack`
   /// (`0x005d435b`, `0x005d43a6`) pass 1, `GotoEnter` (`0x005d68c3`) 0.
   bool lock_destination = false;
@@ -890,8 +960,8 @@ struct GotoOrder {
 
 /// The shared body of the `Goto` family. Returns the host outcome the entry
 /// point should return: `true` on arrival, `false` with a suspension while
-/// walking, `false` outright when the order has timed out -- and, for an
-/// `enter` order that has gone `give_up` without a route, `finish`.
+/// walking or searching, and `finish` once it has gone `give_up` without a
+/// route.
 [[nodiscard]] script::HostOutcome run_goto(script::CallContext& ctx, World& world,
                                            MovementSystem& movement, ObjectId id,
                                            const GotoOrder& order);
@@ -931,25 +1001,28 @@ struct GotoOrder {
 /// it explains the argument (a duration, 50 to 10,000), it explains why
 /// `UNIT_IDLE.VS`'s `while(1)` and `SHIP_IDLE.VS`'s `while(1)` consume game time
 /// at all, and it makes `while (!.Stop(1000));` one call rather than a spin.
-/// Nothing here can interrupt a hold, so it always returns true after
-/// suspending; what would settle the false case is a retail trace of a unit
-/// ordered to stop while an animation is mid-swing.
+/// The false case is a unit with a route: 0x005d6c90 asks the route to stop
+/// and answers false at the re-entry while the unit is still walking to a
+/// free spot to stop on (`stop_impl` in `src/sim/movement.cpp`).
 ///
 /// `Goto`'s five arguments are `(destination, range, slice, flag, give_up)`.
 /// The first two are established: the shipped call sites pass `.range`,
 /// `.sight`, `other.sight/3` and `GetConst("GiveDistance")` in the second
 /// position, which are all distances, and the dumps print exactly such a
-/// tolerance as `Range`. **The last three are inferred**, from their value
-/// distributions and from the loop the calls sit inside:
-/// `while (!.Goto(pt, 0, 2000, true, 0) && .HasPath)`. `slice` is read as the
-/// game-time budget one call may wait for -- the call suspends for the lesser
-/// of it and the time to arrival, and the loop re-tests -- and `give_up` as a
-/// total timeout, where **anything non-positive means no limit**. Both `-1` and
-/// `0` occur and both have to mean "no limit": `0` is the commonest value in the
-/// corpus and appears inside `while (!.Goto(...) && .HasPath)`, so reading it as
-/// an immediate timeout stops every such loop on its second call. The boolean is recorded and not acted on;
-/// no reading of it is better supported than another, and guessing would put an
-/// unearned behaviour in front of whoever settles it.
+/// tolerance as `Range`. `slice` is the game-time budget one call may wait
+/// for -- the call suspends for the lesser of it and the time to arrival, and
+/// the loop re-tests -- inferred from the loop the calls sit inside, `while
+/// (!.Goto(pt, 0, 2000, true, 0) && .HasPath)`. `give_up` is read from
+/// `gbr.exe` (0x005d61b0): how long the call may go without a route before the
+/// script ends, never when negative; `GotoOrder::give_up` has the addresses
+/// and what the earlier reading of it as a total timeout cost. The boolean is
+/// recorded and not acted on: the original reads it only when no route is
+/// laid (0x005d6565), to pick an animation the call then waits out.
+///
+/// `Goto/4` is not one of `gbr.exe`'s registrations -- both of its `Goto`s
+/// take five -- and the handful of shipped four-argument calls are bound here
+/// with no give-up, which is the conservative reading of an argument nobody
+/// passed.
 void register_movement_host(script::HostRegistry& registry);
 
 }  // namespace imperivm::core::sim

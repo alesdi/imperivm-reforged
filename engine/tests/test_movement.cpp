@@ -18,6 +18,7 @@
 //     routes, because the open set is ordered by a total order rather than by
 //     insertion.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -1577,43 +1578,205 @@ TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   CHECK(sank.x >= 1600 - 100 && sank.x <= 1600 - 100 + 10);
 }
 
+namespace {
+
+/// A unit walled into a single cell: no route out exists at all.
+ObstructionGrid sealed_cell(std::int32_t cx, std::int32_t cy) {
+  ObstructionGrid grid = open_field(32);
+  for (std::int32_t d = -1; d <= 1; ++d) {
+    grid.set_cell(cx + d, cy - 1, true);
+    grid.set_cell(cx + d, cy + 1, true);
+    grid.set_cell(cx - 1, cy + d, true);
+    grid.set_cell(cx + 1, cy + d, true);
+  }
+  return grid;
+}
+
+/// `.Goto(dest, 0, slice, true, give_up)` on `unit`.
+HostOutcome goto_once(const HostRegistry& registry, World& world, ObjectId unit, Point dest,
+                      std::int32_t slice, std::int32_t give_up) {
+  HostCall call(world, {Value::object(kTypeObj, unit), pack_point(dest), Value::integer(0),
+                        Value::integer(slice), Value::boolean(true), Value::integer(give_up)});
+  return invoke(registry, CallKind::member, "Goto", 5, call);
+}
+
+}  // namespace
+
 TEST(a_host_goto_into_a_wall_reports_no_path) {
   HostRegistry registry;
   register_movement_host(registry);
 
-  // A unit sealed in, so no route out exists at all.
-  ObstructionGrid grid = open_field(32);
-  for (std::int32_t d = -1; d <= 1; ++d) {
-    grid.set_cell(9 + d, 9, true);
-    grid.set_cell(9 + d, 11, true);
-    grid.set_cell(8, 10 + d, true);
-    grid.set_cell(10, 10 + d, true);
-  }
-
   World world;
   MovementSystem movement;
-  movement.set_grid(std::move(grid));
+  movement.set_grid(sealed_cell(9, 10));
   attach(world, movement);
   const ObjectId unit = spawn_unit(world, movement, Point{9 * 16 + 8, 10 * 16 + 8}, 100);
 
-  HostCall call(world, {Value::object(kTypeObj, unit), pack_point(Point{2000, 2000}),
-                        Value::integer(0), Value::integer(2000), Value::boolean(true),
-                        Value::integer(0)});
-  const HostOutcome outcome = invoke(registry, CallKind::member, "Goto", 5, call);
+  // With a negative give-up the call never ends the script.
+  const HostOutcome outcome = goto_once(registry, world, unit, Point{2000, 2000}, 2000, -1);
   // False *and* no path, so `while (!.Goto(...) && .HasPath)` leaves.
   CHECK(outcome.value.as_integer() == 0);
   HostCall has_path(world, {Value::object(kTypeObj, unit)});
   CHECK(invoke(registry, CallKind::member, "HasPath", 0, has_path).value.as_integer() == 0);
 
   // And it **waits** rather than answering instantly, which the loops that have
-  // no `.HasPath` guard need. `UNIT_MOVE.VS` is the whole script
-  // `while (!.Goto(pt, 0, 2000, true, 0));` and `UNIT_ENTER.VS` writes
-  // `while (!.Goto(pt, 0, 1000, true, 5000));`: an immediate `ok` there spins
-  // the VM against an unreachable point until the instruction budget traps it.
-  // Suspending for the caller's slice turns that into a poll, and does not
-  // change the guarded form, which leaves on `.HasPath` either way.
+  // no `.HasPath` guard need: an immediate `ok` in `while (!.Goto(pt, 0, 2000,
+  // true, -1));` spins the VM against an unreachable point until the
+  // instruction budget traps it. The original waits the slice too (0x005d65e8).
   CHECK(outcome.status == HostStatus::suspend);
   CHECK(outcome.suspend_for == 2000);
+}
+
+TEST(a_host_goto_with_a_zero_give_up_ends_the_script_at_the_first_failed_search) {
+  // `UNIT_ADVANCE.VS` and `UNIT_MOVE.VS` pass 0. In `gbr.exe` (0x005d61b0) a
+  // call that lays no route and is not arrived stamps the failure, and once
+  // the give-up has elapsed since -- at once, for 0 -- returns 2 and the
+  // script ends there. Read as "no limit", a unit with nowhere to go stayed on
+  // its order for the rest of the match.
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(sealed_cell(9, 10));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{9 * 16 + 8, 10 * 16 + 8}, 100);
+
+  const HostOutcome outcome = goto_once(registry, world, unit, Point{2000, 2000}, 2000, 0);
+  CHECK(outcome.status == HostStatus::finish);
+  CHECK(!movement.find(unit)->goto_active);
+  CHECK(movement.find(unit)->goto_failed_at == world.time());
+}
+
+TEST(a_host_goto_times_the_failure_and_not_the_walk) {
+  // `UNIT_ENTER.VS`'s `while (!.Goto(pt, 0, 1000, true, 5000));`, and the
+  // 2,000 ms give-up below, against a walk of four seconds that ends at a
+  // wall. Read as a total timeout the order stopped after two seconds of
+  // walking; in the original nothing times a walk, and the clock starts when
+  // the route runs out and the search from there lays none.
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  // A wall across x = 30 cells, the whole height of the field.
+  ObstructionGrid grid = open_field(64);
+  for (std::int32_t y = 0; y < 64; ++y) grid.set_cell(30, y, true);
+  World world;
+  MovementSystem movement;
+  movement.set_grid(std::move(grid));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{10 * 16 + 8, 20 * 16 + 8}, 100);
+  const Point beyond{40 * 16 + 8, 20 * 16 + 8};
+
+  bool ended = false;
+  GameTime last_route = -1;
+  GameTime ended_at = -1;
+  for (int i = 0; i < 60 && !ended; ++i) {
+    const HostOutcome out = goto_once(registry, world, unit, beyond, 500, 2000);
+    CHECK(out.status == HostStatus::suspend || out.status == HostStatus::finish);
+    CHECK(out.value.as_integer() == 0);
+    if (movement.find(unit)->has_path) last_route = world.time();
+    ended = out.status == HostStatus::finish;
+    if (ended) ended_at = world.time();
+    run(world, movement, {500});
+  }
+  REQUIRE(ended);
+  // It walked for longer than the give-up before the route ran out ...
+  CHECK(last_route > 2000);
+  // ... reached the wall ...
+  CHECK(position_of(world, unit).x >= 28 * 16);
+  // ... and ended two seconds after the last route, to the half-second call.
+  CHECK(ended_at - last_route >= 2000);
+  CHECK(ended_at - last_route <= 2500);
+}
+
+TEST(a_host_goto_keeps_its_failure_stamp_across_orders_until_a_route_is_laid) {
+  // The stamp is the unit's (`[unit+0x150]`), not the order's: a new
+  // destination does not clear it, a laid route does (0x005d6528).
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(sealed_cell(9, 10));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{9 * 16 + 8, 10 * 16 + 8}, 100);
+
+  CHECK(goto_once(registry, world, unit, Point{2000, 2000}, 1000, -1).status ==
+        HostStatus::suspend);
+  const GameTime stamped = world.time();
+  CHECK(movement.find(unit)->goto_failed_at == stamped);
+  world.advance(3000);
+  // Somewhere else, with a give-up of 2,500: three seconds of failing are
+  // already behind it, so the script ends at this call.
+  CHECK(goto_once(registry, world, unit, Point{100, 2000}, 1000, 2500).status ==
+        HostStatus::finish);
+  CHECK(movement.find(unit)->goto_failed_at == stamped);
+
+  // The wall comes down and a route is laid: the stamp clears.
+  movement.set_grid(open_field(32));
+  CHECK(goto_once(registry, world, unit, Point{400, 160}, 1000, 0).status ==
+        HostStatus::suspend);
+  CHECK(movement.find(unit)->has_path);
+  CHECK(movement.find(unit)->goto_failed_at == kNoGotoFailure);
+}
+
+TEST(a_failing_host_goto_draws_and_searches_less_often) {
+  // 0x005d2eb0: with the stamp set, each call draws `rand(0, 2n)` from the
+  // world's generator, `n` the whole 2,048 ms spans since the stamp, at most
+  // 10; anything but 0 tells `SetDest` not to search the goal it already has.
+  // The wall is taken away under a unit still failing, so whether a call
+  // searched shows as whether it now has a route.
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(sealed_cell(9, 10));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{9 * 16 + 8, 10 * 16 + 8}, 100);
+  const Point away{25 * 16 + 8, 10 * 16 + 8};
+
+  // The first failure stamps and draws nothing: the stamp was clear.
+  const Rng clear = world.rng();
+  (void)goto_once(registry, world, unit, away, 1000, -1);
+  CHECK(world.rng() == clear);
+  const GameTime stamped = movement.find(unit)->goto_failed_at;
+  REQUIRE(stamped == world.time());
+
+  // Inside the first 2,048 ms the draw is `rand(0, 0)`: taken, and it always
+  // searches.
+  world.advance(1000);
+  Rng expect = world.rng();
+  (void)expect.between(0, 0);
+  (void)goto_once(registry, world, unit, away, 1000, -1);
+  CHECK(world.rng() == expect);
+  CHECK(!movement.find(unit)->has_path);
+
+  // Six seconds on: `rand(0, 4)` and up. The field opens just before the
+  // first call whose draw is not 0, which must not search; the first call
+  // after that whose draw is 0 must. Every call takes exactly its draw.
+  world.advance(5000);
+  bool opened = false;
+  bool skipped = false;
+  bool searched = false;
+  for (int i = 0; i < 80 && !searched; ++i) {
+    const std::int64_t spans = std::min<std::int64_t>((world.time() - stamped) >> 11, 10);
+    expect = world.rng();
+    const bool draws_zero = expect.between(0, static_cast<std::int32_t>(2 * spans)) == 0;
+    if (!opened && !draws_zero) {
+      movement.set_grid(open_field(32));
+      opened = true;
+    }
+    (void)goto_once(registry, world, unit, away, 100, -1);
+    CHECK(world.rng() == expect);
+    searched = movement.find(unit)->has_path;
+    CHECK(searched == (opened && draws_zero));
+    skipped = skipped || (opened && !searched);
+    world.advance(100);
+  }
+  CHECK(skipped);
+  CHECK(searched);
+  CHECK(movement.find(unit)->goto_failed_at == kNoGotoFailure);
 }
 
 /// `PathTo` asks the same question with the same flag.
@@ -1657,57 +1820,34 @@ TEST(path_to_answers_a_straight_line_for_a_class_that_ignores_passability) {
   CHECK(invoke(registry, CallKind::member, "PathTo", 3, walled).value.as_integer() == -1);
 }
 
-TEST(a_host_goto_that_cannot_reach_still_times_out) {
-  // The give-up clock has to keep running while there is no route, or
-  // `UNIT_ENTER.VS`'s unguarded `while (!.Goto(pt, 0, 1000, true, 5000));`
-  // never leaves. Keying continuation on `has_path` restarts it every call;
-  // `MoveState::goto_active` is what keeps it running.
-  HostRegistry registry;
-  register_movement_host(registry);
-
-  ObstructionGrid grid = open_field(32);
-  for (std::int32_t d = -1; d <= 1; ++d) {
-    grid.set_cell(9 + d, 9, true);
-    grid.set_cell(9 + d, 11, true);
-    grid.set_cell(8, 10 + d, true);
-    grid.set_cell(10, 10 + d, true);
-  }
-
-  World world;
-  MovementSystem movement;
-  movement.set_grid(std::move(grid));
-  attach(world, movement);
-  const ObjectId unit = spawn_unit(world, movement, Point{9 * 16 + 8, 10 * 16 + 8}, 100);
-
-  const auto call_once = [&]() {
-    HostCall call(world, {Value::object(kTypeObj, unit), pack_point(Point{2000, 2000}),
-                          Value::integer(0), Value::integer(1000), Value::boolean(true),
-                          Value::integer(5000)});
-    return invoke(registry, CallKind::member, "Goto", 5, call);
-  };
-
-  // Five seconds of game time in one-second turns, then the order gives up.
-  std::int64_t waited = 0;
-  bool gave_up = false;
-  for (int i = 0; i < 12 && !gave_up; ++i) {
-    const HostOutcome outcome = call_once();
-    CHECK(outcome.value.as_integer() == 0);
-    if (outcome.status == HostStatus::suspend) {
-      waited += outcome.suspend_for;
-      world.advance(static_cast<std::int32_t>(outcome.suspend_for));
-    } else {
-      gave_up = true;
-    }
-  }
-  CHECK(gave_up);
-  CHECK(waited == 5000);
-}
-
 TEST(a_host_stop_reports_true_and_holds_still) {
   // 34 of `Stop`'s 53 sites are `while (!.Stop(1000));`. A void `Stop` yields
   // nil, `!nil` is true, and every one of those loops spins forever -- so it
   // returns a bool. The suspension is what makes `UNIT_IDLE.VS`'s and
   // `SHIP_IDLE.VS`'s `while(1)` consume game time rather than instructions.
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(open_field(64));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{500, 500}, 100);
+
+  HostCall stop(world, {Value::object(kTypeObj, unit), Value::integer(1000)});
+  const HostOutcome outcome = invoke(registry, CallKind::member, "Stop", 1, stop);
+  CHECK(outcome.value.as_integer() == 1);
+  CHECK(outcome.status == HostStatus::suspend);
+  CHECK(outcome.suspend_for == 1000);
+  CHECK(!world.state(unit)->flags.has_active_path);
+}
+
+TEST(a_host_stop_on_a_walking_unit_answers_at_its_re_entry) {
+  // 0x005d6c90 on a unit with a route: the first entry asks the route to stop
+  // and suspends with it in hand; the re-entry answers false while the unit
+  // still has a step to take and true once it has stood still. A `Goto` route
+  // owns a lock, so it stops on the first free spot -- here the next step,
+  // with nobody about.
   HostRegistry registry;
   register_movement_host(registry);
 
@@ -1724,11 +1864,23 @@ TEST(a_host_stop_reports_true_and_holds_still) {
   CHECK(world.state(unit)->flags.has_active_path);
 
   HostCall stop(world, {Value::object(kTypeObj, unit), Value::integer(1000)});
-  const HostOutcome outcome = invoke(registry, CallKind::member, "Stop", 1, stop);
-  CHECK(outcome.value.as_integer() == 1);
-  CHECK(outcome.status == HostStatus::suspend);
-  CHECK(outcome.suspend_for == 1000);
+  const HostOutcome first = invoke(registry, CallKind::member, "Stop", 1, stop);
+  CHECK(first.status == HostStatus::retry);
+  CHECK(first.suspend_for == 1000);
+  CHECK(world.state(unit)->flags.has_active_path);
+  CHECK(movement.find(unit)->stop_requested);
+
+  stop.context.first_call = false;
+  const HostOutcome early = invoke(registry, CallKind::member, "Stop", 1, stop);
+  CHECK(early.status == HostStatus::ok);
+  CHECK(early.value.as_integer() == 0);
+
+  world.advance(200);
   CHECK(!world.state(unit)->flags.has_active_path);
+  const HostOutcome done = invoke(registry, CallKind::member, "Stop", 1, stop);
+  CHECK(done.status == HostStatus::ok);
+  CHECK(done.value.as_integer() == 1);
+  CHECK(position_of(world, unit).x < 600);
 }
 
 TEST(the_deer_prelude_runs_through_the_host) {

@@ -139,6 +139,17 @@ class GaikaTable {
   /// water; failing that -- the point is off the layer, or its area has no node
   /// -- the nearest node overall. Distance is the squared distance, and a tie
   /// keeps the lower id.
+  ///
+  /// **A negative coordinate is no node**, `kNoGaika`, and that part is the
+  /// original's exactly: its one point-to-node lookup, 0x0044e3f0, answers 0
+  /// for `x == -1`, `x < 0` or `y < 0` before it indexes its 128-unit slot
+  /// grid, and every reader goes through it -- `GetGAIKA(point)` (0x005bd0ad),
+  /// the squad node tracker 0x0041f530 (0x0041f5fd, 0x0041f621), and
+  /// `GetGAIKA(Obj)`'s 0x0044e650, which makes the same three tests inline.
+  /// So `(-1, -1)`, where a held object's own position and a gone object's
+  /// answer both stand, lies in no node; this answered the node nearest the
+  /// map's corner for it for a while. Past the far edge the original reads
+  /// beyond its grid; nothing here imitates that, and the nearest node stands.
   [[nodiscard]] GaikaId at(const LsaPartition& areas, Point where) const noexcept;
 
   /// The nodes adjacent to `id`, ascending. Empty for an id that names no node.

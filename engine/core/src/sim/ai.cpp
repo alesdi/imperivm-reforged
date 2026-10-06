@@ -2410,7 +2410,10 @@ HostOutcome m_best_target_in_gaika(CallContext& ctx) {
 
   const GaikaTable& table = world->gaika();
   const LsaPartition& areas = world->lsa();
-  const GaikaId node = table.at(areas, world->resolve_position(self));
+  // `GetGAIKA(Obj)`'s question (0x0044e650): the stored position, or for a
+  // held unit its `posRH` -- the town it garrisons, not the holder record's
+  // (0, 0), which is the node in the map's corner.
+  const GaikaId node = table.at(areas, unit_pos_rh(*world, self));
   // 0x004310c0: no table, or no node, and the search never starts. The
   // original tests those separately -- the table pointer, then the node pointer
   // 0x0044e8e0 hands back -- and `GaikaTable::at` collapses both into
@@ -3007,11 +3010,13 @@ HostOutcome m_settlement_gaika(CallContext& ctx) {
 ///     centre within the point's own area, so a point on an island is never
 ///     answered with a node across the water. See `GaikaTable::at`; the
 ///     original answers this from its slot grid, which is the part of the
-///     partition this project does not reproduce.
+///     partition this project does not reproduce -- except that a negative
+///     coordinate is no node at all (0x0044e3f0), which it does.
 ///   * **An `Obj` is the node its position belongs to**, which is the same
 ///     question asked one hop earlier. 0x0044e650 reads the raw position and,
-///     when that is off the map, the unit's `posRH` (0x005d3db0): a unit in
-///     a town's garrison is in the town's node (`unit_pos_rh`).
+///     when its `x` is negative, the unit's `posRH` (0x005d3db0): a unit in
+///     a town's garrison is in the town's node (`unit_pos_rh`), and one on a
+///     ship in the ship's. A position still negative after that is no node.
 HostOutcome f_gaika_at_point(CallContext& ctx) {
   if (ctx.count() == 0) return HostOutcome::ok_with(Value::integer(kNoGaika));
   // The identity, and it must stay first: an integer is a GAIKA already.

@@ -997,6 +997,8 @@ TEST(save_movement_section_round_trips) {
   // replayed every moving unit's walk from step zero on its first turn.
   first.walking = true;
   first.progress = 123456789;
+  // `Goto`'s failure stamp: the give-up and the re-search draw read it.
+  first.goto_failed_at = 31337;
   first.waypoints = {Point{10, 20}, Point{30, 40}, Point{900, 400}};
   first.path_length = 4242;
   first.path_generation = 7;
@@ -1017,6 +1019,8 @@ TEST(save_movement_section_round_trips) {
   CHECK(restored->progress == 123456789);
   CHECK(restored->walking);
   CHECK(!fresh.find(b)->walking);
+  CHECK(restored->goto_failed_at == 31337);
+  CHECK(fresh.find(b)->goto_failed_at == kNoGotoFailure);
   // The route is not hashed -- `pathfinder` is zero in all nine dumps -- and is
   // written anyway, because a route is not recomputable from the state around
   // it. A unit that came back with an empty path would silently stop.

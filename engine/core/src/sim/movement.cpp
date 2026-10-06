@@ -454,8 +454,8 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   // centre, and the route runs to the one nearest the unit -- for an order
   // that owns a lock, the nearest nobody stands on or has reserved, so a unit
   // whose own side of the target is taken goes round to another.
-  const RingGoal goal =
-      ring_goal(world, move.dest_lock ? id : kNoObject, from, dest, range, move.min_range);
+  const bool owner = lock_owner(id, move);
+  const RingGoal goal = ring_goal(world, owner ? id : kNoObject, from, dest, range, move.min_range);
   PathRequest request;
   request.start = from;
   request.goal = goal.at;
@@ -474,7 +474,7 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
       found = route_past_gates(world, id, from, request, std::move(found));
     }
     cut = false;
-    if (move.dest_lock && found.usable() && found.waypoints.size() >= 2) {
+    if (owner && found.usable() && found.waypoints.size() >= 2) {
       cut = truncate_to_free(world, id, found.waypoints);
       if (cut) found.length = polyline_length(found.waypoints);
     }
@@ -496,7 +496,7 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   // integer square root. The order's band is unchanged: the unit there is
   // not arrived, and its next search is round the rings again.
   bool aimed = false;
-  if ((!path.usable() || path.waypoints.size() < 2) && move.dest_lock && !goal.free &&
+  if ((!path.usable() || path.waypoints.size() < 2) && owner && !goal.free &&
       !move.free_spot_tried && !move.free_spot_aimed) {
     move.free_spot_tried = true;
     ++counters_.free_spot_searches;
@@ -630,10 +630,11 @@ MoveOutcome MovementSystem::order_goto(World& world, ObjectId id, Point dest, st
   }
   move.target_object = kNoObject;
   move.min_range = min_range;
-  move.goto_started = world.time();
   move.goto_active = true;
   move.party = party;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
+  // `SetDest` and `SetFormation` both clear the stop request (0x00417797).
+  move.stop_requested = false;
   return lay_path(world, id, move, dest, range, world.time());
 }
 
@@ -649,10 +650,10 @@ MoveOutcome MovementSystem::order_goto_object(World& world, ObjectId id, ObjectI
   }
   move.target_object = target;
   move.min_range = min_range;
-  move.goto_started = world.time();
   move.goto_active = true;
   move.party = kNoObject;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
+  move.stop_requested = false;
   return lay_path(world, id, move, position(world, target), range, world.time());
 }
 
@@ -674,7 +675,38 @@ void MovementSystem::stop(World& world, ObjectId id) {
   // The retry goes with the order, and its flags with it.
   move->free_spot_tried = false;
   move->free_spot_aimed = false;
+  move->stop_requested = false;
   move->last_outcome = MoveOutcome::idle;
+}
+
+bool MovementSystem::marching(ObjectId id, const MoveState& move) const noexcept {
+  if (move.party == kNoObject || move.party == id) return false;
+  const MoveState* lead = find(move.party);
+  return lead != nullptr && lead->has_path && lead->party == move.party;
+}
+
+bool MovementSystem::lock_owner(ObjectId id, const MoveState& move) const noexcept {
+  // `0x004178d0`. A retry aimed at a formation (`[retry+0xc]`) names its unit
+  // only when the formation's flag (`[form+0x8c]`) is set and the formation
+  // reports its path spent (0x005f22f0: a path, and `[form+0x88]` clear,
+  // which `CreateNextSample` writes once the path has nothing left,
+  // 0x005f5cff); while the march is on it names nobody. Any other retry names
+  // its unit when flag bit 0 is set and the unit's class does not ignore
+  // passability -- which `dest_lock` already folds in.
+  if (move.party != kNoObject && move.party != id) return move.dest_lock && !marching(id, move);
+  return move.dest_lock;
+}
+
+bool MovementSystem::request_stop(World& world, ObjectId id) {
+  MoveState* move = find(id);
+  if (move == nullptr || !move->has_path || !lock_owner(id, *move)) {
+    // With no owner named, the path follower's stop branch takes no step at
+    // all (0x00419ef8 -> 0x0041a019): the unit stands where it is.
+    stop(world, id);
+    return false;
+  }
+  move->stop_requested = true;
+  return true;
 }
 
 // --------------------------------------------------------------------------
@@ -906,7 +938,7 @@ bool MovementSystem::free_spot(World& world, ObjectId id, Point centre, Point& o
 bool MovementSystem::owned_lock(const World& world, ObjectId id, StaticLock& lock) const {
   const MoveState* move = find(id);
   // A route that exists has at least two points.
-  if (move == nullptr || !move->dest_lock || !move->has_path) return false;
+  if (move == nullptr || !move->has_path || !lock_owner(id, *move)) return false;
   // `SetMedia` puts it at the route's last point (`vtbl+0x10` of the media),
   // and `0x0040a580` leaves its own radius at 0, which `0x0040a880` reads as
   // the owner's class radius.
@@ -966,7 +998,7 @@ bool MovementSystem::arrival_spot_free(const World& world, ObjectId id, const Mo
                                        Point here) const {
   // `0x004178d0` names no owner for an order without the flag, and then
   // `IsArrived` asks nothing more than the band.
-  if (!move.dest_lock) return true;
+  if (!lock_owner(id, move)) return true;
   return spot_free(world, id, here, radius_of(world, id));
 }
 
@@ -1150,6 +1182,17 @@ void MovementSystem::walk_turn(World& world, const Turn& turn, Entry& entry) {
   MoveState& move = entry.state;
   if (!move.has_path) return;
 
+  // `Unit::Stop`'s request, as `decide` reads it, tested once a turn here.
+  if (move.stop_requested) {
+    const Point here = position(world, entry.id);
+    if (!lock_owner(entry.id, move) || move.travelled() >= move.path_length ||
+        (!grid_.blocked(here) && spot_free(world, entry.id, here, radius_of(world, entry.id))) ||
+        held_at_gate(world, entry.id, move, move.travelled())) {
+      stop(world, entry.id);
+      return;
+    }
+  }
+
   const std::int64_t rate = move.rate();
   if (rate <= 0) {
     move.last_outcome = MoveOutcome::moving;
@@ -1194,6 +1237,10 @@ void MovementSystem::walk_turn(World& world, const Turn& turn, Entry& entry) {
 
   const bool at_end = travelled >= move.path_length;
   const bool in_range = move.range > 0 && within(next, move.target, move.range);
+  if (move.stop_requested && at_end) {
+    stop(world, entry.id);
+    return;
+  }
   // `IsArrived`'s free spot, as `decide` asks it.
   if ((at_end || in_range) && !arrival_spot_free(world, entry.id, move, next)) {
     if (at_end) {
@@ -1456,7 +1503,39 @@ void MovementSystem::decide(World& world, std::size_t entry, GameTime now) {
   // where it stands, not arrived.
   const bool at_end = travelled >= move.path_length;
   const bool in_range = move.range > 0 && within(here, move.target, move.range);
-  if (at_end || in_range) {
+  if (move.stop_requested) {
+    // `Unit::Stop` asked (`[retry+0x20] & 2`): the path follower's other
+    // branch (0x00419ee6), which never asks `IsArrived`. It stops on a spot
+    // the passability grid leaves open (the bit tested through 0x00623300)
+    // and the free-spot test passes (0x0040a990, the owner `0x004178d0`
+    // names), and otherwise takes the route's next step -- none at its end,
+    // so a unit that runs out of route stops there, free spot or not.
+    // `request_stop` set the flag only for an owner, and an order that has
+    // stopped owning a lock since takes no step at all (0x00419ef8). Nor does
+    // one before a gate that bars it (0x00419f8a .. 0x00419fa2): where the
+    // walk on would wait at the gate, the stop stops there.
+    if (!lock_owner(id, move) || at_end ||
+        (!grid_.blocked(here) && spot_free(world, id, here, radius_of(world, id))) ||
+        held_at_gate(world, id, move, travelled)) {
+      set_position(world, id, here);
+      stop(world, id);
+      return;
+    }
+  } else if (at_end && marching(id, move)) {
+    // A member at the end of its station's route while its hero still
+    // marches waits there for the march's next sample: the original
+    // member's route is the formation's (`SetFormation`, 0x00417790), and it
+    // has a next point for as long as the formation's path does. Here the
+    // next station comes with `place_army`'s next call. **Inference 3.**
+    const Point standing = offset_at(move, travelled);
+    move.holding = true;
+    move.hold_until = turn_end_ + 1;
+    move.step_start = travelled;
+    move.step_end = travelled;
+    move.offset_from = standing;
+    move.offset_to = standing;
+    return;
+  } else if (at_end || in_range) {
     if (arrival_spot_free(world, id, move, here)) {
       arrive(world, entry, in_range);
       return;
@@ -2043,21 +2122,66 @@ HostOutcome set_walk_anim_impl(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `Stop(ms)`: halt, then hold still for `ms`, and report whether the hold
-/// completed. See the note on `register_movement_host` for why this is a
+/// `Stop(ms)`: come to a stop, then report whether the unit has. See the note on `register_movement_host` for why this is a
 /// suspending predicate and not the void procedure it first looked like: 34 of
 /// its 53 sites are `while (!.Stop(1000));`, which a void `Stop` spins forever.
 ///
-/// Nothing here can interrupt a hold, so the answer is always true. The
-/// suspension is the load-bearing half: it is what makes `UNIT_IDLE.VS`'s and
-/// `SHIP_IDLE.VS`'s `while(1)` loops consume game time rather than the
-/// scheduler's instruction budget.
+/// The suspension is the load-bearing half for a standing unit: it is what
+/// makes `UNIT_IDLE.VS`'s and `SHIP_IDLE.VS`'s `while(1)` loops consume game
+/// time rather than the scheduler's instruction budget.
+///
+/// **A unit with a route is read off 0x005d6c90, and it does not stop where it
+/// stands.** The first entry, for a unit with a path object (`[unit+0x148]`)
+/// that is neither held (`[unit+0x154]`) nor at `(-1, -1)`, calls the path's
+/// slot 6 -- `CVXPathRetry` 0x004178b0, which sets flag bit 1 at
+/// `[retry+0x20]` and passes the call down to its media -- sets the marching
+/// activity, writes `ms` to the wait slot and suspends with the route in hand.
+/// The path follower (0x00419ee0) then reads that bit before every step: when
+/// the retry names an owner (`0x004178d0`, `MovementSystem::lock_owner`) it
+/// stops on the first point that is passable and a free spot (0x0040a990) and
+/// otherwise walks on; when it names none it takes no step. The re-entry asks
+/// for the next step (`vtbl+8`): one left is a unit still walking, and the
+/// answer is **false**, so `while (!.Stop(1000));` asks again; none, and the
+/// route is deleted and the answer is true. So a column told to stop by
+/// `UNIT_STAND_POSITION.VS`, or a unit that reached its hero in
+/// `UNIT_ATTACH.VS` and stops in the middle of its `Goto`, does not freeze on
+/// top of the bodies it was walking through: it walks on to the first spot
+/// nobody stands on. Before this every such stop dropped the route at once,
+/// and on Crossroads a hero's recruits that left one door together stood in
+/// one pile at it for the rest of the match.
+///
+/// **What is not reproduced:** for a unit with no route the original deletes
+/// nothing, returns true at once and does **not** suspend (0x005d6d9b); this
+/// still holds still for `ms`, which the idle loops' pacing above rests on and
+/// changing which is a change to every idle script's timing. The first entry
+/// also drops the combat target (`[unit+0x1a8]`), which this does not.
 HostOutcome stop_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
-  self.movement->stop(*self.world, self.id);
   const std::int64_t hold = ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer()
                                                                       : 0;
+  if (!ctx.first_call) {
+    // The re-entry (0x005d6df0) asks the route for its next step: one still
+    // there is a unit still walking to where it may stop, and the answer is
+    // false with the route kept; none, and the route is deleted and the
+    // answer is true.
+    const MoveState* move = self.movement->find(self.id);
+    if (move != nullptr && move->has_path) return HostOutcome::ok_with(Value::boolean(false));
+    self.movement->stop(*self.world, self.id);
+    return HostOutcome::ok_with(Value::boolean(true));
+  }
+  // A unit with a route, on the map (0x005d6d16 .. 0x005d6d48), is asked to
+  // stop and the call suspends for `ms` with the route in hand; the answer
+  // comes at the re-entry.
+  if (const ObjectState* state = self.world->state(self.id);
+      state != nullptr && !state->is_held() && state->position != kHeldPosition &&
+      self.movement->request_stop(*self.world, self.id)) {
+    HostOutcome out;
+    out.status = script::HostStatus::retry;
+    out.suspend_for = hold > 0 ? hold : 0;
+    return out;
+  }
+  self.movement->stop(*self.world, self.id);
   if (hold <= 0) return HostOutcome::ok_with(Value::boolean(true));
   HostOutcome out;
   out.status = script::HostStatus::suspend;
@@ -2338,83 +2462,64 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   MoveState& move = movement.state(id);
   const Point here = world.resolve_position(id);
   // `IsArrived` (`0x005d422b`, `0x005d43b9`): in the band, and on a free spot
-  // when the order owns a lock.
+  // when the order owns a lock. An arrival clears the failure stamp
+  // (0x005d6482).
   if (within(here, dest, order.range) &&
       (!order.lock_destination || movement.ignores_passability(world, id) ||
        movement.spot_free(world, id, here, movement.radius_of(world, id)))) {
     movement.stop(world, id);
+    move.goto_failed_at = kNoGotoFailure;
     return HostOutcome::ok_with(Value::boolean(true));
   }
 
   const GameTime now = now_of(ctx, world);
-  // Continuation is keyed on the *order*, not on whether a route exists.
-  // A destination behind a wall leaves `has_path` false with the order still
-  // outstanding, and `while (!.Goto(pt, 0, 1000, true, 5000));` in
-  // `UNIT_ENTER.VS` has no `.HasPath` guard: if that reset the clock each call,
-  // the give-up would never fire and the loop would never leave.
+  // Continuation is keyed on the *order*, not on whether a route exists: a
+  // destination behind a wall leaves `has_path` false with the order still
+  // outstanding, and the next call to the same place searches again from
+  // where the unit stands rather than starting a new order.
   const bool continuing =
       move.goto_active && move.target == dest && move.target_object == order.target;
 
-  // **Zero means no limit, not "no time at all".** `Goto(pt, 0, 2000, true, 0)`
-  // is the commonest shipped form by a distance, and it sits inside
-  // `while (!.Goto(...) && .HasPath)`; a zero read as an immediate timeout stops
-  // every one of those loops on its second call, after one turn of walking.
-  // That is decisive, and it is how this reading was caught: the deer walked 23
-  // units of a 57-unit route and gave up.
-  if (!order.enter && continuing && order.give_up > 0 &&
-      now - move.goto_started >= order.give_up) {
-    // The order timed out. Drop the path so `.HasPath` reports the failure and
-    // the shipped `while (!.Goto(...) && .HasPath)` loop leaves.
-    movement.stop(world, id);
-    return HostOutcome::ok_with(Value::boolean(false));
+  // **A unit that has been failing searches less often** (0x005d2eb0): with
+  // the stamp set, every call draws `rand(0, 2n)`, `n` the whole 2,048 ms
+  // spans since the stamp, at most 10, and anything but 0 tells `SetDest` not
+  // to search the goal it already has (0x0041a513). The draw is taken whether
+  // or not the goal has changed; `SetDest` reads it only when it has not.
+  bool may_search = true;
+  if (move.goto_failed_at != kNoGotoFailure) {
+    const std::int64_t failing = now > move.goto_failed_at ? now - move.goto_failed_at : 0;
+    const std::int64_t spans = std::min<std::int64_t>(failing >> 11, 10);
+    may_search = world.rng().between(0, static_cast<std::int32_t>(2 * spans)) == 0;
   }
 
-  bool blocked = false;
-  if (!continuing) {
+  // A new order always searches. A live one searches again only when its
+  // route has run out -- walked to the end of a partial route, or taken away
+  // by the grid -- since neither is arrival (`GotoOrder::give_up`); and the
+  // draw above may skip that search, which leaves the unit with no route.
+  if (!continuing || (!move.has_path && may_search)) {
     const MoveOutcome outcome =
         order.target == kNoObject
             ? movement.order_goto(world, id, dest, order.range, order.min_range, kNoObject,
                                   order.lock_destination)
             : movement.order_goto_object(world, id, order.target, order.range, order.min_range,
                                          order.lock_destination);
-    if (outcome == MoveOutcome::arrived) return HostOutcome::ok_with(Value::boolean(true));
-    blocked = outcome == MoveOutcome::blocked;
-    // On the clock the give-up below reads, which is the scheduler's.
-    if (order.enter) move.goto_started = now;
-  } else if (!move.has_path) {
-    // The route ran out under a live order: either it was partial and has been
-    // walked to its end, or the grid changed and nothing else reaches. Neither
-    // is arrival, for `GotoEnter` either (`GotoOrder::enter`): search again
-    // from here.
-    GameTime began = move.goto_started;
-    // An enter order's clock is its failure stamp, so a route that has just
-    // run out starts it now. One the grid took away between two calls
-    // (`decide`'s re-validation) is stamped from the last call that saw a
-    // route: up to one slice early, where the original stamps at the first
-    // call that fails.
-    if (order.enter && move.last_outcome != MoveOutcome::blocked) began = now;
-    blocked =
-        (order.target == kNoObject
-             ? movement.order_goto(world, id, dest, order.range, order.min_range, kNoObject,
-                                   order.lock_destination)
-             : movement.order_goto_object(world, id, order.target, order.range,
-                                          order.min_range, order.lock_destination)) ==
-        MoveOutcome::blocked;
-    // Re-ordering restarts the give-up clock. Put it back: this is the same
-    // order the caller issued, and a destination that is only reachable in fits
-    // would otherwise never time out.
-    move.goto_started = began;
+    if (outcome == MoveOutcome::arrived) {
+      move.goto_failed_at = kNoGotoFailure;
+      return HostOutcome::ok_with(Value::boolean(true));
+    }
   }
 
-  if (order.enter) {
-    if (move.has_path) {
-      // A route is laid, so the failure stamp is clear (0x005d698f).
-      move.goto_started = now;
-    } else if (order.give_up >= 0 && now - move.goto_started >= order.give_up) {
-      // No route, for `give_up` or longer: `GotoEnter` returns 2 and the
-      // script ends at the call (0x005d696e). `UNIT_BUILD_CATAPULT.VS` passes
-      // 0, so a builder with no way to the machine's door leaves the job at
-      // once instead of entering from where it stands.
+  if (move.has_path) {
+    // A route is laid, so the failure stamp is clear (0x005d6528).
+    move.goto_failed_at = kNoGotoFailure;
+  } else {
+    // No route and not arrived: stamp the failure if it is not stamped
+    // already (0x005d64db), and once `give_up >= 0` has elapsed since, the
+    // call returns 2 and the script ends at it (0x005d6504). `UNIT_ADVANCE.VS`
+    // passes 0, so a unit whose route was cut back to where it stands leaves
+    // the advance at once instead of searching again every two seconds.
+    if (move.goto_failed_at == kNoGotoFailure) move.goto_failed_at = now;
+    if (order.give_up >= 0 && now - move.goto_failed_at >= order.give_up) {
       movement.stop(world, id);
       return HostOutcome::end_script();
     }
@@ -2423,23 +2528,15 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   // Not there yet. Wait for the lesser of the caller's slice and the time to
   // arrival, then let the caller's loop re-test.
   //
-  // **A blocked order waits too.** It used to return at once, which spins every
-  // shipped loop that has no `.HasPath` guard -- `UNIT_MOVE.VS`'s
-  // `while (!.Goto(pt, 0, 2000, true, 0));` against an unreachable point burns
-  // the scheduler's instruction budget and traps. Waiting turns that into a slow
-  // poll that either finds a route later or hits its give-up, and it does not
-  // change the guarded form, which leaves on `.HasPath` regardless.
-  const std::int64_t eta = blocked ? -1 : movement.eta(id);
+  // **An order with no route waits too.** It used to return at once, which
+  // spins every shipped loop that has no `.HasPath` guard -- `while (!.Goto(pt,
+  // 0, 2000, true, -1));` against an unreachable point burns the scheduler's
+  // instruction budget and traps. Waiting turns that into a slow poll that
+  // either finds a route later or reaches its give-up, as the original's does
+  // (it waits the slice with no route, 0x005d65e8).
+  const std::int64_t eta = move.has_path ? movement.eta(id) : -1;
   std::int64_t wait = order.slice;
   if (eta >= 0 && (wait <= 0 || eta < wait)) wait = eta;
-  if (!order.enter && order.give_up > 0) {
-    const std::int64_t left = order.give_up - (now - move.goto_started);
-    if (left <= 0) {
-      movement.stop(world, id);
-      return HostOutcome::ok_with(Value::boolean(false));
-    }
-    if (left < wait) wait = left;
-  }
   if (wait <= 0) return HostOutcome::ok_with(Value::boolean(false));
 
   HostOutcome out;
