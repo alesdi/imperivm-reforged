@@ -1717,6 +1717,29 @@ TEST(a_host_stop_reports_true_and_holds_still) {
   attach(world, movement);
   const ObjectId unit = spawn_unit(world, movement, Point{500, 500}, 100);
 
+  HostCall stop(world, {Value::object(kTypeObj, unit), Value::integer(1000)});
+  const HostOutcome outcome = invoke(registry, CallKind::member, "Stop", 1, stop);
+  CHECK(outcome.value.as_integer() == 1);
+  CHECK(outcome.status == HostStatus::suspend);
+  CHECK(outcome.suspend_for == 1000);
+  CHECK(!world.state(unit)->flags.has_active_path);
+}
+
+TEST(a_host_stop_on_a_walking_unit_answers_at_its_re_entry) {
+  // 0x005d6c90 on a unit with a route: the first entry asks the route to stop
+  // and suspends with it in hand; the re-entry answers false while the unit
+  // still has a step to take and true once it has stood still. A `Goto` route
+  // owns a lock, so it stops on the first free spot -- here the next step,
+  // with nobody about.
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(open_field(64));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{500, 500}, 100);
+
   HostCall walk(world, {Value::object(kTypeObj, unit), pack_point(Point{900, 500}),
                         Value::integer(0), Value::integer(2000), Value::boolean(true),
                         Value::integer(0)});
@@ -1724,11 +1747,23 @@ TEST(a_host_stop_reports_true_and_holds_still) {
   CHECK(world.state(unit)->flags.has_active_path);
 
   HostCall stop(world, {Value::object(kTypeObj, unit), Value::integer(1000)});
-  const HostOutcome outcome = invoke(registry, CallKind::member, "Stop", 1, stop);
-  CHECK(outcome.value.as_integer() == 1);
-  CHECK(outcome.status == HostStatus::suspend);
-  CHECK(outcome.suspend_for == 1000);
+  const HostOutcome first = invoke(registry, CallKind::member, "Stop", 1, stop);
+  CHECK(first.status == HostStatus::retry);
+  CHECK(first.suspend_for == 1000);
+  CHECK(world.state(unit)->flags.has_active_path);
+  CHECK(movement.find(unit)->stop_requested);
+
+  stop.context.first_call = false;
+  const HostOutcome early = invoke(registry, CallKind::member, "Stop", 1, stop);
+  CHECK(early.status == HostStatus::ok);
+  CHECK(early.value.as_integer() == 0);
+
+  world.advance(200);
   CHECK(!world.state(unit)->flags.has_active_path);
+  const HostOutcome done = invoke(registry, CallKind::member, "Stop", 1, stop);
+  CHECK(done.status == HostStatus::ok);
+  CHECK(done.value.as_integer() == 1);
+  CHECK(position_of(world, unit).x < 600);
 }
 
 TEST(the_deer_prelude_runs_through_the_host) {

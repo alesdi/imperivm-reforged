@@ -1897,6 +1897,89 @@ TEST(form_setup_moves_the_hero_and_keep_moving_carries_the_army) {
   }
 }
 
+TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) {
+  // `CVXFormObj::SetDest` (0x005f2cc0) that lays a route gives every member
+  // `form_move` with the replace flag (0x005f2b50 -> 0x005b4e90 with 1), so
+  // whatever a member was running -- `UNIT_IDLE.VS`, whose `Stop(2000)` drops
+  // a route every few seconds -- ends. The march then moves only the members
+  // still running it: one given another command since keeps its own.
+  Fixture f;
+  MovementSystem movement;
+  HeroSystem heroes;
+  movement.set_grid(ObstructionGrid(128, 128));
+  Result<FormationTable> formations = FormationTable::parse(bytes(R"(<Formations>
+      <Default Name="Front"/>
+      <FormationClass Name="Front" Width="2" Height="1" OffsetFrontLineByY="60"
+        OffsetWingsByX="80" OffsetWingsByY="-40">
+        <Class Name="Unit" CentralBlock="1"/>
+      </FormationClass>
+    </Formations>)"));
+  REQUIRE(formations.ok());
+  movement.set_formations(std::move(formations.value()));
+  f.world.add_system(&movement);
+  f.world.add_system(&heroes);
+
+  HostRegistry registry;
+  register_movement_host(registry);
+  register_command_host(registry);
+
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.hero_class);
+  f.world.set_position(hero, Point{200, 200});
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 1000);
+  heroes.register_hero(f.world, hero);
+  movement.state(hero).speed = 100;
+  std::vector<ObjectId> army;
+  for (int i = 0; i < 3; ++i) {
+    const ObjectId w = f.spawn(f.warrior_class, Point{200 + 10 * i, 200});
+    heroes.register_unit(f.world, w);
+    CHECK(heroes.attach(f.world, w, hero));
+    movement.state(w).speed = 140;
+    (void)f.order(w, "idle");
+    army.push_back(w);
+  }
+
+  HostCall setup(f.world, {obj(hero), pack_point(Point{2000, 200}), Value::integer(0),
+                           Value::integer(0), Value::boolean(true)});
+  REQUIRE(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, setup).status ==
+          HostStatus::ok);
+  CHECK(movement.find(hero)->form_lock);
+  for (const ObjectId w : army) {
+    CHECK(f.verbs(w) == std::vector<std::string>{"form_move"});
+    CHECK(movement.find(w)->goto_active);
+    CHECK(movement.find(w)->party == hero);
+    // The formation's flag rides on the order; while the hero walks it is
+    // not yet a lock (`0x004178d0`).
+    CHECK(movement.find(w)->dest_lock);
+    CHECK(!movement.lock_owner(w, *movement.find(w)));
+  }
+
+  // One member is given something else and stops; the march goes on.
+  (void)f.order(army[0], "idle");
+  movement.stop(f.world, army[0]);
+  for (int i = 0; i < 4; ++i) f.world.advance(800);
+  HostCall keep(f.world, {obj(hero), Value::integer(1500)});
+  (void)invoke(registry, CallKind::member, "FormKeepMoving", 1, keep);
+  CHECK(!movement.find(army[0])->goto_active);
+  CHECK(movement.find(army[1])->goto_active);
+  CHECK(movement.find(army[2])->goto_active);
+
+  // A setup the hero cannot walk ends the march (0x005f2c10) and hands out
+  // nothing: the marchers lose their routes, and the idle one keeps its idle.
+  f.world.set_position(hero, Point{100 * 16 + 8, 100 * 16 + 8});
+  for (std::int32_t y = 99; y <= 101; ++y) {
+    for (std::int32_t x = 99; x <= 101; ++x) {
+      if (x != 100 || y != 100) movement.mutable_grid().set_cell(x, y, true);
+    }
+  }
+  HostCall walled(f.world, {obj(hero), pack_point(Point{20 * 16 + 8, 20 * 16 + 8}),
+                            Value::integer(0), Value::integer(0), Value::boolean(true)});
+  (void)invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, walled);
+  REQUIRE(movement.find(hero)->last_outcome == MoveOutcome::blocked);
+  CHECK(!movement.find(army[1])->goto_active);
+  CHECK(f.verbs(army[0]) == std::vector<std::string>{"idle"});
+}
+
 TEST(form_keep_moving_waits_for_its_whole_argument_and_never_for_the_eta) {
   // `FormKeepMoving(ms)` used to clamp its wait to `movement->eta(id)` and
   // return the shorter of the two, which reads well against `HERO_MOVE.VS`'s

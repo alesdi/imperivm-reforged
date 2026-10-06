@@ -98,7 +98,16 @@
 //      `place_army`. So a march's members and its hero carry the hero's id in
 //      `MoveState::party` from the order `place_army` gives them until an
 //      order that is not a march; members step `kFormationStride`, the hero
-//      keeps its own.
+//      keeps its own. The original's record is a slot of the formation
+//      object (written by its slot assignment, 0x005f3115, cleared by a
+//      removal, 0x005f4686), so it may well outlast an order there; that
+//      was not followed. And the original member's route is the
+//      formation's (`SetFormation`, 0x00417790), which has a next point for
+//      as long as the formation's path does; here a member at the end of its
+//      station's route waits on it while its hero still walks the march
+//      (`MovementSystem::marching`), and only then arrives -- on a free spot
+//      when the march's flag was set, which is when `0x004178d0` names the
+//      member an owner (`lock_owner`).
 //   4. **Birds in the air.** A unit with `in_air` set neither tests nor
 //      blocks. The callback asks only for bit 22 and a health; whether an
 //      airborne flyer is linked into the ground buckets at all was not
@@ -311,13 +320,29 @@ struct MoveState {
   /// block each other.
   ObjectId party = kNoObject;
   /// `CVXPathRetry`'s flag bit 0 (`[retry+0x20]`), which `Goto` and
-  /// `GotoAttack` set and `GotoEnter` and a formation march do not: the order
-  /// **owns a destination lock** at the end of every route it is laid, and it
-  /// is arrived only on a free spot. Cleared for a class with
+  /// `GotoAttack` set and `GotoEnter` does not: the order **owns a
+  /// destination lock** at the end of every route it is laid, and it is
+  /// arrived only on a free spot. Cleared for a class with
   /// `ignore_passability`, which `0x004178d0` and `SetMedia` (`0x00418770`)
-  /// both refuse a lock. **Saved, and not hashed**: path media, like the rest
-  /// of this block. See `sim/avoidance.hpp`, "Destination locks".
+  /// both refuse a lock. On a march member it carries the formation's own
+  /// flag instead, and owns a lock only once the march is over
+  /// (`MovementSystem::lock_owner`). **Saved, and not hashed**: path media,
+  /// like the rest of this block. See `sim/avoidance.hpp`, "Destination
+  /// locks".
   bool dest_lock = false;
+  /// On the hero leading a march: `FormSetupAndMoveTo`'s fourth argument,
+  /// which `CVXFormObj::SetDest` (0x005f2cc0) stores at `[form+0x8c]` and
+  /// `0x004178d0` reads -- whether the members own a destination lock once
+  /// the formation's path is spent. `place_army` hands it to every member's
+  /// order as `dest_lock`. **Saved, and not hashed**.
+  bool form_lock = false;
+  /// `Unit::Stop` has asked a moving unit to stop: `CVXPathRetry`'s flag bit 1
+  /// (`[retry+0x20] |= 2`, slot 6 at 0x004178b0). The path follower
+  /// (0x00419ee0) then walks on, step by step, until the unit stands on a
+  /// passable free spot or its route runs out (`MovementSystem::decide`).
+  /// Cleared by every new order and by `stop`. **Saved, and not hashed**:
+  /// path media, and what it decides -- where the unit comes to rest -- is.
+  bool stop_requested = false;
   /// `CVXPathRetry`'s flag bit 3 (`[retry+0x20] & 8`): the free-spot search
   /// (`0x004180b0`) has run for this destination. Set when it runs
   /// (`0x004191ab`), whether or not it re-aims; cleared only by `SetDest` to
@@ -572,8 +597,25 @@ class MovementSystem : public System {
   /// moved more than `repath_threshold()` from where it was.
   MoveOutcome order_goto_object(World& world, ObjectId id, ObjectId target, std::int32_t range,
                                 std::int32_t min_range = 0, bool lock_destination = false);
-  /// `Unit.Stop`. Keeps the position, drops the route.
+  /// Keeps the position, drops the route: what `Unit.Stop` does to a unit
+  /// whose route owns no lock, and what every other caller means by stopping.
   void stop(World& world, ObjectId id);
+  /// `Unit.Stop`'s first entry on a unit with a route (0x005d6d4a): ask the
+  /// route to stop. A route whose order owns a lock (`lock_owner`) is walked
+  /// on until the unit stands on a passable free spot or the route runs out;
+  /// any other stops where it is, as `stop`. Returns whether the unit still
+  /// has a route to walk.
+  bool request_stop(World& world, ObjectId id);
+  /// Whether `id`'s route belongs to a formation march that is still on: a
+  /// member (not the hero) whose hero still walks the march's route.
+  /// `0x004178d0` asks the formation object the same thing (0x005f22f0:
+  /// whether its path is spent). **Inferred** onto this engine's march, which
+  /// has no formation path of its own: the hero's route stands for it.
+  [[nodiscard]] bool marching(ObjectId id, const MoveState& move) const noexcept;
+  /// `0x004178d0`: whether `id`'s order owns a destination lock -- the owner
+  /// it names, or none. A march member's does once the march is over and the
+  /// formation's flag was set; any other order's when `dest_lock` is set.
+  [[nodiscard]] bool lock_owner(ObjectId id, const MoveState& move) const noexcept;
   /// `Unit.Face(pt)`: look towards a world point. A point on top of the unit
   /// leaves the facing alone, since it names no direction.
   void face(World& world, ObjectId id, Point towards);
@@ -931,9 +973,9 @@ struct GotoOrder {
 /// it explains the argument (a duration, 50 to 10,000), it explains why
 /// `UNIT_IDLE.VS`'s `while(1)` and `SHIP_IDLE.VS`'s `while(1)` consume game time
 /// at all, and it makes `while (!.Stop(1000));` one call rather than a spin.
-/// Nothing here can interrupt a hold, so it always returns true after
-/// suspending; what would settle the false case is a retail trace of a unit
-/// ordered to stop while an animation is mid-swing.
+/// The false case is a unit with a route: 0x005d6c90 asks the route to stop
+/// and answers false at the re-entry while the unit is still walking to a
+/// free spot to stop on (`stop_impl` in `src/sim/movement.cpp`).
 ///
 /// `Goto`'s five arguments are `(destination, range, slice, flag, give_up)`.
 /// The first two are established: the shipped call sites pass `.range`,

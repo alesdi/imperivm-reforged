@@ -588,6 +588,11 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     // from running again, and it draws from the world's generator when it runs.
     put_bool(out, m.free_spot_tried);
     put_bool(out, m.free_spot_aimed);
+    // The formation's lock flag a march's hero carries, and `Unit::Stop`'s
+    // request: a unit that came back without it would stop where it stood
+    // rather than walk on to a free spot.
+    put_bool(out, m.form_lock);
+    put_bool(out, m.stop_requested);
     // The gates the route crosses, listed when it was laid: path media like
     // the route, and not recomputable from it -- a gate spawned since would
     // join a list the original never rebuilds.
@@ -649,7 +654,8 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
         !get_point(reader, m.offset_from) || !get_point(reader, m.offset_to) ||
         !bytes::get_i32(reader, m.retry_time) || !reader.u32(m.party) ||
         !get_bool(reader, m.dest_lock) || !get_bool(reader, m.free_spot_tried) ||
-        !get_bool(reader, m.free_spot_aimed)) {
+        !get_bool(reader, m.free_spot_aimed) || !get_bool(reader, m.form_lock) ||
+        !get_bool(reader, m.stop_requested)) {
       return FormatError::truncated;
     }
     std::uint32_t crossings = 0;
