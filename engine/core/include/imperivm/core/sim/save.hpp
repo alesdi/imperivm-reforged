@@ -281,7 +281,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// march's hero carries (`[form+0x8c]`). Not hashed -- path media -- and a
 /// version-27 file would load a unit told to stop as one walking on to its
 /// destination.
-inline constexpr std::uint32_t kStateVectorVersion = 28;
+/// 29: the squad section carries the AI's order queues -- per player the
+/// records `Squad::SendTo` posts, the free chain, the drain's timer and its
+/// running script -- and each squad's index into its player's (`[squad+0x26]`).
+/// Hashed, so a version-28 file describes a world this build would hash
+/// differently; and a load without them would carry out no order posted
+/// before the save, and drain the rest on another turn.
+inline constexpr std::uint32_t kStateVectorVersion = 29;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";
