@@ -60,12 +60,27 @@ Result<SaveFileManifest> decode_save_manifest(std::span<const std::byte> ini) {
   return manifest;
 }
 
-std::vector<std::byte> encode_save_file(const SaveFileContents& contents) {
-  // Creation order is the block layout; see the header. The builder cannot
-  // refuse either of these: the names are fixed, distinct and at the root.
-  BlockFileBuilder builder;
-  (void)builder.file(kSaveManifestEntry, encode_save_manifest(contents.manifest));
-  (void)builder.file(kSaveSessionEntry, contents.session);
+std::uint32_t save_block_size(std::size_t session_bytes) noexcept {
+  // One level of index blocks: the node's words after the size and the level
+  // name index blocks, each a block of data block indices.
+  constexpr std::uint64_t pointers = kSaveBlockSize / 4;
+  constexpr std::uint64_t capacity = (pointers - 2) * pointers * kSaveBlockSize;
+  return session_bytes <= capacity ? kSaveBlockSize : kLargeSaveBlockSize;
+}
+
+Result<std::vector<std::byte>> encode_save_file(const SaveFileContents& contents) {
+  // Creation order is the block layout; see the header. The names are fixed,
+  // distinct and at the root, so what the builder can refuse is a payload too
+  // big for its block size -- which is a save that would load as empty, and
+  // is refused rather than written.
+  BlockFileBuilder builder(save_block_size(contents.session.size()));
+  if (const Status status = builder.file(kSaveManifestEntry, encode_save_manifest(contents.manifest));
+      !status.ok()) {
+    return status.error();
+  }
+  if (const Status status = builder.file(kSaveSessionEntry, contents.session); !status.ok()) {
+    return status.error();
+  }
   return builder.build();
 }
 

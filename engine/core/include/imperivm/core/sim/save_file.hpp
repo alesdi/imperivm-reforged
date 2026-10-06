@@ -23,10 +23,11 @@
 //
 // ## Layout
 //
-// A 512-byte-block container (`formats/bfhp.hpp`), entries created in this
-// order, which fixes the block layout and is what `tests/test_corpus_imsave.py`
-// rebuilds with the Python reference writer to hold the two writers to each
-// other:
+// A 512-byte-block container (`formats/bfhp.hpp`) -- or a 4096-byte one when
+// the session outgrows what 512 can hold, below -- with entries created in
+// this order, which fixes the block layout and is what
+// `tests/test_corpus_imsave.py` rebuilds with the Python reference writer to
+// hold the two writers to each other:
 //
 //     save.ini          the manifest, below
 //     session.isav      `GameSession::save`'s bytes, verbatim
@@ -49,6 +50,25 @@
 // `turns` and `time` duplicate the envelope's meta on purpose and for the
 // reason the envelope duplicates the world's: a save browser lists a slot
 // without decoding the session. They are not authoritative; the envelope is.
+//
+// ## The block size
+//
+// A file node holds at most one level of index blocks, and the reader refuses
+// any deeper one, because no shipped container has one. At 512-byte blocks
+// that caps a file at 126 index blocks of 128 pointers of 512 bytes:
+// 8,257,536 bytes. A session passes that late in a big match -- Crossroads,
+// played by the app, writes 8.6 MB by turn 2,400 -- and for as long as the
+// writer was always 512 the builder refused the session's file, the refusal
+// was dropped, and the app printed `saved` over a container whose session
+// entry was empty: a save that no build could load. So the container is 512
+// while the session fits, which is the size of every shipped map container
+// and keeps every save the tests compare byte for byte with the reference
+// writer as it was, and 4096 when it does not, which holds 4.28 GB. 4096 is
+// not a choice of this engine's: the installation's own save slot,
+// `currentadv.bfhp`, is formatted at 4096-byte blocks (`docs/formats/bfhp.md`),
+// so a container of that size is one the original's reader opens.
+// *Inference, labelled:* whether the original sizes its saves by their
+// content was not read; it is enough here that both sizes are its.
 //
 // Nothing here touches a file. `engine/gamedata/save_file.hpp` puts the bytes
 // on disk and resolves the manifest's container against an installation.
@@ -96,8 +116,16 @@ struct SaveFileContents {
 /// `container` key, and a numeric field that is not entirely a number.
 [[nodiscard]] Result<SaveFileManifest> decode_save_manifest(std::span<const std::byte> ini);
 
-/// The whole file: manifest and session in a container.
-[[nodiscard]] std::vector<std::byte> encode_save_file(const SaveFileContents& contents);
+/// The block size a save of `session_bytes` is written at: 512 while a file
+/// of that size fits in one level of index blocks at 512, 4096 past it.
+inline constexpr std::uint32_t kSaveBlockSize = 512;
+inline constexpr std::uint32_t kLargeSaveBlockSize = 4096;
+[[nodiscard]] std::uint32_t save_block_size(std::size_t session_bytes) noexcept;
+
+/// The whole file: manifest and session in a container. Refused -- never
+/// written short -- when the container cannot hold the session, which at
+/// 4096-byte blocks is a session past 4.28 GB.
+[[nodiscard]] Result<std::vector<std::byte>> encode_save_file(const SaveFileContents& contents);
 /// Open a file this engine wrote. Refuses a container without both the
 /// manifest and the session, or one that is not a container at all.
 [[nodiscard]] Result<SaveFileContents> decode_save_file(std::span<const std::byte> bytes);

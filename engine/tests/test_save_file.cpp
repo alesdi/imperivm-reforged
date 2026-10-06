@@ -79,13 +79,16 @@ TEST(a_save_manifest_refuses_what_a_loader_cannot_use) {
 
 TEST(a_save_file_round_trips_through_its_container) {
   const SaveFileContents contents = sample();
-  const std::vector<std::byte> raw = encode_save_file(contents);
+  const Result<std::vector<std::byte>> encoded = encode_save_file(contents);
+  REQUIRE(encoded.ok());
+  const std::vector<std::byte>& raw = encoded.value();
 
   // It is a container the reader accepts, with exactly the two entries, in
-  // the order the header documents.
+  // the order the header documents, at the block size of the shipped maps.
   const Result<BlockFile> file = BlockFile::open(raw);
   REQUIRE(file.ok());
   CHECK(file->validate().ok());
+  CHECK(file->header().block_size == kSaveBlockSize);
   const Result<BlockFileIndex> index = BlockFileIndex::build(*file);
   REQUIRE(index.ok());
   REQUIRE(index->size() == 2);
@@ -93,6 +96,36 @@ TEST(a_save_file_round_trips_through_its_container) {
   CHECK(index->entries()[1].path == kSaveSessionEntry);
 
   const Result<SaveFileContents> back = decode_save_file(raw);
+  REQUIRE(back.ok());
+  CHECK(back->manifest == contents.manifest);
+  CHECK(back->session == contents.session);
+}
+
+TEST(a_save_past_what_512_byte_blocks_hold_is_written_whole) {
+  // One level of index blocks at 512 holds 8,257,536 bytes, and a late
+  // Crossroads session is 8.6 MB. The builder refuses such a file at 512 --
+  // and the save writer once dropped that refusal and wrote a container whose
+  // session was empty. It is written at 4096 now, and comes back whole.
+  constexpr std::size_t kLimit = 126u * 128u * 512u;
+  SaveFileContents contents = sample();
+  contents.session.assign(kLimit + 1, std::byte{0});
+  for (std::size_t i = 0; i < contents.session.size(); ++i) {
+    contents.session[i] = static_cast<std::byte>((i * 2654435761u) >> 24);
+  }
+  {
+    BlockFileBuilder narrow;
+    CHECK(!narrow.file(kSaveSessionEntry, contents.session).ok());
+  }
+  CHECK(save_block_size(kLimit) == kSaveBlockSize);
+  CHECK(save_block_size(kLimit + 1) == kLargeSaveBlockSize);
+
+  const Result<std::vector<std::byte>> encoded = encode_save_file(contents);
+  REQUIRE(encoded.ok());
+  const Result<BlockFile> file = BlockFile::open(encoded.value());
+  REQUIRE(file.ok());
+  CHECK(file->validate().ok());
+  CHECK(file->header().block_size == kLargeSaveBlockSize);
+  const Result<SaveFileContents> back = decode_save_file(encoded.value());
   REQUIRE(back.ok());
   CHECK(back->manifest == contents.manifest);
   CHECK(back->session == contents.session);
