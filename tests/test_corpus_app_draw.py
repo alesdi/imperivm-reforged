@@ -262,13 +262,29 @@ def test_a_bird_flies_between_the_ends_of_its_animation(app, game_dir):
     length of its leg.
     """
     eagle, out = eagle_run(app, game_dir, [f"look:{EAGLE}", "wait:6"], 700)
-    # The look moves the camera, which moves everything; a few frames on, the
-    # view stands still.
-    anchors = layer_origins(out, eagle, (800,))[10:]
-    assert len(anchors) > 200, len(anchors)
-    steps = [max(abs(a[0] - b[0]), abs(a[1] - b[1])) for a, b in zip(anchors, anchors[1:])]
+    # Each placement of the shadow with the game time it was drawn at. The look
+    # moves the camera, which moves everything; a few frames on, the view
+    # stands still.
+    placed: list[tuple[int, tuple[int, int]]] = []
+    drawn = None
+    for line in out.splitlines():
+        if match := FRAME.match(line):
+            drawn = int(match.group(3))
+        elif drawn is not None and (match := ORIGIN.match(line)):
+            found, left, top, off_x, off_y, depth, x, y = map(int, match.groups())
+            if found == eagle and depth == 800:
+                placed.append((drawn, (x - off_x - left, y - off_y - top)))
+    placed = placed[10:]
+    assert len(placed) > 200, len(placed)
+    # A turn's worth at a time: ten to fifteen pixels a turn, never a leg. Only
+    # frames close in game time are compared: a frame the machine was slow to
+    # draw covers several turns, and the eagle travels the more in it, which is
+    # the machine's pace and not a leg drawn at once -- the suite under load
+    # once drew a 102-pixel step that way.
+    steps = [max(abs(a[1][0] - b[1][0]), abs(a[1][1] - b[1][1]))
+             for a, b in zip(placed, placed[1:]) if 0 <= b[0] - a[0] <= 150]
+    assert len(steps) > 150, len(steps)
     moving = [step for step in steps if step]
-    # A turn's worth at a time: ten to fifteen pixels a turn, never a leg.
     assert len(moving) > 30, moving
     assert max(steps) < 30, sorted(steps)[-10:]
 
