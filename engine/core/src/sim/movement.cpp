@@ -630,7 +630,6 @@ MoveOutcome MovementSystem::order_goto(World& world, ObjectId id, Point dest, st
   }
   move.target_object = kNoObject;
   move.min_range = min_range;
-  move.goto_started = world.time();
   move.goto_active = true;
   move.party = party;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
@@ -649,7 +648,6 @@ MoveOutcome MovementSystem::order_goto_object(World& world, ObjectId id, ObjectI
   }
   move.target_object = target;
   move.min_range = min_range;
-  move.goto_started = world.time();
   move.goto_active = true;
   move.party = kNoObject;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
@@ -2338,83 +2336,64 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   MoveState& move = movement.state(id);
   const Point here = world.resolve_position(id);
   // `IsArrived` (`0x005d422b`, `0x005d43b9`): in the band, and on a free spot
-  // when the order owns a lock.
+  // when the order owns a lock. An arrival clears the failure stamp
+  // (0x005d6482).
   if (within(here, dest, order.range) &&
       (!order.lock_destination || movement.ignores_passability(world, id) ||
        movement.spot_free(world, id, here, movement.radius_of(world, id)))) {
     movement.stop(world, id);
+    move.goto_failed_at = kNoGotoFailure;
     return HostOutcome::ok_with(Value::boolean(true));
   }
 
   const GameTime now = now_of(ctx, world);
-  // Continuation is keyed on the *order*, not on whether a route exists.
-  // A destination behind a wall leaves `has_path` false with the order still
-  // outstanding, and `while (!.Goto(pt, 0, 1000, true, 5000));` in
-  // `UNIT_ENTER.VS` has no `.HasPath` guard: if that reset the clock each call,
-  // the give-up would never fire and the loop would never leave.
+  // Continuation is keyed on the *order*, not on whether a route exists: a
+  // destination behind a wall leaves `has_path` false with the order still
+  // outstanding, and the next call to the same place searches again from
+  // where the unit stands rather than starting a new order.
   const bool continuing =
       move.goto_active && move.target == dest && move.target_object == order.target;
 
-  // **Zero means no limit, not "no time at all".** `Goto(pt, 0, 2000, true, 0)`
-  // is the commonest shipped form by a distance, and it sits inside
-  // `while (!.Goto(...) && .HasPath)`; a zero read as an immediate timeout stops
-  // every one of those loops on its second call, after one turn of walking.
-  // That is decisive, and it is how this reading was caught: the deer walked 23
-  // units of a 57-unit route and gave up.
-  if (!order.enter && continuing && order.give_up > 0 &&
-      now - move.goto_started >= order.give_up) {
-    // The order timed out. Drop the path so `.HasPath` reports the failure and
-    // the shipped `while (!.Goto(...) && .HasPath)` loop leaves.
-    movement.stop(world, id);
-    return HostOutcome::ok_with(Value::boolean(false));
+  // **A unit that has been failing searches less often** (0x005d2eb0): with
+  // the stamp set, every call draws `rand(0, 2n)`, `n` the whole 2,048 ms
+  // spans since the stamp, at most 10, and anything but 0 tells `SetDest` not
+  // to search the goal it already has (0x0041a513). The draw is taken whether
+  // or not the goal has changed; `SetDest` reads it only when it has not.
+  bool may_search = true;
+  if (move.goto_failed_at != kNoGotoFailure) {
+    const std::int64_t failing = now > move.goto_failed_at ? now - move.goto_failed_at : 0;
+    const std::int64_t spans = std::min<std::int64_t>(failing >> 11, 10);
+    may_search = world.rng().between(0, static_cast<std::int32_t>(2 * spans)) == 0;
   }
 
-  bool blocked = false;
-  if (!continuing) {
+  // A new order always searches. A live one searches again only when its
+  // route has run out -- walked to the end of a partial route, or taken away
+  // by the grid -- since neither is arrival (`GotoOrder::give_up`); and the
+  // draw above may skip that search, which leaves the unit with no route.
+  if (!continuing || (!move.has_path && may_search)) {
     const MoveOutcome outcome =
         order.target == kNoObject
             ? movement.order_goto(world, id, dest, order.range, order.min_range, kNoObject,
                                   order.lock_destination)
             : movement.order_goto_object(world, id, order.target, order.range, order.min_range,
                                          order.lock_destination);
-    if (outcome == MoveOutcome::arrived) return HostOutcome::ok_with(Value::boolean(true));
-    blocked = outcome == MoveOutcome::blocked;
-    // On the clock the give-up below reads, which is the scheduler's.
-    if (order.enter) move.goto_started = now;
-  } else if (!move.has_path) {
-    // The route ran out under a live order: either it was partial and has been
-    // walked to its end, or the grid changed and nothing else reaches. Neither
-    // is arrival, for `GotoEnter` either (`GotoOrder::enter`): search again
-    // from here.
-    GameTime began = move.goto_started;
-    // An enter order's clock is its failure stamp, so a route that has just
-    // run out starts it now. One the grid took away between two calls
-    // (`decide`'s re-validation) is stamped from the last call that saw a
-    // route: up to one slice early, where the original stamps at the first
-    // call that fails.
-    if (order.enter && move.last_outcome != MoveOutcome::blocked) began = now;
-    blocked =
-        (order.target == kNoObject
-             ? movement.order_goto(world, id, dest, order.range, order.min_range, kNoObject,
-                                   order.lock_destination)
-             : movement.order_goto_object(world, id, order.target, order.range,
-                                          order.min_range, order.lock_destination)) ==
-        MoveOutcome::blocked;
-    // Re-ordering restarts the give-up clock. Put it back: this is the same
-    // order the caller issued, and a destination that is only reachable in fits
-    // would otherwise never time out.
-    move.goto_started = began;
+    if (outcome == MoveOutcome::arrived) {
+      move.goto_failed_at = kNoGotoFailure;
+      return HostOutcome::ok_with(Value::boolean(true));
+    }
   }
 
-  if (order.enter) {
-    if (move.has_path) {
-      // A route is laid, so the failure stamp is clear (0x005d698f).
-      move.goto_started = now;
-    } else if (order.give_up >= 0 && now - move.goto_started >= order.give_up) {
-      // No route, for `give_up` or longer: `GotoEnter` returns 2 and the
-      // script ends at the call (0x005d696e). `UNIT_BUILD_CATAPULT.VS` passes
-      // 0, so a builder with no way to the machine's door leaves the job at
-      // once instead of entering from where it stands.
+  if (move.has_path) {
+    // A route is laid, so the failure stamp is clear (0x005d6528).
+    move.goto_failed_at = kNoGotoFailure;
+  } else {
+    // No route and not arrived: stamp the failure if it is not stamped
+    // already (0x005d64db), and once `give_up >= 0` has elapsed since, the
+    // call returns 2 and the script ends at it (0x005d6504). `UNIT_ADVANCE.VS`
+    // passes 0, so a unit whose route was cut back to where it stands leaves
+    // the advance at once instead of searching again every two seconds.
+    if (move.goto_failed_at == kNoGotoFailure) move.goto_failed_at = now;
+    if (order.give_up >= 0 && now - move.goto_failed_at >= order.give_up) {
       movement.stop(world, id);
       return HostOutcome::end_script();
     }
@@ -2423,23 +2402,15 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   // Not there yet. Wait for the lesser of the caller's slice and the time to
   // arrival, then let the caller's loop re-test.
   //
-  // **A blocked order waits too.** It used to return at once, which spins every
-  // shipped loop that has no `.HasPath` guard -- `UNIT_MOVE.VS`'s
-  // `while (!.Goto(pt, 0, 2000, true, 0));` against an unreachable point burns
-  // the scheduler's instruction budget and traps. Waiting turns that into a slow
-  // poll that either finds a route later or hits its give-up, and it does not
-  // change the guarded form, which leaves on `.HasPath` regardless.
-  const std::int64_t eta = blocked ? -1 : movement.eta(id);
+  // **An order with no route waits too.** It used to return at once, which
+  // spins every shipped loop that has no `.HasPath` guard -- `while (!.Goto(pt,
+  // 0, 2000, true, -1));` against an unreachable point burns the scheduler's
+  // instruction budget and traps. Waiting turns that into a slow poll that
+  // either finds a route later or reaches its give-up, as the original's does
+  // (it waits the slice with no route, 0x005d65e8).
+  const std::int64_t eta = move.has_path ? movement.eta(id) : -1;
   std::int64_t wait = order.slice;
   if (eta >= 0 && (wait <= 0 || eta < wait)) wait = eta;
-  if (!order.enter && order.give_up > 0) {
-    const std::int64_t left = order.give_up - (now - move.goto_started);
-    if (left <= 0) {
-      movement.stop(world, id);
-      return HostOutcome::ok_with(Value::boolean(false));
-    }
-    if (left < wait) wait = left;
-  }
   if (wait <= 0) return HostOutcome::ok_with(Value::boolean(false));
 
   HostOutcome out;

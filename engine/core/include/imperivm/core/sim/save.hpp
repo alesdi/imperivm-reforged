@@ -269,7 +269,14 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// re-aimed by it. Not hashed -- path media -- but the search draws from the
 /// world's generator, so a version-25 file would load with both clear and
 /// let a unit draw again where the original would not.
-inline constexpr std::uint32_t kStateVectorVersion = 26;
+/// 27: the movement section's `MoveState` carries `Goto`'s failure stamp
+/// (`[unit+0x150]`, `goto_failed_at`) in the slot that held the time the
+/// order began, which nothing reads any more: `give_up` times the failure,
+/// not the walk (`GotoOrder::give_up`). Same width, new meaning, so a
+/// version-26 file would load every walking unit as failing since its order
+/// began -- not hashed, and it would end scripts early and draw from the
+/// world's generator where the original does not.
+inline constexpr std::uint32_t kStateVectorVersion = 27;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";
