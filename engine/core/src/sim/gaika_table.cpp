@@ -142,6 +142,9 @@ GaikaId GaikaTable::for_settlement(ObjectId settlement) const noexcept {
 }
 
 GaikaId GaikaTable::at(const LsaPartition& areas, Point where) const noexcept {
+  // 0x0044e3f0 answers node 0 for either coordinate negative, before it
+  // indexes its slot grid. See the header.
+  if (where.x < 0 || where.y < 0) return kNoGaika;
   const LsaId here = areas.at(where);
   GaikaId best = kNoGaika;
   std::int64_t nearest = 0;

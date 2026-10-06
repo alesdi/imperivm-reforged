@@ -3076,6 +3076,74 @@ TEST(a_garrisoned_squad_is_filed_under_its_towns_node) {
   CHECK(b.heroes.squads().find(key)->gaika_in == east_node);
 }
 
+/// `BestTargetInGAIKA` starts from the receiver's node, which is
+/// `GetGAIKA(Obj)`'s question (0x0044e650): for a held unit, its `posRH` --
+/// the town it garrisons. It asked the holder walk for a while, which ends on
+/// the holder record at (0, 0), so a caster inside the eastern town searched
+/// the western node and found nothing to fight in its own.
+TEST(best_target_in_gaika_searches_a_garrisoned_casters_own_town) {
+  StrengthBench b;
+  b.plant(3, 3);                             // the western town, nearest the corner
+  const SettlementId east = b.plant(9, 10);  // the eastern one, far from it
+  b.rebuild();
+  const GaikaId west_node = b.world.gaika().at(b.world.lsa(), in_cell(3, 3));
+  const GaikaId east_node = b.world.gaika().at(b.world.lsa(), in_cell(9, 10));
+  REQUIRE(west_node != east_node);
+  REQUIRE(b.world.gaika().at(b.world.lsa(), (Point{0, 0})) == west_node);
+
+  const ObjectId caster = b.trooper("Legionary", 1, 9, 11);
+  const ObjectId enemy = b.trooper("Archer", 2, 9, 12);
+  b.arm();
+  b.band(2, east_node, {enemy});
+  REQUIRE(best_in_gaika(b, caster) == enemy);
+
+  REQUIRE(garrison_enter(b.world, east, caster, /*force=*/true));
+  REQUIRE(b.world.state(caster)->is_held());
+  REQUIRE(b.world.resolve_position(caster) == (Point{0, 0}));
+  CHECK(best_in_gaika(b, caster) == enemy);
+}
+
+/// **A negative coordinate is in no node.** 0x0044e3f0, the one lookup every
+/// point-to-node reader goes through, answers 0 for `x < 0` or `y < 0` before
+/// it indexes its slot grid; this answered the node nearest the corner.
+TEST(get_gaika_of_a_negative_point_is_no_node) {
+  SiegeBench b;
+  b.plant(3, 3);
+  b.rebuild();
+  const GaikaTable& table = b.world.gaika();
+  REQUIRE(table.count() >= 1);
+  // The control: the corner itself, and a point off the far edge, still have
+  // a node -- only the sign decides.
+  REQUIRE(table.at(b.world.lsa(), (Point{0, 0})) != kNoGaika);
+  REQUIRE(table.at(b.world.lsa(), (Point{100'000, 100'000})) != kNoGaika);
+  CHECK(table.at(b.world.lsa(), kHeldPosition) == kNoGaika);
+  CHECK(table.at(b.world.lsa(), (Point{-1, 500})) == kNoGaika);
+  CHECK(table.at(b.world.lsa(), (Point{500, -1})) == kNoGaika);
+  CHECK(table.at(b.world.lsa(), (Point{-3000, -3000})) == kNoGaika);
+
+  // And through the registry, as `GetGAIKA(point)` (0x005bd090).
+  script::HostRegistry registry;
+  (void)register_all_hosts(registry);
+  HostContext context;
+  context.world = &b.world;
+  const std::uint32_t index = registry.find(script::CallKind::free_function, "GetGAIKA", 1);
+  REQUIRE(index != script::kUnresolvedHost);
+  const auto ask = [&](Point where) {
+    std::vector<script::Value> args{pack_point(where)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = "GetGAIKA";
+    ctx.kind = script::CallKind::free_function;
+    const script::HostOutcome out = registry.entry(index).fn(ctx);
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_integer() ? out.value.as_integer() : -99;
+  };
+  CHECK(ask(in_cell(3, 3)) == table.at(b.world.lsa(), in_cell(3, 3)));
+  CHECK(ask(kHeldPosition) == kNoGaika);
+  CHECK(ask(Point{-1, 500}) == kNoGaika);
+}
+
 namespace {
 
 /// `u.BestMDPos(md, min, max, minEval, protect)`, through the registry.

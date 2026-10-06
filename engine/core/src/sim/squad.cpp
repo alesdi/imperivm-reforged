@@ -2664,7 +2664,12 @@ ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId af
   const LsaPartition& areas = world.lsa();
   for (const ObjectId id : fresh) {
     if (heroes.squads().squad_of(id) != kNoSquad) continue;
-    const GaikaId under = nodes.at(areas, world.resolve_position(id));
+    // 0x0044e650 at 0x0041e877: for a held unit its `posRH`, the town, and
+    // not the holder record's (0, 0). **An equivalence today**, kept for the
+    // reading: a held unit is in a holder no squad holds, so `add_to_squad`'s
+    // step 3 files it nowhere and never reads the node; the fault sweep says
+    // so, and the regroup below, where it does reach a squad, is tested.
+    const GaikaId under = nodes.at(areas, unit_pos_rh(world, id));
     (void)add_to_squad(world, heroes, id, under, 0);
   }
   return highest;
@@ -3954,8 +3959,9 @@ void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const
     flags = slot->state.flags.no_ai ? static_cast<std::uint16_t>(flags | kSquadFlagNoAi)
                                     : static_cast<std::uint16_t>(flags & ~kSquadFlagNoAi);
     flags = static_cast<std::uint16_t>(flags & ~kSquadLocked);
+    // 0x0044e650 at 0x00447495, so a held unit's `posRH`, as at enrolment.
     const GaikaId dest = old != nullptr ? old->dest_gaika
-                                        : world.gaika().at(world.lsa(), world.resolve_position(id));
+                                        : world.gaika().at(world.lsa(), unit_pos_rh(world, id));
     const GaikaId src = old != nullptr ? old->src_gaika : kNoGaika;
     const GameTime fought = old != nullptr ? old->last_fight_time : 0;
     if (old != nullptr) (void)squads.leave(old_key, id);
