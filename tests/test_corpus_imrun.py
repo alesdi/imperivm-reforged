@@ -395,6 +395,11 @@ def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     bring a war to them: one of p1's swordsmen, stood outside p0's east wall
     and sent to p0's town hall, walks along the wall to a gate it cannot pass
     and is killed there by one of p0's sentries.
+
+    `IMRUN_PLACE` takes the swordsman out of its AI's hands, as a map's
+    `no_ai` unit is. Once p1's squads were filed under the right node, its
+    `SQUADMONITOR.VS` called the wounded swordsman's squad home in flight
+    (`SS_Flee`, "enter"), and it got away with 88 health of 400.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():

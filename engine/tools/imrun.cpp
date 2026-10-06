@@ -38,6 +38,8 @@
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/gate.hpp"
+#include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/orders.hpp"
 #include "imperivm/core/world/map.hpp"
 #include "imperivm/core/formats/ini.hpp"
@@ -81,7 +83,7 @@ int main(int argc, char** argv) {
                  "three or more standing bodies share, by class, owner and order;\n"
                  "IMRUN_GOTO=<turn>:<id>:<x>,<y> gives that object its owner's\n"
                  "right-click order to the point before that turn, IMRUN_PLACE=<x>,<y>\n"
-                 "first stands it there, IMRUN_WATCH=<id>\n"
+                 "first stands it there, out of its AI's hands, IMRUN_WATCH=<id>\n"
                  "prints where it stands every ten turns and every gate its route\n"
                  "crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
                  "and as it starts or stops letting units through, and every gate\n"
@@ -663,6 +665,19 @@ int main(int argc, char** argv) {
         move->stop(run.world(), goto_id);
       }
       const bool placed = run.world().set_position(goto_id, sim::Point{place_x, place_y});
+      // And out of its AI's hands: its no-AI flag set, as a map can author it
+      // (`UNITFLAG_NOAI`), and a squad of its own, which takes `SF_NOAI` from
+      // that flag (0x00447330), so `SQUADMONITOR.VS` passes it by. What the
+      // run then shows is the order and the world's answer to it, not its
+      // AI's next thought -- a hurt squad flees home.
+      if (sim::ObjectState* state = run.world().mutable_state(goto_id); placed && state != nullptr) {
+        state->flags.no_ai = true;
+        if (sim::HeroSystem* heroes = sim::hero_system_of(run.world())) {
+          const ObjectId alone[] = {static_cast<ObjectId>(goto_id)};
+          sim::regroup_into_fresh_squads(run.world(), *heroes, alone, /*SS_IDLE*/ 0,
+                                         run.world().time());
+        }
+      }
       std::printf("  place turn %llu: %u at (%d,%d)%s\n", turn, goto_id, place_x, place_y,
                   placed ? "" : " refused");
     }
