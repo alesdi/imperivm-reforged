@@ -829,11 +829,13 @@ inline constexpr std::int64_t kDefaultIdleSlice = 1000;
 ///     if (bEnterCatapult) while(!.Goto(pt, 0, 1000, true, 5000));
 ///     else                while(!.GotoEnter(pt, 0, 1000, true, 5000));
 ///
-/// The difference is in `gbr.exe` (0x005d6620) rather than in the pairing:
-/// **arrival is the band and nothing else**, and **`give_up` is how long the
-/// call may go without a route before it ends the script** -- `0` at the first
-/// failed search, never when negative. A walk is not timed. The details and
-/// addresses are on `GotoOrder::enter`.
+/// In `gbr.exe` (0x005d6620) the two differ only in `SetDest`'s lock flag,
+/// which `GotoEnter` passes clear. Everything else is the shape all four
+/// share: **arrival is the band and nothing else**, and **`give_up` is how
+/// long the call may go without a route before it ends the script** -- `0` at
+/// the first failed search, never when negative. A walk is not timed. The
+/// details and addresses are on `GotoOrder::give_up`; `GotoAttack` reads its
+/// fourth argument the same way (0x005d40c0).
 ///
 /// This used to read the pairing as "the end of a partial route counts as
 /// arrival", inferred for a doorway the building's own footprint might block.

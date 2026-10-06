@@ -82,12 +82,18 @@ def test_a_broken_fort_offers_repair_lit_and_nothing_else(imconform, game_dir):
     assert buttons == {"repair townhall": "lit"}
 
 
-def presses(imconform: Path, game_dir: Path, klass: str, names: list[str], map_name: str = MAP):
-    """[(verdict, [queue entries, running first])] after each press of `names`."""
+def presses(imconform: Path, game_dir: Path, klass: str, names: list[str], map_name: str = MAP,
+            skirmish: bool = False):
+    """[(verdict, [queue entries, running first])] after each press of `names`.
+
+    `skirmish` builds the whole session, passability included, where the
+    default is the thin one, in which no route can be laid."""
     path = game_dir / map_name
     if not path.is_file():
         pytest.skip(f"{map_name} is not in this installation")
     command = [str(imconform), "buttons", str(game_dir), str(path), klass]
+    if skirmish:
+        command.append("--skirmish")
     for name in names:
         command += ["--press", name]
     result = subprocess.run(command, capture_output=True, text=True, timeout=300)
@@ -141,8 +147,14 @@ def test_shift_appends_a_move_and_ctrl_does_not(imconform, game_dir):
     # dispatch's `bModifier`. A plain move replaces the last, a Shift move
     # queues behind it, and a Ctrl move -- which the app used to be unable to
     # give, passing Shift as both -- replaces like a plain one.
+    #
+    # On the whole session, so that the moves have routes: in the thin one the
+    # running move's `Goto(pt, 0, 2000, true, 0)` lays none, and a give-up of 0
+    # ends the script at once (0x005d61b0), so nothing is left running for the
+    # Shift move to queue behind. It used to stay, searching forever.
     first, second, shifted, ctrl = presses(imconform, game_dir, "Unit", [
-        "move@1000,1000", "move@1200,1000", "shift+move@1400,1000", "ctrl+move@1000,1200"])
+        "move@1000,1000", "move@1200,1000", "shift+move@1400,1000", "ctrl+move@1000,1200"],
+        skirmish=True)
     assert first == ("issued", ["move"])
     assert second == ("issued", ["move"])
     assert shifted == ("issued", ["move", "move"])

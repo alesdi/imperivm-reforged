@@ -140,6 +140,10 @@ inline constexpr std::int32_t kFacingLength = 1024;
 /// `SetSpeedFactor`'s neutral value: the class's own `speed`.
 inline constexpr std::int32_t kDefaultSpeedFactor = 100;
 
+/// `MoveState::goto_failed_at` while the unit's `Goto` calls are laying
+/// routes: the original's `-1` in `[unit+0x150]`.
+inline constexpr std::int64_t kNoGotoFailure = -1;
+
 /// Which of an entity's `variations` a heading is drawn as: the sprite sheet
 /// column, which is what `AnimCursor::variation` holds.
 ///
@@ -245,11 +249,9 @@ struct MoveState {
   /// exists right now.
   ///
   /// The two differ exactly where it matters. A unit whose destination is walled
-  /// off has an order and no route, and `Goto`'s give-up timeout has to keep
-  /// running for it -- otherwise `while (!.Goto(pt, 0, 1000, true, 5000));`
-  /// (`UNIT_ENTER.VS`, which has no `.HasPath` guard) never times out, because
-  /// keying the continuation test on `has_path` restarts the clock on every
-  /// call. Cleared by `stop`, by arrival, and by a new order to somewhere else.
+  /// off has an order and no route, and the next `Goto` to the same place is
+  /// the same order searching again from where it stands, not a new one.
+  /// Cleared by `stop`, by arrival, and by a new order to somewhere else.
   bool goto_active = false;
 
   /// The exact accumulator described in the file header: the sum over turns of
@@ -259,8 +261,14 @@ struct MoveState {
 
   /// Game time the unit last moved, for `Unit.TimeWithoutWalking`.
   GameTime last_moved = 0;
-  /// Game time the current `Goto` began, for its give-up timeout.
-  GameTime goto_started = 0;
+  /// When the `Goto` family last began failing to lay a route, or
+  /// `kNoGotoFailure` while it has not -- `[unit+0x150]` in `gbr.exe`, which
+  /// keeps `-1` for the same. Stamped by the first call that lays no route and
+  /// is not arrived, and cleared by a call that lays one or arrives and by the
+  /// end of the unit's command; the give-up and the re-search draw both read
+  /// it. **Not hashed**: nothing the original dumps prints it. See
+  /// `GotoOrder::give_up`.
+  GameTime goto_failed_at = kNoGotoFailure;
 
   /// The route. **Not hashed** -- see the file header.
   std::vector<Point> waypoints;
@@ -860,11 +868,13 @@ struct GotoOrder {
   /// How long one call may wait before returning to the caller's loop. The
   /// call suspends for the lesser of this and the time to arrival.
   std::int64_t slice = 0;
-  /// Total timeout. **Anything non-positive means no limit**; see the note on
-  /// `register_movement_host`. For an `enter` order it is something else; see
-  /// there.
-  std::int64_t give_up = -1;
-  /// `GotoEnter` (0x005d6620), whose give-up `gbr.exe` reads directly:
+  /// **How long the call may go without a route before it ends the script.**
+  /// `0` ends it at the first search that lays none, a negative value never
+  /// does, and a walk, however long, is never timed. The four bodies read it
+  /// identically -- `Goto` to a point (0x005d61b0, give-up at 0x005d64db),
+  /// `GotoEnter` (0x005d6620, at 0x005d6942), and `Goto` to an object
+  /// (0x005d6b90) and `GotoAttack` (0x005d6a90) through their shared body
+  /// 0x005d40c0 (at 0x005d4429):
   ///
   ///   * **arrival is the band and nothing else.** On re-entry the call answers
   ///     `CVXPathRetry::IsArrived` (0x00417c10), and a point route is arrived
@@ -873,16 +883,34 @@ struct GotoOrder {
   ///     march's step (0x00419c4c, 0x00419e19, inside 0x00419b20). So the end
   ///     of a partial route is not arrival, and neither is a route that was
   ///     never laid.
-  ///   * **`give_up` times the failure, not the walk.** When `SetDest`
+  ///   * **the failure is stamped, not the order.** When `SetDest`
   ///     (0x0041a4c0) lays no route and the unit is not arrived, the call
-  ///     stamps `[unit+0x150]` with the time if it is clear (0x005d6942),
-  ///     and when `give_up >= 0` and the time since the stamp has reached it
-  ///     (0x005d2e90) it returns 2 -- **the script ends there** (`script/
-  ///     host.hpp`). A laid route or an arrival clears the stamp (0x005d698f,
-  ///     0x005d68e9). So `0` gives up on the first failed search and a
-  ///     negative value never does; a walk, however long, is never timed.
-  ///     Here `goto_started` carries the stamp for such an order.
-  bool enter = false;
+  ///     stamps `[unit+0x150]` with the time if it is clear, and when
+  ///     `give_up >= 0` and the time since the stamp (0x005d2e90) has reached
+  ///     it, it returns 2 -- **the script ends there** (`script/host.hpp`).
+  ///     A laid route or an arrival clears the stamp (0x005d6528, 0x005d6482);
+  ///     a new order does not. Here it is `MoveState::goto_failed_at`.
+  ///   * **a failing unit searches less and less often.** Before `SetDest`,
+  ///     with the stamp set, the call draws `rand(0, 2n)` from the world's
+  ///     generator, `n` being the whole 2,048 ms spans since the stamp, at
+  ///     most 10 (0x005d2eb0); anything but 0 is `SetDest`'s first argument,
+  ///     which for an unchanged goal skips the search and answers from the
+  ///     route the record already has (0x0041a513, 0x0041a53c). A unit five
+  ///     seconds stuck searches one call in five, and one stuck for 21
+  ///     seconds or more one call in twenty-one.
+  ///   * **the end of the unit's command clears the stamp**, inferred: slot 9
+  ///     of the seven unit vtables (0x005d2940) clears it, with the walking
+  ///     flags, before the base (0x005b5160) pops the command queue's head.
+  ///     So each command's give-up starts from its own first failure.
+  ///
+  /// This used to be read as a total timeout in which anything non-positive
+  /// meant no limit, from the shipped loop `while (!.Goto(pt, 0, 2000, true,
+  /// 0) && .HasPath)`: a `0` read as "at once" seemed to stop every such loop
+  /// on its second call. It does not, because a walk is never timed. What the
+  /// misreading cost is the other half: a unit whose route was cut back to
+  /// where it stands never left `UNIT_ADVANCE.VS`'s loop, and searched again
+  /// every two seconds for as long as the match lasted.
+  std::int64_t give_up = -1;
   /// `SetDest`'s lock flag: `Goto` (`0x005d645c`) and `GotoAttack`
   /// (`0x005d435b`, `0x005d43a6`) pass 1, `GotoEnter` (`0x005d68c3`) 0.
   bool lock_destination = false;
@@ -890,8 +918,8 @@ struct GotoOrder {
 
 /// The shared body of the `Goto` family. Returns the host outcome the entry
 /// point should return: `true` on arrival, `false` with a suspension while
-/// walking, `false` outright when the order has timed out -- and, for an
-/// `enter` order that has gone `give_up` without a route, `finish`.
+/// walking or searching, and `finish` once it has gone `give_up` without a
+/// route.
 [[nodiscard]] script::HostOutcome run_goto(script::CallContext& ctx, World& world,
                                            MovementSystem& movement, ObjectId id,
                                            const GotoOrder& order);
@@ -939,17 +967,20 @@ struct GotoOrder {
 /// The first two are established: the shipped call sites pass `.range`,
 /// `.sight`, `other.sight/3` and `GetConst("GiveDistance")` in the second
 /// position, which are all distances, and the dumps print exactly such a
-/// tolerance as `Range`. **The last three are inferred**, from their value
-/// distributions and from the loop the calls sit inside:
-/// `while (!.Goto(pt, 0, 2000, true, 0) && .HasPath)`. `slice` is read as the
-/// game-time budget one call may wait for -- the call suspends for the lesser
-/// of it and the time to arrival, and the loop re-tests -- and `give_up` as a
-/// total timeout, where **anything non-positive means no limit**. Both `-1` and
-/// `0` occur and both have to mean "no limit": `0` is the commonest value in the
-/// corpus and appears inside `while (!.Goto(...) && .HasPath)`, so reading it as
-/// an immediate timeout stops every such loop on its second call. The boolean is recorded and not acted on;
-/// no reading of it is better supported than another, and guessing would put an
-/// unearned behaviour in front of whoever settles it.
+/// tolerance as `Range`. `slice` is the game-time budget one call may wait
+/// for -- the call suspends for the lesser of it and the time to arrival, and
+/// the loop re-tests -- inferred from the loop the calls sit inside, `while
+/// (!.Goto(pt, 0, 2000, true, 0) && .HasPath)`. `give_up` is read from
+/// `gbr.exe` (0x005d61b0): how long the call may go without a route before the
+/// script ends, never when negative; `GotoOrder::give_up` has the addresses
+/// and what the earlier reading of it as a total timeout cost. The boolean is
+/// recorded and not acted on: the original reads it only when no route is
+/// laid (0x005d6565), to pick an animation the call then waits out.
+///
+/// `Goto/4` is not one of `gbr.exe`'s registrations -- both of its `Goto`s
+/// take five -- and the handful of shipped four-argument calls are bound here
+/// with no give-up, which is the conservative reading of an argument nobody
+/// passed.
 void register_movement_host(script::HostRegistry& registry);
 
 }  // namespace imperivm::core::sim

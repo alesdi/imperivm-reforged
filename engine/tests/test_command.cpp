@@ -1482,6 +1482,42 @@ TEST(a_command_runs_its_class_script_and_retires_when_the_script_returns) {
   CHECK(f.commands.command_count(u) == 1);
 }
 
+TEST(the_end_of_a_command_clears_the_units_goto_failure_stamp) {
+  // `[unit+0x150]`, `Goto`'s failure stamp, is cleared by slot 9 of the unit
+  // vtables (0x005d2940) as its base pops the command queue's head, so each
+  // command's give-up runs from its own first failure (`GotoOrder::give_up`).
+  RunFixture f;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(64, 64));
+  REQUIRE(f.world.add_system(&movement));
+  REQUIRE(f.add_script("// void, Obj This, point pt\nSleep(500);\n",
+                       "data/subai/unit_move.vs"));
+  REQUIRE(f.add_script("// void, Obj me\nwhile (1) Sleep(1000);\n",
+                       "data/subai/unit_idle.vs"));
+
+  const ObjectId u = f.spawn(f.unit_class);
+  Command order;
+  order.arg_kind = CommandArgKind::point;
+  order.point = Point{300, 300};
+  f.commands.set_command(f.world, u, "move", order);
+  f.world.advance(100);
+  REQUIRE(f.commands.command_name(u) == "move");
+  movement.state(u).goto_failed_at = 50;
+
+  // The script returns and the command is over.
+  for (int i = 0; i < 10 && f.commands.command_name(u) == "move"; ++i) {
+    f.scheduler.advance(200);
+    f.world.advance(200);
+  }
+  REQUIRE(f.commands.command_name(u) == "idle");
+  CHECK(movement.find(u)->goto_failed_at == kNoGotoFailure);
+
+  // A command cancelled under it clears the stamp the same way.
+  movement.state(u).goto_failed_at = 50;
+  f.commands.set_command(f.world, u, "move", order);
+  CHECK(movement.find(u)->goto_failed_at == kNoGotoFailure);
+}
+
 /// **A method's `onfinish` runs when its command is over**, with `(This,
 /// bCanceled)`: false when the script returned, true when the command was
 /// killed or replaced under it. It sees the command it is finishing --

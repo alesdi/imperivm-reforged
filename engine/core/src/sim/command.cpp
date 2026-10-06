@@ -425,6 +425,16 @@ void CommandSystem::finish_command(World& world, ObjectId id, const Command& com
   // `!started` is belt and braces: both callers only pass a command that
   // ran, and the sweep labels it so.
   if (scheduler_ == nullptr || !command.started) return;
+  // A command's end clears the unit's `Goto` failure stamp, so the next
+  // command's give-up runs from its own first failure (`GotoOrder::give_up`).
+  // Inferred: slot 9 of the seven unit vtables (0x005d2940) clears
+  // `[unit+0x150]` and the walking flags before its base (0x005b5160) pops the
+  // command queue's head, which reads as this moment, cancel or not.
+  if (MovementSystem* movement = movement_system(world); movement != nullptr) {
+    if (MoveState* move = movement->find(id); move != nullptr) {
+      move->goto_failed_at = kNoGotoFailure;
+    }
+  }
   const ClassGraph* graph = world.class_graph();
   const WorldObject* slot = world.find(id);
   if (graph == nullptr || slot == nullptr || slot->class_index == kNoClass) return;
@@ -1654,14 +1664,12 @@ HostOutcome goto_attack_impl(CallContext& ctx) {
 }
 
 /// `GotoEnter(dest, range, slice, flag, give_up)`: `Goto`'s signature exactly,
-/// and `UNIT_ENTER.VS` puts the two in the arms of one `if`. The difference is
-/// what `give_up` means, and that running out of route ends the script -- see
-/// the header and `GotoOrder::enter`.
+/// and `UNIT_ENTER.VS` puts the two in the arms of one `if`. The one
+/// difference is the lock flag -- see the header and `GotoOrder::give_up`.
 HostOutcome goto_enter_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   GotoOrder order;
-  order.enter = true;
   if (is_point(ctx.arg(1))) {
     order.dest = unpack_point(ctx.arg(1));
   } else if (const ObjectId target = object_of(ctx.arg(1)); target != kNoObject) {
