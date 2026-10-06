@@ -374,9 +374,30 @@ def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, g
     for p, x, y in sentries:
         near = min(((x - wx) ** 2 + (y - wy) ** 2 for wp, wx, wy in posts if wp == p), default=None)
         assert near is not None and near <= 400 ** 2, (p, x, y)
-    spots = collections.Counter((x, y) for _, x, y in sentries)
-    shared = {spot: n for spot, n in spots.items() if n > 1}
-    assert max(spots.values()) <= 2 and len(shared) <= 2, shared
+    #
+    # *Stand*, not happen to meet: a wall re-staffing its posts places its new
+    # sentries together and they walk off along it, so one instant can catch
+    # several pairs on one point -- turn 2,200 once caught three on p1's north
+    # wall, all six sentries spawned that moment and gone by 2,230. What #8 and
+    # #11 were is a sentry that does not leave, so a spot counts only when the
+    # same sentries still share it thirty turns on.
+    def stood(out: str) -> dict[tuple[int, int], frozenset[int]]:
+        at: dict[tuple[int, int], set[int]] = collections.defaultdict(set)
+        for i, x, y in re.findall(r"^\s+(\d+) \S*Sentry\S* p\d+ at \((-?\d+),(-?\d+)\) ",
+                                  out, re.MULTILINE):
+            at[(int(x), int(y))].add(int(i))
+        return {spot: frozenset(ids) for spot, ids in at.items() if len(ids) > 1}
+
+    later = subprocess.run(
+        [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS + 30), "800"],
+        capture_output=True, text=True, timeout=1800,
+        env={**os.environ, "IMRUN_OBJECTS": "Sentry"},
+    )
+    assert later.returncode == 0, later.stdout + later.stderr
+    then, now = stood(output), stood(later.stdout)
+    staying = {spot: sorted(ids) for spot, ids in then.items() if any(
+        len(ids & others) > 1 for others in now.values())}
+    assert all(len(ids) <= 2 for ids in staying.values()) and len(staying) <= 2, (staying, then)
 
     # Nothing the AI or a wall reached on the way traps: no unimplemented entry
     # point, and no script that runs its budget out.
