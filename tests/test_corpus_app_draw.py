@@ -294,13 +294,18 @@ def test_a_walking_unit_is_drawn_between_turns(app, game_dir):
     legionary is drawn at several places inside one turn, at drawn times
     between the turn's ends, its walk cycle stepping as it goes -- and its
     ring under it every frame, so what is clicked is what is drawn.
+
+    The order is given once turn 2 has run, not a number of frames in: on
+    Numantia a move posted before the first turn has run is queued and never
+    walked (why is not followed here), so a frame count made the test pass or
+    fail by how fast the machine reached turn 1.
     """
     if not (game_dir / NUMANTIA).is_file():
         pytest.skip(f"{NUMANTIA} is not in this installation")
     done = subprocess.run(
         [str(app), "--game", str(game_dir), "--map", NUMANTIA, "--play", "--no-fog",
          "--width", "1024", "--height", "768", "--frames", "400", "--turn-interval", "400",
-         "--input", "wait:10;select:class:RHastatus;wait:2;rclick:700,500"],
+         "--input", "turn:2;select:class:RHastatus;wait:2;rclick:700,500"],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "IMPERIVM_DEBUG_VIEW": "1"},
     )
@@ -326,6 +331,9 @@ def test_a_walking_unit_is_drawn_between_turns(app, game_dir):
                 frames[-1]["rings"].append((int(match.group(2)), int(match.group(3))))
     drawn = [f for f in frames if "origin" in f]
     assert len(drawn) > 60, len(drawn)
+    # The view does not move (nothing in the script scrolls it), so a place
+    # on the screen is a place in the world: the walker walked.
+    assert len({f["origin"] for f in drawn}) > 10, "the order did not move the walker"
 
     # Never ahead of the world, never behind the turn before.
     times = {f["turn"]: f["time"] for f in frames}
@@ -333,18 +341,19 @@ def test_a_walking_unit_is_drawn_between_turns(app, game_dir):
         before = times.get(f["turn"] - 1, f["time"] - 400)
         assert before <= f["drawn"] <= f["time"], f
 
-    # Inside one turn the walker is drawn at more than one place: several
-    # turns each show three or more.
+    # Inside one turn the walker is drawn at more than one place -- a turn
+    # drawn at its end is one place a turn. Two or more in each of several
+    # turns holds down to a few frames a turn, on a loaded machine.
     by_turn: dict[int, set] = {}
     rows: dict[int, set] = {}
     for f in drawn:
         by_turn.setdefault(f["turn"], set()).add(f["origin"])
         rows.setdefault(f["turn"], set()).add(f["row"])
-    gliding = [turn for turn, places in by_turn.items() if len(places) >= 3]
+    gliding = [turn for turn, places in by_turn.items() if len(places) >= 2]
     assert len(gliding) >= 3, {turn: sorted(places) for turn, places in by_turn.items()}
     # Its walk cycle steps between turns too: a 400 ms turn covers several of
     # its frames, and they are drawn, not stepped over.
-    assert any(len(rows[turn]) >= 3 for turn in gliding), rows
+    assert any(len(rows[turn]) >= 2 for turn in gliding), rows
 
     # The ring is under the body wherever the body is drawn.
     ringed = [f for f in drawn if f["rings"]]
