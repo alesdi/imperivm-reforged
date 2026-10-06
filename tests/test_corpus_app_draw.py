@@ -272,3 +272,83 @@ def test_a_bird_flies_between_the_ends_of_its_animation(app, game_dir):
     assert len(moving) > 30, moving
     assert max(steps) < 30, sorted(steps)[-10:]
 
+
+#: Numantia's legionaries, one of whom is sent walking across the field.
+NUMANTIA = "Adventures/GreatBattles/2_Great_Battles_Numantia.bfhp"
+#: The line the world view prints ahead of each placement's layers.
+FRAME = re.compile(r"^frame turn (\d+) time (\d+) drawn (\d+)$")
+LAYER_ORIGIN = re.compile(
+    r"^id (\d+) sheet -?\d+ grid \d+x\d+ row (\d+) col \d+ .* lt (-?\d+),(-?\d+) "
+    r"off (-?\d+),(-?\d+) layer \d+ z (-?\d+) at (-?\d+),(-?\d+)$"
+)
+
+
+def test_a_walking_unit_is_drawn_between_turns(app, game_dir):
+    """Playtest report #10's residue: every unit moved once a turn, not every frame.
+
+    `gbr.exe`'s frame (0x0051ea30) runs game time up to the real clock's share
+    of the turn's lockstep window (0x00528e40, 0x00528b40), and a moving
+    object is drawn where its animation has it at that instant (0x0053d830).
+    This engine runs a turn whole, and the view now draws the instant between
+    the two turn ends (`sim/glide.hpp`). With 400 ms turns a walking
+    legionary is drawn at several places inside one turn, at drawn times
+    between the turn's ends, its walk cycle stepping as it goes -- and its
+    ring under it every frame, so what is clicked is what is drawn.
+    """
+    if not (game_dir / NUMANTIA).is_file():
+        pytest.skip(f"{NUMANTIA} is not in this installation")
+    done = subprocess.run(
+        [str(app), "--game", str(game_dir), "--map", NUMANTIA, "--play", "--no-fog",
+         "--width", "1024", "--height", "768", "--frames", "400", "--turn-interval", "400",
+         "--input", "wait:10;select:class:RHastatus;wait:2;rclick:700,500"],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "IMPERIVM_DEBUG_VIEW": "1"},
+    )
+    assert done.returncode == 0, (done.stdout + done.stderr)[-2000:]
+    ordered = re.search(r"^queue:\s+object (\d+) holds \d+ \| move", done.stdout, re.MULTILINE)
+    assert ordered, done.stdout[-2000:]
+    walker = int(ordered.group(1))
+
+    # Per placement: the turn, the turn's end, the drawn time, and the
+    # walker's body origin, walk row and ring.
+    frames: list[dict] = []
+    for line in done.stdout.splitlines():
+        if match := FRAME.match(line):
+            turn, time, drawn = map(int, match.groups())
+            frames.append({"turn": turn, "time": time, "drawn": drawn, "rings": []})
+        elif frames and (match := LAYER_ORIGIN.match(line)):
+            found, row, left, top, off_x, off_y, depth, x, y = map(int, match.groups())
+            if found == walker and depth == 1000:
+                frames[-1]["origin"] = (x - off_x - left, y - off_y - top)
+                frames[-1]["row"] = row
+        elif frames and (match := RING.match(line)):
+            if int(match.group(1)) == walker:
+                frames[-1]["rings"].append((int(match.group(2)), int(match.group(3))))
+    drawn = [f for f in frames if "origin" in f]
+    assert len(drawn) > 60, len(drawn)
+
+    # Never ahead of the world, never behind the turn before.
+    times = {f["turn"]: f["time"] for f in frames}
+    for f in drawn:
+        before = times.get(f["turn"] - 1, f["time"] - 400)
+        assert before <= f["drawn"] <= f["time"], f
+
+    # Inside one turn the walker is drawn at more than one place: several
+    # turns each show three or more.
+    by_turn: dict[int, set] = {}
+    rows: dict[int, set] = {}
+    for f in drawn:
+        by_turn.setdefault(f["turn"], set()).add(f["origin"])
+        rows.setdefault(f["turn"], set()).add(f["row"])
+    gliding = [turn for turn, places in by_turn.items() if len(places) >= 3]
+    assert len(gliding) >= 3, {turn: sorted(places) for turn, places in by_turn.items()}
+    # Its walk cycle steps between turns too: a 400 ms turn covers several of
+    # its frames, and they are drawn, not stepped over.
+    assert any(len(rows[turn]) >= 3 for turn in gliding), rows
+
+    # The ring is under the body wherever the body is drawn.
+    ringed = [f for f in drawn if f["rings"]]
+    assert ringed, "the walker was selected and drew no ring"
+    for f in ringed:
+        assert f["rings"][-1] == f["origin"], f
+

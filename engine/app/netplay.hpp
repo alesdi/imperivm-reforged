@@ -405,6 +405,7 @@ class NetPlay {
           static_cast<std::int32_t>(now - next_due_) > turn->real_ms ? now - turn->real_ms
                                                                      : next_due_;
       next_due_ = base + static_cast<std::uint32_t>(turn->real_ms);
+      last_real_ms_ = turn->real_ms;
       if (options_.speed_turn != 0 && turns_ == options_.speed_turn) ask_speed(options_.speed);
       if (!finished_turns()) {
         // The clock read now: `submit` pumps, and what it hears is stamped
@@ -420,6 +421,20 @@ class NetPlay {
       hand_over_state(session, now);
     }
     return ran;
+  }
+
+  /// How far this peer's clock is through the wait for the next agreed turn:
+  /// 0 the moment one ran, 1 once the next is due -- and 1 while none has run
+  /// or the next has not arrived, which is the original holding its game
+  /// time at the end of a window whose successor is late (0x00528e40 clamps
+  /// below the window's end). What the world view draws between two turns;
+  /// presentation, and read by nothing else.
+  [[nodiscard]] float turn_fraction() const {
+    if (last_real_ms_ <= 0) return 1.0F;
+    const auto left = static_cast<std::int32_t>(next_due_ - net::now_ms());
+    if (left <= 0) return 1.0F;
+    if (left >= last_real_ms_) return 0.0F;
+    return 1.0F - static_cast<float>(left) / static_cast<float>(last_real_ms_);
   }
 
   /// With `stop_after`: every turn ran, and everything this peer holds has
@@ -575,6 +590,8 @@ class NetPlay {
   std::unique_ptr<core::sim::CommandBarSink> sink_;
   std::vector<core::sim::NetOrder> pending_;
   std::uint32_t next_due_ = 0;
+  /// The real length of the turn that ran last, for `turn_fraction`.
+  std::int32_t last_real_ms_ = 0;
   std::uint32_t turns_ = 0;
   std::size_t stalled_frames_ = 0;
   std::uint64_t world_ = 1469598103934665603ULL;

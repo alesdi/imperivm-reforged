@@ -1684,6 +1684,12 @@ class Application {
   /// Real milliseconds owed to the simulation, so a slow frame catches up
   /// rather than dropping game time.
   double owed_ms_ = 0.0;
+  /// The world is drawn as it stands -- not partway through the turn it last
+  /// ran -- until the next turn runs: set whenever the clock stops (a pause,
+  /// a menu, a script waiting on `turn:N`), so a stopped world shows exactly
+  /// the turn it stopped on and a restarted one does not jump back into the
+  /// turn before. See `WorldView::set_turn_fraction`.
+  bool glide_held_ = true;
   std::uint64_t last_ticks_ = 0;
   std::uint64_t turns_run_ = 0;
   /// The local command path of an unnetworked match: what the options
@@ -2453,6 +2459,8 @@ bool Application::load_from(const std::filesystem::path& file) {
   const core::Status status = session_->load(contents.session, identity_, &loaded);
   // A loaded game's ground has nothing to fade from.
   fog_view_.reset();
+  // Nor its units anything to glide from.
+  world_view_.reset_glide();
   if (!status.ok()) {
     std::printf("load refused (error %d); the session is no longer usable\n",
                 static_cast<int>(status.error()));
@@ -3191,6 +3199,7 @@ void Application::run_local_turn() {
   }
   session_->advance(1, args_.turn_length > 0 ? args_.turn_length : turn.length);
   ++turns_run_;
+  glide_held_ = false;
 }
 
 /// What an applied `diplomacy` order did, as the table now holds it: the
@@ -6917,6 +6926,7 @@ void Application::return_to_front() {
   owed_ms_ = 0.0;
   infobar_turn_ = ~0ull;
   fog_view_.reset();
+  world_view_.reset_glide();
   pending_load_.reset();
   seed_ = 1;
   zoom_ground_ = core::ui::Image{};
@@ -6978,6 +6988,7 @@ bool Application::restart_play() {
   owed_ms_ = 0.0;
   infobar_turn_ = ~0ull;
   fog_view_.reset();
+  world_view_.reset_glide();
   zoom_ground_ = core::ui::Image{};
   return start_play();
 }
@@ -7457,6 +7468,7 @@ void Application::tick_play(platform::Window::Frame& frame) {
       // and not whatever the frame's budget ran on to.
       if (input_until_turn_ > 0 && session_->world().turns() >= input_until_turn_) {
         owed_ms_ = 0.0;
+        glide_held_ = true;
         break;
       }
       owed_ms_ -= interval;
@@ -7471,6 +7483,26 @@ void Application::tick_play(platform::Window::Frame& frame) {
       }
     }
     if (owed_ms_ > interval * 8) owed_ms_ = 0.0;
+  } else {
+    glide_held_ = true;
+  }
+  // What the next frame draws, and what its clicks pick: the world at the
+  // game time the original's clock would show now. Its frame (0x0051ea30)
+  // asks 0x00528e40 for the real clock's share of the turn's window and
+  // runs game time up to that share of the window's game span, every frame;
+  // here the turn has already run whole, and the view draws the instant
+  // between its two ends (`sim/glide.hpp`). Presentation: the world is read.
+  {
+    float fraction = 1.0F;
+#if IMPERIVM_HAVE_NET
+    if (net_ != nullptr && session_ != nullptr) {
+      fraction = net_->turn_fraction();
+    } else
+#endif
+    if (!glide_held_ && args_.turn_interval > 0) {
+      fraction = static_cast<float>(owed_ms_ / static_cast<double>(args_.turn_interval));
+    }
+    world_view_.set_turn_fraction(fraction);
   }
   // An open Diplomacy screen shows the other side's policy as the turns
   // just applied left it: a networked peer's OK lands while it is open.
