@@ -978,6 +978,16 @@ bool CombatSystem::stop(ObjectId id) {
   return true;
 }
 
+bool CombatSystem::drop_target(ObjectId id) {
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr) return false;
+  if (unit->target != kNoObject) {
+    unit->target = kNoObject;
+    unit->attacks = 0;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // CombatSystem: damage
 // ---------------------------------------------------------------------------
@@ -2116,9 +2126,10 @@ HostOutcome host_set_experience(CallContext& ctx) {
 /// (!.IsValidTarget(u)) break; if (!.IsVisible) break; }`: with a
 /// non-suspending `Attack`, a hero with a live, visible, valid enemy runs that
 /// loop until the scheduler's instruction budget is gone, every pass, forever.
-/// Nothing else in that file can do it -- `Stop`, `Idle`, `GotoAttack` and
+/// Nothing else in that file can do it -- `Idle`, `GotoAttack` and
 /// `FormKeepMoving` all suspend already, and the outer `while (1)` ends in
-/// `if (.Stop(2000)) .Idle(2000);`.
+/// `if (.Stop(2000)) .Idle(2000);`, whose `Stop` suspends a walking hero and
+/// whose `Idle` suspends a standing one.
 ///
 /// **The slice is inferred, and it is the only invented number here.** The
 /// original's suspension length is written to the scheduler's wait cell at

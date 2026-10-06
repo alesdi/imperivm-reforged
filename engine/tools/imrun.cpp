@@ -704,6 +704,10 @@ int main(int argc, char** argv) {
       }
       std::printf("  goto turn %llu: %u to (%d,%d), %zu issued\n", turn, goto_id, goto_x, goto_y,
                   made.issued);
+      // The order's route is printed whatever it crosses: a route that
+      // crosses no gate after one that crossed none before is still the
+      // answer to this order, and a reader waits for it.
+      if (goto_id == watched) watched_crossing = "\x01";
     }
     run.advance(1, length);
     if (watched != kNoObject) {
