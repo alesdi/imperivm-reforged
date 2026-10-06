@@ -1077,6 +1077,16 @@ class CombatSystem final : public System {
   bool order_attack(ObjectId attacker, ObjectId target);
   /// Drop the current target and go idle.
   bool stop(ObjectId id);
+  /// Drop the current target and nothing else: `gbr.exe`'s target setter
+  /// (0x005d2c70) handed the empty handle -- the write `Unit::Stop`,
+  /// `Unit::Idle`, `Unit::Taunt`, `Unit::FormKeepMoving`,
+  /// `Unit::FormAcceptMove` and both `Goto` bodies make, through the setter or
+  /// inline. `[unit+0x1a8]` is the dump's `target handle` (the printer at
+  /// 0x005d2bd8) and `[unit+0x1ac]` its `number of attacks`; both are written
+  /// only when the handle changes, so a unit with no target keeps its count.
+  /// The action is left alone: the setter does not touch it. False for an
+  /// unknown id.
+  bool drop_target(ObjectId id);
   /// Whether `id` is a combatant in its dying state: still in the world as a
   /// corpse, and no longer a unit anything should drive. `reap_departed` reads
   /// it to end the corpse's own scripts.

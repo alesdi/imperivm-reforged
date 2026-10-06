@@ -2126,9 +2126,8 @@ HostOutcome set_walk_anim_impl(CallContext& ctx) {
 /// suspending predicate and not the void procedure it first looked like: 34 of
 /// its 53 sites are `while (!.Stop(1000));`, which a void `Stop` spins forever.
 ///
-/// The suspension is the load-bearing half for a standing unit: it is what
-/// makes `UNIT_IDLE.VS`'s and `SHIP_IDLE.VS`'s `while(1)` loops consume game
-/// time rather than the scheduler's instruction budget.
+/// The suspension is a walking unit's only: a standing one is answered at once
+/// (below), and the idle loops are paced by the `Idle` that follows.
 ///
 /// **A unit with a route is read off 0x005d6c90, and it does not stop where it
 /// stands.** The first entry, for a unit with a path object (`[unit+0x148]`)
@@ -2150,11 +2149,26 @@ HostOutcome set_walk_anim_impl(CallContext& ctx) {
 /// and on Crossroads a hero's recruits that left one door together stood in
 /// one pile at it for the rest of the match.
 ///
-/// **What is not reproduced:** for a unit with no route the original deletes
-/// nothing, returns true at once and does **not** suspend (0x005d6d9b); this
-/// still holds still for `ms`, which the idle loops' pacing above rests on and
-/// changing which is a change to every idle script's timing. The first entry
-/// also drops the combat target (`[unit+0x1a8]`), which this does not.
+/// **A unit with no route stops at once and the call does not suspend**
+/// (0x005d6d9b): the route slot is cleared (0x005d3830 with 0), the idle
+/// state set, and the answer is true with `eax = 0`, this protocol's "done".
+/// So is a held unit, and one at `(-1, -1)`, route or not. `ms` is never
+/// waited here: it is written to the wait cell only on the walking path.
+/// This used to hold still for `ms` whatever the unit was doing, and
+/// `UNIT_IDLE.VS`'s pacing looked as if it rested on that. It does not: every
+/// loop in the corpus that stops a standing unit suspends on something else
+/// in the same pass -- `UNIT_IDLE.VS`, `HERO_IDLE.VS`, `GHOST_IDLE.VS`,
+/// `PEACEFUL_IDLE.VS` and `UNIT_STAY_HIDDEN.VS` follow a true `Stop` with
+/// `Idle(ms)`, `SHIP_IDLE.VS` with `Idle()`, `SENTRY_GUARD.VS` with a `Sleep`,
+/// and the 34 `while (!.Stop(1000));` sites leave on the first true answer.
+/// What changes is the waits that were only `Stop`'s: `UNIT_ENTER.VS` and
+/// `HERO_ENTER.VS` end a refused entry with `.Stop(10000)`, which was ten
+/// seconds of standing about, still flagged as entering, before the next
+/// command; the original moves on in the same pass.
+///
+/// **The first entry drops the combat target**, before it looks at the route
+/// (0x005d6cf7): the target setter's write (`CombatSystem::drop_target`). The
+/// re-entry does not.
 HostOutcome stop_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
@@ -2170,6 +2184,9 @@ HostOutcome stop_impl(CallContext& ctx) {
     self.movement->stop(*self.world, self.id);
     return HostOutcome::ok_with(Value::boolean(true));
   }
+  if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
+    (void)combat->drop_target(self.id);
+  }
   // A unit with a route, on the map (0x005d6d16 .. 0x005d6d48), is asked to
   // stop and the call suspends for `ms` with the route in hand; the answer
   // comes at the re-entry.
@@ -2181,13 +2198,9 @@ HostOutcome stop_impl(CallContext& ctx) {
     out.suspend_for = hold > 0 ? hold : 0;
     return out;
   }
+  // Anything else stops where it is and is answered at once (0x005d6d9b).
   self.movement->stop(*self.world, self.id);
-  if (hold <= 0) return HostOutcome::ok_with(Value::boolean(true));
-  HostOutcome out;
-  out.status = script::HostStatus::suspend;
-  out.value = Value::boolean(true);
-  out.suspend_for = hold;
-  return out;
+  return HostOutcome::ok_with(Value::boolean(true));
 }
 
 HostOutcome has_path_impl(CallContext& ctx) {

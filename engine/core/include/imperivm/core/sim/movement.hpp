@@ -992,18 +992,16 @@ struct GotoOrder {
 /// `(kTypePoint, x, y)` values that header defines, and object handles
 /// are `(kTypeObj, id)`. Nothing here mints a representation of its own.
 ///
-/// `Stop(ms)` **returns a bool and suspends**, which the call sites settle and
-/// an earlier reading of it as a void procedure got wrong. Of its 53 sites, 34
-/// are `while (!.Stop(1000));` and 7 are `if (.Stop(2000))`; a void `Stop`
-/// yields nil, `!nil` is true, and every one of those `while` loops spins until
-/// the instruction budget traps the script. The reading that makes all 53 work
-/// is **halt, then hold still for `ms`, and report whether the hold completed**:
-/// it explains the argument (a duration, 50 to 10,000), it explains why
-/// `UNIT_IDLE.VS`'s `while(1)` and `SHIP_IDLE.VS`'s `while(1)` consume game time
-/// at all, and it makes `while (!.Stop(1000));` one call rather than a spin.
-/// The false case is a unit with a route: 0x005d6c90 asks the route to stop
-/// and answers false at the re-entry while the unit is still walking to a
-/// free spot to stop on (`stop_impl` in `src/sim/movement.cpp`).
+/// `Stop(ms)` **returns a bool and may suspend**, which the call sites settle
+/// and an earlier reading of it as a void procedure got wrong. Of its 53
+/// sites, 34 are `while (!.Stop(1000));` and 7 are `if (.Stop(2000))`; a void
+/// `Stop` yields nil, `!nil` is true, and every one of those `while` loops
+/// spins until the instruction budget traps the script. 0x005d6c90 answers
+/// true **at once, without suspending,** for a unit with no route (and a held
+/// one); only a unit with a route is asked to stop, suspended for `ms`, and
+/// answered false at the re-entry while it is still walking to a free spot to
+/// stop on (`stop_impl` in `src/sim/movement.cpp`). The idle loops that call
+/// it are paced by the `Idle` or `Sleep` beside it, not by `Stop`.
 ///
 /// `Goto`'s five arguments are `(destination, range, slice, flag, give_up)`.
 /// The first two are established: the shipped call sites pass `.range`,
