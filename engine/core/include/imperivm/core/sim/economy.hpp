@@ -565,9 +565,11 @@ std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime n
 /// answers its own position. A unit in a holder answers **its settlement's
 /// central building position** (0x005c1060: the object at `[settlement+0x8c]`,
 /// read through `vtbl+0x3c`) when the holder belongs to a settlement
-/// (`[holder+0xc]`), and the holder's own position otherwise -- a ship's
-/// passengers are where the ship is, which `World::resolve_position` already
-/// follows and is what this answers there.
+/// (`[holder+0xc]`), and otherwise the position of the object the holder
+/// belongs to (0x005319a0, `[holder+0xe]`) -- a ship's passengers are where
+/// the ship is. `World::resolve_position` does not follow that: a ship's
+/// holder record is a separate internal object standing at (0, 0), so the
+/// ship is found here as the object just before its holder.
 ///
 /// Two readers in `gbr.exe` take it: the squad's node tracker 0x0041f530,
 /// which the holder entry 0x005d3e10 (`garrison_enter`'s original, at
@@ -584,7 +586,8 @@ std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime n
 ///
 /// **For units only**, as the override is: an item or another held object
 /// keeps `resolve_position` here, which is not what its own `posRH` answers
-/// and is not this function's question.
+/// (that is its raw position, `(-1, -1)` while held; see `m_pos_rh` in
+/// `sim/world_host.cpp`) and is not this function's question.
 [[nodiscard]] Point unit_pos_rh(World& world, ObjectId unit);
 
 /// Take `unit` off every settlement roster that holds it, lowering loyalty as

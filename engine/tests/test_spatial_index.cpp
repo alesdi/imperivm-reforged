@@ -80,8 +80,12 @@ std::int64_t d2(Point a, Point b) {
   return dx * dx + dy * dy;
 }
 
-Point located(const World& w, const WorldObject& slot) {
-  return slot.state.is_held() ? w.resolve_position(slot.id) : slot.state.position;
+/// Where an area query sees an object: its own position, which for a held one
+/// is `(-1, -1)` -- the marker every scan below skips, since a held object
+/// stands in no grid cell (`sim/spatial_index.hpp`). These scans resolved a
+/// held object to its holder until that was found not to be the original's.
+Point located(const World&, const WorldObject& slot) {
+  return slot.state.is_held() ? kHeldPosition : slot.state.position;
 }
 
 void take(const World& w, const WorldObject& slot, const ClassFilter& filter,
@@ -123,8 +127,8 @@ std::vector<ObjectId> scan_located(const World& w, std::int32_t l, std::int32_t 
                                    std::int32_t r, std::int32_t b) {
   std::vector<ObjectId> out;
   for (const WorldObject& slot : w.objects()) {
-    if (slot.internal != InternalKind::none) continue;
-    const Point at = w.resolve_position(slot.id);
+    if (slot.internal != InternalKind::none || slot.state.is_held()) continue;
+    const Point at = slot.state.position;
     if (at.x < l || at.x > r || at.y < t || at.y > b) continue;
     out.push_back(slot.id);
   }
@@ -135,8 +139,7 @@ std::vector<ObjectId> scan_sight(const World& w, ObjectId observer, const ClassF
   std::vector<ObjectId> out;
   const WorldObject* watcher = w.find(observer);
   if (watcher == nullptr) return out;
-  const Point eye = w.resolve_position(observer);
-  if (eye == kHeldPosition) return out;
+  const Point eye = watcher->state.position;  // `(-1, -1)` for a held observer
   const std::int64_t limit = std::int64_t{watcher->sight} * watcher->sight;
   for (const WorldObject& slot : w.objects()) {
     if (slot.internal != InternalKind::none) continue;
@@ -386,10 +389,12 @@ TEST(spatial_index_answers_every_query_exactly_as_the_straight_scan) {
   CHECK(held_seen > 1000);
 }
 
-TEST(spatial_index_finds_a_garrison_where_its_holder_moved_to) {
-  // A held object is not in the grid; it is resolved at every query. So a
-  // holder that moves takes its garrison with it without anyone telling the
-  // index about the garrison.
+TEST(spatial_index_finds_no_held_object_and_files_none) {
+  // A held object stands in no grid cell: its position is `(-1, -1)`, which
+  // 0x0053d030 maps to no cell, so no area sweep in the original reaches it.
+  // This index once kept held objects in a list of their own and resolved each
+  // to its holder at every query -- found here at the fort, and in a real
+  // match, where a garrison's holder record stands at (0, 0), in the corner.
   World world;
   const ObjectId fort = world.spawn(NativeClass::building, nullptr);
   const ObjectId inside = world.spawn(NativeClass::unit, nullptr);
@@ -397,13 +402,12 @@ TEST(spatial_index_finds_a_garrison_where_its_holder_moved_to) {
   CHECK(world.put_in_holder(inside, fort));
   std::vector<ObjectId> found;
   world.objects_in_radius(Point{1000, 1000}, 10, ClassFilter{}, found);
-  CHECK(found.size() == 2 && found[0] == fort && found[1] == inside);
-
-  CHECK(world.set_position(fort, Point{9000, 9000}));
-  world.objects_in_radius(Point{1000, 1000}, 10, ClassFilter{}, found);
+  CHECK(found.size() == 1 && found[0] == fort);
+  world.objects_in_rect(-10, -10, 10, 10, ClassFilter{}, found);
   CHECK(found.empty());
-  world.objects_in_radius(Point{9000, 9000}, 10, ClassFilter{}, found);
-  CHECK(found.size() == 2 && found[0] == fort && found[1] == inside);
+  world.objects_located_in_rect(-10, -10, 1010, 1010, found);
+  CHECK(found.size() == 1 && found[0] == fort);
+  CHECK(world.spatial_index_consistent());
 
   // Out, and found where it was put.
   CHECK(world.remove_from_holder(inside, Point{200, 200}));

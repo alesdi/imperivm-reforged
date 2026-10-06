@@ -781,6 +781,14 @@ Point unit_pos_rh(World& world, ObjectId unit) {
       return world.resolve_position(s->anchor);
     }
   }
+  // Not a settlement's: the object the holder belongs to (0x005319a0, the
+  // handle at `[holder+0xe]`), read through its `vtbl+0x3c`. The one such
+  // holder this engine mints is a ship's, at the ship's handle plus one.
+  if (const WorldObject* carrier = world.find(slot->state.holder - 1);
+      carrier != nullptr && carrier->object != nullptr &&
+      carrier->object->is_a(NativeClass::ship) && !carrier->state.is_held()) {
+    return carrier->state.position;
+  }
   return world.resolve_position(unit);
 }
 

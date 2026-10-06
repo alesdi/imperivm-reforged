@@ -1490,47 +1490,52 @@ HostOutcome m_pos(CallContext& ctx) {
   }
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_with(pack_point(kHeldPosition));
-  // Resolved, not raw: a garrisoned object's position is its holder's, and the
-  // raw field holds the `(-1, -1)` marker rather than coordinates.
-  return HostOutcome::ok_with(pack_point(world->resolve_position(slot->id)));
+  // **Raw**: 0x005add20 copies `[obj+0x24]`/`[obj+0x28]` and asks nothing
+  // else, so a held object answers the `(-1, -1)` its holder entry wrote
+  // (0x005d3e10 sets it through `vtbl+0x38` at 0x005d3ef9) -- which is what
+  // `SETTLEMENT_BEHAVIOR_AMBIENT.VS` tests `ol[i].pos.x == -1` for, to erase a
+  // villager that has already gone inside. This answered the holder walk for
+  // a while, and the walk ends on the holder record at (0, 0): the villager
+  // was sent to the door nearest the map's corner instead.
+  return HostOutcome::ok_with(pack_point(slot->state.position));
 }
 
-/// `Obj::posRH` -- 141 call sites, and **the same value as `pos`**.
+/// `Obj::posRH` -- 141 call sites, and **the same value as `pos` for
+/// everything but a held unit**.
 ///
-/// The two look like they must differ and do not. `Obj::pos` (0x005add20)
-/// reads the object's stored fields at `+0x24`/`+0x28` directly; `Obj::posRH`
-/// (0x005ad8a0) calls the virtual at `vtbl + 0xC8`, which in **all 15** classes
-/// carrying the shared `SetPos` at `vtbl + 0x38` is one thunk, 0x005a75d0,
-/// forwarding to `vtbl + 0x3c` -- and that slot is the same function in all 15
-/// too, 0x0063d900, whose entire body is `out = {[obj+0x24], [obj+0x28]}`. So
-/// `posRH` is `pos` reached through two indirections, and nothing in the image
-/// overrides either slot. (The census is anchored on the `SetPos` pointer
-/// rather than on a guessed vtable start, which is what makes it exhaustive
-/// rather than a sample.)
+/// `Obj::pos` (0x005add20) reads the object's stored fields at `+0x24`/`+0x28`
+/// directly; `Obj::posRH` (0x005ad8a0) calls the virtual at `vtbl + 0xC8`. In
+/// **all 15** classes carrying the shared `SetPos` at `vtbl + 0x38` that slot
+/// is one thunk, 0x005a75d0, forwarding to `vtbl + 0x3c` -- the same function
+/// in all 15, 0x0063d900, whose entire body is `out = {[obj+0x24],
+/// [obj+0x28]}` -- so for those `posRH` is `pos` reached through two
+/// indirections. (The census is anchored on the `SetPos` pointer rather than
+/// on a guessed vtable start, which is what makes it exhaustive.)
 ///
-/// What does differ is the miss. `pos` prints `The function 'Obj::pos' called
+/// **The units are the seven classes it leaves out**, and they override the
+/// slot: a unit's `SetPos` is 0x005d39e0 and its `vtbl + 0xC8` is 0x005d3db0,
+/// which for a unit in a holder answers its settlement's central building, or
+/// the ship it is aboard -- `unit_pos_rh` in `sim/economy.hpp`. So a garrisoned
+/// or embarked unit's `posRH` is a place on the map while its `pos` is
+/// `(-1, -1)`. Both answered the holder walk here for a while, which ends on
+/// the holder record at (0, 0): `UNIT_TRAIN.VS`'s notification, a druid's
+/// summons from inside a town (`Place("GGhost", .posRH, …)`) and the item
+/// scripts' "cannot use in holder" all went to the map's corner.
+///
+/// What also differs is the miss. `pos` prints `The function 'Obj::pos' called
 /// for an uninitialized or invalid object` before pushing its result; `posRH`
 /// pushes silently. Both push the same thing, so the difference is invisible
 /// to a script and this engine keeps the two bodies apart anyway -- a
 /// diagnostic that exists is worth having a place to go.
-///
-/// Resolved rather than raw, for the reason `m_pos` records: this engine's
-/// `pos` made that decision and the two must not disagree.
-///
-/// **The census above leaves the units out, and they do override the slot.**
-/// A unit carries its own `SetPos` (0x005d39e0) and its own `vtbl + 0xC8`,
-/// 0x005d3db0, which for a *held* unit answers its settlement's central
-/// building -- `unit_pos_rh` in `sim/economy.hpp`. So for a
-/// garrisoned unit the original's `posRH` and `pos` do differ (the building's
-/// point against `(-1, -1)`), and both answer the holder walk here. That is
-/// a known difference this body keeps for now; `Squad::pos` and the node
-/// filing, which reach the slot from the engine side, already take it.
 HostOutcome m_pos_rh(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("posRH: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_with(pack_point(kHeldPosition));
-  return HostOutcome::ok_with(pack_point(world->resolve_position(slot->id)));
+  if (slot->state.flags.is_unit) {
+    return HostOutcome::ok_with(pack_point(unit_pos_rh(*world, slot->id)));
+  }
+  return HostOutcome::ok_with(pack_point(slot->state.position));
 }
 
 HostOutcome m_health(CallContext& ctx) {
@@ -1788,10 +1793,11 @@ HostOutcome fn_enemy_in_range(CallContext& ctx) {
   const std::int32_t range = ctx.arg(1).as_integer();
   const PlayerTable& players = world->players();
   const PlayerId asking = who->state.owner;
-  // The square, not a circle -- and every object whose *resolved* position is
-  // in it, `(-1, -1)` included, which is what this tested when it walked the
-  // whole table. Only whether anything answers is returned, so the order the
-  // sweep yields in cannot reach the result.
+  // The square, not a circle, over the object grid (0x004dbea0) -- so a held
+  // object, which stands in no cell, is not there to be found: a garrison
+  // resolved to its holder record at (0, 0) once made every wall near the
+  // map's corner see an enemy. Only whether anything answers is returned, so
+  // the order the sweep yields in cannot reach the result.
   std::vector<ObjectId> near;
   world->objects_located_in_rect(centre.x - range, centre.y - range, centre.x + range,
                                  centre.y + range, near);

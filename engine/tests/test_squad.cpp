@@ -3878,3 +3878,47 @@ TEST(a_unit_enrolled_at_placement_is_filed_under_the_node_it_stands_in) {
   CHECK(f.heroes.squads().squad_of(filed) == own);
   CHECK(f.heroes.squads().find(own)->dest_gaika == kNoGaika);
 }
+
+/// A garrisoned unit regrouped with no squad to copy a destination from is
+/// sent to **its own town's node**: the regroup 0x00447330 asks 0x0044e650 (at
+/// 0x00447495), which for a held unit reads its `posRH`, the town's central
+/// building. It asked the holder walk for a while, which ends on the holder
+/// record at (0, 0) -- the node nearest the map's corner, here another town's.
+///
+/// (Enrolment at placement, 0x0041e820, asks the same at 0x0041e877, and reads
+/// it the same way now; but a held unit whose holder is in no squad gets no
+/// squad there at all -- `add_to_squad`'s step 3 -- so no test can see it.)
+TEST(a_garrisoned_unit_regrouped_from_no_squad_is_sent_to_its_towns_node) {
+  TrainFixture f;
+  const auto town = [&](Point at) {
+    const World::SettlementIds ids = f.world.spawn_settlement(1);
+    const ObjectId hall = f.world.spawn(NativeClass::building, nullptr, f.hall);
+    f.world.set_position(hall, at);
+    f.world.set_owner(hall, 1);
+    SettlementInit init;
+    init.settlement_object = ids.settlement;
+    init.holder_object = ids.holder;
+    init.warehouse_object = ids.warehouse;
+    init.anchor = hall;
+    init.owner = 1;
+    init.kind = SettlementKind::stronghold;
+    (void)f.economy.settlements().create(init);
+    return ids.holder;
+  };
+  (void)town(Point{100, 100});  // the corner's town
+  const ObjectId far_holder = town(Point{20'000, 20'000});
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  const GaikaId corner = f.world.gaika().at(f.world.lsa(), Point{0, 0});
+  const GaikaId far_town = f.world.gaika().at(f.world.lsa(), Point{20'000, 20'000});
+  REQUIRE(corner != kNoGaika);
+  REQUIRE(far_town != kNoGaika);
+  REQUIRE(corner != far_town);
+
+  const ObjectId loose = f.spawn(f.warrior);
+  REQUIRE(f.world.put_in_holder(loose, far_holder));
+  REQUIRE(f.world.resolve_position(loose) == (Point{0, 0}));
+  const ObjectId units[] = {loose};
+  regroup_into_fresh_squads(f.world, f.heroes, units, 9, f.world.time());
+  REQUIRE(f.squad_holding(loose) != nullptr);
+  CHECK(f.squad_holding(loose)->dest_gaika == far_town);
+}
