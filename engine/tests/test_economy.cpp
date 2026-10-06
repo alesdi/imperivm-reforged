@@ -1788,6 +1788,36 @@ TEST(economy_a_building_receiver_captures_its_whole_settlement) {
   CHECK(b.owner_of(b.garrison_a) == 0);
 }
 
+TEST(economy_a_captured_settlement_answers_its_new_owner_to_its_own_members) {
+  // `Settlement::player` (0x005c2340), `IsOwn` (0x004252c0), `IsEnemy` and
+  // `IsAlly` all read `[settlement+0x90]`, which the capture worker writes at
+  // 0x005c4f78. Here they read the settlement object's owner, so a capture
+  // that moved the row alone left a captured village answering its previous
+  // owner -- and `GS_CAPTURE.VS`, looping `while (set.IsEnemy(AIPlayer))`,
+  // kept an army besieging a village its own side already held. Captured
+  // through a building, the shipped path.
+  CaptureBench b;
+  (void)register_player_host(b.registry);
+  const auto ask = [&](const char* name, std::uint16_t arity,
+                       std::vector<script::Value> args) {
+    const script::HostOutcome out =
+        call_host(b.registry, b.world, script::CallKind::member, name, arity, std::move(args));
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value;
+  };
+  REQUIRE(ask("player", 0, {b.settlement_handle()}).as_integer() == 1);
+  CHECK(b.set_player(CaptureBench::obj(b.anchor), 3).status == script::HostStatus::ok);
+  REQUIRE(b.economy.find(b.town)->owner == 2);
+
+  CHECK(ask("player", 0, {b.settlement_handle()}).as_integer() == 3);
+  CHECK(ask("IsOwn", 1, {b.settlement_handle(), script::Value::integer(3)}).truthy_scalar());
+  CHECK(!ask("IsOwn", 1, {b.settlement_handle(), script::Value::integer(1)}).truthy_scalar());
+  // The holder and the warehouse are still not touched as objects.
+  const Settlement* s = b.economy.find(b.town);
+  CHECK(b.owner_of(s->holder.object) == 0);
+  CHECK(b.owner_of(s->warehouse.object) == 0);
+}
+
 TEST(economy_a_unit_receiver_defects_alone_and_drops_its_orders) {
   // The guard against reusing `settlement_at`, which maps *any* object with a
   // settlement back-link to its settlement -- and units carry that link here,

@@ -573,10 +573,14 @@ std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime n
 /// which the holder entry 0x005d3e10 (`garrison_enter`'s original, at
 /// 0x005d3ed9) and the unit's `SetPos` 0x005d39e0 (at 0x005d3a6f) run with
 /// the old and the new `posRH`, and `GetGAIKA(Obj)` (0x00424660 ->
-/// 0x0044e650), which turns to it when the raw position is off the map. `World::resolve_position` stops at the holder
-/// record instead, an internal object that stands at (0, 0), so before this
-/// every garrisoned squad was filed under whichever node lies nearest the
-/// map's corner.
+/// 0x0044e650), which turns to it when the raw position is off the map; and
+/// `Squad::pos` (0x00422cf0, the front member's `vtbl+0xc8`).
+/// `World::resolve_position` stops at the holder record instead, an internal
+/// object that stands at (0, 0), so before this every garrisoned squad -- in a
+/// town, a tower or a siege engine -- was filed under whichever node lies
+/// nearest the map's corner: an army at home looked away from home and was
+/// sent back to its own gate, and a siege engine's crew vanished from the node
+/// it was besieging the moment it climbed in.
 ///
 /// **For units only**, as the override is: an item or another held object
 /// keeps `resolve_position` here, which is not what its own `posRH` answers

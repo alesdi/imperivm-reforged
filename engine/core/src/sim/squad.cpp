@@ -178,7 +178,8 @@ void revalue_squads(World& world, SquadTable& squads) {
     // what 0x0041f530 is handed: a member in a town's garrison stands at the
     // town's central building, so a squad that marched home and went in is
     // filed under the town's node and not under wherever its holder record
-    // happens to sit.
+    // happens to sit -- and a siege engine's crew stays filed under the node
+    // it is besieging.
     if (!squad.members.empty() && world.find(squad.members.front()) != nullptr) {
       squad.gaika_in = nodes.at(areas, unit_pos_rh(world, squad.members.front()));
     }
