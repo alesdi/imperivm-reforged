@@ -1270,16 +1270,14 @@ class World {
   //
   // All of these clear `out` and append in ascending id order.
 
-  /// Objects whose resolved position is within `radius` of `center`. Held
-  /// objects are located at their holder, so a garrison is found where the
-  /// building is.
+  /// Objects standing within `radius` of `center`. **A held object is not
+  /// found**, by this or any other area query: it stands at `(-1, -1)` in no
+  /// grid cell, as in the original (`sim/spatial_index.hpp`).
   std::size_t objects_in_radius(Point center, std::int32_t radius, const ClassFilter& filter,
                                 std::vector<ObjectId>& out) const;
 
-  /// Objects whose resolved position falls inside an axis-aligned box,
-  /// **corners inclusive**. Held objects are located at their holder, exactly
-  /// as `objects_in_radius` does it, so a garrison inside a rectangle area is
-  /// found there.
+  /// Objects standing inside an axis-aligned box, **corners inclusive**, and
+  /// no held object, exactly as `objects_in_radius`.
   ///
   /// The corners are taken as given. `objs_in_rect` normalises them when it
   /// builds the spec, which is the one place a map's authoring order reaches.
@@ -1287,7 +1285,9 @@ class World {
                               std::int32_t bottom, const ClassFilter& filter,
                               std::vector<ObjectId>& out) const;
 
-  /// Objects within `observer`'s sight radius, excluding the observer itself.
+  /// Objects within `observer`'s sight radius of its own stored position,
+  /// excluding the observer itself -- so a held observer looks out from
+  /// `(-1, -1)`, as 0x004ff080 does.
   std::size_t objects_in_sight(ObjectId observer, const ClassFilter& filter,
                                std::vector<ObjectId>& out) const;
 
@@ -1326,10 +1326,9 @@ class World {
   std::size_t buildings_in_settlement(ObjectId settlement, const ClassFilter& filter,
                                       std::vector<ObjectId>& out) const;
 
-  /// Every non-internal object whose resolved position lies in the box,
-  /// corners inclusive, in spawn order and with **no other test**: an object
-  /// that resolves to `kHeldPosition` is included when the box covers it, and
-  /// so is a spawn template. The raw sweep the filtered queries above are
+  /// Every non-internal object standing in the box, corners inclusive, in
+  /// spawn order and with **no other test** -- a spawn template is included --
+  /// beyond the one every area query makes: a held object stands nowhere. The raw sweep the filtered queries above are
   /// built on, for a caller whose own rule differs from theirs -- `EnemyInRange`
   /// is one.
   std::size_t objects_located_in_rect(std::int32_t left, std::int32_t top, std::int32_t right,

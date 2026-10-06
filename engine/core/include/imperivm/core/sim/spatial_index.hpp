@@ -13,19 +13,22 @@
 // Iteration order is state; the order the grid holds its entries in is not
 // allowed to reach anything.
 //
-// Two kinds of object are filed:
+// Only an object that stands somewhere is filed: in the cell of its own
+// `state.position`, with that position copied into the entry so the sweep can
+// test it without a lookup.
 //
-//  * one that stands somewhere, in the cell of its own `state.position`, with
-//    that position copied into the entry so the sweep can test it without a
-//    lookup;
-//  * one that is **held**, in a separate list and not in the grid at all. A
-//    held object is found where its holder is, following the chain, and a
-//    holder that moves carries its contents with it -- so a held object's
-//    position is resolved at every query rather than filed, and moving a
-//    holder never has to touch what it holds. A few hundred on a shipped map.
+// A **held** object is filed nowhere, and no spatial query finds it. That is
+// the original's grid: the holder entry 0x005d3e10 sets the unit's position to
+// `(-1, -1)` (0x005d3ef9), the relink in 0x0053f000 asks 0x0053d030 for the
+// cell of that point, and 0x0053d030 answers none for `x == -1`, so the object
+// leaves its cell's list; every area sweep (the circle at 0x004fde60,
+// `EnemyInRange`'s square at 0x004dbea0, and the rest) walks those lists and
+// nothing else. This index once kept held objects in a list of their own and
+// resolved each to its holder at every query -- which, a garrison's holder
+// record standing at (0, 0), found every garrison on the map in the corner.
 //
 // Internal objects -- settlements, holders, warehouses, queries -- are filed
-// nowhere, since no spatial query can answer with one.
+// nowhere either, since no spatial query can answer with one.
 
 #include <cstddef>
 #include <cstdint>
@@ -55,7 +58,6 @@ struct SpatialBox {
 /// `World` carries a grid that still agrees with it.
 struct SpatialSlot {
   std::int32_t cell = -1;  ///< grid cell, or -1 when not in the grid
-  bool held = false;       ///< in the held list
 };
 
 class SpatialIndex {
@@ -75,19 +77,16 @@ class SpatialIndex {
 
   void clear() noexcept;
 
-  /// File `slot` where it is now -- in its cell, in the held list, or (being
-  /// internal) nowhere -- moving it from wherever it was filed before.
+  /// File `slot` where it is now -- in its cell, or (being internal or held)
+  /// nowhere -- moving it from wherever it was filed before.
   void file(WorldObject& slot);
 
   /// Take `slot` out of the index altogether (despawn).
   void drop(WorldObject& slot) noexcept;
 
   /// Append to `out` the id of every grid entry whose position is in `box`.
-  /// Unordered, and without the held list.
+  /// Unordered.
   void gather(const SpatialBox& box, std::vector<ObjectId>& out) const;
-
-  /// Every held object, ascending by id.
-  [[nodiscard]] std::span<const ObjectId> held() const noexcept { return held_; }
 
   /// How many cells `box` touches, for the caller's choice between the grid
   /// and a straight scan.
@@ -101,10 +100,8 @@ class SpatialIndex {
   [[nodiscard]] static std::int32_t axis_cell(std::int64_t v) noexcept;
   [[nodiscard]] static std::int32_t cell_of(Point at) noexcept;
   void unfile_cell(WorldObject& slot) noexcept;
-  void unfile_held(WorldObject& slot) noexcept;
 
   std::vector<std::vector<Entry>> cells_;
-  std::vector<ObjectId> held_;
 };
 
 }  // namespace imperivm::core::sim

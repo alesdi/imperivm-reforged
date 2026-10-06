@@ -2975,6 +2975,27 @@ TEST(a_squad_inside_a_settlement_is_filed_where_its_central_building_stands) {
   REQUIRE(out.status == script::HostStatus::ok);
   CHECK(unpack_point(out.value) == hall);
 
+  // And a script asking the unit itself: `posRH` is the slot (0x005ad8a0 ->
+  // `vtbl+0xc8`), the hall; `pos` is the stored field (0x005add20), the
+  // `(-1, -1)` the holder entry wrote. Both answered the holder record's
+  // (0, 0) for a while.
+  const auto ask_unit = [&](const char* name) -> Point {
+    const std::uint32_t at = registry.find(script::CallKind::member, name, 0);
+    CHECK(at != script::kUnresolvedHost);
+    if (at == script::kUnresolvedHost) return Point{-2, -2};
+    std::vector<script::Value> self{script::Value::object(script::TypeId{1}, crew)};
+    script::CallContext call;
+    call.arguments = self;
+    call.user = &context;
+    call.name = name;
+    call.kind = script::CallKind::member;
+    const script::HostOutcome got = registry.entry(at).fn(call);
+    CHECK(got.status == script::HostStatus::ok);
+    return unpack_point(got.value);
+  };
+  CHECK(ask_unit("posRH") == hall);
+  CHECK(ask_unit("pos") == kHeldPosition);
+
   // And out on the map again, it is its own position that counts.
   CHECK(b.world.remove_from_holder(crew, in_cell(2, 2)));
   CHECK(garrison_forget(b.world, crew));

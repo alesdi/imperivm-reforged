@@ -10,7 +10,6 @@ namespace imperivm::core::sim {
 
 void SpatialIndex::clear() noexcept {
   cells_.clear();
-  held_.clear();
 }
 
 std::int32_t SpatialIndex::axis_cell(std::int64_t v) noexcept {
@@ -47,27 +46,13 @@ void SpatialIndex::unfile_cell(WorldObject& slot) noexcept {
   slot.spatial.cell = -1;
 }
 
-void SpatialIndex::unfile_held(WorldObject& slot) noexcept {
-  if (!slot.spatial.held) return;
-  const auto it = std::lower_bound(held_.begin(), held_.end(), slot.id);
-  if (it != held_.end() && *it == slot.id) held_.erase(it);
-  slot.spatial.held = false;
-}
-
 void SpatialIndex::file(WorldObject& slot) {
-  if (slot.internal != InternalKind::none) {
+  // An internal object stands nowhere, and neither does a held one: its
+  // position is `(-1, -1)`, which 0x0053d030 maps to no cell at all.
+  if (slot.internal != InternalKind::none || slot.state.is_held()) {
     drop(slot);
     return;
   }
-  if (slot.state.is_held()) {
-    unfile_cell(slot);
-    if (!slot.spatial.held) {
-      held_.insert(std::lower_bound(held_.begin(), held_.end(), slot.id), slot.id);
-      slot.spatial.held = true;
-    }
-    return;
-  }
-  unfile_held(slot);
   if (cells_.empty()) cells_.resize(kCells);
   const Point at = slot.state.position;
   const std::int32_t cell = cell_of(at);
@@ -84,10 +69,7 @@ void SpatialIndex::file(WorldObject& slot) {
   slot.spatial.cell = cell;
 }
 
-void SpatialIndex::drop(WorldObject& slot) noexcept {
-  unfile_cell(slot);
-  unfile_held(slot);
-}
+void SpatialIndex::drop(WorldObject& slot) noexcept { unfile_cell(slot); }
 
 void SpatialIndex::gather(const SpatialBox& box, std::vector<ObjectId>& out) const {
   if (cells_.empty() || box.right < box.left || box.bottom < box.top) return;
@@ -106,19 +88,12 @@ void SpatialIndex::gather(const SpatialBox& box, std::vector<ObjectId>& out) con
 
 bool SpatialIndex::consistent(std::span<const WorldObject> objects) const {
   std::size_t in_grid = 0;
-  std::size_t in_held = 0;
   for (const WorldObject& slot : objects) {
-    if (slot.internal != InternalKind::none) {
-      if (slot.spatial.cell >= 0 || slot.spatial.held) return false;
+    if (slot.internal != InternalKind::none || slot.state.is_held()) {
+      if (slot.spatial.cell >= 0) return false;
       continue;
     }
-    if (slot.state.is_held()) {
-      if (slot.spatial.cell >= 0 || !slot.spatial.held) return false;
-      if (!std::binary_search(held_.begin(), held_.end(), slot.id)) return false;
-      ++in_held;
-      continue;
-    }
-    if (slot.spatial.held || cells_.empty()) return false;
+    if (cells_.empty()) return false;
     if (slot.spatial.cell != cell_of(slot.state.position)) return false;
     bool found = false;
     for (const Entry& entry : cells_[static_cast<std::size_t>(slot.spatial.cell)]) {
@@ -132,7 +107,7 @@ bool SpatialIndex::consistent(std::span<const WorldObject> objects) const {
   }
   std::size_t filed = 0;
   for (const std::vector<Entry>& cell : cells_) filed += cell.size();
-  return filed == in_grid && held_.size() == in_held;
+  return filed == in_grid;
 }
 
 }  // namespace imperivm::core::sim

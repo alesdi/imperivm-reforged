@@ -896,13 +896,15 @@ void World::collect(const WorldObject& slot, const ClassFilter& filter,
 // spatial queries
 // --------------------------------------------------------------------------
 
-// Every query below is a test on `(slot, at)`, where `at` is the resolved
-// position -- a garrison is found where its building is, so a held object is
-// resolved rather than tested at `(-1, -1)`. `scan` applies it to every object
-// in spawn order, which is what each of these was written as. `sweep` gives the
-// same answer from the grid: it gathers the objects the box can hold, puts them
-// back into spawn order, and applies the same test and the same `collect`. See
-// `sim/spatial_index.hpp` for why the grid can never be the order.
+// Every query below is a test on `(slot, at)`, where `at` is the object's own
+// position, over the objects that **stand on the map**: a held object is in no
+// grid cell in the original and no area sweep there finds it, so none here
+// does either (`sim/spatial_index.hpp` has the addresses). `scan` applies the
+// test to every such object in spawn order, which is what each of these was
+// written as. `sweep` gives the same answer from the grid: it gathers the
+// objects the box can hold, puts them back into spawn order, and applies the
+// same test and the same `collect`. See `sim/spatial_index.hpp` for why the
+// grid can never be the order.
 
 namespace {
 
@@ -930,8 +932,8 @@ std::size_t World::scan(const ClassFilter& filter, bool filtered, std::vector<Ob
                         Test&& test) const {
   out.clear();
   for (const WorldObject& slot : objects_) {  // spawn order, never any other
-    if (slot.internal != InternalKind::none) continue;
-    const Point at = (slot.state.is_held() ? resolve_position(slot.id) : slot.state.position);
+    if (slot.internal != InternalKind::none || slot.state.is_held()) continue;
+    const Point at = slot.state.position;
     if (!test(slot, at)) continue;
     if (filtered) {
       collect(slot, filter, out);
@@ -948,9 +950,6 @@ std::size_t World::sweep(const SpatialBox& box, const ClassFilter& filter, bool 
   if (SpatialIndex::cells_touched(box) > kMaxSweepCells) return scan(filter, filtered, out, test);
   out.clear();
   index_.gather(box, out);
-  for (const ObjectId id : index_.held()) {
-    if (box.contains(resolve_position(id))) out.push_back(id);
-  }
   // Back into spawn order, which is ascending id order. Each object is filed
   // exactly once, so there is nothing to deduplicate.
   std::sort(out.begin(), out.end());
@@ -960,7 +959,7 @@ std::size_t World::sweep(const SpatialBox& box, const ClassFilter& filter, bool 
     cursor = std::lower_bound(cursor, objects_.end(), id,
                               [](const WorldObject& slot, ObjectId key) { return slot.id < key; });
     const WorldObject& slot = *cursor;
-    const Point at = (slot.state.is_held() ? resolve_position(slot.id) : slot.state.position);
+    const Point at = slot.state.position;
     if (!test(slot, at)) continue;
     // `collect`'s own tests, applied in place.
     if (filtered && (slot.state.flags.unspawned || !matches_filter(slot, filter))) continue;
@@ -1015,8 +1014,10 @@ std::size_t World::objects_in_sight(ObjectId observer, const ClassFilter& filter
   out.clear();
   const WorldObject* watcher = find(observer);
   if (watcher == nullptr) return 0;
-  const Point eye = resolve_position(observer);
-  if (eye == kHeldPosition) return 0;
+  // The observer's own stored position, as 0x004ff080 reads it through
+  // `vtbl+0x3c` (0x004ff133) -- so a held observer looks out from `(-1, -1)`,
+  // the map's corner, and not from its holder; nothing it stands in is asked.
+  const Point eye = watcher->state.position;
 
   const std::int32_t sight = watcher->sight;
   const auto seen = [&](const WorldObject& slot, Point at) {
@@ -1177,12 +1178,11 @@ std::size_t World::units_in_settlement(ObjectId settlement, const ClassFilter& f
   // the dead test is made here rather than there because no other sweep in
   // `gbr.exe` makes it and widening `collect` would apply it to all of them.
   //
-  // Held objects are skipped rather than resolved to their holder's position,
-  // which is the opposite of what `objects_in_radius` does above. The reason is
-  // the mode split itself: a garrisoned unit holds `(-1, -1)` and occupies no
-  // grid cell in the original, so it cannot be swept by the ring, and resolving
-  // it here would make `UnitsAroundSettlement` a superset of
-  // `UnitsInSettlement` -- collapsing the very distinction the mode encodes.
+  // Held objects are skipped, as every area sweep skips them: a garrisoned
+  // unit holds `(-1, -1)` and occupies no grid cell in the original, so it
+  // cannot be swept by the ring, and resolving it here would make
+  // `UnitsAroundSettlement` a superset of `UnitsInSettlement` -- collapsing the
+  // very distinction the mode encodes.
   for (const WorldObject& tower : objects_) {
     if (tower.internal != InternalKind::none) continue;
     if (tower.settlement != settlement) continue;
@@ -1324,9 +1324,16 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
     case QueryKind::map_area_circle: {
       // `ObjsInRange` anchors on an object and `ObjsInCircle` on a point; the
       // dumps show one runtime type for both, so the anchor wins when present.
-      const Point center =
-          spec->subject != kNoObject ? resolve_position(spec->subject) : spec->center;
-      if (center == kHeldPosition) return 0;
+      // The anchor's own stored position, read afresh at each evaluation
+      // (0x004ff133), and a held anchor's is `(-1, -1)`: the sweep goes round
+      // the map's corner, as `objects_in_sight` does. An anchor that is gone
+      // answers nothing (0x004ff0cd).
+      Point center = spec->center;
+      if (spec->subject != kNoObject) {
+        const WorldObject* anchor = find(spec->subject);
+        if (anchor == nullptr) return 0;
+        center = anchor->state.position;
+      }
       return objects_in_radius(center, spec->radius, spec->filter, out);
     }
 
