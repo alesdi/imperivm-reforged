@@ -1684,6 +1684,19 @@ HostOutcome goto_enter_impl(CallContext& ctx) {
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
 }
 
+/// The verb `CVXFormObj` hands every member when its march is set up
+/// (0x005f2b50, the string at 0x007d5698), bound by `UNIT.SC.XML` to
+/// `UNIT_FORM_MOVE.VS`.
+constexpr std::string_view kFormMove = "form_move";
+
+/// Whether `id` is on its hero's march: running the march's verb. A world
+/// with no command system has no verbs to run, and every member marches.
+[[nodiscard]] bool on_march(World& world, ObjectId id) {
+  const CommandSystem* commands = command_system(world);
+  if (commands == nullptr) return true;
+  return commands->command_count(id) > 0 && commands->command_name(id, 0) == kFormMove;
+}
+
 /// Place a hero's army at its formation offsets around `anchor`.
 ///
 /// The offsets, the three placements and the spacing all come from
@@ -1691,6 +1704,21 @@ HostOutcome goto_enter_impl(CallContext& ctx) {
 /// A member is only re-ordered when its destination has moved more than
 /// `repath_threshold` from where it was already going, so a marching column
 /// does not run a fresh A* per member per call.
+///
+/// **Only a member running `form_move` is on the march.** The original's
+/// members follow the formation object's samples through a route aimed at
+/// it (`SetFormation`, 0x00417790), which `UNIT_FORM_MOVE.VS`'s
+/// `FormAcceptMove` sets up; a member given any other command since -- a
+/// squad order, `stand_position` at the march's end -- has a script of its
+/// own and a route of its own, and the march no longer moves it. Here every
+/// member used to be re-ordered on every call whatever it was running, and
+/// as nothing gave it `form_move` it was running `UNIT_IDLE.VS`, whose
+/// `Stop(2000)` dropped the station's route every few seconds: an army
+/// marched in fits and was left wherever the last `Stop` caught it when its
+/// hero arrived -- on Crossroads, columns of four and five to a 16-unit cell.
+/// The members' orders carry the formation's lock flag (`MoveState::form_lock`
+/// on the hero), which makes them free-spot tested once the march is over
+/// (`MovementSystem::lock_owner`).
 std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroes, ObjectId hero,
                        Point anchor, Point facing) {
   const HeroRecord* record = heroes.hero(hero);
@@ -1700,6 +1728,7 @@ std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroe
   // one another's steps (`sim/movement.hpp`, inference 3).
   movement.state(hero).party = hero;
   const MoveState& lead = movement.state(hero);
+  const bool lock = lead.form_lock;
   const FormationClassDef* formation = lead.formation.empty()
                                            ? movement.formations().default_formation()
                                            : movement.formations().find(lead.formation);
@@ -1722,6 +1751,7 @@ std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroe
   std::vector<Point> offsets(members.size());
   const std::size_t placed = formation_offsets(*formation, members, facing, offsets);
   for (std::size_t i = 0; i < placed; ++i) {
+    if (!on_march(world, members[i].id)) continue;
     const Point station{anchor.x + offsets[i].x, anchor.y + offsets[i].y};
     // A member inside a settlement steps out towards its station first --
     // `FormAcceptMove`'s 0x005d3f20 (0x005d7955). **Not throttled:** the
@@ -1733,10 +1763,11 @@ std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroe
       (void)garrison_exit(world, members[i].id, station, world.time(), /*throttled=*/false);
     }
     const MoveState& member = movement.state(members[i].id);
-    if (member.goto_active && within(member.target, station, MovementSystem::repath_threshold())) {
+    if (member.goto_active && member.party == hero &&
+        within(member.target, station, MovementSystem::repath_threshold())) {
       continue;
     }
-    movement.order_goto(world, members[i].id, station, 0, 0, hero);
+    movement.order_goto(world, members[i].id, station, 0, 0, hero, lock);
   }
   return placed;
 }
@@ -1773,11 +1804,34 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
     (void)garrison_exit(*self.world, self.id, dest, self.world->time(), /*throttled=*/false);
   }
 
-  if (target == kNoObject) {
-    self.movement->order_goto(*self.world, self.id, dest, range, min_range);
-  } else {
-    self.movement->order_goto_object(*self.world, self.id, target, range, min_range);
+  // `CVXFormObj::SetDest` (0x005f2cc0) keeps the flag at `[form+0x8c]`.
+  self.movement->state(self.id).form_lock = ctx.count() > 4 && ctx.arg(4).truthy_scalar();
+  const MoveOutcome outcome =
+      target == kNoObject
+          ? self.movement->order_goto(*self.world, self.id, dest, range, min_range)
+          : self.movement->order_goto_object(*self.world, self.id, target, range, min_range);
+
+  // The march is handed to the army. `SetDest` that lays a route gives every
+  // member `form_move` (0x005f2b50): its route deleted (0x005d3830(0)) and the
+  // command inserted with the replace flag (0x005b4e90 with 1), which ends
+  // whatever it was running. One that lays none ends the march instead
+  // (0x005f2c10): every member running `form_move` loses its route, and
+  // `UNIT_FORM_MOVE.VS`'s `while (.HasPath())` lets it go.
+  const HeroRecord* record = heroes->hero(self.id);
+  CommandSystem* commands = command_system(*self.world);
+  if (record != nullptr && commands != nullptr) {
+    const std::vector<ObjectId> army = record->army;
+    for (const ObjectId member : army) {
+      if (outcome == MoveOutcome::blocked) {
+        if (on_march(*self.world, member)) self.movement->stop(*self.world, member);
+        continue;
+      }
+      self.movement->stop(*self.world, member);
+      (void)commands->set_command(*self.world, member, kFormMove, Command{});
+    }
   }
+  if (outcome == MoveOutcome::blocked) return HostOutcome::ok_void();
+
   const MoveState& lead = self.movement->state(self.id);
   place_army(*self.world, *self.movement, *heroes, self.id,
              self.world->resolve_position(self.id), lead.facing);
@@ -1803,18 +1857,16 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
 /// its state to 3 -- marching -- and finish.
 ///
 /// **What runs here is the finishing half, and why the rest does not.** The
-/// original's party-move code hands each member a `form_move` command and a
-/// target through that record, and the member fetches the target itself
-/// here. This engine's formation march is `place_army` (below): when the hero
-/// moves, every member is ordered straight to its station through the
-/// movement system, and nothing issues `form_move` -- the verb is bound by
-/// `UNIT.SC.XML` and named by no shipped script but `HERO_IDLE.VS`, which only
-/// reads it back. So a member that does reach this call already has its
-/// order, and the answer is the original's "nothing pending" exit: finish, so
-/// the script's `while (.HasPath())` takes over. The exit queue out of a
-/// holder is not reproduced, for the same reason: a held member gets no
-/// station from `place_army`, so there is no march for it to join, and a wait
-/// with nothing to wait for would never end.
+/// original's party-move code hands each member a `form_move` command
+/// (0x005f2b50) and a target through that record, and the member fetches the
+/// target itself here. This engine's formation march is `place_army`: the
+/// same `FormSetupAndMoveTo` that gives the members `form_move` orders each
+/// straight to its station through the movement system, before the command's
+/// script first runs. So a member that reaches this call already has its
+/// order, and the answer is to finish, so the script's `while (.HasPath())`
+/// takes over; the member's route then lasts as long as the march does
+/// (`MovementSystem::marching`). The exit queue out of a holder is not
+/// reproduced: `place_army` steps a held member out itself, unthrottled.
 HostOutcome form_accept_move_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);

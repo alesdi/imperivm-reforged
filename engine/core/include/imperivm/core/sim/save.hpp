@@ -276,7 +276,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// version-26 file would load every walking unit as failing since its order
 /// began -- not hashed, and it would end scripts early and draw from the
 /// world's generator where the original does not.
-inline constexpr std::uint32_t kStateVectorVersion = 27;
+/// 28: the movement section's `MoveState` grew `Unit::Stop`'s request
+/// (`CVXPathRetry` flag bit 1, 0x004178b0) and the formation's lock flag a
+/// march's hero carries (`[form+0x8c]`). Not hashed -- path media -- and a
+/// version-27 file would load a unit told to stop as one walking on to its
+/// destination.
+inline constexpr std::uint32_t kStateVectorVersion = 28;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

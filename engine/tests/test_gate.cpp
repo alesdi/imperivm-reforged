@@ -394,6 +394,28 @@ TEST(an_enemy_stands_before_a_closed_gate_it_cannot_go_round_until_it_opens) {
   }
 }
 
+/// `Unit::Stop` asked of a unit waiting before a gate that bars it: the path
+/// follower's stop branch asks the gate after the free spot (0x00419f8a ..
+/// 0x00419fa2) and takes no step when it bars, so the unit stops there even
+/// on a taken spot -- where waiting for the gate, it would answer `Stop`'s
+/// re-entry false for as long as the gate stayed shut.
+TEST(a_unit_told_to_stop_before_a_gate_that_bars_it_stops_there) {
+  GateField f;
+  const ObjectId foe = f.unit(1, kSouth);
+  f.movement.order_goto(f.world, foe, kNorth, 0, 0, kNoObject, /*lock_destination=*/true);
+  REQUIRE(f.move(foe).has_path);
+  CHECK(!f.walk(foe, 10000));
+  REQUIRE(f.move(foe).has_path);
+  REQUIRE((f.at(foe) == Point{1000, kStandY}));
+  // Somebody stands on the spot, so it is not free.
+  (void)f.unit(1, Point{1000, kStandY});
+  REQUIRE(f.movement.request_stop(f.world, foe));
+  f.world.advance(100);
+  f.world.advance(100);
+  CHECK(!f.move(foe).has_path);
+  CHECK((f.at(foe) == Point{1000, kStandY}));
+}
+
 /// No way round and a long route (more than 1,300): the second search's
 /// partial route is walked, and it ends at the gate's line, south of it.
 /// The short-route exception is for exactly one enemy gate: across two --

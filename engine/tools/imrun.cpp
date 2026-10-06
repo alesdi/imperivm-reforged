@@ -80,7 +80,8 @@ int main(int argc, char** argv) {
                  "every n turns and prints the worst turn, and the melee units in a\n"
                  "fight that are engaged, closing or waiting out of reach; with\n"
                  "IMRUN_PILES=1 as well, each sample also lists every 16-unit cell\n"
-                 "three or more standing bodies share, by class, owner and order;\n"
+                 "three or more standing bodies share, by class, owner, order and\n"
+                 "the hero whose army it is (h<id>, or h- for none);\n"
                  "IMRUN_GOTO=<turn>:<id>:<x>,<y> gives that object its owner's\n"
                  "right-click order to the point before that turn, IMRUN_PLACE=<x>,<y>\n"
                  "first stands it there, out of its AI's hands, IMRUN_WATCH=<id>\n"
@@ -538,9 +539,11 @@ int main(int argc, char** argv) {
   // `IMRUN_PILES=1`: with the census, where the bodies are piled -- every
   // 16-unit cell that three or more standing bodies share (standing as the
   // census means it: a live unit on the map with no route), with each body's
-  // class, owner and running order.
+  // class, owner and running order, and the hero whose army it is in.
   // A pair count says how bad; this says which order, which player and which
-  // spot, which is how the piles at p1's door on Crossroads were found.
+  // spot, which is how the piles at p1's door on Crossroads were found -- and
+  // which army, which is how a hero's recruits stopped in one pile at the door
+  // they left by were.
   const bool show_piles = std::getenv("IMRUN_PILES") != nullptr;
   const auto list_piles = [](sim::World& world, std::uint64_t at) {
     const ClassGraph* graph = world.class_graph();
@@ -565,6 +568,13 @@ int main(int argc, char** argv) {
                     commands != nullptr && commands->command_count(id) > 0
                         ? std::string(commands->command_name(id, 0)).c_str()
                         : "-");
+        const sim::HeroSystem* heroes = sim::hero_system_of(world);
+        const ObjectId hero = heroes != nullptr ? heroes->hero_of(id) : kNoObject;
+        if (hero != kNoObject) {
+          std::printf(" h%u", hero);
+        } else {
+          std::printf(" h-");
+        }
       }
       std::printf("\n");
     }

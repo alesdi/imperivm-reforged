@@ -106,6 +106,10 @@
 //     the band on a taken spot a route walks on; at the route's end the path
 //     follower (`0x00419ee0`, `0x0041a056`) re-lays it (`RecastPathfind`,
 //     `0x00419730`) from where the unit stands.
+//   * the path follower's stop branch (0x00419ee0, taken while `Unit::Stop`'s
+//     bit 1 is set at `[retry+0x20]`), which stops the owner on the first
+//     point that is passable and free and walks on otherwise; with no owner
+//     it takes no step. Built: `MovementSystem::request_stop` and `decide`.
 //   * the smart pathfinder, handed the owner (`0x004141bd` .. `0x00414263`),
 //     which cuts a found route back from its end, one cell at a time, to the
 //     first cell whose centre is free, and never tests the start's cell.
