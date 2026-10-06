@@ -411,10 +411,16 @@ def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     assert enemies, first.stdout[-3000:]
     unit = enemies[0]
 
+    # Pinned: out of p1's AI, so the order is the test's. Unpinned, the
+    # swordsman stays in its squad's `SS_Approach`, and whether p1's recruiter
+    # re-routes that squad to some village before the walls reach it is AI
+    # timing -- which it did once garrisoned squads were filed under the node
+    # their settlement stands in, and the swordsman died to an independent
+    # slinger far from p0.
     second = subprocess.run(
         [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "800"],
         capture_output=True, text=True, timeout=600,
-        env={**os.environ, "IMRUN_DEATHS": "1",
+        env={**os.environ, "IMRUN_DEATHS": "1", "IMRUN_PIN": "1",
              "IMRUN_PLACE": f"{P0_OUTSIDE[0]},{P0_OUTSIDE[1]}",
              "IMRUN_GOTO": f"{ORDER_TURN}:{unit}:{P0_TOWNHALL[0]},{P0_TOWNHALL[1]}"},
     )

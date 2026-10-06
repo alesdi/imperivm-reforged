@@ -2924,6 +2924,63 @@ TEST(squad_gaika_in_follows_the_first_member_and_src_gaika_is_stamped_once) {
   CHECK(b.heroes.squads().find(key)->src_gaika == west);
 }
 
+/// A unit inside a settlement stands where that settlement's central building
+/// stands -- `Unit::GetPos` (0x005d3db0) for a held unit -- so its squad stays
+/// filed under the settlement's node and `Squad::pos` answers the building.
+///
+/// The holder walk ends on the settlement's holder, which has no place of its
+/// own; a crew that climbed into a siege engine used to be filed under the
+/// node of the map's corner, and the siege it was serving lost it.
+TEST(a_squad_inside_a_settlement_is_filed_where_its_central_building_stands) {
+  StrengthBench b;
+  b.plant(3, 3);                             // the western island
+  const SettlementId town = b.plant(10, 8);  // the eastern one
+  b.rebuild();
+  const GaikaId east = b.world.gaika().at(b.world.lsa(), in_cell(10, 8));
+  REQUIRE(east != kNoGaika);
+  // The corner the walk answered is somewhere else, which is what makes the
+  // case able to tell the two readings apart.
+  REQUIRE(b.world.gaika().at(b.world.lsa(), Point{0, 0}) != east);
+  const Settlement* row = b.economy.settlements().find(town);
+  REQUIRE(row != nullptr);
+  const Point hall = b.world.resolve_position(row->anchor);
+  REQUIRE(hall == in_cell(10, 8));
+
+  const ObjectId crew = b.trooper("Legionary", 1, 9, 12);
+  b.arm();
+  const SquadKey key = b.raw(1, {crew});
+  b.step();
+  REQUIRE(b.heroes.squads().find(key)->gaika_in == east);
+
+  REQUIRE(garrison_enter(b.world, town, crew, /*force=*/true));
+  REQUIRE(b.world.find(crew)->state.is_held());
+  CHECK(unit_reported_position(b.world, crew) == hall);
+  b.step();
+  CHECK(b.heroes.squads().find(key)->gaika_in == east);
+
+  // `Squad::pos` asks the same slot of the front member (0x00422d37).
+  script::HostRegistry registry;
+  (void)register_all_hosts(registry);
+  HostContext context;
+  context.world = &b.world;
+  const std::uint32_t index = registry.find(script::CallKind::member, "pos", 0);
+  REQUIRE(index != script::kUnresolvedHost);
+  std::vector<script::Value> args{pack_squad(key)};
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &context;
+  ctx.name = "pos";
+  ctx.kind = script::CallKind::member;
+  const script::HostOutcome out = registry.entry(index).fn(ctx);
+  REQUIRE(out.status == script::HostStatus::ok);
+  CHECK(unpack_point(out.value) == hall);
+
+  // And out on the map again, it is its own position that counts.
+  CHECK(b.world.remove_from_holder(crew, in_cell(2, 2)));
+  CHECK(garrison_forget(b.world, crew));
+  CHECK(unit_reported_position(b.world, crew) == in_cell(2, 2));
+}
+
 namespace {
 
 /// `u.BestMDPos(md, min, max, minEval, protect)`, through the registry.

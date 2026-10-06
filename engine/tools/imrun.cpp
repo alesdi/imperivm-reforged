@@ -38,6 +38,8 @@
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/gate.hpp"
+#include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/orders.hpp"
 #include "imperivm/core/world/map.hpp"
 #include "imperivm/core/formats/ini.hpp"
@@ -594,6 +596,12 @@ int main(int argc, char** argv) {
   if (const char* place = std::getenv("IMRUN_PLACE")) {
     place_wanted = std::sscanf(place, "%d,%d", &place_x, &place_y) == 2;
   }
+  // `IMRUN_PIN=1`: the ordered object is taken out of its AI's hands first --
+  // `UNITFLAG_NOAI` on the unit and `SF_NOAI` on its squad, the two marks a
+  // mission puts on a body it owns -- so the order is the test's and no
+  // recruiter re-routes it. A check that places a unit is about placement, and
+  // whether its AI happens to re-task it before it arrives is AI timing.
+  const bool pin_wanted = std::getenv("IMRUN_PIN") != nullptr;
   ObjectId watched = kNoObject;
   if (const char* watch = std::getenv("IMRUN_WATCH")) watched = static_cast<ObjectId>(std::strtoul(watch, nullptr, 10));
   const bool show_gates = std::getenv("IMRUN_GATES") != nullptr;
@@ -629,6 +637,14 @@ int main(int argc, char** argv) {
       const bool placed = run.world().set_position(goto_id, sim::Point{place_x, place_y});
       std::printf("  place turn %llu: %u at (%d,%d)%s\n", turn, goto_id, place_x, place_y,
                   placed ? "" : " refused");
+    }
+    if (goto_wanted && turn == goto_turn && pin_wanted) {
+      if (sim::ObjectState* state = run.world().mutable_state(goto_id)) state->flags.no_ai = true;
+      if (sim::HeroSystem* heroes = sim::hero_system_of(run.world())) {
+        if (sim::Squad* squad = heroes->squads().find(heroes->squads().squad_of(goto_id))) {
+          squad->flags = static_cast<std::uint16_t>(squad->flags | sim::kSquadFlagNoAi);
+        }
+      }
     }
     if (goto_wanted && turn == goto_turn) {
       const sim::WorldObject* actor = run.world().find(goto_id);

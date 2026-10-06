@@ -560,6 +560,29 @@ bool garrison_enter(World& world, SettlementId id, ObjectId unit, bool force);
 std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime now,
                            bool throttled = true);
 
+/// Where a unit **says** it stands: `Unit::GetPos`, the virtual at `vtbl +
+/// 0xc8`, which for a unit is 0x005d3db0 and not the shared `Obj` thunk the
+/// other fifteen classes carry there (`world_host.cpp`'s `posRH` note is about
+/// those). A unit on the map answers its own position. A held unit asks its
+/// holder (`[unit+0x154]`) for the holder's owner (`[holder+0xc]`) and, when
+/// there is one, answers **that settlement's** position, which 0x005c1060
+/// reads off the central building (`[settlement+0x8c]`); a holder with no
+/// owner -- a ship's -- answers its container's position instead, which is
+/// what `World::resolve_position` already walks to and is left to it.
+///
+/// It differs from `World::resolve_position` for a garrison and only there:
+/// the chain that walks ends at the settlement's holder, an internal object
+/// with no place of its own, so a unit inside a town, a tower or a siege
+/// engine resolved to the holder's unset `(0, 0)` -- the map's corner.
+///
+/// Two readers in the original go through this slot, and both are here:
+/// `Squad::pos` (0x00422cf0, the front member's `vtbl+0xc8`), and the node
+/// hook every move runs (0x0041f530, called with `vtbl+0xc8` as the new point
+/// by `SetPos` at 0x005d3a62 and by the holder entry at 0x005d3ecc, *after*
+/// 0x005d3ec5 has written the holder link) -- which is how a garrison's squad
+/// stays filed under the node of the place it went into.
+[[nodiscard]] Point unit_reported_position(World& world, ObjectId unit);
+
 /// Take `unit` off every settlement roster that holds it, lowering loyalty as
 /// leaving does. For the dead and the erased: the holder removal (0x00531a80)
 /// is the same routine whatever took the unit away. Returns whether any

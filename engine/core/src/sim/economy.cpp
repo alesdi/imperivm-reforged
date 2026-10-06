@@ -728,6 +728,26 @@ bool garrison_forget(World& world, ObjectId unit) {
   return held;
 }
 
+Point unit_reported_position(World& world, ObjectId unit) {
+  const WorldObject* slot = world.find(unit);
+  if (slot == nullptr) return kHeldPosition;
+  if (slot->state.is_held()) {
+    // The holder's owner, which is the settlement whose holder it is: the
+    // same lookup `garrison_exit` makes, and for the same object.
+    EconomySystem* economy = economy_of(world);
+    const Settlement* s =
+        economy == nullptr ? nullptr : economy->settlements().for_object(slot->state.holder);
+    // 0x005c1060 reads the central building without a test, so a holding
+    // settlement always has one there; here a razed anchor falls through to
+    // the walk rather than inventing a place.
+    if (s != nullptr && s->holder.object == slot->state.holder &&
+        world.find(s->anchor) != nullptr) {
+      return world.resolve_position(s->anchor);
+    }
+  }
+  return world.resolve_position(unit);
+}
+
 std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime now,
                            bool throttled) {
   const WorldObject* slot = world.find(unit);
