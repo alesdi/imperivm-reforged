@@ -560,6 +560,29 @@ bool garrison_enter(World& world, SettlementId id, ObjectId unit, bool force);
 std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime now,
                            bool throttled = true);
 
+/// `Unit::posRH` (0x005d3db0, the unit's own `vtbl+0xc8`): where a unit
+/// stands for the questions that ask which node it is in. A unit on the map
+/// answers its own position. A unit in a holder answers **its settlement's
+/// central building position** (0x005c1060: the object at `[settlement+0x8c]`,
+/// read through `vtbl+0x3c`) when the holder belongs to a settlement
+/// (`[holder+0xc]`), and the holder's own position otherwise -- a ship's
+/// passengers are where the ship is, which `World::resolve_position` already
+/// follows and is what this answers there.
+///
+/// Two readers in `gbr.exe` take it: the squad's node tracker 0x0041f530,
+/// which the holder entry 0x005d3e10 (`garrison_enter`'s original, at
+/// 0x005d3ed9) and the unit's `SetPos` 0x005d39e0 (at 0x005d3a6f) run with
+/// the old and the new `posRH`, and `GetGAIKA(Obj)` (0x00424660 ->
+/// 0x0044e650), which turns to it when the raw position is off the map. `World::resolve_position` stops at the holder
+/// record instead, an internal object that stands at (0, 0), so before this
+/// every garrisoned squad was filed under whichever node lies nearest the
+/// map's corner.
+///
+/// **For units only**, as the override is: an item or another held object
+/// keeps `resolve_position` here, which is not what its own `posRH` answers
+/// and is not this function's question.
+[[nodiscard]] Point unit_pos_rh(World& world, ObjectId unit);
+
 /// Take `unit` off every settlement roster that holds it, lowering loyalty as
 /// leaving does. For the dead and the erased: the holder removal (0x00531a80)
 /// is the same routine whatever took the unit away. Returns whether any

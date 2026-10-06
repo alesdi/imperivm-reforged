@@ -768,6 +768,22 @@ std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime n
   return 0;
 }
 
+Point unit_pos_rh(World& world, ObjectId unit) {
+  const WorldObject* slot = world.find(unit);
+  if (slot == nullptr) return kHeldPosition;
+  if (!slot->state.flags.is_unit || !slot->state.is_held()) return world.resolve_position(unit);
+  // The holder's settlement, matched both ways as `garrison_exit` matches it:
+  // the roster's holder must be the record this unit is in.
+  if (const EconomySystem* economy = economy_of(world); economy != nullptr) {
+    const Settlement* s = economy->settlements().for_object(slot->state.holder);
+    if (s != nullptr && s->holder.object == slot->state.holder && s->anchor != kNoObject &&
+        world.find(s->anchor) != nullptr) {
+      return world.resolve_position(s->anchor);
+    }
+  }
+  return world.resolve_position(unit);
+}
+
 // --------------------------------------------------------------------------
 // sentries and burning
 // --------------------------------------------------------------------------
