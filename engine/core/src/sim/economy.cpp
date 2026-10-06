@@ -768,6 +768,22 @@ std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime n
   return 0;
 }
 
+Point unit_pos_rh(World& world, ObjectId unit) {
+  const WorldObject* slot = world.find(unit);
+  if (slot == nullptr) return kHeldPosition;
+  if (!slot->state.flags.is_unit || !slot->state.is_held()) return world.resolve_position(unit);
+  // The holder's settlement, matched both ways as `garrison_exit` matches it:
+  // the roster's holder must be the record this unit is in.
+  if (const EconomySystem* economy = economy_of(world); economy != nullptr) {
+    const Settlement* s = economy->settlements().for_object(slot->state.holder);
+    if (s != nullptr && s->holder.object == slot->state.holder && s->anchor != kNoObject &&
+        world.find(s->anchor) != nullptr) {
+      return world.resolve_position(s->anchor);
+    }
+  }
+  return world.resolve_position(unit);
+}
+
 // --------------------------------------------------------------------------
 // sentries and burning
 // --------------------------------------------------------------------------
@@ -3008,6 +3024,18 @@ void give_settlement_to(CallContext& ctx, EconomySystem& economy, World& world, 
     match->record_gold_captured(owner, gold);
   }
   (void)economy.set_owner(s.id, owner);
+  // And the settlement's own owner as its members read it. 0x005c4f78 writes
+  // the player record at `[settlement+0x90]`, and that one field is what
+  // `Settlement::player` (0x005c2340), `IsOwn` (0x004252c0), `IsEnemy`
+  // (0x00425250), `IsAlly` (0x004251e0) and `IsIndependent` (0x00425320) all
+  // read. Here the first four share their bodies with `Obj`'s and read the
+  // settlement *object's* owner, so that is where the write has to land: the
+  // row alone moved, and every captured outpost and village went on
+  // answering its previous owner -- `GS_CAPTURE.VS` loops `while
+  // (set.IsEnemy(AIPlayer))`, so an AI kept its army "capturing" a village it
+  // already held, and `GETGAIKASTRAT.VS` kept choosing to. This is not the
+  // holder or the warehouse, which the note above leaves where they were.
+  (void)world.set_owner(s.object, owner);
   CommandSystem* commands = command_system(world);
   for (const SettlementBuilding& building : s.buildings) {
     if (building.object == kNoObject) continue;

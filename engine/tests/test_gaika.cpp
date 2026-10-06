@@ -2924,6 +2924,137 @@ TEST(squad_gaika_in_follows_the_first_member_and_src_gaika_is_stamped_once) {
   CHECK(b.heroes.squads().find(key)->src_gaika == west);
 }
 
+/// A unit inside a settlement stands where that settlement's central building
+/// stands -- `Unit::GetPos` (0x005d3db0) for a held unit -- so its squad stays
+/// filed under the settlement's node and `Squad::pos` answers the building.
+///
+/// The holder walk ends on the settlement's holder, which has no place of its
+/// own; a crew that climbed into a siege engine used to be filed under the
+/// node of the map's corner, and the siege it was serving lost it.
+TEST(a_squad_inside_a_settlement_is_filed_where_its_central_building_stands) {
+  StrengthBench b;
+  b.plant(3, 3);                             // the western island
+  const SettlementId town = b.plant(10, 8);  // the eastern one
+  b.rebuild();
+  const GaikaId east = b.world.gaika().at(b.world.lsa(), in_cell(10, 8));
+  REQUIRE(east != kNoGaika);
+  // The corner the walk answered is somewhere else, which is what makes the
+  // case able to tell the two readings apart.
+  REQUIRE(b.world.gaika().at(b.world.lsa(), Point{0, 0}) != east);
+  const Settlement* row = b.economy.settlements().find(town);
+  REQUIRE(row != nullptr);
+  const Point hall = b.world.resolve_position(row->anchor);
+  REQUIRE(hall == in_cell(10, 8));
+
+  const ObjectId crew = b.trooper("Legionary", 1, 9, 12);
+  b.arm();
+  const SquadKey key = b.raw(1, {crew});
+  b.step();
+  REQUIRE(b.heroes.squads().find(key)->gaika_in == east);
+
+  REQUIRE(garrison_enter(b.world, town, crew, /*force=*/true));
+  REQUIRE(b.world.find(crew)->state.is_held());
+  CHECK(unit_pos_rh(b.world, crew) == hall);
+  b.step();
+  CHECK(b.heroes.squads().find(key)->gaika_in == east);
+
+  // `Squad::pos` asks the same slot of the front member (0x00422d37).
+  script::HostRegistry registry;
+  (void)register_all_hosts(registry);
+  HostContext context;
+  context.world = &b.world;
+  const std::uint32_t index = registry.find(script::CallKind::member, "pos", 0);
+  REQUIRE(index != script::kUnresolvedHost);
+  std::vector<script::Value> args{pack_squad(key)};
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &context;
+  ctx.name = "pos";
+  ctx.kind = script::CallKind::member;
+  const script::HostOutcome out = registry.entry(index).fn(ctx);
+  REQUIRE(out.status == script::HostStatus::ok);
+  CHECK(unpack_point(out.value) == hall);
+
+  // And out on the map again, it is its own position that counts.
+  CHECK(b.world.remove_from_holder(crew, in_cell(2, 2)));
+  CHECK(garrison_forget(b.world, crew));
+  CHECK(unit_pos_rh(b.world, crew) == in_cell(2, 2));
+}
+
+namespace {
+
+/// `GetGAIKA(u)` on an object, through the registry, as a script reaches it.
+GaikaId gaika_of_object(SiegeBench& b, ObjectId id) {
+  script::HostRegistry registry;
+  (void)register_all_hosts(registry);
+  HostContext context;
+  context.world = &b.world;
+  const std::uint32_t index = registry.find(script::CallKind::free_function, "GetGAIKA", 1);
+  CHECK(index != script::kUnresolvedHost);
+  if (index == script::kUnresolvedHost) return kNoGaika;
+  std::vector<script::Value> args{script::Value::object(script::TypeId{1}, id)};
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &context;
+  ctx.name = "GetGAIKA";
+  ctx.kind = script::CallKind::free_function;
+  const script::HostOutcome out = registry.entry(index).fn(ctx);
+  CHECK(out.status == script::HostStatus::ok);
+  return out.value.is_integer() ? static_cast<GaikaId>(out.value.as_integer()) : kNoGaika;
+}
+
+}  // namespace
+
+/// A squad whose leader is in a town's garrison is filed under **the town's
+/// node**: its `posRH` (0x005d3db0) is the central building's position, and
+/// that is what the node tracker 0x0041f530 is handed. So is `GetGAIKA(u)`
+/// (0x0044e650) for the garrisoned unit itself.
+///
+/// The holder record a garrisoned unit is in stands at (0, 0), which here is
+/// the western sea, nearest the western town's node. Filed by that, every
+/// squad that went home on Crossroads was "elsewhere": `AIOSENDSQUAD.VS` sent
+/// it to its own town -- `GetDestPoint`, 450 units outside the gate -- and the
+/// units that came out to go there stood on the door they came out of.
+TEST(a_garrisoned_squad_is_filed_under_its_towns_node) {
+  StrengthBench b;
+  b.plant(3, 3);                             // the western town, nearest the corner
+  const SettlementId east = b.plant(9, 10);  // the eastern one, far from it
+  b.rebuild();
+  const GaikaId west_node = b.world.gaika().at(b.world.lsa(), in_cell(3, 3));
+  const GaikaId east_node = b.world.gaika().at(b.world.lsa(), in_cell(9, 10));
+  REQUIRE(west_node != kNoGaika);
+  REQUIRE(east_node != kNoGaika);
+  REQUIRE(west_node != east_node);
+  // The control: where the holder record stands is the western node's.
+  const Settlement* town = b.economy.settlements().find(east);
+  REQUIRE(town != nullptr);
+  REQUIRE(b.world.resolve_position(town->holder.object) == (Point{0, 0}));
+  REQUIRE(b.world.gaika().at(b.world.lsa(), (Point{0, 0})) == west_node);
+
+  const ObjectId lead = b.trooper("Legionary", 1, 9, 11);
+  b.arm();
+  const SquadKey key = b.raw(1, {lead});
+  b.step();
+  REQUIRE(b.heroes.squads().find(key) != nullptr);
+  REQUIRE(b.heroes.squads().find(key)->gaika_in == east_node);
+  CHECK(gaika_of_object(b, lead) == east_node);
+
+  // In: still the eastern town's.
+  REQUIRE(garrison_enter(b.world, east, lead, /*force=*/true));
+  REQUIRE(b.world.state(lead)->is_held());
+  CHECK(unit_pos_rh(b.world, lead) == in_cell(9, 10));
+  b.step();
+  CHECK(b.heroes.squads().find(key)->gaika_in == east_node);
+  CHECK(gaika_of_object(b, lead) == east_node);
+
+  // Out again, on the map: its own position decides once more.
+  CHECK(garrison_exit(b.world, lead, in_cell(9, 13), b.world.time(), /*throttled=*/false) == 0);
+  REQUIRE(!b.world.state(lead)->is_held());
+  CHECK(unit_pos_rh(b.world, lead) == b.world.resolve_position(lead));
+  b.step();
+  CHECK(b.heroes.squads().find(key)->gaika_in == east_node);
+}
+
 namespace {
 
 /// `u.BestMDPos(md, min, max, minEval, protect)`, through the registry.

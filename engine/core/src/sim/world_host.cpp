@@ -1483,7 +1483,10 @@ HostOutcome m_pos(CallContext& ctx) {
     if (squad->members.empty() || world->find(squad->members.front()) == nullptr) {
       return HostOutcome::ok_with(pack_point(kHeldPosition));
     }
-    return HostOutcome::ok_with(pack_point(world->resolve_position(squad->members.front())));
+    // The front member's `vtbl+0xc8` (0x00422d37), which for a garrisoned
+    // unit is its settlement's central building rather than the holder walk.
+    return HostOutcome::ok_with(
+        pack_point(unit_pos_rh(*world, squad->members.front())));
   }
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_with(pack_point(kHeldPosition));
@@ -1513,6 +1516,15 @@ HostOutcome m_pos(CallContext& ctx) {
 ///
 /// Resolved rather than raw, for the reason `m_pos` records: this engine's
 /// `pos` made that decision and the two must not disagree.
+///
+/// **The census above leaves the units out, and they do override the slot.**
+/// A unit carries its own `SetPos` (0x005d39e0) and its own `vtbl + 0xC8`,
+/// 0x005d3db0, which for a *held* unit answers its settlement's central
+/// building -- `unit_pos_rh` in `sim/economy.hpp`. So for a
+/// garrisoned unit the original's `posRH` and `pos` do differ (the building's
+/// point against `(-1, -1)`), and both answer the holder walk here. That is
+/// a known difference this body keeps for now; `Squad::pos` and the node
+/// filing, which reach the slot from the engine side, already take it.
 HostOutcome m_pos_rh(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("posRH: no world");

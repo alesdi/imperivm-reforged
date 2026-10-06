@@ -15,7 +15,12 @@ void fail(std::string* error, std::string text) {
 
 bool write_save_file(const std::filesystem::path& path,
                      const core::sim::SaveFileContents& contents, std::string* error) {
-  const std::vector<std::byte> bytes = core::sim::encode_save_file(contents);
+  const core::Result<std::vector<std::byte>> encoded = core::sim::encode_save_file(contents);
+  if (!encoded.ok()) {
+    fail(error, "cannot write " + path.string() + ": the session does not fit in a container");
+    return false;
+  }
+  const std::vector<std::byte>& bytes = encoded.value();
   std::error_code ec;
   if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
   std::FILE* file = std::fopen(path.string().c_str(), "wb");

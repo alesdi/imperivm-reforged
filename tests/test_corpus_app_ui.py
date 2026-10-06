@@ -156,9 +156,12 @@ def test_a_garrison_portrait_selects_its_unit_in_place(app, game_dir, garrisoned
               env={"IMPERIVM_INFOBAR": "1"})
     # The portrait is a class's: a plain click selects every unit behind it.
     assert re.search(r"^holder: (\d+) of \1 selected in place:( \d+)+$", out, re.M), out
-    # The bar now describes a unit, not the town hall it is still inside.
+    # The bar now describes a unit, not the town hall it is still inside --
+    # a soldier's bar or a hero's (`thumb,hero,...`): which one stands first in
+    # the garrison is the AI's doing, and since the town halls keep their
+    # people it garrisons its heroes too.
     after = out[out.index("holder:"):]
-    assert re.search(r"^infobar: class \S+ .*tags thumb unit", after, re.M), after
+    assert re.search(r"^infobar: class \S+ .*tags thumb (unit|hero)", after, re.M), after
 
 
 def test_an_enemy_garrison_portrait_does_nothing(app, game_dir, garrisoned):

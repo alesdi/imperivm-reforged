@@ -663,7 +663,13 @@ mounts `currentadv.bfhp` as `AdvSave/` and persists the whole mounted filesystem
 that document beside the session, where the original keeps it.
 
 A 512-byte-block container, entries created in this order — and the order is the block
-layout, which is why it is stated:
+layout, which is why it is stated. 512 holds a file of at most 8,257,536 bytes (one level of
+index blocks, the deepest the reader accepts, [bfhp.md](bfhp.md)), and a session passes that
+late in a big match: Crossroads played by the app is 8.6 MB at turn 2,400. Such a save is
+written at 4096-byte blocks instead, the size the installation's own save slot
+`currentadv.bfhp` is formatted at, which holds 4.28 GB. Until it was, the writer dropped the
+builder's refusal and wrote a container whose session entry was empty — `saved`, and loadable
+by nothing.
 
 ```
 save.ini          the manifest

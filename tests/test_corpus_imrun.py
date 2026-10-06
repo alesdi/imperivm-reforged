@@ -395,6 +395,11 @@ def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     bring a war to them: one of p1's swordsmen, stood outside p0's east wall
     and sent to p0's town hall, walks along the wall to a gate it cannot pass
     and is killed there by one of p0's sentries.
+
+    `IMRUN_PLACE` takes the swordsman out of its AI's hands, as a map's
+    `no_ai` unit is. Once p1's squads were filed under the right node, its
+    `SQUADMONITOR.VS` called the wounded swordsman's squad home in flight
+    (`SS_Flee`, "enter"), and it got away with 88 health of 400.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
@@ -491,6 +496,48 @@ def test_alesias_armies_do_not_stand_on_one_another(imrun, game_dir):
     aims = re.search(r"^\s+free spot\s+(\d+) full band\(s\) searched out from, (\d+) route\(s\) re-aimed$",
                      output, re.MULTILINE)
     assert aims and int(aims.group(2)) > 0, output[-3000:]
+
+
+#: p1's army on Crossroads: the Egyptian line units its recruiter raises.
+P1_ARMY = "EGuardian,EArcher,EAxetrower,EAnubis"
+
+
+def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game_dir):
+    """A squad in its own town's garrison is in its town's node, and so the
+    AI leaves it there.
+
+    A garrisoned unit's `posRH` is its settlement's central building
+    (0x005d3db0), and that is what files its squad under a node (0x0041f530)
+    and what `GetGAIKA(u)` answers (0x0044e650). This engine used to read the
+    holder record's position instead, which is (0, 0), and so filed every
+    squad that went home under the node nearest the map's corner. Asked to
+    hold its town, `AIOSENDSQUAD.VS` then saw a squad that was elsewhere and
+    sent it home: to `GetDestPoint`, 450 units outside the town's nearest
+    gate. Every squad got the same point and the same range of 0, so the first
+    arrived and the rest stood in a column cut back along the route to the
+    door, on `advance` for good; at 12,000 turns the units still coming out
+    of the door stood on one another, 356 pairs in the overlap census.
+
+    At 2,200 turns 70 of p1's 78 line units stood on the map in that column
+    and 5 were garrisoned; now one is out on an `advance` and 91 of 109 are
+    inside their town.
+    """
+    crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
+    if not crossroads.is_file():
+        pytest.skip("Crossroads.BFHP is not in this installation")
+    result = subprocess.run(
+        [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS), "800"],
+        capture_output=True, text=True, timeout=1800,
+        env={**os.environ, "IMRUN_OBJECTS": P1_ARMY},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = result.stdout
+    army = re.findall(r"^\s+\d+ \S+ p1 at \((-?\d+),(-?\d+)\) holder (\d+) .* order (\S+)$",
+                      output, re.MULTILINE)
+    assert len(army) > 40, output[-3000:]
+    out_on_advance = [a for a in army if a[2] == "0" and a[3] == "advance"]
+    assert len(out_on_advance) < 10, out_on_advance
+    assert "no traps." in output, output[output.find("distinct traps"):]
 
 
 # ---------------------------------------------------------------------------

@@ -3009,7 +3009,9 @@ HostOutcome m_settlement_gaika(CallContext& ctx) {
 ///     original answers this from its slot grid, which is the part of the
 ///     partition this project does not reproduce.
 ///   * **An `Obj` is the node its position belongs to**, which is the same
-///     question asked one hop earlier.
+///     question asked one hop earlier. 0x0044e650 reads the raw position and,
+///     when that is off the map, the unit's `posRH` (0x005d3db0): a unit in
+///     a town's garrison is in the town's node (`unit_pos_rh`).
 HostOutcome f_gaika_at_point(CallContext& ctx) {
   if (ctx.count() == 0) return HostOutcome::ok_with(Value::integer(kNoGaika));
   // The identity, and it must stay first: an integer is a GAIKA already.
@@ -3024,7 +3026,7 @@ HostOutcome f_gaika_at_point(CallContext& ctx) {
   } else if (ctx.arg(0).is_object()) {
     const WorldObject* slot = world->find(ctx.arg(0).as_object().id);
     if (slot == nullptr) return HostOutcome::ok_with(Value::integer(kNoGaika));
-    where = world->resolve_position(slot->id);
+    where = unit_pos_rh(*world, slot->id);
   } else {
     return HostOutcome::ok_with(Value::integer(kNoGaika));
   }

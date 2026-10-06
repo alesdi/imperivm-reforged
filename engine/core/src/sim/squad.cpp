@@ -173,8 +173,15 @@ void revalue_squads(World& world, SquadTable& squads) {
     // (0x00444809) and then destroys it, and `HeroSystem::advance` has already
     // run `prune_empty` by the time this does -- so a squad with no members is
     // not here to be filed anywhere. The guard is a guard, not that rule.
+    //
+    // Where the front member stands is its `posRH` (`unit_pos_rh`), which is
+    // what 0x0041f530 is handed: a member in a town's garrison stands at the
+    // town's central building, so a squad that marched home and went in is
+    // filed under the town's node and not under wherever its holder record
+    // happens to sit -- and a siege engine's crew stays filed under the node
+    // it is besieging.
     if (!squad.members.empty() && world.find(squad.members.front()) != nullptr) {
-      squad.gaika_in = nodes.at(areas, world.resolve_position(squad.members.front()));
+      squad.gaika_in = nodes.at(areas, unit_pos_rh(world, squad.members.front()));
     }
     // 0x0041eb04, and it is the whole of what `SrcGAIKA` means: the first node
     // the squad was ever filed under, written once and never again.
