@@ -334,6 +334,12 @@ What is still once a turn about scripts (**engine choices**, `script/scheduler.h
   (the turn end) for questions about what the systems stamped (`TimeWithoutWalking`, the
   siege planner's ceasefire test, `TimePastLastAttack`). Where a stamp from one is read
   against the other the difference can be up to a turn, and those readers clamp at zero.
+  One exception is made, because scripts wait on it: **an animation a script starts begins on
+  the script's millisecond.** Its cursor is brought forward by the part of the turn it has lived
+  through, as combat does for a blow (`start_anim_at`), and `TimeToAnimFinish` and
+  `TimeToActionMoment` count down from the script's millisecond (`sim/anim.cpp`). Without it a
+  script that waits out its animation woke up to a turn before the cursor reached the end, and
+  a bird flew its next leg before the last was drawn to its end (`test_corpus_app_draw.py`).
 * **A zero wait yields to the next pass**, at its end, rather than running again on its own
   millisecond as the original does: the world it waits on moves only between passes here, so a
   re-run would spin (`ANIM.VS` on an object with no such animation is one).

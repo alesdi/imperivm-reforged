@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "imperivm/core/game/entity.hpp"
+#include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/sim/flying.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
@@ -91,16 +92,50 @@ void face_unless_self(CallContext& ctx, World& world, const WorldObject& slot, s
   }
 }
 
+/// How far the world's clock stands ahead of the running script's.
+///
+/// A script runs at its own wake time inside a pass, and the world it acts on
+/// has already been advanced to the turn's end (`Scheduler`'s "A script wakes
+/// on its own millisecond"). Zero outside a pass, and for a script running at
+/// the turn's end.
+[[nodiscard]] GameTime script_lag(const CallContext& ctx, const World& world) {
+  if (ctx.scheduler == nullptr) return 0;
+  const GameTime lag = world.time() - ctx.scheduler->now();
+  return lag > 0 ? lag : 0;
+}
+
 /// Start `slot` on the receiver, facing the point at argument `at`.
 ///
 /// `AnimRepeat::hold`, always. `entity.hpp` draws the line where the evidence
 /// does: an animation named by a state's `anim_idx` is that pose's own loop,
 /// and one a script starts runs once and hands control back. Every entry point
 /// here is the second kind.
+///
+/// **It starts on the script's millisecond.** The original starts the
+/// animation at the instant the script runs; here the world already stands at
+/// the turn's end, so the cursor is brought forward by the part of the turn it
+/// has lived through, as combat does for a blow (`start_anim_at`). Otherwise a
+/// script that waits out its animation wakes while the cursor is still short
+/// of the end -- a bird's next leg began before the last one was drawn to its
+/// end, a jump of the rest of the leg.
 bool start(CallContext& ctx, World& world, const WorldObject& slot, std::int32_t anim_slot,
            std::size_t at) {
   face_unless_self(ctx, world, slot, at);
-  return world.play_anim(slot.id, anim_slot, AnimRepeat::hold);
+  const ObjectId id = slot.id;
+  if (!world.play_anim(id, anim_slot, AnimRepeat::hold)) return false;
+  const GameTime lag = script_lag(ctx, world);
+  WorldObject* object = world.find(id);
+  if (lag <= 0 || object == nullptr || object->object == nullptr) return true;
+  AnimCursor& cursor = object->object->anim;
+  cursor.elapsed_ms = advance_elapsed(object->timeline, cursor.elapsed_ms,
+                                      static_cast<std::int32_t>(lag), object->repeat);
+  const AnimSample sample = object->timeline.sample(cursor.elapsed_ms, object->repeat);
+  cursor.step = sample.step;
+  if (sample.finished) object->animating = false;
+  // Still the one this call started: the caller suspends for its length,
+  // counted from the script's millisecond, whether or not the world's clock
+  // has already seen it end.
+  return true;
 }
 
 // --------------------------------------------------------------------------
@@ -274,7 +309,9 @@ HostOutcome m_time_to_anim_finish(CallContext& ctx) {
   const EntityAnim* anim = playing(*slot);
   if (anim == nullptr) return integer(0);
   const std::int32_t total = cycle_of(*slot, slot->object->anim.anim_slot);
-  const std::int32_t left = total - slot->object->anim.elapsed_ms;
+  // At the script's millisecond, which the world's clock may be ahead of.
+  const std::int32_t left = total - slot->object->anim.elapsed_ms +
+                            static_cast<std::int32_t>(script_lag(ctx, *world));
   return integer(left > 0 ? left : 0);
 }
 
@@ -296,7 +333,8 @@ HostOutcome m_time_to_action_moment(CallContext& ctx) {
   if (slot == nullptr) return integer(0);
   const EntityAnim* anim = playing(*slot);
   if (anim == nullptr) return integer(0);
-  const std::int32_t left = anim->action_time - slot->object->anim.elapsed_ms;
+  const std::int32_t left = anim->action_time - slot->object->anim.elapsed_ms +
+                            static_cast<std::int32_t>(script_lag(ctx, *world));
   return integer(left > 0 ? left : 0);
 }
 
