@@ -92,10 +92,16 @@ void hash_i32(std::uint64_t& state, std::int32_t value) noexcept {
 std::int32_t advance_elapsed(const AnimTimeline& timeline, std::int32_t elapsed, GameTime delta,
                              AnimRepeat repeat) noexcept {
   if (!timeline.valid()) return 0;
+  return advance_elapsed(timeline.cycle(), elapsed, delta, repeat);
+}
+
+std::int32_t advance_elapsed(std::int32_t cycle_ms, std::int32_t elapsed, GameTime delta,
+                             AnimRepeat repeat) noexcept {
+  if (cycle_ms <= 0) return 0;
   if (elapsed < 0) elapsed = 0;
   if (delta < 0) delta = 0;
 
-  const GameTime cycle = timeline.cycle();
+  const GameTime cycle = cycle_ms;
   if (repeat == AnimRepeat::loop) {
     // Reduce the delta first so the sum cannot overflow, then reduce again.
     // (a + b) mod c does not depend on where the interval was split, which is
