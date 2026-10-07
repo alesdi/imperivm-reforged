@@ -179,3 +179,59 @@ def test_a_press_on_a_queue_cell_released_off_it_cancels_nothing(app, game_dir):
                frames=50, where=CROSSROADS)
     assert "cancel of command" not in out, out
     assert queues(out)[-1] == ["trainBSwordsman", "trainBBowman"], out
+
+
+#: The world view's debug output (`IMPERIVM_DEBUG_VIEW=1`): the line ahead of
+#: each frame's placements, and a body's layer.
+FRAME = re.compile(r"^frame turn (\d+) time \d+ drawn \d+$")
+BODY = re.compile(r"^id (\d+) sheet .* lt (-?\d+),(-?\d+) off (-?\d+),(-?\d+) layer \d+ z 1000 "
+                  r"at (-?\d+),(-?\d+)$")
+
+
+def test_an_order_given_as_the_match_opens_is_walked(app, game_dir):
+    """A right click on the first frame the input can give one is walked.
+
+    `gbr.exe` starts a match's clock on a one-millisecond real window with no
+    game time in it (0x00526637 calling 0x00528d10), so the match's first
+    frame opens the first game window and runs the command pump on it before
+    a millisecond has run (0x0051ea9e, 0x0051eab3). A player's order waits
+    for the pump at the next window, after the scripts started with the match
+    have had their first slice. The app let the world stand at turn 0 for a
+    whole turn interval and issued a click in it at once, ahead of that
+    slice: on Numantia the opening sequence then gave the legion
+    `SetCommand(..., "attach", hero)`, which replaced the move, and the
+    legionary never walked. The first turn now runs as the match opens.
+
+    The turn is two real seconds, so that the click lands well inside what
+    was turn 0 even on a loaded machine. The view does not move, so another
+    place on the screen is a step in the world.
+    """
+    done = subprocess.run(
+        [str(app), "--game", str(game_dir), *SIZE, "--map", NUMANTIA, "--play", "--no-fog",
+         "--frames", "420", "--turn-interval", "2000",
+         "--input", "select:class:RHastatus;rclick:700,500"],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "IMPERIVM_DEBUG_VIEW": "1"},
+    )
+    assert done.returncode == 0, (done.stdout + done.stderr)[-2000:]
+    out = done.stdout
+    ordered = re.search(r"^queue:\s+object (\d+) holds 1 \| move$", out, re.M)
+    assert ordered, out[-2000:]
+    walker = int(ordered.group(1))
+
+    turn = None
+    order_turn = None
+    places: set[tuple[int, int]] = set()
+    for line in out.splitlines():
+        if match := FRAME.match(line):
+            turn = int(match.group(1))
+        elif line.startswith("order:") and order_turn is None:
+            order_turn = turn
+        elif (match := BODY.match(line)) and int(match.group(1)) == walker:
+            left, top, off_x, off_y, x, y = map(int, match.groups()[1:])
+            places.add((x - off_x - left, y - off_y - top))
+    # The first turn had run when the click came: there is no turn 0 left
+    # to give an order in.
+    assert order_turn is not None and order_turn >= 1, order_turn
+    assert turn is not None and turn >= 3, turn
+    assert len(places) > 10, f"the legionary did not walk: {sorted(places)}"
