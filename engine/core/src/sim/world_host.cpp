@@ -2927,7 +2927,7 @@ HostOutcome m_mutate(CallContext& ctx) {
 
   if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
     const SquadKey key = heroes->squads().squad_of(self);
-    if (key.valid()) (void)heroes->squads().leave(key, self);
+    if (key.valid()) (void)heroes->squads().leave(*world, key, self);
   }
   if (CommandSystem* commands = command_system(*world); commands != nullptr) {
     (void)commands->clear_commands(*world, self);

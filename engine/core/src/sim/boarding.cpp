@@ -623,7 +623,7 @@ HostOutcome m_cancel_army_board(CallContext& ctx) {
   // Copied out: `detach` writes the very list this walks.
   const std::vector<ObjectId> army = record->army;
   for (const ObjectId member : army) {
-    if (in_ship(member) != hero_aboard) (void)heroes->detach(member);
+    if (in_ship(member) != hero_aboard) (void)heroes->detach(*world, member);
   }
 
   if (!hero_aboard) {

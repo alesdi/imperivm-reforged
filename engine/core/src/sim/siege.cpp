@@ -571,7 +571,7 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
       attackers.push_back(entry.unit);
       continue;
     }
-    (void)heroes->detach(entry.unit);
+    (void)heroes->detach(world, entry.unit);
     (void)commands->clear_commands(world, entry.unit);
     Command build;
     build.arg_kind = CommandArgKind::object;

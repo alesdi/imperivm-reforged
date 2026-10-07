@@ -534,11 +534,11 @@ class HeroSystem final : public System {
 
   /// `Unit.DetachFrom(hero)`. Also the path `HERO_DETACH_BEHAVIOR.VS` takes
   /// when a warrior strays past `DetachDistance`.
-  bool detach(ObjectId unit);
+  bool detach(World& world, ObjectId unit);
 
   /// `Hero.DetachArmy()` -- `HERO_LEAVE_ARMY.VS` is nothing but this call.
   /// Every warrior leaves; the hero keeps its squad.
-  std::size_t detach_army(ObjectId hero);
+  std::size_t detach_army(World& world, ObjectId hero);
 
   // -- death ---------------------------------------------------------------
   //
@@ -777,7 +777,7 @@ class HeroSystem final : public System {
   void run_egoism(World& world, GameTime from, GameTime to);
   void clear_dead(World& world);
   /// The detaches `on_death` and `on_erase` share.
-  void detach_for_death(ObjectId id);
+  void detach_for_death(World& world, ObjectId id);
 
   HeroConstants constants_{};
   SquadTable squads_;
