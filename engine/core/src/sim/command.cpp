@@ -1478,26 +1478,79 @@ HostOutcome get_cmd_stamina_cost_impl(CallContext& ctx) {
 /// **An order, not a predicate.** Its 63 call sites are all bare statements:
 /// not one is a condition, not one is assigned, and the inventory's return
 /// column is blank because no typed local ever receives it. `UNIT_IDLE.VS`'s
-/// `.Idle(1900 + rand(100))` and `WOLF_IDLE.VS`'s `.Idle(2000)` are the shape.
+/// `.Idle(1900 + rand(100))` and `WOLF_IDLE.VS`'s `.Idle(2000)` are the shape,
+/// and `SHIP_IDLE.VS`'s `while(1) { ... if (.Stop(200)) .Idle(); }` spins the
+/// scheduler if `Idle` costs no game time.
 ///
-/// The only behaviour the corpus proves is the suspension, and that much it
-/// does prove: `SHIP_IDLE.VS`'s `while(1) { ... if (.Stop(200)) .Idle(); }`
-/// spins the scheduler if `Idle` costs no game time. It deliberately does *not*
-/// stop the unit, because every site that wants that calls `Stop` right next to
-/// it -- `while (!.Stop(1000)); .Idle(1500);` -- and a redundant call is weaker
-/// evidence than an absent one. Whether it also selects an idle animation is
-/// unknown; the deer's `SetWalkAnim(13)` suggests the slot exists but nothing
-/// ties it to this entry point.
+/// It does not stop the unit's route: every site that wants that calls `Stop`
+/// right next to it -- `while (!.Stop(1000)); .Idle(1500);`.
+///
+/// **What `Unit::Idle` does** (0x005d6030), read off `gbr.exe`. It runs on the
+/// suspending registrar, so the interpreter tells it a first entry from a
+/// resume by a flag byte it writes above the arguments (opcode 0x1E's handler,
+/// 0x0069d564: set on the first entry, cleared on the resume).
+///
+///   * **A held receiver** -- position `(-1, -1)`, a unit inside a building or
+///     a ship -- writes `ms` to the wait cell and returns 1, suspend; its
+///     resume pops the arguments and returns 0. A plain timed wait.
+///   * **Anything on the map** pops the arguments, sets the unit's activity to
+///     4 (the setter 0x005a7680), **drops the combat target** (0x005d60b7: the
+///     handle at `[unit+0x1a8]` emptied and the attack count beside it zeroed,
+///     only when there is a target) and returns **3**.
+///
+/// **What a 3 is.** The suspending call's dispatch (the jump table at
+/// 0x0069dbc4) treats 0 as done, 1 as suspend-and-run-again, 2 as end the
+/// script, and 3 as *done, but end the slice*: the call is stepped over as a 0
+/// is, the slice's wait cell is set to -1 and the budget is forced out
+/// (0x0069d5fb). The scheduler reads a -1 as no timed wake at all: it takes
+/// the coroutine off its timer queue (0x0069f842 -> 0x00687bf0). What wakes it
+/// is the unit, when the activity the call started is over.
+///
+/// **And the activity spends the `ms` the call popped.** The idle and taunt
+/// activity (0x005d2ca0, reached from the unit's activity dispatch at
+/// 0x005d5bc2 for 4 and 5) reads its budget from the slot just above the
+/// script's stack pointer -- which is where `Idle`'s argument was before the
+/// pop, and the pop is made *before* the activity is set so that it is still
+/// there. `Ship::Idle` (0x005c6ea0), the arity-0 form, writes its own duration
+/// into that same slot before it returns 3, which is the second reading and
+/// agrees. The activity holds the idle pose and plays fidget animations within
+/// that budget, in 100 ms steps, and when the budget is spent it wakes the
+/// script (0x005d2de0 -> 0x0069f8f0, a wake at once) and sets the activity
+/// back to 0. So an `Idle(1900)` on the map costs about 1,900 ms of game time
+/// in both branches, and the difference between them is the target.
+///
+/// **Here:** the held branch is the timed wait it was; the other drops the
+/// target and is a suspension of `ms`, which is what the activity's budget
+/// amounts to. `CombatSystem::stop` is the drop, as it is for `Taunt`: it also
+/// moves an engaging unit out of the engaging state, which the activity write
+/// does too. A non-positive `ms` still ends the slice, as a 3 always does --
+/// one pass, the shortest wait this scheduler has -- and no shipped site
+/// passes one.
+///
+/// **Not reproduced, recorded:** the fidget animations are drawn from the
+/// synchronised generator (`[0x996ff4] + 0x12a0`, its `vtbl+0x14`, a one in 15
+/// chance per 100 ms step for an idle, one in 3 for a taunt), so in `gbr.exe`
+/// an idle on the map spends random draws that this engine does not. The
+/// activity write itself is absent for the reasons `Taunt` gives below.
+/// A handle that names no object is held for `ms` as before: the original
+/// dereferences null there, which is a fault rather than a behaviour, and a
+/// wait is what keeps an idle loop from spinning on one.
+HostOutcome idle_activity(const Self& self, std::int64_t ms) {
+  const HostOutcome wait = HostOutcome::sleep_for(ms > 0 ? ms : 0);
+  const WorldObject* slot = self.world->find(self.id);
+  if (slot == nullptr || slot->state.position == kHeldPosition) return wait;
+  if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
+    (void)combat->stop(self.id);
+  }
+  return wait;
+}
+
 HostOutcome idle_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   std::int64_t ms = kDefaultIdleSlice;
   if (ctx.count() > 1 && ctx.arg(1).is_integer()) ms = ctx.arg(1).as_integer();
-  if (ms <= 0) return HostOutcome::ok_void();
-  HostOutcome out;
-  out.status = script::HostStatus::suspend;
-  out.suspend_for = ms;
-  return out;
+  return idle_activity(self, ms);
 }
 
 /// `ForceIdle()` -- one shipped site, `HEN_IDLE.VS`, on the line before its
@@ -1563,15 +1616,9 @@ HostOutcome force_idle_impl(CallContext& ctx) {
 /// engaging animation, which the original does too, just into a taunt pose
 /// rather than an idle one. This engine has no taunt pose to move it into.
 ///
-/// **The discrepancy with `Idle` above is recorded rather than resolved.**
-/// `Idle` here suspends for its argument unconditionally, and `Unit::Idle`
-/// does that only for a held receiver. `gbr.exe` also registers `Unit::Idle`
-/// **once**, at arity 1; the arity-0 form this engine serves from the same
-/// body is `Ship::Idle` (0x005c6ea0), a different function that writes the
-/// `ForceIdle` flag. Correcting that is a change to 63 call sites and belongs
-/// in its own change, with its own evidence about whether the shipped idle
-/// loops still pace themselves -- they would, because ending the slice costs a
-/// scheduler step, which is what the spin argument there actually needs.
+/// `gbr.exe` registers `Unit::Idle` **once**, at arity 1; the arity-0 form this
+/// engine serves from the same body is `Ship::Idle` (0x005c6ea0), which sets
+/// the `ForceIdle` flag and supplies its own duration (see `Idle` above).
 HostOutcome taunt_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);

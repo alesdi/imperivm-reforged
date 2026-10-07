@@ -1716,23 +1716,32 @@ Frequency-ordered, the cheapest useful milestones:
   off the class it names. `projectile_class` is the reading taken;
   `building_projectile_class` is the alternative, and the two differ for a tower.
 
-- **`Unit::Idle` and `Unit::Taunt` are the same function, and this engine's `Idle` does not
-  match it.** 0x005d6030 and 0x005d60f0 differ in one byte: the activity constant they pass to
+- **`Unit::Idle` and `Unit::Taunt` are the same function, and both cost their argument.**
+  0x005d6030 and 0x005d60f0 differ in one byte: the activity constant they pass to
   0x005a7680, 4 for an idle and 5 for a taunt. Both are `(Unit, int)` on the suspend registrar,
   and both branch on the receiver's *position*: `(-1, -1)` — the constant pair at 0x008212bc /
   0x008212c0, `0xffffffff` with no writer in `.text`, which is what a unit inside a holder
-  reads — suspends for the argument and returns, and anything with a real position sets the
-  activity, drops the combat target, and returns the code that ends the time slice without a
-  timed wake. So the `2000` every shipped `Taunt` site passes is **only ever consumed by the
-  held branch**.
+  reads — suspends for the argument (return 1) and returns 0 on the resume, and anything with a
+  real position pops the arguments, sets the activity, drops the combat target and returns 3.
 
-  Two consequences for the inventory. `Unit::Idle` is registered **once**, at arity 1; the
-  arity-0 `Idle` in the corpus is `Ship::Idle` (0x005c6ea0), a different function that writes
-  the `ForceIdle` flag. And `Idle`'s implementation here suspends for its argument
-  unconditionally, which is right for the held branch and wrong for the other one. Correcting
-  it is a change to 63 call sites and has not been made: the shipped idle loops would still
-  pace themselves, because ending the slice costs a scheduler step, but that is a claim that
-  wants its own evidence rather than a footnote in someone else's change.
+  A 3 from a suspending entry point (the dispatch table at 0x0069dbc4) means *the call is
+  done, but end the slice*: the call is stepped over as a 0 is, the slice's wait cell is set
+  to -1 and its budget forced out (0x0069d5fb), and the scheduler takes a coroutine whose wait
+  is -1 off its timer queue altogether (0x0069f842 → 0x00687bf0). The object wakes it. For
+  `Idle` and `Taunt` that is the unit's idle-and-taunt activity (0x005d2ca0), which takes its
+  budget from the stack slot just above the script's stack pointer — where the popped argument
+  still lies, the pop being made before the activity is set — spends it on the pose and on
+  fidget animations in 100 ms steps, and wakes the script when it is spent (0x005d2de0 →
+  0x0069f8f0). `Ship::Idle` writes its own duration into that slot before it returns 3, which
+  is the same mechanism read a second way. **So the `2000` every shipped `Taunt` site passes is
+  a two-second taunt, on the map as much as in a holder**; an earlier reading here, that the
+  on-map branch costs one scheduler step and only the held branch consumes the argument,
+  missed where the activity's budget comes from.
+
+  `Unit::Idle` is registered **once**, at arity 1; the arity-0 `Idle` in the corpus is
+  `Ship::Idle` (0x005c6ea0), a different function that sets the `ForceIdle` flag and supplies
+  the duration itself. Not reproduced: the fidgets are drawn from the synchronised generator,
+  so an idle or taunt on the map spends random draws in `gbr.exe` that this engine does not.
 
 - **The four team scores share one shape and one half-known term.**
   `GetTeamMilitaryScore/1` (2 sites), `GetTeamOverallScore/1` (4),

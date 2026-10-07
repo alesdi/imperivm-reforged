@@ -1183,6 +1183,69 @@ TEST(idle_is_an_order_that_costs_game_time) {
   CHECK(f.commands.command_count(u) == 0);
 }
 
+/// `Unit::Idle` on the map drops the combat target and still costs its
+/// argument; in a holder it only waits.
+///
+/// 0x005d6030 sets the idle activity, empties `[unit+0x1a8]` and returns 3,
+/// which ends the slice with no timed wake (0x0069d5fb); the idle activity
+/// (0x005d2ca0) spends the popped `ms` and then wakes the script. A held
+/// receiver writes `ms` to the wait cell and returns 1 instead, and its target
+/// is left alone.
+TEST(idle_on_the_map_drops_the_target_and_still_waits_its_argument) {
+  Fixture f;
+  CombatSystem combat;
+  REQUIRE(f.world.add_system(&combat));
+  HostRegistry registry;
+  register_command_host(registry);
+
+  const ObjectId u = f.spawn(f.unit_class, Point{100, 100});
+  const ObjectId foe = f.spawn(f.unit_class, Point{140, 100}, /*owner=*/2);
+  Combatant a;
+  a.id = u;
+  a.owner = 1;
+  a.health = 100;
+  a.position = Point{100, 100};
+  a.target = foe;
+  a.attacks = 3;
+  a.action = Action::engaging;
+  combat.add(a);
+
+  HostCall standing(f.world, {obj(u), Value::integer(1900)});
+  const HostOutcome idled = invoke(registry, CallKind::member, "Idle", 1, standing);
+  CHECK(idled.status == HostStatus::suspend);
+  CHECK(idled.suspend_for == 1900);
+  REQUIRE(combat.find(u) != nullptr);
+  CHECK(combat.find(u)->target == kNoObject);
+  CHECK(combat.find(u)->attacks == 0);
+  CHECK(combat.find(u)->action == Action::idle);
+
+  // A non-positive argument still ends the slice, as every 3 does.
+  combat.find(u)->target = foe;
+  HostCall zero(f.world, {obj(u), Value::integer(0)});
+  const HostOutcome yielded = invoke(registry, CallKind::member, "Idle", 1, zero);
+  CHECK(yielded.status == HostStatus::suspend);
+  CHECK(yielded.suspend_for == 0);
+  CHECK(combat.find(u)->target == kNoObject);
+
+  // Inside a holder: the argument as a wait, and the target kept.
+  const ObjectId inside = f.spawn(f.unit_class, Point{200, 200});
+  const World::SettlementIds town = f.world.spawn_settlement(1);
+  REQUIRE(f.world.put_in_holder(inside, town.holder));
+  Combatant held;
+  held.id = inside;
+  held.owner = 1;
+  held.health = 100;
+  held.target = foe;
+  held.attacks = 2;
+  combat.add(held);
+  HostCall boxed(f.world, {obj(inside), Value::integer(1500)});
+  const HostOutcome waited = invoke(registry, CallKind::member, "Idle", 1, boxed);
+  CHECK(waited.status == HostStatus::suspend);
+  CHECK(waited.suspend_for == 1500);
+  CHECK(combat.find(inside)->target == foe);
+  CHECK(combat.find(inside)->attacks == 2);
+}
+
 /// `Taunt` yields where it can taunt and sleeps where it cannot.
 ///
 /// `Unit::Taunt` and `Unit::Idle` are the same function in `gbr.exe`, one
