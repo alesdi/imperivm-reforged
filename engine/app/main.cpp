@@ -7459,6 +7459,26 @@ void Application::tick_play(platform::Window::Frame& frame) {
     // rate that depended on the frame rate, and two machines disagree.
     owed_ms_ += static_cast<double>(elapsed);
     const double interval = static_cast<double>(args_.turn_interval);
+    // **The first turn is owed as the match opens**, not a turn's real time
+    // later. `gbr.exe`'s match start (0x00526637) starts its clock
+    // (0x00528d10) on a real window one millisecond long, with no game time
+    // in it (the constructor zeroes the game window, 0x005289ee-0x00528a0a),
+    // so the match's first frame (0x0051ea30) finds the window over, opens
+    // the first game window (0x0051ea9e) and runs the command pump on it
+    // (0x0051eab3) before a millisecond of game time has run; the frames
+    // after run that window's game time (0x00528e40 -> 0x00528b40), where
+    // the sequences and idles started with the match take their first
+    // slice, and an order the player gives meanwhile waits for the pump at
+    // the next window. So a player's order never runs ahead of the scripts'
+    // first slice. Here the world used to stand at turn 0 for a whole turn
+    // interval -- longer if the clock was held -- and a click in it was
+    // issued at once, ahead of turn 1's scripts: on Numantia the opening
+    // sequence's `SetCommand(army, "attach", hero)` then replaced the move,
+    // and the legionary never walked. Owing turn 1 at once leaves no turn 0
+    // to click in, so every order lands after the first turn, as there.
+    // Inferred: that nothing reaches the original's pump before its first
+    // frame (the match's world has not yet been shown).
+    if (session_->world().turns() == 0) owed_ms_ = std::max(owed_ms_, interval);
     // Capped: after a breakpoint or a drag of the window, do not try to
     // replay a minute of game time in one frame.
     int budget = 8;

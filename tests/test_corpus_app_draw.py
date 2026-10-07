@@ -311,17 +311,19 @@ def test_a_walking_unit_is_drawn_between_turns(app, game_dir):
     between the turn's ends, its walk cycle stepping as it goes -- and its
     ring under it every frame, so what is clicked is what is drawn.
 
-    The order is given once turn 2 has run, not a number of frames in: on
-    Numantia a move posted before the first turn has run is queued and never
-    walked (why is not followed here), so a frame count made the test pass or
-    fail by how fast the machine reached turn 1.
+    The order is given ten frames in, as it was before a move posted ahead
+    of the first turn was found never to be walked: Numantia's opening
+    sequence replaced it. The first turn now runs as the match opens, as
+    `gbr.exe`'s first game window does
+    (`test_an_order_given_as_the_match_opens_is_walked`), so the tenth frame
+    is after it on any machine.
     """
     if not (game_dir / NUMANTIA).is_file():
         pytest.skip(f"{NUMANTIA} is not in this installation")
     done = subprocess.run(
         [str(app), "--game", str(game_dir), "--map", NUMANTIA, "--play", "--no-fog",
          "--width", "1024", "--height", "768", "--frames", "400", "--turn-interval", "400",
-         "--input", "turn:2;select:class:RHastatus;wait:2;rclick:700,500"],
+         "--input", "wait:10;select:class:RHastatus;wait:2;rclick:700,500"],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "IMPERIVM_DEBUG_VIEW": "1"},
     )

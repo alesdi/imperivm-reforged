@@ -381,6 +381,84 @@ TEST(a_hero_and_his_army_leave_the_garrison_one_exit_slot_at_a_time) {
   CHECK(g.world.find(second)->state.holder == ship.holder);
 }
 
+TEST(a_point_goto_drops_the_target_only_once_its_unit_is_out) {
+  // 0x005d61b0 waits its turn at the settlement's exit (0x005d3f20) before
+  // anything else, and empties the target handle only past that wait
+  // (0x005d639a).
+  Garrison g;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(512, 512));
+  REQUIRE(g.world.add_system(&movement));
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  (void)register_world_host(registry);
+  register_movement_host(registry);
+
+  const ObjectId second = g.world.spawn(NativeClass::unit, nullptr, g.graph.find("Soldier"));
+  g.world.set_owner(second, 0);
+  g.world.set_health(second, 200);
+  REQUIRE(garrison_enter(g.world, g.town_id, second, /*force=*/true));
+  REQUIRE(garrison_enter(g.world, g.town_id, g.mine, /*force=*/true));
+  REQUIRE(g.combat.find(g.mine) != nullptr);
+  g.combat.find(g.mine)->target = g.theirs;
+  g.combat.find(g.mine)->attacks = 1;
+  const std::vector<script::Value> go_second = {
+      obj(second), pack_point(Point{3600, 3000}), script::Value::integer(0),
+      script::Value::integer(1000), script::Value::boolean(true), script::Value::integer(0)};
+  std::vector<script::Value> go_mine = go_second;
+  go_mine[0] = obj(g.mine);
+
+  REQUIRE(call(registry, g.world, "Goto", 5, go_second).status != script::HostStatus::error);
+  REQUIRE(!g.world.find(second)->state.is_held());
+  // The next waits out the exit interval, its target kept.
+  // The wait is the original's return 1: the call runs again whole.
+  CHECK(call(registry, g.world, "Goto", 5, go_mine).status == script::HostStatus::retry);
+  REQUIRE(g.world.find(g.mine)->state.is_held());
+  CHECK(g.combat.find(g.mine)->target == g.theirs);
+  CHECK(g.combat.find(g.mine)->attacks == 1);
+}
+
+TEST(the_goto_family_keeps_a_ships_passenger_aboard_and_polls_every_100_ms) {
+  // 0x005d62b9: a held unit whose holder belongs to an object -- a ship --
+  // writes 100 to the wait cell and returns 1, without trying the exit, so
+  // the call runs again whole and the passenger stays aboard. `GotoEnter`
+  // (0x005d6729) and `GotoAttack`'s worker (0x005d4103) make the same poll.
+  Garrison g;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(512, 512));
+  REQUIRE(g.world.add_system(&movement));
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  (void)register_world_host(registry);
+  register_movement_host(registry);
+  (void)register_command_host(registry);
+
+  const World::ShipIds ship = g.world.spawn_ship(nullptr);
+  g.world.set_position(ship.ship, Point{2000, 2000});
+  REQUIRE(g.world.put_in_holder(g.mine, ship.holder));
+  REQUIRE(g.combat.find(g.mine) != nullptr);
+  g.combat.find(g.mine)->target = g.theirs;
+  const std::vector<script::Value> to_point = {
+      obj(g.mine), pack_point(Point{3600, 3000}), script::Value::integer(0),
+      script::Value::integer(1000), script::Value::boolean(true), script::Value::integer(0)};
+  for (const char* verb : {"Goto", "GotoEnter"}) {
+    const script::HostOutcome aboard = call(registry, g.world, verb, 5, to_point);
+    CHECK(aboard.status == script::HostStatus::retry);
+    CHECK(aboard.suspend_for == 100);
+    CHECK(g.world.find(g.mine)->state.holder == ship.holder);
+    CHECK(movement.find(g.mine) == nullptr || !movement.find(g.mine)->goto_active);
+  }
+  const script::HostOutcome attack =
+      call(registry, g.world, "GotoAttack", 4,
+           {obj(g.mine), obj(g.theirs), script::Value::integer(1000),
+            script::Value::boolean(true), script::Value::integer(0)});
+  CHECK(attack.status == script::HostStatus::retry);
+  CHECK(attack.suspend_for == 100);
+  CHECK(g.world.find(g.mine)->state.holder == ship.holder);
+  // Nothing past the poll ran: the point form's target drop included.
+  CHECK(g.combat.find(g.mine)->target == g.theirs);
+}
+
 TEST(form_accept_move_drops_the_members_combat_target) {
   // 0x005d798b: the target setter handed the empty handle, for every member
   // that reaches the march's set-up -- on the map as much as out of a holder.

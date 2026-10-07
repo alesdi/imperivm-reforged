@@ -67,6 +67,9 @@ int main(int argc, char** argv) {
                  "                    carry before the mission's sequences start, and\n"
                  "                    write FILE when the human's match ends won\n"
                  "  --human N         which slot the human holds (default: none)\n"
+                 "  --seed N          the world seed (default 1); a different seed is\n"
+                 "                    a different game, the same seed the same one.\n"
+                 "                    A save carries its own, so not with `--load`\n"
                  "  --declare-won     end the human's match as won after the run, as a\n"
                  "                    victory sequence would, so that the carry is\n"
                  "                    written; a knob for testing the boundary, and\n"
@@ -74,6 +77,8 @@ int main(int argc, char** argv) {
                  "\nIMRUN_UNTIL_OVER=1 stops at the turn the match is decided; the\n"
                  "`match` block says which turn that was either way.\n"
                  "IMRUN_DEATHS=1 prints every death, where and to whom;\n"
+                 "IMRUN_CAPTURES=1 prints every settlement that changes hands, on\n"
+                 "the turn it does, outposts and all;\n"
                  "IMRUN_OBJECTS=<text>[,<text>...] lists every object whose class\n"
                  "contains any of them;\n"
                  "IMRUN_OVERLAPS=<n> counts standing bodies drawn through each other\n"
@@ -83,7 +88,8 @@ int main(int argc, char** argv) {
                  "three or more standing bodies share, by class, owner, order and\n"
                  "the hero whose army it is (h<id>, or h- for none);\n"
                  "IMRUN_GOTO=<turn>:<id>:<x>,<y> gives that object its owner's\n"
-                 "right-click order to the point before that turn, IMRUN_PLACE=<x>,<y>\n"
+                 "right-click order to the point before that turn (1 or later: no\n"
+                 "player orders before the first), IMRUN_PLACE=<x>,<y>\n"
                  "first stands it there, out of its AI's hands, IMRUN_WATCH=<id>\n"
                  "prints where it stands every ten turns and every gate its route\n"
                  "crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
@@ -124,6 +130,7 @@ int main(int argc, char** argv) {
   std::string campaign_path;
   sim::PlayerId human = kNoPlayer;
   bool declare_won = false;
+  bool seed_given = false;
   int end = positional;
   while (end < argc && std::strncmp(argv[end], "--", 2) != 0) ++end;
   for (int i = end; i < argc; ++i) {
@@ -131,10 +138,27 @@ int main(int argc, char** argv) {
     if (flag == "--campaign" && i + 1 < argc) campaign_path = argv[++i];
     else if (flag == "--human" && i + 1 < argc) human = static_cast<sim::PlayerId>(std::atoi(argv[++i]));
     else if (flag == "--declare-won") declare_won = true;
+    else if (flag == "--seed" && i + 1 < argc) {
+      // One run measures one game: the ending turn and the overlap census
+      // swing with the seed, so a change is judged over several of them
+      // (`tools/seeds.py`), each one reproducible on its own.
+      char* rest = nullptr;
+      const unsigned long long value = std::strtoull(argv[++i], &rest, 10);
+      if (rest == argv[i] || *rest != '\0' || value > 0xffffffffull) {
+        std::fprintf(stderr, "--seed needs a number from 0 to 4294967295\n");
+        return 2;
+      }
+      seed = static_cast<std::uint32_t>(value);
+      seed_given = true;
+    }
     else {
       std::fprintf(stderr, "unknown option %s\n", flag.c_str());
       return 2;
     }
+  }
+  if (seed_given && resuming) {
+    std::fprintf(stderr, "--seed does not apply to --load: the save's manifest names its seed\n");
+    return 2;
   }
   const std::uint64_t turns =
       end > positional ? std::strtoull(argv[positional], nullptr, 10) : 200;
@@ -247,6 +271,7 @@ int main(int argc, char** argv) {
 
   std::printf("classes   %zu from %zu files\n", install.classes().size(), install.class_files());
   std::printf("objects   %zu\n", run.world().objects().size());
+  std::printf("seed      %u\n", seed);
   // Trigger regions attached to a named object. Printed because a subsystem
   // that is complete and *unreachable* has cost this project twice: the
   // settlement timers and the command table each passed every unit test while
@@ -654,6 +679,14 @@ int main(int argc, char** argv) {
   bool goto_wanted = false;
   if (const char* order = std::getenv("IMRUN_GOTO")) {
     goto_wanted = std::sscanf(order, "%llu:%u:%d,%d", &goto_turn, &goto_id, &goto_x, &goto_y) == 4;
+    // Not before the first turn: no player's order runs ahead of it, in
+    // `gbr.exe` or in the app, which owes its first turn as the match opens
+    // (`engine/app/main.cpp` says why), so an order there would play a game
+    // nobody can.
+    if (goto_wanted && goto_turn == 0) {
+      std::printf("  goto refused: no order is given before turn 1, as no player can give one\n");
+      goto_wanted = false;
+    }
   }
   // `IMRUN_PLACE=<x>,<y>`: the ordered object is stood there first, so a test
   // can send a unit from where the map never puts one -- an enemy outside a
@@ -674,6 +707,18 @@ int main(int argc, char** argv) {
   // reaches `ESH_BUILDARMY.VS`'s gold floor is a curve, not an end state.
   std::uint64_t economy_every = 0;
   if (const char* every = std::getenv("IMRUN_ECONOMY")) economy_every = std::strtoull(every, nullptr, 10);
+  // `IMRUN_CAPTURES=1`: every settlement whose owner changes, on the turn it
+  // does -- every kind, unlike the economy lines, which leave out the
+  // outposts the computer players' armies go after first. "Who took what,
+  // when" is the plainest measure of a war, and sampling it misses a town
+  // taken and retaken between two samples.
+  const bool show_captures = std::getenv("IMRUN_CAPTURES") != nullptr;
+  std::map<sim::SettlementId, sim::PlayerId> owners;
+  if (show_captures) {
+    if (const sim::EconomySystem* economy = sim::economy_of(run.world())) {
+      for (const sim::Settlement& set : economy->settlements().all()) owners[set.id] = set.owner;
+    }
+  }
   // `IMRUN_ORDERS=<n>`: the AI order queues every n turns.
   std::uint64_t orders_every = 0;
   if (const char* every = std::getenv("IMRUN_ORDERS")) orders_every = std::strtoull(every, nullptr, 10);
@@ -735,6 +780,20 @@ int main(int argc, char** argv) {
       if (goto_id == watched) watched_crossing = "\x01";
     }
     run.advance(1, length);
+    if (show_captures) {
+      if (const sim::EconomySystem* economy = sim::economy_of(run.world())) {
+        for (const sim::Settlement& set : economy->settlements().all()) {
+          const auto seen = owners.find(set.id);
+          if (seen != owners.end() && seen->second != set.owner) {
+            std::printf("  capture turn %llu: #%u kind %d p%d -> p%d\n",
+                        static_cast<unsigned long long>(turn + 1), set.id,
+                        static_cast<int>(set.kind), static_cast<int>(seen->second),
+                        static_cast<int>(set.owner));
+          }
+          owners[set.id] = set.owner;
+        }
+      }
+    }
     if (orders_every > 0 && (turn + 1) % orders_every == 0) {
       // The AI order queues: per player, the slots, the orders still waiting
       // and the most urgent of them, and whether slot 2's runner is alive.

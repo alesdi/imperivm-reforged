@@ -165,10 +165,10 @@ app: a match opens at 1000, OK posts 999, and the turn after the one it was appl
 **In the app's single-player match** the speed is an order too, through `sim::LocalOrders`:
 posted orders wait for the next turn, whose length is converted *before* they are applied,
 exactly as the negotiator converts turn `t` before `t`'s orders run. The real length of an
-unnetworked turn is `--turn-interval` (100 ms by default, **this engine's number**, since
-no single-player turn length was read), converted at the clock's speed, so a match at 1000
-runs in real time. `--turn-length N` still forces N units a turn for a scripted
-fast-forward. **Inferred:** that a single-player match's speed is always variable; the
+unnetworked turn is `--turn-interval` (100 ms by default, **this engine's number**; the
+original's is 150 ms, and why the default stays 100 for now is in "The single-player turn"
+below), converted at the clock's speed, so a match at 1000 runs in real time.
+`--turn-length N` still forces N units a turn for a scripted fast-forward. **Inferred:** that a single-player match's speed is always variable; the
 settings' `gamespeed` was read for the lobby's record (−1 by default), and the
 single-player screens that fill it were not followed.
 
@@ -213,12 +213,9 @@ rather than invent a step length.
 in `gbr.exe`: the frame (`0x0051ea30`) hands the real clock to `0x00528e40`, which puts game
 time the real clock's share of the way across the turn's window — `[clock+0x24]` to
 `[clock+0x28]`, opened by `0x00528a80` — held below the window's end, and `0x00528b40` runs
-the schedulers up to it one millisecond at a time. (Both frame routines, `0x0051ea30` and the
-one at `0x004ccc60`, open the next window themselves with **150 ms** of real time when the
-real clock reaches the last one's end, `0x0051ea97` and `0x004cccca`; the networked transport
-opens it with the agreed length, `0x00407fe7`. So the unnetworked turn this section calls
-"not read" above looks to be 150 ms, not this engine's 100. Which frame routine a
-single-player match runs was not followed, and the app's default is left alone here.) A
+the schedulers up to it one millisecond at a time. (Every single-player frame routine opens
+the next window itself with **150 ms** of real time; the networked transport opens it with the
+agreed length. "The single-player turn" below has the classes and what it would cost here.) A
 moving object is drawn where its animation has it at that instant:
 `GetCurrentPosition` (`0x0053d830`, slot `+0x40` of some thirty vtables) runs the point from
 where the animation started to its destination by the clock's place in the animation's
@@ -240,6 +237,129 @@ other, on the map at both, and slower than one world unit a millisecond. Rings, 
 and both picks are placed from the same anchor. A paused or held clock (a menu, `turn:N`)
 draws the world as it stands until the next turn runs. Nothing the view derives reaches the
 world: `test_glide.cpp` holds the hash, and the app is held to `imrun`'s.
+
+### The single-player turn
+
+**The original runs every unnetworked match in turns of 150 ms of real time.** Read in
+`gbr.exe`. The game object (`[0x00996ff4]`) is built at `0x0074831c` as one of four classes,
+chosen by the kind of the match's settings object (`[0x00a87c48]`). Each class names itself
+through the cast at its vtable `+4`, which compares against the class-name records at
+`0x0082127c`, `0x0081b214`, `0x0081b21c` and `0x008212cc`. Their per-frame routine is vtable
+`+0x7c`:
+
+| class | vtable | constructor | frame routine | who opens the next turn |
+|---|---|---|---|---|
+| `CVXGameSingle` | `0x007bf2c8` | `0x005261e0` | `0x0051ea30` | itself, 150 ms (`0x0051ea97`) |
+| `CVXGameAdv` | `0x007b8d28` | `0x004ceeb0` | `0x004ccc80` | itself, 150 ms (`0x004cccc3`) |
+| `CVXGameConq`, derived from `Adv` | `0x007b8dd8` | `0x004cf030` | `0x004cced0`, which hands on to `0x004ccc80` | as `Adv` |
+| `CVXGameMultiplayer` | `0x007c2858` | `0x005502b0` | `0x00550890`, which opens none | the transport, the agreed length (`0x00407fe7`) |
+
+**Inferred** from the names and the install's `Scenarios/`, `Adventures/` and `Conquests/`
+folders: `Single` is a scenario or skirmish map, `Adv` a campaign mission, `Conq` a conquest
+map. (The earlier note here gave the `Adv` routine as `0x004ccc60`; that address is the tail
+of the function before it.) The routine that opens a window, `0x00528a80`, has exactly those
+three callers. The 150 is an immediate operand: no ini key, setting or slider reaches it.
+CONST.INI's `[VXTIME]` holds only `GameSpeed`, and `MinTickSize`/`MaxTickSize` (200/800,
+`netjoin.md`) are read by the network transport alone.
+
+**How a window opens** (`0x00528a80`). The clock's turn counter (clock `+0x2c`, game
+`+0x1264`) goes up by one. The real window starts where the last one ended, or at the real
+clock if that has fallen more than 2,000 ms behind. It lasts the first argument plus the
+second. The game window starts where the last one ended and lasts speed × first argument /
+1000, truncated, unless the game is paused. Single player passes (150, 0). The transport
+passes the agreed length and the agreed delay, so a network delay stretches a turn's real
+time without adding game time. A single-player turn is therefore 150 game ms at 1000, 149 at
+the options' round-trip 999, 105 at `SlowSpeed` and 300 at `FastestSpeed`.
+
+**What happens at the boundary: queued orders run.** Right after opening the window, both
+single-player frame routines run the command pump's tick (`0x004f79d0`, the routine that logs
+`CVXCmdPump::Tick --- Time:`), which executes every queued command. So a player's order takes
+effect at the head of the next window, up to 150 ms after the click. That is the same rule as
+`LocalOrders` here, with a different latency.
+
+**What does not happen at the boundary: everything else.** Every frame, `0x00528e40` places
+game time inside the window. `0x00528b40` then advances game time one millisecond at a time
+up to that point, and at each millisecond steps the two schedulers at game `+0x1294` and
+`+0x1298` (`0x006879a0`). Each is a timing wheel that fires an entry on its own due
+millisecond. **Inferred:** these are the script threads' and timers' schedulers. If so, a
+`Sleep(500)`, a `Wait…` poll, a `Unit.Stop(1000)` timeout and a CONST.INI interval all come
+due on their exact millisecond, wherever the turn boundary falls. `GetTime` (`0x004c64e0`)
+returns the running game time (game `+0x1258`) in milliseconds. That is what a script derives
+game minutes from, and it counts no turns. The turn counter is read at a handful of sites
+(`0x004069c4`, `0x004e72b3`, `0x00524419`, `0x00550a0d`, `0x005ee8c5`, `0x006bf864`,
+`0x00749f4a`). The two looked at (`0x004e72b3`, `0x005ee8c5`) compare it with a stored copy,
+which looks like a once-a-turn guard. They were not followed further.
+
+So in the original the turn length is observable in one place: the instant queued orders
+execute. Game-time rates (walking, production, growth, script waits, game minutes) do not
+depend on it. **150 ms is a pacing and input-latency constant, not a gameplay quantity.**
+How sure: the constant, its three callers and the four classes are read; that a
+single-player match is one of the three non-network classes follows from the factory; that
+the millisecond wheels are the scripts' is inferred.
+
+**Here the turn length is observable in more places.** These are event-timed inside a turn
+already, and do not care where the boundary falls: movement (above), the settlement
+economy's timers (`EconomySystem::advance` steps to the nearest due timer), combat's actions
+and impacts (absolute game times), and animation cursors. These happen once a turn:
+
+* **Script wake-ups, the large one.** `GameSession::advance` runs the scheduler once a turn,
+  after the systems, with `now` at the turn's end (`Scheduler::advance`). A suspension's wake
+  time is `now` plus its duration (`vm.cpp`). So every `Sleep`, `Wait…` poll, `Stop` timeout
+  and `Goto` give-up resumes at the first turn end at or after it is due. The next wait counts
+  from that turn end, so a waiting loop's period is its wait rounded up to whole turns.
+  `GetTime` answers the turn end, not the due instant.
+* The AI order queues' timer (`run_ai_orders`), at the turn's time.
+* Once-a-turn refreshes: the command queues (`CommandSystem`), `Squad::GAIKAIn` and
+  `Squad::Eval`, squad revaluation, fog, hero skill expiry, the feeder's reconcile, army
+  pruning, movement's test of a `Unit::Stop` request, and combat's exchange of position,
+  owner and health with the world.
+* Posted orders run at the next turn (`LocalOrders`), as in the original.
+
+The period of a loop that only waits, in game ms. The literal counts are from the shipped
+scripts: 397 of the 660 `Sleep` calls take a literal, and 317 of those are multiples of 100.
+
+| wait | literal sites | original | 100 ms at 1000 | 100 ms at 999 | 150 ms at 1000 | 150 ms at 999 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 17 | 1 | 100 | 99 | 150 | 149 |
+| 100 | 47 | 100 | 100 | **198** | 150 | 149 |
+| 200 | 10 | 200 | 200 | 297 | 300 | 298 |
+| 250 | 6 | 250 | 300 | 297 | 300 | 298 |
+| 500 | 31 | 500 | 500 | 594 | **600** | 596 |
+| 1000 | 58 | 1000 | 1000 | 1089 | 1050 | 1043 |
+| 2000 | 53 | 2000 | 2000 | 2079 | 2100 | 2086 |
+
+**Decision: keep 100 ms as the app's default for now.** While script wake-ups snap to turn
+ends, 100 ms at speed 1000 gives the original's period for every wait that is a multiple of
+100. Those are most of the literal waits. At 150 ms the half-second loops would run every
+600 ms, and the AI's 1- and 2-second loops would be 5% slow. The 150 ms buys only the
+original's input latency and real-time pacing, and nobody can see either.
+
+**Before switching, make wake-ups exact.** A resumed script should take its own wake time as
+`now`, and the scheduler should keep running whatever falls due before the turn's end. Waits
+then chain on their due milliseconds as the original's wheel does, and the turn length stops
+mattering to scripts. After that, 150 ms is a one-line change. That fix is needed at 100 ms
+too: at the 999 the options screen's OK sets, a turn is 99 units, and every 100 ms poll
+already runs every 198.
+
+**What switching would cost.**
+
+* **Tests.** The Crossroads pins do not depend on the default: `CROSSROADS_TURNS = 2_200` in
+  `tests/test_corpus_imrun.py`, `TURNS = 2_205` in `tests/test_corpus_app_match.py`, and
+  the save-and-resume runs. `imrun` takes its length as a positional (800 in all of these,
+  100 in the gate tests), and has no real-time pace. The app runs set `--turn-length 800
+  --turn-interval 1`. `test_corpus_app_speed.py` sets `--turn-interval 800`, and the glide
+  test in `test_corpus_app_draw.py` sets 400. The rest of the app tests run on the default,
+  where turns are paced by the real clock. A `turn:N` wait would take 1.5 times as long, and a
+  test that counts frames or `wait:` steps would see about two-thirds as many turns. That
+  was not measured. Run `tools/verify.py --full` with the change.
+* **Saves.** Nothing in the format changes. An unnetworked turn's length is recomputed from
+  `turn_interval` every turn, so an older save resumes at the new length. The world hash
+  includes the turn length, so a resumed match no longer hashes like one resumed at 100. Only
+  hash-comparing tests could notice, and they pin 800.
+* **Network play.** Unaffected. The negotiator sets every networked turn: it opens at 400
+  and is clamped to 200–800. The app's network path does not read `turn_interval`.
+* The doc comment on `turn_interval` in `engine/app/main.cpp` still says the single-player
+  length "was not read". Fix it with the change.
 
 ### The determinism contract is narrower than it looks
 

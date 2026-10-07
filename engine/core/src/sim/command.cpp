@@ -139,6 +139,7 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
     // be aimed at.
     def.group_verifier.assign(doc.attribute(n, "groupverifier"));
     def.group_dispatch.assign(doc.attribute(n, "groupdispatch"));
+    def.on_add_remove.assign(doc.attribute(n, "onaddremovescript"));
     def.cursor.assign(doc.attribute(n, "cursor"));
     for (NodeIndex text = doc.child(n, "cmdtext"); text != kNoNode;
          text = doc.next(text, "cmdtext")) {
@@ -719,10 +720,83 @@ void settle(World& world, ObjectId id, const Command& command, bool refund) {
 
 }  // namespace
 
+bool CommandSystem::run_add_remove(ObjectId id, const Command& command, bool add) {
+  if (scheduler_ == nullptr || command.name.empty()) return true;
+  const CommandDef* row = table_.find(command.name);
+  if (row == nullptr || row->on_add_remove.empty()) return true;
+  const std::uint32_t chunk = library_ != nullptr ? library_->chunk_for(row->on_add_remove)
+                                                  : scheduler_->find_chunk(row->on_add_remove);
+  if (chunk == script::kNoChunk) return true;
+  // `// bool, Obj This, bool bAdd` -- the shipped script's own header, and the
+  // two words 0x004e7600 hands the interpreter.
+  const script::Value args[2] = {script::Value::object(kTypeObj, id),
+                                 script::Value::boolean(add)};
+  // The row's `cmdparam` and costs are ambient for the length of the call and
+  // no longer, as the original's globals are; nested, the outer one comes back.
+  const Command* outer = hooked_;
+  hooked_ = &command;
+  const script::CallReport ran = scheduler_->call(chunk, args);
+  hooked_ = outer;
+  if (ran.status == script::ExecStatus::failed) {
+    hook_traps_.push_back(
+        script::FailedScript{ran.id, scheduler_->chunk(chunk).source_name, ran.trap});
+  }
+  // The answer starts out true and only a returned value overwrites it.
+  if (ran.status != script::ExecStatus::finished || ran.result.is_nil()) return true;
+  return ran.result.truthy_scalar();
+}
+
+bool CommandSystem::accept(World& world, ObjectId id, const Command& command) {
+  if (!charge(world, id, command)) return false;
+  if (run_add_remove(id, command, /*add=*/true)) return true;
+  // Refused by the row's script after it was paid for: the payment goes back
+  // (0x005b18bc, `vtbl+0x88`), and nothing is queued.
+  settle(world, id, command, /*refund=*/true);
+  return false;
+}
+
+void CommandSystem::release(World& world, ObjectId id, const Command& command) {
+  settle(world, id, command, /*refund=*/true);
+  // 0x005b07d0 calls `vtbl+0x90` only for a row with a cost (`[def+0x1e8]`,
+  // `[def+0x1ec]`, `[def+0x1f0]`), and the hook is inside it.
+  const CommandDef* row = command.name.empty() ? nullptr : table_.find(command.name);
+  if (row == nullptr || (row->cost_gold == 0 && row->cost_food == 0 && row->cost_pop == 0)) {
+    return;
+  }
+  (void)run_add_remove(id, command, /*add=*/false);
+}
+
+bool CommandSystem::remove_at(World& world, ObjectId id, std::size_t index) {
+  CommandQueue* q = find(id);
+  if (q == nullptr || index >= q->entries.size()) return false;
+  // Released while it still stands in the queue, as 0x005b07d0 does: a copy,
+  // because the hook can reach this queue.
+  const Command released = q->entries[index];
+  release(world, id, released);
+  q = find(id);
+  if (q == nullptr) return true;
+  std::size_t at = index;
+  if (at >= q->entries.size() || q->entries[at].id != released.id) {
+    const auto found = std::find_if(q->entries.begin(), q->entries.end(),
+                                    [&](const Command& c) { return c.id == released.id; });
+    if (found == q->entries.end()) return true;
+    at = static_cast<std::size_t>(found - q->entries.begin());
+  }
+  // Index 0 is ended as `KillCommand` ends it, its `onfinish` told it was
+  // cancelled; anything behind it never ran and is erased.
+  if (at == 0) {
+    retire(world, id, q->entries.front(), /*canceled=*/true);
+  } else {
+    retire(q->entries[at]);
+  }
+  q->entries.erase(q->entries.begin() + static_cast<std::ptrdiff_t>(at));
+  return true;
+}
+
 std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_view verb,
                                          const Command& prototype) {
   if (world.find(id) == nullptr) return 0;
-  CommandQueue& q = queue(id);
+  (void)queue(id);
 
   // The command takes its id when it is made, before the insert can refuse it
   // (0x00599302 in the constructor), so a refused one has used its id.
@@ -732,29 +806,35 @@ std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_
   command.script = script::kNoScript;
   command.started = false;
   const std::uint32_t issued = command.id;
-  // Paid for before the queue it replaces is refunded (0x005b4e90 asks the
-  // accept test first), so a replace cannot spend what the commands it
-  // clears are holding, and a refused one leaves them running.
-  if (!charge(world, id, command)) return 0;
+  // Paid for, and its row's script asked, before the queue it replaces is
+  // refunded (0x005b4e90 asks the accept test first), so a replace cannot
+  // spend what the commands it clears are holding, and a refused one leaves
+  // them running.
+  if (!accept(world, id, command)) return 0;
 
   // Aborts what is running, which `AI HELPERS\GUARD.VS` requires: it issues
   // `SetCommand("move", pt)` to a unit whose running command is `idle`, and
   // `UNIT_IDLE.VS` is a `while(1)` that never returns on its own. A running
   // command that is replaced is a cancelled one: its `onfinish` gets `true`
-  // and its cost comes back.
-  for (Command& old : q.entries) {
-    settle(world, id, old, /*refund=*/true);
-    retire(world, id, old, /*canceled=*/true);
+  // and its cost comes back. In the original's order (0x005b4e90 with the
+  // flag): the pending tail last first (`vtbl+0xc0(0)`, 0x005b1120), the new
+  // command pushed, then the old head (0x005b07d0 with 0).
+  const CommandQueue* q = find(id);
+  const bool had_head = q != nullptr && !q->entries.empty();
+  const std::uint32_t head = had_head ? q->entries.front().id : 0u;
+  for (std::size_t i = had_head ? q->entries.size() : 0; i-- > 1;) (void)remove_at(world, id, i);
+  queue(id).entries.push_back(std::move(command));
+  q = find(id);
+  if (had_head && q->entries.size() > 1 && q->entries.front().id == head) {
+    (void)remove_at(world, id, 0);
   }
-  q.entries.clear();
-  q.entries.push_back(std::move(command));
   return issued;
 }
 
 std::uint32_t CommandSystem::add_command(World& world, ObjectId id, bool front,
                                          std::string_view verb, const Command& prototype) {
   if (world.find(id) == nullptr) return 0;
-  CommandQueue& q = queue(id);
+  (void)queue(id);
 
   Command command = prototype;
   command.id = world.next_command_id();
@@ -762,11 +842,13 @@ std::uint32_t CommandSystem::add_command(World& world, ObjectId id, bool front,
   command.script = script::kNoScript;
   command.started = false;
   const std::uint32_t issued = command.id;
-  if (!charge(world, id, command)) return 0;
+  if (!accept(world, id, command)) return 0;
 
   // `front` inserts at index 1 -- behind the running command, ahead of the rest
   // -- and never at index 0. See the header: the `AddCommand(true, ...);
-  // KillCommand();` idiom only works if the runner survives the insert.
+  // KillCommand();` idiom only works if the runner survives the insert. Found
+  // again after the accept test, whose script could have added a queue.
+  CommandQueue& q = queue(id);
   const std::size_t at = front && !q.entries.empty() ? std::size_t{1} : q.entries.size();
   q.entries.insert(q.entries.begin() + static_cast<std::ptrdiff_t>(at), std::move(command));
   return issued;
@@ -782,47 +864,39 @@ std::uint32_t CommandSystem::append_order(World& world, ObjectId id, std::string
   const CommandQueue* before = find(id);
   const bool resting = before != nullptr && !before->entries.empty() &&
                        equal_fold(before->entries.front().verb, default_verb_);
+  const std::uint32_t head = resting ? before->entries.front().id : 0u;
   const std::uint32_t issued = add_command(world, id, /*front=*/false, verb, prototype);
   if (issued == 0 || !resting) return issued;
-  CommandQueue& q = queue(id);
-  settle(world, id, q.entries.front(), /*refund=*/true);
-  retire(world, id, q.entries.front(), /*canceled=*/true);
-  q.entries.erase(q.entries.begin());
+  const CommandQueue* q = find(id);
+  if (q != nullptr && !q->entries.empty() && q->entries.front().id == head) {
+    (void)remove_at(world, id, 0);
+  }
   return issued;
 }
 
 bool CommandSystem::kill_command(World& world, ObjectId id) {
-  CommandQueue* q = find(id);
-  if (q == nullptr || q->entries.empty()) return false;
-  settle(world, id, q->entries.front(), /*refund=*/true);
-  retire(world, id, q->entries.front(), /*canceled=*/true);
-  q->entries.erase(q->entries.begin());
-  return true;
+  return remove_at(world, id, 0);
 }
 
 std::size_t CommandSystem::clear_commands(World& world, ObjectId id) {
-  CommandQueue* q = find(id);
+  // 0x005b1120 with 0: every index from the last down to 1, each through
+  // 0x005b07d0, so the last queued is released first.
+  const CommandQueue* q = find(id);
   if (q == nullptr || q->entries.size() <= 1) return 0;
-  const std::size_t dropped = q->entries.size() - 1;
-  for (std::size_t i = 1; i < q->entries.size(); ++i) {
-    settle(world, id, q->entries[i], /*refund=*/true);
-    retire(q->entries[i]);
+  std::size_t dropped = 0;
+  for (std::size_t i = q->entries.size(); i-- > 1;) {
+    if (remove_at(world, id, i)) ++dropped;
   }
-  q->entries.erase(q->entries.begin() + 1, q->entries.end());
   return dropped;
 }
 
 bool CommandSystem::cancel_command(World& world, ObjectId id, std::uint32_t command_id) {
-  CommandQueue* q = find(id);
+  const CommandQueue* q = find(id);
   if (q == nullptr || command_id == 0) return false;
   const auto at = std::find_if(q->entries.begin(), q->entries.end(),
                                [command_id](const Command& c) { return c.id == command_id; });
   if (at == q->entries.end()) return false;
-  if (at == q->entries.begin()) return kill_command(world, id);
-  settle(world, id, *at, /*refund=*/true);
-  retire(*at);
-  q->entries.erase(at);
-  return true;
+  return remove_at(world, id, static_cast<std::size_t>(at - q->entries.begin()));
 }
 
 std::string_view CommandSystem::command_name(ObjectId id, std::size_t index) const noexcept {
@@ -856,7 +930,10 @@ const Command* CommandSystem::command_of_script(script::ScriptId script) const n
   for (const Command& command : finishing_) {
     if (command.script == script) return &command;
   }
-  return nullptr;
+  // Inside a row's `onaddremovescript`, which is no command's own script: the
+  // row it was run for, as the original's ambient globals say for as long as
+  // the call lasts.
+  return hooked_;
 }
 
 CommandSystem* command_system(World& world) noexcept {
@@ -1478,26 +1555,79 @@ HostOutcome get_cmd_stamina_cost_impl(CallContext& ctx) {
 /// **An order, not a predicate.** Its 63 call sites are all bare statements:
 /// not one is a condition, not one is assigned, and the inventory's return
 /// column is blank because no typed local ever receives it. `UNIT_IDLE.VS`'s
-/// `.Idle(1900 + rand(100))` and `WOLF_IDLE.VS`'s `.Idle(2000)` are the shape.
+/// `.Idle(1900 + rand(100))` and `WOLF_IDLE.VS`'s `.Idle(2000)` are the shape,
+/// and `SHIP_IDLE.VS`'s `while(1) { ... if (.Stop(200)) .Idle(); }` spins the
+/// scheduler if `Idle` costs no game time.
 ///
-/// The only behaviour the corpus proves is the suspension, and that much it
-/// does prove: `SHIP_IDLE.VS`'s `while(1) { ... if (.Stop(200)) .Idle(); }`
-/// spins the scheduler if `Idle` costs no game time. It deliberately does *not*
-/// stop the unit, because every site that wants that calls `Stop` right next to
-/// it -- `while (!.Stop(1000)); .Idle(1500);` -- and a redundant call is weaker
-/// evidence than an absent one. Whether it also selects an idle animation is
-/// unknown; the deer's `SetWalkAnim(13)` suggests the slot exists but nothing
-/// ties it to this entry point.
+/// It does not stop the unit's route: every site that wants that calls `Stop`
+/// right next to it -- `while (!.Stop(1000)); .Idle(1500);`.
+///
+/// **What `Unit::Idle` does** (0x005d6030), read off `gbr.exe`. It runs on the
+/// suspending registrar, so the interpreter tells it a first entry from a
+/// resume by a flag byte it writes above the arguments (opcode 0x1E's handler,
+/// 0x0069d564: set on the first entry, cleared on the resume).
+///
+///   * **A held receiver** -- position `(-1, -1)`, a unit inside a building or
+///     a ship -- writes `ms` to the wait cell and returns 1, suspend; its
+///     resume pops the arguments and returns 0. A plain timed wait.
+///   * **Anything on the map** pops the arguments, sets the unit's activity to
+///     4 (the setter 0x005a7680), **drops the combat target** (0x005d60b7: the
+///     handle at `[unit+0x1a8]` emptied and the attack count beside it zeroed,
+///     only when there is a target) and returns **3**.
+///
+/// **What a 3 is.** The suspending call's dispatch (the jump table at
+/// 0x0069dbc4) treats 0 as done, 1 as suspend-and-run-again, 2 as end the
+/// script, and 3 as *done, but end the slice*: the call is stepped over as a 0
+/// is, the slice's wait cell is set to -1 and the budget is forced out
+/// (0x0069d5fb). The scheduler reads a -1 as no timed wake at all: it takes
+/// the coroutine off its timer queue (0x0069f842 -> 0x00687bf0). What wakes it
+/// is the unit, when the activity the call started is over.
+///
+/// **And the activity spends the `ms` the call popped.** The idle and taunt
+/// activity (0x005d2ca0, reached from the unit's activity dispatch at
+/// 0x005d5bc2 for 4 and 5) reads its budget from the slot just above the
+/// script's stack pointer -- which is where `Idle`'s argument was before the
+/// pop, and the pop is made *before* the activity is set so that it is still
+/// there. `Ship::Idle` (0x005c6ea0), the arity-0 form, writes its own duration
+/// into that same slot before it returns 3, which is the second reading and
+/// agrees. The activity holds the idle pose and plays fidget animations within
+/// that budget, in 100 ms steps, and when the budget is spent it wakes the
+/// script (0x005d2de0 -> 0x0069f8f0, a wake at once) and sets the activity
+/// back to 0. So an `Idle(1900)` on the map costs about 1,900 ms of game time
+/// in both branches, and the difference between them is the target.
+///
+/// **Here:** the held branch is the timed wait it was; the other drops the
+/// target and is a suspension of `ms`, which is what the activity's budget
+/// amounts to. `CombatSystem::stop` is the drop, as it is for `Taunt`: it also
+/// moves an engaging unit out of the engaging state, which the activity write
+/// does too. A non-positive `ms` still ends the slice, as a 3 always does --
+/// one pass, the shortest wait this scheduler has -- and no shipped site
+/// passes one.
+///
+/// **Not reproduced, recorded:** the fidget animations are drawn from the
+/// synchronised generator (`[0x996ff4] + 0x12a0`, its `vtbl+0x14`, a one in 15
+/// chance per 100 ms step for an idle, one in 3 for a taunt), so in `gbr.exe`
+/// an idle on the map spends random draws that this engine does not. The
+/// activity write itself is absent for the reasons `Taunt` gives below.
+/// A handle that names no object is held for `ms` as before: the original
+/// dereferences null there, which is a fault rather than a behaviour, and a
+/// wait is what keeps an idle loop from spinning on one.
+HostOutcome idle_activity(const Self& self, std::int64_t ms) {
+  const HostOutcome wait = HostOutcome::sleep_for(ms > 0 ? ms : 0);
+  const WorldObject* slot = self.world->find(self.id);
+  if (slot == nullptr || slot->state.position == kHeldPosition) return wait;
+  if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
+    (void)combat->stop(self.id);
+  }
+  return wait;
+}
+
 HostOutcome idle_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   std::int64_t ms = kDefaultIdleSlice;
   if (ctx.count() > 1 && ctx.arg(1).is_integer()) ms = ctx.arg(1).as_integer();
-  if (ms <= 0) return HostOutcome::ok_void();
-  HostOutcome out;
-  out.status = script::HostStatus::suspend;
-  out.suspend_for = ms;
-  return out;
+  return idle_activity(self, ms);
 }
 
 /// `ForceIdle()` -- one shipped site, `HEN_IDLE.VS`, on the line before its
@@ -1548,51 +1678,36 @@ HostOutcome force_idle_impl(CallContext& ctx) {
 ///      `Stop`, both `Goto`s, `GotoAttack`, `FormKeepMoving`, `Attack` and
 ///      `AttackEveryone`. It is this family's "a new order supersedes combat"
 ///      prologue.
-///   3. Return the code that ends the script's time slice without asking for a
-///      timed wake (3, which the interpreter's dispatch table at 0x0069dbc4
-///      turns into `sleep = -1` plus a forced budget exhaustion). So the taunt
-///      itself is fire-and-forget and the 2,000 every shipped site passes is
-///      **only ever consumed by the held branch**.
+///   3. Return 3: the call is done and the slice ends with no timed wake
+///      (0x0069d5fb), and the taunt activity wakes the script once it has
+///      spent the argument the call popped (see `Idle` above). **So a
+///      `Taunt(2000)` on the map is a two-second taunt.**
 ///
-/// **The activity is deliberately not written**, on the same grounds `Idle`
-/// above gives for not selecting an animation: `+0x130` is a small transient
-/// enum this engine does not model, it is not in the original's serialiser
-/// list, and a value written here and read by nobody would be state two peers
+/// **This used to cost one scheduler pass.** The reading was that a 3 is
+/// fire-and-forget and the 2,000 every shipped site passes is consumed only
+/// by the held branch; it missed that the activity (0x005d2ca0) takes its
+/// budget from the slot the argument was popped from. The difference is the
+/// capture rate: `UNIT_CAPTURE.VS` and `HERO_CAPTURE.VS` loop
+/// `.Taunt(2000); b.settlement.DecreaseLoyalty(1);`, which took a point of
+/// loyalty every pass rather than every two seconds.
+///
+/// **The activity is deliberately not written** (nor, for `Idle`, the idle
+/// one): `+0x130` is a small transient enum this engine does not model, it is
+/// not in the original's serialiser list, and a value written here and read by nobody would be state two peers
 /// could disagree about for no reason. Dropping the target *is* modelled, and
 /// `CombatSystem::stop` is that pair -- it also moves the unit out of the
 /// engaging animation, which the original does too, just into a taunt pose
 /// rather than an idle one. This engine has no taunt pose to move it into.
 ///
-/// **The discrepancy with `Idle` above is recorded rather than resolved.**
-/// `Idle` here suspends for its argument unconditionally, and `Unit::Idle`
-/// does that only for a held receiver. `gbr.exe` also registers `Unit::Idle`
-/// **once**, at arity 1; the arity-0 form this engine serves from the same
-/// body is `Ship::Idle` (0x005c6ea0), a different function that writes the
-/// `ForceIdle` flag. Correcting that is a change to 63 call sites and belongs
-/// in its own change, with its own evidence about whether the shipped idle
-/// loops still pace themselves -- they would, because ending the slice costs a
-/// scheduler step, which is what the spin argument there actually needs.
+/// `gbr.exe` registers `Unit::Idle` **once**, at arity 1; the arity-0 form this
+/// engine serves from the same body is `Ship::Idle` (0x005c6ea0), which sets
+/// the `ForceIdle` flag and supplies its own duration (see `Idle` above).
 HostOutcome taunt_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
-  const WorldObject* slot = self.world->find(self.id);
-  if (slot == nullptr) return HostOutcome::ok_void();
-
-  // The held case: wait out the argument and do nothing else.
-  if (slot->state.position == kHeldPosition) {
-    std::int64_t ms = 0;
-    if (ctx.count() > 1 && ctx.arg(1).is_integer()) ms = ctx.arg(1).as_integer();
-    return ms > 0 ? HostOutcome::sleep_for(ms) : HostOutcome::ok_void();
-  }
-
-  if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
-    (void)combat->stop(self.id);
-  }
-  // Yield the rest of the slice with no timed wake, which is what a 3 is.
-  HostOutcome out;
-  out.status = script::HostStatus::suspend;
-  out.suspend_for = 0;
-  return out;
+  std::int64_t ms = 0;
+  if (ctx.count() > 1 && ctx.arg(1).is_integer()) ms = ctx.arg(1).as_integer();
+  return idle_activity(self, ms);
 }
 
 // -- the cross-domain orders -----------------------------------------------
@@ -1996,10 +2111,28 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
 /// call's result. Each call re-places the army around where the hero is *now*,
 /// which is what makes the formation follow him rather than pile up at the
 /// destination he was given.
+///
+/// **Two functions answer to this name, and only the unit's drops the
+/// target.** `Hero::FormKeepMoving` (0x0052eaf0) keeps the hero's formation
+/// moving and leaves his combat target alone; `Unit::FormKeepMoving`
+/// (0x005d7a40), which `UNIT_FORM_MOVE.VS`'s army members reach, empties the
+/// target handle at `[unit+0x1a8]` with the attack count beside it on its
+/// first entry (0x005d7a7b), then sets the marching state and suspends for
+/// `ms` as the hero's does. Every shipped site but that one declares its
+/// receiver `Hero`. The original picks the function by the receiver's
+/// declared type; this registry keys on name and arity alone, so **the
+/// receiver being a registered hero is read as the `Hero` form** -- an
+/// inference that agrees with all 29 sites.
 HostOutcome form_keep_moving_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
-  if (HeroSystem* heroes = hero_system_of(*self.world); heroes != nullptr) {
+  HeroSystem* heroes = hero_system_of(*self.world);
+  if (heroes == nullptr || heroes->hero(self.id) == nullptr) {
+    if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
+      (void)combat->drop_target(self.id);
+    }
+  }
+  if (heroes != nullptr) {
     const MoveState& lead = self.movement->state(self.id);
     place_army(*self.world, *self.movement, *heroes, self.id,
                self.world->resolve_position(self.id), lead.facing);

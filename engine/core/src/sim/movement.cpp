@@ -2000,6 +2000,21 @@ struct Self {
 /// `Goto/4` and `Goto/5`. Arguments after the receiver are `(destination,
 /// range, slice, flag, give_up)`. See the header for which of those are
 /// established and which are read from the shape of the call sites.
+///
+/// **Both forms drop the unit's combat target**, as `Stop` does, through the
+/// same pair of writes (the handle at `[unit+0x1a8]` emptied and the attack
+/// count zeroed, only when there is a target; `CombatSystem::drop_target`):
+///
+///   * the **object** form (0x005d6b90) on every entry, first or resumed,
+///     before anything else -- the write at 0x005d6c2f precedes even the
+///     worker it hands the call to;
+///   * the **point** form (0x005d61b0) once the unit is out of any holder
+///     (0x005d639a): on the first entry, or on a resume that has just stepped
+///     out or finds no route. A resume that is walking a route keeps it.
+///
+/// One call here is one first entry and its resumes in the original (the
+/// walking path answers the caller's loop rather than resuming), so both
+/// forms drop the target on every call that gets as far as their write.
 HostOutcome goto_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
@@ -2013,6 +2028,13 @@ HostOutcome goto_impl(CallContext& ctx) {
   order.slice = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
   order.give_up = ctx.count() > 5 && ctx.arg(5).is_integer() ? ctx.arg(5).as_integer() : -1;
   order.lock_destination = true;
+  if (order.target != kNoObject) {
+    if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
+      (void)combat->drop_target(self.id);
+    }
+  } else {
+    order.drop_target = true;
+  }
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
 }
 
@@ -2454,22 +2476,55 @@ HostOutcome form_description_impl(CallContext& ctx) {
 // the Goto family
 // --------------------------------------------------------------------------
 
+namespace {
+/// What a ship's passenger waits before it asks again whether it may step
+/// off: the 100 the `Goto` family writes to the wait cell (0x005d62c8).
+constexpr std::int32_t kGotoCarrierPoll = 100;
+}  // namespace
+
 HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, ObjectId id,
                      const GotoOrder& order) {
   const Point dest =
       order.target == kNoObject ? order.dest : world.resolve_position(order.target);
-  // **A garrisoned unit steps out of its settlement first** (0x005d62a0-
-  // 0x005d62ec): `Goto` asks 0x005d3f20 to put it outside, towards where it
-  // is going, before it measures or routes anything, and waits whatever the
-  // settlement's exit timing asks. `garrison_exit` is that routine.
+  // **A held unit steps out of its holder first** (0x005d62a0-0x005d62ec),
+  // before it measures or routes anything, and every wait on the way is the
+  // original's return 1 -- suspend, and run the call again whole
+  // (0x005d6606), which is `retry` here:
+  //
+  //   * **aboard a ship it polls every 100 ms** (0x005d62b9): when the
+  //     holder belongs to an object (0x005319a0 resolves `[holder+0xe]`,
+  //     `held_by_carrier`), the call writes 100 to the wait cell and does not
+  //     try the exit at all, so a passenger stays aboard until the ship lets
+  //     it off. `GotoEnter` (0x005d6729) and the worker `GotoAttack` and the
+  //     object `Goto` share (0x005d4103) make the same poll;
+  //   * otherwise it asks 0x005d3f20 to put it outside, towards where it is
+  //     going, and waits whatever the settlement's exit timing asks
+  //     (`garrison_exit`).
+  //
+  // Both used to answer the script `false` after the wait instead of running
+  // again, and a passenger was not held back at all: `garrison_exit` does
+  // nothing for a holder that is not a settlement's, and the unit was routed
+  // from inside the ship.
+  //
+  // **Not reproduced:** a unit still at `(-1, -1)` after both, which the
+  // original polls every 500 ms (0x005d6312). Its exit routine takes a unit
+  // out of any holder; `garrison_exit` only out of a settlement's, so a
+  // unit this engine fails to take out is one the original would have, and
+  // a 500 ms poll here would hold it for ever.
   if (const ObjectState* state = world.state(id); state != nullptr && state->is_held()) {
-    const std::int32_t wait = garrison_exit(world, id, dest, now_of(ctx, world));
+    const std::int32_t wait = held_by_carrier(world, id)
+                                  ? kGotoCarrierPoll
+                                  : garrison_exit(world, id, dest, now_of(ctx, world));
     if (wait > 0) {
       HostOutcome out;
-      out.status = script::HostStatus::suspend;
-      out.value = Value::boolean(false);
+      out.status = script::HostStatus::retry;
       out.suspend_for = wait;
       return out;
+    }
+  }
+  if (order.drop_target) {
+    if (CombatSystem* combat = combat_system_of(world); combat != nullptr) {
+      (void)combat->drop_target(id);
     }
   }
   MoveState& move = movement.state(id);

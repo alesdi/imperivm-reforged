@@ -956,12 +956,18 @@ struct GotoOrder {
   /// `SetDest`'s lock flag: `Goto` (`0x005d645c`) and `GotoAttack`
   /// (`0x005d435b`, `0x005d43a6`) pass 1, `GotoEnter` (`0x005d68c3`) 0.
   bool lock_destination = false;
+  /// Whether the call drops the unit's combat target once the unit is out of
+  /// any holder: the point form of `Goto` does, at 0x005d639a, after its
+  /// step-out waits and before it measures anything. Not a field of the
+  /// original's; set by `Goto`'s entry point only, since `GotoAttack` and
+  /// `GotoEnter` were not read for it.
+  bool drop_target = false;
 };
 
 /// The shared body of the `Goto` family. Returns the host outcome the entry
 /// point should return: `true` on arrival, `false` with a suspension while
-/// walking or searching, and `finish` once it has gone `give_up` without a
-/// route.
+/// walking or searching, a `retry` while a held unit waits to step out of its
+/// holder, and `finish` once it has gone `give_up` without a route.
 [[nodiscard]] script::HostOutcome run_goto(script::CallContext& ctx, World& world,
                                            MovementSystem& movement, ObjectId id,
                                            const GotoOrder& order);
