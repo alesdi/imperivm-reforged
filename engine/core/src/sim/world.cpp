@@ -451,6 +451,26 @@ ObjectId World::allocate(InternalKind kind, std::unique_ptr<NativeObject> object
   const ObjectId assigned = slot.id;
   objects_.push_back(std::move(slot));
   reindex(objects_.back());
+  // **A sentry is born out of the AI's hands.** The `CVXUnit` constructor
+  // (0x005d3170) zeroes the second flag word `[unit+0x194]` and then, for a
+  // class that is a `Sentry` heir (0x005400c0, 0x005d331a), ORs in
+  // `0x04040000`: bit 18, `UNITFLAG_NOAI`, and bit 26, the minimap bit. The
+  // desync dumps print exactly that word, `unit flags=4040000`, on the
+  // sentries, and bit 18 is the one the state-vector census found on 417
+  // units "in guard or patrol, near-exclusively". It is what keeps a town's
+  // own AI off its walls: a squad formed round a no-AI unit carries
+  // `SF_NOAI` (0x00446c8e), and every `Squad::SetCmd` refuses such a squad
+  // (0x00427361, 0x00427517, 0x0043ec15) -- so `GS_KILLENEMIES.VS`, which
+  // orders every own squad in a node under attack to `ai_killall`, leaves the
+  // sentries to their wall. A map-placed unit's word is then replaced
+  // outright by its `UnitFlags` (0x005dd6a9), which `spawn_map_object` does.
+  if (WorldObject& made = objects_.back(); made.state.flags.is_unit && classes_ != nullptr) {
+    const ClassIndex sentry = classes_->find("Sentry");
+    if (sentry != kNoClass && class_is_a(assigned, sentry)) {
+      made.state.flags.no_ai = true;
+      made.state.flags.on_minimap = true;
+    }
+  }
   if (objects_.back().object != nullptr) objects_.back().object->on_spawn();
   return assigned;
 }
@@ -1487,6 +1507,9 @@ ObjectId World::spawn_map_object(const MapObject& placed, Point at, ObjectId set
   // And 46 birds start airborne, which `ObjectFlags::in_air` recorded as
   // something nothing sets. Bit 22 occurs only on flying units.
   slot->state.flags.in_air = (placed.unit_flags & kUnitFlagInAir) != 0;
+  // The word is replaced, not merged (0x005dd6a9): a sentry the map places
+  // keeps the bits its map gives it rather than the ones `allocate` set.
+  slot->state.flags.on_minimap = (placed.unit_flags & kUnitFlagOnMinimap) != 0;
   // Health as the map authors it, not as the class declares it.
   //
   // The nine dumps agree with the class maximum because the corpus is

@@ -563,6 +563,10 @@ def test_alesias_armies_do_not_stand_on_one_another(imrun, game_dir):
     the free-spot search finds (`0x004180b0`). Sampled every ten turns, melee
     units in a fight stood out of reach 819 times against 288 in reach before;
     with both, 357 against 417, and 6,523 blows landed rather than 5,117.
+    Since a sentry is born no-AI (`gbr.exe` 0x005d3323) the Gauls'
+    `GS_KILLENEMIES.VS` no longer sends their wall sentries out after the
+    Romans, and the fight is smaller: 366 out of reach against 349 in it,
+    5,602 blows rather than 6,839.
     """
     alesia = game_dir / ALESIA
     if not alesia.is_file():
@@ -591,7 +595,7 @@ def test_alesias_armies_do_not_stand_on_one_another(imrun, game_dir):
                       output, re.MULTILINE)
     assert melee, output[-3000:]
     engaged, _, waiting = map(int, melee.groups())
-    assert engaged > 350 and 2 * waiting < 3 * engaged, melee.group(0)
+    assert engaged > 300 and 2 * waiting < 3 * engaged, melee.group(0)
     aims = re.search(r"^\s+free spot\s+(\d+) full band\(s\) searched out from, (\d+) route\(s\) re-aimed$",
                      output, re.MULTILINE)
     assert aims and int(aims.group(2)) > 0, output[-3000:]
