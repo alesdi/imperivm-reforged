@@ -381,6 +381,42 @@ TEST(a_hero_and_his_army_leave_the_garrison_one_exit_slot_at_a_time) {
   CHECK(g.world.find(second)->state.holder == ship.holder);
 }
 
+TEST(a_point_goto_drops_the_target_only_once_its_unit_is_out) {
+  // 0x005d61b0 waits its turn at the settlement's exit (0x005d3f20) before
+  // anything else, and empties the target handle only past that wait
+  // (0x005d639a).
+  Garrison g;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(512, 512));
+  REQUIRE(g.world.add_system(&movement));
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  (void)register_world_host(registry);
+  register_movement_host(registry);
+
+  const ObjectId second = g.world.spawn(NativeClass::unit, nullptr, g.graph.find("Soldier"));
+  g.world.set_owner(second, 0);
+  g.world.set_health(second, 200);
+  REQUIRE(garrison_enter(g.world, g.town_id, second, /*force=*/true));
+  REQUIRE(garrison_enter(g.world, g.town_id, g.mine, /*force=*/true));
+  REQUIRE(g.combat.find(g.mine) != nullptr);
+  g.combat.find(g.mine)->target = g.theirs;
+  g.combat.find(g.mine)->attacks = 1;
+  const std::vector<script::Value> go_second = {
+      obj(second), pack_point(Point{3600, 3000}), script::Value::integer(0),
+      script::Value::integer(1000), script::Value::boolean(true), script::Value::integer(0)};
+  std::vector<script::Value> go_mine = go_second;
+  go_mine[0] = obj(g.mine);
+
+  REQUIRE(call(registry, g.world, "Goto", 5, go_second).status != script::HostStatus::error);
+  REQUIRE(!g.world.find(second)->state.is_held());
+  // The next waits out the exit interval, its target kept.
+  (void)call(registry, g.world, "Goto", 5, go_mine);
+  REQUIRE(g.world.find(g.mine)->state.is_held());
+  CHECK(g.combat.find(g.mine)->target == g.theirs);
+  CHECK(g.combat.find(g.mine)->attacks == 1);
+}
+
 TEST(form_accept_move_drops_the_members_combat_target) {
   // 0x005d798b: the target setter handed the empty handle, for every member
   // that reaches the march's set-up -- on the map as much as out of a holder.

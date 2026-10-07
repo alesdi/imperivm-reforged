@@ -2000,6 +2000,21 @@ struct Self {
 /// `Goto/4` and `Goto/5`. Arguments after the receiver are `(destination,
 /// range, slice, flag, give_up)`. See the header for which of those are
 /// established and which are read from the shape of the call sites.
+///
+/// **Both forms drop the unit's combat target**, as `Stop` does, through the
+/// same pair of writes (the handle at `[unit+0x1a8]` emptied and the attack
+/// count zeroed, only when there is a target; `CombatSystem::drop_target`):
+///
+///   * the **object** form (0x005d6b90) on every entry, first or resumed,
+///     before anything else -- the write at 0x005d6c2f precedes even the
+///     worker it hands the call to;
+///   * the **point** form (0x005d61b0) once the unit is out of any holder
+///     (0x005d639a): on the first entry, or on a resume that has just stepped
+///     out or finds no route. A resume that is walking a route keeps it.
+///
+/// One call here is one first entry and its resumes in the original (the
+/// walking path answers the caller's loop rather than resuming), so both
+/// forms drop the target on every call that gets as far as their write.
 HostOutcome goto_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
@@ -2013,6 +2028,13 @@ HostOutcome goto_impl(CallContext& ctx) {
   order.slice = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
   order.give_up = ctx.count() > 5 && ctx.arg(5).is_integer() ? ctx.arg(5).as_integer() : -1;
   order.lock_destination = true;
+  if (order.target != kNoObject) {
+    if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
+      (void)combat->drop_target(self.id);
+    }
+  } else {
+    order.drop_target = true;
+  }
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
 }
 
@@ -2470,6 +2492,11 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
       out.value = Value::boolean(false);
       out.suspend_for = wait;
       return out;
+    }
+  }
+  if (order.drop_target) {
+    if (CombatSystem* combat = combat_system_of(world); combat != nullptr) {
+      (void)combat->drop_target(id);
     }
   }
   MoveState& move = movement.state(id);
