@@ -671,8 +671,14 @@ class CampaignSystem final : public System {
   struct SequenceEntry {
     std::string name;    ///< the `name` attribute, and `RunSequence`'s argument
     std::string script;  ///< the entry path, already resolved against the base
-    /// The script currently running it, or `script::kNoScript`. Rebuilt on
-    /// load, never serialised.
+    /// The script currently running it, or `script::kNoScript`. **Saved**, by
+    /// sequence name, in the campaign section: the manifest is rebuilt on
+    /// load, but the thread a sequence is waiting on is not configuration.
+    /// It used to be left to the rebuild, which holds the ids the *fresh*
+    /// session spawned before the load replaced its scripts -- so a sequence
+    /// running at the save was never marked `"Finished"` when its script
+    /// ended, or was marked so at once when a stale id named a dead one,
+    /// and `RunSequence` then refused or restarted it accordingly.
     script::ScriptId running = script::kNoScript;
   };
 

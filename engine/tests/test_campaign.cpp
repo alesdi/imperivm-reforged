@@ -998,6 +998,7 @@ struct SequenceSession {
     scripts.add("sequences/seq0.vs", "//void\nEnvWriteInt(\"/Auto\", 1);\nwhile (1) Sleep(1000);\n");
     scripts.add("sequences/seq1.vs", "//void\nEnvWriteInt(\"/Ran\", 1);\nwhile (1) Sleep(1000);\n");
     scripts.add("sequences/seq2.vs", "//void\nEnvWriteInt(\"/Quick\", 1);\n");
+    scripts.add("sequences/seq3.vs", "//void\nSleep(2000);\n");
 
     SessionInputs inputs;
     inputs.classes = &graph;
@@ -1012,6 +1013,7 @@ struct SequenceSession {
         SequenceRef{"Waiter", "CurrentGame/sequences/seq1.vs", "", false},
         SequenceRef{"Quick", "CurrentGame/sequences/seq2.vs", "", false},
         SequenceRef{"Broken", "CurrentGame/sequences/seq9.vs", "", false},
+        SequenceRef{"Later", "CurrentGame/sequences/seq3.vs", "", false},
     };
     CHECK(session->start_sequences(std::span(manifest), /*base=*/"") == 1);
   }
@@ -1098,6 +1100,35 @@ TEST(campaign_run_sequence_starts_the_one_that_would_not_autorun) {
   CHECK(!s.ran("/Ran"));
   s.session->advance(/*turns=*/1, /*turn_length=*/800);
   CHECK(s.ran("/Ran"));
+}
+
+/// A sequence running when the game is saved is `"Finished"` when its script
+/// ends after the load, as it is in the game that played on.
+///
+/// The thread a sequence waits on used to be left to the load's rebuild of the
+/// manifest, which holds whatever the *fresh* session's own start spawned --
+/// nothing at all for a sequence `RunSequence` started mid-game, so its end
+/// was never seen and a later `RunSequence` of it did nothing. Numantia's
+/// `BestTarget` did exactly that one turn after a save at turn 100.
+TEST(campaign_a_sequence_running_at_a_save_finishes_after_the_load) {
+  SequenceSession played;
+  CHECK(played.call("RunSequence", {script::Value::string("Later")}).status ==
+        script::HostStatus::ok);
+  played.session->advance(/*turns=*/1, /*turn_length=*/800);
+  CHECK(played.status("Later") == "Running");
+  const Result<std::vector<std::byte>> saved = played.session->save("test");
+  REQUIRE(saved.ok());
+
+  SequenceSession loaded;
+  REQUIRE(loaded.session->load(saved.value(), "test").ok());
+  CHECK(loaded.status("Later") == "Running");
+  played.session->advance(/*turns=*/3, /*turn_length=*/800);
+  loaded.session->advance(/*turns=*/3, /*turn_length=*/800);
+  CHECK(played.status("Later") == "Finished");
+  CHECK(loaded.status("Later") == "Finished");
+  // And `Auto`, started by the fresh session's own start as well as by the
+  // saved one, still runs: the save's thread, not the fresh session's.
+  CHECK(loaded.status("Auto") == "Running");
 }
 
 TEST(campaign_run_sequence_on_a_running_sequence_does_nothing) {
