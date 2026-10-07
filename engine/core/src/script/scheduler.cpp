@@ -1,6 +1,8 @@
 #include "imperivm/core/script/scheduler.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <queue>
 #include <utility>
 
 namespace imperivm::core::script {
@@ -262,53 +264,90 @@ VmEnv Scheduler::env_for(const ScriptRecord& record) const {
   return env;
 }
 
-RunReport Scheduler::run_ready() {
+RunReport Scheduler::run_ready() { return run_window(now_, now_); }
+
+RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
   RunReport report;
 
-  // Indexed, and re-reading `scripts_[i]` each time, because a script may spawn
-  // others while it runs: the vector grows underneath this loop, and the new
-  // entries -- which always have higher ids -- are picked up by the same pass.
-  // `DATA\AI\MAIN.VS` is six `AIRun` calls and a return, and this is what makes
-  // its six monitors start on the tick that started it.
-  for (std::size_t i = 0; i < scripts_.size(); ++i) {
-    if (scripts_[i].dead) continue;
-    const ExecStatus status = scripts_[i].execution.status;
-    const bool runnable = status == ExecStatus::ready ||
-                          (status == ExecStatus::suspended &&
-                           scripts_[i].execution.wake_time <= now_);
-    if (!runnable) continue;
-    if (scripts_[i].chunk_index >= chunks_.size()) continue;
+  // The pass's queue, by `(instant, id)`. Transient: it is empty before and
+  // after every pass, so it is never saved -- between passes each script's
+  // wake time is the whole of its place in it.
+  using Due = std::pair<std::int64_t, ScriptId>;
+  std::priority_queue<Due, std::vector<Due>, std::greater<Due>> due;
 
-    const ScriptId id = scripts_[i].id;
-    const std::uint32_t chunk_index = scripts_[i].chunk_index;
-    const VmEnv env = env_for(scripts_[i]);
+  // What is runnable as the pass opens. Anything that became so outside a
+  // pass, or whose wait ended at or before the last pass's end (a zero
+  // wait), runs at the end: see "A script wakes on its own millisecond".
+  for (const ScriptRecord& record : scripts_) {
+    if (record.dead) continue;
+    const ExecStatus status = record.execution.status;
+    if (status == ExecStatus::ready) {
+      due.emplace(to, record.id);
+    } else if (status == ExecStatus::suspended && record.execution.wake_time <= to) {
+      due.emplace(record.execution.wake_time > from ? record.execution.wake_time : to, record.id);
+    }
+  }
+
+  while (!due.empty()) {
+    const auto [instant, id] = due.top();
+    due.pop();
+    ScriptRecord* queued = find(id);
+    if (queued == nullptr || queued->dead) continue;
+    if (queued->chunk_index >= chunks_.size()) continue;
+    now_ = instant;
+
+    // A script may spawn others while it runs, and the vector grows at its
+    // tail -- new ids are always the highest. Whatever was appended by the
+    // end of the slice is queued at this instant, so it runs after
+    // everything else due now. `DATA\AI\MAIN.VS` is six `AIRun` calls and a
+    // return, and this is what makes its six monitors start on the tick that
+    // started it.
+    const std::size_t known = scripts_.size();
+    const std::uint32_t chunk_index = queued->chunk_index;
+    const VmEnv env = env_for(*queued);
 
     // Detached for the duration of the run. A host call can spawn, which
     // reallocates `scripts_`, and a reference held across that would dangle.
-    Execution execution = std::move(scripts_[i].execution);
+    Execution execution = std::move(queued->execution);
     execution.status = ExecStatus::ready;
     ++report.resumed;
     run(execution, chunks_[chunk_index], env);
 
     ScriptRecord* record = find(id);
-    if (record == nullptr) continue;  // killed itself and was compacted away
-
-    if (execution.status == ExecStatus::finished) {
-      ++report.completed;
-      record->dead = true;
-    } else if (execution.status == ExecStatus::failed) {
-      ++report.failed;
-      report.traps.push_back(FailedScript{id, chunks_[chunk_index].source_name, execution.trap});
-      record->dead = true;
+    if (record != nullptr) {
+      if (execution.status == ExecStatus::finished) {
+        ++report.completed;
+        record->dead = true;
+      } else if (execution.status == ExecStatus::failed) {
+        ++report.failed;
+        report.traps.push_back(
+            FailedScript{id, chunks_[chunk_index].source_name, execution.trap});
+        record->dead = true;
+      }
+      record->execution = std::move(execution);
+      // The slice is over and the record is whole again. See `StepHook`: this
+      // is where the original performs a deferred `Erase`, and the reason it is
+      // here rather than in the pass hook is that the next script must not see
+      // an object the previous one destroyed.
+      if (step_hook_ != nullptr) step_hook_(user_, *this, id);
     }
-    record->execution = std::move(execution);
-    // The slice is over and the record is whole again. See `StepHook`: this is
-    // where the original performs a deferred `Erase`, and the reason it is here
-    // rather than in the pass hook is that the next script must not see an
-    // object the previous one destroyed.
-    if (step_hook_ != nullptr) step_hook_(user_, *this, id);
+
+    // Due again inside this pass: a wait that ends after the instant it began
+    // and no later than the pass's end. Looked up again, because the step
+    // hook may have killed it.
+    if (const ScriptRecord* again = find(id);
+        again != nullptr && !again->dead && again->execution.status == ExecStatus::suspended &&
+        again->execution.wake_time > instant && again->execution.wake_time <= to) {
+      due.emplace(again->execution.wake_time, id);
+    }
+    for (std::size_t i = known; i < scripts_.size(); ++i) {
+      if (!scripts_[i].dead && scripts_[i].execution.status == ExecStatus::ready) {
+        due.emplace(instant, scripts_[i].id);
+      }
+    }
   }
 
+  now_ = to;
   report.visited = static_cast<std::uint32_t>(scripts_.size());
   compact();
   // After compaction, so the hook never sees a record that is on its way out,
@@ -351,8 +390,7 @@ CallReport Scheduler::call(std::uint32_t chunk_index, std::span<const Value> arg
 }
 
 RunReport Scheduler::advance(std::int64_t delta) {
-  now_ += delta;
-  return run_ready();
+  return run_window(now_, now_ + delta);
 }
 
 // -- serialisation ----------------------------------------------------------

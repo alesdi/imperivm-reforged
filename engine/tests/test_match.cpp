@@ -817,8 +817,9 @@ TEST(match_host_entry_points_answer_from_the_match) {
   CHECK(call("MapSize", 0, {}).value.as_integer() == 16383);
 
   // `GetTime` is milliseconds -- `ESH_BUILDARMY.VS` compares it against
-  // `600000` for ten minutes -- and it is the world's clock, not the
-  // scheduler's.
+  // `600000` for ten minutes. Called with no scheduler, as here, it is the
+  // world's clock; inside a pass it is the running script's wake time
+  // (`test_wakeup.cpp`).
   CHECK(call("GetTime", 0, {}).value.as_integer() == 0);
   w.world.advance(800);
   w.world.advance(800);

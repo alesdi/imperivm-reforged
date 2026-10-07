@@ -2182,10 +2182,12 @@ int run_map(const MapArgs& args) {
   // **Partition invariance is not a property this engine has once scripts run,
   // and asserting it would send someone hunting a bug that is the design.**
   //
-  // `Scheduler::advance` is `now_ += delta; run_ready();` with no
-  // interpolation, so a script due at 1000 first runs when `now_` reaches 1600
-  // under 800-unit turns and 1200 under 400s. Its **wake count over a fixed
-  // total therefore depends on the partition** -- and shipped scripts draw from
+  // `Scheduler::advance` runs each script at its own wake time now, so a
+  // script due at 1000 runs at 1000 under 800-unit turns and under 400s alike.
+  // But the world it reads stands at the turn's end -- 1600 under 800s, 1200
+  // under 400s -- and a script spawned by a system, or one that waited zero,
+  // runs at the turn's end. **What a script sees, and so what it does next,
+  // therefore depends on the partition** -- and shipped scripts draw from
   // the world RNG when they wake (`CROW_IDLE.VS` sleeps for
   // `rand(2000)`, `DEER_IDLE.VS` has nine `rand` sites). A different number of
   // draws desynchronises the shared generator, and with it everything
@@ -2204,8 +2206,8 @@ int run_map(const MapArgs& args) {
   options.partition_invariance = !args.scripts;
   if (args.scripts) {
     std::printf(
-        "note      partition invariance not checked: script wake counts depend on the\n"
-        "          partition, and shipped scripts draw from the world RNG when they wake.\n"
+        "note      partition invariance not checked: what a waking script reads depends\n"
+        "          on the partition, and shipped scripts draw from the world RNG when they wake.\n"
         "          Re-run with --no-scripts to check it over the systems alone.\n\n");
   }
 

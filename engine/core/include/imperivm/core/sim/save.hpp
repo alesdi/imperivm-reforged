@@ -287,7 +287,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// Hashed, so a version-28 file describes a world this build would hash
 /// differently; and a load without them would carry out no order posted
 /// before the save, and drain the rest on another turn.
-inline constexpr std::uint32_t kStateVectorVersion = 29;
+/// 30: the campaign section carries the thread each running sequence waits
+/// on (`SequenceEntry::running`), by name. A version-29 file would load every
+/// sequence running at the save with the fresh session's thread ids, so its
+/// end would never mark it `"Finished"` -- or a stale id would mark it so at
+/// once -- and `RunSequence` would refuse or restart it on that reading.
+inline constexpr std::uint32_t kStateVectorVersion = 30;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

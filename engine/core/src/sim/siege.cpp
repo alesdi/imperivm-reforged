@@ -656,6 +656,11 @@ namespace {
   return ctx.count() > at && ctx.arg(at).is_integer() ? ctx.arg(at).as_integer() : 0;
 }
 
+/// The scripts' clock, for the squad's state stamp, which scripts write and
+/// read back (`sq.StateTime`). The planner itself is handed the **world's**:
+/// it asks the hero system whether a ceasefire still holds, against stamps
+/// the systems write at the world's time, and the world it plans over stands
+/// at the turn's end (`Scheduler`'s "A script wakes on its own millisecond").
 [[nodiscard]] GameTime now_of(CallContext& ctx, World& world) noexcept {
   return ctx.scheduler != nullptr ? ctx.scheduler->now() : world.time();
 }
@@ -675,7 +680,7 @@ HostOutcome objlist_siege_impl(CallContext& ctx) {
   }
   const std::vector<ObjectId> members = receiver_objects(*world, ctx.arg(0), false);
   (void)run_siege_plan(*world, members, ctx.arg(1).as_object().id, int_arg(ctx, 2),
-                       int_arg(ctx, 3), now_of(ctx, *world));
+                       int_arg(ctx, 3), world->time());
   return HostOutcome::ok_void();
 }
 
@@ -702,7 +707,7 @@ HostOutcome squad_siege_impl(CallContext& ctx) {
   }
   const std::vector<ObjectId> members = squad->members;
   (void)run_siege_plan(*world, members, ctx.arg(1).as_object().id, int_arg(ctx, 2),
-                       int_arg(ctx, 3), now);
+                       int_arg(ctx, 3), world->time());
   return HostOutcome::ok_void();
 }
 

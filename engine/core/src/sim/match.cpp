@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "imperivm/core/game/class_graph.hpp"
+#include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/host_context.hpp"
@@ -136,10 +137,17 @@ HostOutcome fn_set_difficulty(CallContext& ctx) {
 /// offers -- is 10,800,000, so the clamp is unreachable in any real match and
 /// is here only so that a runaway conformance run reports a stuck clock rather
 /// than a negative one.
+///
+/// **The scripts' clock, not the world's.** 0x004c64e0 reads the game's
+/// running time (`+0x1258`), which the millisecond loop (0x00528b40) moves
+/// one step at a time while the scripts' wheel fires, so a script reads the
+/// millisecond it woke on. Here that is the scheduler's `now` -- the running
+/// script's wake time inside a pass -- while the world stands at the turn's
+/// end. A bare run with no scheduler falls back to the world's.
 HostOutcome fn_get_time(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetTime: no world");
-  GameTime time = world->time();
+  GameTime time = ctx.scheduler != nullptr ? ctx.scheduler->now() : world->time();
   if (time < 0) time = 0;
   if (time > 0x7fffffff) time = 0x7fffffff;
   return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(time)));
