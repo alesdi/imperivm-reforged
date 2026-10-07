@@ -2611,6 +2611,21 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   const std::int64_t eta = move.has_path ? movement.eta(id) : -1;
   std::int64_t wait = order.slice;
   if (eta >= 0 && (wait <= 0 || eta < wait)) wait = eta;
+  // **A route walked to its end but not yet arrived** -- the step is done and
+  // the decision that ends the route falls in the next turn -- has no time
+  // left to wait and has not arrived either. Answering at once spins
+  // `UNIT_ADVANCE.VS`'s `while (1) { ... if (.Goto(pt, 0, 2000, true, 0))
+  // return; }` through its whole instruction budget, since nothing moves
+  // inside a pass. It waits for the world's next step instead: a zero wait,
+  // which the scheduler runs at the next pass's end. **Engine choice**; the
+  // original's route ends on its own millisecond.
+  if (eta == 0) {
+    HostOutcome out;
+    out.status = script::HostStatus::suspend;
+    out.value = Value::boolean(false);
+    out.suspend_for = 0;
+    return out;
+  }
   if (wait <= 0) return HostOutcome::ok_with(Value::boolean(false));
 
   HostOutcome out;

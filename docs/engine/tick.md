@@ -342,7 +342,9 @@ What is still once a turn about scripts (**engine choices**, `script/scheduler.h
   a bird flew its next leg before the last was drawn to its end (`test_corpus_app_draw.py`).
 * **A zero wait yields to the next pass**, at its end, rather than running again on its own
   millisecond as the original does: the world it waits on moves only between passes here, so a
-  re-run would spin (`ANIM.VS` on an object with no such animation is one).
+  re-run would spin (`ANIM.VS` on an object with no such animation is one). `Goto` on a route
+  walked to its end whose arrival the next turn decides waits the same way rather than answering
+  at once, which spun `UNIT_ADVANCE.VS` through its budget once polls ran eight times a turn.
 * **A script made runnable outside a pass** (by the session, a system or an AI order) runs at
   the pass's end, the world's time.
 
