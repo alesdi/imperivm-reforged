@@ -147,8 +147,9 @@ HostOutcome m_start_delayed_anim(CallContext& ctx) {
 /// for the mechanism the original uses and why this engine cannot use it.
 ///
 /// A slot the entity does not declare plays nothing and suspends for zero,
-/// which still yields: `Scheduler::run_ready` resumes each script at most once
-/// per pass, so a zero-length suspension costs a turn rather than spinning.
+/// which still yields: the scheduler runs a zero-length suspension again at
+/// the next pass's end, not on the instant it began, so it costs a turn
+/// rather than spinning.
 /// That is what keeps `ANIM.VS` -- `while (1) This.PlayAnim(1, This.pos);` --
 /// bounded even on an object whose entity is missing.
 HostOutcome m_play_anim(CallContext& ctx) {

@@ -2333,11 +2333,17 @@ HostOutcome is_passable_3x3_impl(CallContext& ctx) {
       Value::boolean(movement->grid().passable_3x3(unpack_point(ctx.arg(0)))));
 }
 
+/// `TimeWithoutWalking` -- against the **world's** clock, not the scripts'.
+/// The stamp it subtracts is movement's (`last_moved`, set as a turn plays
+/// out) and the world the script sees stands at the turn's end, so "how long
+/// has it stood" is asked of that instant. The scripts' clock can be up to a
+/// turn behind it (`Scheduler`'s "A script wakes on its own millisecond") and
+/// would answer a negative for a unit that moved later in the turn.
 HostOutcome time_without_walking_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   const MoveState* move = self.movement->find(self.id);
-  const GameTime now = now_of(ctx, *self.world);
+  const GameTime now = self.world->time();
   const GameTime since = move == nullptr ? now : now - move->last_moved;
   return HostOutcome::ok_with(
       Value::integer(static_cast<std::int32_t>(std::min<GameTime>(since, 0x7FFFFFFF))));
