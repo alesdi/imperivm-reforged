@@ -300,6 +300,84 @@ def test_a_won_conquest_mission_carries_its_reward_to_the_next(imrun, game_dir, 
 
 
 # ---------------------------------------------------------------------------
+# the seed: one game per seed, and the same game every time
+# ---------------------------------------------------------------------------
+
+
+def test_a_seed_is_one_game_and_another_seed_is_another(imrun, game_dir):
+    """`--seed N` is what lets a change be judged over several games rather
+    than one: the Crossroads ending turn and the overlap census swing with
+    the seed, so `tools/seeds.py` runs a map on K of them. That is only worth
+    anything if a seed reproduces its game exactly -- every line the run
+    prints, down to the world hash -- and if two seeds are two games. On
+    Crossroads they differ from turn 0: each town's layout is drawn from its
+    race's templates by the seeded generator, so even the ground laid differs.
+    """
+    crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
+    if not crossroads.is_file():
+        pytest.skip("Crossroads.BFHP is not in this installation")
+    first = run(imrun, game_dir, crossroads, "--seed", "7", turns=20)
+    again = run(imrun, game_dir, crossroads, "--seed", "7", turns=20)
+    other = run(imrun, game_dir, crossroads, "--seed", "8", turns=20)
+    default = run(imrun, game_dir, crossroads, turns=20)
+    assert field(first, "seed") == "7"
+    assert field(other, "seed") == "8"
+    assert field(default, "seed") == "1"
+    assert first == again
+    assert field(first, "  hash") != field(other, "  hash")
+    assert field(first, "  hash") != field(default, "  hash")
+
+
+#: Long enough on seed 1 for settlements to change hands: a village is taken
+#: at about turn 700 and an outpost at about 1,150.
+CAPTURE_TURNS = 1_500
+
+
+def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to_its_last(
+        imrun, game_dir):
+    """`IMRUN_CAPTURES=1` is how `tools/seeds.py` counts a war's captures, so
+    it has to be the whole story: replaying its lines over the owners at
+    turn 0 must give the owners at the end, every settlement, outposts
+    included. A capture missed, or printed for a settlement that did not
+    change hands, breaks the reconciliation; a run with no capture at all
+    would pass it vacuously, so one is required.
+    """
+    crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
+    if not crossroads.is_file():
+        pytest.skip("Crossroads.BFHP is not in this installation")
+    owner_line = re.compile(r"^\s+#(\d+) p(-?\d+) kind (\d+) ", re.MULTILINE)
+
+    def owners(turns: int) -> tuple[dict[int, int], str]:
+        result = subprocess.run(
+            [str(imrun), str(game_dir), str(crossroads), str(turns), "800", "--seed", "1"],
+            capture_output=True, text=True, timeout=1800,
+            env={**os.environ, "IMRUN_SETTLEMENTS": "1", "IMRUN_CAPTURES": "1"},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        found = {int(m.group(1)): int(m.group(2)) for m in owner_line.finditer(result.stdout)}
+        assert found, f"no settlements listed:\n{result.stdout}"
+        return found, result.stdout
+
+    start, _ = owners(0)
+    end, output = owners(CAPTURE_TURNS)
+    captures = re.findall(r"^  capture turn (\d+): #(\d+) kind \d+ p(-?\d+) -> p(-?\d+)$",
+                          output, re.MULTILINE)
+    assert start != end, (
+        f"no settlement changed hands in {CAPTURE_TURNS} turns on seed 1; "
+        "lengthen CAPTURE_TURNS so that this test has something to check")
+    replayed = dict(start)
+    last_turn = 0
+    for turn, settlement, before, after in captures:
+        assert int(turn) >= last_turn, "captures are printed in turn order"
+        last_turn = int(turn)
+        assert replayed[int(settlement)] == int(before), (
+            f"#{settlement} was taken from p{before} at turn {turn}, "
+            f"but its owner was p{replayed[int(settlement)]}")
+        replayed[int(settlement)] = int(after)
+    assert replayed == end
+
+
+# ---------------------------------------------------------------------------
 # a skirmish at war, and a town that defends itself
 # ---------------------------------------------------------------------------
 
