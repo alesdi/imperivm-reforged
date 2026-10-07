@@ -349,12 +349,27 @@ WorldView::Cursor WorldView::cursor_for(const sim::WorldObject& object,
     // simulation end up disagreeing about what happened.
     //
     // Between two turns the cursor is the world's carried back to the drawn
-    // time (`TurnGlide::anim_elapsed`): the same clock, sampled the way
-    // `run_turn` samples it, at an instant `run_turn` steps over.
+    // time (`TurnGlide::anim`): the same clock, sampled the way `run_turn`
+    // samples it, at an instant `run_turn` steps over. An animation begun
+    // inside the turn is not yet playing before it began: what the turn end
+    // before saw is, on its own timeline when it is another slot's.
     std::uint32_t step = anim.step;
     if (view_world_ != nullptr) {
-      const std::int32_t elapsed = glide_.anim_elapsed(*view_world_, object, draw_time_);
-      if (elapsed != anim.elapsed_ms) step = object.timeline.sample(elapsed, object.repeat).step;
+      const sim::TurnGlide::Anim drawn = glide_.anim(*view_world_, object, draw_time_);
+      if (drawn.earlier && drawn.anim_slot != anim.anim_slot) {
+        const core::EntityAnim* earlier = object.object->entity->anim(drawn.anim_slot);
+        const Pose* pose = art.for_slot(drawn.anim_slot);
+        if (earlier != nullptr && pose != nullptr) {
+          const core::AnimTimeline timeline = object.object->entity->timeline(*earlier);
+          if (timeline.valid()) {
+            out.pose = pose;
+            out.row = timeline.row_of_step(timeline.sample(drawn.elapsed, drawn.repeat).step);
+            return out;
+          }
+        }
+      } else if (drawn.elapsed != anim.elapsed_ms || drawn.repeat != object.repeat) {
+        step = object.timeline.sample(drawn.elapsed, drawn.repeat).step;
+      }
     }
     out.row = object.timeline.row_of_step(step);
     // A siege engine under construction is frozen on the stage
@@ -576,7 +591,7 @@ void WorldView::build(const sim::World& world, const Camera& camera) {
     // Where the object is at the drawn time, between the turn end before and
     // the world's: a walking unit part of the way along its last turn's walk
     // (`sim/glide.hpp`), anything that did not walk where it stands.
-    const std::int32_t clock = glide_.anim_elapsed(world, object, draw_time_);
+    const sim::TurnGlide::Anim drawn = glide_.anim(world, object, draw_time_);
     const sim::Point ground = glide_.position(world, object, draw_time_);
     ScreenPoint at = camera.project(ground);
     // A bird flying a leg is drawn along it: each end projected, ground and
@@ -584,7 +599,10 @@ void WorldView::build(const sim::World& world, const Camera& camera) {
     // the original's visual runs it (`sim::flight_progress`) -- the clock at
     // the drawn time. Everything placed from the anchor follows -- the
     // shadow, the ring, the bar, the pick -- as it follows the original's.
-    if (const sim::FlightProgress leg = sim::flight_progress(world, object, clock); leg.moving()) {
+    // A leg its script replaced inside the turn is flown to its end first
+    // (`TurnGlide::anim`, `earlier`).
+    if (const sim::FlightProgress leg = sim::flight_progress(drawn.flight, drawn.elapsed);
+        leg.moving()) {
       const ScreenPoint from = camera.project(leg.from);
       const ScreenPoint to = camera.project(leg.to);
       at = ScreenPoint{leg.along(from.x, to.x), leg.along(from.y, to.y)};
@@ -603,7 +621,7 @@ void WorldView::build(const sim::World& world, const Camera& camera) {
     // key: the original writes them beside the layer's own offset, and what
     // its depth sort does with them is not read.
     const std::int32_t raise = sim::gate_raise(object, draw_time_);
-    const std::int32_t lift = sim::flying_lift(world, object, clock);
+    const std::int32_t lift = sim::flying_lift(world, drawn.flight, drawn.elapsed);
     placed_.push_back(Placed{&object, at, lift});
 
     for (const LayerArt& layer : *cursor.pose) {

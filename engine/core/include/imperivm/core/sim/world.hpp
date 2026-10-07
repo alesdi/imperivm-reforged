@@ -84,6 +84,11 @@ namespace imperivm::core::sim {
 /// composing this over any partition of an interval gives one answer.
 [[nodiscard]] std::int32_t advance_elapsed(const AnimTimeline& timeline, std::int32_t elapsed,
                                            GameTime delta, AnimRepeat repeat) noexcept;
+/// The same, for a timeline of which only the cycle is known: what the view
+/// keeps of an animation it saw at the turn end before (`sim/glide.hpp`). A
+/// cycle of 0 or less is an animation that cannot advance, and answers 0.
+[[nodiscard]] std::int32_t advance_elapsed(std::int32_t cycle, std::int32_t elapsed, GameTime delta,
+                                           AnimRepeat repeat) noexcept;
 
 // --------------------------------------------------------------------------
 // SyncFlags

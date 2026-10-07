@@ -219,10 +219,13 @@ TEST(glide_carries_an_animation_clock_from_the_turn_end_before) {
   REQUIRE(world.play_anim(id, 1, AnimRepeat::loop));
   CHECK(glide.anim_elapsed(world, *world.find(id), 250) == 0);
   // The turn end before saw the run that was cut short, so the clock it
-  // shows now is not that run's carried on: drawn as the world has it.
+  // shows now is not that run's carried on: it is the new run's, which began
+  // when the turn did -- its 200 ms are the whole turn -- and is drawn from
+  // there, not as the world has it at the turn's end.
   world.advance(200);
   glide.observe(world);
-  CHECK(glide.anim_elapsed(world, *world.find(id), 500) == 200);
+  CHECK(glide.anim_elapsed(world, *world.find(id), 500) == 100);
+  CHECK(glide.anim_elapsed(world, *world.find(id), 600) == 200);
   // And from the next turn on it is carried again.
   world.advance(200);
   glide.observe(world);
@@ -250,6 +253,129 @@ TEST(glide_carries_an_animation_clock_from_the_turn_end_before) {
   CHECK(glide.anim_elapsed(world, *world.find(id), 1650) == 250);
   CHECK(glide.anim_elapsed(world, *world.find(id), 1700) == 300);
   CHECK(glide.anim_elapsed(world, *world.find(id), 1800) == 300);
+}
+
+/// An animation begun at a turn's end -- where a script's `PlayAnim` and the
+/// systems start one -- had not begun at any instant inside that turn: what
+/// the turn end before saw is drawn there, carried on. One begun earlier in
+/// the turn, as combat starts a swing at its blow, is drawn from its own
+/// start, which its clock at the turn's end gives. The original's visual runs
+/// an animation from the start time it was handed (0x0053e6c0, 0x0062a0e0).
+TEST(glide_draws_an_animation_begun_inside_the_turn_from_its_own_start) {
+  Result<Entity> entity = Entity::parse(bytes_of(kEntityXml));
+  REQUIRE(entity.ok());
+  World world;
+  world.start();
+  const ObjectId id = world.spawn(NativeClass::unit, &entity.value());
+  (void)world.set_position(id, pt(100, 100));
+  REQUIRE(world.play_anim(id, 1, AnimRepeat::hold));
+
+  TurnGlide glide;
+  world.advance(100);
+  glide.observe(world);  // 100 ms into the first run
+  world.advance(100);
+  REQUIRE(world.play_anim(id, 1, AnimRepeat::hold));  // again, at the turn's end
+  glide.observe(world);
+  REQUIRE(world.time() == 200);
+  const TurnGlide::Anim mid = glide.anim(world, *world.find(id), 150);
+  CHECK(mid.earlier);
+  CHECK(mid.anim_slot == 1);
+  CHECK(mid.elapsed == 150);
+  CHECK(glide.anim_elapsed(world, *world.find(id), 150) == 0);
+  const TurnGlide::Anim end = glide.anim(world, *world.find(id), 200);
+  CHECK(!end.earlier);
+  CHECK(end.elapsed == 0);
+
+  // Begun 40 ms before the turn's end: from then on on its own clock, and
+  // before then the first run's.
+  world.advance(100);
+  glide.observe(world);  // the second run, 100 ms in
+  world.advance(100);
+  REQUIRE(world.play_anim(id, 1, AnimRepeat::hold));
+  world.find(id)->object->anim.elapsed_ms = 40;
+  glide.observe(world);
+  REQUIRE(world.time() == 400);
+  CHECK(!glide.anim(world, *world.find(id), 380).earlier);
+  CHECK(glide.anim(world, *world.find(id), 380).elapsed == 20);
+  CHECK(glide.anim(world, *world.find(id), 360).elapsed == 0);
+  const TurnGlide::Anim before = glide.anim(world, *world.find(id), 350);
+  CHECK(before.earlier);
+  CHECK(before.elapsed == 150);  // the second run, carried on
+}
+
+/// A bird's leg replaced at a turn's end is flown to its end inside that
+/// turn, not jumped over: the glide keeps the leg it saw at the turn end
+/// before. Before this the bird was drawn at the new leg's start -- the old
+/// leg's end -- for the whole of that turn.
+TEST(glide_flies_a_replaced_leg_to_its_end) {
+  Result<Entity> entity = Entity::parse(bytes_of(kEntityXml));
+  REQUIRE(entity.ok());
+  World world;
+  world.start();
+  const ObjectId id = world.spawn(NativeClass::flying_unit, &entity.value());
+  const auto fly = [&](Point from, Point to) {
+    REQUIRE(world.play_anim(id, 1, AnimRepeat::hold));
+    (void)world.set_position(id, to);
+    world.find(id)->flight = FlightLeg{from, to, true};
+  };
+  fly(pt(100, 100), pt(400, 100));  // 300 ms, a unit a millisecond
+
+  TurnGlide glide;
+  glide.observe(world);
+  world.advance(200);
+  glide.observe(world);
+  world.advance(200);  // the leg ends at 300
+  fly(pt(400, 100), pt(400, 400));  // and the script starts the next at 400
+  glide.observe(world);
+  REQUIRE(world.time() == 400);
+
+  const auto drawn_at = [&](GameTime at) {
+    const TurnGlide::Anim drawn = glide.anim(world, *world.find(id), at);
+    const FlightProgress leg = flight_progress(drawn.flight, drawn.elapsed);
+    return leg.moving() ? pt(leg.along(leg.from.x, leg.to.x), leg.along(leg.from.y, leg.to.y))
+                        : drawn.flight.at;
+  };
+  CHECK(drawn_at(200) == pt(300, 100));
+  CHECK(drawn_at(250) == pt(350, 100));
+  CHECK(drawn_at(300) == pt(400, 100));
+  CHECK(drawn_at(350) == pt(400, 100));  // the old leg's end, until the new one begins
+  CHECK(drawn_at(400) == pt(400, 100));
+  // And from the next turn the new leg runs on its own clock.
+  world.advance(200);
+  glide.observe(world);
+  CHECK(drawn_at(500) == pt(400, 200));
+}
+
+/// A walk begun at the turn's end on a unit that already moved inside it --
+/// `play_locomotion` runs after the unit has moved -- is drawn on its first
+/// frame across that turn, not with what the unit stood playing before it set
+/// off: the glide is walking it, and a standing pose would slide.
+TEST(glide_walks_a_unit_that_set_off_inside_the_turn_on_its_walk) {
+  Result<Entity> entity = Entity::parse(bytes_of(kEntityXml));
+  REQUIRE(entity.ok());
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(128, 128));
+  World world;
+  REQUIRE(world.add_system(&movement));
+  world.start();
+  const ObjectId id = world.spawn(NativeClass::unit, &entity.value());
+  (void)world.set_position(id, pt(100, 100));
+  movement.state(id).speed = 100;
+  REQUIRE(world.play_anim(id, 1, AnimRepeat::hold));  // standing, 50 ms into something
+
+  TurnGlide glide;
+  world.advance(50);
+  glide.observe(world);
+  REQUIRE(movement.order_goto(world, id, pt(1500, 100), 0) == MoveOutcome::moving);
+  world.advance(200);
+  glide.observe(world);
+  const WorldObject& slot = *world.find(id);
+  REQUIRE(slot.state.position != pt(100, 100));
+  REQUIRE(slot.object->anim.elapsed_ms == 0);  // the walk, started at the turn's end
+  const TurnGlide::Anim drawn = glide.anim(world, slot, 150);
+  CHECK(!drawn.earlier);
+  CHECK(drawn.elapsed == 0);
+  CHECK(glide.position(world, slot, 150) != pt(100, 100));
 }
 
 /// Presentation: observing a world and asking where things are drawn reads it

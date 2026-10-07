@@ -587,15 +587,12 @@ namespace {
 
 /// `flying_z` with the animation's clock at `elapsed` rather than wherever the
 /// world's cursor has it: the view's question, between two turns.
-std::int32_t flying_z_at(const World& world, const WorldObject& slot, std::int32_t elapsed_ms) noexcept {
-  if (!slot.state.flags.in_air) {
-    return terrain_height(world, world.resolve_position(slot.id));
-  }
+std::int32_t flying_z_at(const World& world, const FlightPose& pose, std::int32_t elapsed_ms) noexcept {
+  if (!pose.in_air) return terrain_height(world, pose.at);
   // With no animation ever started there is nothing to interpolate along, and
   // the altitude is the one the last one ended at.
-  if (slot.object == nullptr || !slot.timeline.valid()) return slot.state.z_from;
-  const std::int32_t cycle = slot.timeline.cycle();
-  if (cycle <= 0) return slot.state.z_from;
+  const std::int32_t cycle = pose.cycle;
+  if (cycle <= 0) return pose.z_from;
 
   // **The boundary is the whole mechanism.** The original tests `now` against
   // the animation's own `[start, end]` with `jb`/`ja` (0x0051b08f), so the
@@ -607,14 +604,15 @@ std::int32_t flying_z_at(const World& world, const WorldObject& slot, std::int32
   // climb. `AnimTimeline` saturates `elapsed` at the cycle rather than running
   // it on, so the clamp below is where that boundary lives here.
   const std::int32_t elapsed = clamp_to(elapsed_ms, 0, cycle);
-  const std::int64_t span = static_cast<std::int64_t>(slot.state.z_to) - slot.state.z_from;
-  return static_cast<std::int32_t>(slot.state.z_from + span * elapsed / cycle);
+  const std::int64_t span = static_cast<std::int64_t>(pose.z_to) - pose.z_from;
+  return static_cast<std::int32_t>(pose.z_from + span * elapsed / cycle);
 }
 
 }  // namespace
 
 std::int32_t flying_z(const World& world, const WorldObject& slot) noexcept {
-  return flying_z_at(world, slot, slot.object != nullptr ? slot.object->anim.elapsed_ms : 0);
+  return flying_z_at(world, flight_pose(world, slot),
+                     slot.object != nullptr ? slot.object->anim.elapsed_ms : 0);
 }
 
 std::int32_t FlightProgress::along(std::int32_t a, std::int32_t b) const noexcept {
@@ -623,25 +621,39 @@ std::int32_t FlightProgress::along(std::int32_t a, std::int32_t b) const noexcep
   return static_cast<std::int32_t>(a + span * elapsed / cycle);
 }
 
+FlightPose flight_pose(const World& world, const WorldObject& slot) noexcept {
+  FlightPose out;
+  out.flying = slot.object != nullptr && slot.object->is_a(NativeClass::flying_unit);
+  out.in_air = slot.state.flags.in_air;
+  out.z_from = slot.state.z_from;
+  out.z_to = slot.state.z_to;
+  out.cycle = slot.object != nullptr && slot.timeline.valid() ? slot.timeline.cycle() : 0;
+  out.at = world.resolve_position(slot.id);
+  // Moved since by anything but its own animation: the leg is over.
+  if (slot.flight.valid && out.flying && out.cycle > 0 && out.at == slot.flight.to) {
+    out.leg = slot.flight;
+  }
+  return out;
+}
+
 FlightProgress flight_progress(const World& world, const WorldObject& slot) noexcept {
   return flight_progress(world, slot, slot.object != nullptr ? slot.object->anim.elapsed_ms : 0);
 }
 
 FlightProgress flight_progress(const World& world, const WorldObject& slot,
                                std::int32_t elapsed_ms) noexcept {
+  return flight_progress(flight_pose(world, slot), elapsed_ms);
+}
+
+FlightProgress flight_progress(const FlightPose& pose, std::int32_t elapsed_ms) noexcept {
   FlightProgress out;
-  if (!slot.flight.valid || slot.object == nullptr) return out;
-  if (!slot.object->is_a(NativeClass::flying_unit) || !slot.timeline.valid()) return out;
-  // Moved since by anything but its own animation: the leg is over.
-  if (world.resolve_position(slot.id) != slot.flight.to) return out;
-  const std::int32_t cycle = slot.timeline.cycle();
-  if (cycle <= 0) return out;
-  out.from = slot.flight.from;
-  out.to = slot.flight.to;
+  if (!pose.leg.valid || pose.cycle <= 0) return out;
+  out.from = pose.leg.from;
+  out.to = pose.leg.to;
   // The same clamp `flying_z` makes, for the same reason: the clock saturates
   // at the end of a held animation, and the end of the window is `to`.
-  out.elapsed = clamp_to(elapsed_ms, 0, cycle);
-  out.cycle = cycle;
+  out.elapsed = clamp_to(elapsed_ms, 0, pose.cycle);
+  out.cycle = pose.cycle;
   return out;
 }
 
@@ -650,8 +662,12 @@ Point flying_position(const World& world, const WorldObject& slot) noexcept {
 }
 
 Point flying_position(const World& world, const WorldObject& slot, std::int32_t elapsed_ms) noexcept {
-  const FlightProgress leg = flight_progress(world, slot, elapsed_ms);
-  if (!leg.moving()) return world.resolve_position(slot.id);
+  return flying_position(flight_pose(world, slot), elapsed_ms);
+}
+
+Point flying_position(const FlightPose& pose, std::int32_t elapsed_ms) noexcept {
+  const FlightProgress leg = flight_progress(pose, elapsed_ms);
+  if (!leg.moving()) return pose.at;
   return Point{leg.along(leg.from.x, leg.to.x), leg.along(leg.from.y, leg.to.y)};
 }
 
@@ -660,12 +676,15 @@ std::int32_t flying_lift(const World& world, const WorldObject& slot) noexcept {
 }
 
 std::int32_t flying_lift(const World& world, const WorldObject& slot, std::int32_t elapsed_ms) noexcept {
-  if (slot.object == nullptr || !slot.object->is_a(NativeClass::flying_unit)) return 0;
-  if (!slot.state.flags.in_air) return 0;
+  return flying_lift(world, flight_pose(world, slot), elapsed_ms);
+}
+
+std::int32_t flying_lift(const World& world, const FlightPose& pose, std::int32_t elapsed_ms) noexcept {
+  if (!pose.flying || !pose.in_air) return 0;
   // 0x0051b272 asks the object where it is *now*, vtable `+0x40`: the ground
   // under the bird as drawn, not under the end of its leg.
-  const std::int32_t ground = terrain_height(world, flying_position(world, slot, elapsed_ms));
-  const std::int32_t lift = flying_z_at(world, slot, elapsed_ms) - ground;
+  const std::int32_t ground = terrain_height(world, flying_position(pose, elapsed_ms));
+  const std::int32_t lift = flying_z_at(world, pose, elapsed_ms) - ground;
   // Below the ground is drawn on it: the original clamps the offset at zero.
   return lift > 0 ? lift : 0;
 }
