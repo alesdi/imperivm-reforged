@@ -597,8 +597,16 @@ def test_alesias_armies_do_not_stand_on_one_another(imrun, game_dir):
     assert aims and int(aims.group(2)) > 0, output[-3000:]
 
 
-#: p1's army on Crossroads: the Egyptian line units its recruiter raises.
-P1_ARMY = "EGuardian,EArcher,EAxetrower,EAnubis"
+#: The computer players' line units on Crossroads -- p1 and p2 are Egyptian,
+#: p3 Carthaginian -- and their town halls, which `IMRUN_OBJECTS` prints with
+#: them.
+AI_ARMIES = ("EGuardian,EArcher,EAxetrower,EAnubisWarrior,EHorusWarrior,ESwordsman,EChariot,"
+             "CLibyanFootman,CBerberAssassin,CJavelinThrower,CMaceman,CNoble,CWarElephant,"
+             "CNumidian,Townhall")
+#: How near its own town hall a unit on `advance` counts as standing at home.
+#: The column this test was written for stood 450 units outside the nearest
+#: gate, and a Crossroads town's gates are within 1,300 of its hall.
+HOME_RADIUS = 2_000
 
 
 def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game_dir):
@@ -618,8 +626,19 @@ def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game
     of the door stood on one another, 356 pairs in the overlap census.
 
     At 2,200 turns 70 of p1's 78 line units stood on the map in that column
-    and 5 were garrisoned; now one is out on an `advance` and 91 of 109 are
-    inside their town.
+    and 5 were garrisoned; with the fix one was out on an `advance` and 91 of
+    109 were inside their town.
+
+    **Every computer player's army, not p1's.** Which player has an army at
+    2,200 turns is the AI's business: an Egyptian stronghold that draws
+    `TS_EGYPTTACTIC.VS` (`GETTACTICSCRIPT.VS`, a roll under 50 inside the
+    match's first two seconds) researches through four phases before it
+    recruits, and one that does not trains from the start. Once scripts woke
+    on their own millisecond every stronghold rolled -- at 800-ms turns the
+    monitor used to ask at 2,400, after the window shut -- and on seed 1 p1
+    drew the tactic and had three line units here. So the claim is held over
+    all three computer players: enough line units to say something, and
+    almost none of them standing on `advance` near their own town.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
@@ -627,15 +646,24 @@ def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game
     result = subprocess.run(
         [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS), "800"],
         capture_output=True, text=True, timeout=1800,
-        env={**os.environ, "IMRUN_OBJECTS": P1_ARMY},
+        env={**os.environ, "IMRUN_OBJECTS": AI_ARMIES},
     )
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout
-    army = re.findall(r"^\s+\d+ \S+ p1 at \((-?\d+),(-?\d+)\) holder (\d+) .* order (\S+)$",
-                      output, re.MULTILINE)
+    listed = re.findall(r"^\s+\d+ (\S+) p(\d+) at \((-?\d+),(-?\d+)\) holder (\d+) .* order (\S+)$",
+                        output, re.MULTILINE)
+    halls = {int(p): (int(x), int(y)) for cls, p, x, y, _, _ in listed if "Townhall" in cls}
+    army = [(int(p), int(x), int(y), holder, order) for cls, p, x, y, holder, order in listed
+            if "Townhall" not in cls and int(p) in (1, 2, 3)]
+    assert {1, 2, 3} <= set(halls), halls
     assert len(army) > 40, output[-3000:]
-    out_on_advance = [a for a in army if a[2] == "0" and a[3] == "advance"]
-    assert len(out_on_advance) < 10, out_on_advance
+
+    def home(p: int, x: int, y: int) -> bool:
+        hx, hy = halls[p]
+        return (x - hx) ** 2 + (y - hy) ** 2 <= HOME_RADIUS ** 2
+
+    at_home_on_advance = [a for a in army if a[3] == "0" and a[4] == "advance" and home(*a[:3])]
+    assert len(at_home_on_advance) < 10, at_home_on_advance
     assert "no traps." in output, output[output.find("distinct traps"):]
 
 
