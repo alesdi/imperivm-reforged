@@ -223,3 +223,23 @@ TEST(wakeup_a_script_spawned_mid_turn_starts_at_its_spawners_millisecond) {
   CHECK(marks()[2].tag == 3);
   CHECK(marks()[2].time == 240);
 }
+
+/// `TACTICMONITOR.VS` sleeps `rand(500) + 500` and then asks each stronghold
+/// for a tactic, and `GETTACTICSCRIPT.VS` hands one out only `if (GetTime <
+/// 2000)` -- an Egyptian stronghold runs `TS_EGYPTTACTIC.VS` on a roll under
+/// 50. On the original's wheel every monitor asks inside that window. Rounded
+/// up to an 800-ms turn end, a monitor started at 800 that slept 900 asked at
+/// 2400, after it had shut, and its strongholds never rolled: on Crossroads
+/// seed 1 that was p2, which then trained by `ES_STRONGHOLD.VS`'s own rules
+/// all match. Now it asks at 1700.
+TEST(wakeup_the_tactic_monitor_asks_inside_the_two_second_window_at_800_ms_turns) {
+  Bench bench;
+  REQUIRE(bench.session != nullptr);
+  REQUIRE(bench.spawn("// void\nSleep(900);\nif (GetTime < 2000) Mark(1, GetTime());\n"
+                      "else Mark(2, GetTime());\n",
+                      "monitor.vs") != script::kNoScript);
+  bench.session->advance(4, 800);
+  REQUIRE(marks().size() == 1);
+  CHECK(marks()[0].tag == 1);
+  CHECK(marks()[0].time == 1700);
+}
