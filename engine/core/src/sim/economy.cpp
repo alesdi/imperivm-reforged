@@ -768,6 +768,14 @@ std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime n
   return 0;
 }
 
+bool held_by_carrier(const World& world, ObjectId unit) {
+  const WorldObject* slot = world.find(unit);
+  if (slot == nullptr || !slot->state.is_held() || slot->state.holder == kNoObject) return false;
+  const WorldObject* carrier = world.find(slot->state.holder - 1);
+  return carrier != nullptr && carrier->object != nullptr &&
+         carrier->object->is_a(NativeClass::ship);
+}
+
 Point unit_pos_rh(World& world, ObjectId unit) {
   const WorldObject* slot = world.find(unit);
   if (slot == nullptr) return kHeldPosition;

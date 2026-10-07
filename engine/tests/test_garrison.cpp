@@ -269,7 +269,13 @@ TEST(goto_erase_and_exitholder_take_a_unit_out_of_the_garrison) {
   CHECK(!g.town_row().holder.contains(g.theirs));
 }
 
-TEST(a_hero_and_his_army_march_out_of_the_garrison_together) {
+TEST(a_hero_and_his_army_leave_the_garrison_one_exit_slot_at_a_time) {
+  // `Hero::FormSetupAndMoveTo` (0x0052e65d) and `Unit::FormAcceptMove`
+  // (0x005d7906) each take the settlement's exit slot (0x005d3f20) and, while
+  // the last exit is too recent, suspend for the wait it answers and run
+  // again. The hero goes first; each member leaves in its own
+  // `FormAcceptMove`, one per `exit_interval`, and is then sent to its
+  // station. A member aboard a ship waits 100 ms at a time.
   Garrison g;
   MovementSystem movement;
   movement.set_grid(ObstructionGrid(512, 512));
@@ -295,20 +301,115 @@ TEST(a_hero_and_his_army_march_out_of_the_garrison_together) {
   g.world.set_position(hero, Point{3050, 3000});
   g.world.set_owner(hero, 0);
   g.world.set_health(hero, 1000);
+  const ObjectId second = g.world.spawn(NativeClass::unit, nullptr, g.graph.find("Soldier"));
+  g.world.set_position(second, Point{3100, 3040});
+  g.world.set_owner(second, 0);
+  g.world.set_health(second, 200);
+  heroes.register_hero(g.world, hero);
+  heroes.register_unit(g.world, g.mine);
+  heroes.register_unit(g.world, second);
+  REQUIRE(heroes.attach(g.world, g.mine, hero));
+  REQUIRE(heroes.attach(g.world, second, hero));
+  REQUIRE(garrison_enter(g.world, g.town_id, hero, /*force=*/true));
+  REQUIRE(garrison_enter(g.world, g.town_id, g.mine, /*force=*/true));
+  REQUIRE(garrison_enter(g.world, g.town_id, second, /*force=*/true));
+  const std::int32_t interval = g.town_row().exit_interval;
+  REQUIRE(interval > 0);
+
+  // Somebody has just left: the hero waits the slot out, sets nothing up,
+  // and is asked again.
+  const std::int32_t slot[] = {interval};
+  const ObjectId before = g.world.spawn(NativeClass::unit, nullptr, g.graph.find("Soldier"));
+  REQUIRE(garrison_enter(g.world, g.town_id, before, /*force=*/true));
+  REQUIRE(garrison_exit(g.world, before, Point{3800, 3000}, g.world.time()) == 0);
+  const std::vector<script::Value> order = {obj(hero), pack_point(Point{3800, 3000}),
+                                            script::Value::integer(0), script::Value::integer(0),
+                                            script::Value::boolean(true)};
+  const script::HostOutcome waited = call(registry, g.world, "FormSetupAndMoveTo", 4, order);
+  CHECK(waited.status == script::HostStatus::retry);
+  CHECK(waited.suspend_for == interval);
+  CHECK(g.world.find(hero)->state.is_held());
+  CHECK(movement.find(hero) == nullptr || !movement.find(hero)->goto_active);
+
+  // A slot later the hero takes it: out, and nobody else with him.
+  g.world.advance(std::span<const std::int32_t>(slot));
+  const GameTime start = g.world.time();
+  const script::HostOutcome setup = call(registry, g.world, "FormSetupAndMoveTo", 4, order);
+  CHECK(setup.status == script::HostStatus::ok);
+  CHECK(!g.world.find(hero)->state.is_held());
+  CHECK(g.world.find(g.mine)->state.is_held());
+  CHECK(g.world.find(second)->state.is_held());
+  CHECK(g.town_row().last_unit_exit_time == start);
+
+  // A member in the same instant waits the slot out, and stays inside.
+  const script::HostOutcome early = call(registry, g.world, "FormAcceptMove", 0, {obj(g.mine)});
+  CHECK(early.status == script::HostStatus::retry);
+  CHECK(early.suspend_for == interval);
+  CHECK(g.world.find(g.mine)->state.is_held());
+
+  // A slot later it is out and marching to its station; the next waits.
+  g.world.advance(std::span<const std::int32_t>(slot));
+  CHECK(call(registry, g.world, "FormAcceptMove", 0, {obj(g.mine)}).status ==
+        script::HostStatus::ok);
+  CHECK(!g.world.find(g.mine)->state.is_held());
+  CHECK(movement.find(g.mine) != nullptr && movement.find(g.mine)->goto_active);
+  CHECK(movement.find(g.mine)->party == hero);
+  CHECK(call(registry, g.world, "FormAcceptMove", 0, {obj(second)}).status ==
+        script::HostStatus::retry);
+  CHECK(g.world.find(second)->state.is_held());
+  g.world.advance(std::span<const std::int32_t>(slot));
+  CHECK(call(registry, g.world, "FormAcceptMove", 0, {obj(second)}).status ==
+        script::HostStatus::ok);
+  CHECK(!g.world.find(second)->state.is_held());
+  CHECK(g.town_row().holder.count() == 0);
+
+  // A march set up again does not pull anyone out of a garrison: a member
+  // back inside stays there until its own `FormAcceptMove`.
+  REQUIRE(garrison_enter(g.world, g.town_id, second, /*force=*/true));
+  g.world.advance(std::span<const std::int32_t>(slot));
+  CHECK(call(registry, g.world, "FormKeepMoving", 1, {obj(hero), script::Value::integer(500)})
+            .status == script::HostStatus::suspend);
+  CHECK(g.world.find(second)->state.is_held());
+
+  // Aboard a ship: a 100 ms poll, and still aboard.
+  const World::ShipIds ship = g.world.spawn_ship(nullptr);
+  REQUIRE(garrison_forget(g.world, second));
+  REQUIRE(g.world.put_in_holder(second, ship.holder));
+  const script::HostOutcome aboard = call(registry, g.world, "FormAcceptMove", 0, {obj(second)});
+  CHECK(aboard.status == script::HostStatus::retry);
+  CHECK(aboard.suspend_for == 100);
+  CHECK(g.world.find(second)->state.holder == ship.holder);
+}
+
+TEST(form_accept_move_drops_the_members_combat_target) {
+  // 0x005d798b: the target setter handed the empty handle, for every member
+  // that reaches the march's set-up -- on the map as much as out of a holder.
+  Garrison g;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(512, 512));
+  HeroSystem heroes;
+  REQUIRE(g.world.add_system(&movement));
+  REQUIRE(g.world.add_system(&heroes));
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  (void)register_world_host(registry);
+  register_movement_host(registry);
+  (void)register_command_host(registry);
+
+  const ObjectId hero = g.world.spawn(NativeClass::hero, nullptr, g.graph.find("Leader"));
+  g.world.set_position(hero, Point{3050, 3000});
+  g.world.set_owner(hero, 0);
+  g.world.set_health(hero, 1000);
   heroes.register_hero(g.world, hero);
   heroes.register_unit(g.world, g.mine);
   REQUIRE(heroes.attach(g.world, g.mine, hero));
-  REQUIRE(garrison_enter(g.world, g.town_id, hero, /*force=*/true));
-  REQUIRE(garrison_enter(g.world, g.town_id, g.mine, /*force=*/true));
+  REQUIRE(g.combat.find(g.mine) != nullptr);
+  REQUIRE(g.combat.order_attack(g.mine, g.theirs));
 
-  const script::HostOutcome setup =
-      call(registry, g.world, "FormSetupAndMoveTo", 4,
-           {obj(hero), pack_point(Point{3800, 3000}), script::Value::integer(0),
-            script::Value::integer(0), script::Value::boolean(true)});
-  CHECK(setup.status == script::HostStatus::ok);
-  CHECK(!g.world.find(hero)->state.is_held());
-  CHECK(!g.world.find(g.mine)->state.is_held());
-  CHECK(g.town_row().holder.count() == 0);
+  CHECK(call(registry, g.world, "FormAcceptMove", 0, {obj(g.mine)}).status ==
+        script::HostStatus::ok);
+  CHECK(g.combat.find(g.mine)->target == kNoObject);
+  CHECK(g.combat.find(g.mine)->attacks == 0);
 }
 
 TEST(the_dead_and_the_departed_leave_the_garrison) {

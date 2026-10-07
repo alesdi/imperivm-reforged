@@ -302,6 +302,114 @@ TEST(the_ai_fields_default_to_nothing_and_stay_out_of_the_hash) {
   CHECK(!refused.deserialize(older).ok());
 }
 
+/// **A squad that goes takes its AI order with it** (0x00444803): whether its
+/// last member leaves, it is destroyed outright, or it is pruned having never
+/// had one, its record goes back on the free chain -- otherwise the next squad
+/// to be given its index would inherit an order nobody gave it.
+TEST(a_squad_that_goes_frees_its_ai_order) {
+  SquadTable table;
+  const SquadKey left = table.create(2);
+  const SquadKey destroyed = table.create(2);
+  const SquadKey hollow = table.create(2);
+  REQUIRE(table.join(left, 21));
+  REQUIRE(table.join(destroyed, 22));
+  REQUIRE(table.post_order(left, 4, 9));
+  REQUIRE(table.post_order(destroyed, 4, 9));
+  REQUIRE(table.post_order(hollow, 4, 9));
+  const AiOrderQueue& queue = *table.orders(2);
+  REQUIRE(queue.todo.size() == 3);
+
+  REQUIRE(table.leave(left, 21));
+  CHECK(table.find(left)->order == -1);
+  CHECK(table.find(left)->order_dest == kNoGaika);
+  CHECK(queue.todo[0].verb == 0);
+  CHECK(queue.first_free == 0);
+
+  REQUIRE(table.destroy(destroyed));
+  CHECK(queue.todo[1].verb == 0);
+  CHECK(queue.first_free == 1);
+  CHECK(queue.todo[1].next_free == 0);
+
+  table.prune_empty();
+  CHECK(queue.todo[2].verb == 0);
+  CHECK(queue.first_free == 2);
+
+  // And the index a new squad is given carries nothing.
+  const SquadKey reborn = table.create(2);
+  CHECK(reborn == left);
+  CHECK(table.find(reborn)->order == -1);
+}
+
+/// **The AI order queues ride in the squad section, and in its hash** -- every
+/// slot of every player's queue, free ones with the priority they kept, the
+/// free chain, the timer and the runner -- and a squad's index into its queue
+/// comes back with it. A squad whose index names a record that is not its own
+/// is refused rather than loaded.
+TEST(save_squad_section_carries_the_ai_order_queues_and_hashes_them) {
+  SquadTable table;
+  const SquadKey a = table.create(1);
+  const SquadKey b = table.create(1);
+  const SquadKey c = table.create(3);
+  REQUIRE(table.join(a, 11));
+  REQUIRE(table.join(b, 12));
+  REQUIRE(table.join(c, 13));
+  REQUIRE(table.post_order(a, 5, 100));
+  REQUIRE(table.post_order(b, 6, 7));
+  REQUIRE(table.post_order(c, 8, 1));
+  REQUIRE(table.delete_order(a));  // slot 0 of player 1 is free, priority kept
+  AiOrderQueue* ones = table.mutable_orders(1);
+  REQUIRE(ones != nullptr);
+  CHECK(ones->first_free == 0);
+  CHECK(ones->todo[0].priority == 100);
+  ones->due = 1500;
+  ones->runner = 42;
+
+  std::uint64_t before = 0;
+  table.hash(before);
+  const auto hash_of = [&] {
+    std::uint64_t h = 0;
+    table.hash(h);
+    return h;
+  };
+  ones->due = 2000;
+  CHECK(hash_of() != before);
+  ones->due = 1500;
+  table.mutable_orders(3)->todo[0].priority = 2;
+  CHECK(hash_of() != before);
+  table.mutable_orders(3)->todo[0].priority = 1;
+  ones->todo[0].priority = 99;  // a free slot's, too
+  CHECK(hash_of() != before);
+  ones->todo[0].priority = 100;
+  REQUIRE(hash_of() == before);
+
+  std::vector<std::byte> bytes_out;
+  table.serialize(bytes_out);
+  SquadTable loaded;
+  REQUIRE(loaded.deserialize(bytes_out).ok());
+  for (PlayerId p = 0; p < kPlayerCount; ++p) CHECK(*loaded.orders(p) == *table.orders(p));
+  CHECK(loaded.find(a)->order == -1);
+  CHECK(loaded.find(b)->order == 1);
+  CHECK(loaded.find(b)->order_dest == 6);
+  CHECK(loaded.find(c)->order == 0);
+  std::uint64_t reloaded = 0;
+  loaded.hash(reloaded);
+  CHECK(reloaded == before);
+
+  for (std::size_t cut = 0; cut < bytes_out.size(); ++cut) {
+    SquadTable partial;
+    CHECK(!partial.deserialize(std::span(bytes_out).first(cut)).ok());
+  }
+
+  // An index that names another squad's record.
+  for (Squad& squad : table.mutable_squads()) {
+    if (squad.key == b) squad.order = 0;
+  }
+  std::vector<std::byte> crossed;
+  table.serialize(crossed);
+  SquadTable refused;
+  CHECK(!refused.deserialize(crossed).ok());
+}
+
 // --------------------------------------------------------------------------
 // AIDest
 // --------------------------------------------------------------------------
@@ -1280,9 +1388,11 @@ TEST(squad_del_order_clears_the_order_and_the_ai_destination_it_carried) {
   register_squad_host(registry);
 
   const SquadKey key = f.squad_of(1, 1);
+  REQUIRE(f.heroes.squads().post_order(key, 5, 3));
   Squad* squad = f.heroes.squads().find(key);
-  squad->order_dest = 5;
-  squad->ai_dest = 6;
+  CHECK(squad->order == 0);
+  CHECK(squad->order_dest == 5);
+  CHECK(squad->ai_dest == 5);
   squad->dest_gaika = 7;
   squad->gaika_in = 8;
 
@@ -1290,11 +1400,21 @@ TEST(squad_del_order_clears_the_order_and_the_ai_destination_it_carried) {
   CHECK(invoke(registry, CallKind::member, "DelOrder", 0, call).status == HostStatus::ok);
 
   squad = f.heroes.squads().find(key);
+  CHECK(squad->order == -1);
   CHECK(squad->order_dest == kNoGaika);
   CHECK(squad->ai_dest == kNoGaika);
   CHECK(squad_ai_dest(*squad) == 7);
   CHECK(squad->dest_gaika == 7);
   CHECK(squad->gaika_in == 8);
+  // The record is a free slot now: no verb, at the head of the chain, so the
+  // drain never takes it.
+  const AiOrderQueue* queue = f.heroes.squads().orders(1);
+  REQUIRE(queue != nullptr);
+  REQUIRE(queue->todo.size() == 1);
+  CHECK(queue->todo[0].verb == 0);
+  CHECK(queue->first_free == 0);
+  // And a second `DelOrder` has nothing to free.
+  CHECK(!f.heroes.squads().delete_order(key));
 }
 
 /// **`IsEnemyInSquadSight` is always false, and so is the original's.**

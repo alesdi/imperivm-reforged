@@ -2914,14 +2914,46 @@ struct SendToBench {
     squad->gaika_in = home;
   }
 
-  script::HostStatus send(GaikaId node) {
+  script::HostStatus send(GaikaId node, std::int32_t priority = 1) {
+    return send_squad(key, node, priority);
+  }
+  script::HostStatus send_squad(SquadKey which, GaikaId node, std::int32_t priority) {
     const script::HostOutcome out =
         f.call(script::CallKind::member, "SendTo",
-               {pack_squad(key), gaika_value(node), script::Value::integer(1)}, script::kNoScript);
+               {pack_squad(which), gaika_value(node), script::Value::integer(priority)},
+               script::kNoScript);
     if (out.status != script::HostStatus::ok && out.error != nullptr) std::printf("  %s\n", out.error);
     return out.status;
   }
   Squad& squad() { return *f.heroes.squads().find(key); }
+
+  /// One more squad of player 1: a single guarding soldier at `at`, filed
+  /// under `home`.
+  SquadKey squad_at(Point at) {
+    const SquadKey made = f.heroes.squads().create(1);
+    const ObjectId id = f.world.spawn(imperivm::core::NativeClass::unit, nullptr);
+    f.world.set_owner(id, 1);
+    f.world.set_health(id, 100);
+    CHECK(f.world.set_position(id, at));
+    CHECK(f.heroes.squads().join(made, id));
+    (void)commands.set_command(f.world, id, "guard", Command{});
+    if (Squad* found = f.heroes.squads().find(made)) found->gaika_in = home;
+    return made;
+  }
+  [[nodiscard]] std::string verb_of(SquadKey which) {
+    const Squad* found = f.heroes.squads().find(which);
+    if (found == nullptr || found->members.empty()) return {};
+    return std::string(commands.command_name(found->members.front()));
+  }
+
+  /// The timer, at `now`; and the scheduler's pass the runner it spawns waits
+  /// for. Driven by hand, so nothing here depends on when the AI acts.
+  std::size_t drain(GameTime now) { return run_ai_orders(f.world, f.scheduler, nullptr, now); }
+  void run_scripts() { (void)f.scheduler.run_ready(); }
+  [[nodiscard]] const AiOrderQueue& queue() { return *f.heroes.squads().orders(1); }
+  [[nodiscard]] const AiOrder& record_of(SquadKey which) {
+    return queue().todo[static_cast<std::size_t>(f.heroes.squads().find(which)->order)];
+  }
 };
 
 /// The two branches of the shipped `AIOSENDSQUAD.VS` that decide who moves --
@@ -2941,22 +2973,44 @@ constexpr std::string_view kSendSquadStandIn =
 
 }  // namespace
 
-/// **An order is carried out by `data/ai/AIOSendSquad.vs`**, the file the AI's
-/// order drain (0x00448b60) runs for verb 1 with a `SquadList` of the squad and
-/// the node -- not by `SendTo` walking the members itself. Here the script
-/// sends a squad standing elsewhere: its state and its members' commands are
-/// the script's, and the squad's own `DestGAIKA` is untouched -- the order
-/// carries the destination, and `AIDest` reads it from there.
-TEST(send_to_runs_aio_send_squad_with_the_squad_and_the_node) {
+/// **`SendTo` posts; the AI's order drain carries it out**, by spawning
+/// `data/ai/AIOSendSquad.vs` (0x00448b60, verb 1) with a `SquadList` of the
+/// squad and the node. Until the timer drains it nobody moves; the drain takes
+/// the record (priority 0), writes the squad's `SrcGAIKA` from its `GAIKAIn`,
+/// and the runner it spawns -- the AI's, so `AIGetPlayer` answers its player --
+/// moves the squad in the pass that follows. The squad's own `DestGAIKA` is
+/// untouched, and the order keeps answering `OrderDest` after it is done.
+TEST(send_to_posts_an_order_and_the_drain_runs_aio_send_squad_with_the_squad_and_the_node) {
   SendToBench bench;
   REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
                 "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
-  CHECK(bench.send(bench.dest) == script::HostStatus::ok);
+  bench.squad().src_gaika = 99;
+  CHECK(bench.send(bench.dest, 30) == script::HostStatus::ok);
+  {
+    Squad& squad = bench.squad();
+    CHECK(squad.order_dest == bench.dest);
+    CHECK(squad.ai_dest == bench.dest);
+    CHECK(squad.dest_gaika == kNoGaika);
+    CHECK(squad_ai_dest(squad) == bench.dest);
+    CHECK(squad.state == 7);
+    for (const ObjectId id : bench.soldiers) CHECK(bench.commands.command_name(id) == "guard");
+    const AiOrder& record = bench.record_of(bench.key);
+    CHECK(record.verb == 1);
+    CHECK(record.squad == bench.key.index);
+    CHECK(record.node == bench.dest);
+    CHECK(record.priority == 30);
+  }
+
+  CHECK(bench.drain(0) == 1);
+  CHECK(bench.record_of(bench.key).priority == 0);
+  const script::ScriptId runner = bench.queue().runner;
+  REQUIRE(runner != script::kNoScript);
+  CHECK(bench.f.ai.script_player(runner, bench.f.scheduler) == 2);
+  CHECK(bench.squad().src_gaika == bench.home);
+  CHECK(bench.squad().state == 7);  // spawned, not yet run
+
+  bench.run_scripts();
   Squad& squad = bench.squad();
-  CHECK(squad.order_dest == bench.dest);
-  CHECK(squad.ai_dest == bench.dest);
-  CHECK(squad.dest_gaika == kNoGaika);
-  CHECK(squad_ai_dest(squad) == bench.dest);
   CHECK(squad.state == 1);
   CHECK((squad.flags & kSquadFlagAdvChooser) == 0);
   for (const ObjectId id : bench.soldiers) {
@@ -2966,6 +3020,9 @@ TEST(send_to_runs_aio_send_squad_with_the_squad_and_the_node) {
     CHECK(q->entries[0].verb == "advance");
     CHECK(q->entries[0].point == bench.centre);
   }
+  CHECK(!bench.f.scheduler.alive(runner));
+  CHECK(squad.order_dest == bench.dest);
+  CHECK(squad.dest_gaika == kNoGaika);
 }
 
 /// **A squad sent to the node it already stands in moves nobody**: the script's
@@ -2977,6 +3034,8 @@ TEST(send_to_a_squad_already_in_the_node_stops_it_where_it_stands) {
   REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
                 "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
   CHECK(bench.send(bench.home) == script::HostStatus::ok);
+  CHECK(bench.drain(0) == 1);
+  bench.run_scripts();
   Squad& squad = bench.squad();
   CHECK(squad.order_dest == bench.home);
   CHECK(squad.state == 0);
@@ -2987,19 +3046,270 @@ TEST(send_to_a_squad_already_in_the_node_stops_it_where_it_stands) {
   }
 }
 
-/// **With no such script the order is posted and nobody moves**: the movement
+/// **With no such script the order is taken and nobody moves**: the movement
 /// is the script's, so a world without the file has a destination and no
-/// journey -- what `SendTo` did before it carried orders out at all, and not
-/// the stand-in that replaced the script with an `advance` to the centre.
-TEST(send_to_without_the_order_script_posts_the_order_and_moves_nobody) {
+/// journey -- and the record is spent, as a spawn of a missing file spends it.
+TEST(send_to_without_the_order_script_takes_the_order_and_moves_nobody) {
   SendToBench bench;
   CHECK(bench.send(bench.dest) == script::HostStatus::ok);
+  CHECK(bench.drain(0) == 0);
+  CHECK(bench.record_of(bench.key).priority == 0);
+  CHECK(bench.queue().runner == script::kNoScript);
+  bench.run_scripts();
   Squad& squad = bench.squad();
   CHECK(squad.order_dest == bench.dest);
   CHECK(squad.ai_dest == bench.dest);
   CHECK(squad.dest_gaika == kNoGaika);
   CHECK(squad.state == 7);
   for (const ObjectId id : bench.soldiers) CHECK(bench.commands.command_name(id) == "guard");
+}
+
+/// **The post** (0x004494c0): a squad sent again frees its old record first and
+/// so takes the same slot back; another squad's order takes the next one; the
+/// priority is the script's `n` in sixteen bits.
+TEST(send_to_reposts_into_the_squads_own_slot_and_keeps_sixteen_bits_of_priority) {
+  SendToBench bench;
+  const SquadKey other = bench.squad_at(Point{4000, 1100});
+  CHECK(bench.send(bench.dest, 5) == script::HostStatus::ok);
+  CHECK(bench.send_squad(other, bench.dest, 5) == script::HostStatus::ok);
+  CHECK(bench.squad().order == 0);
+  CHECK(bench.f.heroes.squads().find(other)->order == 1);
+  CHECK(bench.send(bench.home, 70000) == script::HostStatus::ok);
+  CHECK(bench.squad().order == 0);
+  CHECK(bench.queue().todo.size() == 2);
+  CHECK(bench.record_of(bench.key).node == bench.home);
+  CHECK(bench.record_of(bench.key).priority == static_cast<std::int16_t>(70000 - 65536));
+  CHECK(bench.queue().first_free == -1);
+}
+
+/// **The timer** (0x0041d790): armed at no delay when the AI starts, it drains
+/// one order whenever it is due and re-arms itself 500 from the moment it
+/// fired. Two orders far apart are two drains, half a second apart.
+TEST(the_order_drain_fires_when_due_and_rearms_half_a_second_after) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  const SquadKey other = bench.squad_at(Point{4000, 1100});
+  CHECK(bench.send(bench.dest) == script::HostStatus::ok);
+  CHECK(bench.send_squad(other, bench.dest, 1) == script::HostStatus::ok);
+  CHECK(bench.queue().due == 0);
+
+  CHECK(bench.drain(100) == 1);
+  CHECK(bench.record_of(bench.key).priority == 0);
+  CHECK(bench.record_of(other).priority == 1);
+  CHECK(bench.queue().due == 600);
+  bench.run_scripts();
+
+  CHECK(bench.drain(599) == 0);
+  CHECK(bench.record_of(other).priority == 1);
+  CHECK(bench.queue().due == 600);
+
+  CHECK(bench.drain(600) == 1);
+  CHECK(bench.record_of(other).priority == 0);
+  CHECK(bench.queue().due == 1100);
+  bench.run_scripts();
+  CHECK(bench.verb_of(other) == "advance");
+}
+
+/// **Slot 2** (0x0069f950): while the runner the last drain spawned is still
+/// alive, the drain executes nothing -- the record it picked keeps waiting --
+/// and the timer re-arms all the same.
+TEST(the_order_drain_takes_nothing_while_the_last_runner_still_runs) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  const SquadKey other = bench.squad_at(Point{4000, 1100});
+  CHECK(bench.send(bench.dest) == script::HostStatus::ok);
+  CHECK(bench.send_squad(other, bench.dest, 1) == script::HostStatus::ok);
+
+  CHECK(bench.drain(0) == 1);
+  const script::ScriptId first = bench.queue().runner;
+  REQUIRE(bench.f.scheduler.alive(first));
+  CHECK(bench.drain(500) == 0);
+  CHECK(bench.record_of(other).priority == 1);
+  CHECK(bench.queue().runner == first);
+  CHECK(bench.queue().due == 1000);
+
+  bench.run_scripts();
+  CHECK(bench.drain(1000) == 1);
+  CHECK(bench.record_of(other).priority == 0);
+  CHECK(bench.queue().runner != first);
+}
+
+/// **The pick** (0x00448ad0 with 0x004488e0): the larger `priority / 5` first,
+/// and within one band the squad nearer `View`, which nothing moves from
+/// (-1, -1) -- so a 5 near the corner goes before a 9 further out, and a 4 goes
+/// last whatever its place.
+TEST(the_order_drain_takes_the_larger_fifth_first_and_the_corner_within_one) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  const SquadKey near_corner = bench.squad_at(Point{500, 500});
+  const SquadKey corner = bench.squad_at(Point{200, 200});
+  CHECK(bench.send(bench.dest, 9) == script::HostStatus::ok);  // record 0, at (1000, 1100)
+  CHECK(bench.send_squad(near_corner, bench.dest, 5) == script::HostStatus::ok);
+  CHECK(bench.send_squad(corner, bench.dest, 4) == script::HostStatus::ok);
+
+  CHECK(bench.drain(0) == 1);
+  CHECK(bench.record_of(near_corner).priority == 0);
+  CHECK(bench.record_of(bench.key).priority == 8);  // record 0 aged, band unchanged
+  CHECK(bench.record_of(corner).priority == 4);
+  bench.run_scripts();
+
+  CHECK(bench.drain(500) == 1);
+  CHECK(bench.record_of(bench.key).priority == 0);
+  CHECK(bench.record_of(corner).priority == 4);
+  bench.run_scripts();
+
+  CHECK(bench.drain(1000) == 1);
+  CHECK(bench.record_of(corner).priority == 0);
+}
+
+/// A tie in band and in distance keeps the record the walk met first: the
+/// comparison is strict.
+TEST(the_order_drain_breaks_a_full_tie_by_the_lower_slot) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  const SquadKey first = bench.squad_at(Point{3000, 3000});
+  const SquadKey second = bench.squad_at(Point{3000, 3000});
+  // Two nodes, so the second is not swept into the first's list.
+  CHECK(bench.send_squad(first, bench.dest, 1) == script::HostStatus::ok);
+  CHECK(bench.send_squad(second, bench.home, 1) == script::HostStatus::ok);
+  CHECK(bench.drain(0) == 1);
+  CHECK(bench.record_of(first).priority == 0);
+  CHECK(bench.record_of(second).priority == 1);
+}
+
+/// **The batch** (0x00448be9..0x00448cbc): every other order still waiting for
+/// the same node whose squad's front member stands within 240 of this one's
+/// goes in the same list, taken the same way -- 239 is in and 240 is out, and
+/// an order for another node is out at any distance.
+TEST(the_order_drain_sends_the_squads_bound_for_one_node_within_240_in_one_list) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  // The bench squad's front member stands at (1000, 1100).
+  const SquadKey within = bench.squad_at(Point{1239, 1100});
+  const SquadKey edge = bench.squad_at(Point{1000, 1340});
+  const SquadKey elsewhere = bench.squad_at(Point{1010, 1100});
+  bench.f.heroes.squads().find(edge)->src_gaika = 77;
+  CHECK(bench.send(bench.dest) == script::HostStatus::ok);
+  CHECK(bench.send_squad(within, bench.dest, 1) == script::HostStatus::ok);
+  CHECK(bench.send_squad(edge, bench.dest, 1) == script::HostStatus::ok);
+  CHECK(bench.send_squad(elsewhere, bench.home, 1) == script::HostStatus::ok);
+
+  CHECK(bench.drain(0) == 1);
+  CHECK(bench.record_of(bench.key).priority == 0);
+  CHECK(bench.record_of(within).priority == 0);
+  CHECK(bench.record_of(edge).priority == 1);
+  CHECK(bench.record_of(elsewhere).priority == 1);
+  CHECK(bench.f.heroes.squads().find(within)->src_gaika == bench.home);
+  CHECK(bench.f.heroes.squads().find(edge)->src_gaika == 77);
+
+  bench.run_scripts();
+  CHECK(bench.verb_of(bench.key) == "advance");
+  CHECK(bench.verb_of(within) == "advance");
+  CHECK(bench.verb_of(edge) == "guard");
+  CHECK(bench.verb_of(elsewhere) == "guard");
+}
+
+/// **The ageing** (0x004489a0 with 0x004487d0) was meant to walk every record
+/// and stops after the first, because its callback answers 0: record 0 alone
+/// loses a point a drain, never below 1, whether or not anything ran.
+TEST(the_order_drain_ages_only_the_first_record) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  const SquadKey urgent = bench.squad_at(Point{4000, 1100});
+  const SquadKey middling = bench.squad_at(Point{5000, 1100});
+  CHECK(bench.send(bench.dest, 3) == script::HostStatus::ok);
+  CHECK(bench.send_squad(urgent, bench.dest, 100) == script::HostStatus::ok);
+  CHECK(bench.send_squad(middling, bench.dest, 50) == script::HostStatus::ok);
+
+  CHECK(bench.drain(0) == 1);  // `urgent`; its runner is left alive
+  CHECK(bench.record_of(urgent).priority == 0);
+  CHECK(bench.record_of(bench.key).priority == 2);
+  CHECK(bench.record_of(middling).priority == 50);
+  CHECK(bench.drain(500) == 0);  // `middling` picked, slot 2 busy
+  CHECK(bench.record_of(bench.key).priority == 1);
+  CHECK(bench.record_of(middling).priority == 50);
+  CHECK(bench.drain(1000) == 0);
+  CHECK(bench.record_of(bench.key).priority == 1);
+}
+
+/// **The regroup re-posts the order** (0x00447527..0x0044755d): a unit taken
+/// out of its squad into a fresh one carries the old order's node and its
+/// priority as it stands. The old squad emptied frees its slot first, so the
+/// fresh squad's record takes it back. An order still waiting is then drained
+/// for the fresh squad; one already carried out comes back at 0 and is never
+/// carried out again -- the fresh squad answers `OrderDest` and nobody is sent.
+TEST(a_regrouped_unit_takes_its_squads_order_to_the_fresh_squad) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  const SquadKey done = bench.squad_at(Point{4000, 1100});
+  const SquadKey waiting = bench.squad_at(Point{5000, 1100});
+  CHECK(bench.send_squad(done, bench.dest, 1) == script::HostStatus::ok);
+  CHECK(bench.drain(0) == 1);
+  bench.run_scripts();
+  REQUIRE(bench.record_of(done).priority == 0);
+  CHECK(bench.send_squad(waiting, bench.home, 100) == script::HostStatus::ok);
+  const std::int32_t done_slot = bench.f.heroes.squads().find(done)->order;
+  const std::int32_t waiting_slot = bench.f.heroes.squads().find(waiting)->order;
+  const ObjectId done_unit = bench.f.heroes.squads().find(done)->members.front();
+  const ObjectId waiting_unit = bench.f.heroes.squads().find(waiting)->members.front();
+
+  const ObjectId units[2] = {done_unit, waiting_unit};
+  regroup_into_fresh_squads(bench.f.world, bench.f.heroes, units, 5, 0);
+  SquadTable& squads = bench.f.heroes.squads();
+  const SquadKey fresh_done = squads.squad_of(done_unit);
+  const SquadKey fresh_waiting = squads.squad_of(waiting_unit);
+  REQUIRE(fresh_done.valid());
+  REQUIRE(fresh_waiting.valid());
+  CHECK(squads.find(fresh_done)->order == done_slot);
+  CHECK(squads.find(fresh_waiting)->order == waiting_slot);
+  CHECK(squads.find(fresh_done)->order_dest == bench.dest);
+  CHECK(squads.find(fresh_waiting)->order_dest == bench.home);
+  CHECK(bench.record_of(fresh_done).priority == 0);
+  CHECK(bench.record_of(fresh_waiting).priority == 100);
+  CHECK(bench.record_of(fresh_waiting).squad == fresh_waiting.index);
+
+  CHECK(bench.drain(500) == 1);
+  CHECK(bench.record_of(fresh_waiting).priority == 0);
+  bench.run_scripts();
+  // A fresh squad is filed under no node until the next turn's revaluation,
+  // so the stand-in sends it on (state 1). The other keeps the regroup's
+  // state and its unit's command, sent nowhere.
+  CHECK(squads.find(fresh_waiting)->state == 1);
+  CHECK(bench.verb_of(fresh_waiting) == "advance");
+  CHECK(squads.find(fresh_done)->state == 5);
+  CHECK(bench.drain(1000) == 0);
+}
+
+/// **`AIStop` takes the queue with the AI** (0x00448e90): every record freed,
+/// every squad of the player answering no `OrderDest`, and the runner killed
+/// with the AI's other scripts.
+TEST(ai_stop_takes_the_order_queue_and_its_runner_with_the_ai) {
+  SendToBench bench;
+  REQUIRE(build(bench.f.scheduler, bench.f.registry, kSendSquadStandIn,
+                "DATA\\AI\\AIOSENDSQUAD.VS") != script::kNoChunk);
+  const SquadKey other = bench.squad_at(Point{4000, 1100});
+  CHECK(bench.send(bench.dest) == script::HostStatus::ok);
+  CHECK(bench.send_squad(other, bench.dest, 1) == script::HostStatus::ok);
+  CHECK(bench.drain(0) == 1);
+  const script::ScriptId runner = bench.queue().runner;
+  REQUIRE(bench.f.scheduler.alive(runner));
+
+  CHECK(ai_stop(bench.f.world, 1, bench.f.scheduler));
+  CHECK(!bench.f.scheduler.alive(runner));
+  CHECK(bench.queue() == AiOrderQueue{});
+  CHECK(bench.squad().order == -1);
+  CHECK(bench.squad().order_dest == kNoGaika);
+  CHECK(bench.f.heroes.squads().find(other)->order == -1);
+  CHECK(bench.f.heroes.squads().find(other)->ai_dest == kNoGaika);
+  // And a stopped AI's timer does not fire.
+  CHECK(bench.drain(500) == 0);
 }
 
 /// `g.MinNeed(...)` and `g.MaxNeed(...)` **run a script** and then divide by

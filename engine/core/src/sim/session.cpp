@@ -1262,6 +1262,11 @@ void GameSession::advance(std::uint64_t turns, std::int32_t turn_length) {
     // slice would only reap again and find nothing).
     if (CombatSystem* combat = combat_system_of(impl.world)) combat->forget_fresh_deaths();
     (void)reap_departed(impl.scheduler, impl.world);
+    // The AI order queues' timer (0x0041d790), at the turn's time: a due queue
+    // drains one order, and the `AIOSendSquad.vs` it spawns runs in the pass
+    // below. Here, between the systems and the scripts, is the labelled part --
+    // see `AiOrderQueue`.
+    (void)run_ai_orders(impl.world, impl.scheduler, &impl, impl.world.time());
     const script::RunReport report = impl.scheduler.advance(turn_length);
     // Whichever sequences ended this pass are `"Finished"` now. The original
     // does it from a completion callback (0x005b9f50) that matches the ended

@@ -374,9 +374,30 @@ def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, g
     for p, x, y in sentries:
         near = min(((x - wx) ** 2 + (y - wy) ** 2 for wp, wx, wy in posts if wp == p), default=None)
         assert near is not None and near <= 400 ** 2, (p, x, y)
-    spots = collections.Counter((x, y) for _, x, y in sentries)
-    shared = {spot: n for spot, n in spots.items() if n > 1}
-    assert max(spots.values()) <= 2 and len(shared) <= 2, shared
+    #
+    # *Stand*, not happen to meet: a wall re-staffing its posts places its new
+    # sentries together and they walk off along it, so one instant can catch
+    # several pairs on one point -- turn 2,200 once caught three on p1's north
+    # wall, all six sentries spawned that moment and gone by 2,230. What #8 and
+    # #11 were is a sentry that does not leave, so a spot counts only when the
+    # same sentries still share it thirty turns on.
+    def stood(out: str) -> dict[tuple[int, int], frozenset[int]]:
+        at: dict[tuple[int, int], set[int]] = collections.defaultdict(set)
+        for i, x, y in re.findall(r"^\s+(\d+) \S*Sentry\S* p\d+ at \((-?\d+),(-?\d+)\) ",
+                                  out, re.MULTILINE):
+            at[(int(x), int(y))].add(int(i))
+        return {spot: frozenset(ids) for spot, ids in at.items() if len(ids) > 1}
+
+    later = subprocess.run(
+        [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS + 30), "800"],
+        capture_output=True, text=True, timeout=1800,
+        env={**os.environ, "IMRUN_OBJECTS": "Sentry"},
+    )
+    assert later.returncode == 0, later.stdout + later.stderr
+    then, now = stood(output), stood(later.stdout)
+    staying = {spot: sorted(ids) for spot, ids in then.items() if any(
+        len(ids & others) > 1 for others in now.values())}
+    assert all(len(ids) <= 2 for ids in staying.values()) and len(staying) <= 2, (staying, then)
 
     # Nothing the AI or a wall reached on the way traps: no unimplemented entry
     # point, and no script that runs its budget out.
@@ -703,14 +724,23 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
 #: swordsmen walk: where an enemy is stood before it is sent in.
 P1_OUTSIDE = (12500, 4300)
 
+#: The foot soldiers the enemy AIs train first on Crossroads, any of which
+#: can be the unit sent in.
+ENEMY_SOLDIERS = ("Swordsman", "Axetrower")
+
 
 def test_an_enemy_sent_into_a_walled_town_is_not_routed_through_its_closed_gates(imrun, game_dir):
     """A gate bars an enemy's route per search (`sim/gate.hpp`): the search
     runs on the open grid, finds a straight way in through a gate, and runs
     again with every gate that counts the mover an enemy laid across its
     passage, unless it stands fully open (gbr.exe's 0x00419110). So one of
-    p2's swordsmen, stood outside p1's town and sent to its market, gets a
+    p2's soldiers, stood outside p1's town and sent to its market, gets a
     route that crosses none of p1's shut gates and never gets in.
+
+    Which soldier p2 has trained by the order turn is the AI's choice, and
+    moves with every change to what its draws are spent on -- a swordsman
+    once, an axe thrower since `Unit::Stop` stopped waiting for a standing
+    unit -- so any of p1's enemies' foot soldiers on the map will do.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
@@ -718,12 +748,13 @@ def test_an_enemy_sent_into_a_walled_town_is_not_routed_through_its_closed_gates
     first = subprocess.run(
         [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "100"],
         capture_output=True, text=True, timeout=600,
-        env={**os.environ, "IMRUN_OBJECTS": "Swordsman", "IMRUN_GATES": "1"},
+        env={**os.environ, "IMRUN_OBJECTS": ",".join(ENEMY_SOLDIERS), "IMRUN_GATES": "1"},
     )
     assert first.returncode == 0, first.stdout + first.stderr
     # p1's enemies: every other player of the four is at war with it.
+    soldiers = "|".join(ENEMY_SOLDIERS)
     enemies = [int(i) for i in
-               re.findall(r"^\s+(\d+) \w*Swordsman p[023] at \(-?\d+,-?\d+\) holder 0 ",
+               re.findall(rf"^\s+(\d+) \w*(?:{soldiers}) p[023] at \(-?\d+,-?\d+\) holder 0 ",
                           first.stdout, re.MULTILINE)]
     assert enemies, first.stdout[-3000:]
     unit = enemies[0]

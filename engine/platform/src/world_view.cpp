@@ -3,8 +3,10 @@
 #include "imperivm/core/sim/anim.hpp"
 #include "imperivm/core/sim/flying.hpp"
 #include "imperivm/core/sim/gate.hpp"
+#include "imperivm/core/sim/glide.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
@@ -345,7 +347,16 @@ WorldView::Cursor WorldView::cursor_for(const sim::WorldObject& object,
     // sheet's `remaping` sequencing. Neither is recomputed here: re-deriving a
     // frame index from a clock the view does not own is how a renderer and a
     // simulation end up disagreeing about what happened.
-    out.row = object.timeline.row_of_step(anim.step);
+    //
+    // Between two turns the cursor is the world's carried back to the drawn
+    // time (`TurnGlide::anim_elapsed`): the same clock, sampled the way
+    // `run_turn` samples it, at an instant `run_turn` steps over.
+    std::uint32_t step = anim.step;
+    if (view_world_ != nullptr) {
+      const std::int32_t elapsed = glide_.anim_elapsed(*view_world_, object, draw_time_);
+      if (elapsed != anim.elapsed_ms) step = object.timeline.sample(elapsed, object.repeat).step;
+    }
+    out.row = object.timeline.row_of_step(step);
     // A siege engine under construction is frozen on the stage
     // `Catapult::SetBuildFrame` set, whatever its build animation's clock
     // says (0x004e2ed0 stops the sprite's clock) -- until `SetBuilt` clears it.
@@ -436,8 +447,26 @@ const WorldView::EntityArt* WorldView::decor_art(std::int32_t kind) {
 // staging
 // --------------------------------------------------------------------------
 
+void WorldView::set_turn_fraction(float fraction) noexcept {
+  turn_fraction_ = std::isfinite(fraction) ? std::clamp(fraction, 0.0F, 1.0F) : 1.0F;
+}
+
+void WorldView::begin_view(const sim::World& world) {
+  glide_.observe(world);
+  view_world_ = &world;
+  // The original's clock (0x00528e40) puts game time the real clock's share
+  // of the way across the turn's window; the window here is the turn that
+  // last ran, from the turn end before to the world's.
+  const sim::GameTime now = world.time();
+  const std::int32_t length = std::max(0, world.clock().turn().length);
+  const auto lag = static_cast<sim::GameTime>(
+      std::lround(static_cast<double>(1.0F - turn_fraction_) * static_cast<double>(length)));
+  draw_time_ = std::max(glide_.since(), now - lag);
+}
+
 std::size_t WorldView::prepare(const sim::World& world, std::string* error) {
   if (vfs_ == nullptr || renderer_ == nullptr) return 0;
+  begin_view(world);
 
   stats_.objects = world.size();
   stats_.drawable = 0;
@@ -509,6 +538,19 @@ std::size_t WorldView::prepare(const sim::World& world, std::string* error) {
 // --------------------------------------------------------------------------
 
 void WorldView::build(const sim::World& world, const Camera& camera) {
+  begin_view(world);
+  {
+    // One line a placement -- a frame's, or a pick's -- ahead of its layers:
+    // the turn the world stands at and the game time it is drawn at, so a
+    // trace can tell a frame that moved a unit between two turns from one
+    // that moved it with a turn.
+    static const bool trace = std::getenv("IMPERIVM_DEBUG_VIEW") != nullptr;
+    if (trace) {
+      std::printf("frame turn %llu time %lld drawn %lld\n",
+                  static_cast<unsigned long long>(world.turns()),
+                  static_cast<long long>(world.time()), static_cast<long long>(draw_time_));
+    }
+  }
   items_.clear();
   order_.clear();
   placed_.clear();
@@ -531,13 +573,18 @@ void WorldView::build(const sim::World& world, const Camera& camera) {
     const Cursor cursor = visible_cursor(object);
     if (cursor.pose == nullptr) continue;
 
-    ScreenPoint at = camera.project(object.state.position);
+    // Where the object is at the drawn time, between the turn end before and
+    // the world's: a walking unit part of the way along its last turn's walk
+    // (`sim/glide.hpp`), anything that did not walk where it stands.
+    const std::int32_t clock = glide_.anim_elapsed(world, object, draw_time_);
+    const sim::Point ground = glide_.position(world, object, draw_time_);
+    ScreenPoint at = camera.project(ground);
     // A bird flying a leg is drawn along it: each end projected, ground and
     // all, and the anchor run between the two by the animation's clock, as
-    // the original's visual runs it (`sim::flight_progress`). Everything
-    // placed from the anchor follows -- the shadow, the ring, the bar, the
-    // pick -- as it follows the original's.
-    if (const sim::FlightProgress leg = sim::flight_progress(world, object); leg.moving()) {
+    // the original's visual runs it (`sim::flight_progress`) -- the clock at
+    // the drawn time. Everything placed from the anchor follows -- the
+    // shadow, the ring, the bar, the pick -- as it follows the original's.
+    if (const sim::FlightProgress leg = sim::flight_progress(world, object, clock); leg.moving()) {
       const ScreenPoint from = camera.project(leg.from);
       const ScreenPoint to = camera.project(leg.to);
       at = ScreenPoint{leg.along(from.x, to.x), leg.along(from.y, to.y)};
@@ -547,7 +594,7 @@ void WorldView::build(const sim::World& world, const Camera& camera) {
       ++stats_.culled;
       continue;
     }
-    const float shade = shade_ ? static_cast<float>(shade_(object.state.position)) / 32.0F : 1.0F;
+    const float shade = shade_ ? static_cast<float>(shade_(ground)) / 32.0F : 1.0F;
     // Two per-layer offsets the original's visuals carry and the entity data
     // does not: a gate's portcullis raised by its position (`sim/gate.hpp`),
     // and a bird's body lifted by its altitude above the ground while its
@@ -555,8 +602,8 @@ void WorldView::build(const sim::World& world, const Camera& camera) {
     // and neither is worked out here. They move the picture and not the sort
     // key: the original writes them beside the layer's own offset, and what
     // its depth sort does with them is not read.
-    const std::int32_t raise = sim::gate_raise(object, world.time());
-    const std::int32_t lift = sim::flying_lift(world, object);
+    const std::int32_t raise = sim::gate_raise(object, draw_time_);
+    const std::int32_t lift = sim::flying_lift(world, object, clock);
     placed_.push_back(Placed{&object, at, lift});
 
     for (const LayerArt& layer : *cursor.pose) {

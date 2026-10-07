@@ -37,6 +37,7 @@
 // the process that wrote it.
 
 #include <algorithm>
+#include <array>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -80,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 29;  // 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 30;  // 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -374,6 +375,26 @@ void SquadTable::serialize(std::vector<std::byte>& out) const {
     bytes::put_i64(out, squad.last_fight_time);
     bytes::put_u32(out, squad.last_attacker);
     bytes::put_i32(out, squad.eval);
+    bytes::put_i32(out, squad.order);
+  }
+  // The sixteen AI order queues, `CExecutionAI::Persist`'s three names in its
+  // order -- `FirstFree`, `View`, `Todo` -- and then the AI object's timer and
+  // its slot-2 runner, which the original persists with the object's timers
+  // and scripts. Every slot, free ones included: a free slot's priority is
+  // still aged and still hashed.
+  for (const AiOrderQueue& queue : orders_) {
+    bytes::put_i32(out, queue.first_free);
+    put_point(out, queue.view);
+    bytes::put_u32(out, static_cast<std::uint32_t>(queue.todo.size()));
+    for (const AiOrder& record : queue.todo) {
+      bytes::put_u16(out, record.verb);
+      bytes::put_i32(out, record.squad);
+      bytes::put_i32(out, record.node);
+      bytes::put_u16(out, static_cast<std::uint16_t>(record.priority));
+      bytes::put_i32(out, record.next_free);
+    }
+    bytes::put_i64(out, queue.due);
+    bytes::put_u32(out, queue.runner);
   }
 }
 
@@ -393,13 +414,49 @@ Status SquadTable::deserialize(std::span<const std::byte> data) {
         !bytes::get_i32(reader, squad.gaika_in) || !bytes::get_i32(reader, squad.dest_gaika) ||
         !bytes::get_i32(reader, squad.order_dest) || !bytes::get_i32(reader, squad.ai_dest) ||
         !bytes::get_i64(reader, squad.last_fight_time) ||
-        !reader.u32(squad.last_attacker) || !bytes::get_i32(reader, squad.eval)) {
+        !reader.u32(squad.last_attacker) || !bytes::get_i32(reader, squad.eval) ||
+        !bytes::get_i32(reader, squad.order)) {
       return FormatError::truncated;
     }
     squads.push_back(std::move(squad));
   }
+  std::array<AiOrderQueue, kPlayerCount> queues{};
+  for (AiOrderQueue& queue : queues) {
+    std::uint32_t records = 0;
+    if (!bytes::get_i32(reader, queue.first_free) || !get_point(reader, queue.view) ||
+        !reader.u32(records)) {
+      return FormatError::truncated;
+    }
+    for (std::uint32_t i = 0; i < records; ++i) {
+      AiOrder record;
+      std::uint16_t priority = 0;
+      if (!reader.u16(record.verb) || !bytes::get_i32(reader, record.squad) ||
+          !bytes::get_i32(reader, record.node) || !reader.u16(priority) ||
+          !bytes::get_i32(reader, record.next_free)) {
+        return FormatError::truncated;
+      }
+      record.priority = static_cast<std::int16_t>(priority);
+      queue.todo.push_back(record);
+    }
+    if (!bytes::get_i64(reader, queue.due) || !reader.u32(queue.runner)) {
+      return FormatError::truncated;
+    }
+  }
   if (const Status status = finish(reader); !status.ok()) return status;
+  // A squad's index and its record have to agree, or `OrderDest` would answer
+  // one node and the drain send it to another.
+  for (const Squad& squad : squads) {
+    if (squad.order < 0) continue;
+    if (squad.key.player >= queues.size()) return FormatError::malformed;
+    const AiOrderQueue& queue = queues[squad.key.player];
+    if (static_cast<std::size_t>(squad.order) >= queue.todo.size()) return FormatError::malformed;
+    const AiOrder& record = queue.todo[static_cast<std::size_t>(squad.order)];
+    if (record.verb != 1 || record.squad != squad.key.index || record.node != squad.order_dest) {
+      return FormatError::malformed;
+    }
+  }
   squads_ = std::move(squads);
+  orders_ = std::move(queues);
   return Status();
 }
 

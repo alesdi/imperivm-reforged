@@ -745,6 +745,46 @@ TEST(flight_progress_runs_a_bird_along_its_leg_and_is_presentation_only) {
   CHECK(!flight_progress(b.world, *b.world.find(walker)).moving());
 }
 
+/// Between two turns the view draws a bird where its leg has it at the drawn
+/// instant, not at the turn's end: the same leg, the same lift, on the clock it
+/// is handed (`sim/glide.hpp`). The original reads one clock for the anchor
+/// and the altitude, and that clock moves every frame (0x00528e40).
+TEST(flight_progress_and_lift_read_the_clock_they_are_handed) {
+  FlightBench b;
+  const Point start = pt(16, 16);
+  const Point end = pt(120, 40);
+  const ObjectId id = b.spawn(start, b.crow_class, NativeClass::flying_unit);
+  const std::int32_t ground = terrain_height(b.world, start);
+  b.call(script::CallKind::member, "PlayAnim", 3,
+         {FlightBench::obj(id), script::Value::integer(16), b.point(end),
+          script::Value::integer(80 + ground)});
+  b.world.advance_turns(1);
+  const WorldObject& slot = *b.world.find(id);
+  const std::int32_t now = slot.object->anim.elapsed_ms;
+  REQUIRE(now > 0);
+  // Handed the world's own clock, the answers are the plain ones.
+  CHECK(flying_position(b.world, slot, now) == flying_position(b.world, slot));
+  CHECK(flying_lift(b.world, slot, now) == flying_lift(b.world, slot));
+  CHECK(flight_progress(b.world, slot, now).elapsed == flight_progress(b.world, slot).elapsed);
+  // Handed the turn end before: at the start of the leg, on the ground.
+  CHECK(flying_position(b.world, slot, 0) == start);
+  CHECK(flying_lift(b.world, slot, 0) == 0);
+  // Halfway back: halfway along.
+  const FlightProgress half = flight_progress(b.world, slot, now / 2);
+  REQUIRE(half.moving());
+  CHECK(half.elapsed == now / 2);
+  const Point mid = flying_position(b.world, slot, now / 2);
+  CHECK(mid.x == half.along(start.x, end.x));
+  CHECK(mid.x > start.x && mid.x < flying_position(b.world, slot).x);
+  // Past the end of the animation it is the end, at the altitude it climbs
+  // to, over the ground there -- the turn's own clock has not got that far.
+  CHECK(flying_position(b.world, slot, slot.timeline.cycle() + 50) == end);
+  const std::int32_t top = 80 + ground - terrain_height(b.world, end);
+  REQUIRE(top > 0);
+  CHECK(flying_lift(b.world, slot, slot.timeline.cycle()) == top);
+  CHECK(flying_lift(b.world, slot) != top);
+}
+
 /// **`initial_z` is the one class property that starts an object in the air**,
 /// and exactly one shipped class declares it.
 ///

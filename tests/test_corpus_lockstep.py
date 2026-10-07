@@ -515,7 +515,15 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
 
 @long_net
 def test_netplay_agrees_well_into_the_war(imconform, game_dir):
-    result = run_skirmish(imconform, game_dir, "netplay", "2400", "2", "1", timeout=1800)
+    # On Alesia with the strike, as the short run and the late join play it.
+    # On Crossroads' own skirmish -- two idle seats, the computer everywhere
+    # else -- the war this run is about was one archer's shot between players
+    # 2 and 3 at turn 900; once a standing unit's `Stop` answered at once, an
+    # army left its town one exit slot at a time and the AI's orders waited on
+    # its queue as the original's do, the first blow moved past 2,400 turns or
+    # never came between players at all. Placement does not move.
+    result = run_skirmish(imconform, game_dir, "netplay", "2400", "2", "1", *WAR,
+                          relative=ALESIA, timeout=1800)
     assert result.returncode == 0, result.stdout + result.stderr
     assert netplay_fields(result.stdout).get("agreed") == 2400, result.stdout
     assert war_fields(result.stdout)["deaths"] > 0, result.stdout

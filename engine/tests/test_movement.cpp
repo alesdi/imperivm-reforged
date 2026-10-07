@@ -26,6 +26,7 @@
 
 #include "imperivm/core/formats/grid.hpp"
 #include "imperivm/core/game/localization.hpp"
+#include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/session.hpp"
@@ -1820,26 +1821,57 @@ TEST(path_to_answers_a_straight_line_for_a_class_that_ignores_passability) {
   CHECK(invoke(registry, CallKind::member, "PathTo", 3, walled).value.as_integer() == -1);
 }
 
-TEST(a_host_stop_reports_true_and_holds_still) {
+TEST(a_host_stop_on_a_standing_unit_answers_true_at_once_and_drops_its_target) {
   // 34 of `Stop`'s 53 sites are `while (!.Stop(1000));`. A void `Stop` yields
   // nil, `!nil` is true, and every one of those loops spins forever -- so it
-  // returns a bool. The suspension is what makes `UNIT_IDLE.VS`'s and
-  // `SHIP_IDLE.VS`'s `while(1)` consume game time rather than instructions.
+  // returns a bool. For a unit with no route 0x005d6c90 answers true **without
+  // suspending** (0x005d6d9b): `ms` is not waited, and the idle loops are paced
+  // by the `Idle` beside it. The first entry drops the combat target
+  // (0x005d6cf7, `[unit+0x1a8]` and the attack count beside it) whatever the
+  // route.
   HostRegistry registry;
   register_movement_host(registry);
 
   World world;
   MovementSystem movement;
   movement.set_grid(open_field(64));
+  CombatSystem combat;
+  world.add_system(&combat);
   attach(world, movement);
   const ObjectId unit = spawn_unit(world, movement, Point{500, 500}, 100);
+  const ObjectId foe = spawn_unit(world, movement, Point{540, 500}, 100);
+  Combatant fighter;
+  fighter.id = unit;
+  fighter.owner = 0;
+  fighter.health = 100;
+  fighter.target = foe;
+  fighter.attacks = 3;
+  (void)combat.add(fighter);
 
   HostCall stop(world, {Value::object(kTypeObj, unit), Value::integer(1000)});
   const HostOutcome outcome = invoke(registry, CallKind::member, "Stop", 1, stop);
   CHECK(outcome.value.as_integer() == 1);
-  CHECK(outcome.status == HostStatus::suspend);
-  CHECK(outcome.suspend_for == 1000);
+  CHECK(outcome.status == HostStatus::ok);
+  CHECK(outcome.suspend_for == 0);
   CHECK(!world.state(unit)->flags.has_active_path);
+  CHECK(combat.find(unit)->target == kNoObject);
+  CHECK(combat.find(unit)->attacks == 0);
+
+  // A unit with no target keeps its count: the setter writes only on a change.
+  combat.find(unit)->attacks = 2;
+  (void)invoke(registry, CallKind::member, "Stop", 1, stop);
+  CHECK(combat.find(unit)->attacks == 2);
+
+  // A walking unit loses its target on the first entry too, and is suspended.
+  combat.find(unit)->target = foe;
+  HostCall walk(world, {Value::object(kTypeObj, unit), pack_point(Point{900, 500}),
+                        Value::integer(0), Value::integer(2000), Value::boolean(true),
+                        Value::integer(0)});
+  (void)invoke(registry, CallKind::member, "Goto", 5, walk);
+  REQUIRE(world.state(unit)->flags.has_active_path);
+  combat.find(unit)->target = foe;
+  CHECK(invoke(registry, CallKind::member, "Stop", 1, stop).status == HostStatus::retry);
+  CHECK(combat.find(unit)->target == kNoObject);
 }
 
 TEST(a_host_stop_on_a_walking_unit_answers_at_its_re_entry) {

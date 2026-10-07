@@ -560,6 +560,18 @@ bool garrison_enter(World& world, SettlementId id, ObjectId unit, bool force);
 std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime now,
                            bool throttled = true);
 
+/// Whether `unit` is held by an object rather than by a settlement: what
+/// `Goto` (0x005d62b9), `Hero::FormSetupAndMoveTo` (0x0052e674) and
+/// `Unit::FormAcceptMove` (0x005d791d) ask of a held unit's holder before
+/// they try `garrison_exit`. 0x005319a0 resolves the handle at
+/// `[holder+0xe]`, the object the holder belongs to; a settlement's holder
+/// names none, a ship's names the ship. When it resolves the caller does not
+/// step out at all: it waits 100 ms and asks again, so a passenger stays
+/// aboard until the ship lets it off. The one such holder this engine mints is
+/// a ship's, at the ship's handle plus one (`World::spawn_ship`), which is how
+/// it is recognised here, as `Unit::InShip` recognises it.
+[[nodiscard]] bool held_by_carrier(const World& world, ObjectId unit);
+
 /// `Unit::posRH` (0x005d3db0, the unit's own `vtbl+0xc8`): where a unit
 /// stands for the questions that ask which node it is in. A unit on the map
 /// answers its own position. A unit in a holder answers **its settlement's

@@ -5,9 +5,12 @@
 
 #include <algorithm>
 #include <span>
+#include <string_view>
+#include <utility>
 
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/game/registry.hpp"
+#include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/path.hpp"
 #include "imperivm/core/sim/world.hpp"
@@ -144,6 +147,49 @@ void gate_line_cells(Point a, Point b, std::vector<GateCell>& out) {
 // the routes
 // --------------------------------------------------------------------------
 
+namespace {
+
+/// 0x0040aab0's branch for a leg parallel to the axis (0x0040abab..0x0040aca1):
+/// whether the leg meets the axis, and where. See `route_crossing` in the
+/// header for what each case is.
+bool parallel_meeting(Point a, Point b, Point from, Point to, Point& meet) noexcept {
+  const std::int64_t gx = static_cast<std::int64_t>(a.x) - b.x;
+  const std::int64_t gy = static_cast<std::int64_t>(a.y) - b.y;
+  // The leg's start, else its end, when either lies within the axis's span on
+  // the one coordinate that varies, both ends inclusive.
+  const auto either_end = [&](std::int32_t lo, std::int32_t hi, std::int32_t first,
+                              std::int32_t second) {
+    if (lo > hi) std::swap(lo, hi);
+    if (lo <= first && first <= hi) {
+      meet = from;
+      return true;
+    }
+    if (lo <= second && second <= hi) {
+      meet = to;
+      return true;
+    }
+    return false;
+  };
+  // An upright axis with the leg's start on its column, then a level one with
+  // the leg's start on its row: the only two cases that look at the spans.
+  if (gx == 0 && from.x == a.x) return either_end(a.y, b.y, from.y, to.y);
+  if (gy == 0 && from.y == a.y) return either_end(a.x, b.x, from.x, to.x);
+  // Otherwise the leg meets the axis when either end of it lies on the axis's
+  // line, wherever along the line that is, and the original writes no point.
+  // **Inference:** its caller's point is then an uninitialised local
+  // (0x00417ed0's `[esp+0x10]`); the leg's start is taken, so the crossing is
+  // where the leg begins.
+  const std::int64_t to_x = static_cast<std::int64_t>(to.x) - b.x;
+  const std::int64_t to_y = static_cast<std::int64_t>(to.y) - b.y;
+  const std::int64_t from_x = static_cast<std::int64_t>(from.x) - b.x;
+  const std::int64_t from_y = static_cast<std::int64_t>(from.y) - b.y;
+  const bool on_line = to_y * gx == to_x * gy || from_x * gy == from_y * gx;
+  if (on_line) meet = from;
+  return on_line;
+}
+
+}  // namespace
+
 std::int64_t route_crossing(std::span<const Point> route, Point a, Point b) noexcept {
   // 0x0040aab0 with the gate as its first segment and the leg as its second:
   // `denominator` is the cross product of the two directions, and the meeting
@@ -171,6 +217,8 @@ std::int64_t route_crossing(std::span<const Point> route, Point a, Point b) noex
                          static_cast<std::int32_t>(to.y + ly * on_leg / denominator)};
         return before + distance(from, meet);
       }
+    } else if (Point meet; parallel_meeting(a, b, from, to, meet)) {
+      return before + distance(from, meet);
     }
     before += distance(from, to);
   }
@@ -181,11 +229,23 @@ bool gate_bars(const World& world, const WorldObject& gate, PlayerId owner) noex
   return world.players().is_enemy(gate.state.owner, owner);
 }
 
+bool gate_closed_by_command(const World& world, const WorldObject& gate) noexcept {
+  const CommandSystem* commands = command_system(world);
+  if (commands == nullptr) return false;
+  // The first byte of `[gate+0x10c]` against `'c'` (0x00418346): one byte,
+  // case and all. An empty name's first byte is its terminator.
+  const std::string_view running = commands->command_name(gate.id);
+  return !running.empty() && running.front() == 'c';
+}
+
 bool gate_waves_through(const World& world, const WorldObject& gate, PlayerId owner,
                         GameTime now) noexcept {
-  // A friend, with nobody hostile near the gate: through, whatever the
-  // portcullis says. The action-name test is not reproduced; see the header.
-  if (!gate_bars(world, gate, owner) && !gate.state.flags.enemies_near) return true;
+  // A friend, with nobody hostile near the gate and the gate not closed by
+  // its owner's order: through, whatever the portcullis says.
+  if (!gate_bars(world, gate, owner) && !gate.state.flags.enemies_near &&
+      !gate_closed_by_command(world, gate)) {
+    return true;
+  }
   // Anyone else: through a gate that lets units through, or one opening.
   return gate_lets_through(gate, now) || gate.state.flags.gate_open;
 }

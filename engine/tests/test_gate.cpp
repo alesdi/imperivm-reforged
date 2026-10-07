@@ -26,6 +26,7 @@
 
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/game/entity.hpp"
+#include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/gate.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/path.hpp"
@@ -92,7 +93,9 @@ struct GateField {
   MovementSystem movement;
   ObjectId gate = kNoObject;
 
-  explicit GateField(bool second_gap = false) {
+  /// `commands`, when given, runs before the movement: the gate's running
+  /// command is the one thing the step reads from it.
+  explicit GateField(bool second_gap = false, CommandSystem* commands = nullptr) {
     graph.add(bytes_of(R"(<class id="Soldier" cpp_class="CVXUnit" parent="">
       <properties speed="100" radius="15"/></class>)"),
               "soldier.sc.xml");
@@ -112,6 +115,7 @@ struct GateField {
       grid.set_cell(x, 63, true);
     }
     movement.set_grid(std::move(grid));
+    if (commands != nullptr) REQUIRE(world.add_system(commands));
     REQUIRE(world.add_system(&movement));
     world.start();
     // Players 0 and 1 at war, each its own friend.
@@ -211,8 +215,8 @@ TEST(a_route_crossing_is_the_distance_to_where_it_first_meets_the_axis) {
   // Short of the route, and beside it.
   CHECK(route_crossing(route, Point{50, 1}, Point{50, 20}) == -1);
   CHECK(route_crossing(route, Point{150, -10}, Point{150, 10}) == -1);
-  // Parallel to a leg crosses nothing, even on it (the original's own
-  // branch for it was not followed).
+  // Along a leg, right across the axis with both of the leg's ends beyond
+  // it: the parallel branch looks only at the ends, so nothing.
   CHECK(route_crossing(route, Point{10, 0}, Point{20, 0}) == -1);
   // The first meeting, not the nearest: the axis meets both legs.
   CHECK(route_crossing(route, Point{40, -10}, Point{120, 70}) == 50);
@@ -222,6 +226,62 @@ TEST(a_route_crossing_is_the_distance_to_where_it_first_meets_the_axis) {
   // A route of one point crosses nothing.
   const std::vector<Point> still{{50, 0}};
   CHECK(route_crossing(still, Point{50, -10}, Point{50, 10}) == -1);
+}
+
+/// 0x0040aab0's branch for a leg parallel to the axis (0x0040abab..0x0040aca1).
+/// A level or upright axis with the leg starting on its row or column meets
+/// the leg at its start when that is within the axis's span, else at its end
+/// when that is; any other parallel leg meets the axis when an end of it lies
+/// anywhere on the axis's line, and is measured to the leg's start (the
+/// original writes no point; see the header).
+TEST(a_leg_parallel_to_the_axis_meets_it_only_at_an_end) {
+  // A level axis, x 40..60 at y 0.
+  const Point la{40, 0};
+  const Point lb{60, 0};
+  // Starting within the span: met where the leg starts.
+  const std::vector<Point> starts_inside{{50, 0}, {200, 0}};
+  CHECK(route_crossing(starts_inside, la, lb) == 0);
+  // Both ends within: the start, which is looked at first.
+  const std::vector<Point> both_inside{{55, 0}, {45, 0}};
+  CHECK(route_crossing(both_inside, la, lb) == 0);
+  // Starting outside and ending within: met where the leg ends.
+  const std::vector<Point> ends_inside{{0, 0}, {45, 0}};
+  CHECK(route_crossing(ends_inside, la, lb) == 45);
+  // Either end on the span's ends, inclusive; and the axis given either way
+  // round.
+  const std::vector<Point> ends_on_end{{0, 0}, {40, 0}};
+  CHECK(route_crossing(ends_on_end, la, lb) == 40);
+  CHECK(route_crossing(ends_on_end, lb, la) == 40);
+  const std::vector<Point> starts_on_end{{60, 0}, {100, 0}};
+  CHECK(route_crossing(starts_on_end, la, lb) == 0);
+  // Running right across it, both ends beyond: not met, and the route's next
+  // leg is measured after it.
+  const std::vector<Point> across{{0, 0}, {100, 0}, {100, 50}};
+  CHECK(route_crossing(across, la, lb) == -1);
+  CHECK(route_crossing(across, Point{90, 20}, Point{110, 20}) == 120);
+  // A level leg one unit off the axis's row meets nothing.
+  const std::vector<Point> beside{{0, 1}, {45, 1}};
+  CHECK(route_crossing(beside, la, lb) == -1);
+  // An upright axis, y 40..60 at x 0: the same, by columns.
+  const Point ua{0, 60};
+  const Point ub{0, 40};
+  const std::vector<Point> up_ends{{0, 0}, {0, 50}};
+  CHECK(route_crossing(up_ends, ua, ub) == 50);
+  const std::vector<Point> up_after{{30, 0}, {0, 0}, {0, 50}, {0, 300}};
+  CHECK(route_crossing(up_after, ua, ub) == 80);
+  const std::vector<Point> up_starts{{0, 45}, {0, 300}};
+  CHECK(route_crossing(up_starts, ua, ub) == 0);
+  const std::vector<Point> up_across{{0, 0}, {0, 100}};
+  CHECK(route_crossing(up_across, ua, ub) == -1);
+  // A slanting axis, (0,0)..(10,10): a parallel leg on its line meets it
+  // anywhere along the line, far beyond the axis, at the leg's start; one off
+  // the line does not.
+  const Point da{0, 0};
+  const Point db{10, 10};
+  const std::vector<Point> far_on_line{{300, 200}, {300, 300}, {400, 400}};
+  CHECK(route_crossing(far_on_line, da, db) == 100);
+  const std::vector<Point> off_line{{300, 200}, {300, 310}, {400, 410}};
+  CHECK(route_crossing(off_line, da, db) == -1);
 }
 
 /// The lines are learnt as gates appear and dropped as they go, the axis takes
@@ -365,6 +425,36 @@ TEST(an_enemys_route_goes_round_a_closed_gate) {
   CHECK(f.at(foe) == kNorth);
 }
 
+/// A stealthed enemy -- `SetVisible(false)`, `kSyncHidden` -- is passed over by
+/// `Gate::LookAround` (0x00529510), so it neither closes the gate nor keeps it
+/// shut; but the route search asks the gate's diplomacy row alone (0x00419331)
+/// and the step the same row (0x00418328), never the hidden bit. So a closed
+/// gate bars a hidden enemy's route and stops it at the gate exactly as it
+/// does a visible one, and only a gate opened for someone else lets it in.
+TEST(a_hidden_enemy_is_barred_by_a_closed_gate_as_any_enemy_is) {
+  {
+    GateField f(/*second_gap=*/true);
+    const ObjectId foe = f.unit(1, kSouth);
+    f.world.mutable_state(foe)->flags.hidden = true;
+    f.movement.order_goto(f.world, foe, kNorth, 0);
+    CHECK(f.movement.avoidance().gate_searches == 1);
+    CHECK(f.move(foe).gate_crossings.empty());
+    CHECK(f.move(foe).path_length > 1500);
+  }
+  GateField f;
+  const ObjectId foe = f.unit(1, kSouth);
+  f.world.mutable_state(foe)->flags.hidden = true;
+  f.movement.order_goto(f.world, foe, kNorth, 0);
+  REQUIRE(f.move(foe).gate_crossings.size() == 1);
+  CHECK(!f.walk(foe, 5000));
+  CHECK((f.at(foe) == Point{1000, kStandY}));
+  CHECK(!gate_waves_through(f.world, f.gate_slot(), 1, f.world.time()));
+  // Opened for a friend, which the hidden enemy did nothing to stop: it walks in.
+  f.swing(true);
+  CHECK(f.walk(foe, 10000));
+  CHECK(f.at(foe) == kNorth);
+}
+
 /// No way round, and a short route: the first route is kept (0x00419490), the
 /// soldier walks up to the gate and stands within reach of it -- both kinds of
 /// route, stepped and walked a turn at a time -- until the gate is opening,
@@ -502,6 +592,49 @@ TEST(a_friend_stands_before_its_closed_gate_while_enemies_are_near) {
   g.state.flags.gate_open = true;  // opening, at 0
   CHECK(gate_waves_through(f.world, g, 0, t));
   CHECK(gate_waves_through(f.world, g, 1, t));
+}
+
+/// 0x00418346: a gate running its owner's Close Gate -- a command whose name
+/// begins with `c` -- waves no friend through. The friend stands before it as
+/// anyone would, and walks on once the order is over and the gate opens.
+TEST(a_friend_stands_before_its_gate_while_the_gate_runs_close_gate) {
+  CommandSystem commands;
+  GateField f(/*second_gap=*/false, &commands);
+  REQUIRE(commands.set_command(f.world, f.gate, "closegate", Command{}) != 0);
+  REQUIRE(commands.command_name(f.gate) == "closegate");
+  const ObjectId friend_ = f.unit(0, kSouth);
+  f.movement.order_goto(f.world, friend_, kNorth, 0);
+  CHECK(f.movement.avoidance().gate_searches == 0);
+  CHECK(!f.walk(friend_, 5000));
+  CHECK((f.at(friend_) == Point{1000, kStandY}));
+  // The order over, the gate idles; `GATE_IDLE.VS` sees a friend and opens.
+  REQUIRE(commands.set_command(f.world, f.gate, "idle", Command{}) != 0);
+  f.swing(true);
+  CHECK(f.walk(friend_, 8000));
+  CHECK(f.at(friend_) == kNorth);
+
+  // The rule: the first byte, and nothing else of the name.
+  CommandSystem rule;
+  GateField g(/*second_gap=*/false, &rule);
+  WorldObject& gate = g.gate_slot();
+  const GameTime t = g.world.time();
+  CHECK(!gate_closed_by_command(g.world, gate));  // nothing queued: no name
+  CHECK(gate_waves_through(g.world, gate, 0, t));
+  for (const std::string_view verb : {"closegate", "close_permanent", "c"}) {
+    REQUIRE(rule.set_command(g.world, g.gate, verb, Command{}) != 0);
+    CHECK(gate_closed_by_command(g.world, gate));
+    CHECK(!gate_waves_through(g.world, gate, 0, t));
+  }
+  for (const std::string_view verb : {"idle", "opengate", "repair gate", "Closegate"}) {
+    REQUIRE(rule.set_command(g.world, g.gate, verb, Command{}) != 0);
+    CHECK(!gate_closed_by_command(g.world, gate));
+    CHECK(gate_waves_through(g.world, gate, 0, t));
+  }
+  // Opening, it lets everyone through, its order or not.
+  REQUIRE(rule.set_command(g.world, g.gate, "closegate", Command{}) != 0);
+  gate.state.flags.gate_open = true;
+  CHECK(gate_waves_through(g.world, gate, 0, t));
+  CHECK(gate_waves_through(g.world, gate, 1, t));
 }
 
 /// A gate standing fully open is laid for nobody: an enemy walks straight

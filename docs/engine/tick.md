@@ -207,6 +207,40 @@ Every other system still advances once per turn. A later system that needs sub-t
 resolution should do what movement does — derive its instants from its own exact state —
 rather than invent a step length.
 
+### What is drawn between two turns
+
+**The original's game clock moves every frame; this engine's moves a turn at a time.** Read
+in `gbr.exe`: the frame (`0x0051ea30`) hands the real clock to `0x00528e40`, which puts game
+time the real clock's share of the way across the turn's window — `[clock+0x24]` to
+`[clock+0x28]`, opened by `0x00528a80` — held below the window's end, and `0x00528b40` runs
+the schedulers up to it one millisecond at a time. (Both frame routines, `0x0051ea30` and the
+one at `0x004ccc60`, open the next window themselves with **150 ms** of real time when the
+real clock reaches the last one's end, `0x0051ea97` and `0x004cccca`; the networked transport
+opens it with the agreed length, `0x00407fe7`. So the unnetworked turn this section calls
+"not read" above looks to be 150 ms, not this engine's 100. Which frame routine a
+single-player match runs was not followed, and the app's default is left alone here.) A
+moving object is drawn where its animation has it at that instant:
+`GetCurrentPosition` (`0x0053d830`, slot `+0x40` of some thirty vtables) runs the point from
+where the animation started to its destination by the clock's place in the animation's
+window, and the flying visual (`0x0051b272`) asks the same. So between two turns the
+original's units walk frame by frame, and its turn boundaries are invisible.
+
+Here `World::advance` takes the clock to the window's end in one call, and the world then
+stands there for the turn's real length. The view used to draw that, so every unit stood for
+a turn and jumped a turn's walk — 100 ms at a time in a single-player match, up to 800 in a
+networked one. **The view now draws the instant the original's clock would show**, between the
+turn end before and the world's, by the real clock's share of the turn (`sim/glide.hpp`,
+`WorldView::set_turn_fraction`). It cannot run the simulation there, and must not; it reads
+the two turn ends it has seen. A position runs in a straight line between them — the
+original's answer along a straight stretch of a route, a chord across a corner turned inside
+the turn — and an animation's clock is carried on from the turn end before exactly as
+`run_turn` carries it, so a walk cycle steps frame by frame; a bird's leg and lift and a
+portcullis are read at the same instant. Only what walked glides: on a route at one end or the
+other, on the map at both, and slower than one world unit a millisecond. Rings, bars, shadows
+and both picks are placed from the same anchor. A paused or held clock (a menu, `turn:N`)
+draws the world as it stands until the next turn runs. Nothing the view derives reaches the
+world: `test_glide.cpp` holds the hash, and the app is held to `imrun`'s.
+
 ### The determinism contract is narrower than it looks
 
 The dumps carry eight hash channels. Across all nine:

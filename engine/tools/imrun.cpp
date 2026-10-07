@@ -88,7 +88,10 @@ int main(int argc, char** argv) {
                  "prints where it stands every ten turns and every gate its route\n"
                  "crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
                  "and as it starts or stops letting units through, and every gate\n"
-                 "at the end.\n");
+                 "at the end.\n"
+                 "IMRUN_ORDERS=<n> prints every n turns each AI's order queue: its\n"
+                 "slots, the orders still waiting and the most urgent, and whether\n"
+                 "the order it last carried out is still running.\n");
     return 2;
   }
   const std::string game = argv[1];
@@ -300,6 +303,25 @@ int main(int argc, char** argv) {
   // scripts are what call it when no sequence does.
   sim::MatchOptions match_options;
   match_options.human = human;
+  // `IMRUN_SEATS=<p>[,<p>...]`: those seats are people who give no orders, as
+  // `imconform --skirmish` seats its peers, so a run can watch the AI play the
+  // networked skirmish the long lockstep checks play.
+  if (const char* seats = std::getenv("IMRUN_SEATS")) {
+    match_options.multiplayer = true;
+    for (const char* at = seats; *at != '\0';) {
+      char* end = nullptr;
+      const unsigned long seat = std::strtoul(at, &end, 10);
+      if (end == at) break;
+      if (seat < sim::kPlayerCount) {
+        match_options.control_set[seat] = true;
+        match_options.controls[seat] = sim::PlayerControl::human;
+        if (match_options.human == kNoPlayer || seat < match_options.human) {
+          match_options.human = static_cast<sim::PlayerId>(seat);
+        }
+      }
+      at = *end == ',' ? end + 1 : end;
+    }
+  }
   const std::size_t victory_started = run.start_match(match_options);
   const std::size_t objects_started = run.start_object_scripts();
   // The AI, for every computer-controlled player -- the app's order: match,
@@ -652,6 +674,9 @@ int main(int argc, char** argv) {
   // reaches `ESH_BUILDARMY.VS`'s gold floor is a curve, not an end state.
   std::uint64_t economy_every = 0;
   if (const char* every = std::getenv("IMRUN_ECONOMY")) economy_every = std::strtoull(every, nullptr, 10);
+  // `IMRUN_ORDERS=<n>`: the AI order queues every n turns.
+  std::uint64_t orders_every = 0;
+  if (const char* every = std::getenv("IMRUN_ORDERS")) orders_every = std::strtoull(every, nullptr, 10);
   for (std::uint64_t turn = 0; turn < turns; ++turn) {
     if (until_over && ended_at != 0) break;
     if (economy_every != 0 && turn % economy_every == 0) {
@@ -704,8 +729,33 @@ int main(int argc, char** argv) {
       }
       std::printf("  goto turn %llu: %u to (%d,%d), %zu issued\n", turn, goto_id, goto_x, goto_y,
                   made.issued);
+      // The order's route is printed whatever it crosses: a route that
+      // crosses no gate after one that crossed none before is still the
+      // answer to this order, and a reader waits for it.
+      if (goto_id == watched) watched_crossing = "\x01";
     }
     run.advance(1, length);
+    if (orders_every > 0 && (turn + 1) % orders_every == 0) {
+      // The AI order queues: per player, the slots, the orders still waiting
+      // and the most urgent of them, and whether slot 2's runner is alive.
+      if (const sim::HeroSystem* heroes = sim::hero_system_of(run.world())) {
+        for (PlayerId p = 0; p < sim::kPlayerCount; ++p) {
+          const sim::AiOrderQueue* queue = heroes->squads().orders(p);
+          if (queue == nullptr || queue->todo.empty()) continue;
+          std::size_t waiting = 0;
+          std::int32_t top = 0;
+          for (const sim::AiOrder& record : queue->todo) {
+            if (record.verb == 0 || record.priority <= 0) continue;
+            ++waiting;
+            top = std::max<std::int32_t>(top, record.priority);
+          }
+          std::printf("  orders turn %llu: p%u %zu slot(s), %zu waiting, top %d, runner %s\n",
+                      static_cast<unsigned long long>(turn + 1), static_cast<unsigned>(p),
+                      queue->todo.size(), waiting, top,
+                      run.scheduler().alive(queue->runner) ? "running" : "free");
+        }
+      }
+    }
     if (watched != kNoObject) {
       // The gates the watched unit's route crosses, whenever they change: a
       // route a gate bars is searched again round it (`sim/gate.hpp`).

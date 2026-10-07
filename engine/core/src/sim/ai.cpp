@@ -673,12 +673,24 @@ AiStartStatus ai_start(World& world, PlayerId player, std::string_view profile,
   // takes only a scheduler. The original's constructor sizes both arrays from
   // `GAIKACount` in the same breath as allocating the AI object.
   if (status == AiStartStatus::ok) ai->seed_gaika_view(player, world.gaika().count());
+  // The order queue is the AI object's too (0x00449250, constructed with it),
+  // so an AI that replaced another starts from an empty one -- and the timer
+  // `CVXAI::Start` arms with no delay is the reset queue's own `due` of 0. The
+  // two statuses are the ones `start` reaches only after its `stop`.
+  if (status == AiStartStatus::ok || status == AiStartStatus::no_main_script) {
+    if (HeroSystem* heroes = hero_system_of(world)) heroes->squads().reset_orders(player);
+  }
   return status;
 }
 
 bool ai_stop(World& world, PlayerId player, script::Scheduler& scheduler) {
   AiSystem* ai = ai_system_of(world);
-  return ai != nullptr && ai->stop(player, scheduler);
+  if (ai == nullptr || !ai->stop(player, scheduler)) return false;
+  // The queue goes with the AI object (0x00448e90): every record freed, every
+  // squad of the player answering no `OrderDest`. `stop` has already killed
+  // the runner, which it owns.
+  if (HeroSystem* heroes = hero_system_of(world)) heroes->squads().reset_orders(player);
+  return true;
 }
 
 std::size_t ai_start_players(World& world, script::Scheduler& scheduler,
