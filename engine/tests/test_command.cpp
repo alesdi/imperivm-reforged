@@ -1183,14 +1183,78 @@ TEST(idle_is_an_order_that_costs_game_time) {
   CHECK(f.commands.command_count(u) == 0);
 }
 
-/// `Taunt` yields where it can taunt and sleeps where it cannot.
+/// `Unit::Idle` on the map drops the combat target and still costs its
+/// argument; in a holder it only waits.
+///
+/// 0x005d6030 sets the idle activity, empties `[unit+0x1a8]` and returns 3,
+/// which ends the slice with no timed wake (0x0069d5fb); the idle activity
+/// (0x005d2ca0) spends the popped `ms` and then wakes the script. A held
+/// receiver writes `ms` to the wait cell and returns 1 instead, and its target
+/// is left alone.
+TEST(idle_on_the_map_drops_the_target_and_still_waits_its_argument) {
+  Fixture f;
+  CombatSystem combat;
+  REQUIRE(f.world.add_system(&combat));
+  HostRegistry registry;
+  register_command_host(registry);
+
+  const ObjectId u = f.spawn(f.unit_class, Point{100, 100});
+  const ObjectId foe = f.spawn(f.unit_class, Point{140, 100}, /*owner=*/2);
+  Combatant a;
+  a.id = u;
+  a.owner = 1;
+  a.health = 100;
+  a.position = Point{100, 100};
+  a.target = foe;
+  a.attacks = 3;
+  a.action = Action::engaging;
+  combat.add(a);
+
+  HostCall standing(f.world, {obj(u), Value::integer(1900)});
+  const HostOutcome idled = invoke(registry, CallKind::member, "Idle", 1, standing);
+  CHECK(idled.status == HostStatus::suspend);
+  CHECK(idled.suspend_for == 1900);
+  REQUIRE(combat.find(u) != nullptr);
+  CHECK(combat.find(u)->target == kNoObject);
+  CHECK(combat.find(u)->attacks == 0);
+  CHECK(combat.find(u)->action == Action::idle);
+
+  // A non-positive argument still ends the slice, as every 3 does.
+  combat.find(u)->target = foe;
+  HostCall zero(f.world, {obj(u), Value::integer(0)});
+  const HostOutcome yielded = invoke(registry, CallKind::member, "Idle", 1, zero);
+  CHECK(yielded.status == HostStatus::suspend);
+  CHECK(yielded.suspend_for == 0);
+  CHECK(combat.find(u)->target == kNoObject);
+
+  // Inside a holder: the argument as a wait, and the target kept.
+  const ObjectId inside = f.spawn(f.unit_class, Point{200, 200});
+  const World::SettlementIds town = f.world.spawn_settlement(1);
+  REQUIRE(f.world.put_in_holder(inside, town.holder));
+  Combatant held;
+  held.id = inside;
+  held.owner = 1;
+  held.health = 100;
+  held.target = foe;
+  held.attacks = 2;
+  combat.add(held);
+  HostCall boxed(f.world, {obj(inside), Value::integer(1500)});
+  const HostOutcome waited = invoke(registry, CallKind::member, "Idle", 1, boxed);
+  CHECK(waited.status == HostStatus::suspend);
+  CHECK(waited.suspend_for == 1500);
+  CHECK(combat.find(inside)->target == foe);
+  CHECK(combat.find(inside)->attacks == 2);
+}
+
+/// `Taunt` costs its argument wherever it is, and drops the target on the map.
 ///
 /// `Unit::Taunt` and `Unit::Idle` are the same function in `gbr.exe`, one
 /// constant apart, and the branch they share is on the receiver's *position*:
 /// `(-1, -1)` -- a unit inside a holder, whose location is its holder's -- takes
 /// the argument as a sleep and does nothing else, and anything with a real
-/// position drops its combat target and ends the slice. The 2,000 every shipped
-/// site passes is therefore only ever consumed by the held branch.
+/// position drops its combat target and returns 3, whose wake comes from the
+/// taunt activity once it has spent the popped argument (0x005d2ca0). So the
+/// 2,000 every shipped site passes is two seconds on the map too.
 TEST(taunt_drops_the_target_on_the_map_and_waits_in_a_holder) {
   Fixture f;
   CombatSystem combat;
@@ -1212,9 +1276,10 @@ TEST(taunt_drops_the_target_on_the_map_and_waits_in_a_holder) {
 
   HostCall standing(f.world, {obj(u), Value::integer(2000)});
   const HostOutcome yielded = invoke(registry, CallKind::member, "Taunt", 1, standing);
-  // Suspended with no timed wake: one scheduler step, not two seconds.
+  // Two seconds of taunting, not one scheduler step: `UNIT_CAPTURE.VS` takes
+  // a point of loyalty after each.
   CHECK(yielded.status == HostStatus::suspend);
-  CHECK(yielded.suspend_for == 0);
+  CHECK(yielded.suspend_for == 2000);
   // "A new order supersedes combat" -- the prologue this shares with `Stop`,
   // both `Goto`s, `Attack` and `AttackEveryone`.
   REQUIRE(combat.find(u) != nullptr);
@@ -1241,9 +1306,12 @@ TEST(taunt_drops_the_target_on_the_map_and_waits_in_a_holder) {
   CHECK(combat.find(inside)->target == foe);   // untouched
   CHECK(combat.find(inside)->attacks == 2);
 
-  // A held receiver with a non-positive argument has nothing to wait for.
+  // A non-positive argument still suspends, for one pass: the held branch
+  // writes it to the wait cell and returns 1, the other returns 3.
   HostCall zero(f.world, {obj(inside), Value::integer(0)});
-  CHECK(invoke(registry, CallKind::member, "Taunt", 1, zero).status == HostStatus::ok);
+  const HostOutcome brief = invoke(registry, CallKind::member, "Taunt", 1, zero);
+  CHECK(brief.status == HostStatus::suspend);
+  CHECK(brief.suspend_for == 0);
 
   // It touches the queue no more than `Idle` does.
   CHECK(f.commands.command_count(u) == 0);
@@ -1267,9 +1335,12 @@ TEST(taunt_without_a_combat_system_still_yields) {
   // A handle that is a number but names no object gets past `resolve` and is
   // caught here instead: this body reads the position and the original
   // dereferences null in the same place, which is a fault rather than a
-  // behaviour.
+  // behaviour. It waits its argument, as an idle does, so that no loop spins
+  // on it.
   HostCall stale(f.world, {obj(static_cast<ObjectId>(9999)), Value::integer(2000)});
-  CHECK(invoke(registry, CallKind::member, "Taunt", 1, stale).status == HostStatus::ok);
+  const HostOutcome gone = invoke(registry, CallKind::member, "Taunt", 1, stale);
+  CHECK(gone.status == HostStatus::suspend);
+  CHECK(gone.suspend_for == 2000);
 }
 
 // --------------------------------------------------------------------------
@@ -2096,6 +2167,51 @@ TEST(form_keep_moving_waits_for_its_whole_argument_and_never_for_the_eta) {
   // does not make.
   HostCall zero(f.world, {obj(hero), Value::integer(0)});
   CHECK(invoke(registry, CallKind::member, "FormKeepMoving", 1, zero).status == HostStatus::ok);
+}
+
+TEST(a_members_form_keep_moving_drops_its_target_and_a_heros_does_not) {
+  // `Unit::FormKeepMoving` (0x005d7a40) empties `[unit+0x1a8]` on its first
+  // entry (0x005d7a7b); `Hero::FormKeepMoving` (0x0052eaf0) has no such write.
+  Fixture f;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(64, 64));
+  f.world.add_system(&movement);
+  HeroSystem heroes;
+  f.world.add_system(&heroes);
+  CombatSystem combat;
+  REQUIRE(f.world.add_system(&combat));
+  HostRegistry registry;
+  register_movement_host(registry);
+  register_command_host(registry);
+
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.hero_class);
+  f.world.set_position(hero, Point{100, 100});
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 1000);
+  heroes.register_hero(f.world, hero);
+  const ObjectId member = f.spawn(f.unit_class, Point{120, 100});
+  const ObjectId foe = f.spawn(f.unit_class, Point{300, 100}, /*owner=*/2);
+  for (const ObjectId id : {hero, member}) {
+    Combatant c;
+    c.id = id;
+    c.owner = 1;
+    c.health = 100;
+    c.target = foe;
+    c.attacks = 2;
+    combat.add(c);
+  }
+
+  HostCall member_keep(f.world, {obj(member), Value::integer(1000)});
+  const HostOutcome kept = invoke(registry, CallKind::member, "FormKeepMoving", 1, member_keep);
+  CHECK(kept.status == HostStatus::suspend);
+  CHECK(kept.suspend_for == 1000);
+  CHECK(combat.find(member)->target == kNoObject);
+  CHECK(combat.find(member)->attacks == 0);
+
+  HostCall hero_keep(f.world, {obj(hero), Value::integer(1500)});
+  (void)invoke(registry, CallKind::member, "FormKeepMoving", 1, hero_keep);
+  CHECK(combat.find(hero)->target == foe);
+  CHECK(combat.find(hero)->attacks == 2);
 }
 
 TEST(form_path_left_is_a_distance) {

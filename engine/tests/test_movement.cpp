@@ -1821,6 +1821,58 @@ TEST(path_to_answers_a_straight_line_for_a_class_that_ignores_passability) {
   CHECK(invoke(registry, CallKind::member, "PathTo", 3, walled).value.as_integer() == -1);
 }
 
+TEST(both_forms_of_goto_drop_the_combat_target) {
+  // The point form empties `[unit+0x1a8]` once the unit is out of any holder
+  // (0x005d639a), the object form on every entry before anything else
+  // (0x005d6c2f): a new order supersedes combat, as it does for `Stop`.
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(open_field(64));
+  CombatSystem combat;
+  world.add_system(&combat);
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{500, 500}, 100);
+  const ObjectId foe = spawn_unit(world, movement, Point{540, 500}, 100);
+  const ObjectId post = spawn_unit(world, movement, Point{1500, 500}, 100);
+  Combatant fighter;
+  fighter.id = unit;
+  fighter.owner = 0;
+  fighter.health = 100;
+  fighter.target = foe;
+  fighter.attacks = 3;
+  (void)combat.add(fighter);
+
+  HostCall to_point(world, {Value::object(kTypeObj, unit), pack_point(Point{900, 500}),
+                            Value::integer(0), Value::integer(2000), Value::boolean(true),
+                            Value::integer(0)});
+  (void)invoke(registry, CallKind::member, "Goto", 5, to_point);
+  CHECK(combat.find(unit)->target == kNoObject);
+  CHECK(combat.find(unit)->attacks == 0);
+
+  // The same order again, walking: still dropped, since each call here is a
+  // first entry of the original's.
+  combat.find(unit)->target = foe;
+  (void)invoke(registry, CallKind::member, "Goto", 5, to_point);
+  CHECK(combat.find(unit)->target == kNoObject);
+
+  combat.find(unit)->target = foe;
+  combat.find(unit)->attacks = 4;
+  HostCall to_object(world, {Value::object(kTypeObj, unit), Value::object(kTypeObj, post),
+                             Value::integer(0), Value::integer(2000), Value::boolean(true),
+                             Value::integer(0)});
+  (void)invoke(registry, CallKind::member, "Goto", 5, to_object);
+  CHECK(combat.find(unit)->target == kNoObject);
+  CHECK(combat.find(unit)->attacks == 0);
+
+  // A unit with no target keeps its count: the writes are made on a change.
+  combat.find(unit)->attacks = 2;
+  (void)invoke(registry, CallKind::member, "Goto", 5, to_point);
+  CHECK(combat.find(unit)->attacks == 2);
+}
+
 TEST(a_host_stop_on_a_standing_unit_answers_true_at_once_and_drops_its_target) {
   // 34 of `Stop`'s 53 sites are `while (!.Stop(1000));`. A void `Stop` yields
   // nil, `!nil` is true, and every one of those loops spins forever -- so it
