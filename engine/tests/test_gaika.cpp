@@ -2924,6 +2924,132 @@ TEST(squad_gaika_in_follows_the_first_member_and_src_gaika_is_stamped_once) {
   CHECK(b.heroes.squads().find(key)->src_gaika == west);
 }
 
+namespace {
+
+/// `StrengthBench` armed so that an `Archer` is worth **nothing** to a squad.
+///
+/// The census valuation is `(attack + armour) * (level + 13) * (maxhealth / 4
+/// + health) / 1000 + 1`, and a squad adds it up in sixteen bits a member
+/// (0x004447e9, 0x00445b22). With 10 attack, no armour, a fresh level of 1 and
+/// 374,488 health of 374,488 that is 10 * 14 * 468,110 / 1000 + 1 = 65,536,
+/// which those sixteen bits read as 0 -- the one way a member can be worth
+/// nothing, and so the one way a squad's strength reaches 0 with somebody in
+/// it.
+struct SpentBench : StrengthBench {
+  static constexpr std::int32_t kSpentHealth = 374488;
+
+  void arm_spent() {
+    CombatProfile p;
+    p.damage = 10;
+    p.damage_type = DamageType::slash;
+    p.max_health = 200;
+    p.range = 17;
+    p.radius = 15;
+    p.selection_radius = 15;
+    p.sight = 500;
+    p.attack_interval = 1000;
+    combat.set_profile(graph.find("Legionary"), p);
+    p.max_health = kSpentHealth;
+    combat.set_profile(graph.find("Archer"), p);
+    for (const WorldObject& slot : world.objects()) {
+      if (slot.class_index == graph.find("Archer")) CHECK(world.set_health(slot.id, kSpentHealth));
+    }
+    combat.start(world);
+  }
+};
+
+}  // namespace
+
+/// **A squad's order is freed when its strength reaches 0 at a leave, with
+/// members left in it** -- `Squad::RemoveMember` (0x00444750) tests the running
+/// strength at 0x004447f6, not the member count -- and the squad is stood down
+/// with it: filed under no node (0x0041eac0 with 0) and bound for none
+/// (0x00444210 with 0). The squad itself stays, with the member it has.
+TEST(a_leave_that_brings_a_squads_strength_to_0_frees_its_order_with_members_left) {
+  SpentBench b;
+  b.plant(3, 3);
+  b.rebuild();
+  const GaikaId node = b.world.gaika().at(b.world.lsa(), in_cell(2, 2));
+  REQUIRE(node != kNoGaika);
+  const ObjectId lead = b.trooper("Legionary", 2, 2, 2);
+  const ObjectId spent = b.trooper("Archer", 2, 2, 3);
+  const ObjectId other = b.trooper("Legionary", 2, 3, 2);
+  const ObjectId kept = b.trooper("Legionary", 2, 3, 3);
+  b.arm_spent();
+  REQUIRE(b.worth(spent) == 0);
+  REQUIRE(b.worth(lead) > 0);
+
+  SquadTable& table = b.heroes.squads();
+  const SquadKey key = b.raw(2, {lead, spent});
+  // A control beside it: the same leave, from a squad whose member left is
+  // worth something.
+  const SquadKey control = b.raw(2, {other, kept});
+  b.step();
+  REQUIRE(table.find(key)->eval == b.worth(lead));
+  REQUIRE(table.find(key)->gaika_in == node);
+  REQUIRE(table.post_order(key, node, 7));
+  REQUIRE(table.post_order(control, node, 7));
+  table.find(key)->dest_gaika = node;
+  table.find(control)->dest_gaika = node;
+  const std::int32_t slot = table.find(key)->order;
+  REQUIRE(slot >= 0);
+
+  CHECK(table.leave(b.world, key, lead));
+  const Squad* squad = table.find(key);
+  REQUIRE(squad != nullptr);
+  CHECK(squad->members == std::vector<ObjectId>{spent});
+  CHECK(squad->eval == 0);
+  CHECK(squad->order == -1);
+  CHECK(squad->order_dest == kNoGaika);
+  CHECK(squad->ai_dest == kNoGaika);
+  CHECK(squad->gaika_in == kNoGaika);
+  CHECK(squad->dest_gaika == kNoGaika);
+  const AiOrderQueue* queue = table.orders(2);
+  REQUIRE(queue != nullptr);
+  CHECK(queue->todo[static_cast<std::size_t>(slot)].verb == 0);
+  CHECK(queue->first_free == slot);
+
+  // The control keeps everything, and its strength is the member left's on
+  // the instant -- the leave takes the sum, not the next turn.
+  CHECK(table.leave(b.world, control, other));
+  const Squad* still = table.find(control);
+  REQUIRE(still != nullptr);
+  CHECK(still->eval == b.worth(kept));
+  CHECK(still->order >= 0);
+  CHECK(still->order_dest == node);
+  CHECK(still->gaika_in == node);
+  CHECK(still->dest_gaika == node);
+}
+
+/// **Only a leave tests it.** The total's other writers in the original
+/// (0x0041e890 and 0x0041e900, either side of a health write or a stat recalc)
+/// subtract and add and test nothing, so a squad that is worth nothing and
+/// loses nobody keeps its order -- here, through the turn that sums it.
+TEST(a_squad_worth_nothing_that_loses_nobody_keeps_its_order) {
+  SpentBench b;
+  b.plant(3, 3);
+  b.rebuild();
+  const GaikaId node = b.world.gaika().at(b.world.lsa(), in_cell(2, 2));
+  REQUIRE(node != kNoGaika);
+  const ObjectId spent = b.trooper("Archer", 2, 2, 3);
+  b.arm_spent();
+  REQUIRE(b.worth(spent) == 0);
+
+  SquadTable& table = b.heroes.squads();
+  const SquadKey key = b.raw(2, {spent});
+  REQUIRE(table.post_order(key, node, 7));
+  table.find(key)->dest_gaika = node;
+  b.step();
+  b.step();
+  const Squad* squad = table.find(key);
+  REQUIRE(squad != nullptr);
+  CHECK(squad->eval == 0);
+  CHECK(squad->order >= 0);
+  CHECK(squad->order_dest == node);
+  CHECK(squad->dest_gaika == node);
+  CHECK(squad->gaika_in == node);
+}
+
 /// A unit inside a settlement stands where that settlement's central building
 /// stands -- `Unit::GetPos` (0x005d3db0) for a held unit -- so its squad stays
 /// filed under the settlement's node and `Squad::pos` answers the building.

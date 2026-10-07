@@ -272,7 +272,7 @@ TEST(infobar_lists_a_heros_army_in_the_holder_strip) {
 
   // A hero with no army: a cell of its own in a multiple selection, with no
   // number.
-  CHECK(heroes->detach_army(7) == 3);
+  CHECK(heroes->detach_army(world, 7) == 3);
   f.select({7, 4});
   info = f.bar->describe(0);
   REQUIRE(info.holder.size() == 2);

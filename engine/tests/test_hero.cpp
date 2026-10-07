@@ -478,7 +478,7 @@ TEST(detach_clears_the_hero_handle_and_the_squad) {
   CHECK(f.heroes.attach(f.world, a, hero));
   CHECK(f.heroes.attach(f.world, b, hero));
 
-  CHECK(f.heroes.detach(a));
+  CHECK(f.heroes.detach(f.world, a));
   CHECK(f.heroes.hero_of(a) == sim::kNoObject);
   CHECK(f.heroes.squad_of(a) == kNoSquad);
   CHECK(f.heroes.army_size(hero) == 1);
@@ -486,7 +486,7 @@ TEST(detach_clears_the_hero_handle_and_the_squad) {
   REQUIRE(squad != nullptr);
   CHECK(squad->size() == 2);       // hero + b
   CHECK(squad->members[1] == b);   // order preserved
-  CHECK(!f.heroes.detach(a));      // idempotent, and says so
+  CHECK(!f.heroes.detach(f.world, a));      // idempotent, and says so
 }
 
 TEST(detach_army_empties_the_squad_but_keeps_the_hero_in_it) {
@@ -495,7 +495,7 @@ TEST(detach_army_empties_the_squad_but_keeps_the_hero_in_it) {
   const ObjectId hero = f.spawn_hero();
   for (int i = 0; i < 5; ++i) CHECK(f.heroes.attach(f.world, f.spawn_warrior(), hero));
 
-  CHECK(f.heroes.detach_army(hero) == 5);
+  CHECK(f.heroes.detach_army(f.world, hero) == 5);
   CHECK(f.heroes.army_size(hero) == 0);
   CHECK(!f.heroes.has_army(hero));
   const Squad* squad = f.heroes.squads().find(f.heroes.squad_of(hero));
@@ -803,7 +803,7 @@ TEST(a_detached_warrior_loses_the_floor) {
   f.grant(hero, 10);
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::discipline, 8));
   CHECK(f.heroes.level(warrior) == 10);
-  CHECK(f.heroes.detach(warrior));
+  CHECK(f.heroes.detach(f.world, warrior));
   CHECK(f.heroes.level(warrior) == 1);
 }
 
@@ -1364,7 +1364,7 @@ TEST(two_identical_worlds_produce_identical_squads) {
     const ObjectId b = f.spawn_hero(1);
     for (int i = 0; i < 4; ++i) f.heroes.attach(f.world, f.spawn_warrior(0), a);
     for (int i = 0; i < 9; ++i) f.heroes.attach(f.world, f.spawn_warrior(1), b);
-    f.heroes.detach_army(a);
+    f.heroes.detach_army(f.world, a);
     for (int i = 0; i < 3; ++i) f.heroes.attach(f.world, f.spawn_warrior(0), a);
     std::uint64_t hash = 0xcbf29ce484222325ull;
     f.heroes.hash(hash);
@@ -2029,7 +2029,7 @@ TEST(a_heros_army_comes_back_as_a_list_in_attach_order) {
   // reference -- `{handle, 0x1cc, hero + 0x1cc}` -- and the divergence is
   // recorded at `m_army`; this pins which of the two this engine does, so that
   // changing it is a decision rather than an accident.
-  REQUIRE(f.heroes.detach(first));
+  REQUIRE(f.heroes.detach(f.world, first));
   CHECK(call(script::CallKind::member, "count", {full.value}).value.as_integer() == 2);
   CHECK(call(script::CallKind::member, "count",
              {call(script::CallKind::member, "army", {hero_ref}).value})

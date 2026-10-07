@@ -237,7 +237,7 @@ HeroRecord& HeroSystem::register_hero(World& world, ObjectId id) {
   // each judged it by whichever they found first -- the hero alone.
   SquadKey existing = squads_.squad_of(id);
   if (Squad* squad = squads_.find(existing); squad != nullptr && squad->members.front() != id) {
-    (void)squads_.leave(existing, id);
+    (void)squads_.leave(world, existing, id);
     existing = kNoSquad;
   }
   if (existing != kNoSquad) {
@@ -260,14 +260,14 @@ HeroRecord& HeroSystem::register_hero(World& world, ObjectId id) {
 void HeroSystem::forget(World& world, ObjectId id) {
   if (HeroRecord* record = hero(id)) {
     const std::vector<ObjectId> army = record->army;
-    for (const ObjectId member : army) detach(member);
+    for (const ObjectId member : army) detach(world, member);
     squads_.destroy(record->squad);
     heroes_.erase(heroes_.begin() + static_cast<std::ptrdiff_t>(hero_slot(id)));
   }
   if (const UnitRecord* record = unit(id)) {
-    if (record->hero != kNoObject) detach(id);
+    if (record->hero != kNoObject) detach(world, id);
     const std::size_t at = unit_slot(id);
-    squads_.leave(units_[at].squad, id);
+    squads_.leave(world, units_[at].squad, id);
     units_.erase(units_.begin() + static_cast<std::ptrdiff_t>(at));
   }
   items_.drop_owner(world, id);
@@ -371,7 +371,7 @@ bool HeroSystem::attach(World& world, ObjectId unit_id, ObjectId hero_id) {
   if (unit_state->owner != hero_state->owner) return false;
   if (army_full(hero_id)) return false;
 
-  if (record->hero != kNoObject) detach(unit_id);
+  if (record->hero != kNoObject) detach(world, unit_id);
 
   record->hero = hero_id;
   record->squad = leader->squad;
@@ -380,25 +380,25 @@ bool HeroSystem::attach(World& world, ObjectId unit_id, ObjectId hero_id) {
   return true;
 }
 
-bool HeroSystem::detach(ObjectId unit_id) {
+bool HeroSystem::detach(World& world, ObjectId unit_id) {
   UnitRecord* record = unit(unit_id);
   if (record == nullptr || record->hero == kNoObject) return false;
 
   if (HeroRecord* leader = hero(record->hero)) {
     const auto it = std::find(leader->army.begin(), leader->army.end(), unit_id);
     if (it != leader->army.end()) leader->army.erase(it);
-    squads_.leave(leader->squad, unit_id);
+    squads_.leave(world, leader->squad, unit_id);
   }
   record->hero = kNoObject;
   record->squad = kNoSquad;
   return true;
 }
 
-std::size_t HeroSystem::detach_army(ObjectId hero_id) {
+std::size_t HeroSystem::detach_army(World& world, ObjectId hero_id) {
   HeroRecord* leader = hero(hero_id);
   if (leader == nullptr) return 0;
   const std::vector<ObjectId> army = leader->army;
-  for (const ObjectId member : army) detach(member);
+  for (const ObjectId member : army) detach(world, member);
   return army.size();
 }
 
@@ -422,18 +422,18 @@ void HeroSystem::roll_wisdom(World& world, ObjectId unit_id) {
   if (constants_.percent_per_wisdom_level * points > draw) (void)add_experience(leader, 1);
 }
 
-void HeroSystem::detach_for_death(ObjectId id) {
+void HeroSystem::detach_for_death(World& world, ObjectId id) {
   // `DetachArmy` first, as the hero's override has it: every warrior leaves the
   // hero, and with it the hero's squad.
-  if (hero(id) != nullptr) (void)detach_army(id);
+  if (hero(id) != nullptr) (void)detach_army(world, id);
   // `DetachHero`: out of the army deque, hero handle to 65535.
   if (const UnitRecord* record = unit(id); record != nullptr && record->hero != kNoObject) {
-    (void)detach(id);
+    (void)detach(world, id);
   }
   // The AI unregister: the squad handle cleared and the unit out of its squad.
   // Re-found, because `detach` may already have cleared it.
   if (UnitRecord* record = unit(id); record != nullptr) {
-    if (record->squad.valid()) (void)squads_.leave(record->squad, id);
+    if (record->squad.valid()) (void)squads_.leave(world, record->squad, id);
     record->squad = kNoSquad;
   }
   // And out of whatever squad the table lists it in, which is the squad the
@@ -443,7 +443,7 @@ void HeroSystem::detach_for_death(ObjectId id) {
   // Crossroads, 1,716 dead or erased members in 4,000 turns, squads of
   // corpses the recruiter and the squad monitor walked for the rest of the
   // match.
-  if (const SquadKey listed = squads_.squad_of(id); listed.valid()) (void)squads_.leave(listed, id);
+  if (const SquadKey listed = squads_.squad_of(id); listed.valid()) (void)squads_.leave(world, listed, id);
   if (HeroRecord* record = hero(id); record != nullptr) record->squad = kNoSquad;
   squads_.prune_empty();
 }
@@ -451,12 +451,12 @@ void HeroSystem::detach_for_death(ObjectId id) {
 void HeroSystem::on_death(World& world, ObjectId id) {
   // A held unit takes the erase route in the original, and the erase detaches.
   if (const ObjectState* state = world.state(id); state != nullptr && state->is_held()) return;
-  detach_for_death(id);
+  detach_for_death(world, id);
 }
 
 void HeroSystem::on_erase(World& world, ObjectId id) {
   (void)world;
-  detach_for_death(id);
+  detach_for_death(world, id);
 }
 
 // --------------------------------------------------------------------------
@@ -838,7 +838,7 @@ void HeroSystem::clear_dead(World& world) {
     std::vector<ObjectId>& army = record.army;
     const auto gone = std::remove_if(army.begin(), army.end(), [&](ObjectId member) {
       if (world.find(member) != nullptr) return false;
-      squads_.leave(record.squad, member);
+      squads_.leave(world, record.squad, member);
       if (UnitRecord* unit_record = unit(member)) {
         unit_record->hero = kNoObject;
         unit_record->squad = kNoSquad;
@@ -1081,12 +1081,12 @@ HostOutcome fn_detach_from(CallContext& ctx) {
   if (named != kNoObject && host->heroes->hero_of(unit) != named) {
     return HostOutcome::ok_with(Value::boolean(false));
   }
-  return HostOutcome::ok_with(Value::boolean(host->heroes->detach(unit)));
+  return HostOutcome::ok_with(Value::boolean(host->heroes->detach(*host->world, unit)));
 }
 
 HostOutcome fn_detach_army(CallContext& ctx) {
   HERO_STATE(ctx);
-  host->heroes->detach_army(receiver(ctx));
+  host->heroes->detach_army(*host->world, receiver(ctx));
   return HostOutcome::ok_void();
 }
 

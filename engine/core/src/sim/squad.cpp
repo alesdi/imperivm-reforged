@@ -96,18 +96,43 @@ bool SquadTable::join(SquadKey key, ObjectId id) {
   return true;
 }
 
-bool SquadTable::leave(SquadKey key, ObjectId id) {
+Squad* SquadTable::remove_member(SquadKey key, ObjectId id) {
   Squad* squad = find(key);
-  if (squad == nullptr) return false;
+  if (squad == nullptr) return nullptr;
   const auto it = std::find(squad->members.begin(), squad->members.end(), id);
-  if (it == squad->members.end()) return false;
+  if (it == squad->members.end()) return nullptr;
   squad->members.erase(it);
   // The dumps show no promotion on a leader's departure, and `DetachArmy`
   // disbands rather than reassigning, so a leaderless squad is a real state.
   if (squad->leader == id) squad->leader = kNoObject;
-  // 0x00444803: the squad that loses its last member loses its order there and
-  // then, before whatever the caller does next.
-  if (squad->members.empty()) free_order(*squad);
+  return squad;
+}
+
+void SquadTable::stand_down(Squad& squad) noexcept {
+  squad.eval = 0;
+  free_order(squad);
+  squad.gaika_in = kNoGaika;
+  squad.dest_gaika = kNoGaika;
+}
+
+bool SquadTable::leave(SquadKey key, ObjectId id) {
+  Squad* squad = remove_member(key, id);
+  if (squad == nullptr) return false;
+  // 0x004447dd: nobody left is strength 0 whatever the total said, and that is
+  // the one strength this form can know. Stood down there and then, before
+  // whatever the caller does next.
+  if (squad->members.empty()) stand_down(*squad);
+  return true;
+}
+
+bool SquadTable::leave(World& world, SquadKey key, ObjectId id) {
+  Squad* squad = remove_member(key, id);
+  if (squad == nullptr) return false;
+  // 0x004447e6 takes the leaver's valuation off the running total; the total
+  // being the members' sum at every instant in the original, the sum of those
+  // left is the same number. 0x004447f6 then tests it -- not the member count.
+  squad->eval = squad->members.empty() ? 0 : squad_worth(world, *squad);
+  if (squad->eval == 0) stand_down(*squad);
   return true;
 }
 
@@ -251,18 +276,22 @@ void SquadTable::reset_orders(PlayerId player) {
 
 // See `sim/squad.hpp` for the two chains this reproduces and for what running
 // them once a turn gives up.
-void revalue_squads(World& world, SquadTable& squads) {
+std::int32_t squad_worth(World& world, const Squad& squad) {
   const CombatSystem* combat = combat_system_of(world);
+  std::int32_t worth = 0;
+  for (const ObjectId member : squad.members) {
+    const WorldObject* slot = world.find(member);
+    if (slot == nullptr) continue;
+    worth += object_power(world, combat, *slot);
+  }
+  return worth;
+}
+
+void revalue_squads(World& world, SquadTable& squads) {
   const GaikaTable& nodes = world.gaika();
   const LsaPartition& areas = world.lsa();
   for (Squad& squad : squads.mutable_squads()) {
-    std::int32_t worth = 0;
-    for (const ObjectId member : squad.members) {
-      const WorldObject* slot = world.find(member);
-      if (slot == nullptr) continue;
-      worth += object_power(world, combat, *slot);
-    }
-    squad.eval = worth;
+    squad.eval = squad_worth(world, squad);
 
     // 0x00443df0 answers the member deque's **front**, which is `Squad::leader`
     // whenever there is one and the next member along when a leader has left
@@ -1082,10 +1111,11 @@ HostOutcome mil_eval_impl(CallContext& ctx) {
 /// spawns `data/ai/AIOSendSquad.vs` with the squad and the node; `n` decides
 /// how soon (the drain takes the largest `n / 5` first). `OrderDest` and
 /// `AIDest` answer the node from the moment of the post, and keep answering it
-/// after the order is carried out: only `DelOrder`, the next `SendTo` or the
-/// squad emptying frees the record. `dest_gaika` is not touched -- the
-/// original's `DestGAIKA` is the squad's own field. `GS_SIEGE.VS` line 95 says
-/// the same from the script side:
+/// after the order is carried out: only `DelOrder`, the next `SendTo` or a
+/// leave that brings the squad's strength to 0 frees the record (and that
+/// leave clears `dest_gaika` too, `SquadTable::stand_down`). The post leaves
+/// `dest_gaika` alone: the original's `DestGAIKA` is the squad's own field.
+/// `GS_SIEGE.VS` line 95 says the same from the script side:
 ///
 ///     if (squad.OrderDest != gaika) { squad.SendTo(gaika, 1); continue; }
 ///     // issue order, to force squad's AIDest to gaika
@@ -2436,11 +2466,11 @@ inline constexpr int kRehomeDepth = 1;
 /// is folded into the world hash (`HeroSystem::hash`), so a unit the table moved
 /// and the record did not is a divergence rather than a cosmetic drift.
 /// `regroup_into_fresh_squads` maintains the same pair for the same reason.
-void move_member(HeroSystem& heroes, ObjectId id, SquadKey key) {
+void move_member(World& world, HeroSystem& heroes, ObjectId id, SquadKey key) {
   SquadTable& table = heroes.squads();
   const SquadKey was = table.squad_of(id);
   if (was == key) return;
-  if (was != kNoSquad) (void)table.leave(was, id);
+  if (was != kNoSquad) (void)table.leave(world, was, id);
   (void)table.join(key, id);
   if (UnitRecord* record = heroes.unit(id); record != nullptr) record->squad = key;
 }
@@ -2496,7 +2526,7 @@ SquadKey hero_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest)
     // record it also writes.
     const std::vector<ObjectId> army = record->army;
     for (const ObjectId member : army) {
-      if (member != id) move_member(heroes, member, made);
+      if (member != id) move_member(world, heroes, member, made);
     }
   }
   return made;
@@ -2570,7 +2600,7 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   if (slot->state.holder != kNoObject) {
     const SquadKey holders = table.squad_of(slot->state.holder);
     if (holders == kNoSquad) return kNoSquad;
-    if (!is_attached(heroes, id)) move_member(heroes, id, holders);
+    if (!is_attached(heroes, id)) move_member(world, heroes, id, holders);
     table.prune_empty();
     return table.squad_of(id);
   }
@@ -2629,7 +2659,7 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
       if (leads && current != nullptr) {
         orphans.assign(current->members.begin(), current->members.end());
       }
-      move_member(heroes, id, target);
+      move_member(world, heroes, id, target);
       if (depth < kRehomeDepth) {
         for (const ObjectId orphan : orphans) {
           if (orphan == id || world.find(orphan) == nullptr) continue;
@@ -2662,7 +2692,7 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
 
   // 7b. A follower nobody will take starts a squad of its own.
   const SquadKey made = table.create(slot->state.owner);
-  move_member(heroes, id, made);
+  move_member(world, heroes, id, made);
   if (Squad* squad = table.find(made); squad != nullptr) {
     squad->flags = flags;
     squad->state = state;
@@ -3951,7 +3981,7 @@ HostOutcome train_impl(CallContext& ctx) {
   }
   to_enter.insert(to_enter.end(), rest.begin(), rest.end());
 
-  for (const ObjectId id : to_train) (void)heroes->detach(id);
+  for (const ObjectId id : to_train) (void)heroes->detach(world, id);
 
   for (const ObjectId id : to_enter) {
     const WorldObject* slot = world.find(id);
@@ -4032,7 +4062,7 @@ void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const
     }
     // Emptying the old squad frees its order here (`SquadTable::leave`), which
     // is why the post below takes the slot it left, as the original's does.
-    if (old != nullptr) (void)squads.leave(old_key, id);
+    if (old != nullptr) (void)squads.leave(world, old_key, id);
 
     const SquadKey key = squads.create(slot->state.owner);
     (void)squads.join(key, id);
