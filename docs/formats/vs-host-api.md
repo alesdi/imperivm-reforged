@@ -1601,7 +1601,7 @@ How the host reaches a script, and what the first parameter is.
 | `<behavior script="…"/>` | 50 | idem | the object; script is an endless `while(1) { … Sleep(n); }` coroutine |
 | `<cmd groupverifier="…"/>` | 350 | `DATA\COMMANDS\*.XML` | `ObjList objs` (the selection) plus `str OUT reasonText`; returns `bool` |
 | `<cmd groupdispatch="…"/>` | 20 | idem | `ObjList objs, point pt, Obj obj, bool bReplace, bool bModifier, int player` |
-| `<cmd onaddremovescript="…"/>` | 12 | idem | the object plus `bool bAdd` |
+| `<cmd onaddremovescript="…"/>` | 12 | idem | the object plus `bool bAdd`; returns `bool`, and false refuses an add (0x005b1760) |
 | `use_script` / `kill_script` / `equip_script` / `attacheddie_script` / `object_script` | 17 | `DATA\ITEMS.XML` | `Obj owner`, sometimes plus `Obj victim` / `Obj target` / `Item item` |
 | `AIRun(name, …)` | 72 | script source | whatever the caller passes; the receiver form `set.AIRun(…)` binds the receiver |
 | engine-hardcoded name | — | `gbr.exe` | `Main.vs`, `HeroSkill %s.vs`, `GetTacticScript.vs`, `GetEconomyScript.vs`, `CalcGAIKAPriority.vs`, `unit_form_move.vs` |

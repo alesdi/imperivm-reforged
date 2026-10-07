@@ -136,17 +136,15 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "imperivm/core/formats/result.hpp"
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/script/value.hpp"
 #include "imperivm/core/sim/system.hpp"
 #include "imperivm/core/sim/world.hpp"
-
-namespace imperivm::core::script {
-class Scheduler;
-}
 
 namespace imperivm::core::sim {
 
@@ -265,6 +263,14 @@ struct CommandDef {
   /// bReplace, bool bModifier, int player)`: a script that issues the order
   /// itself, in place of one command per actor. 18 rows.
   std::string group_dispatch;
+  /// `onaddremovescript=` -- `bool f(Obj This, bool bAdd)`, run on the object
+  /// whenever a command of this row is added to its queue or taken out of it
+  /// unrun. Twelve shipped rows, every one a `trainex` naming
+  /// `TRAINEX_ONADDREMOVE.VS`, which keeps the building's `QueuedBuild/<class>`
+  /// count and refuses an add past the unit's cap. `gbr.exe` keeps the
+  /// compiled script at `[def+0x170]`; see `CommandSystem::set_command` for
+  /// when it runs.
+  std::string on_add_remove;
   /// `cursor=` -- the cursor while the row waits for its target: `attack`,
   /// `do_something`, `move_in_fight`. Empty for the arrow.
   std::string cursor;
@@ -462,6 +468,14 @@ class CommandSystem final : public System {
     return launch_failures_;
   }
 
+  /// The `onaddremovescript` runs that trapped since the last call, oldest
+  /// first, and forgets them. A hook runs inside whatever inserted or removed
+  /// the command, never in a scheduler pass, so its traps reach no
+  /// `RunReport`; the session drains them here once a turn instead.
+  [[nodiscard]] std::vector<script::FailedScript> take_hook_traps() {
+    return std::exchange(hook_traps_, {});
+  }
+
   void set_table(CommandTable table) { table_ = std::move(table); }
   [[nodiscard]] const CommandTable& table() const noexcept { return table_; }
   [[nodiscard]] CommandTable& mutable_table() noexcept { return table_; }
@@ -501,6 +515,49 @@ class CommandSystem final : public System {
   /// building). A refused command has still used its id. So a cancel's refund
   /// (`cancel_command`) is always exactly what was charged. See `charge` in
   /// `src/sim/command.cpp`.
+  ///
+  /// **A row's `onaddremovescript` is asked on every insert and told of every
+  /// unrun removal**, synchronously, inside the call that adds or removes.
+  /// `gbr.exe` keeps the compiled script on the row (`[def+0x170]`) and runs
+  /// it through 0x004e7600, which binds `(This, bAdd)` and a `bool` for the
+  /// answer that starts out true, runs the interpreter to the end with the
+  /// `0x0fffffff` budget, and returns the answer -- so a row with no script, or
+  /// a script that returns nothing, accepts. While it runs the row's strings
+  /// and costs are the ambient `cmdparam` / `cmdcost_*` (the globals at
+  /// 0x008210c8.. and 0x0081b2d0..0x0081b2dc, cleared again after).
+  ///
+  ///   * **Add** -- the accept test every insert opens with (0x005b1760): for
+  ///     a command with a row it first takes the payment when the row has a
+  ///     cost (`vtbl+0x84`, 0x004df070 on a building), then runs the script
+  ///     with `bAdd` true **whether or not the row has a cost**, and when the
+  ///     script answers false it puts the payment back (`vtbl+0x88`,
+  ///     0x004df400) and refuses: nothing is queued. So the script runs after
+  ///     the money is taken and before the command is in the queue.
+  ///     `TRAINEX_ONADDREMOVE.VS` uses the answer: it refuses an add that would
+  ///     take the class past its cap counting the units alive and the ones
+  ///     already queued, and otherwise adds the order's number to
+  ///     `QueuedBuild/<class>` on the building.
+  ///   * **Remove** -- 0x005b07d0, the one routine `KillCommand`,
+  ///     `ClearCommands` (0x005b1120, last index first), a cancel (0x004e63c0),
+  ///     a replacing insert (0x005b4e90 with the flag: the tail last first,
+  ///     then the old head) and an ownership change (0x005aa0a0's `vtbl+0xc0`
+  ///     with 1) all end in. For a row with a cost, and only then, it calls
+  ///     `vtbl+0x90` (0x005b18d0) **before** the command leaves the queue,
+  ///     which refunds first and then runs the script with `bAdd` false; the
+  ///     answer is not looked at. All twelve shipped rows have a cost, so the
+  ///     gate decides nothing in the corpus.
+  ///   * **Not on completion.** A command whose script returned is popped by
+  ///     the object's `vtbl+0x1c` (0x005b5160), which neither refunds nor
+  ///     calls `vtbl+0x90`. The method script accounts for itself:
+  ///     `TRAIN_EX.VS` / `BARRACK_TRAIN_EX.VS` take their number back off
+  ///     `QueuedBuild/<class>` once the `Progress` is through, so a running
+  ///     `trainex` that is cancelled before that point is taken off by the
+  ///     hook and one that ran to the end by itself, never both.
+  ///   * **Not when the object leaves the world.** `forget` drops a dead
+  ///     object's queue with no refund and no script, as before. INFERRED, not
+  ///     traced: the original's removal of a destroyed object was not followed
+  ///     to its queue. The shipped script writes only the building's own
+  ///     environment, so nothing could read what it would have written.
   std::uint32_t set_command(World& world, ObjectId id, std::string_view verb,
                             const Command& prototype);
   /// `AddCommand(front, verb[, arg])`. `front` inserts at index 1 -- behind the
@@ -569,11 +626,10 @@ class CommandSystem final : public System {
   /// refunded whether it had started or not, and the rest of the queue keeps
   /// its place.
   ///
-  /// **Not modelled, labelled:** the same `vtbl+0x90` runs the row's
-  /// `onaddremovescript` with `bAdd` false (0x004e7600, `[def+0x170]`) -- the
-  /// twelve `trainex` rows' `TRAINEX_ONADDREMOVE.VS`, which keeps a
-  /// `QueuedBuild/<class>` count -- and this engine runs that script on
-  /// neither the add nor the remove.
+  /// The same `vtbl+0x90` then runs the row's `onaddremovescript` with
+  /// `bAdd` false (0x004e7600, `[def+0x170]`): a cancelled `trainex` takes
+  /// itself back off its building's `QueuedBuild/<class>` count. See
+  /// `set_command` for the whole of when that script runs.
   bool cancel_command(World& world, ObjectId id, std::uint32_t command_id);
 
   // -- reads -------------------------------------------------------------
@@ -726,6 +782,29 @@ class CommandSystem final : public System {
                                                      std::string_view verb);
   const ClassMethods& methods_for(const ClassGraph& graph, ClassIndex index) const;
 
+  /// The accept test every insert opens with (0x005b1760): pay, then ask the
+  /// row's `onaddremovescript`, and put the payment back when it says no.
+  /// False is a refusal, and then the command must not be queued.
+  [[nodiscard]] bool accept(World& world, ObjectId id, const Command& command);
+  /// What 0x005b07d0 does before a command leaves a queue: the refund and,
+  /// for a row with a cost, the row's `onaddremovescript` with `bAdd` false
+  /// (`vtbl+0x90`, 0x005b18d0).
+  void release(World& world, ObjectId id, const Command& command);
+  /// Run `command`'s row's `onaddremovescript` on `id`, to its end, now, and
+  /// return its answer: true for no row, no script, a script that could not
+  /// be compiled, one that trapped or yielded, and one that returned nothing
+  /// -- the original's answer starts out true (0x004e7600). The trap and the
+  /// yield are INFERRED from that: what the interpreter leaves in the answer
+  /// when it gives up was not traced, and the shipped script neither traps
+  /// nor sleeps.
+  [[nodiscard]] bool run_add_remove(ObjectId id, const Command& command, bool add);
+  /// 0x005b07d0: take the command at `index` out of `id`'s queue -- released
+  /// first, while it is still in place, then ended (index 0, its `onfinish`
+  /// told it was cancelled) or erased unrun. False when there is no such
+  /// index. Finds the command again after the hook, which could have run
+  /// anything.
+  bool remove_at(World& world, ObjectId id, std::size_t index);
+
   struct DisabledEntry {
     ObjectId id = kNoObject;
     /// Canonical `CommandDef::name`s, sorted by the folded name.
@@ -757,6 +836,13 @@ class CommandSystem final : public System {
   script::Scheduler* scheduler_ = nullptr;
   ScriptLibrary* library_ = nullptr;
   std::map<std::string, std::size_t, std::less<>> launch_failures_;
+  /// The command whose row's `onaddremovescript` is running, or null. What
+  /// `cmdparam` and `cmdcost_*` answer for inside the hook: the original
+  /// writes the row's strings and costs into the ambient globals for exactly
+  /// the length of the call. Transient -- set and cleared inside one host
+  /// call -- so never saved.
+  const Command* hooked_ = nullptr;
+  std::vector<script::FailedScript> hook_traps_;
   std::string default_verb_{kDefaultCommandVerb};
   /// Sorted by class index. Derived from the class graph, never hashed.
   mutable std::vector<ClassMethods> method_cache_;
