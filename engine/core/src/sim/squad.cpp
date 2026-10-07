@@ -565,6 +565,16 @@ struct Self {
 void squad_set_cmd(World& world, Squad& squad, std::int32_t state, std::int32_t set_flags,
                    std::int32_t clear_flags, std::string_view verb, const Command& prototype,
                    GameTime now) {
+  // **A squad no AI may touch is refused whole** -- state, clock, flags and
+  // orders all left as they were. Each of the three overloads tests
+  // `[squad+0x30] & 1`, `SF_NOAI`, straight after resolving the handle and
+  // leaves on it (0x00427361 plain, 0x00427517 with an object), and the
+  // point form's core 0x0043ec00, which `Ship::ApplyAiTransport` shares,
+  // does the same at 0x0043ec15. `ClrCmd` has the same refusal. It is what
+  // keeps a town's sentries -- born no-AI, see `World::allocate` -- on their
+  // walls when `GS_KILLENEMIES.VS` sends every own squad in the node to
+  // `ai_killall`.
+  if ((squad.flags & kSquadFlagNoAi) != 0) return;
   squad.state = state;
   squad.state_time = now;
   const auto set_mask = static_cast<std::uint16_t>(set_flags & 0xFFFF);
@@ -868,9 +878,11 @@ HostOutcome take_nearby_items_impl(CallContext& ctx) {
 /// shipped site is a squad being *stopped* -- `AIOSENDSQUAD.VS` for a squad
 /// already in the node it was sent to, `GS_SIEGE.VS` and `GS_CAPTURE.VS` for an
 /// approach that has arrived. Without it a squad "cleared" to `SS_IDLE` kept
-/// walking wherever its last order sent it, and a town's own sentries, sent to
-/// the node they stand in, never stopped to be re-posted by `WALL_PATROL.VS`
-/// and `GATE_PATROL.VS`, which re-order only a sentry whose command is `idle`.
+/// walking wherever its last order sent it. (This note used to add a town's
+/// sentries to that, stopped here to be re-posted by their walls. A sentry is
+/// born no-AI -- `World::allocate`, 0x005d3323 -- so its squad carries
+/// `SF_NOAI` and step 1 refuses it, as `SetCmd` and `SendTo` do: none of the
+/// three moves a sentry, which is what keeps it on its wall.)
 ///
 /// **It still stamps `state_time`.** `EVALRECRUIT.VS` reads `sq.StateTime` as
 /// "how long since anything last happened to this squad".

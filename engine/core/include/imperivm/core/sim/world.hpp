@@ -223,6 +223,11 @@ inline constexpr std::uint32_t kUnitFlagNoAI = 0x00040000u;
 /// things that can be in the air. So 46 birds start a map airborne, and
 /// `ObjectFlags::in_air`'s claim that nothing sets it is retired.
 inline constexpr std::uint32_t kUnitFlagInAir = 0x00400000u;
+/// Bit 26 of the same word, `Unit::SetMinimapFlag`. No shipped map authors
+/// it; it matters here because the `CVXUnit` constructor sets it on every
+/// sentry together with `kUnitFlagNoAI`, and a map-placed unit's `UnitFlags`
+/// replaces the whole word (0x005dd6a9), this bit included.
+inline constexpr std::uint32_t kUnitFlagOnMinimap = 0x04000000u;
 
 /// Pack an object's owner and category bits into the original's word.
 ///

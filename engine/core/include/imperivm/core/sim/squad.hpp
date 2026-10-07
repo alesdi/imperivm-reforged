@@ -752,7 +752,8 @@ class SquadListPool {
 
 /// `Squad::SetCmd`'s core (0x0043ec00): the state and its stamp, the flags
 /// masked set-then-clear, and `verb` with `prototype` replacing every member's
-/// queue in join order. Shared by the three `SetCmd` overloads and by
+/// queue in join order -- or nothing at all for a squad carrying `SF_NOAI`
+/// (0x0043ec15). Shared by the three `SetCmd` overloads and by
 /// `Ship::ApplyAiTransport`, which runs it on every squad it lands.
 void squad_set_cmd(World& world, Squad& squad, std::int32_t state, std::int32_t set_flags,
                    std::int32_t clear_flags, std::string_view verb, const Command& prototype,

@@ -472,7 +472,7 @@ set; the low 16 bits are always zero. Bit correlations, n=3,432:
 |---:|---:|---|
 | 16 | 1,088 | `form_move`, `moveenter`, `capture` — movement orders |
 | 17 | 1,281 | `form_move`, `engage`, `capture` |
-| 18 | 417 | `guard` (213) and `patrol` (203) — sentries, near-exclusively |
+| 18 | 417 | `guard` (213) and `patrol` (203) — sentries, near-exclusively. It is `UNITFLAG_NOAI`, which the `CVXUnit` constructor sets on every `Sentry` heir together with bit 26 (`0x04040000`, 0x005d3323) |
 | 19 | 1,069 | `form_move`, `engage`, `capture` |
 | 20 | 204 | `moveenter`, `enter`, `build_catapult`, `attach` — entering something |
 | 21 | 141 | `idle`, `lead` |
@@ -481,7 +481,7 @@ set; the low 16 bits are always zero. Bit correlations, n=3,432:
 | 25 | 559 | mixed |
 | 26 | 861 | `idle`, `guard`, `patrol`, `moveenter` |
 
-Bits 18 and 22 have clean single meanings (sentry duty; is-flying). The rest are **unknown**. Do
+Bits 18 and 22 have clean single meanings (`UNITFLAG_NOAI`, carried in these games near-exclusively by the sentries; is-flying). The rest are **unknown**. Do
 not guess a layout.
 
 ### `CVXHero` — n=31, 4/9 files
