@@ -1283,6 +1283,12 @@ void GameSession::advance(std::uint64_t turns, std::int32_t turn_length) {
     impl.ai.reap_helpers(impl.scheduler);
     impl.finished += report.completed;
     impl.collect_traps(report);
+    // And a command row's `onaddremovescript` that trapped: it runs inside
+    // whatever queued or removed the command, never in a pass, so no pass
+    // reported it.
+    script::RunReport hooks;
+    hooks.traps = impl.command.take_hook_traps();
+    if (!hooks.traps.empty()) impl.collect_traps(hooks);
     ++impl.turns;
   }
 }

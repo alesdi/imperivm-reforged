@@ -1595,6 +1595,154 @@ TEST(a_commands_onfinish_runs_with_the_cancel_flag_and_the_commands_param) {
   f.commands.set_default_verb(kDefaultCommandVerb);
 }
 
+/// **A row's `onaddremovescript` is asked on every add and told of every unrun
+/// removal.** `gbr.exe` runs it from the accept test every insert opens with
+/// (0x005b1760, `bAdd` true, a false answer refusing the insert) and from
+/// 0x005b07d0 -- the routine a cancel, `KillCommand`, `ClearCommands` and a
+/// replacing insert all end in -- through `vtbl+0x90` (0x005b18d0, `bAdd`
+/// false), but only for a row with a cost. A command whose script returned is
+/// popped by 0x005b5160, which runs nothing: `TRAIN_EX.VS` takes itself off the
+/// count it keeps. The hook here is written for the test: it keeps a count in
+/// the unit's `user` word, adding and taking the length of the ambient
+/// `cmdparam` -- which must be the row's inside the hook -- and refuses an add
+/// past 6, the shape of `TRAINEX_ONADDREMOVE.VS`'s cap.
+TEST(a_rows_onaddremovescript_is_asked_on_every_add_and_told_of_every_unrun_removal) {
+  RunFixture f;
+  (void)register_global_hosts(f.registry);
+  (void)register_text_host(f.registry);
+  REQUIRE(f.add_script("// void, Obj This\nSleep(500);\n", "data/subai/barrack_train.vs"));
+  REQUIRE(f.add_script("// void, Obj me\nwhile (1) Sleep(1000);\n",
+                       "data/subai/unit_idle.vs"));
+  REQUIRE(f.add_script("// bool, Obj This, bool bAdd\n"
+                       "int n; n = This.user;\n"
+                       "if (bAdd) {\n"
+                       "  if (n + StrLen(cmdparam) > 6) return false;\n"
+                       "  This.SetUser(n + StrLen(cmdparam));\n"
+                       "  return true;\n"
+                       "}\n"
+                       "This.SetUser(n - StrLen(cmdparam));\n"
+                       "return true;\n",
+                       "data/subai/count_queued.vs"));
+  CommandDef hire;
+  hire.name = "hire";
+  hire.method = "train";
+  hire.param = "abc";
+  hire.cost_gold = 10;
+  hire.train_command = true;
+  hire.on_add_remove = "data/subai/count_queued.vs";
+  f.commands.mutable_table().set(hire);
+  CommandDef free_row = hire;
+  free_row.name = "hire free";
+  free_row.cost_gold = 0;
+  f.commands.mutable_table().set(free_row);
+
+  const auto step = [&f](std::int32_t ms) {
+    f.scheduler.advance(ms);
+    f.world.advance(ms);
+  };
+  const auto user = [&f](ObjectId id) { return f.world.find(id)->state.user; };
+  Command order;
+  order.name = "hire";
+  order.param = "abc";
+  order.cost_gold = 10;
+
+  // Two adds, each asked first and counted; the third would pass 6 and is
+  // refused: nothing queued, and the count as it was.
+  const ObjectId u = f.spawn(f.unit_class);
+  CHECK(f.commands.append_order(f.world, u, "train", order) != 0);
+  CHECK(user(u) == 3);
+  const std::uint32_t second = f.commands.append_order(f.world, u, "train", order);
+  CHECK(second != 0);
+  CHECK(user(u) == 6);
+  CHECK(f.commands.append_order(f.world, u, "train", order) == 0);
+  CHECK(f.commands.command_count(u) == 2);
+  CHECK(user(u) == 6);
+  CHECK(f.commands.take_hook_traps().empty());
+
+  // A cancel of the pending one tells the row; the count comes back down.
+  CHECK(f.commands.cancel_command(f.world, u, second));
+  CHECK(user(u) == 3);
+  CHECK(f.commands.command_count(u) == 1);
+
+  // The running one runs to its end: no hook, the count stays.
+  step(100);
+  REQUIRE(f.commands.command_name(u) == "train");
+  for (int i = 0; i < 10 && f.commands.command_name(u) == "train"; ++i) step(200);
+  REQUIRE(f.commands.command_name(u) == "idle");
+  CHECK(user(u) == 3);
+
+  // `KillCommand` on a running one tells it.
+  f.world.find(u)->state.user = 0;
+  CHECK(f.commands.append_order(f.world, u, "train", order) != 0);
+  step(100);
+  REQUIRE(f.commands.command_name(u) == "train");
+  CHECK(user(u) == 3);
+  CHECK(f.commands.kill_command(f.world, u));
+  CHECK(user(u) == 0);
+
+  // `ClearCommands` tells every pending one, and a replacing `SetCommand`
+  // every one it clears, the running one included.
+  step(100);
+  CHECK(f.commands.append_order(f.world, u, "train", order) != 0);
+  CHECK(f.commands.append_order(f.world, u, "train", order) != 0);
+  CHECK(user(u) == 6);
+  step(100);
+  REQUIRE(f.commands.command_name(u) == "train");
+  CHECK(f.commands.clear_commands(f.world, u) == 1);
+  CHECK(user(u) == 3);
+  CHECK(f.commands.append_order(f.world, u, "train", order) != 0);
+  CHECK(user(u) == 6);
+  CHECK(f.commands.set_command(f.world, u, "idle", Command{}) != 0);
+  CHECK(user(u) == 0);
+
+  // A row with no cost is asked on the add and never told of a removal:
+  // 0x005b07d0 calls `vtbl+0x90` only for a row with a cost.
+  Command free_order = order;
+  free_order.name = "hire free";
+  free_order.cost_gold = 0;
+  const std::uint32_t free_id = f.commands.append_order(f.world, u, "train", free_order);
+  CHECK(free_id != 0);
+  CHECK(user(u) == 3);
+  CHECK(f.commands.cancel_command(f.world, u, free_id));
+  CHECK(user(u) == 3);
+}
+
+/// **A hook that answers nothing, or traps, accepts.** 0x004e7600 starts the
+/// answer at true and only a returned value overwrites it. A trap is not lost
+/// either: it runs inside the insert, outside every scheduler pass, so the
+/// queue keeps it for the session to report.
+TEST(a_rows_onaddremovescript_that_answers_nothing_or_traps_accepts) {
+  RunFixture f;
+  (void)register_global_hosts(f.registry);
+  REQUIRE(f.add_script("// void, Obj This\nSleep(500);\n", "data/subai/barrack_train.vs"));
+  REQUIRE(f.add_script("// bool, Obj This, bool bAdd\nThis.SetUser(This.user + 1);\n",
+                       "data/subai/silent.vs"));
+  REQUIRE(f.add_script("// bool, Obj This, bool bAdd\nint n; n = 1 / (This.user - This.user);\nreturn false;\n",
+                       "data/subai/trapping.vs"));
+  CommandDef silent;
+  silent.name = "silent";
+  silent.method = "train";
+  silent.on_add_remove = "data/subai/silent.vs";
+  f.commands.mutable_table().set(silent);
+  CommandDef trapping = silent;
+  trapping.name = "trapping";
+  trapping.on_add_remove = "data/subai/trapping.vs";
+  f.commands.mutable_table().set(trapping);
+
+  const ObjectId u = f.spawn(f.unit_class);
+  Command order;
+  order.name = "silent";
+  CHECK(f.commands.append_order(f.world, u, "train", order) != 0);
+  CHECK(f.world.find(u)->state.user == 1);
+  order.name = "trapping";
+  CHECK(f.commands.append_order(f.world, u, "train", order) != 0);
+  CHECK(f.commands.command_count(u) == 2);
+  const std::vector<FailedScript> traps = f.commands.take_hook_traps();
+  REQUIRE(traps.size() == 1);
+  CHECK(traps.front().source_name == "data/subai/trapping.vs");
+  CHECK(f.commands.take_hook_traps().empty());
+}
+
 /// **A parameter the caller never passed is its type's default, not nil.**
 /// `HERO_STAND_GROUND.VS` is declared `(Obj me, point pt)`, re-issues itself
 /// as `SetCommand("stand_position")` with no point, and reads `pt` on the next

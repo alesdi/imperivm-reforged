@@ -77,10 +77,14 @@ struct FailedScript {
 /// `finished`, `failed` (with `trap`), or `suspended` for a script that tried
 /// to yield and was abandoned there -- see `call`. `id` is the real script id
 /// the call ran under, and `kNoScript` when there was no such chunk.
+/// `result` is what a `finished` script returned, nil when it returned
+/// nothing; a caller that asks a hook a question (a command row's
+/// `onaddremovescript`, `bool f(Obj This, bool bAdd)`) reads its answer here.
 struct CallReport {
   ScriptId id = kNoScript;
   ExecStatus status = ExecStatus::failed;
   Trap trap;
+  Value result;
 };
 
 /// What one `run` did. Counts rather than logs, plus the traps, because a trap

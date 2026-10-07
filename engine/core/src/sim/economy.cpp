@@ -2481,6 +2481,7 @@ HostOutcome repair_all_impl(CallContext& ctx) {
   const std::int32_t reserved = reserved_gold(env->env(), *s);
   Command prototype;
   prototype.param = row->param;
+  prototype.name = row->name;
   prototype.cost_gold = row->cost_gold;
   prototype.cost_food = row->cost_food;
   prototype.cost_pop = row->cost_pop;
@@ -2931,6 +2932,7 @@ HostOutcome upgrade_best_barrack_impl(CallContext& ctx) {
 
   Command order;
   order.param = best_row->param;
+  order.name = best_row->name;
   order.cost_gold = best_row->cost_gold;
   order.cost_food = best_row->cost_food;
   order.cost_pop = best_row->cost_pop;
@@ -3603,8 +3605,12 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        if (commands == nullptr) return HostOutcome::ok_void();
        // The costs travel with the command, the way `ExecCmd` sends them, so
        // that `cmdcost_gold` and `.cmddelay` answer inside the method script.
+       // So does the row, which the original's command points at
+       // (`[cmd+0x2c]`): it is how the queue finds the row's
+       // `onaddremovescript` -- `ESH_ARENAUNITS.VS` hires through here.
        Command order;
        order.param = row->param;
+       order.name = row->name;
        order.cost_gold = row->cost_gold;
        order.cost_food = row->cost_food;
        order.cost_pop = row->cost_pop;

@@ -22,7 +22,9 @@
 #include <string_view>
 #include <vector>
 
+#include "imperivm/core/script/compiler.hpp"
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/array.hpp"
 #include "imperivm/core/sim/combat.hpp"
@@ -4909,6 +4911,76 @@ TEST(economy_a_cancelled_queue_entry_is_refunded_and_the_rest_keep_their_place) 
   report = apply_turn(b.world, turn);
   CHECK(report.cancels == 0);
   CHECK(s->warehouse.gold == 9000);
+}
+
+/// **A row's `onaddremovescript` runs after the payment and before the
+/// refund, and a refusal gives the payment back.** The accept test (0x005b1760)
+/// takes the cost through the building's payment (`vtbl+0x84`, 0x004df070),
+/// then runs the row's script with `bAdd` true, and on a false answer calls
+/// the refund (`vtbl+0x88`, 0x004df400) and refuses the insert. A cancel goes
+/// through `vtbl+0x90` (0x005b18d0), which refunds first and runs the script
+/// with `bAdd` false after. `set.Research` is the route `ESH_ARENAUNITS.VS`
+/// hires by, so the command it queues has to carry its row for the queue to
+/// find the script at all. The hook here is written for the test: it writes
+/// the gold it sees into the tavern's `user` word, and refuses the first add.
+TEST(economy_a_rows_onaddremovescript_runs_between_the_payment_and_the_refund) {
+  LabBench b;
+  const ObjectId tavern = b.add_building(b.classes.tavern);
+  b.set_store(9000, 9000, 50);
+  const Settlement* s = b.economy.settlements().find(b.town);
+  REQUIRE(s != nullptr);
+
+  script::Scheduler scheduler;
+  WorldHost host{b.world};
+  HostContext context;
+  context.world = &b.world;
+  script::register_scheduler_builtins(b.registry);
+  scheduler.set_registry(&b.registry);
+  scheduler.set_host(&host);
+  scheduler.set_user(&context);
+  b.commands.set_scheduler(&scheduler);
+  const std::string_view source =
+      "// bool, Obj This, bool bAdd\n"
+      "Building bld; int seen; bool first;\n"
+      "bld = This.AsBuilding;\n"
+      "seen = bld.settlement.gold;\n"
+      "first = This.user == 0;\n"
+      "This.SetUser(seen);\n"
+      "if (first) return false;\n"
+      "return true;\n";
+  script::Diagnostic diagnostic;
+  const auto parsed = script::parse(bytes_of(source), "data/subai/seen_gold.vs", &diagnostic);
+  REQUIRE(parsed.ok());
+  script::CompileError error;
+  auto chunk = script::compile(parsed.value(), &b.registry, &error);
+  REQUIRE(chunk.ok());
+  REQUIRE(scheduler.add_chunk(std::move(chunk.value())) != script::kNoChunk);
+  const CommandDef* feast = b.commands.table().find("Feast");
+  REQUIRE(feast != nullptr);
+  CommandDef hooked = *feast;
+  hooked.on_add_remove = "data/subai/seen_gold.vs";
+  b.commands.mutable_table().set(hooked);
+
+  // Refused: the script saw the gold with the 100 already taken, and the 100
+  // came back; nothing was queued.
+  b.call("Research", 1, {b.settlement_value(), script::Value::string("Feast")});
+  CHECK(b.world.find(tavern)->state.user == 8900);
+  CHECK(s->warehouse.gold == 9000);
+  CHECK(s->warehouse.food == 9000);
+  CHECK(s->population == 50);
+  CHECK(b.commands.command_count(tavern, "research") == 0);
+
+  // Accepted: paid, and queued.
+  b.call("Research", 1, {b.settlement_value(), script::Value::string("Feast")});
+  CHECK(b.world.find(tavern)->state.user == 8900);
+  CHECK(s->warehouse.gold == 8900);
+  REQUIRE(b.commands.command_count(tavern, "research") == 1);
+
+  // Cancelled: refunded first, then the script told.
+  const std::uint32_t id = b.commands.find(tavern)->entries.front().id;
+  CHECK(b.commands.cancel_command(b.world, tavern, id));
+  CHECK(s->warehouse.gold == 9000);
+  CHECK(b.world.find(tavern)->state.user == 9000);
 }
 
 /// `AllowCapture` writes the field `CanBeCaptured` reads. One word, a setter

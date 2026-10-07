@@ -342,6 +342,7 @@ CallReport Scheduler::call(std::uint32_t chunk_index, std::span<const Value> arg
 
   report.status = execution.status;
   if (execution.status == ExecStatus::failed) report.trap = execution.trap;
+  if (execution.status == ExecStatus::finished) report.result = execution.result;
   // Discarded whatever the status, and a suspension with it: the original
   // deletes the context the moment the interpreter returns. The teardown fires
   // here, once, for the one id this call ever had.

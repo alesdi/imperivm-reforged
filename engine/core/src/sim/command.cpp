@@ -139,6 +139,7 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
     // be aimed at.
     def.group_verifier.assign(doc.attribute(n, "groupverifier"));
     def.group_dispatch.assign(doc.attribute(n, "groupdispatch"));
+    def.on_add_remove.assign(doc.attribute(n, "onaddremovescript"));
     def.cursor.assign(doc.attribute(n, "cursor"));
     for (NodeIndex text = doc.child(n, "cmdtext"); text != kNoNode;
          text = doc.next(text, "cmdtext")) {
@@ -719,10 +720,83 @@ void settle(World& world, ObjectId id, const Command& command, bool refund) {
 
 }  // namespace
 
+bool CommandSystem::run_add_remove(ObjectId id, const Command& command, bool add) {
+  if (scheduler_ == nullptr || command.name.empty()) return true;
+  const CommandDef* row = table_.find(command.name);
+  if (row == nullptr || row->on_add_remove.empty()) return true;
+  const std::uint32_t chunk = library_ != nullptr ? library_->chunk_for(row->on_add_remove)
+                                                  : scheduler_->find_chunk(row->on_add_remove);
+  if (chunk == script::kNoChunk) return true;
+  // `// bool, Obj This, bool bAdd` -- the shipped script's own header, and the
+  // two words 0x004e7600 hands the interpreter.
+  const script::Value args[2] = {script::Value::object(kTypeObj, id),
+                                 script::Value::boolean(add)};
+  // The row's `cmdparam` and costs are ambient for the length of the call and
+  // no longer, as the original's globals are; nested, the outer one comes back.
+  const Command* outer = hooked_;
+  hooked_ = &command;
+  const script::CallReport ran = scheduler_->call(chunk, args);
+  hooked_ = outer;
+  if (ran.status == script::ExecStatus::failed) {
+    hook_traps_.push_back(
+        script::FailedScript{ran.id, scheduler_->chunk(chunk).source_name, ran.trap});
+  }
+  // The answer starts out true and only a returned value overwrites it.
+  if (ran.status != script::ExecStatus::finished || ran.result.is_nil()) return true;
+  return ran.result.truthy_scalar();
+}
+
+bool CommandSystem::accept(World& world, ObjectId id, const Command& command) {
+  if (!charge(world, id, command)) return false;
+  if (run_add_remove(id, command, /*add=*/true)) return true;
+  // Refused by the row's script after it was paid for: the payment goes back
+  // (0x005b18bc, `vtbl+0x88`), and nothing is queued.
+  settle(world, id, command, /*refund=*/true);
+  return false;
+}
+
+void CommandSystem::release(World& world, ObjectId id, const Command& command) {
+  settle(world, id, command, /*refund=*/true);
+  // 0x005b07d0 calls `vtbl+0x90` only for a row with a cost (`[def+0x1e8]`,
+  // `[def+0x1ec]`, `[def+0x1f0]`), and the hook is inside it.
+  const CommandDef* row = command.name.empty() ? nullptr : table_.find(command.name);
+  if (row == nullptr || (row->cost_gold == 0 && row->cost_food == 0 && row->cost_pop == 0)) {
+    return;
+  }
+  (void)run_add_remove(id, command, /*add=*/false);
+}
+
+bool CommandSystem::remove_at(World& world, ObjectId id, std::size_t index) {
+  CommandQueue* q = find(id);
+  if (q == nullptr || index >= q->entries.size()) return false;
+  // Released while it still stands in the queue, as 0x005b07d0 does: a copy,
+  // because the hook can reach this queue.
+  const Command released = q->entries[index];
+  release(world, id, released);
+  q = find(id);
+  if (q == nullptr) return true;
+  std::size_t at = index;
+  if (at >= q->entries.size() || q->entries[at].id != released.id) {
+    const auto found = std::find_if(q->entries.begin(), q->entries.end(),
+                                    [&](const Command& c) { return c.id == released.id; });
+    if (found == q->entries.end()) return true;
+    at = static_cast<std::size_t>(found - q->entries.begin());
+  }
+  // Index 0 is ended as `KillCommand` ends it, its `onfinish` told it was
+  // cancelled; anything behind it never ran and is erased.
+  if (at == 0) {
+    retire(world, id, q->entries.front(), /*canceled=*/true);
+  } else {
+    retire(q->entries[at]);
+  }
+  q->entries.erase(q->entries.begin() + static_cast<std::ptrdiff_t>(at));
+  return true;
+}
+
 std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_view verb,
                                          const Command& prototype) {
   if (world.find(id) == nullptr) return 0;
-  CommandQueue& q = queue(id);
+  (void)queue(id);
 
   // The command takes its id when it is made, before the insert can refuse it
   // (0x00599302 in the constructor), so a refused one has used its id.
@@ -732,29 +806,35 @@ std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_
   command.script = script::kNoScript;
   command.started = false;
   const std::uint32_t issued = command.id;
-  // Paid for before the queue it replaces is refunded (0x005b4e90 asks the
-  // accept test first), so a replace cannot spend what the commands it
-  // clears are holding, and a refused one leaves them running.
-  if (!charge(world, id, command)) return 0;
+  // Paid for, and its row's script asked, before the queue it replaces is
+  // refunded (0x005b4e90 asks the accept test first), so a replace cannot
+  // spend what the commands it clears are holding, and a refused one leaves
+  // them running.
+  if (!accept(world, id, command)) return 0;
 
   // Aborts what is running, which `AI HELPERS\GUARD.VS` requires: it issues
   // `SetCommand("move", pt)` to a unit whose running command is `idle`, and
   // `UNIT_IDLE.VS` is a `while(1)` that never returns on its own. A running
   // command that is replaced is a cancelled one: its `onfinish` gets `true`
-  // and its cost comes back.
-  for (Command& old : q.entries) {
-    settle(world, id, old, /*refund=*/true);
-    retire(world, id, old, /*canceled=*/true);
+  // and its cost comes back. In the original's order (0x005b4e90 with the
+  // flag): the pending tail last first (`vtbl+0xc0(0)`, 0x005b1120), the new
+  // command pushed, then the old head (0x005b07d0 with 0).
+  const CommandQueue* q = find(id);
+  const bool had_head = q != nullptr && !q->entries.empty();
+  const std::uint32_t head = had_head ? q->entries.front().id : 0u;
+  for (std::size_t i = had_head ? q->entries.size() : 0; i-- > 1;) (void)remove_at(world, id, i);
+  queue(id).entries.push_back(std::move(command));
+  q = find(id);
+  if (had_head && q->entries.size() > 1 && q->entries.front().id == head) {
+    (void)remove_at(world, id, 0);
   }
-  q.entries.clear();
-  q.entries.push_back(std::move(command));
   return issued;
 }
 
 std::uint32_t CommandSystem::add_command(World& world, ObjectId id, bool front,
                                          std::string_view verb, const Command& prototype) {
   if (world.find(id) == nullptr) return 0;
-  CommandQueue& q = queue(id);
+  (void)queue(id);
 
   Command command = prototype;
   command.id = world.next_command_id();
@@ -762,11 +842,13 @@ std::uint32_t CommandSystem::add_command(World& world, ObjectId id, bool front,
   command.script = script::kNoScript;
   command.started = false;
   const std::uint32_t issued = command.id;
-  if (!charge(world, id, command)) return 0;
+  if (!accept(world, id, command)) return 0;
 
   // `front` inserts at index 1 -- behind the running command, ahead of the rest
   // -- and never at index 0. See the header: the `AddCommand(true, ...);
-  // KillCommand();` idiom only works if the runner survives the insert.
+  // KillCommand();` idiom only works if the runner survives the insert. Found
+  // again after the accept test, whose script could have added a queue.
+  CommandQueue& q = queue(id);
   const std::size_t at = front && !q.entries.empty() ? std::size_t{1} : q.entries.size();
   q.entries.insert(q.entries.begin() + static_cast<std::ptrdiff_t>(at), std::move(command));
   return issued;
@@ -782,47 +864,39 @@ std::uint32_t CommandSystem::append_order(World& world, ObjectId id, std::string
   const CommandQueue* before = find(id);
   const bool resting = before != nullptr && !before->entries.empty() &&
                        equal_fold(before->entries.front().verb, default_verb_);
+  const std::uint32_t head = resting ? before->entries.front().id : 0u;
   const std::uint32_t issued = add_command(world, id, /*front=*/false, verb, prototype);
   if (issued == 0 || !resting) return issued;
-  CommandQueue& q = queue(id);
-  settle(world, id, q.entries.front(), /*refund=*/true);
-  retire(world, id, q.entries.front(), /*canceled=*/true);
-  q.entries.erase(q.entries.begin());
+  const CommandQueue* q = find(id);
+  if (q != nullptr && !q->entries.empty() && q->entries.front().id == head) {
+    (void)remove_at(world, id, 0);
+  }
   return issued;
 }
 
 bool CommandSystem::kill_command(World& world, ObjectId id) {
-  CommandQueue* q = find(id);
-  if (q == nullptr || q->entries.empty()) return false;
-  settle(world, id, q->entries.front(), /*refund=*/true);
-  retire(world, id, q->entries.front(), /*canceled=*/true);
-  q->entries.erase(q->entries.begin());
-  return true;
+  return remove_at(world, id, 0);
 }
 
 std::size_t CommandSystem::clear_commands(World& world, ObjectId id) {
-  CommandQueue* q = find(id);
+  // 0x005b1120 with 0: every index from the last down to 1, each through
+  // 0x005b07d0, so the last queued is released first.
+  const CommandQueue* q = find(id);
   if (q == nullptr || q->entries.size() <= 1) return 0;
-  const std::size_t dropped = q->entries.size() - 1;
-  for (std::size_t i = 1; i < q->entries.size(); ++i) {
-    settle(world, id, q->entries[i], /*refund=*/true);
-    retire(q->entries[i]);
+  std::size_t dropped = 0;
+  for (std::size_t i = q->entries.size(); i-- > 1;) {
+    if (remove_at(world, id, i)) ++dropped;
   }
-  q->entries.erase(q->entries.begin() + 1, q->entries.end());
   return dropped;
 }
 
 bool CommandSystem::cancel_command(World& world, ObjectId id, std::uint32_t command_id) {
-  CommandQueue* q = find(id);
+  const CommandQueue* q = find(id);
   if (q == nullptr || command_id == 0) return false;
   const auto at = std::find_if(q->entries.begin(), q->entries.end(),
                                [command_id](const Command& c) { return c.id == command_id; });
   if (at == q->entries.end()) return false;
-  if (at == q->entries.begin()) return kill_command(world, id);
-  settle(world, id, *at, /*refund=*/true);
-  retire(*at);
-  q->entries.erase(at);
-  return true;
+  return remove_at(world, id, static_cast<std::size_t>(at - q->entries.begin()));
 }
 
 std::string_view CommandSystem::command_name(ObjectId id, std::size_t index) const noexcept {
@@ -856,7 +930,10 @@ const Command* CommandSystem::command_of_script(script::ScriptId script) const n
   for (const Command& command : finishing_) {
     if (command.script == script) return &command;
   }
-  return nullptr;
+  // Inside a row's `onaddremovescript`, which is no command's own script: the
+  // row it was run for, as the original's ambient globals say for as long as
+  // the call lasts.
+  return hooked_;
 }
 
 CommandSystem* command_system(World& world) noexcept {
