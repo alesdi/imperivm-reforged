@@ -2476,20 +2476,48 @@ HostOutcome form_description_impl(CallContext& ctx) {
 // the Goto family
 // --------------------------------------------------------------------------
 
+namespace {
+/// What a ship's passenger waits before it asks again whether it may step
+/// off: the 100 the `Goto` family writes to the wait cell (0x005d62c8).
+constexpr std::int32_t kGotoCarrierPoll = 100;
+}  // namespace
+
 HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, ObjectId id,
                      const GotoOrder& order) {
   const Point dest =
       order.target == kNoObject ? order.dest : world.resolve_position(order.target);
-  // **A garrisoned unit steps out of its settlement first** (0x005d62a0-
-  // 0x005d62ec): `Goto` asks 0x005d3f20 to put it outside, towards where it
-  // is going, before it measures or routes anything, and waits whatever the
-  // settlement's exit timing asks. `garrison_exit` is that routine.
+  // **A held unit steps out of its holder first** (0x005d62a0-0x005d62ec),
+  // before it measures or routes anything, and every wait on the way is the
+  // original's return 1 -- suspend, and run the call again whole
+  // (0x005d6606), which is `retry` here:
+  //
+  //   * **aboard a ship it polls every 100 ms** (0x005d62b9): when the
+  //     holder belongs to an object (0x005319a0 resolves `[holder+0xe]`,
+  //     `held_by_carrier`), the call writes 100 to the wait cell and does not
+  //     try the exit at all, so a passenger stays aboard until the ship lets
+  //     it off. `GotoEnter` (0x005d6729) and the worker `GotoAttack` and the
+  //     object `Goto` share (0x005d4103) make the same poll;
+  //   * otherwise it asks 0x005d3f20 to put it outside, towards where it is
+  //     going, and waits whatever the settlement's exit timing asks
+  //     (`garrison_exit`).
+  //
+  // Both used to answer the script `false` after the wait instead of running
+  // again, and a passenger was not held back at all: `garrison_exit` does
+  // nothing for a holder that is not a settlement's, and the unit was routed
+  // from inside the ship.
+  //
+  // **Not reproduced:** a unit still at `(-1, -1)` after both, which the
+  // original polls every 500 ms (0x005d6312). Its exit routine takes a unit
+  // out of any holder; `garrison_exit` only out of a settlement's, so a
+  // unit this engine fails to take out is one the original would have, and
+  // a 500 ms poll here would hold it for ever.
   if (const ObjectState* state = world.state(id); state != nullptr && state->is_held()) {
-    const std::int32_t wait = garrison_exit(world, id, dest, now_of(ctx, world));
+    const std::int32_t wait = held_by_carrier(world, id)
+                                  ? kGotoCarrierPoll
+                                  : garrison_exit(world, id, dest, now_of(ctx, world));
     if (wait > 0) {
       HostOutcome out;
-      out.status = script::HostStatus::suspend;
-      out.value = Value::boolean(false);
+      out.status = script::HostStatus::retry;
       out.suspend_for = wait;
       return out;
     }

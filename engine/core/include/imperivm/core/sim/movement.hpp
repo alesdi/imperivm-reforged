@@ -966,8 +966,8 @@ struct GotoOrder {
 
 /// The shared body of the `Goto` family. Returns the host outcome the entry
 /// point should return: `true` on arrival, `false` with a suspension while
-/// walking or searching, and `finish` once it has gone `give_up` without a
-/// route.
+/// walking or searching, a `retry` while a held unit waits to step out of its
+/// holder, and `finish` once it has gone `give_up` without a route.
 [[nodiscard]] script::HostOutcome run_goto(script::CallContext& ctx, World& world,
                                            MovementSystem& movement, ObjectId id,
                                            const GotoOrder& order);
