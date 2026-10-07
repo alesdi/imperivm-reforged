@@ -2034,10 +2034,28 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
 /// call's result. Each call re-places the army around where the hero is *now*,
 /// which is what makes the formation follow him rather than pile up at the
 /// destination he was given.
+///
+/// **Two functions answer to this name, and only the unit's drops the
+/// target.** `Hero::FormKeepMoving` (0x0052eaf0) keeps the hero's formation
+/// moving and leaves his combat target alone; `Unit::FormKeepMoving`
+/// (0x005d7a40), which `UNIT_FORM_MOVE.VS`'s army members reach, empties the
+/// target handle at `[unit+0x1a8]` with the attack count beside it on its
+/// first entry (0x005d7a7b), then sets the marching state and suspends for
+/// `ms` as the hero's does. Every shipped site but that one declares its
+/// receiver `Hero`. The original picks the function by the receiver's
+/// declared type; this registry keys on name and arity alone, so **the
+/// receiver being a registered hero is read as the `Hero` form** -- an
+/// inference that agrees with all 29 sites.
 HostOutcome form_keep_moving_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
-  if (HeroSystem* heroes = hero_system_of(*self.world); heroes != nullptr) {
+  HeroSystem* heroes = hero_system_of(*self.world);
+  if (heroes == nullptr || heroes->hero(self.id) == nullptr) {
+    if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
+      (void)combat->drop_target(self.id);
+    }
+  }
+  if (heroes != nullptr) {
     const MoveState& lead = self.movement->state(self.id);
     place_army(*self.world, *self.movement, *heroes, self.id,
                self.world->resolve_position(self.id), lead.facing);

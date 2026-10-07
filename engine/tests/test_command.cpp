@@ -2169,6 +2169,51 @@ TEST(form_keep_moving_waits_for_its_whole_argument_and_never_for_the_eta) {
   CHECK(invoke(registry, CallKind::member, "FormKeepMoving", 1, zero).status == HostStatus::ok);
 }
 
+TEST(a_members_form_keep_moving_drops_its_target_and_a_heros_does_not) {
+  // `Unit::FormKeepMoving` (0x005d7a40) empties `[unit+0x1a8]` on its first
+  // entry (0x005d7a7b); `Hero::FormKeepMoving` (0x0052eaf0) has no such write.
+  Fixture f;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(64, 64));
+  f.world.add_system(&movement);
+  HeroSystem heroes;
+  f.world.add_system(&heroes);
+  CombatSystem combat;
+  REQUIRE(f.world.add_system(&combat));
+  HostRegistry registry;
+  register_movement_host(registry);
+  register_command_host(registry);
+
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.hero_class);
+  f.world.set_position(hero, Point{100, 100});
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 1000);
+  heroes.register_hero(f.world, hero);
+  const ObjectId member = f.spawn(f.unit_class, Point{120, 100});
+  const ObjectId foe = f.spawn(f.unit_class, Point{300, 100}, /*owner=*/2);
+  for (const ObjectId id : {hero, member}) {
+    Combatant c;
+    c.id = id;
+    c.owner = 1;
+    c.health = 100;
+    c.target = foe;
+    c.attacks = 2;
+    combat.add(c);
+  }
+
+  HostCall member_keep(f.world, {obj(member), Value::integer(1000)});
+  const HostOutcome kept = invoke(registry, CallKind::member, "FormKeepMoving", 1, member_keep);
+  CHECK(kept.status == HostStatus::suspend);
+  CHECK(kept.suspend_for == 1000);
+  CHECK(combat.find(member)->target == kNoObject);
+  CHECK(combat.find(member)->attacks == 0);
+
+  HostCall hero_keep(f.world, {obj(hero), Value::integer(1500)});
+  (void)invoke(registry, CallKind::member, "FormKeepMoving", 1, hero_keep);
+  CHECK(combat.find(hero)->target == foe);
+  CHECK(combat.find(hero)->attacks == 2);
+}
+
 TEST(form_path_left_is_a_distance) {
   // Both sites compare it against a radius --
   // `if (.FormPathLeft() < .FormRadius() + s.radius) break;`
