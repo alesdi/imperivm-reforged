@@ -344,6 +344,13 @@ struct MoveState {
   /// the formation's path is spent. `place_army` hands it to every member's
   /// order as `dest_lock`. **Saved, and not hashed**.
   bool form_lock = false;
+  /// On the hero leading a march: the formation's radius, `[form+0x34]` --
+  /// how far its farthest station stands from him, the integer square root
+  /// of the largest squared offset `place_army` laid (0x005f1f60, 0x005f2062).
+  /// 0 with no station. The gate step reads it as the march's reach
+  /// (0x005f2350, 0x00418260; `sim/gate.hpp`, "A group's floor"). **Saved and
+  /// hashed**: it decides where the march stands before a gate.
+  std::int32_t form_extent = 0;
   /// `Unit::Stop` has asked a moving unit to stop: `CVXPathRetry`'s flag bit 1
   /// (`[retry+0x20] |= 2`, slot 6 at 0x004178b0). The path follower
   /// (0x00419ee0) then walks on, step by step, until the unit stands on a

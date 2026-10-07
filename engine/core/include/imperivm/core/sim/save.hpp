@@ -287,7 +287,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// Hashed, so a version-28 file describes a world this build would hash
 /// differently; and a load without them would carry out no order posted
 /// before the save, and drain the rest on another turn.
-inline constexpr std::uint32_t kStateVectorVersion = 29;
+/// 30: the movement section carries a march's formation radius
+/// (`MoveState::form_extent`, `[form+0x34]`), which decides how far short of a
+/// gate the march stands. Hashed, so a version-29 file describes a world this
+/// build would hash differently.
+inline constexpr std::uint32_t kStateVectorVersion = 30;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

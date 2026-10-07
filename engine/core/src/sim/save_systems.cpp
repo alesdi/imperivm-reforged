@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 30;  // 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 31;  // 31: a march's formation radius (`MoveState::form_extent`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -653,6 +653,9 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     // rather than walk on to a free spot.
     put_bool(out, m.form_lock);
     put_bool(out, m.stop_requested);
+    // The formation's radius a march's hero carries: how far short of a gate
+    // the march stands, until `place_army` lays its stations again.
+    bytes::put_i32(out, m.form_extent);
     // The gates the route crosses, listed when it was laid: path media like
     // the route, and not recomputable from it -- a gate spawned since would
     // join a list the original never rebuilds.
@@ -715,7 +718,7 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
         !bytes::get_i32(reader, m.retry_time) || !reader.u32(m.party) ||
         !get_bool(reader, m.dest_lock) || !get_bool(reader, m.free_spot_tried) ||
         !get_bool(reader, m.free_spot_aimed) || !get_bool(reader, m.form_lock) ||
-        !get_bool(reader, m.stop_requested)) {
+        !get_bool(reader, m.stop_requested) || !bytes::get_i32(reader, m.form_extent)) {
       return FormatError::truncated;
     }
     std::uint32_t crossings = 0;

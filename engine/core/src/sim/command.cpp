@@ -1931,6 +1931,14 @@ std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroe
   std::vector<Point> stations;
   const std::size_t placed =
       army_stations(world, movement, *record, hero, anchor, facing, members, stations);
+  // The formation's radius, `[form+0x34]`: the layout (0x005f1f60) keeps the
+  // largest squared offset of any station from the centre and stores its
+  // square root (0x005f2062). The march's route reads it at a gate.
+  std::int64_t farthest = 0;
+  for (std::size_t i = 0; i < placed; ++i) {
+    farthest = std::max(farthest, dist_sq(stations[i], anchor));
+  }
+  movement.state(hero).form_extent = static_cast<std::int32_t>(isqrt(farthest));
   for (std::size_t i = 0; i < placed; ++i) {
     if (!on_march(world, members[i].id)) continue;
     if (const ObjectState* state = world.state(members[i].id);
