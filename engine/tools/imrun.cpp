@@ -83,7 +83,8 @@ int main(int argc, char** argv) {
                  "three or more standing bodies share, by class, owner, order and\n"
                  "the hero whose army it is (h<id>, or h- for none);\n"
                  "IMRUN_GOTO=<turn>:<id>:<x>,<y> gives that object its owner's\n"
-                 "right-click order to the point before that turn, IMRUN_PLACE=<x>,<y>\n"
+                 "right-click order to the point before that turn (1 or later: no\n"
+                 "player orders before the first), IMRUN_PLACE=<x>,<y>\n"
                  "first stands it there, out of its AI's hands, IMRUN_WATCH=<id>\n"
                  "prints where it stands every ten turns and every gate its route\n"
                  "crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
@@ -654,6 +655,14 @@ int main(int argc, char** argv) {
   bool goto_wanted = false;
   if (const char* order = std::getenv("IMRUN_GOTO")) {
     goto_wanted = std::sscanf(order, "%llu:%u:%d,%d", &goto_turn, &goto_id, &goto_x, &goto_y) == 4;
+    // Not before the first turn: no player's order runs ahead of it, in
+    // `gbr.exe` or in the app, which owes its first turn as the match opens
+    // (`engine/app/main.cpp` says why), so an order there would play a game
+    // nobody can.
+    if (goto_wanted && goto_turn == 0) {
+      std::printf("  goto refused: no order is given before turn 1, as no player can give one\n");
+      goto_wanted = false;
+    }
   }
   // `IMRUN_PLACE=<x>,<y>`: the ordered object is stood there first, so a test
   // can send a unit from where the map never puts one -- an enemy outside a
