@@ -1246,14 +1246,15 @@ TEST(idle_on_the_map_drops_the_target_and_still_waits_its_argument) {
   CHECK(combat.find(inside)->attacks == 2);
 }
 
-/// `Taunt` yields where it can taunt and sleeps where it cannot.
+/// `Taunt` costs its argument wherever it is, and drops the target on the map.
 ///
 /// `Unit::Taunt` and `Unit::Idle` are the same function in `gbr.exe`, one
 /// constant apart, and the branch they share is on the receiver's *position*:
 /// `(-1, -1)` -- a unit inside a holder, whose location is its holder's -- takes
 /// the argument as a sleep and does nothing else, and anything with a real
-/// position drops its combat target and ends the slice. The 2,000 every shipped
-/// site passes is therefore only ever consumed by the held branch.
+/// position drops its combat target and returns 3, whose wake comes from the
+/// taunt activity once it has spent the popped argument (0x005d2ca0). So the
+/// 2,000 every shipped site passes is two seconds on the map too.
 TEST(taunt_drops_the_target_on_the_map_and_waits_in_a_holder) {
   Fixture f;
   CombatSystem combat;
@@ -1275,9 +1276,10 @@ TEST(taunt_drops_the_target_on_the_map_and_waits_in_a_holder) {
 
   HostCall standing(f.world, {obj(u), Value::integer(2000)});
   const HostOutcome yielded = invoke(registry, CallKind::member, "Taunt", 1, standing);
-  // Suspended with no timed wake: one scheduler step, not two seconds.
+  // Two seconds of taunting, not one scheduler step: `UNIT_CAPTURE.VS` takes
+  // a point of loyalty after each.
   CHECK(yielded.status == HostStatus::suspend);
-  CHECK(yielded.suspend_for == 0);
+  CHECK(yielded.suspend_for == 2000);
   // "A new order supersedes combat" -- the prologue this shares with `Stop`,
   // both `Goto`s, `Attack` and `AttackEveryone`.
   REQUIRE(combat.find(u) != nullptr);
@@ -1304,9 +1306,12 @@ TEST(taunt_drops_the_target_on_the_map_and_waits_in_a_holder) {
   CHECK(combat.find(inside)->target == foe);   // untouched
   CHECK(combat.find(inside)->attacks == 2);
 
-  // A held receiver with a non-positive argument has nothing to wait for.
+  // A non-positive argument still suspends, for one pass: the held branch
+  // writes it to the wait cell and returns 1, the other returns 3.
   HostCall zero(f.world, {obj(inside), Value::integer(0)});
-  CHECK(invoke(registry, CallKind::member, "Taunt", 1, zero).status == HostStatus::ok);
+  const HostOutcome brief = invoke(registry, CallKind::member, "Taunt", 1, zero);
+  CHECK(brief.status == HostStatus::suspend);
+  CHECK(brief.suspend_for == 0);
 
   // It touches the queue no more than `Idle` does.
   CHECK(f.commands.command_count(u) == 0);
@@ -1330,9 +1335,12 @@ TEST(taunt_without_a_combat_system_still_yields) {
   // A handle that is a number but names no object gets past `resolve` and is
   // caught here instead: this body reads the position and the original
   // dereferences null in the same place, which is a fault rather than a
-  // behaviour.
+  // behaviour. It waits its argument, as an idle does, so that no loop spins
+  // on it.
   HostCall stale(f.world, {obj(static_cast<ObjectId>(9999)), Value::integer(2000)});
-  CHECK(invoke(registry, CallKind::member, "Taunt", 1, stale).status == HostStatus::ok);
+  const HostOutcome gone = invoke(registry, CallKind::member, "Taunt", 1, stale);
+  CHECK(gone.status == HostStatus::suspend);
+  CHECK(gone.suspend_for == 2000);
 }
 
 // --------------------------------------------------------------------------

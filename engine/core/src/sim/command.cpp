@@ -1601,16 +1601,22 @@ HostOutcome force_idle_impl(CallContext& ctx) {
 ///      `Stop`, both `Goto`s, `GotoAttack`, `FormKeepMoving`, `Attack` and
 ///      `AttackEveryone`. It is this family's "a new order supersedes combat"
 ///      prologue.
-///   3. Return the code that ends the script's time slice without asking for a
-///      timed wake (3, which the interpreter's dispatch table at 0x0069dbc4
-///      turns into `sleep = -1` plus a forced budget exhaustion). So the taunt
-///      itself is fire-and-forget and the 2,000 every shipped site passes is
-///      **only ever consumed by the held branch**.
+///   3. Return 3: the call is done and the slice ends with no timed wake
+///      (0x0069d5fb), and the taunt activity wakes the script once it has
+///      spent the argument the call popped (see `Idle` above). **So a
+///      `Taunt(2000)` on the map is a two-second taunt.**
 ///
-/// **The activity is deliberately not written**, on the same grounds `Idle`
-/// above gives for not selecting an animation: `+0x130` is a small transient
-/// enum this engine does not model, it is not in the original's serialiser
-/// list, and a value written here and read by nobody would be state two peers
+/// **This used to cost one scheduler pass.** The reading was that a 3 is
+/// fire-and-forget and the 2,000 every shipped site passes is consumed only
+/// by the held branch; it missed that the activity (0x005d2ca0) takes its
+/// budget from the slot the argument was popped from. The difference is the
+/// capture rate: `UNIT_CAPTURE.VS` and `HERO_CAPTURE.VS` loop
+/// `.Taunt(2000); b.settlement.DecreaseLoyalty(1);`, which took a point of
+/// loyalty every pass rather than every two seconds.
+///
+/// **The activity is deliberately not written** (nor, for `Idle`, the idle
+/// one): `+0x130` is a small transient enum this engine does not model, it is
+/// not in the original's serialiser list, and a value written here and read by nobody would be state two peers
 /// could disagree about for no reason. Dropping the target *is* modelled, and
 /// `CombatSystem::stop` is that pair -- it also moves the unit out of the
 /// engaging animation, which the original does too, just into a taunt pose
@@ -1622,24 +1628,9 @@ HostOutcome force_idle_impl(CallContext& ctx) {
 HostOutcome taunt_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
-  const WorldObject* slot = self.world->find(self.id);
-  if (slot == nullptr) return HostOutcome::ok_void();
-
-  // The held case: wait out the argument and do nothing else.
-  if (slot->state.position == kHeldPosition) {
-    std::int64_t ms = 0;
-    if (ctx.count() > 1 && ctx.arg(1).is_integer()) ms = ctx.arg(1).as_integer();
-    return ms > 0 ? HostOutcome::sleep_for(ms) : HostOutcome::ok_void();
-  }
-
-  if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
-    (void)combat->stop(self.id);
-  }
-  // Yield the rest of the slice with no timed wake, which is what a 3 is.
-  HostOutcome out;
-  out.status = script::HostStatus::suspend;
-  out.suspend_for = 0;
-  return out;
+  std::int64_t ms = 0;
+  if (ctx.count() > 1 && ctx.arg(1).is_integer()) ms = ctx.arg(1).as_integer();
+  return idle_activity(self, ms);
 }
 
 // -- the cross-domain orders -----------------------------------------------
