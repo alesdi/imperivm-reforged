@@ -2491,7 +2491,7 @@ int run_buttons(const MapArgs& args, const std::string& class_name, const char* 
 void usage() {
   std::fprintf(stderr,
                "usage: imconform self  [turns] [turn-length]\n"
-               "       imconform lockstep <game> <map> [turns] [length]\n"
+               "       imconform lockstep <game> <map> [turns] [length] [--seed N]\n"
                "       imconform netplay  <game> <map> [turns] [delay] [net-seed]\n"
                "       imconform netjoin  <game> <map> [turns] [net-seed]\n"
                "       imconform observe  <game> <map> [turns]\n"
@@ -2590,6 +2590,9 @@ bool take_skirmish_flags(int& argc, char** argv, MapArgs& args) {
     } else if (flag == "--speed" && i + 1 < argc &&
                (std::strcmp(argv[1], "netplay") == 0 || std::strcmp(argv[1], "netjoin") == 0)) {
       args.speed = static_cast<std::int32_t>(std::strtol(argv[++i], nullptr, 10));
+    } else if (flag == "--seed" && i + 1 < argc && std::strcmp(argv[1], "lockstep") == 0) {
+      // The game's seed, as imrun's `--seed`: both peers play that game.
+      args.seed = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
     } else {
       argv[kept++] = argv[i];
     }
