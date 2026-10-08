@@ -830,9 +830,13 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
 #: swordsmen walk: where an enemy is stood before it is sent in.
 P1_OUTSIDE = (12500, 4300)
 
-#: The foot soldiers the enemy AIs train first on Crossroads, any of which
-#: can be the unit sent in.
-ENEMY_SOLDIERS = ("Swordsman", "Axetrower")
+#: The foot soldiers p1's enemies train on Crossroads -- Britons, Egyptians,
+#: Carthaginians -- any of which can be the unit sent in. Which one is on the
+#: map by the order turn is the AI's: a swordsman once, then an axe thrower,
+#: and a guardian once every stronghold rolled for a tactic inside the
+#: match's first two seconds (`GETTACTICSCRIPT.VS`).
+ENEMY_SOLDIERS = ("Swordsman", "Axetrower", "Guardian", "Archer", "LibyanFootman",
+                  "BerberAssassin", "Maceman", "Highlander", "Spearman", "Bowman")
 
 
 def test_an_enemy_sent_into_a_walled_town_is_not_routed_through_its_closed_gates(imrun, game_dir):
