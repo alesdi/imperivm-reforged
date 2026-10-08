@@ -108,16 +108,48 @@ HostOutcome builtin_airun_free(CallContext& context) {
   return spawn_from(context, context.arg(0), context.arguments.subspan(1));
 }
 
+/// `set.AIRun('ESH_NeedTech.vs')`, `gaika.AIRun('GSH_SynchApproach.vs',
+/// AIPlayer)`, `sq.AIRun(...)` -- 21 sites, and **a call, not a spawn.**
+///
+/// `Settlement::AIRun` (0x0043df70), `GAIKA::AIRun` (0x0043e0b0) and
+/// `Squad::AIRun` (0x0043e190) all resolve the script and hand it to
+/// 0x006a0360, the synchronous launcher the class hooks use (0x0069dca0): the
+/// helper runs to its end inside the caller's host call, and the caller's next
+/// statement sees what it wrote. The scripts are written that way --
+/// `ES_STRONGHOLD.VS` reads `nBuildCount` and `nBuildType` out of the
+/// environment on the line after `set.AIRun("ESH_BuildArmy.vs")`, and
+/// `ESH_BUILDARMY.VS` reads `UnitsEnabled` on the line after its own
+/// `set.AIRun("ESH_EnabledUnits.vs")`. None of the fourteen helpers so called
+/// sleeps or waits. The free `AIRun` is the other kind: it starts a thread
+/// and answers its handle (0x0041cd00).
+///
+/// This used to spawn a peer, so every caller read what the helper had
+/// written the *last* time it ran, and acted on it. While every script ran
+/// once a turn at the turn's end the lag was one loop of the caller; once
+/// scripts wake on their own millisecond it is a stale answer about another
+/// moment, and the AI's strongholds stopped raising armies.
+///
+/// The receiver binds as the helper's first parameter, which is what the
+/// signature comments of the scripts so called expect. A helper that traps is
+/// reported with the pass that called it (`Scheduler::report_trap`); its
+/// caller carries on, as the original's does once the interpreter returns.
 HostOutcome builtin_airun_member(CallContext& context) {
-  // `set.AIRun('ESH_NeedTech.vs')`, `gaika.AIRun('GSH_SynchApproach.vs', AIPlayer)`:
-  // the receiver binds as the new script's first parameter, which is what the
-  // signature comments of the scripts so started expect.
   if (context.count() < 2) return HostOutcome::failed("AIRun expects a script name");
+  if (context.scheduler == nullptr) return HostOutcome::failed("AIRun needs a scheduler");
+  if (!context.arg(1).is_string()) return HostOutcome::failed("AIRun expects a script name");
   std::vector<Value> args;
   args.reserve(context.count() - 1);
   args.push_back(context.arg(0));
   for (std::size_t i = 2; i < context.count(); ++i) args.push_back(context.arg(i));
-  return spawn_from(context, context.arg(1), args);
+  Scheduler& scheduler = *context.scheduler;
+  const std::uint32_t chunk = scheduler.find_chunk(context.arg(1).as_string());
+  // A missing script is survivable, as the spawning forms' is.
+  if (chunk == kNoChunk) return HostOutcome::ok_void();
+  const CallReport ran = scheduler.call(chunk, args);
+  if (ran.status == ExecStatus::failed) {
+    scheduler.report_trap(FailedScript{ran.id, scheduler.chunk(chunk).source_name, ran.trap});
+  }
+  return HostOutcome::ok_void();
 }
 
 HostOutcome builtin_break_script(CallContext& context) {
@@ -348,6 +380,12 @@ RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
   }
 
   now_ = to;
+  // The synchronous calls that trapped during the pass (`report_trap`).
+  for (FailedScript& trap : call_traps_) {
+    ++report.failed;
+    report.traps.push_back(std::move(trap));
+  }
+  call_traps_.clear();
   report.visited = static_cast<std::uint32_t>(scripts_.size());
   compact();
   // After compaction, so the hook never sees a record that is on its way out,

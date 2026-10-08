@@ -980,6 +980,33 @@ TEST(vs_the_scheduler_runs_many_scripts_in_id_order) {
   CHECK(stage.scheduler.live_count() == 0);
 }
 
+/// The member `AIRun` -- `set.AIRun("ESH_BuildArmy.vs")` -- is a call: the
+/// helper runs to its end inside the caller's statement, with the receiver as
+/// its first parameter, and the caller's next statement sees what it did.
+/// `Settlement::AIRun` (0x0043df70), `GAIKA::AIRun` and `Squad::AIRun` hand
+/// the script to the synchronous launcher 0x006a0360. It used to spawn a
+/// peer, so `ES_STRONGHOLD.VS` read the build order the helper had written
+/// the previous time.
+TEST(vs_member_airun_runs_the_helper_before_the_callers_next_statement) {
+  Stage stage;
+  REQUIRE(stage.add("// void, int set, int n\nNote(set * 100 + n);\n", "helper.vs"));
+  REQUIRE(stage.add(
+      "// void\n"
+      "int set;\n"
+      "set = 7;\n"
+      "set.AIRun(\"helper.vs\", 3);\n"
+      "Note(\"after\");\n",
+      "caller.vs"));
+  REQUIRE(stage.scheduler.spawn(1) != kNoScript);
+  const RunReport report = stage.scheduler.run_ready();
+  REQUIRE(stage.world.log.size() == 2);
+  CHECK(stage.world.log[0] == "703");
+  CHECK(stage.world.log[1] == "after");
+  // Not a peer: nothing is left running, and only the caller was resumed.
+  CHECK(report.resumed == 1);
+  CHECK(stage.scheduler.live_count() == 0);
+}
+
 TEST(vs_airun_spawns_a_peer_and_aibreakscript_kills_it) {
   Stage stage;
   // The child is the standard behaviour shape: an infinite loop around a sleep.

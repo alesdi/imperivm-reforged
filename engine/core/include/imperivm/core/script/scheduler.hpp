@@ -313,6 +313,12 @@ class Scheduler {
   /// interpreter holds a reference to.
   CallReport call(std::uint32_t chunk_index, std::span<const Value> args = {});
 
+  /// A trap in something `call` ran on a script's behalf, reported with the
+  /// pass that is running: the next `advance` or `run_ready` hands it out in
+  /// its `RunReport` (counted in `failed`) and forgets it. The member `AIRun`
+  /// is the caller; a hook's caller collects its own.
+  void report_trap(FailedScript trap) { call_traps_.push_back(std::move(trap)); }
+
   // -- the clock ---------------------------------------------------------
 
   /// The scripts' clock. Between passes, the end of the last one; while a
@@ -363,6 +369,8 @@ class Scheduler {
   /// Sorted by id, ascending, because ids are issued in order and spawns
   /// append. Iteration is therefore stable without sorting anything.
   std::vector<ScriptRecord> scripts_;
+  /// See `report_trap`. Not state: emptied by every pass.
+  std::vector<FailedScript> call_traps_;
   ScriptId next_id_ = 1;
   std::int64_t now_ = 0;
 

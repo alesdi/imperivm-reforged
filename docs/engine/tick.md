@@ -379,6 +379,16 @@ networked match's longest turn. `SUBAI/TOWNHALL_AUTOTRAIN.VS` is where the 1-ms 
 yields `Sleep(1)` once per unit it looks at and counts the yields off its own budget, so a
 pass over thirty units took thirty turns, 24 s at 800 ms, where the original takes 30 ms.
 
+The rounding also moved *when* a script first asked something, and one question has a
+deadline. `TACTICMONITOR.VS` sleeps `rand(500) + 500` before it asks each stronghold for a
+tactic, and `GETTACTICSCRIPT.VS` deals one only `if (GetTime < 2000)`: an Egyptian stronghold
+that rolls under 50 runs `TS_EGYPTTACTIC.VS`, which researches through four phases before it
+recruits, where one without a tactic trains from the start. On the original's wheel every
+monitor asks inside the window. At 800-ms turns the old scheduler asked at 1,600 or 2,400, and
+over Crossroads seeds 1 to 6 five of the eighteen strongholds asked at 2,400 and never rolled;
+now all eighteen ask between 1,354 and 1,797 (`test_wakeup.cpp`). So computer players that
+draw a tactic raise their armies later than they did here, as they do in the original.
+
 **Decision: keep 100 ms as the app's default for now.** It was kept while script wake-ups
 snapped to turn ends, where 100 ms at speed 1000 gave the original's period for every wait that
 is a multiple of 100. **Wake-ups are now exact** (above), so the turn length no longer sets a

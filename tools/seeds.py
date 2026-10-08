@@ -31,6 +31,9 @@ stayed inside the noise.
 * `deaths` -- death events, and by the dead unit's owner in the last column
   (`IMRUN_DEATHS`); a unit gone by the time it is reported counts as `p?`.
 * `blows` -- strikes landed, melee and arrows alike.
+* `made` -- units the computer players produced (p1 and up), from the match
+  report's `units N produced`, and by player in the last column. The report's
+  next number, before `killed`, is kills, not production.
 * `overlap` -- the worst sampled turn of the overlap census: standing pairs
   nearer than their radii, and the turn (`IMRUN_OVERLAPS`, every
   `--overlap-every` turns).
@@ -122,10 +125,20 @@ class Result:
     deaths: int = 0
     by_owner: dict[int, int] = dataclasses.field(default_factory=dict)
     blows: int = 0
+    made_by: dict[int, int] = dataclasses.field(default_factory=dict)
     overlap: int = 0
     overlap_turn: int = 0
     traps: int = 0
     hash: str = ""
+
+
+#: `report p1: units 305 produced 20 killed ...` -- the first number is the
+#: units that player produced.
+REPORT = re.compile(r"^\s+report p(\d+): units (\d+) produced", re.MULTILINE)
+
+
+def made(r: Result) -> int:
+    return sum(r.made_by.values())
 
 
 def parse(seed: int, text: str) -> Result:
@@ -151,6 +164,10 @@ def parse(seed: int, text: str) -> Result:
         r.deaths += 1
         owner = int(death.group(2))
         r.by_owner[owner] = r.by_owner.get(owner, 0) + 1
+    for report in REPORT.finditer(text):
+        player = int(report.group(1))
+        if player >= 1:
+            r.made_by[player] = int(report.group(2))
     if (strikes := STRIKES.search(text)) is not None:
         r.blows = int(strikes.group(1))
     if (overlap := OVERLAP.search(text)) is not None:
@@ -193,8 +210,8 @@ def owners_text(by_owner: dict[int, int]) -> str:
 
 
 HEADER = (f"{'seed':>5} {'build':<5} {'turns':>6} {'end':>6} {'winner':>6} {'caps':>5} "
-          f"{'towns':>5} {'deaths':>6} {'blows':>7} {'overlap':>12} {'traps':>6} "
-          f"{'hash':<8} {'secs':>5}  deaths by owner")
+          f"{'towns':>5} {'deaths':>6} {'blows':>7} {'made':>5} {'overlap':>12} {'traps':>6} "
+          f"{'hash':<8} {'secs':>5}  deaths by owner | made by player")
 
 
 def row(label: str, r: Result) -> str:
@@ -204,8 +221,9 @@ def row(label: str, r: Result) -> str:
     winner = "-" if r.winner is None else f"p{r.winner}"
     overlap = f"{r.overlap}@{r.overlap_turn}"
     return (f"{r.seed:>5} {label:<5} {r.turns:>6} {end:>6} {winner:>6} {r.captures:>5} "
-            f"{r.towns:>5} {r.deaths:>6} {r.blows:>7} {overlap:>12} {r.traps:>6} "
-            f"{r.hash[:8]:<8} {r.seconds:>5.0f}  {owners_text(r.by_owner)}")
+            f"{r.towns:>5} {r.deaths:>6} {r.blows:>7} {made(r):>5} {overlap:>12} {r.traps:>6} "
+            f"{r.hash[:8]:<8} {r.seconds:>5.0f}  {owners_text(r.by_owner)} | "
+            f"{owners_text(r.made_by)}")
 
 
 #: The summarised figures: (name, how to read it off a result).
@@ -215,6 +233,7 @@ FIGURES = (
     ("towns", lambda r: r.towns),
     ("deaths", lambda r: r.deaths),
     ("blows", lambda r: r.blows),
+    ("made", made),
     ("overlap", lambda r: r.overlap),
     ("traps", lambda r: r.traps),
 )
