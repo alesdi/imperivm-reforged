@@ -328,9 +328,13 @@ def test_a_seed_is_one_game_and_another_seed_is_another(imrun, game_dir):
     assert field(first, "  hash") != field(default, "  hash")
 
 
-#: Long enough on seed 1 for settlements to change hands: a village is taken
-#: at about turn 700 and an outpost at about 1,150.
-CAPTURE_TURNS = 1_500
+#: How long a run is asked to go before it must have seen a capture: the
+#: first length usually does on seed 1 (an outpost or village changed hands at
+#: turn 1,110 on main, 586 with exact wake-ups, 484 with the sentries fix as
+#: well), the second is the margin. When the computer players first take
+#: something is their business, and moves with every change to what they do;
+#: the claim is about the lines a run prints, whatever turn they come on.
+CAPTURE_TURNS = (1_500, 4_000)
 
 
 def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to_its_last(
@@ -359,11 +363,14 @@ def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to
         return found, result.stdout
 
     start, _ = owners(0)
-    end, output = owners(CAPTURE_TURNS)
+    for turns in CAPTURE_TURNS:
+        end, output = owners(turns)
+        if start != end:
+            break
     captures = re.findall(r"^  capture turn (\d+): #(\d+) kind \d+ p(-?\d+) -> p(-?\d+)$",
                           output, re.MULTILINE)
     assert start != end, (
-        f"no settlement changed hands in {CAPTURE_TURNS} turns on seed 1; "
+        f"no settlement changed hands in {CAPTURE_TURNS[-1]} turns on seed 1; "
         "lengthen CAPTURE_TURNS so that this test has something to check")
     replayed = dict(start)
     last_turn = 0
