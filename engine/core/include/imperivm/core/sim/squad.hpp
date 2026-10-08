@@ -291,7 +291,8 @@ struct AiOrder {
 ///   * **The free** (0x00448a10) writes the squad's index back to -1, links the
 ///     slot into the chain and zeroes its verb. Its priority is left where it
 ///     was. Three things free: the next post for the squad, `Squad::DelOrder`
-///     (0x00421670), and the squad emptying (0x00444803).
+///     (0x00421670), and a leave that brings the squad's strength to 0
+///     (0x00444803; see `SquadTable::leave`).
 ///   * **The timer.** `CVXAI::Start` (0x0041e2d0) arms the AI object's timer 1
 ///     with no delay; its handler (0x0041d790) drains (0x00448dd0) and re-arms
 ///     it for 500 (0x00688240, which adds the delay to the clock now).
@@ -343,9 +344,10 @@ struct AiOrder {
 ///     two runs first on a shared tick was not read.
 ///   * **Slot 2's `Context`** (0x0041ccb0 names it after the player) is not
 ///     kept: `AIOSendSquad.vs` reads no environment key, so nothing observes it.
-///   * **A squad empties** is the free here; the original frees when the
-///     squad's running strength reaches zero (0x004447f6), which is the same
-///     moment for every squad whose last member has any strength.
+///   * **The squad's strength reaching 0 at a leave** frees it, as in the
+///     original (0x004447f6) -- `SquadTable::leave` says when that is short of
+///     the squad emptying, which is only when every member left values at
+///     exactly 65,536.
 ///
 /// ## Hashed
 ///
@@ -405,10 +407,38 @@ class SquadTable {
   /// leader leaves the squad leaderless rather than promoting anybody: the
   /// dumps have no evidence for promotion, and `DetachArmy` disbands instead.
   ///
-  /// The last member leaving frees the squad's AI order on the spot, as
-  /// 0x00444803 does, so a post that follows in the same breath -- the
-  /// regroup's -- takes the slot it left.
+  /// `Squad::RemoveMember` (0x00444750), whose rule is about **strength**, not
+  /// membership: it brings the squad's running strength (`eval`) down by the
+  /// leaver's valuation -- or to 0 outright when nobody is left -- and when
+  /// that strength is 0 it stands the squad down (`stand_down`): the AI order
+  /// is freed (0x00444803), the squad is filed under no node and bound for
+  /// none. So a post that follows in the same breath -- the regroup's -- takes
+  /// the slot it left.
+  ///
+  /// This form has no world to value the members with, so the only strength
+  /// it can know is an empty squad's, which is 0 by 0x004447dd; `eval` is left
+  /// alone otherwise. Every caller in the simulation has a world and uses the
+  /// form below; this one is the table on its own, for the tests of it.
   bool leave(SquadKey key, ObjectId id);
+
+  /// The same, with the strength the original keeps: `eval` becomes the sum of
+  /// the members left (`squad_worth`), and the squad stands down when that is
+  /// 0 **while members remain** as well as when it is empty.
+  ///
+  /// The original keeps the total running -- added on a join, subtracted on a
+  /// leave, re-bracketed by every health write and stat recalc -- so at the
+  /// moment of a leave it *is* the sum of the members left, which is what is
+  /// taken here. Every member is worth at least 1 (0x004439d0 ends in `+ 1`,
+  /// and a ram is 1), so the sum reaches 0 with members left only when each of
+  /// them values at exactly 65,536, which the sixteen bits the total is built
+  /// from (0x004447e9, `movzx`) read as 0. That is the whole of the
+  /// difference from "it empties", and it is the original's arithmetic.
+  ///
+  /// **Only a leave tests it.** The original's other two writers of the total
+  /// (0x0041e890 and 0x0041e900, either side of a health write or a stat
+  /// recalc) subtract and add and test nothing, so a squad whose strength
+  /// reaches 0 by a member's wound keeps its order until somebody leaves.
+  bool leave(World& world, SquadKey key, ObjectId id);
 
   /// Remove the squad entirely, and its AI order with it.
   bool destroy(SquadKey key);
@@ -444,9 +474,10 @@ class SquadTable {
   //
   // `AiOrderQueue` carries the reading. Held here rather than on `AiSystem`,
   // whose object the original hangs it from, because a record is freed the
-  // moment its squad empties and every way a squad loses a member is a method
-  // of this table: a queue anywhere else would need to be told, from eleven
-  // call sites, or would find out late and reuse its slots in another order.
+  // moment its squad's strength reaches 0 at a leave, and every way a squad
+  // loses a member is a method of this table: a queue anywhere else would
+  // need to be told, from eleven call sites, or would find out late and reuse
+  // its slots in another order.
 
   /// `player`'s queue, or null outside the table.
   [[nodiscard]] const AiOrderQueue* orders(PlayerId player) const noexcept;
@@ -507,6 +538,26 @@ class SquadTable {
   /// 0x00448a10: the squad's record back on the free chain, and the squad
   /// pointed at none.
   void free_order(Squad& squad) noexcept;
+  /// `id` out of the squad `key` names: the squad, or null when either is not
+  /// there.
+  Squad* remove_member(SquadKey key, ObjectId id);
+  /// What 0x00444750 does to a squad whose strength has reached 0
+  /// (0x004447f8..0x0044481a), in its order:
+  ///
+  ///   * its timers are killed (0x00687c80). The one timer a squad arms is
+  ///     0x28, on its first member's join (0x00445b4b), and its handler
+  ///     (0x00444590) calls `vtbl+0x1c`, which in the squad's vtable
+  ///     (0x007b13c0) is a bare return (0x004a3d70) -- so there is nothing
+  ///     to kill here and nothing is modelled;
+  ///   * its AI order is freed (0x0041e9c0, reaching 0x00448a80 on the
+  ///     player's queue when the player has an AI);
+  ///   * it is filed under no node (0x0041eac0 with 0): `GAIKAIn` is 0, and
+  ///     `SrcGAIKA`, stamped from it only while 0, is left as it is;
+  ///   * it is bound for no node (0x00444210 with 0): `DestGAIKA` is 0.
+  ///
+  /// The squad itself stays, with whatever members it has: nothing here
+  /// destroys it, and the leave's two callers ignore what it answers.
+  void stand_down(Squad& squad) noexcept;
 
   std::vector<Squad> squads_;  ///< sorted by squad_key_less; iteration order is state
   std::array<AiOrderQueue, kPlayerCount> orders_{};  ///< by player; see `AiOrderQueue`
@@ -548,6 +599,14 @@ class SquadTable {
 ///     A script that reads `sq.Eval` after damaging a unit *within the same
 ///     turn* sees the value from the turn's start. Nothing shipped does that:
 ///     the nine readers are all AI polling loops that sleep between passes.
+///     A member's leave is the exception and is on the instant:
+///     `SquadTable::leave` takes the sum again there, because that is where
+///     the original tests it.
+///   * **A squad stood down with members left is filed again a turn later.**
+///     The original files it again at its leader's next move (0x0041f530 finds
+///     the node under the mover differing from none); this files every squad
+///     every turn. It can only matter to a squad whose members are all worth
+///     65,536 (see `SquadTable::leave`).
 ///   * **The "leader" the node follows is the member deque's front**
 ///     (0x00443df0), which is `Squad::leader` whenever there is one and the
 ///     next member along when a leader has left without being replaced -- so a
@@ -560,6 +619,12 @@ class SquadTable {
 ///     which leaves that unit's contribution frozen at whatever it was when it
 ///     joined; here every member is valued alike.
 void revalue_squads(World& world, SquadTable& squads);
+
+/// The sum of `squad`'s members' census valuations (`object_power`, sixteen
+/// bits each) -- what `Squad::Eval` holds. Shared by `revalue_squads` and
+/// `SquadTable::leave` so the two cannot disagree; a member the world no longer
+/// has is worth nothing.
+[[nodiscard]] std::int32_t squad_worth(World& world, const Squad& squad);
 
 class ScriptLibrary;
 
@@ -752,7 +817,8 @@ class SquadListPool {
 
 /// `Squad::SetCmd`'s core (0x0043ec00): the state and its stamp, the flags
 /// masked set-then-clear, and `verb` with `prototype` replacing every member's
-/// queue in join order. Shared by the three `SetCmd` overloads and by
+/// queue in join order -- or nothing at all for a squad carrying `SF_NOAI`
+/// (0x0043ec15). Shared by the three `SetCmd` overloads and by
 /// `Ship::ApplyAiTransport`, which runs it on every squad it lands.
 void squad_set_cmd(World& world, Squad& squad, std::int32_t state, std::int32_t set_flags,
                    std::int32_t clear_flags, std::string_view verb, const Command& prototype,

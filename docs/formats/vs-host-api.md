@@ -1926,6 +1926,9 @@ Frequency-ordered, the cheapest useful milestones:
       argument is a player number where the free function's is a `point`.
     - **`AIRun`.** `Settlement::AIRun`, `GAIKA::AIRun` and `Squad::AIRun` (`0x00443794`,
       `0x004437ad`, `0x004437c6`) are all `void`, and all 21 member call sites are statements.
+      They are also **calls, not spawns**: each body (`0x0043df70`, `0x0043e0b0`, `0x0043e190`)
+      hands the script to `0x006a0360`, the synchronous launcher, so the helper has finished
+      before the caller's next statement reads what it wrote.
       The `int` came from the free `AIRun`, which is genuinely `int` — `heroScId = AIRun(
       "TS_AttackAtWill.vs", set, ol, oDummy, 0);` in `TS_BRITISHTACTIC.VS`.
 

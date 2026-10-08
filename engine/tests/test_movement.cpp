@@ -1538,6 +1538,41 @@ TEST(dist_to_measures_from_the_edges_not_the_centres) {
 // so a unit sent to a camp with range 0 stops where the camp begins rather
 // than on its anchor -- which is where `UNIT_CAPTURE.VS`'s mirror walk used to
 // find it, aiming at its own feet and never yielding.
+/// A route walked to its end whose arrival the next turn decides has no time
+/// left to wait and has not arrived: `Goto` waits for the world's next step
+/// (a zero wait, run at the next pass's end) rather than answering at once.
+///
+/// Answered at once, `UNIT_ADVANCE.VS`'s `while (1) { ... if (.Goto(pt, 0,
+/// 2000, true, 0)) return; }` spun through its instruction budget, since
+/// nothing moves inside a pass. Scripts poll eight times as often at 800-ms
+/// turns now that they wake on their own millisecond, and two of six
+/// Crossroads seeds trapped there, three times. The state is set by hand: the step
+/// done, the route still held.
+TEST(a_host_goto_on_a_spent_route_waits_for_the_next_step) {
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(open_field(64));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{100, 100}, 100);
+
+  HostCall call(world, {Value::object(kTypeObj, unit), pack_point(Point{500, 100}),
+                        Value::integer(0), Value::integer(2000), Value::boolean(true),
+                        Value::integer(0)});
+  REQUIRE(invoke(registry, CallKind::member, "Goto", 5, call).status == HostStatus::suspend);
+  MoveState& move = movement.state(unit);
+  REQUIRE(move.has_path);
+  move.progress = move.path_length * kSpeedScale;
+  REQUIRE(movement.eta(unit) == 0);
+
+  const HostOutcome again = invoke(registry, CallKind::member, "Goto", 5, call);
+  CHECK(again.status == HostStatus::suspend);
+  CHECK(again.suspend_for == 0);
+  CHECK(again.value.as_integer() == 0);  // not arrived
+}
+
 TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   EdgeField f;
   const ObjectId walker = f.place("Walker", Point{1000, 1000});

@@ -47,6 +47,8 @@ ClassGraph attribute_graph() {
             "test_map_attributes.cpp");
   graph.add(bytes_of(R"(<class id="Trader" parent="Unit" cpp_class="CVXWagon"/>)"),
             "test_map_attributes.cpp");
+  graph.add(bytes_of(R"(<class id="Sentry" parent="Unit" cpp_class="CVXUnit"/>)"),
+            "test_map_attributes.cpp");
   graph.add(bytes_of(R"(<class id="Hut" parent="Object" cpp_class="CVXBuilding">
       <properties maxhealth="500" maxstamina="0" radius="30"/>
     </class>)"),
@@ -144,6 +146,34 @@ constexpr std::string_view kMap = R"(<mapobject>
 	flags="0x80400001"
 	dir.x="0"
 	dir.y="1"/>
+	<scriptobj
+		class="Sentry"
+		num="5"
+	Level="0"
+	UnitFlags="0"
+	player="1"
+	healthperc="100"
+	stamina="10"
+	inventorysize="0"
+	x="1400"
+	y="1000"
+	flags="0x80400001"
+	dir.x="0"
+	dir.y="1"/>
+	<scriptobj
+		class="Sentry"
+		num="6"
+	Level="0"
+	UnitFlags="262144"
+	player="1"
+	healthperc="100"
+	stamina="10"
+	inventorysize="0"
+	x="1500"
+	y="1000"
+	flags="0x80400001"
+	dir.x="0"
+	dir.y="1"/>
 </mapobject>
 )";
 
@@ -218,6 +248,29 @@ TEST(a_veteran_unit_a_loaded_trader_and_a_building_take_their_authored_values) {
   // and the unit is otherwise whole.
   CHECK(heroes.items().count_for(b.object(4)) == 0);
   CHECK(b.session->world().find(b.object(4)) != nullptr);
+}
+
+/// A sentry's own word is replaced, not merged. The `CVXUnit` constructor
+/// gives every `Sentry` heir `UNITFLAG_NOAI` and the minimap bit (0x005d3323,
+/// `World::allocate`), and the unit loader then stores the map's `UnitFlags`
+/// over the whole of `[unit+0x194]` (0x005dd6a9) -- so a sentry the map places
+/// has exactly the bits its map gives it, and one `Place` makes keeps both.
+TEST(a_map_placed_sentry_takes_its_maps_unit_flags_over_the_constructors) {
+  Bench b;
+  World& world = b.session->world();
+  const WorldObject* bare = world.find(b.object(5));
+  const WorldObject* quiet = world.find(b.object(6));
+  REQUIRE(bare != nullptr);
+  REQUIRE(quiet != nullptr);
+  CHECK(!bare->state.flags.no_ai);
+  CHECK(!bare->state.flags.on_minimap);
+  CHECK(quiet->state.flags.no_ai);
+  CHECK(!quiet->state.flags.on_minimap);
+  // And one a script places is the constructor's.
+  const ObjectId placed = world.spawn_of_class(b.graph.find("Sentry"));
+  REQUIRE(placed != kNoObject);
+  CHECK(world.find(placed)->state.flags.no_ai);
+  CHECK(world.find(placed)->state.flags.on_minimap);
 }
 
 TEST(the_authored_values_survive_a_save) {

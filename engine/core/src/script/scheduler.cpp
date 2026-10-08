@@ -1,6 +1,8 @@
 #include "imperivm/core/script/scheduler.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <queue>
 #include <utility>
 
 namespace imperivm::core::script {
@@ -106,16 +108,48 @@ HostOutcome builtin_airun_free(CallContext& context) {
   return spawn_from(context, context.arg(0), context.arguments.subspan(1));
 }
 
+/// `set.AIRun('ESH_NeedTech.vs')`, `gaika.AIRun('GSH_SynchApproach.vs',
+/// AIPlayer)`, `sq.AIRun(...)` -- 21 sites, and **a call, not a spawn.**
+///
+/// `Settlement::AIRun` (0x0043df70), `GAIKA::AIRun` (0x0043e0b0) and
+/// `Squad::AIRun` (0x0043e190) all resolve the script and hand it to
+/// 0x006a0360, the synchronous launcher the class hooks use (0x0069dca0): the
+/// helper runs to its end inside the caller's host call, and the caller's next
+/// statement sees what it wrote. The scripts are written that way --
+/// `ES_STRONGHOLD.VS` reads `nBuildCount` and `nBuildType` out of the
+/// environment on the line after `set.AIRun("ESH_BuildArmy.vs")`, and
+/// `ESH_BUILDARMY.VS` reads `UnitsEnabled` on the line after its own
+/// `set.AIRun("ESH_EnabledUnits.vs")`. None of the fourteen helpers so called
+/// sleeps or waits. The free `AIRun` is the other kind: it starts a thread
+/// and answers its handle (0x0041cd00).
+///
+/// This used to spawn a peer, so every caller read what the helper had
+/// written the *last* time it ran, and acted on it. While every script ran
+/// once a turn at the turn's end the lag was one loop of the caller; once
+/// scripts wake on their own millisecond it is a stale answer about another
+/// moment, and the AI's strongholds stopped raising armies.
+///
+/// The receiver binds as the helper's first parameter, which is what the
+/// signature comments of the scripts so called expect. A helper that traps is
+/// reported with the pass that called it (`Scheduler::report_trap`); its
+/// caller carries on, as the original's does once the interpreter returns.
 HostOutcome builtin_airun_member(CallContext& context) {
-  // `set.AIRun('ESH_NeedTech.vs')`, `gaika.AIRun('GSH_SynchApproach.vs', AIPlayer)`:
-  // the receiver binds as the new script's first parameter, which is what the
-  // signature comments of the scripts so started expect.
   if (context.count() < 2) return HostOutcome::failed("AIRun expects a script name");
+  if (context.scheduler == nullptr) return HostOutcome::failed("AIRun needs a scheduler");
+  if (!context.arg(1).is_string()) return HostOutcome::failed("AIRun expects a script name");
   std::vector<Value> args;
   args.reserve(context.count() - 1);
   args.push_back(context.arg(0));
   for (std::size_t i = 2; i < context.count(); ++i) args.push_back(context.arg(i));
-  return spawn_from(context, context.arg(1), args);
+  Scheduler& scheduler = *context.scheduler;
+  const std::uint32_t chunk = scheduler.find_chunk(context.arg(1).as_string());
+  // A missing script is survivable, as the spawning forms' is.
+  if (chunk == kNoChunk) return HostOutcome::ok_void();
+  const CallReport ran = scheduler.call(chunk, args);
+  if (ran.status == ExecStatus::failed) {
+    scheduler.report_trap(FailedScript{ran.id, scheduler.chunk(chunk).source_name, ran.trap});
+  }
+  return HostOutcome::ok_void();
 }
 
 HostOutcome builtin_break_script(CallContext& context) {
@@ -262,53 +296,96 @@ VmEnv Scheduler::env_for(const ScriptRecord& record) const {
   return env;
 }
 
-RunReport Scheduler::run_ready() {
+RunReport Scheduler::run_ready() { return run_window(now_, now_); }
+
+RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
   RunReport report;
 
-  // Indexed, and re-reading `scripts_[i]` each time, because a script may spawn
-  // others while it runs: the vector grows underneath this loop, and the new
-  // entries -- which always have higher ids -- are picked up by the same pass.
-  // `DATA\AI\MAIN.VS` is six `AIRun` calls and a return, and this is what makes
-  // its six monitors start on the tick that started it.
-  for (std::size_t i = 0; i < scripts_.size(); ++i) {
-    if (scripts_[i].dead) continue;
-    const ExecStatus status = scripts_[i].execution.status;
-    const bool runnable = status == ExecStatus::ready ||
-                          (status == ExecStatus::suspended &&
-                           scripts_[i].execution.wake_time <= now_);
-    if (!runnable) continue;
-    if (scripts_[i].chunk_index >= chunks_.size()) continue;
+  // The pass's queue, by `(instant, id)`. Transient: it is empty before and
+  // after every pass, so it is never saved -- between passes each script's
+  // wake time is the whole of its place in it.
+  using Due = std::pair<std::int64_t, ScriptId>;
+  std::priority_queue<Due, std::vector<Due>, std::greater<Due>> due;
 
-    const ScriptId id = scripts_[i].id;
-    const std::uint32_t chunk_index = scripts_[i].chunk_index;
-    const VmEnv env = env_for(scripts_[i]);
+  // What is runnable as the pass opens. Anything that became so outside a
+  // pass, or whose wait ended at or before the last pass's end (a zero
+  // wait), runs at the end: see "A script wakes on its own millisecond".
+  for (const ScriptRecord& record : scripts_) {
+    if (record.dead) continue;
+    const ExecStatus status = record.execution.status;
+    if (status == ExecStatus::ready) {
+      due.emplace(to, record.id);
+    } else if (status == ExecStatus::suspended && record.execution.wake_time <= to) {
+      due.emplace(record.execution.wake_time > from ? record.execution.wake_time : to, record.id);
+    }
+  }
+
+  while (!due.empty()) {
+    const auto [instant, id] = due.top();
+    due.pop();
+    ScriptRecord* queued = find(id);
+    if (queued == nullptr || queued->dead) continue;
+    if (queued->chunk_index >= chunks_.size()) continue;
+    now_ = instant;
+
+    // A script may spawn others while it runs, and the vector grows at its
+    // tail -- new ids are always the highest. Whatever was appended by the
+    // end of the slice is queued at this instant, so it runs after
+    // everything else due now. `DATA\AI\MAIN.VS` is six `AIRun` calls and a
+    // return, and this is what makes its six monitors start on the tick that
+    // started it.
+    const std::size_t known = scripts_.size();
+    const std::uint32_t chunk_index = queued->chunk_index;
+    const VmEnv env = env_for(*queued);
 
     // Detached for the duration of the run. A host call can spawn, which
     // reallocates `scripts_`, and a reference held across that would dangle.
-    Execution execution = std::move(scripts_[i].execution);
+    Execution execution = std::move(queued->execution);
     execution.status = ExecStatus::ready;
     ++report.resumed;
     run(execution, chunks_[chunk_index], env);
 
     ScriptRecord* record = find(id);
-    if (record == nullptr) continue;  // killed itself and was compacted away
-
-    if (execution.status == ExecStatus::finished) {
-      ++report.completed;
-      record->dead = true;
-    } else if (execution.status == ExecStatus::failed) {
-      ++report.failed;
-      report.traps.push_back(FailedScript{id, chunks_[chunk_index].source_name, execution.trap});
-      record->dead = true;
+    if (record != nullptr) {
+      if (execution.status == ExecStatus::finished) {
+        ++report.completed;
+        record->dead = true;
+      } else if (execution.status == ExecStatus::failed) {
+        ++report.failed;
+        report.traps.push_back(
+            FailedScript{id, chunks_[chunk_index].source_name, execution.trap});
+        record->dead = true;
+      }
+      record->execution = std::move(execution);
+      // The slice is over and the record is whole again. See `StepHook`: this
+      // is where the original performs a deferred `Erase`, and the reason it is
+      // here rather than in the pass hook is that the next script must not see
+      // an object the previous one destroyed.
+      if (step_hook_ != nullptr) step_hook_(user_, *this, id);
     }
-    record->execution = std::move(execution);
-    // The slice is over and the record is whole again. See `StepHook`: this is
-    // where the original performs a deferred `Erase`, and the reason it is here
-    // rather than in the pass hook is that the next script must not see an
-    // object the previous one destroyed.
-    if (step_hook_ != nullptr) step_hook_(user_, *this, id);
+
+    // Due again inside this pass: a wait that ends after the instant it began
+    // and no later than the pass's end. Looked up again, because the step
+    // hook may have killed it.
+    if (const ScriptRecord* again = find(id);
+        again != nullptr && !again->dead && again->execution.status == ExecStatus::suspended &&
+        again->execution.wake_time > instant && again->execution.wake_time <= to) {
+      due.emplace(again->execution.wake_time, id);
+    }
+    for (std::size_t i = known; i < scripts_.size(); ++i) {
+      if (!scripts_[i].dead && scripts_[i].execution.status == ExecStatus::ready) {
+        due.emplace(instant, scripts_[i].id);
+      }
+    }
   }
 
+  now_ = to;
+  // The synchronous calls that trapped during the pass (`report_trap`).
+  for (FailedScript& trap : call_traps_) {
+    ++report.failed;
+    report.traps.push_back(std::move(trap));
+  }
+  call_traps_.clear();
   report.visited = static_cast<std::uint32_t>(scripts_.size());
   compact();
   // After compaction, so the hook never sees a record that is on its way out,
@@ -351,8 +428,7 @@ CallReport Scheduler::call(std::uint32_t chunk_index, std::span<const Value> arg
 }
 
 RunReport Scheduler::advance(std::int64_t delta) {
-  now_ += delta;
-  return run_ready();
+  return run_window(now_, now_ + delta);
 }
 
 // -- serialisation ----------------------------------------------------------

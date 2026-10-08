@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 30;  // 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 32;  // 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -653,6 +653,9 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     // rather than walk on to a free spot.
     put_bool(out, m.form_lock);
     put_bool(out, m.stop_requested);
+    // The formation's radius a march's hero carries: how far short of a gate
+    // the march stands, until `place_army` lays its stations again.
+    bytes::put_i32(out, m.form_extent);
     // The gates the route crosses, listed when it was laid: path media like
     // the route, and not recomputable from it -- a gate spawned since would
     // join a list the original never rebuilds.
@@ -715,7 +718,7 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
         !bytes::get_i32(reader, m.retry_time) || !reader.u32(m.party) ||
         !get_bool(reader, m.dest_lock) || !get_bool(reader, m.free_spot_tried) ||
         !get_bool(reader, m.free_spot_aimed) || !get_bool(reader, m.form_lock) ||
-        !get_bool(reader, m.stop_requested)) {
+        !get_bool(reader, m.stop_requested) || !bytes::get_i32(reader, m.form_extent)) {
       return FormatError::truncated;
     }
     std::uint32_t crossings = 0;
@@ -1886,6 +1889,18 @@ void CampaignSystem::serialize(std::vector<std::byte>& out) const {
   results_.serialize(results);
   bytes::put_u32(out, static_cast<std::uint32_t>(results.size()));
   out.insert(out.end(), results.begin(), results.end());
+  // The sequences that are running and the thread each waits on, by name, in
+  // manifest order. See `SequenceEntry::running`.
+  std::uint32_t running = 0;
+  for (const SequenceEntry& entry : sequences_) {
+    if (entry.running != script::kNoScript) ++running;
+  }
+  bytes::put_u32(out, running);
+  for (const SequenceEntry& entry : sequences_) {
+    if (entry.running == script::kNoScript) continue;
+    bytes::put_string(out, entry.name);
+    bytes::put_u32(out, entry.running);
+  }
 }
 
 Status CampaignSystem::deserialize(std::span<const std::byte> data) {
@@ -1931,6 +1946,19 @@ Status CampaignSystem::deserialize(std::span<const std::byte> data) {
     return status;
   }
 
+  std::uint32_t running = 0;
+  if (!reader.u32(running)) return FormatError::truncated;
+  std::vector<std::pair<std::string, script::ScriptId>> threads;
+  for (std::uint32_t i = 0; i < running; ++i) {
+    std::string name;
+    script::ScriptId id = script::kNoScript;
+    if (!bytes::get_string(reader, name) || !reader.u32(id)) return FormatError::truncated;
+    // A sequence the manifest this session was configured with does not
+    // declare: the save is another container's.
+    if (find_sequence(name) == nullptr || id == script::kNoScript) return FormatError::malformed;
+    threads.emplace_back(std::move(name), id);
+  }
+
   if (const Status status = finish(reader); !status.ok()) return status;
 
   // Through `restore`, not by assignment: it is the existing check that the
@@ -1941,6 +1969,10 @@ Status CampaignSystem::deserialize(std::span<const std::byte> data) {
   if (!restored.ok()) return restored;
   board_ = std::move(board);
   results_ = std::move(conversation_results);
+  // Whatever a fresh session's own start left in `running` names its
+  // threads, not the loaded ones: every entry takes the save's word.
+  for (SequenceEntry& entry : sequences_) entry.running = script::kNoScript;
+  for (const auto& [name, id] : threads) find_sequence(name)->running = id;
   return Status();
 }
 

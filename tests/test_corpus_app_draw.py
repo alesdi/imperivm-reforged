@@ -262,31 +262,42 @@ def test_a_bird_flies_between_the_ends_of_its_animation(app, game_dir):
     length of its leg.
     """
     eagle, out = eagle_run(app, game_dir, [f"look:{EAGLE}", "wait:6"], 700)
-    # Each placement of the shadow with the game time it was drawn at. The look
+    # Each placement of the shadow with its frame's two game times: the
+    # instant it was drawn at and the turn end the world stood at. The look
     # moves the camera, which moves everything; a few frames on, the view
     # stands still.
-    placed: list[tuple[int, tuple[int, int]]] = []
-    drawn = None
+    placed: list[tuple[int, int, tuple[int, int]]] = []
+    frame = None
     for line in out.splitlines():
         if match := FRAME.match(line):
-            drawn = int(match.group(3))
-        elif drawn is not None and (match := ORIGIN.match(line)):
+            frame = (int(match.group(3)), int(match.group(2)))
+        elif frame is not None and (match := ORIGIN.match(line)):
             found, left, top, off_x, off_y, depth, x, y = map(int, match.groups())
             if found == eagle and depth == 800:
-                placed.append((drawn, (x - off_x - left, y - off_y - top)))
+                placed.append((*frame, (x - off_x - left, y - off_y - top)))
     placed = placed[10:]
     assert len(placed) > 200, len(placed)
-    # A turn's worth at a time: ten to fifteen pixels a turn, never a leg. Only
-    # frames close in game time are compared: a frame the machine was slow to
-    # draw covers several turns, and the eagle travels the more in it, which is
-    # the machine's pace and not a leg drawn at once -- the suite under load
-    # once drew a 102-pixel step that way.
-    steps = [max(abs(a[1][0] - b[1][0]), abs(a[1][1] - b[1][1]))
-             for a, b in zip(placed, placed[1:]) if 0 <= b[0] - a[0] <= 150]
-    assert len(steps) > 150, len(steps)
-    moving = [step for step in steps if step]
+    pairs = [(max(abs(a[2][0] - b[2][0]), abs(a[2][1] - b[2][1])), b[1] - a[0], a, b)
+             for a, b in zip(placed, placed[1:])]
+    # It moves from frame to frame, not once a leg.
+    moving = [step for step, *_ in pairs if step]
     assert len(moving) > 30, moving
-    assert max(steps) < 30, sorted(steps)[-10:]
+    # And no faster than it flies. How far that is between two frames is a
+    # matter of game time, not of frames -- a frame the machine was slow to
+    # draw spans several turns -- and the span is from the first frame's drawn
+    # instant to the second's turn end: a leg begun inside a turn is drawn
+    # where the turn's end has it, since the view carries on only an
+    # animation it saw at the turn before (`TurnGlide::anim_elapsed`). The
+    # eagle's legs from turn 20 to 425 are 51 to 179 pixels long and take 400
+    # to 1,200 ms; the fastest, 90 pixels in 400 ms, runs 0.225 pixels a game
+    # millisecond. The bound is 0.3, and two pixels for the truncation at
+    # either end. A leg drawn at once covers its length in one frame, 0.42
+    # pixels a millisecond and more. A fixed 30 pixels between frames up to
+    # 150 ms of drawn time apart, which this used to ask, is less than a fast
+    # leg and its start cover: under load, 30 to 40 pixels.
+    assert all(span >= 0 for _, span, *_ in pairs), "game time ran backwards between frames"
+    fast = [(step, span, a, b) for step, span, a, b in pairs if 10 * step > 3 * span + 20]
+    assert not fast, fast[:5]
 
 
 #: Numantia's legionaries, one of whom is sent walking across the field.
@@ -379,3 +390,52 @@ def test_a_walking_unit_is_drawn_between_turns(app, game_dir):
     for f in ringed:
         assert f["rings"][-1] == f["origin"], f
 
+
+
+def test_a_bird_flies_its_last_leg_to_the_end_in_the_turn_the_next_begins(app, game_dir):
+    """A bird jumped to the end of its leg on the first frame of a turn and stood there.
+
+    `EAGLE_MOVE.VS` resumes when a leg's animation ends and starts the next
+    with `PlayAnim`. Scripts run at a turn's end here, so the world holds the
+    new leg from that turn end on, its clock at 0, and the view draws up to a
+    turn behind the world. The view carried on only an animation it had seen
+    at the turn end before, so for the whole of that turn it drew the new leg
+    at its start: the rest of the old leg was crossed in one frame and the
+    bird stood at the junction until the turn ended. The original's visual
+    runs an animation from its own start time (0x0053e6c0 records it,
+    0x0062a0e0 draws the clock less it), so before the new leg began the bird
+    is still flying the old one (`TurnGlide::anim`).
+
+    Judged by game time, not by frames: between two frames the shadow moves
+    no further than the eagle flies in the drawn time between them -- 0.3
+    pixels a game millisecond and two for truncation, the bound
+    `test_a_bird_flies_between_the_ends_of_its_animation` explains. Before the
+    fix the first frame of such a turn crossed 11 to 18 pixels in 17 ms.
+    A frame that spans more than one turn end is not judged: the view keeps
+    one turn end before the world's, and a slow frame can step over a whole
+    leg between them.
+    """
+    eagle, out = eagle_run(app, game_dir, [f"look:{EAGLE}", "wait:6"], 700)
+    placed: list[tuple[int, int, tuple[int, int]]] = []
+    frame = None
+    for line in out.splitlines():
+        if match := FRAME.match(line):
+            frame = (int(match.group(2)), int(match.group(3)))
+        elif frame is not None and (match := ORIGIN.match(line)):
+            found, left, top, off_x, off_y, depth, x, y = map(int, match.groups())
+            if found == eagle and depth == 800:
+                placed.append((*frame, (x - off_x - left, y - off_y - top)))
+    # The look moves the camera; a few frames on, the view stands still.
+    placed = placed[10:]
+    assert len(placed) > 200, len(placed)
+    turn = min(b[0] - a[0] for a, b in zip(placed, placed[1:]) if b[0] > a[0])
+    judged = [(a, b) for a, b in zip(placed, placed[1:]) if b[0] - a[0] <= turn]
+    assert len(judged) > 100, len(judged)
+    # Drawn times never run backwards.
+    assert all(a[1] <= b[1] for a, b in judged), "drawn time ran backwards"
+    fast = []
+    for a, b in judged:
+        step = max(abs(a[2][0] - b[2][0]), abs(a[2][1] - b[2][1]))
+        if 10 * step > 3 * (b[1] - a[1]) + 20:
+            fast.append((step, b[1] - a[1], a, b))
+    assert not fast, fast[:5]

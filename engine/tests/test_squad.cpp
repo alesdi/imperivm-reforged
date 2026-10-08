@@ -754,16 +754,17 @@ TEST(set_cmd_sets_the_state_and_masks_the_flags) {
   const SquadKey key = f.squad_of(1, 2);
   Squad* squad = f.heroes.squads().find(key);
   REQUIRE(squad != nullptr);
-  squad->flags = 0x0007;
+  // Not bit 0: `SF_NOAI` makes the whole call a no-op, tested below.
+  squad->flags = 0x0006;
   f.world.advance(2500);
 
   HostCall call(f.world, {pack_squad(key), Value::integer(6), Value::integer(0x0010),
-                          Value::integer(0x0001), Value::string("ai_killall")});
+                          Value::integer(0x0002), Value::string("ai_killall")});
   CHECK(invoke(registry, CallKind::member, "SetCmd", 4, call).status == HostStatus::ok);
 
   CHECK(squad->state == 6);
   // `(flags | set) & ~clear`.
-  CHECK(squad->flags == 0x0016);
+  CHECK(squad->flags == 0x0014);
   CHECK(squad->state_time == f.world.time());
 }
 
@@ -1103,6 +1104,97 @@ TEST(squad_clr_cmd_refuses_a_squad_no_ai_may_touch) {
   CHECK(squad->flags == 0x0005);
   CHECK(squad->state_time == 0);
   for (const ObjectId member : members) CHECK(f.commands.command_name(member) == "guard");
+}
+
+/// `SetCmd` refuses an `SF_NOAI` squad exactly as `ClrCmd` does, in all three
+/// overloads: `[squad+0x30] & 1` and out, before the state, the clock, the
+/// flags or any member is touched (0x00427361 plain, 0x00427517 with an
+/// object, 0x0043ec15 in the point form's core).
+TEST(set_cmd_refuses_a_squad_no_ai_may_touch) {
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  const SquadKey key = f.squad_of(1, 2);
+  Squad* squad = f.heroes.squads().find(key);
+  squad->flags = static_cast<std::uint16_t>(kSquadFlagNoAi | kSquadFlagSentries);
+  squad->state = 3;
+  squad->state_time = 0;
+  const std::vector<ObjectId> members = squad->members;
+  for (const ObjectId member : members) {
+    (void)f.commands.set_command(f.world, member, "guard", Command{});
+  }
+  f.world.advance_turns(2);
+
+  const ObjectId target = f.spawn(Point{500, 500}, 2);
+  for (const Value& argument : {Value{}, pack_point(Point{640, 480}), obj(target)}) {
+    std::vector<Value> args{pack_squad(key), Value::integer(6), Value::integer(0x0010),
+                            Value::integer(0x0002), Value::string("ai_killall")};
+    std::uint16_t arity = 4;
+    if (!argument.is_nil()) {
+      args.push_back(argument);
+      arity = 5;
+    }
+    HostCall call(f.world, {});
+    call.arguments = args;
+    call.context.arguments = call.arguments;
+    CHECK(invoke(registry, CallKind::member, "SetCmd", arity, call).status == HostStatus::ok);
+
+    squad = f.heroes.squads().find(key);
+    CHECK(squad->state == 3);
+    CHECK(squad->flags == (kSquadFlagNoAi | kSquadFlagSentries));
+    CHECK(squad->state_time == 0);
+    for (const ObjectId member : members) CHECK(f.commands.command_name(member) == "guard");
+  }
+}
+
+/// **A sentry is born out of the AI's hands, and so is its squad.** The
+/// `CVXUnit` constructor (0x005d3170) ORs `0x04040000` into a `Sentry` heir's
+/// second flag word at 0x005d3323 -- `UNITFLAG_NOAI` and the minimap bit, the
+/// `unit flags=4040000` the desync dumps print on every sentry -- and a squad
+/// formed round it takes `SF_NOAI` from that bit (0x00446c8e). So when
+/// `GS_KILLENEMIES.VS` sends every own squad in a town's node to `ai_killall`
+/// (its line 123), the walls' sentries keep the order their wall gave them.
+/// Crossroads seed 3 is what it looked like without: p3's gate and wall
+/// sentries marched to its town hall at turn 5,023, went `idle` there when
+/// the fight ended, and `GATE_PATROL.VS` and `WALL_PATROL.VS` -- which turn an
+/// idle sentry to `guard` where it stands -- left them stacked there for good.
+TEST(a_sentry_is_born_no_ai_and_the_ai_cannot_order_it_off_its_wall) {
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  const auto sentry = [&](Point at) {
+    const ObjectId id = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Sentry"));
+    f.world.set_owner(id, 1);
+    f.world.set_position(id, at);
+    f.world.set_health(id, 100);
+    return id;
+  };
+  const ObjectId watch = sentry(Point{400, 400});
+  const ObjectId soldier = f.spawn(Point{600, 400});
+  CHECK(f.world.find(watch)->state.flags.no_ai);
+  CHECK(f.world.find(watch)->state.flags.on_minimap);
+  CHECK(!f.world.find(soldier)->state.flags.no_ai);
+  CHECK(!f.world.find(soldier)->state.flags.on_minimap);
+
+  const SquadKey post = add_to_squad(f.world, f.heroes, watch, kNoGaika);
+  const SquadKey army = add_to_squad(f.world, f.heroes, soldier, kNoGaika);
+  REQUIRE(post.valid());
+  REQUIRE(army.valid());
+  CHECK(f.heroes.squads().find(post)->flags == (kSquadFlagNoAi | kSquadFlagSentries));
+  CHECK(f.heroes.squads().find(army)->flags == 0);
+
+  (void)f.commands.set_command(f.world, watch, "guard", Command{});
+  (void)f.commands.set_command(f.world, soldier, "guard", Command{});
+  for (const SquadKey key : {post, army}) {
+    // `squad.SetCmd(SS_KillAll, 0, SF_ADVCHOOSER, "ai_killall")`.
+    HostCall call(f.world, {pack_squad(key), Value::integer(6), Value::integer(0),
+                            Value::integer(0x0002), Value::string("ai_killall")});
+    CHECK(invoke(registry, CallKind::member, "SetCmd", 4, call).status == HostStatus::ok);
+  }
+  CHECK(f.commands.command_name(watch) == "guard");
+  CHECK(f.commands.command_name(soldier) == "ai_killall");
 }
 
 /// `sq.EvalAttach(leader, min)` -- four refusals, then a standing against
@@ -3797,8 +3889,10 @@ TEST(train_regroups_with_the_old_squads_fields_or_the_class_defaults) {
   CHECK(fresh->src_gaika == 3);
   CHECK(fresh->last_fight_time == 1234);
   // They all came from `old`, so the sentry inherits its flags too -- the
-  // class default only applies to a unit with no squad, tested below.
-  CHECK(f.squad_holding(sentry)->flags == kSquadFlagPeaceful);
+  // class default only applies to a unit with no squad, tested below -- and
+  // bit 0 from its own no-AI flag, which a sentry is born with
+  // (`World::allocate`, 0x005d3323).
+  CHECK(f.squad_holding(sentry)->flags == (kSquadFlagPeaceful | kSquadFlagNoAi));
   CHECK(f.squad_holding(quiet)->flags == (kSquadFlagPeaceful | kSquadFlagNoAi));
 }
 
@@ -3816,7 +3910,9 @@ TEST(regroup_defaults_come_from_the_class_when_there_was_no_squad) {
   const ObjectId units[] = {sentry, hen, monk, quiet, plain};
   regroup_into_fresh_squads(f.world, f.heroes, units, 9, f.world.time());
 
-  CHECK(f.squad_holding(sentry)->flags == kSquadFlagSentries);
+  // `SF_SENTRIES` from the class, and `SF_NOAI` from the no-AI flag the
+  // `CVXUnit` constructor gives every sentry (0x005d3323).
+  CHECK(f.squad_holding(sentry)->flags == (kSquadFlagSentries | kSquadFlagNoAi));
   CHECK(f.squad_holding(hen)->flags == kSquadFlagPeaceful);
   CHECK(f.squad_holding(monk)->flags == kSquadFlagPeaceful);
   CHECK(f.squad_holding(quiet)->flags == kSquadFlagNoAi);

@@ -14,6 +14,7 @@
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/sim/anim.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
@@ -94,6 +95,8 @@ struct AnimBench {
   HeroSystem heroes;
   script::HostRegistry registry;
   HostContext context;
+  /// The scripts' clock, when a test puts a call inside a pass.
+  script::Scheduler* scheduler = nullptr;
 
   AnimBench() {
     REQUIRE(entity.ok());
@@ -122,6 +125,7 @@ struct AnimBench {
     script::CallContext ctx;
     ctx.arguments = args;
     ctx.user = &context;
+    ctx.scheduler = scheduler;
     ctx.name = name;
     ctx.kind = script::CallKind::member;
     return registry.entry(index).fn(ctx);
@@ -224,8 +228,8 @@ TEST(anim_play_anim_suspends_for_the_length_of_what_it_started) {
   CHECK(b.world.find(id)->object->anim.anim_slot == 13);
 
   // A slot nothing declares plays nothing and suspends for zero -- which still
-  // yields, because the scheduler resumes each script at most once per pass. So
-  // `ANIM.VS` stays bounded even on an object whose entity is missing.
+  // yields, because the scheduler runs a zero wait again at the next pass's
+  // end. So `ANIM.VS` stays bounded even on an object whose entity is missing.
   const script::HostOutcome miss =
       b.call("PlayAnim", 2, {AnimBench::obj(id), script::Value::integer(5),
                              AnimBench::point(100, 100)});
@@ -316,6 +320,40 @@ TEST(anim_time_to_anim_finish_counts_down_and_bottoms_out_at_zero) {
   // And a receiver that resolves to nothing.
   CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(9999)}) == 0);
   CHECK(b.number("TimeToAnimFinish", 0, {script::Value::integer(2)}) == 0);
+}
+
+/// An animation a script starts mid-turn starts on the script's millisecond.
+///
+/// A script runs at its own wake time inside a pass while the world already
+/// stands at the turn's end. The original starts the animation at the
+/// script's instant, so here the cursor is brought forward by the part of the
+/// turn it has lived through, and the two countdowns are read at the script's
+/// instant -- so `Sleep(.TimeToAnimFinish())` wakes the script when the
+/// animation ends, not up to a turn early. A bird that flew its next leg
+/// before the last was drawn to its end is how this showed.
+TEST(anim_a_script_mid_turn_starts_an_animation_on_its_own_millisecond) {
+  AnimBench b;
+  script::Scheduler clock;
+  b.scheduler = &clock;
+  const ObjectId id = b.spawn();
+  b.world.advance_turns(8);  // the world at 800
+  REQUIRE(b.world.time() == 800);
+  clock.set_now(700);  // a script woke at 700, inside the turn that ended at 800
+
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(19),
+                          AnimBench::point(100, 100)});
+  // 100 of its 300 already played by the turn's end.
+  CHECK(b.world.find(id)->object->anim.elapsed_ms == 100);
+  // And counted from the script's millisecond, the whole of it is left.
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 300);
+  CHECK(b.number("TimeToActionMoment", 0, {AnimBench::obj(id)}) == 100);
+
+  // At the turn's end itself nothing is brought forward.
+  clock.set_now(800);
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(13),
+                          AnimBench::point(100, 100)});
+  CHECK(b.world.find(id)->object->anim.elapsed_ms == 0);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 264);
 }
 
 /// `TimeToActionMoment` counts down to the entity's `action_time`, not to the

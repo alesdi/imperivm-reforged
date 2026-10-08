@@ -108,6 +108,23 @@
 //      (`MovementSystem::marching`), and only then arrives -- on a free spot
 //      when the march's flag was set, which is when `0x004178d0` names the
 //      member an owner (`lock_owner`).
+//      **Not reproduced: the original's claim on its stations.**
+//      `CVXFormObj::PlaceSample` (0x005f5a20) ends by moving every station
+//      its member cannot stand on (0x005f5b7b -> 0x005f3fe0): a flood from
+//      the sample centre over the collision cells within max(formation
+//      radius, 1,024) (0x005f5b02, 0x005f3c60) marks the cells it reaches;
+//      each member in turn keeps its station's cell if it is reached and not
+//      yet taken, and takes it (0x005f29a0); otherwise it goes to the
+//      cheapest reached cell near its station (0x005f25d0, 0x005f2370), a
+//      cell it does not take, so two moved stations can share one. Here
+//      `place_army` sends each member to its station as laid, and one in a
+//      building walks to the nearest point it can reach. Built and measured
+//      on Crossroads, the claim made crowding worse (overlap median 25 -> 38
+//      on seeds 1-6, 28 -> 40 on seeds 7-12), so it is not wired. The likely
+//      reason, not established: members here walk their own routes to the
+//      moved stations, not the formation's samples (above), and a march's
+//      single file, which does not block itself, stops on itself. See
+//      `docs/plan.html`.
 //   4. **Birds in the air.** A unit with `in_air` set neither tests nor
 //      blocks. The callback asks only for bit 22 and a health; whether an
 //      airborne flyer is linked into the ground buckets at all was not
@@ -344,6 +361,13 @@ struct MoveState {
   /// the formation's path is spent. `place_army` hands it to every member's
   /// order as `dest_lock`. **Saved, and not hashed**.
   bool form_lock = false;
+  /// On the hero leading a march: the formation's radius, `[form+0x34]` --
+  /// how far its farthest station stands from him, the integer square root
+  /// of the largest squared offset `place_army` laid (0x005f1f60, 0x005f2062).
+  /// 0 with no station. The gate step reads it as the march's reach
+  /// (0x005f2350, 0x00418260; `sim/gate.hpp`, "A group's floor"). **Saved and
+  /// hashed**: it decides where the march stands before a gate.
+  std::int32_t form_extent = 0;
   /// `Unit::Stop` has asked a moving unit to stop: `CVXPathRetry`'s flag bit 1
   /// (`[retry+0x20] |= 2`, slot 6 at 0x004178b0). The path follower
   /// (0x00419ee0) then walks on, step by step, until the unit stands on a

@@ -50,8 +50,19 @@
 //     before, carried on to `at` exactly as `World::run_turn` carries it
 //     (`advance_elapsed`), so a walk cycle steps frame by frame instead of a
 //     turn's worth at a time;
+//   * **an animation begun inside the turn** -- a script's `PlayAnim`, a
+//     swing -- runs from its own start, as the original's visual runs one
+//     from the start time it was handed (0x0053e6c0 records it, 0x0062a0e0
+//     reads the clock less it). Its clock at the turn's end says when that
+//     was; before then the object is drawn playing what the turn end before
+//     saw, carried on (`TurnGlide::anim`) -- unless the glide is walking it,
+//     when it keeps its walk's first frame rather than slide standing;
 //   * **a bird on a leg** is drawn along it by that clock already
-//     (`sim::flight_progress`); the clock is now `at`'s.
+//     (`sim::flight_progress`); the clock is now `at`'s. The leg it was flying
+//     at the turn end before is kept (`FlightPose`), so a leg its script
+//     replaced inside the turn is still flown to its end -- before this, the
+//     bird jumped there on the turn's first frame and stood until the turn
+//     ended.
 //
 // Nothing glides that did not walk: an object glides only when it was on a
 // route at one end or the other (`has_active_path`), stood on the map at both
@@ -63,6 +74,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "imperivm/core/sim/flying.hpp"
 #include "imperivm/core/sim/world.hpp"
 
 namespace imperivm::core::sim {
@@ -93,9 +105,27 @@ class TurnGlide {
   /// glide (see the header).
   [[nodiscard]] Point position(const World& world, const WorldObject& slot, GameTime at) const noexcept;
 
+  /// What `slot` is drawn playing at `at`.
+  struct Anim {
+    std::int32_t anim_slot = kNoAnim;
+    /// Its clock at `at`.
+    std::int32_t elapsed = 0;
+    AnimRepeat repeat = AnimRepeat::loop;
+    /// A bird's leg and altitudes, for `flight_progress` and `flying_lift`.
+    FlightPose flight;
+    /// The animation the turn end before saw, carried on: the world's began
+    /// inside the turn, after `at`.
+    bool earlier = false;
+  };
+  /// The world's animation at `at`, or the one before it when it had not yet
+  /// begun there (see the header). Everything but the clock is the world's
+  /// when it does not glide.
+  [[nodiscard]] Anim anim(const World& world, const WorldObject& slot, GameTime at) const noexcept;
+
   /// How far into its animation `slot` is at `at`: the elapsed time it had at
-  /// the turn end before, carried on to `at` -- or its own elapsed time when
-  /// the animation it plays now is not the one it played then, carried on.
+  /// the turn end before, carried on to `at` -- or, when the animation it
+  /// plays now began inside the turn, its own elapsed time carried back to
+  /// `at`, and 0 before it began. `anim(...).elapsed` unless that is `earlier`.
   [[nodiscard]] std::int32_t anim_elapsed(const World& world, const WorldObject& slot,
                                           GameTime at) const noexcept;
 
@@ -105,13 +135,19 @@ class TurnGlide {
     ObjectId id = kNoObject;
     Point position;
     bool moving = false;
+    bool animating = false;
     std::int32_t anim_slot = kNoAnim;
     std::int32_t elapsed = 0;
     std::int32_t cycle = 0;
     AnimRepeat repeat = AnimRepeat::loop;
+    /// Only for a flying unit: what `flight_pose` has of anything else is
+    /// never read.
+    FlightPose flight;
   };
 
   static void capture(const World& world, std::vector<Mark>& out);
+  /// The turn end before's mark of an object `position` glides, or null.
+  [[nodiscard]] const Mark* walked(const World& world, const WorldObject& slot) const noexcept;
   [[nodiscard]] static const Mark* find(const std::vector<Mark>& marks, ObjectId id) noexcept;
 
   const World* world_ = nullptr;

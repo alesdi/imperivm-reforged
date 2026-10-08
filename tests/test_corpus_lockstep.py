@@ -474,6 +474,11 @@ def test_a_seat_left_and_taken_back_twice_through_the_war(imconform, game_dir):
 # by a capture on the same turn and with the same final hash `imrun` reaches,
 # which is the proof that the peers played the game and not a lesser one.
 
+#: The capture run's game and ceiling: a seed whose computers take a
+#: settlement from one another inside it (see the test).
+CAPTURE_SEED = 4
+CAPTURE_TURNS = 3_000
+
 long_net = pytest.mark.skipif(not os.environ.get("IMPERIVM_LONG_NET"),
                               reason="a long network run; IMPERIVM_LONG_NET=1 runs it")
 
@@ -486,21 +491,31 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     path = game_dir / CROSSROADS
     if not path.is_file():
         pytest.skip(f"{CROSSROADS} is not in this installation")
-    # Until the match is over, as far as 12,000 turns: which turn the AI takes a
-    # town is the seed's (`docs/plan.html`, the siege row) and has moved from
-    # under every cap this test held, so the cap is a ceiling, not a guess.
+    # Seed 4's war, as far as 3,000 turns or the match's end. Which turn the AI
+    # takes a town is the seed's and has moved from under every cap this test
+    # held on seed 1 -- since every stronghold rolls for a tactic in its first
+    # two seconds, seed 1 is undecided at 12,000 turns, a run of half an hour.
+    # Seed 4 has the computers fight from turn 537 and one take a village from
+    # another at 2,698, so the peers are held to a war in which a settlement
+    # changes hands between players; which seed shows that is the AI's, and the
+    # capture is asserted on the solo run rather than assumed.
     solo = subprocess.run(
-        [str(imrun), str(game_dir), str(path), "12000", str(LENGTH)],
+        [str(imrun), str(game_dir), str(path), str(CAPTURE_TURNS), str(LENGTH),
+         "--seed", str(CAPTURE_SEED)],
         capture_output=True, text=True, timeout=1800,
-        env={**os.environ, "IMRUN_UNTIL_OVER": "1"},
+        env={**os.environ, "IMRUN_UNTIL_OVER": "1", "IMRUN_CAPTURES": "1"},
     )
     assert solo.returncode == 0, solo.stdout + solo.stderr
     over = re.search(r"after (\d+) turns of", solo.stdout)
     digest = re.search(r"hash\s+([0-9a-f]{16})", solo.stdout)
     assert over and digest, solo.stdout
+    between_players = [m for m in re.findall(r"capture turn \d+: #\d+ kind \d+ p(\d+) -> p(\d+)",
+                                             solo.stdout)
+                       if int(m[0]) < 14 and int(m[1]) < 14]
+    assert between_players, solo.stdout[-3000:]
     turns = int(over[1])
     result = run_skirmish(imconform, game_dir, "lockstep", str(turns), str(LENGTH),
-                          "--setup", "map", timeout=1800)
+                          "--setup", "map", "--seed", str(CAPTURE_SEED), timeout=1800)
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"agree on all {turns} turns" in result.stdout, result.stdout
     assert re.search(rf"session\s+hash {digest[1]} after turn {turns}", result.stdout), (

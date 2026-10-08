@@ -14,7 +14,8 @@
 // the same millisecond and both call `rand` consume the RNG in whichever order
 // the scheduler visits them, and a lockstep match desynchronises if two clients
 // disagree about that order. So scripts are held in a vector kept sorted by
-// script id, ids are issued monotonically, and iteration is an index walk.
+// script id, ids are issued monotonically, and a pass visits them by
+// `(wake time, id)` -- a total order, since ids are unique.
 // There is no unordered container anywhere in this file, and there must never
 // be one.
 //
@@ -23,9 +24,10 @@
 // `AIRun("SquadMonitor.vs")` returns an integer handle and `AIBreakScript(id)`
 // kills it; 74 call sites do the latter. A spawned script is a peer, not a
 // child frame -- it has its own `Execution` and its own place in the wake
-// order. A script spawned during a pass is appended, and because ids only ever
-// increase it is still ahead of the walk -- so `MAIN.VS`, which is six `AIRun`
-// calls and a return, does start its six monitors on the tick that started it,
+// order. A script spawned during a pass is appended and queued at its
+// spawner's instant, and because ids only ever increase it runs after
+// everything else due then -- so `MAIN.VS`, which is six `AIRun` calls and a
+// return, does start its six monitors on the tick that started it,
 // deterministically and without recursion.
 //
 // ## The clock
@@ -33,6 +35,43 @@
 // Game time in milliseconds, held here, advanced by the caller. The core owns
 // no clock: `Sleep(1000)` means "when this counter has advanced by 1000", and
 // what a millisecond costs in wall time is the platform's business.
+//
+// ## A script wakes on its own millisecond
+//
+// `advance` is called once a turn, but a turn is not the scheduler's grain.
+// In `gbr.exe` the script VMs are thread managers (base `0x006876f0`, which
+// keeps its wheel at `+0x18`) built against the game's timing wheel at
+// `+0x1294` (the VM base `0x0069f6b0`, from `0x0053b0dc`, `0x00541e30`,
+// `0x005670e5`, `0x0056f69e`, `0x0053d50f` and `0x006b88e9`), and
+// `0x00528b40` steps that wheel one millisecond at a time inside the turn
+// (`0x006879a0` fires what is due on exactly that millisecond, through slot
+// `+0xc` of the owner, which for a VM is the runner `0x0069f7a0`). The runner
+// re-arms a script that suspended at the wheel's *current* millisecond plus
+// the wait (`0x00688220`), so `Sleep(500)` runs every 500 ms wherever the
+// turn boundaries fall, and a wake (`0x0069f8f0`) is armed at the current
+// millisecond too.
+//
+// So a pass over a turn `(from, to]` runs scripts in **wake-time order**,
+// each at its own wake time: `now()` reads that instant while it runs, its
+// next wait counts from it, and whatever falls due again before `to` runs
+// again in the same pass. Ties keep the order they always had, ascending id.
+// `now()` is `to` again when the pass ends.
+//
+// What this clock is *not* is the world's. The world has already been
+// advanced to `to` when a pass runs (`GameSession::advance`): every position,
+// fight and queue a script reads is the turn's end, and an order it gives
+// takes effect from there. Only the scripts' own time -- waits, timeouts,
+// `GetTime`, the stamps a script writes and reads back -- is exact.
+//
+// Two cases run at `to`, not at a wake time inside the pass:
+//
+//  * a script made runnable outside a pass -- spawned by the session or a
+//    system, which act at the world's time, the turn's end; and
+//  * a script whose wait ended no later than the instant it ran at (a zero
+//    wait). The original re-arms that on the millisecond being swept and
+//    runs it again there (`0x00688060` points the sweep at the new node);
+//    here it waits for the next pass instead, because the world it waits on
+//    moves only between passes and a re-run would spin. **Engine choice.**
 
 #include <cstddef>
 #include <cstdint>
@@ -274,21 +313,35 @@ class Scheduler {
   /// interpreter holds a reference to.
   CallReport call(std::uint32_t chunk_index, std::span<const Value> args = {});
 
+  /// A trap in something `call` ran on a script's behalf, reported with the
+  /// pass that is running: the next `advance` or `run_ready` hands it out in
+  /// its `RunReport` (counted in `failed`) and forgets it. The member `AIRun`
+  /// is the caller; a hook's caller collects its own.
+  void report_trap(FailedScript trap) { call_traps_.push_back(std::move(trap)); }
+
   // -- the clock ---------------------------------------------------------
 
+  /// The scripts' clock. Between passes, the end of the last one; while a
+  /// script runs, the instant it woke at. See "A script wakes on its own
+  /// millisecond" above.
   [[nodiscard]] std::int64_t now() const { return now_; }
   void set_now(std::int64_t milliseconds) { now_ = milliseconds; }
 
-  /// Advance game time by `delta` milliseconds and run everything awake.
+  /// Advance game time by `delta` milliseconds and run everything that falls
+  /// due on the way, each at its own wake time, in `(wake time, id)` order.
+  ///
+  /// A script spawned during the pass runs at its spawner's instant, after
+  /// whatever else is due then. A script that sleeps runs again in the same
+  /// pass if it is due by the end. A zero wait, and anything runnable before
+  /// the pass began, runs at the end.
   RunReport advance(std::int64_t delta);
 
   /// Run everything runnable at the current time, in id order, without moving
-  /// the clock.
+  /// the clock: `advance(0)`.
   ///
   /// Each script is resumed at most once per call, so a script that sleeps for
   /// zero milliseconds yields the rest of the tick rather than spinning the
-  /// scheduler. Scripts spawned during the pass do run in it, because ids are
-  /// issued in order and the walk is over a growing vector.
+  /// scheduler. Scripts spawned during the pass do run in it.
   RunReport run_ready();
 
   // -- serialisation -----------------------------------------------------
@@ -303,6 +356,8 @@ class Scheduler {
   Status deserialize(std::span<const std::byte> bytes);
 
  private:
+  /// One pass over `(from, to]`. See `advance`.
+  RunReport run_window(std::int64_t from, std::int64_t to);
   void compact();
   [[nodiscard]] VmEnv env_for(const ScriptRecord& record) const;
 
@@ -314,6 +369,8 @@ class Scheduler {
   /// Sorted by id, ascending, because ids are issued in order and spawns
   /// append. Iteration is therefore stable without sorting anything.
   std::vector<ScriptRecord> scripts_;
+  /// See `report_trap`. Not state: emptied by every pass.
+  std::vector<FailedScript> call_traps_;
   ScriptId next_id_ = 1;
   std::int64_t now_ = 0;
 

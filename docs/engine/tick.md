@@ -205,7 +205,8 @@ softly and hardly, cut four ways. See `docs/engine/state-vector.md` and
 
 Every other system still advances once per turn. A later system that needs sub-turn
 resolution should do what movement does — derive its instants from its own exact state —
-rather than invent a step length.
+rather than invent a step length. The scripts do: each wakes on its own wait's millisecond
+("The single-player turn" below), though the world they read stands at the turn's end.
 
 ### What is drawn between two turns
 
@@ -281,9 +282,22 @@ effect at the head of the next window, up to 150 ms after the click. That is the
 game time inside the window. `0x00528b40` then advances game time one millisecond at a time
 up to that point, and at each millisecond steps the two schedulers at game `+0x1294` and
 `+0x1298` (`0x006879a0`). Each is a timing wheel that fires an entry on its own due
-millisecond. **Inferred:** these are the script threads' and timers' schedulers. If so, a
-`Sleep(500)`, a `Wait…` poll, a `Unit.Stop(1000)` timeout and a CONST.INI interval all come
-due on their exact millisecond, wherever the turn boundary falls. `GetTime` (`0x004c64e0`)
+millisecond. **The scripts are on the first one, read.** Every script VM is a thread manager
+(the base `0x006876f0` keeps a wheel at `+0x18`, and saves which of the game's three wheels,
+`+0x1294`, `+0x1298` or `+0x129c`, as a byte under `threadman`). The VM base `0x0069f6b0` hands
+its first argument through as that wheel, and six of its nine callers pass game `+0x1294`
+directly (`0x0053b0dc`, `0x00541e30`, `0x005670e5`, `0x0056f69e`, `0x0053d50f`,
+`0x006b88e9`); the AI helper's (`0x004d2e65`) and two others pass a wheel their caller chose,
+not followed. When an entry falls due, `0x006879a0` calls slot `+0xc` of its owner, which for
+all eight VM vtables is the runner `0x0069f7a0`. The runner runs the bytecode and reads back
+the wait the script asked for (`Sleep`, `0x006945e0`, writes its argument there). A wait of
+`-1` takes the script off its wheel (`0x00687bf0`); anything else re-arms it at the wheel's
+*current* millisecond plus the wait (`0x00688220`), and a wake by id is armed at the current
+millisecond (`0x0069f8f0`). So a `Sleep(500)`, a `Wait…` poll and a `Unit.Stop(1000)` timeout
+come due on their exact millisecond, wherever the turn boundary falls. A wait of zero is
+re-armed on the millisecond being swept, and the insert (`0x00688060`) points the sweep at it,
+so it runs again on that same millisecond. **Still inferred:** that CONST.INI intervals and
+the other timers are on these wheels too. `GetTime` (`0x004c64e0`)
 returns the running game time (game `+0x1258`) in milliseconds. That is what a script derives
 game minutes from, and it counts no turns. The turn counter is read at a handful of sites
 (`0x004069c4`, `0x004e72b3`, `0x00524419`, `0x00550a0d`, `0x005ee8c5`, `0x006bf864`,
@@ -295,19 +309,47 @@ execute. Game-time rates (walking, production, growth, script waits, game minute
 depend on it. **150 ms is a pacing and input-latency constant, not a gameplay quantity.**
 How sure: the constant, its three callers and the four classes are read; that a
 single-player match is one of the three non-network classes follows from the factory; that
-the millisecond wheels are the scripts' is inferred.
+the scripts wake on the millisecond wheel is read (above).
 
 **Here the turn length is observable in more places.** These are event-timed inside a turn
 already, and do not care where the boundary falls: movement (above), the settlement
 economy's timers (`EconomySystem::advance` steps to the nearest due timer), combat's actions
-and impacts (absolute game times), and animation cursors. These happen once a turn:
+and impacts (absolute game times), animation cursors, and **script wake-ups**.
 
-* **Script wake-ups, the large one.** `GameSession::advance` runs the scheduler once a turn,
-  after the systems, with `now` at the turn's end (`Scheduler::advance`). A suspension's wake
-  time is `now` plus its duration (`vm.cpp`). So every `Sleep`, `Wait…` poll, `Stop` timeout
-  and `Goto` give-up resumes at the first turn end at or after it is due. The next wait counts
-  from that turn end, so a waiting loop's period is its wait rounded up to whole turns.
-  `GetTime` answers the turn end, not the due instant.
+`GameSession::advance` runs the scheduler once a turn, after the systems, and that pass now
+covers the turn's whole window `(from, to]`: it runs scripts in `(wake time, id)` order, each
+at its own wake time. While a script runs, the scheduler's `now` is that instant, so its next
+wait counts from there, `GetTime` reads it, and a script due again before `to` runs again in
+the same pass. A script spawned mid-pass runs at its spawner's instant. `test_wakeup.cpp`
+holds a `Sleep(500)` loop to 500 ms at 150- and 99-ms turns, a `Sleep(100)` poll to eight runs
+in an 800-ms turn, and two scripts in one turn to the order they fall due.
+
+What is still once a turn about scripts (**engine choices**, `script/scheduler.hpp`):
+
+* **The world they read is the turn's end.** The systems have already run to `to`. Every
+  position, fight, queue and stamp a script reads is the turn end's, and an order it gives takes
+  effect from there. Host functions keep the clock they read: the scheduler's (the script's
+  instant) for waits and the stamps scripts write and read back (`sq.StateTime`, `ClrCmd`,
+  a command's progress bar, a garrison's exit throttle, `Goto`'s failure spans), the world's
+  (the turn end) for questions about what the systems stamped (`TimeWithoutWalking`, the
+  siege planner's ceasefire test, `TimePastLastAttack`). Where a stamp from one is read
+  against the other the difference can be up to a turn, and those readers clamp at zero.
+  One exception is made, because scripts wait on it: **an animation a script starts begins on
+  the script's millisecond.** Its cursor is brought forward by the part of the turn it has lived
+  through, as combat does for a blow (`start_anim_at`), and `TimeToAnimFinish` and
+  `TimeToActionMoment` count down from the script's millisecond (`sim/anim.cpp`). Without it a
+  script that waits out its animation woke up to a turn before the cursor reached the end, and
+  a bird flew its next leg before the last was drawn to its end (`test_corpus_app_draw.py`).
+* **A zero wait yields to the next pass**, at its end, rather than running again on its own
+  millisecond as the original does: the world it waits on moves only between passes here, so a
+  re-run would spin (`ANIM.VS` on an object with no such animation is one). `Goto` on a route
+  walked to its end whose arrival the next turn decides waits the same way rather than answering
+  at once, which spun `UNIT_ADVANCE.VS` through its budget once polls ran eight times a turn.
+* **A script made runnable outside a pass** (by the session, a system or an AI order) runs at
+  the pass's end, the world's time.
+
+The other once-a-turn things:
+
 * The AI order queues' timer (`run_ai_orders`), at the turn's time.
 * Once-a-turn refreshes: the command queues (`CommandSystem`), `Squad::GAIKAIn` and
   `Squad::Eval`, squad revaluation, fog, hero skill expiry, the feeder's reconcile, army
@@ -318,28 +360,41 @@ and impacts (absolute game times), and animation cursors. These happen once a tu
 The period of a loop that only waits, in game ms. The literal counts are from the shipped
 scripts: 397 of the 660 `Sleep` calls take a literal, and 317 of those are multiples of 100.
 
-| wait | literal sites | original | 100 ms at 1000 | 100 ms at 999 | 150 ms at 1000 | 150 ms at 999 |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 17 | 1 | 100 | 99 | 150 | 149 |
-| 100 | 47 | 100 | 100 | **198** | 150 | 149 |
-| 200 | 10 | 200 | 200 | 297 | 300 | 298 |
-| 250 | 6 | 250 | 300 | 297 | 300 | 298 |
-| 500 | 31 | 500 | 500 | 594 | **600** | 596 |
-| 1000 | 58 | 1000 | 1000 | 1089 | 1050 | 1043 |
-| 2000 | 53 | 2000 | 2000 | 2079 | 2100 | 2086 |
+Before, the pass ran each script once at the turn's end and counted its next wait from
+there, so a waiting loop's period was its wait rounded up to whole turns. The table is that
+old period; the original's, and this engine's now, is the wait itself at every turn length.
 
-**Decision: keep 100 ms as the app's default for now.** While script wake-ups snap to turn
-ends, 100 ms at speed 1000 gives the original's period for every wait that is a multiple of
-100. Those are most of the literal waits. At 150 ms the half-second loops would run every
-600 ms, and the AI's 1- and 2-second loops would be 5% slow. The 150 ms buys only the
-original's input latency and real-time pacing, and nobody can see either.
+| wait | literal sites | original | 100 ms at 1000 | 100 ms at 999 | 150 ms at 1000 | 150 ms at 999 | 800 ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 17 | 1 | 100 | 99 | 150 | 149 | 800 |
+| 100 | 47 | 100 | 100 | **198** | 150 | 149 | 800 |
+| 200 | 10 | 200 | 200 | 297 | 300 | 298 | 800 |
+| 250 | 6 | 250 | 300 | 297 | 300 | 298 | 800 |
+| 500 | 31 | 500 | 500 | 594 | **600** | 596 | 800 |
+| 1000 | 58 | 1000 | 1000 | 1089 | 1050 | 1043 | 1600 |
+| 2000 | 53 | 2000 | 2000 | 2079 | 2100 | 2086 | 2400 |
 
-**Before switching, make wake-ups exact.** A resumed script should take its own wake time as
-`now`, and the scheduler should keep running whatever falls due before the turn's end. Waits
-then chain on their due milliseconds as the original's wheel does, and the turn length stops
-mattering to scripts. After that, 150 ms is a one-line change. That fix is needed at 100 ms
-too: at the 999 the options screen's OK sets, a turn is 99 units, and every 100 ms poll
-already runs every 198.
+The 800-ms column is the corpus runs' (`imrun … 800`, the app's `--turn-length 800`) and a
+networked match's longest turn. `SUBAI/TOWNHALL_AUTOTRAIN.VS` is where the 1-ms waits are: it
+yields `Sleep(1)` once per unit it looks at and counts the yields off its own budget, so a
+pass over thirty units took thirty turns, 24 s at 800 ms, where the original takes 30 ms.
+
+The rounding also moved *when* a script first asked something, and one question has a
+deadline. `TACTICMONITOR.VS` sleeps `rand(500) + 500` before it asks each stronghold for a
+tactic, and `GETTACTICSCRIPT.VS` deals one only `if (GetTime < 2000)`: an Egyptian stronghold
+that rolls under 50 runs `TS_EGYPTTACTIC.VS`, which researches through four phases before it
+recruits, where one without a tactic trains from the start. On the original's wheel every
+monitor asks inside the window. At 800-ms turns the old scheduler asked at 1,600 or 2,400, and
+over Crossroads seeds 1 to 6 five of the eighteen strongholds asked at 2,400 and never rolled;
+now all eighteen ask between 1,354 and 1,797 (`test_wakeup.cpp`). So computer players that
+draw a tactic raise their armies later than they did here, as they do in the original.
+
+**Decision: keep 100 ms as the app's default for now.** It was kept while script wake-ups
+snapped to turn ends, where 100 ms at speed 1000 gave the original's period for every wait that
+is a multiple of 100. **Wake-ups are now exact** (above), so the turn length no longer sets a
+script's period, at 99 ms or 150 or 800, and 150 ms is a one-line change. It is left for its
+own change: it buys only the original's input latency and real-time pacing, and its cost
+below still stands.
 
 **What switching would cost.**
 

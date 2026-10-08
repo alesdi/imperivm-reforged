@@ -221,6 +221,32 @@ struct FlightProgress {
 [[nodiscard]] std::int32_t flying_lift(const World& world, const WorldObject& slot,
                                        std::int32_t elapsed_ms) noexcept;
 
+/// Everything `flight_progress` and `flying_lift` read off a bird, taken at one
+/// instant: its leg (valid only where `flight_progress` would find one), the
+/// leg's window, the altitudes at the window's two ends and where it stands.
+///
+/// The functions above read the object as the world has it now. The view
+/// also draws a bird as it was at the turn end before -- the leg it was
+/// flying then, after its script has started the next one (`sim/glide.hpp`)
+/// -- and the object no longer holds that leg, so the glide keeps one of
+/// these per object instead.
+struct FlightPose {
+  FlightLeg leg;
+  std::int32_t cycle = 0;  ///< the leg's window; 0 with no animation to run it
+  std::int32_t z_from = 0;
+  std::int32_t z_to = 0;
+  Point at;                ///< `World::resolve_position`: the leg's end, or where it stands
+  bool flying = false;     ///< a flying unit at all
+  bool in_air = false;
+};
+
+[[nodiscard]] FlightPose flight_pose(const World& world, const WorldObject& slot) noexcept;
+/// `flight_progress`, `flying_position` and `flying_lift` of a pose.
+[[nodiscard]] FlightProgress flight_progress(const FlightPose& pose, std::int32_t elapsed_ms) noexcept;
+[[nodiscard]] Point flying_position(const FlightPose& pose, std::int32_t elapsed_ms) noexcept;
+[[nodiscard]] std::int32_t flying_lift(const World& world, const FlightPose& pose,
+                                       std::int32_t elapsed_ms) noexcept;
+
 /// Whether `flying_lift` moves a layer drawn at depth `z`: the two constants
 /// 0x0051b2b3 and 0x0051b2ba compare against. The crow's and the eagle's
 /// bodies are 1000 and their shadows 800.
