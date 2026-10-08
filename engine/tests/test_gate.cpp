@@ -26,12 +26,17 @@
 
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/game/entity.hpp"
+#include "imperivm/core/script/bytecode.hpp"
+#include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/gate.hpp"
+#include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/path.hpp"
 #include "imperivm/core/sim/player.hpp"
 #include "imperivm/core/sim/world.hpp"
+#include "imperivm/core/sim/world_host.hpp"
 #include "test.hpp"
 
 using namespace imperivm::core;
@@ -95,7 +100,9 @@ struct GateField {
 
   /// `commands`, when given, runs before the movement: the gate's running
   /// command is the one thing the step reads from it.
-  explicit GateField(bool second_gap = false, CommandSystem* commands = nullptr) {
+  /// `heroes`, when given, runs after it: a hero's march needs his army.
+  explicit GateField(bool second_gap = false, CommandSystem* commands = nullptr,
+                     HeroSystem* heroes = nullptr) {
     graph.add(bytes_of(R"(<class id="Soldier" cpp_class="CVXUnit" parent="">
       <properties speed="100" radius="15"/></class>)"),
               "soldier.sc.xml");
@@ -117,6 +124,7 @@ struct GateField {
     movement.set_grid(std::move(grid));
     if (commands != nullptr) REQUIRE(world.add_system(commands));
     REQUIRE(world.add_system(&movement));
+    if (heroes != nullptr) REQUIRE(world.add_system(heroes));
     world.start();
     // Players 0 and 1 at war, each its own friend.
     world.players().set(0, 1, Relation::allied, false);
@@ -635,6 +643,131 @@ TEST(a_friend_stands_before_its_gate_while_the_gate_runs_close_gate) {
   gate.state.flags.gate_open = true;
   CHECK(gate_waves_through(g.world, gate, 0, t));
   CHECK(gate_waves_through(g.world, gate, 1, t));
+}
+
+namespace {
+
+/// `FormSetupAndMoveTo(dest, 0, 0, false)` on `hero`, through the host as a
+/// script calls it.
+void march(World& world, ObjectId hero, Point dest) {
+  script::HostRegistry registry;
+  register_movement_host(registry);
+  register_command_host(registry);
+  std::vector<script::Value> arguments{
+      script::Value::object(script::ObjectRef{kTypeObj, hero}), pack_point(dest),
+      script::Value::integer(0), script::Value::integer(0), script::Value::boolean(false)};
+  HostContext context_state;
+  context_state.world = &world;
+  script::CallContext context;
+  context.arguments = arguments;
+  context.user = &context_state;
+  const std::uint32_t index =
+      registry.find(script::CallKind::member, "FormSetupAndMoveTo", 4);
+  REQUIRE(index != script::kUnresolvedHost);
+  REQUIRE(registry.entry(index).fn(context).status == script::HostStatus::ok);
+}
+
+}  // namespace
+
+/// The route that moves a formation looks ahead of a gate by the formation's
+/// radius -- how far its farthest member stands from the centre -- and never
+/// by less than 275, before the 210 (0x00418286..0x004182f6, 0x005f2350,
+/// `[form+0x34]` from 0x005f1f60). Here that route is the hero's while he
+/// leads a march.
+///
+/// A friend sent from (1000, 1900) to (1000, 700) crosses its own gate's axis
+/// 900 along, and with an enemy near the gate it stands once the crossing is
+/// within reach. Alone, a soldier's reach is 15 + 210 = 225: it stands at the
+/// first decision at or past 675 along, 680, at y 1220. A hero leading three
+/// soldiers in a `Front` -- two abreast 26 either side of him and one 52
+/// behind, so the formation's radius is 52 -- reaches max(52, 275) + 210 =
+/// 485: he stands at 440 along, y 1460. A hero whose two soldiers march on
+/// the wings 400 either side has a formation radius of 400 and reaches 610:
+/// he stands at 320 along, y 1580.
+TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_275) {
+  constexpr Point kFar{1000, 1900};
+  struct Case {
+    const char* formation;
+    std::vector<Point> army;
+    std::int32_t extent;
+    std::int32_t stand_y;
+  };
+  const Case cases[] = {
+      {R"(<FormationClass Name="Front" Width="2" Height="1" OffsetFrontLineByY="60"
+            OffsetWingsByX="80" OffsetWingsByY="-40">
+            <Class Name="Soldier" CentralBlock="1"/></FormationClass>)",
+       {Point{974, 1900}, Point{1026, 1900}, Point{1000, 1952}}, 52, 1460},
+      {R"(<FormationClass Name="Front" Width="2" Height="1" OffsetFrontLineByY="60"
+            OffsetWingsByX="400" OffsetWingsByY="0">
+            <Class Name="Soldier" Wings="1"/></FormationClass>)",
+       {Point{600, 1900}, Point{1400, 1900}}, 400, 1580},
+  };
+  for (const Case& c : cases) {
+    HeroSystem heroes;
+    GateField f(/*second_gap=*/false, nullptr, &heroes);
+    std::string xml = "<Formations><Default Name=\"Front\"/>";
+    xml += c.formation;
+    xml += "</Formations>";
+    Result<FormationTable> formations = FormationTable::parse(bytes_of(xml));
+    REQUIRE(formations.ok());
+    f.movement.set_formations(std::move(formations.value()));
+    f.gate_slot().state.flags.enemies_near = true;
+
+    // The lone soldier: its own radius.
+    const ObjectId alone = f.unit(0, Point{1600, 1900});
+    f.movement.order_goto(f.world, alone, Point{1000, 700}, 0);
+
+    const ObjectId hero = f.world.spawn(NativeClass::hero, &f.soldier.value(),
+                                        f.graph.find("Soldier"));
+    REQUIRE(f.world.set_position(hero, kFar));
+    f.world.set_health(hero, 100);
+    f.world.set_owner(hero, 0);
+    heroes.register_hero(f.world, hero);
+    std::vector<ObjectId> army;
+    for (const Point at : c.army) {
+      const ObjectId w = f.unit(0, at);
+      heroes.register_unit(f.world, w);
+      REQUIRE(heroes.attach(f.world, w, hero));
+      army.push_back(w);
+    }
+    march(f.world, hero, Point{1000, 700});
+    REQUIRE(f.move(hero).party == hero);
+    CHECK(f.move(hero).form_extent == c.extent);
+    REQUIRE(f.move(hero).gate_crossings.size() == 1);
+    CHECK(f.move(hero).gate_crossings[0].at == 900);
+
+    CHECK(!f.walk(hero, 15000));
+    CHECK(f.move(hero).has_path);  // waiting, not given up
+    CHECK((f.at(hero) == Point{1000, c.stand_y}));
+    // The lone soldier, on the far side of the gate's gap, crosses the axis
+    // obliquely; it still stands its own reach short of the line.
+    CHECK(f.move(alone).has_path);
+    CHECK(f.at(alone).y > kGatePoint.y);
+
+    // The radius is the march's state: saved and hashed.
+    std::uint64_t with = 0;
+    f.movement.hash(with);
+    std::vector<std::byte> saved;
+    f.movement.serialize(saved);
+    f.movement.state(hero).form_extent = 0;
+    std::uint64_t without = 0;
+    f.movement.hash(without);
+    CHECK(with != without);
+    REQUIRE(f.movement.deserialize(saved).ok());
+    CHECK(f.move(hero).form_extent == c.extent);
+
+    // The gate opening, the march walks on through it.
+    f.swing(true);
+    CHECK(f.walk(hero, 15000));
+  }
+
+  // The unit rule, for contrast: a soldier on its own stands 225 short.
+  GateField f;
+  f.gate_slot().state.flags.enemies_near = true;
+  const ObjectId soldier = f.unit(0, kFar);
+  f.movement.order_goto(f.world, soldier, Point{1000, 700}, 0);
+  CHECK(!f.walk(soldier, 15000));
+  CHECK((f.at(soldier) == Point{1000, 1220}));
 }
 
 /// A gate standing fully open is laid for nobody: an enemy walks straight

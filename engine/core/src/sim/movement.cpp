@@ -585,8 +585,17 @@ bool MovementSystem::held_at_gate(const World& world, ObjectId id, const MoveSta
   // order, so it is the first at or beyond where the unit has got to.
   for (const GateCrossing& crossing : move.gate_crossings) {
     if (crossing.at < travelled) continue;
-    const std::int32_t radius = radius_of(world, id);
-    const std::int64_t reach = static_cast<std::int64_t>(radius > 0 ? radius : 0) + kGateApproach;
+    // A unit's own radius, or below zero none (0x004182b0); the route that
+    // moves a formation -- here, its hero's while he leads a march -- takes
+    // the formation's radius, or its leader's when it has none (0x005f2350),
+    // and never less than 275 (0x00418286..0x004182be).
+    std::int32_t radius = radius_of(world, id);
+    std::int32_t floor = 0;
+    if (move.party == id) {
+      if (move.form_extent != 0) radius = move.form_extent;
+      floor = kGateGroupRadius;
+    }
+    const std::int64_t reach = static_cast<std::int64_t>(radius > floor ? radius : floor) + kGateApproach;
     if (crossing.at - travelled > reach) return false;
     const WorldObject* gate = world.find(crossing.gate);
     const WorldObject* self = world.find(id);
@@ -1858,6 +1867,8 @@ void MovementSystem::hash(std::uint64_t& accumulator) const {
     // divergence in it is caught a turn before it becomes a divergence in a
     // coordinate. That is the whole value of hashing it.
     hash_u64(accumulator, static_cast<std::uint64_t>(move.progress));
+    // How far a march's route looks ahead of a gate (`sim/gate.hpp`).
+    hash_i32(accumulator, move.form_extent);
     // Deliberately absent: `waypoints`, `path_length`, `path_generation`,
     // `last_outcome`. The route is the pathfinder's output, and the pathfinder
     // is not in the determinism contract -- `pathfinder` is zero in all nine

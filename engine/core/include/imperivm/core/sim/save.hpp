@@ -292,7 +292,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// sequence running at the save with the fresh session's thread ids, so its
 /// end would never mark it `"Finished"` -- or a stale id would mark it so at
 /// once -- and `RunSequence` would refuse or restart it on that reading.
-inline constexpr std::uint32_t kStateVectorVersion = 30;
+/// 31: the movement section carries a march's formation radius
+/// (`MoveState::form_extent`, `[form+0x34]`), which decides how far short of a
+/// gate the march stands. Hashed, so a version-30 file describes a world this
+/// build would hash differently.
+inline constexpr std::uint32_t kStateVectorVersion = 31;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

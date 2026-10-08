@@ -108,7 +108,9 @@
 ///
 /// Every tick of a route, the first crossing not yet passed (0x00418210) is
 /// tested once the mover is within its class `radius` plus 210 of it
-/// (0x004182f6; a radius below zero counts as zero). The mover walks on:
+/// (0x004182f6; a radius below zero counts as zero). A route that moves a
+/// formation reaches further: its radius is the formation's (below), and
+/// never less than 275. The mover walks on:
 ///
 ///   * when it is the gate's **friend**, the gate has **no enemies near**
 ///     (`[gate+0x210]`, `AreEnemiesAround`) and its running command's name
@@ -146,9 +148,27 @@
 ///     (0x005f4333..0x005f434e). This engine has no shared formation route --
 ///     a march's members each lay their own -- so every route takes the unit's
 ///     rule, and that one is not reproduced.
-///   * *A group's floor.* In a formation the reach is the group's radius with
-///     a floor of 275 (0x00418286..0x004182f6, 0x005f2350); without a group
-///     route, here it is always the mover's own radius.
+///   * *A group's floor.* The path follower's group (`[path+0xc]`, the sixth
+///     argument of `SetDest`, 0x0041a5a3) is set on one route only: the
+///     formation's own, which `CVXFormObj::SetDest` (0x005f2cc0) lays at
+///     `[form+0x84]` and passes itself to (0x005f2dc8). On that route, and not
+///     on a member's (`SetFormation`'s mode 2, 0x004177a3, which drops the
+///     member's own route), the radius is the formation's (0x005f2350) with a
+///     floor of 275 (0x00418286..0x004182f6), so a formation stops at least
+///     485 short of a gate it may not cross. The formation's radius is
+///     `[form+0x34]`: the layout (0x005f1f60) keeps the largest squared
+///     length of any member's offset from the centre (0x005f0463 and its
+///     siblings, the global at 0x009c0978) and stores its integer square root
+///     (0x0067c3d0) -- how far its farthest member stands from the centre. A
+///     formation with no members, or with that radius 0, answers its
+///     leader's class `radius` (0x005f235e). Here the formation's route is the
+///     hero's own while he leads a march (`MoveState::party` is himself, set
+///     by `place_army`), and its radius is `MoveState::form_extent`, which
+///     `place_army` writes from the stations it lays; **an inference** in that
+///     the stations are this engine's layout, not the original's, which also
+///     adds a draw from the world's generator to each offset (0x005f0418,
+///     0x005f043b). A hero with no army record here leads no
+///     march, and takes the unit rule.
 ///   * *Two sides of one gate.* A formation stopped at a gate compares which
 ///     side of it its leader and the member stand (0x00417dc0, 0x005295d0)
 ///     and halts a member on the far side. Not reproduced, for the same reason.
@@ -224,6 +244,10 @@ inline constexpr std::int32_t kGatePassableAbove = 20;
 /// How far ahead of a crossing, beyond the mover's radius, the step looks at
 /// the gate: `add eax, 0xd2` at 0x004182f6.
 inline constexpr std::int32_t kGateApproach = 210;
+/// The least radius a formation's route looks ahead of a crossing by, before
+/// the 210: `mov edi, 0x113` at 0x00418292, taken over the formation's radius
+/// at 0x004182bc. See the header, "A group's floor".
+inline constexpr std::int32_t kGateGroupRadius = 275;
 /// A route at most this long that crossed one enemy gate is kept when going
 /// round does not arrive: `cmp eax, 0x514` at 0x00419490.
 inline constexpr std::int32_t kGateShortRoute = 1300;
