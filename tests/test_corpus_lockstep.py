@@ -476,8 +476,8 @@ def test_a_seat_left_and_taken_back_twice_through_the_war(imconform, game_dir):
 
 #: The capture run's game and ceiling: a seed whose computers take a
 #: settlement from one another inside it (see the test).
-CAPTURE_SEED = 5
-CAPTURE_TURNS = 3_400
+CAPTURE_SEED = 11
+CAPTURE_TURNS = 3_200
 
 @pytest.mark.slow
 def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
@@ -487,15 +487,19 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     path = game_dir / CROSSROADS
     if not path.is_file():
         pytest.skip(f"{CROSSROADS} is not in this installation")
-    # Seed 5's war, as far as 3,400 turns or the match's end. Which turn the AI
+    # Seed 11's war, as far as 3,200 turns or the match's end. Which turn the AI
     # takes a town is the seed's and has moved from under every cap this test
     # held: seed 1 is undecided at 12,000 turns, and seed 4, which had one
     # computer take a village from another at 2,698, has it at 3,306 since a
     # swordsman cannot hit a building (playtest #24) and a hero's army marches
-    # at its pace (#22). Over seeds 1 to 12 at 6,000 turns a settlement changes
-    # hands between players on four, the first on seed 5 at turn 3,078, so the
-    # peers are held to a war in which that happens; which seed shows it is
-    # the AI's, and the capture is asserted on the solo run rather than assumed.
+    # at its pace (#22). This test then played seed 5, whose first capture
+    # between players came at 3,078; once a settlement's loyalty was gbr.exe's
+    # (kept by the soldiers near it, at most 100) seed 5 has none in 6,000
+    # turns, and over seeds 1 to 12 the first is seed 11's, p2 taking p1's
+    # village at turn 3,090 (then seeds 4, 7 and 8 at 3,483, 4,108 and 4,610).
+    # The peers are held to a war in which that happens; which seed shows it
+    # is the AI's, and the capture is asserted on the solo run rather than
+    # assumed.
     solo = subprocess.run(
         [str(imrun), str(game_dir), str(path), str(CAPTURE_TURNS), str(LENGTH),
          "--seed", str(CAPTURE_SEED)],
