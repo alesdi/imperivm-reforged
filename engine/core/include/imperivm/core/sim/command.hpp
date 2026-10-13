@@ -185,8 +185,9 @@ struct CommandDef {
   std::string button;
   std::string queue_icon;
   std::string key;
-  /// `traincommand="yes"` -- the row trains a unit, which is what the queue
-  /// strip shows and the rest of the queue does not.
+  /// `traincommand="yes"` -- the row trains a unit. Only the insert reads it;
+  /// the info bar's queue strip does not (0x006ee810 shows every queued row,
+  /// a blacksmith's research as much as a barracks' training: playtest #25).
   ///
   /// **A train row is never inserted replacing.** `gbr.exe` keeps the flag at
   /// `[def+0x1b4]` (the loader compares the attribute with `"no"`, 0x004f3fb1)
