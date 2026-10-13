@@ -270,8 +270,8 @@ std::uint64_t SettlementStore::hash() const noexcept {
     mix(h, static_cast<std::uint64_t>(s.last_capture_query_time));
     mix(h, static_cast<std::uint32_t>(s.exit_interval));
     mix(h, static_cast<std::uint32_t>(s.loan));
-    mix(h, static_cast<std::uint32_t>(s.loyalty));
-    mix(h, static_cast<std::uint32_t>(s.loyalty_decreased));
+    mix(h, static_cast<std::uint32_t>(s.loyalty_tenths));
+    mix(h, static_cast<std::uint32_t>(s.loyalty_pending));
     mix(h, static_cast<std::uint32_t>(s.efficiency));
     mix(h, static_cast<std::uint32_t>(s.sentries));
     mix(h, static_cast<std::uint32_t>(s.max_sentries));

@@ -557,53 +557,82 @@ TEST(economy_hash_covers_the_unit_a_wagon_follows) {
 // capture and loyalty
 // --------------------------------------------------------------------------
 
-/// `LoyaltySettlementsInitial = 10` at creation; `DecreaseLoyalty(1)` per
-/// capture beat; `SetPlayer` then `SetLoyalty(11)` at zero, which is
-/// `UNIT_CAPTURE.VS` line for line.
+/// `LoyaltySettlementsInitial = 10` at creation, kept in tenths; each
+/// `DecreaseLoyalty(1)` is ten tenths off the pending change, which the cap
+/// tick applies; `SetPlayer` then `SetLoyalty(11)` at zero, which is
+/// `UNIT_CAPTURE.VS` line for line. No class graph here, so the gain tick
+/// counts no soldier and adds its bare 3 tenths a window.
 TEST(economy_capture_needs_loyalty_at_zero) {
   World world;
   EconomySystem economy;
   const SettlementId id = economy.create(town_hall());
   economy.start(world);
-  CHECK(economy.find(id)->loyalty == 10);
+  CHECK(economy.find(id)->loyalty_tenths == 100);
+  CHECK(economy.find(id)->loyalty_points() == 10);
 
   CHECK(!economy.capture(id, 3));  // loyalty is not zero yet
 
-  for (int i = 0; i < 10; ++i) {
-    economy.decrease_loyalty(id, 1);
-    // The cap window has to roll over, or the eleventh point cannot be taken.
-    run(economy, world, 400, 2000);
-  }
-  CHECK(economy.find(id)->loyalty == 0);
+  // Ten taunts in one window: -100 tenths, +3 from the gain tick, applied at
+  // the window's end. 3 tenths is 0 points.
+  for (int i = 0; i < 10; ++i) CHECK(economy.decrease_loyalty(id, 1));
+  CHECK(economy.find(id)->loyalty_tenths == 100);  // nothing moves before the tick
+  run(economy, world, 400, 2000);
+  CHECK(economy.find(id)->loyalty_tenths == 3);
+  CHECK(economy.find(id)->loyalty_pending == 0);
+  CHECK(economy.find(id)->loyalty_points() == 0);
 
   CHECK(economy.capture(id, 3));
   CHECK(economy.find(id)->owner == 3);
-  CHECK(economy.find(id)->loyalty == 11);
+  CHECK(economy.find(id)->loyalty_points() == 11);
 }
 
-/// `LoyaltyChangeCap = 10` per `LoyaltyCapInterval = 2000` -- the constant's own
-/// comment says "No more than … decreased in LoyaltyCapInterval".
-TEST(economy_loyalty_decrease_is_capped_per_window) {
+/// `LoyaltyChangeCap = 10` points per `LoyaltyCapInterval = 2000`, applied to
+/// the net change of the window (0x005c0f00); loyalty lives between 0 and 100
+/// points; `SetLoyalty` refuses anything outside them and `DecreaseLoyalty` a
+/// negative amount, writing nothing (0x005c280d, 0x005c286b).
+TEST(economy_loyalty_change_is_capped_per_window) {
   World world;
   EconomySystem economy;
   SettlementInit init = town_hall();
   const SettlementId id = economy.create(init);
-  economy.set_loyalty(id, 100);
+  CHECK(economy.set_loyalty(id, 100));
   economy.start(world);
+  CHECK(economy.find(id)->loyalty_tenths == 1000);
 
-  CHECK(economy.decrease_loyalty(id, 40) == 10);
-  CHECK(economy.decrease_loyalty(id, 40) == 0);
-  CHECK(economy.find(id)->loyalty == 90);
+  CHECK(!economy.set_loyalty(id, 101));
+  CHECK(!economy.set_loyalty(id, -1));
+  CHECK(!economy.decrease_loyalty(id, -1));
+  CHECK(economy.find(id)->loyalty_tenths == 1000);
+  CHECK(economy.find(id)->loyalty_pending == 0);
 
-  run(economy, world, 400, 2000);  // window rolls over
-  CHECK(economy.decrease_loyalty(id, 40) == 10);
-  CHECK(economy.find(id)->loyalty == 80);
+  CHECK(economy.decrease_loyalty(id, 40));
+  CHECK(economy.decrease_loyalty(id, 40));
+  CHECK(economy.find(id)->loyalty_pending == -800);
+  run(economy, world, 400, 2000);  // -797 pending, capped at -100
+  CHECK(economy.find(id)->loyalty_points() == 90);
+  CHECK(economy.find(id)->loyalty_pending == 0);
+
+  // A window with nobody taunting gains its 3 tenths, and loyalty stops at
+  // 100 points however long it gains.
+  run(economy, world, 400, 2000);
+  CHECK(economy.find(id)->loyalty_tenths == 903);
+  run(economy, world, 400, 2000 * 40);
+  CHECK(economy.find(id)->loyalty_tenths == 1000);
+
+  // And at 0 however hard it is taunted.
+  CHECK(economy.set_loyalty(id, 5));
+  CHECK(economy.decrease_loyalty(id, 10));
+  run(economy, world, 400, 2000);
+  CHECK(economy.find(id)->loyalty_tenths == 0);
 }
 
-/// `LoyaltyIncreasePerUnit = 10` per garrisoned unit, which is what makes
-/// `LoyaltyUnitsOutTreshold = 151` a number rather than a mystery: a settlement
-/// holding fifteen units sits above it.
-TEST(economy_garrison_raises_loyalty) {
+/// Garrisoning writes no loyalty: the original's five loyalty writers are the
+/// two constructors, `SetLoyalty`, `DecreaseLoyalty` and the two ticks, and
+/// the holder entry is none of them. So no town passes 100 points, and
+/// `TOWNHALL_BEHAVIOR_GUARD.VS`'s `loyalty < LoyaltyUnitsOutTreshold` (151)
+/// always holds: a town with enemies in sight sends its garrison out however
+/// many it holds.
+TEST(economy_garrison_writes_no_loyalty) {
   World world;
   EconomySystem economy;
   const SettlementId id = economy.create(town_hall());
@@ -611,11 +640,11 @@ TEST(economy_garrison_raises_loyalty) {
 
   for (ObjectId u = 1; u <= 15; ++u) CHECK(economy.garrison_add(id, u));
   CHECK(economy.find(id)->holder.count() == 15);
-  CHECK(economy.find(id)->loyalty == 10 + 15 * 10);
-  CHECK(economy.find(id)->loyalty > economy.rules().loyalty_units_out_threshold);
-
+  CHECK(economy.find(id)->loyalty_tenths == 100);
   CHECK(economy.garrison_remove(id, 7));
-  CHECK(economy.find(id)->loyalty == 150);
+  CHECK(economy.find(id)->loyalty_tenths == 100);
+  CHECK(economy.find(id)->loyalty_pending == 0);
+  CHECK(economy.find(id)->loyalty_points() < economy.rules().loyalty_units_out_threshold);
 }
 
 /// `max_units` on the holder: `AddUnit` refuses past it, `ForceAddUnit` does
@@ -1689,7 +1718,7 @@ struct CaptureBench {
     s->buildings.push_back(SettlementBuilding{anchor, 5000});
     s->buildings.push_back(SettlementBuilding{barracks, 800});
     s->buildings.push_back(SettlementBuilding{tower, 400});
-    s->loyalty = 40;
+    s->loyalty_tenths = 400;
     (void)economy.garrison_force_add(town, garrison_a);
     (void)economy.garrison_force_add(town, garrison_b);
     // The back-link the object model resolves a settlement through, and the
@@ -1747,7 +1776,7 @@ TEST(economy_capture_leaves_loyalty_stock_and_population_alone) {
   CHECK(b.set_player(b.settlement_handle(), 2).status == script::HostStatus::ok);
 
   const Settlement* after = b.economy.find(b.town);
-  CHECK(after->loyalty == before.loyalty);
+  CHECK(after->loyalty_tenths == before.loyalty_tenths);
   CHECK(after->gold() == before.gold());
   CHECK(after->food() == before.food());
   CHECK(after->population == before.population);
