@@ -549,6 +549,24 @@ CombatProfile CombatProfile::from_class(const ClassGraph& graph, ClassIndex inde
   if (interval <= 0) interval = kDefaultAttackInterval;
   out.attack_interval = interval;
 
+  out.shoots = !projectile.empty() && projectile != "**Invalid**";
+  // One walk up the ancestry for every name `Unit::CanAttack` tests, so the
+  // predicate never parses a class name per candidate.
+  for (const ClassIndex step : graph.ancestry(index)) {
+    const std::string_view id = graph.at(step).id;
+    if (id == "RamUnit") out.lineage |= kLineRamUnit;
+    else if (id == "Sentry") out.lineage |= kLineSentry;
+    else if (id == "FakeTower") out.lineage |= kLineFakeTower;
+    else if (id == "Gate") out.lineage |= kLineGate;
+    else if (id == "Catapult") out.lineage |= kLineCatapult;
+    else if (id == "Outpost") out.lineage |= kLineOutpost;
+    else if (id == "BaseShipyard") out.lineage |= kLineBaseShipyard;
+    else if (id == "Wolf" || id == "Bear" || id == "Boar" || id == "LionM" || id == "LionF") {
+      out.lineage |= kLineBeast;
+    }
+  }
+  if (graph.at(index).id == "Fish") out.lineage |= kLineFish;
+
   return out;
 }
 
@@ -768,6 +786,7 @@ std::size_t CombatSystem::reconcile(World& world) {
 void CombatSystem::start(World& world) {
   // The world's diplomacy replaces this system's own ally table from here on.
   players_ = &world.players();
+  world_ = &world;
   // And the world's objects are the population. Registering a system is not the
   // same as feeding it: `CombatSystem` was complete, tested and registered in
   // `kSystemOrder`, and `add` had no caller outside the unit tests, so every
@@ -933,7 +952,61 @@ bool CombatSystem::targetable(const Combatant& self, const Combatant& other) con
   if (other.position == kHeldPosition) return false;
   if (!is_enemy(self, other)) return false;
   const CombatProfile theirs = profile(other.class_index);
-  return theirs.can_be_attacked && !theirs.never_targeted();
+  if (!theirs.can_be_attacked || theirs.never_targeted()) return false;
+  // 0x005db650 asks the attacker's `CanAttack` virtual of every candidate
+  // before anything else, so a swordsman's sweep never finds a building.
+  return unit_can_attack(self, other);
+}
+
+bool CombatSystem::unit_can_attack(const Combatant& self, const Combatant& target) const {
+  if (world_ == nullptr) return true;
+  const WorldObject* me = world_->find(self.id);
+  const WorldObject* them = world_->find(target.id);
+  if (me == nullptr || them == nullptr) return true;
+  // A tower's or an engine's own virtual is not this one.
+  if (!me->state.flags.is_unit) return true;
+
+  const CombatProfile mine = profile(self.class_index);
+  const CombatProfile theirs = profile(target.class_index);
+  const bool target_is_unit = them->state.flags.is_unit;
+  const bool target_is_building = them->state.flags.is_building;
+
+  if (target_is_unit) {
+    if (theirs.is(CombatProfile::kLineSentry) && !mine.shoots) return false;
+    if (mine.is(CombatProfile::kLineRamUnit)) return false;
+  }
+  if (theirs.is(CombatProfile::kLineFish)) return false;
+
+  if (target_is_building && them->settlement != kNoObject) {
+    if (EconomySystem* economy = economy_of(*world_); economy != nullptr) {
+      if (const Settlement* set = economy->settlements().for_object(them->settlement);
+          set != nullptr) {
+        if (theirs.is(CombatProfile::kLineFakeTower)) return false;
+        if (mine.is(CombatProfile::kLineRamUnit)) {
+          const WorldObject* anchor = world_->find(set->anchor);
+          const CombatProfile hub = profile(anchor != nullptr ? anchor->class_index : kNoClass);
+          const bool soft =
+              hub.is(CombatProfile::kLineOutpost) || hub.is(CombatProfile::kLineBaseShipyard);
+          return soft || theirs.is(CombatProfile::kLineGate);
+        }
+      }
+    }
+  }
+
+  if (target_is_building && theirs.is(CombatProfile::kLineCatapult)) {
+    return !mine.is(CombatProfile::kLineBeast);
+  }
+
+  switch (mine.damage_type) {
+    case DamageType::slash:
+    case DamageType::pierce:
+      return target_is_unit || mine.shoots;
+    case DamageType::siege:
+      return true;
+    case DamageType::none:
+    default:
+      return false;
+  }
 }
 
 std::int64_t CombatSystem::target_score(const Combatant& self,
@@ -959,6 +1032,8 @@ bool CombatSystem::order_attack(ObjectId attacker, ObjectId target) {
   if (d->position == kHeldPosition || a->position == kHeldPosition) return false;  // and there
   if (!is_enemy(*a, *d)) return false;
   if (!profile(d->class_index).can_be_attacked) return false;
+  // `Unit::Attack`'s refused path (0x005ddbd2): playtest #24's swordsman.
+  if (!unit_can_attack(*a, *d)) return false;
   if (a->target != target) a->attacks = 0;
   a->target = target;
   a->action = Action::engaging;
@@ -1654,7 +1729,7 @@ void CombatSystem::act(World& world, Combatant& unit, GameTime now) {
   Combatant* target = mutable_find(unit.target);
   if (target != nullptr && (!target->alive || target->action == Action::dying ||
                             target->health <= 0 || target->position == kHeldPosition ||
-                            !is_enemy(unit, *target))) {
+                            !is_enemy(unit, *target) || !unit_can_attack(unit, *target))) {
     target = nullptr;
     unit.target = kNoObject;
     unit.attacks = 0;
@@ -2170,8 +2245,14 @@ HostOutcome host_can_attack(CallContext& ctx) {
   const Combatant* a = combat->find(id_of(ctx.arg(0)));
   const Combatant* d = combat->find(id_of(ctx.arg(1)));
   if (a == nullptr || d == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  // `Obj::CanAttack` (0x005ab060) is the receiver's `CanAttack` virtual and
+  // the range test; the virtual is `unit_can_attack`, and the range half is
+  // left out for the reason given there -- it must refuse exactly what
+  // `Attack` refuses, or `RAM_ATTACK.VS`'s `if (!.CanAttack(t)) break;
+  // .Attack(t);` loop spins on a refusal that never suspends.
   const bool ok = combat->profile(a->class_index).can_attack() &&
-                  combat->profile(d->class_index).can_be_attacked && combat->is_enemy(*a, *d);
+                  combat->profile(d->class_index).can_be_attacked && combat->is_enemy(*a, *d) &&
+                  combat->unit_can_attack(*a, *d);
   return HostOutcome::ok_with(Value::boolean(ok));
 }
 
@@ -2182,8 +2263,12 @@ HostOutcome host_is_valid_target(CallContext& ctx) {
   const Combatant* d = combat->find(id_of(ctx.arg(1)));
   if (a == nullptr || d == nullptr) return HostOutcome::ok_with(Value::boolean(false));
   const CombatProfile theirs = combat->profile(d->class_index);
+  // `Obj::IsValidTarget` (0x005aafd0) is nothing but the receiver's
+  // `CanAttack` virtual, so a swordsman's `MELEE_ATTACK.VS` and
+  // `UNIT_AI_ATTACK_GATE.VS` leave at their first test of a building.
   const bool ok = combat->is_enemy(*a, *d) && combat->is_alive(d->id) && d->health > 0 &&
-                  theirs.can_be_attacked && !theirs.never_targeted();
+                  theirs.can_be_attacked && !theirs.never_targeted() &&
+                  combat->unit_can_attack(*a, *d);
   return HostOutcome::ok_with(Value::boolean(ok));
 }
 

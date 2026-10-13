@@ -1014,3 +1014,65 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
         assert not far, (turn, far)
     # The march is over, and the army stands where it was stood.
     assert all(order == "stand_position" for *_, order in army), army
+
+
+# ---------------------------------------------------------------------------
+# who may attack a building (playtest #24)
+# ---------------------------------------------------------------------------
+
+#: Numantia, and the Iberian outpost nearest the Roman camp (radius 345).
+NUMANTIA_OUTPOST = (13681, 13531)
+#: Turn 10: the Roman army is out of its camp and following its heroes.
+SIEGE_TURN = 10
+
+
+@pytest.mark.parametrize("cls, stand, hurts", [
+    # 20 beyond the outpost's edge, inside a sword's 17 + 15 + 345.
+    ("RHastatus", (NUMANTIA_OUTPOST[0] + 365, NUMANTIA_OUTPOST[1]), False),
+    # 300 beyond it, inside a bow's reach.
+    ("RArcher", (NUMANTIA_OUTPOST[0] + 645, NUMANTIA_OUTPOST[1]), True),
+])
+def test_the_attack_button_on_a_fort_hurts_it_from_an_archer_and_not_from_a_sword(
+        imrun, game_dir, cls, stand, hurts):
+    """Playtest #24: a swordsman sent at a fort with the command bar's attack
+    row (A) hit it and its health fell. In `gbr.exe` `Unit::CanAttack`
+    (0x005b1da0) refuses a `slash` or `pierce` unit every building unless its
+    class has a `projectile_class`, and `Obj::IsValidTarget` (0x005aafd0) is
+    that virtual, so `MELEE_ATTACK.VS` leaves at its first test and the
+    hastatus stands idle beside a whole outpost. An archer is accepted, and the
+    outpost loses health. `IMRUN_PLACE` takes the unit out of its AI's hands;
+    the garrison may kill it, which does not matter to either answer.
+    """
+    numantia = game_dir / NUMANTIA
+    if not numantia.is_file():
+        pytest.skip(f"{NUMANTIA} is not in this installation")
+    first = subprocess.run(
+        [str(imrun), str(game_dir), str(numantia), str(SIEGE_TURN), "800"],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_OBJECTS": f"{cls},IOutpost"},
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    units = [int(i) for i in re.findall(
+        rf"^\s+(\d+) {cls} p0 at \(-?\d+,-?\d+\) holder 0 health \d+ order ",
+        first.stdout, re.MULTILINE)]
+    assert units, first.stdout[-3000:]
+    fort = re.search(rf"^\s+(\d+) IOutpost p3 at \({NUMANTIA_OUTPOST[0]},{NUMANTIA_OUTPOST[1]}\) "
+                     r"holder 0 health (\d+) ", first.stdout, re.MULTILINE)
+    assert fort, first.stdout[-3000:]
+    unit, outpost, before = units[0], int(fort.group(1)), int(fort.group(2))
+
+    second = subprocess.run(
+        [str(imrun), str(game_dir), str(numantia), str(SIEGE_TURN + 150), "800"],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_OBJECTS": "IOutpost",
+             "IMRUN_PLACE": f"{stand[0]},{stand[1]}", "IMRUN_ATTACK": str(outpost),
+             "IMRUN_GOTO": f"{SIEGE_TURN}:{unit}:{NUMANTIA_OUTPOST[0]},{NUMANTIA_OUTPOST[1]}"},
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    out = second.stdout
+    assert re.search(rf"^\s+goto turn {SIEGE_TURN}: {unit} to .*, 1 issued$", out, re.MULTILINE), \
+        out[-3000:]
+    after = re.search(rf"^\s+{outpost} IOutpost p3 at .* health (\d+) ", out, re.MULTILINE)
+    assert after, out[-3000:]
+    assert (int(after.group(1)) < before) == hurts, (cls, before, after.group(0))
+    assert "no traps." in out, out[out.find("distinct traps"):]

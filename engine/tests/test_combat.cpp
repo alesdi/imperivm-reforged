@@ -2130,6 +2130,13 @@ ClassGraph enrolment_graph() {
   graph.add(bytes_of(R"(<class id="Hut" cpp_class="CVXBuilding" parent="Object">
       <properties maxhealth="1000" radius="40" sight="600" target_priority="100"/>
     </class>)"), "test_combat.cpp");
+  // A unit that may strike a building at melee reach: `siege` damage, which
+  // `Unit::CanAttack` accepts against anything (a `slash` legionary is
+  // refused every building -- playtest #24).
+  graph.add(bytes_of(R"(<class id="Breaker" cpp_class="CVXUnit" parent="Object">
+      <properties maxhealth="200" maxstamina="10" damage="40" damage_type="siege"
+                  range="17" min_range="2" radius="15" sight="500" attack_delay="400"/>
+    </class>)"), "test_combat.cpp");
   graph.link();
   return graph;
 }
@@ -2406,10 +2413,11 @@ TEST(a_building_keeps_a_running_total_of_the_damage_it_takes) {
 /// it.
 TEST(a_building_at_no_health_stands_broken_and_is_no_longer_a_target) {
   ClassGraph graph = enrolment_graph();
-  // An enemy hut on a sliver of health, in the legionary's reach (17 + 15 + 40
-  // surface to surface), and nothing else for him to fight.
+  // An enemy hut on a sliver of health, in the breaker's reach (17 + 15 + 40
+  // surface to surface), and nothing else for him to fight. A breaker and not
+  // a legionary: a `slash` unit with no projectile may not attack a building.
   constexpr std::string_view kHutMap = R"(<mapobject>
-  <scriptobj class="Legionary" num="0" x="1000" y="1000" player="1"
+  <scriptobj class="Breaker" num="0" x="1000" y="1000" player="1"
       healthperc="100" flags="0x80400001"/>
   <scriptobj class="Hut" num="1" x="1060" y="1000" player="2"
       health="30" flags="0x80800002"/>
