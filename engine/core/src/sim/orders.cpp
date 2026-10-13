@@ -304,6 +304,116 @@ bool is_commandable(const World& world, ObjectId id, PlayerId issuer) noexcept {
 }
 
 // --------------------------------------------------------------------------
+// the drag box
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// `hero_system_of`, for a world this code only reads.
+const HeroSystem* heroes_of(const World& world) noexcept {
+  for (const System* system : world.systems()) {
+    if (system != nullptr && system->name() == "hero") return static_cast<const HeroSystem*>(system);
+  }
+  return nullptr;
+}
+
+/// The insert's ownership test: the owner's relation towards `local` carries
+/// share-control (bit 5). An unowned object is nobody's, so foreign.
+bool owned_by(const World& world, const WorldObject& object, PlayerId local) noexcept {
+  const PlayerId owner = object.state.owner;
+  if (!PlayerTable::is_valid(owner) || !PlayerTable::is_valid(local)) return false;
+  return world.players().has(owner, local, Relation::share_control);
+}
+
+/// The insert's rank: 3 for a unit or hero, 1 for anything else it takes.
+int rank_of(const WorldObject& object) noexcept { return object.state.flags.is_unit ? 3 : 1; }
+
+/// `[obj+0x170]`: the hero leading `unit`, or `kNoObject`.
+ObjectId leader_of(const HeroSystem* heroes, ObjectId unit) {
+  return heroes == nullptr ? kNoObject : heroes->hero_of(unit);
+}
+
+}  // namespace
+
+bool is_band_selectable(const World& world, ObjectId id) noexcept {
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr) return false;
+  const ObjectFlags& flags = slot->state.flags;
+  // 0x005e1a9c: a spawn template is in the handle table and nowhere else.
+  if (flags.unspawned) return false;
+  // 0x005e1aac: no entity record, no band. A classless object has none.
+  if (slot->class_index == kNoClass) return false;
+  // 0x005e1abb: units only -- every building, item holder and decor is
+  // refused here, which is the whole of report #23's building half.
+  if (!flags.is_unit) return false;
+  // 0x005e1ac8: `Unit::SetNoselectFlag`.
+  if (flags.noselect) return false;
+  // The insert's own gates (dead, 0x005b91f7), and the map's: a garrisoned
+  // unit is not in the sweep's grid at all.
+  return is_selectable(world, id);
+}
+
+bool insert_band_unit(const World& world, PlayerId local, Selection& selection, ObjectId id) {
+  if (selection.contains(id) || !is_band_selectable(world, id)) return false;
+  const WorldObject& object = *world.find(id);
+  const HeroSystem* heroes = heroes_of(world);
+  const ObjectId leader = leader_of(heroes, id);
+  // 0x005b921e: a hero with no leader of its own is kind 2; every other unit,
+  // a hero in someone's army included, kind 1. Both rank 3.
+  const bool hero = object.state.flags.is_hero && leader == kNoObject;
+
+  bool held_own = false;
+  int held_rank = 0;
+  for (const ObjectId member : selection.ids()) {
+    const WorldObject* m = world.find(member);
+    if (m == nullptr) continue;
+    held_own = held_own || owned_by(world, *m, local);
+    held_rank = std::max(held_rank, rank_of(*m));
+  }
+  if (selection.empty()) held_rank = 0;
+
+  if (!owned_by(world, object, local)) {
+    // 0x005b92c5: foreign, and the selection holds anything at all.
+    if (!selection.empty()) return false;
+    selection.add(id);
+    return true;
+  }
+  // 0x005b932b: own over a selection with nothing own in it (empty, or one
+  // foreign object), or (0x005b939e) over one of lower rank: start afresh.
+  if (!held_own || held_rank < 3) {
+    selection.clear();
+    selection.add(id);
+    return true;
+  }
+  if (hero) {
+    // 0x005b93bc-0x005b94ac: the hero stands for its army. The members it
+    // leads go; everything else keeps its place.
+    std::vector<ObjectId> kept;
+    kept.reserve(selection.size());
+    for (const ObjectId member : selection.ids()) {
+      if (leader_of(heroes, member) != id) kept.push_back(member);
+    }
+    selection.assign(kept);
+    selection.add(id);
+    return true;
+  }
+  // 0x005b94c7: a unit whose hero is already selected is there through it.
+  if (leader != kNoObject && selection.contains(leader)) return false;
+  selection.add(id);
+  return true;
+}
+
+std::size_t apply_band(const World& world, PlayerId local, std::span<const ObjectId> candidates,
+                       Selection& selection) {
+  // The band's own list (`+0x98`), swept from empty...
+  Selection band;
+  for (const ObjectId id : candidates) (void)insert_band_unit(world, local, band, id);
+  // ...and inserted into the committed one member by member (0x005b9610).
+  for (const ObjectId id : band.ids()) (void)insert_band_unit(world, local, selection, id);
+  return band.size();
+}
+
+// --------------------------------------------------------------------------
 // candidates
 // --------------------------------------------------------------------------
 

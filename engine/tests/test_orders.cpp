@@ -538,6 +538,149 @@ TEST(commandable_is_share_control_not_ownership) {
 }
 
 // --------------------------------------------------------------------------
+// the drag box -- playtest report #23
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// The ids of a selection, for comparing with a literal.
+std::vector<ObjectId> held(const Selection& selection) {
+  return {selection.ids().begin(), selection.ids().end()};
+}
+
+/// A building, spawned as one: the unit bit clear, the building bit set.
+ObjectId spawn_building(Fixture& f, PlayerId owner) {
+  const ObjectId id = f.world.spawn(NativeClass::town_hall, nullptr, f.building);
+  f.world.set_position(id, Point{100, 100});
+  f.world.set_owner(id, owner);
+  f.world.set_health(id, 1000);
+  return id;
+}
+
+}  // namespace
+
+TEST(a_band_offers_units_only_and_never_a_template_or_a_noselect_unit) {
+  Fixture f;
+  const ObjectId soldier = f.spawn(f.unit, 1);
+  const ObjectId hall = spawn_building(f, 1);
+  REQUIRE(f.world.state(hall) != nullptr);
+  CHECK(!f.world.state(hall)->flags.is_unit);
+  // The click's test takes a building (0x005e1b80); the band's does not
+  // (0x005e1abb). That difference is the report.
+  CHECK(is_selectable(f.world, hall));
+  CHECK(!is_band_selectable(f.world, hall));
+  CHECK(is_band_selectable(f.world, soldier));
+
+  // A hen: a unit the map marked `noselect` (0x005e1ac8).
+  const ObjectId hen = f.spawn(f.unit, kNeutralWildlife);
+  CHECK(is_band_selectable(f.world, hen));
+  f.world.mutable_state(hen)->flags.noselect = true;
+  CHECK(!is_band_selectable(f.world, hen));
+
+  // A spawn template (0x005e1a9c).
+  const ObjectId spare = f.spawn(f.unit, 1);
+  f.world.mutable_state(spare)->flags.unspawned = true;
+  CHECK(!is_band_selectable(f.world, spare));
+
+  // The insert's gates: dead, and not on the map.
+  const ObjectId fallen = f.spawn(f.unit, 1);
+  f.world.set_health(fallen, 0);
+  CHECK(!is_band_selectable(f.world, fallen));
+  const ObjectId inside = f.spawn(f.unit, 1);
+  CHECK(f.world.put_in_holder(inside, hall));
+  CHECK(!is_band_selectable(f.world, inside));
+  CHECK(!is_band_selectable(f.world, 999999));
+
+  // Over all of them, the band holds the one soldier.
+  Selection selection;
+  const std::vector<ObjectId> box{soldier, hall, hen, spare, fallen, inside};
+  CHECK(apply_band(f.world, 1, box, selection) == 1);
+  CHECK(held(selection) == std::vector<ObjectId>{soldier});
+}
+
+TEST(a_band_takes_every_own_unit_and_at_most_one_foreign_one) {
+  Fixture f;
+  // An animal first in sweep order, then the player's own, an ally's that
+  // shares control, and an enemy's.
+  const ObjectId wolf = f.spawn(f.unit, kNeutralWildlife);
+  const ObjectId mine_a = f.spawn(f.unit, 1);
+  const ObjectId enemy = f.spawn(f.unit, 2);
+  const ObjectId allys = f.spawn(f.unit, 3);
+  const ObjectId mine_b = f.spawn(f.unit, 1);
+
+  // The wolf goes in alone; the first own unit clears it (0x005b9334), and
+  // the enemy is refused by a selection that is no longer empty.
+  Selection selection;
+  const std::vector<ObjectId> box{wolf, mine_a, enemy, allys, mine_b};
+  CHECK(apply_band(f.world, 1, box, selection) == 3);
+  CHECK(held(selection) == (std::vector<ObjectId>{mine_a, allys, mine_b}));
+
+  // With none of the player's own in the box: one foreign unit, the first,
+  // and no more (0x005b92c5).
+  selection.clear();
+  const std::vector<ObjectId> strangers{wolf, enemy};
+  CHECK(apply_band(f.world, 1, strangers, selection) == 1);
+  CHECK(held(selection) == std::vector<ObjectId>{wolf});
+  // The same box seen from player 2's screen holds player 2's own unit.
+  selection.clear();
+  CHECK(apply_band(f.world, 2, strangers, selection) == 1);
+  CHECK(held(selection) == std::vector<ObjectId>{enemy});
+}
+
+TEST(a_band_merges_into_what_shift_kept_through_the_same_insert) {
+  Fixture f;
+  const ObjectId hall = spawn_building(f, 1);
+  const ObjectId mine_a = f.spawn(f.unit, 1);
+  const ObjectId mine_b = f.spawn(f.unit, 1);
+  const ObjectId wolf = f.spawn(f.unit, kNeutralWildlife);
+
+  // Own units outrank the building Shift kept (0x005b939e): it goes.
+  Selection selection;
+  selection.add(hall);
+  const std::vector<ObjectId> box{mine_a};
+  CHECK(apply_band(f.world, 1, box, selection) == 1);
+  CHECK(held(selection) == std::vector<ObjectId>{mine_a});
+
+  // Added, not toggled: a unit already held stays, a new one joins.
+  const std::vector<ObjectId> both{mine_a, mine_b};
+  CHECK(apply_band(f.world, 1, both, selection) == 2);
+  CHECK(held(selection) == (std::vector<ObjectId>{mine_a, mine_b}));
+
+  // A foreign band never joins a selection that holds anything.
+  const std::vector<ObjectId> animal{wolf};
+  CHECK(apply_band(f.world, 1, animal, selection) == 1);
+  CHECK(held(selection) == (std::vector<ObjectId>{mine_a, mine_b}));
+
+  // And an own one displaces a foreign one Shift kept.
+  selection.clear();
+  selection.add(wolf);
+  CHECK(apply_band(f.world, 1, box, selection) == 1);
+  CHECK(held(selection) == std::vector<ObjectId>{mine_a});
+}
+
+TEST(a_hero_in_a_band_stands_for_its_army) {
+  Fixture f;
+  const ObjectId soldier = f.spawn(f.unit, 1);
+  const ObjectId captain = f.spawn(f.hero, 1);
+  const ObjectId loose = f.spawn(f.unit, 1);
+  const ObjectId recruit = f.spawn(f.unit, 1);
+  f.world.mutable_state(captain)->flags.is_hero = true;
+  f.heroes.register_hero(f.world, captain);
+  f.heroes.register_unit(f.world, soldier);
+  f.heroes.register_unit(f.world, recruit);
+  REQUIRE(f.heroes.attach(f.world, soldier, captain));
+  REQUIRE(f.heroes.attach(f.world, recruit, captain));
+
+  // The soldier is met first and taken; the hero then drops it and is
+  // appended (0x005b93bc); the recruit, met after its hero, is refused
+  // (0x005b94c7). The loose unit is nobody's and stays where it was.
+  Selection selection;
+  const std::vector<ObjectId> box{soldier, captain, loose, recruit};
+  CHECK(apply_band(f.world, 1, box, selection) == 2);
+  CHECK(held(selection) == (std::vector<ObjectId>{captain, loose}));
+}
+
+// --------------------------------------------------------------------------
 // candidates
 // --------------------------------------------------------------------------
 

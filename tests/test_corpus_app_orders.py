@@ -235,3 +235,25 @@ def test_an_order_given_as_the_match_opens_is_walked(app, game_dir):
     assert order_turn is not None and order_turn >= 1, order_turn
     assert turn is not None and turn >= 3, turn
     assert len(places) > 10, f"the legionary did not walk: {sorted(places)}"
+
+
+#: `selected T of N under the cursor (player P holds H)`, after a release.
+SELECTED = re.compile(r"^selected (\d+) of (\d+) under the cursor \(player \d+ holds (\d+)\)$", re.M)
+
+
+def test_a_band_takes_no_building_and_a_click_still_does(app, game_dir):
+    """Playtest report #23: a drag box took buildings.
+
+    The band offers units only (0x005e1a60 refuses anything without
+    `SyncFlags` bit 22), so a box over Crossroads' opening view -- the
+    player's gate, towers, walls and well, and not one unit -- selects
+    nothing, where it used to select the gate. A click has its own test
+    (0x005e1b80), which takes a building, and still does.
+    """
+    out = play(app, game_dir, ["drag:5,60,1015,600", "wait:4", "click:480,250", "wait:4"],
+               frames=40, where=CROSSROADS)
+    band, click = [tuple(map(int, m.groups())) for m in SELECTED.finditer(out)]
+    taken, offered, holds = band
+    assert offered > 0 and taken == 0 and holds == 0, out[-2000:]
+    assert click == (1, 1, 1), out[-2000:]
+    assert re.search(r'^infobar: class BGate2 .* tags thumb building ', out, re.M), out[-2000:]
