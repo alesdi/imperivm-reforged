@@ -78,7 +78,8 @@ int main(int argc, char** argv) {
                  "`match` block says which turn that was either way.\n"
                  "IMRUN_DEATHS=1 prints every death, where and to whom;\n"
                  "IMRUN_CAPTURES=1 prints every settlement that changes hands, on\n"
-                 "the turn it does, outposts and all;\n"
+                 "the turn it does, outposts and all; IMRUN_UNTIL_CAPTURE=1 prints\n"
+                 "them too, and stops at the end of the turn the first one comes on;\n"
                  "IMRUN_OBJECTS=<text>[,<text>...] lists every object whose class\n"
                  "contains any of them;\n"
                  "IMRUN_OVERLAPS=<n> counts standing bodies drawn through each other\n"
@@ -712,7 +713,13 @@ int main(int argc, char** argv) {
   // outposts the computer players' armies go after first. "Who took what,
   // when" is the plainest measure of a war, and sampling it misses a town
   // taken and retaken between two samples.
-  const bool show_captures = std::getenv("IMRUN_CAPTURES") != nullptr;
+  // `IMRUN_UNTIL_CAPTURE=1` stops at the first, as `IMRUN_UNTIL_OVER` stops at
+  // the end: the turn the computer players first take something is theirs to
+  // decide, so a caller that needs one gives a generous `turns` and this
+  // stops at the answer.
+  const bool until_capture = std::getenv("IMRUN_UNTIL_CAPTURE") != nullptr;
+  const bool show_captures = until_capture || std::getenv("IMRUN_CAPTURES") != nullptr;
+  bool captured = false;
   std::map<sim::SettlementId, sim::PlayerId> owners;
   if (show_captures) {
     if (const sim::EconomySystem* economy = sim::economy_of(run.world())) {
@@ -724,6 +731,7 @@ int main(int argc, char** argv) {
   if (const char* every = std::getenv("IMRUN_ORDERS")) orders_every = std::strtoull(every, nullptr, 10);
   for (std::uint64_t turn = 0; turn < turns; ++turn) {
     if (until_over && ended_at != 0) break;
+    if (until_capture && captured) break;
     if (economy_every != 0 && turn % economy_every == 0) {
       if (const sim::EconomySystem* economy = sim::economy_of(run.world())) {
         for (const sim::Settlement& set : economy->settlements().all()) {
@@ -789,6 +797,7 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(turn + 1), set.id,
                         static_cast<int>(set.kind), static_cast<int>(seen->second),
                         static_cast<int>(set.owner));
+            captured = true;
           }
           owners[set.id] = set.owner;
         }

@@ -102,8 +102,10 @@ def test_a_real_session_round_trips_through_a_save(imsave, game_dir, container):
 # `tools/save_sweep.py`'s `MID_WAR` runs this same command and requires the same
 # (ROUND TRIP OK, which `imsave` prints only when the hashes match at every
 # turn and the re-save is byte-identical, and a town fallen, broken or taken),
-# so `verify.py --full`, which runs the sweep, deselects it here.
+# so `verify.py --slow`, which runs the sweep's mid-war case, deselects it
+# here. 1,600 turns of war, so `slow` as well.
 @pytest.mark.swept
+@pytest.mark.slow
 def test_a_save_taken_mid_war_loads_back_into_the_same_game(imsave, game_dir):
     """Crossroads at 1,600 turns: armies marching, towns broken and taken.
 

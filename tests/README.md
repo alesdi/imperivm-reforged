@@ -50,9 +50,29 @@ python -m pytest -m corpus          # requires an installation
 Expected results, measured on the retail install:
 
 ```
-234 passed                        with game data      (~19 s)
-191 passed, 43 skipped             without            (~0.7 s)
+506 passed, 7 skipped (slow)      with game data, -n auto --dist loadgroup   (~1.5-2 min)
+218 passed, 295 skipped            without                                     (~2 s)
 ```
+
+`tools/verify.py --full` runs the first, deselecting the one `swept` test.
+
+## Slow tests
+
+A test that plays a war -- Crossroads for thousands of turns, in `imrun`, in
+the app, between networked peers -- is marked `slow` and skipped unless asked
+for:
+
+```
+python -m pytest --slow                              # everything
+python -m pytest --slow -m slow                      # only the wars
+python -m pytest tests/test_corpus_imrun.py::test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds
+```
+
+A slow test named by node id runs without `--slow`. `tools/verify.py --slow`
+runs them all, once per merged round of work. They were five tests and 44% of
+the suite's time, and what they wait for is the AI's to decide, so they moved
+whenever it changed; before marking a new test `slow`, see whether its claim
+holds in a few hundred turns, or in a fight it orders.
 
 ## The failure mode this design guards against
 

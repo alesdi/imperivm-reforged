@@ -53,15 +53,39 @@ a few small ways and confirm a test fails each time.
 CI runs on every pull request, but it cannot see the game: it builds the core and runs the C++ tests, the boundary check and the Python tests, whose corpus half skips without an installation. Everything that reads the game is yours to run, so run these before you push.
 
 ```sh
-python3 tools/verify.py          # the quick checks, after most changes
-python3 tools/verify.py --full   # everything, after changes to saves, the app or the tools
+python3 tools/verify.py          # the quick checks, after most changes (~20 s)
+python3 tools/verify.py --full   # once, before handing a change back (~1.5 min)
+python3 tools/verify.py --slow   # the wars: once per merged round of work (tens of minutes)
 ```
 
-The quick tier builds and runs the C++ tests, checks the core boundary and the fixtures,
-and runs every shipped map for a short while looking for script traps. `--full` adds the
-save round-trip of every map and the Python suite. Both need `build-core` configured as
-in the README; the corpus checks need `IMPERIVM_GAME_DIR` pointing at an installation and
-skip without one.
+While working, run less than any tier: build the target you changed and run
+the one test that covers it, by node id (`pytest
+tests/test_corpus_imrun.py::test_...`), or `core_tests`, which takes under two
+seconds whole. Run the quick tier when the change is done, and `--full` once
+before you hand it back -- not after every edit.
+
+The quick tier builds and runs the C++ tests, checks the core boundary and the
+fixtures, and runs every shipped map for a short while looking for script
+traps. `--full` adds the app build, the save round-trip of every map and the
+Python suite. `--slow` adds everything that plays a war: the tests marked
+`slow` (Crossroads for thousands of turns in `imrun`, in the app and between
+networked peers), a save taken mid-war, and every skirmish run for thousands
+of turns looking for traps. Those are slow, and what they wait on is the AI's
+to decide, so they move whenever it changes; whoever merges a round of work
+runs them once on the result. All of them need `build-core` configured as in
+the README; the corpus checks need `IMPERIVM_GAME_DIR` pointing at an
+installation and skip without one.
+
+A test that needs a war is a `slow` test, and the last resort. Most claims
+about one hold in a few hundred turns, or in a fight the test orders
+(`IMRUN_PLACE`, `IMRUN_GOTO`); a slow test is skipped unless `pytest --slow`
+is given or it is named by node id.
+
+Anything that runs for more than a minute -- a long `imrun`, a seed sweep, the
+slow tier -- belongs in the background, not in a loop that polls for it.
+
+The build goes through `ccache` when it is installed (`brew install ccache`,
+`apt install ccache`); a fresh worktree's build is then mostly cache hits.
 
 ## Documenting a format
 

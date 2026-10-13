@@ -18,9 +18,10 @@ an animation's length is its sheet's rows, and Crossroads parted at turn 4.
 And the app ran its match at the options' difficulty where `imrun` runs the
 match's own 0, which parted it at turn 0; `--difficulty 0` says which.
 
-Costly: both run 2,200 turns, about a minute and a half side by side, and
-a saved game resumed in both takes another half minute. `tools/verify.py
---full` runs it (the Python suite), the quick tier does not. Every app run here is headless (`conftest.py` sets `IMPERIVM_HEADLESS=1`).
+Held at two turns: 605, a quarter of a minute, by every run of the suite,
+and 2,205, about two minutes side by side, in the slow tier (`pytest
+--slow`, `tools/verify.py --slow`). A saved game resumed in both takes
+another half minute. Every app run here is headless (`conftest.py` sets `IMPERIVM_HEADLESS=1`).
 
 The Statistics screen the end-game screen opens is held to the original's
 rules by a cheap test beside it: `--declare-won` ends the match on its first
@@ -41,14 +42,17 @@ import pytest
 import corpus
 from conftest import requires_game
 
-pytestmark = requires_game
+# Each test is its own pair of runs; under `--dist loadgroup` they may go to
+# different workers rather than queue behind the longest.
+pytestmark = [requires_game, pytest.mark.spread]
 
 CROSSROADS = "Scenarios/Crossroads.BFHP"
-#: The turn the two are held at: just past `test_corpus_imrun.py`'s 2,200, and
-#: on purpose not a multiple of eight -- a frame runs up to eight turns, so a
-#: `turn:N` that did not hold the clock on N would read the world a few turns
-#: late here, where on a multiple of eight it can land on N by luck.
-TURNS = 2_205
+#: The turns the two are held at: 605, when the computer players have armies
+#: out and fighting, and just past `test_corpus_imrun.py`'s 2,200, in the slow
+#: tier. On purpose not multiples of eight -- a frame runs up to eight turns,
+#: so a `turn:N` that did not hold the clock on N would read the world a few
+#: turns late here, where on a multiple of eight it can land on N by luck.
+TURNS = (605, pytest.param(2_205, marks=pytest.mark.slow))
 #: A frame runs at most eight turns, however fast the machine, so 2,200 turns
 #: take about 280 frames; this bounds a run whose script never finishes.
 FRAMES = 2_000
@@ -125,9 +129,11 @@ def imrun() -> Path:
     return path
 
 
-def test_crossroads_is_the_same_game_in_the_app_as_in_imrun(app, imrun, game_dir, tmp_path):
+@pytest.mark.parametrize("turns", TURNS)
+def test_crossroads_is_the_same_game_in_the_app_as_in_imrun(app, imrun, game_dir, tmp_path,
+                                                            turns):
     headless = subprocess.Popen(
-        [str(imrun), str(game_dir), str(game_dir / CROSSROADS), str(TURNS), "800"],
+        [str(imrun), str(game_dir), str(game_dir / CROSSROADS), str(turns), "800"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     shot = tmp_path / "war.png"
@@ -136,7 +142,7 @@ def test_crossroads_is_the_same_game_in_the_app_as_in_imrun(app, imrun, game_dir
     # confirmation's Yes, which a press finds on the open dialog or says it
     # could not. (Quit alone opened the confirmation and left the app to run
     # out its frames, half a minute of an idle menu.)
-    script = f"turn:{TURNS};hash;shot:{shot};key:F10;wait:3;press:Quit;wait:3;press:Yes"
+    script = f"turn:{turns};hash;shot:{shot};key:F10;wait:3;press:Quit;wait:3;press:Yes"
     played = subprocess.run(
         [str(app), "--game", str(game_dir), "--map", CROSSROADS, "--play", "--player", "0",
          "--difficulty", "0", "--turn-length", "800", "--turn-interval", "1",
@@ -158,7 +164,7 @@ def test_crossroads_is_the_same_game_in_the_app_as_in_imrun(app, imrun, game_dir
     turn, digest = int(held.group(1)), held.group(2)
     ran = int(re.search(r"^after (\d+) turns", reference, re.MULTILINE).group(1))
     reference_hash = re.search(r"^\s+hash\s+([0-9a-f]{16})$", reference, re.MULTILINE).group(1)
-    assert (turn, digest) == (ran, reference_hash) == (TURNS, reference_hash), (
+    assert (turn, digest) == (ran, reference_hash) == (turns, reference_hash), (
         out[-2000:], reference[-2000:])
 
     # And the app got there by itself and left by its menu before FRAMES.

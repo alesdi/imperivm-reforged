@@ -136,6 +136,14 @@ requires_pixel_store = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--slow", action="store_true",
+        help="also run the tests marked `slow`: whole wars, minutes each "
+        "(`tools/verify.py --slow` passes it)",
+    )
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "corpus: requires a real game installation; skips without one"
@@ -148,7 +156,12 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "swept: also run, the same command and the same assertions, by a sweep that "
-        "`tools/verify.py --full` runs; verify deselects it there, a bare pytest keeps it",
+        "`tools/verify.py` runs; verify deselects it there, a bare pytest keeps it",
+    )
+    config.addinivalue_line(
+        "markers",
+        "slow: a whole war or near it, a minute or more; skipped unless `--slow` is "
+        "given or the test is named by its node id, see _skip_slow",
     )
 
 
@@ -191,6 +204,32 @@ def _scope(item: pytest.Item) -> str:
     return "_".join(names) if names else item.nodeid
 
 
+def _skip_slow(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip the `slow` tests unless asked for.
+
+    **The slow tests are the wars**: Crossroads played for thousands of turns,
+    in `imrun`, in the app and between networked peers. They were most of the
+    suite's time -- five tests, 44% of it, and the one that ran longest set
+    the suite's wall time by itself -- and the most fragile, since what they
+    wait for is the AI's to decide. So a run while working leaves them out,
+    and `tools/verify.py --slow` runs them once a round of work is merged.
+
+    Asked for by `--slow`, or by naming the test: `pytest
+    tests/test_corpus_imrun.py::test_...` runs it whatever it is marked. They
+    are skipped rather than deselected, so the count says they exist.
+    """
+    if config.getoption("--slow"):
+        return
+    named = {arg.split("[")[0] for arg in config.args if "::" in arg}
+    skip = pytest.mark.skip(reason="slow: a whole war; `--slow` or its node id runs it")
+    for item in items:
+        if item.get_closest_marker("slow") is None:
+            continue
+        if any(item.nodeid.split("[")[0].endswith(name.rsplit("/", 1)[-1]) for name in named):
+            continue
+        item.add_marker(skip)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Tag every corpus module so `-m corpus` / `-m 'not corpus'` select cleanly.
@@ -207,6 +246,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if _module_of(item).split("/")[-1].startswith("test_corpus_"):
             item.add_marker(pytest.mark.corpus)
+    _skip_slow(config, items)
 
     # Collection happens on the workers, and xdist rewrites a worker's `dist`
     # to "no" and says `loadgroup` instead; the controller never collects.

@@ -33,7 +33,7 @@
 //
 // ## And a check that the checks work
 //
-// `--verify-faults` re-runs the whole thing ten times, each time deleting one
+// `--verify-faults` repeats the round trip ten times, each time deleting one
 // system's section from the save before loading it, and requires every one of
 // them to be caught. A check that has never been seen to fail is not a check.
 //
@@ -620,7 +620,23 @@ int run(const Args& args) {
     return run;
   };
 
+  // A fault's reference, once the clean round trip has passed: the honest save
+  // loaded into a fresh session. That pass is the proof that a session loaded
+  // from it hashes as the original does at every one of the `more` turns, and
+  // the reference is read by nothing but check 3, which compares those hashes;
+  // so a fault is caught against it exactly when it is caught against the
+  // original, and each costs a load rather than `turns` turns over again --
+  // Balcans' ten faults took two and a half minutes re-running its 300.
+  const auto loaded_original = [&]() -> std::unique_ptr<sim::GameSession> {
+    std::unique_ptr<sim::GameSession> run = start_session(fixture, args.seed, args.scripts);
+    if (run == nullptr) return nullptr;
+    sim::SessionLoadReport report;
+    if (!run->load(saved.value(), fixture.identity, &report).ok()) return nullptr;
+    return run;
+  };
+
   int failures = 0;
+  bool clean_trip = false;
   {
     std::unique_ptr<sim::GameSession> reference = fresh_original();
     if (reference == nullptr) return 1;
@@ -655,7 +671,8 @@ int run(const Args& args) {
     const Outcome outcome =
         round_trip(fixture, args, *reference, saved.value(), saved.value(),
                    /*verbose=*/true);
-    if (outcome.clean()) {
+    clean_trip = outcome.clean();
+    if (clean_trip) {
       std::printf("  hashes    match at every one of the %zu turns after the load\n",
                   args.more);
       std::printf("  re-save   byte-identical\n");
@@ -692,7 +709,8 @@ int run(const Args& args) {
         ++failures;
         continue;
       }
-      std::unique_ptr<sim::GameSession> reference = fresh_original();
+      std::unique_ptr<sim::GameSession> reference =
+          clean_trip ? loaded_original() : fresh_original();
       if (reference == nullptr) return 1;
       const Outcome outcome = round_trip(fixture, args, *reference, broken, saved.value(),
                                          /*verbose=*/false);
