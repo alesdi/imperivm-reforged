@@ -512,6 +512,81 @@ class SelectionTable {
 [[nodiscard]] bool is_commandable(const World& world, ObjectId id, PlayerId issuer) noexcept;
 
 // --------------------------------------------------------------------------
+// the drag box
+// --------------------------------------------------------------------------
+//
+// Playtest report #23: a band took buildings and animals. **A band takes
+// units only, and a click is the only way to select anything else.** The rule
+// is in two parts in `gbr.exe`, and both live here rather than in the app
+// because they are questions about the world -- kind bits, flags, diplomacy,
+// who leads whom -- and not about the screen. Where the box is on the map is
+// the app's (`platform::WorldView::pick_in_rect`).
+//
+// **What a band offers** is the per-object test of the band's grid sweep
+// (0x005e1a60). It refuses a spawn template (`SyncFlags` bit 27), an object
+// whose class resolves no entity record (0x0053cee0 answers null), anything
+// that is not a unit (`SyncFlags` bit 22 -- so every building, item holder and
+// piece of decor), and a unit carrying `noselect` (bit 23 of the second flag
+// word, `[obj+0x194]`, which the maps set on hens and villagers). Animals,
+// ships and wagons are units and are offered. Nothing else is asked: not the
+// owner, not the class's `non_selectable` (which only `Tower`, `Wall` and
+// `FakeTower` carry), and not the fog.
+//
+// **What a band keeps** is decided by the selection insert (0x005b9170), which
+// every add goes through, the band's included. Its gates for a unit:
+//
+//   * already selected, unresolvable, dead (`vtbl+0x50`) or classless: refused;
+//   * an object whose owner shares control with the local player -- the owner's
+//     relation word towards that player, bit 5 (`0x20`), read at 0x005b92b0 --
+//     is *own*. An own object clears a selection that holds no own object and
+//     starts it afresh (0x005b9334); a foreign object is accepted only into an
+//     **empty** selection (0x005b92c5), and then alone. So a box over any of
+//     the player's units selects all of them and nothing else, and a box over
+//     none selects **one** foreign unit, which may well be an animal;
+//   * units and heroes rank 3, buildings and item holders 1, and an own object
+//     of higher rank clears a selection of lower rank (0x005b939e); of rank 1
+//     only one is ever held (0x005b93a9);
+//   * a hero -- hero bit 24 and no leader of its own (`[obj+0x170]`, which is
+//     `HeroSystem::hero_of`) -- takes the place of its own army in the
+//     selection: the members it leads are dropped, the rest kept in order, and
+//     it is appended (0x005b93bc-0x005b94ac). A unit whose hero is already
+//     selected is refused (0x005b94c7). The info bar and the orders reach the
+//     army through the hero (`SelAvg*` above).
+//
+// Neither part caps the count.
+//
+// **The band is a second list.** The view keeps the committed selection
+// (`+0x6c`) and the band's (`+0x98`) apart. A press clears both unless Shift is
+// down (0x005ea703 -> 0x005e7e50); every pointer move clears the band's and
+// sweeps it afresh from empty (0x005eacad -> 0x005e32d0 -> 0x005e2ff0); what
+// is shown is the committed one with the band's inserted into it, member by
+// member (0x005e7910 -> 0x005b9610); and the release does that insertion for
+// good and empties the band (0x005ea763 -> 0x005e1380). So Shift *adds* a
+// band, through the same insert, and never toggles.
+
+/// Whether a band may offer `id` (0x005e1a60, less where it stands): a unit
+/// in play, not `noselect`, alive and on the map. See the section above.
+[[nodiscard]] bool is_band_selectable(const World& world, ObjectId id) noexcept;
+
+/// The selection insert (0x005b9170) as it treats a **unit** -- the only kind
+/// a band offers. Returns whether `id` was taken. Anything `is_band_selectable`
+/// refuses is refused here too.
+///
+/// The original keeps the selection's ownership and rank beside the list; here
+/// they are read off the members (own if any member's owner shares control
+/// with `local`; rank 3 if any member is a unit, else 1), which is the same
+/// answer for every selection the insert itself builds and a defined one for
+/// a selection a plain click or a script built.
+bool insert_band_unit(const World& world, PlayerId local, Selection& selection, ObjectId id);
+
+/// One band, from `candidates` in the order the sweep met them: a fresh list
+/// built through the insert, then inserted member by member into `selection`
+/// (cleared first by the caller unless Shift was down at the press). Returns
+/// how many the band itself held.
+std::size_t apply_band(const World& world, PlayerId local, std::span<const ObjectId> candidates,
+                       Selection& selection);
+
+// --------------------------------------------------------------------------
 // the target of an order
 // --------------------------------------------------------------------------
 

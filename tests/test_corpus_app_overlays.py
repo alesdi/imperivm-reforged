@@ -73,14 +73,17 @@ def test_the_band_is_drawn_while_held_and_the_selection_is_ringed(app, game_dir,
     before, during, after = shots
     # Nothing selected, no band: nothing over the world.
     assert before == (0, 0, 0, 0)
-    # The button held: the band, and still no ring -- the selection changes on release.
-    assert during[0] == 1 and during[1] == 0
+    # The button held: the band, and already the rings of what it holds. The
+    # original rebuilds the band's selection on every move and shows it
+    # (0x005eacad -> 0x005e32d0, 0x005e7910); the release only keeps it.
+    assert during[0] == 1
     # Released: no band, and one ring for every unit the band took.
     taken = re.search(r"^selected (\d+) of \d+ under the cursor \(player \d+ holds (\d+)\)$",
                       out, re.MULTILINE)
     assert taken, out[-2000:]
     held = int(taken.group(2))
     assert held > 0
+    assert during[1] == held
     assert after[0] == 0
     assert after[1] == held
     # No bars: the mode starts off, as the original's does.
