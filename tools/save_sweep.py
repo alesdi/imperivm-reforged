@@ -57,7 +57,8 @@ RUN_TIMEOUT_SECONDS = 900
 #: town hall's node in the map's corner. Crossroads at 2,700 turns has a
 #: town taken (p3 takes an independent village at turn 2,647) and armies on
 #: the road; it was 1,600 until a swordsman could no longer hurt a building
-#: (playtest #24) and the first town fell later. `imsave` prints how many nodes
+#: (playtest #24) and the first town fell later -- measured with that change
+#: alone, before playtest #22's march pacing, which may move it again. `imsave` prints how many nodes
 #: outlive their centre, how many centres stand broken and how many towns
 #: changed hands, and a run where all three are zero is reported as a failure
 #: of coverage, not a pass.

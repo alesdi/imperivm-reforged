@@ -126,7 +126,9 @@ def test_a_save_taken_mid_war_loads_back_into_the_same_game(imsave, game_dir):
     a building (playtest #24): the three town halls broken by then
     stand whole, and the first town now falls later. The node restore itself
     keeps its core test, which erases a town hall outright. About thirty
-    seconds.
+    seconds. Turn 2,700 was measured with that change alone, on a tree
+    without playtest #22's march pacing; a merge with it may move the
+    first capture again.
     """
     output = run(imsave, game_dir, "Scenarios/Crossroads.BFHP", "--turns", "2700", "--more", "10")
     war = 0
