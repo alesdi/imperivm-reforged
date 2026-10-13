@@ -637,6 +637,17 @@ class Application {
   std::int32_t band_y0_ = 0;
   std::int32_t band_x1_ = 0;
   std::int32_t band_y1_ = 0;
+  /// The band as `gbr.exe` keeps it (`sim/orders.hpp`, *the drag box*): the
+  /// committed selection as the press left it -- what was selected under
+  /// Shift, nothing otherwise (0x005e7e50) -- and whether the pointer has yet
+  /// moved far enough to make this a band rather than a click. Once it has,
+  /// every move shows that selection with the band's units inserted into it
+  /// (0x005eacad), and the release keeps the last one.
+  std::vector<core::ObjectId> band_base_;
+  bool band_live_ = false;
+  /// The selection `band_base_` plus whatever the band holds now. Returns
+  /// how many the band itself took.
+  std::size_t rebuild_band();
   /// Whether the last frame drew the band: what the `drawn:` line counts.
   bool band_drawn_ = false;
   void draw_band();
@@ -7201,8 +7212,14 @@ void Application::handle_play_mouse(const SDL_Event& event) {
     }
     if (event.button.button == SDL_BUTTON_LEFT) {
       band_select_ = true;
+      band_live_ = false;
       band_x0_ = band_x1_ = static_cast<std::int32_t>(event.button.x);
       band_y0_ = band_y1_ = static_cast<std::int32_t>(event.button.y);
+      band_base_.clear();
+      if (shift) {
+        const std::span<const core::ObjectId> held = session_->selections().player(local_player_).ids();
+        band_base_.assign(held.begin(), held.end());
+      }
     } else if (event.button.button == SDL_BUTTON_MIDDLE) {
       dragging_ = true;
     } else if (event.button.button == SDL_BUTTON_RIGHT) {
@@ -7275,6 +7292,13 @@ void Application::handle_play_mouse(const SDL_Event& event) {
     if (band_select_) {
       band_x1_ = static_cast<std::int32_t>(event.motion.x);
       band_y1_ = static_cast<std::int32_t>(event.motion.y);
+      // A box of a few pixels is still a click (see the release). Past that
+      // it is a band, and the original rebuilds it on every move.
+      if (std::abs(band_x1_ - band_x0_) >= 4 || std::abs(band_y1_ - band_y0_) >= 4) band_live_ = true;
+      if (band_live_) {
+        (void)rebuild_band();
+        session_->selections().note_selection_changed(local_player_, session_->scheduler().now());
+      }
     } else if (dragging_) {
       map_.move_view(-static_cast<std::int32_t>(event.motion.xrel),
                      -static_cast<std::int32_t>(event.motion.yrel));
@@ -7309,40 +7333,40 @@ void Application::handle_play_mouse(const SDL_Event& event) {
     }
     if (event.button.button != SDL_BUTTON_LEFT || !band_select_) return;
     band_select_ = false;
-
-    platform::ScreenRect rect;
-    rect.x = std::min(band_x0_, band_x1_);
-    rect.y = std::min(band_y0_, band_y1_);
-    rect.width = std::abs(band_x1_ - band_x0_);
-    rect.height = std::abs(band_y1_ - band_y0_);
-
-    picked_.clear();
-    // A box of a few pixels is a click, and a click wants the topmost sprite
-    // under it rather than whatever anchor happens to fall in the box.
-    if (rect.width < 4 && rect.height < 4) {
-      const core::ObjectId hit = world_view_.pick(world, camera_, band_x0_, band_y0_);
-      if (hit != core::kNoObject) picked_.push_back(hit);
-    } else {
-      world_view_.pick_in_rect(world, camera_, rect, picked_);
-    }
+    band_x1_ = static_cast<std::int32_t>(event.button.x);
+    band_y1_ = static_cast<std::int32_t>(event.button.y);
+    if (std::abs(band_x1_ - band_x0_) >= 4 || std::abs(band_y1_ - band_y0_) >= 4) band_live_ = true;
 
     core::sim::Selection& selection = session_->selections().player(local_player_);
     // A fresh selection is made from nothing, so all of it is new and an
-    // object clicked again speaks again; Shift adds to what there is.
-    std::vector<core::ObjectId> before;
-    if (shift) before.assign(selection.ids().begin(), selection.ids().end());
-    if (!shift) selection.clear();
+    // object clicked again speaks again; Shift adds to what there was.
+    const std::vector<core::ObjectId> before = band_base_;
     std::size_t taken = 0;
-    for (const core::ObjectId id : picked_) {
-      // `is_selectable` is the class graph's answer -- towers and walls carry
-      // `non_selectable="1"` -- not a guess made here.
-      if (!core::sim::is_selectable(world, id)) continue;
-      if (shift) {
-        selection.toggle(id);
-      } else {
-        selection.add(id);
+    if (band_live_) {
+      // The band: the last move's, swept once more where the button came up.
+      // It takes units only, and the player's own over anyone else's
+      // (`sim/orders.hpp`, *the drag box*). Report #23.
+      band_live_ = false;
+      taken = rebuild_band();
+    } else {
+      // A click wants the topmost sprite under it rather than whatever anchor
+      // happens to fall near it, and it is the only way to select a building,
+      // an item holder, or an animal or an enemy among the player's own.
+      picked_.clear();
+      const core::ObjectId hit = world_view_.pick(world, camera_, band_x0_, band_y0_);
+      if (hit != core::kNoObject) picked_.push_back(hit);
+      if (!shift) selection.clear();
+      for (const core::ObjectId id : picked_) {
+        // `is_selectable` is the class graph's answer -- towers and walls carry
+        // `non_selectable="1"` -- not a guess made here.
+        if (!core::sim::is_selectable(world, id)) continue;
+        if (shift) {
+          selection.toggle(id);
+        } else {
+          selection.add(id);
+        }
+        ++taken;
       }
-      ++taken;
     }
     // What the original's selection-changed handler does, and the reason it is
     // a call rather than something `add` does: `Obj::_LastSelectionTime` is
@@ -7354,6 +7378,27 @@ void Application::handle_play_mouse(const SDL_Event& event) {
                 picked_.size(), static_cast<unsigned>(local_player_), selection.size());
     std::fflush(stdout);
   }
+}
+
+std::size_t Application::rebuild_band() {
+  core::sim::World& world = session_->world();
+  platform::ScreenRect rect;
+  rect.x = std::min(band_x0_, band_x1_);
+  rect.y = std::min(band_y0_, band_y1_);
+  rect.width = std::abs(band_x1_ - band_x0_);
+  rect.height = std::abs(band_y1_ - band_y0_);
+  // **Where** the box is stays the view's question: each object's ground
+  // point in the rectangle, in ascending id. Two readings, labelled as such.
+  // The original's test (0x005e1b2f) takes the anchor's x, and its projected
+  // y at two points offset by 2/5 and 2/7 of a value its entity record
+  // carries at `+0x28c`, whose meaning is not settled, either one inside
+  // counting. And its sweep meets objects in grid-cell order (0x005e2700),
+  // which decides which one foreign unit a box with none of the player's own
+  // takes; here it is the lowest id.
+  world_view_.pick_in_rect(world, camera_, rect, picked_);
+  core::sim::Selection& selection = session_->selections().player(local_player_);
+  selection.assign(band_base_);
+  return core::sim::apply_band(world, local_player_, picked_, selection);
 }
 
 void Application::tick_play(platform::Window::Frame& frame) {
@@ -7728,6 +7773,11 @@ void Application::refresh_infobar() {
     }
     std::printf(" queue %zu holder %zu items %zu skills %zu specials %zu\n", info.queue.size(),
                 info.holder.size(), info.items.size(), info.skills.size(), info.specials.size());
+    // The `BuildingQueue` cells, each with its command and its bar (-1 none).
+    for (std::size_t i = 0; i < info.queue.size(); ++i) {
+      std::printf("infobar: queue %zu icon %s command %u bar %d\n", i, info.queue[i].icon.c_str(),
+                  info.queue[i].command, info.queue[i].health);
+    }
     // The `UIHolder` portraits, each with its number and what a click on it
     // selects; and, for a hero, its army as the hero system keeps it, so
     // that the two can be compared.

@@ -2,23 +2,24 @@
 """Every check this project makes, in one command, in the right order.
 
     python3 tools/verify.py             # quick: after most changes
-    python3 tools/verify.py --full      # plus the save sweep and the Python suite
-    python3 tools/verify.py --war       # plus the trap sweep's war pass (slow)
+    python3 tools/verify.py --full      # plus the app, the save sweep and the Python suite
+    python3 tools/verify.py --slow      # plus the wars: once per merged round
 
-**Tiers.** Run the smallest one that can see what you changed.
+**Tiers.** Run the smallest one that can see what you changed; while working,
+smaller still -- the one test, by node id, that covers the change.
 
   quick   build, core tests, net tests, sound tests, core boundary, fixtures, host
-          coverage, the trap sweep's short pass over every map
-  --full  quick, plus the app build, the save sweep (every map and the
-          mid-war case) and the Python corpus suite -- after touching the save
-          path, the session, the app, the tools, or before calling a
-          milestone done
-  --war   whichever of the above, plus the trap sweep's war pass: every
-          skirmish for thousands of turns. A quarter of an hour on Balcans
-          alone since class behaviours start, so it is never in a tier; the
-          Crossroads corpus test already asserts a trap-free war to a capture.
-          And beside it the long network runs of Crossroads' war
-          (`IMPERIVM_LONG_NET` in test_corpus_lockstep.py)
+          coverage, the trap sweep's short pass over every map. About 20 s.
+  --full  quick, plus the app build, the save sweep (every map, saved early)
+          and the Python suite without its `slow` tests -- once, before
+          handing a change back, or after touching the save path, the
+          session, the app or the tools. About a minute and a half.
+  --slow  --full, plus everything that plays a war: the suite's `slow` tests
+          (Crossroads for thousands of turns in `imrun`, in the app and
+          between networked peers), the save sweep's mid-war save, and the
+          trap sweep's war pass over every skirmish. Tens of minutes, and
+          what the AI does moves them, so it is run once on a merged round
+          of work rather than by each change in it. `--war` is its old name.
 
 It exists because running them by hand costs more than running them. The
 corpus tools refuse a binary older than the newest engine source -- a guard
@@ -167,10 +168,11 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--full", action="store_true",
-                    help="also the app build, the save sweep and the Python corpus suite")
-    ap.add_argument("--war", action="store_true",
-                    help="also the trap sweep's war pass and the long network runs of a war "
-                    "(slow; never in a tier)")
+                    help="also the app build, the save sweep and the Python suite, without "
+                    "its slow tests: once, before handing a change back")
+    ap.add_argument("--slow", "--war", dest="slow", action="store_true",
+                    help="--full, plus the suite's slow tests, the mid-war save and the trap "
+                    "sweep's war pass: once per merged round")
     ap.add_argument("--serial", action="store_true",
                     help="run the checks one at a time rather than at once")
     ap.add_argument("--build", default="build-core")
@@ -180,6 +182,7 @@ def main() -> int:
                     help="--full: whose tools the save sweep and the suite run (default: "
                     "--app-build's unless it is a Debug build, else --build's)")
     args = ap.parse_args()
+    args.full = args.full or args.slow
     started = time.time()
 
     # First, always. Everything below is measured against what this built,
@@ -207,7 +210,7 @@ def main() -> int:
     sweep_jobs = ["--jobs", "1"] if args.serial else []
     trap = [sys.executable, "tools/trap_sweep.py", "--imrun", tool(args.build, "imrun"),
             *sweep_jobs]
-    if args.war:
+    if args.slow:
         trap.append("--war")
     checks: list[Check] = [
         ("core tests", [f"./{args.build}/engine/tests/core_tests"], "checks,", None),
@@ -222,8 +225,8 @@ def main() -> int:
         ("fixtures", [sys.executable, "tools/check_fixtures.py"], None, None),
         ("host coverage", [sys.executable, "tools/host_coverage.py",
                            "--imcheck", tool(args.build, "imcheck")], "whole install", None),
-        ("trap sweep" + (" + war" if args.war else ""), trap,
-         "war traps" if args.war else "traps ", None),
+        ("trap sweep" + (" + war" if args.slow else ""), trap,
+         "war traps" if args.slow else "traps ", None),
     ]
     if args.full:
         corpus_build = args.corpus_build
@@ -237,13 +240,21 @@ def main() -> int:
         # Every map saved, loaded and run on identically: the only check that
         # runs the save path against the inputs the app uses, which is how
         # `MoveState::walking` was found missing from the movement section.
-        checks.append(("save sweep", [sys.executable, "tools/save_sweep.py",
-                                      "--imsave", tool(corpus_build, "imsave"), *sweep_jobs],
+        # The mid-war save is 1,600 turns of war, nine tenths of the sweep's
+        # time, so it is --slow's.
+        mid_war = [] if args.slow else ["--no-mid-war"]
+        checks.append(("save sweep" + (" + mid-war" if args.slow else ""),
+                       [sys.executable, "tools/save_sweep.py",
+                        "--imsave", tool(corpus_build, "imsave"), *mid_war, *sweep_jobs],
                        "saves ", None))
         python = suite_python()
         # `swept` tests run the same command a sweep above runs, with the same
         # assertions; a bare pytest keeps them.
         suite = [python, "-m", "pytest", "tests", "-q", "-m", "not swept"]
+        # The wars, the long network runs among them (see `_skip_slow` in
+        # `tests/conftest.py`).
+        if args.slow:
+            suite.append("--slow")
         # Across every core when pytest-xdist is there (the dev extras bring
         # it). `loadgroup` with the groups `tests/conftest.py` assigns: a
         # module to a worker, as `loadfile` would, except the modules marked
@@ -255,22 +266,8 @@ def main() -> int:
         has_xdist = subprocess.run([python, "-c", "import xdist"], capture_output=True)
         if not args.serial and has_xdist.returncode == 0:
             suite += ["-n", "auto", "--dist", "loadgroup", "--no-loadscope-reorder"]
-        checks.append(("python suite", suite, "passed", corpus_env))
-
-    if args.war:
-        # The computer's war between networked peers, to the capture and well
-        # into the war: lockstep on the map's own setup against imrun's turn
-        # and hash, netplay over 2,400 turns, a seat changing hands four times
-        # over 1,500. Minutes each, so opt-in in the suite (`IMPERIVM_LONG_NET`)
-        # and here, beside the war pass they take less time than.
-        python = suite_python()
-        net_war = [python, "-m", "pytest", "tests/test_corpus_lockstep.py", "-q",
-                   "-k", "agrees_to_the_capture or well_into_the_war"]
-        if not args.serial and subprocess.run([python, "-c", "import xdist"],
-                                              capture_output=True).returncode == 0:
-            net_war += ["-n", "3"]
-        checks.append(("net war", net_war, "passed",
-                       {**tool_env(args.build), "IMPERIVM_LONG_NET": "1"}))
+        checks.append(("python suite" + (" + slow" if args.slow else ""), suite, "passed",
+                       corpus_env))
 
     if args.serial:
         results = [run(command, env) for _, command, _, env in checks]

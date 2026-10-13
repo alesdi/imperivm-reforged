@@ -78,7 +78,8 @@ int main(int argc, char** argv) {
                  "`match` block says which turn that was either way.\n"
                  "IMRUN_DEATHS=1 prints every death, where and to whom;\n"
                  "IMRUN_CAPTURES=1 prints every settlement that changes hands, on\n"
-                 "the turn it does, outposts and all;\n"
+                 "the turn it does, outposts and all; IMRUN_UNTIL_CAPTURE=1 prints\n"
+                 "them too, and stops at the end of the turn the first one comes on;\n"
                  "IMRUN_OBJECTS=<text>[,<text>...] lists every object whose class\n"
                  "contains any of them;\n"
                  "IMRUN_OVERLAPS=<n> counts standing bodies drawn through each other\n"
@@ -90,8 +91,11 @@ int main(int argc, char** argv) {
                  "IMRUN_GOTO=<turn>:<id>:<x>,<y> gives that object its owner's\n"
                  "right-click order to the point before that turn (1 or later: no\n"
                  "player orders before the first), IMRUN_PLACE=<x>,<y>\n"
-                 "first stands it there, out of its AI's hands, IMRUN_WATCH=<id>\n"
-                 "prints where it stands every ten turns and every gate its route\n"
+                 "first stands it there, out of its AI's hands, IMRUN_ATTACK=<id>\n"
+                 "makes the order the command bar's attack row (A) aimed at that\n"
+                 "object instead of the right click, IMRUN_WATCH=<id>\n"
+                 "prints where it stands every ten turns -- a hero, each member of\n"
+                 "his army too, and what it runs -- and every gate its route\n"
                  "crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
                  "and as it starts or stops letting units through, and every gate\n"
                  "at the end.\n"
@@ -697,6 +701,13 @@ int main(int argc, char** argv) {
   if (const char* place = std::getenv("IMRUN_PLACE")) {
     place_wanted = std::sscanf(place, "%d,%d", &place_x, &place_y) == 2;
   }
+  // `IMRUN_ATTACK=<id>`: the order is the bar's `attack` row aimed at that
+  // object -- the button, which skips the right click's `<defaultcmd>` list
+  // and so reaches a fort a right click would only capture (playtest #24).
+  ObjectId attack_target = kNoObject;
+  if (const char* attack = std::getenv("IMRUN_ATTACK")) {
+    attack_target = static_cast<ObjectId>(std::strtoul(attack, nullptr, 10));
+  }
   ObjectId watched = kNoObject;
   if (const char* watch = std::getenv("IMRUN_WATCH")) watched = static_cast<ObjectId>(std::strtoul(watch, nullptr, 10));
   const bool show_gates = std::getenv("IMRUN_GATES") != nullptr;
@@ -712,7 +723,13 @@ int main(int argc, char** argv) {
   // outposts the computer players' armies go after first. "Who took what,
   // when" is the plainest measure of a war, and sampling it misses a town
   // taken and retaken between two samples.
-  const bool show_captures = std::getenv("IMRUN_CAPTURES") != nullptr;
+  // `IMRUN_UNTIL_CAPTURE=1` stops at the first, as `IMRUN_UNTIL_OVER` stops at
+  // the end: the turn the computer players first take something is theirs to
+  // decide, so a caller that needs one gives a generous `turns` and this
+  // stops at the answer.
+  const bool until_capture = std::getenv("IMRUN_UNTIL_CAPTURE") != nullptr;
+  const bool show_captures = until_capture || std::getenv("IMRUN_CAPTURES") != nullptr;
+  bool captured = false;
   std::map<sim::SettlementId, sim::PlayerId> owners;
   if (show_captures) {
     if (const sim::EconomySystem* economy = sim::economy_of(run.world())) {
@@ -724,6 +741,7 @@ int main(int argc, char** argv) {
   if (const char* every = std::getenv("IMRUN_ORDERS")) orders_every = std::strtoull(every, nullptr, 10);
   for (std::uint64_t turn = 0; turn < turns; ++turn) {
     if (until_over && ended_at != 0) break;
+    if (until_capture && captured) break;
     if (economy_every != 0 && turn % economy_every == 0) {
       if (const sim::EconomySystem* economy = sim::economy_of(run.world())) {
         for (const sim::Settlement& set : economy->settlements().all()) {
@@ -766,11 +784,24 @@ int main(int argc, char** argv) {
       const ObjectId actors[] = {static_cast<ObjectId>(goto_id)};
       const sim::CommandTable* table = sim::order_command_table(run.world());
       sim::OrderReport made;
-      if (actor != nullptr && table != nullptr) {
+      if (actor != nullptr && table != nullptr && attack_target != kNoObject) {
         sim::OrderTarget target;
         target.point = sim::Point{goto_x, goto_y};
+        target.object = attack_target;
+        const sim::CommandDef* row = table->find("attack");
+        if (row != nullptr &&
+            sim::issue_order(run.world(), goto_id, *row, target, sim::OrderMode::replace) != 0) {
+          made.issued = 1;
+        }
+      } else if (actor != nullptr && table != nullptr) {
+        sim::OrderTarget target;
+        target.point = sim::Point{goto_x, goto_y};
+        // With the click's verifier over the run's own scripts, as the app
+        // and `imconform` give one: without it a candidate with a `verify=`
+        // -- a hero's `moveinfight` before his `move` -- blocks the order.
+        sim::ScriptOrderVerifier verifier(run.scheduler(), run.host_context());
         made = sim::issue_default_order(run.world(), *table, actors, target, sim::OrderMode::replace,
-                                        false, actor->state.owner, nullptr);
+                                        false, actor->state.owner, &verifier);
       }
       std::printf("  goto turn %llu: %u to (%d,%d), %zu issued\n", turn, goto_id, goto_x, goto_y,
                   made.issued);
@@ -789,6 +820,7 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(turn + 1), set.id,
                         static_cast<int>(set.kind), static_cast<int>(seen->second),
                         static_cast<int>(set.owner));
+            captured = true;
           }
           owners[set.id] = set.owner;
         }
@@ -836,6 +868,23 @@ int main(int argc, char** argv) {
       const sim::Point at = run.world().resolve_position(watched);
       std::printf("  watch turn %llu: %u at (%d,%d)\n", static_cast<unsigned long long>(turn + 1),
                   watched, at.x, at.y);
+      // A watched hero's army, member by member: where each stands relative
+      // to him and what it is running -- whether an army keeps its formation
+      // is a question about all of them at once.
+      if (const sim::HeroSystem* heroes = sim::hero_system_of(run.world())) {
+        if (const sim::HeroRecord* record = heroes->hero(watched)) {
+          const sim::CommandSystem* commands = sim::command_system(run.world());
+          for (const ObjectId member : record->army) {
+            const sim::Point m = run.world().resolve_position(member);
+            std::printf("  army turn %llu: %u at (%d,%d) off (%d,%d) order %s\n",
+                        static_cast<unsigned long long>(turn + 1), member, m.x, m.y, m.x - at.x,
+                        m.y - at.y,
+                        commands != nullptr && commands->command_count(member) > 0
+                            ? std::string(commands->command_name(member, 0)).c_str()
+                            : "-");
+          }
+        }
+      }
     }
     if (show_gates) {
       for (const sim::WorldObject& slot : run.world().objects()) {

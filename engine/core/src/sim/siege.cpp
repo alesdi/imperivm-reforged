@@ -141,6 +141,12 @@ constexpr std::int32_t kEnoughCrews = 10;
 /// The order is the original's. What it does not model is listed in the
 /// header: the per-player visibility mask behind bit 21, the two unit flag
 /// bits, the class flag at `+0xb30`, and `[settlement+0x40]`.
+///
+/// **`CombatSystem::unit_can_attack` is the same rule** for the fight itself
+/// (`Attack`, `IsValidTarget`, `CanAttack` and the target sweep), read off
+/// cached class bits instead of class names. It leaves out what this keeps --
+/// the hero ceasefire and the widening for non-enemies -- because its callers
+/// test those their own way; change one table and the other must follow.
 [[nodiscard]] bool can_attack(World& world, const HeroSystem* heroes, EconomySystem* economy,
                               const WorldObject& self, const WorldObject& target, GameTime now) {
   if (target.state.health <= 0) return false;

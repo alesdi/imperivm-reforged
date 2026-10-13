@@ -590,6 +590,31 @@ struct CombatProfile {
   bool can_be_attacked = true;
   bool is_projectile = false;
 
+  /// `projectile_class` declared and not the loader's `**Invalid**` default:
+  /// the test 0x0053f5b0 makes, which is what lets a `slash` or `pierce`
+  /// unit hit a building at all. Not `is_ranged()`, which asks whether the
+  /// name *resolved*; the original asks only whether it was given.
+  bool shoots = false;
+
+  /// The classes `Unit::CanAttack` (0x005b1da0) asks about by name, answered
+  /// once per class off its ancestry rather than once per candidate. Bits of
+  /// `kLine*`. See `CombatSystem::unit_can_attack`.
+  std::uint16_t lineage = 0;
+  static constexpr std::uint16_t kLineRamUnit = 1u << 0;    ///< 0x00540460
+  static constexpr std::uint16_t kLineSentry = 1u << 1;     ///< 0x005400c0
+  static constexpr std::uint16_t kLineFakeTower = 1u << 2;  ///< the string at 0x007ba860
+  static constexpr std::uint16_t kLineGate = 1u << 3;       ///< 0x005404d0
+  static constexpr std::uint16_t kLineCatapult = 1u << 4;   ///< the type at 0x0081b24c
+  /// `Wolf`, `Bear`, `Boar`, `LionM` or `LionF`: the five that may not
+  /// attack a catapult (0x005b2040 onwards).
+  static constexpr std::uint16_t kLineBeast = 1u << 5;
+  /// The class *is* `Fish` -- an exact name compare (0x005b1ef5), not an
+  /// ancestry test.
+  static constexpr std::uint16_t kLineFish = 1u << 6;
+  static constexpr std::uint16_t kLineOutpost = 1u << 7;       ///< 0x00440060
+  static constexpr std::uint16_t kLineBaseShipyard = 1u << 8;  ///< 0x004400b0
+  [[nodiscard]] bool is(std::uint16_t line) const noexcept { return (lineage & line) != 0; }
+
   /// The channel `type` meets. `siege` and `none` meet nothing.
   [[nodiscard]] std::int32_t armour_against(DamageType type) const noexcept;
   /// A class that shoots rather than reaches: `range` beyond melee reach.
@@ -1075,6 +1100,68 @@ class CombatSystem final : public System {
   /// own `while (.Attack(u))` would put it back into the engaged state and it
   /// would swing from the grave.
   bool order_attack(ObjectId attacker, ObjectId target);
+
+  /// `Unit::CanAttack(target)`, the virtual at `vtbl+0xb4` (body 0x005b1da0,
+  /// shared by the unit vtables): **whether this kind of unit may strike that
+  /// kind of thing at all.** Playtest #24 was its absence -- a swordsman
+  /// ordered onto a fort hit it and its health fell.
+  ///
+  /// It is the first half of every gate the original puts in front of a
+  /// strike. `Unit::Attack` (0x005ddb50) passes its target through 0x005a78a0,
+  /// which is this and then a range test (0x005a7800), and takes the refused
+  /// path at 0x005ddbd2 if either fails. `Obj::IsValidTarget` (0x005aafd0) is
+  /// this virtual and nothing else, `Obj::CanAttack` (0x005ab060) is this and
+  /// the range test, and the target-search predicate (0x005db650) asks it of
+  /// every candidate before it scores one. So here it gates `order_attack`,
+  /// the acquisition (`targetable`), the strike loop's hold on a target, and
+  /// the `IsValidTarget` and `CanAttack` entry points, together: an `Attack`
+  /// refused while `CanAttack` accepted would spin `RAM_ATTACK.VS`'s loop.
+  ///
+  /// The rule, in the original's order, for a unit attacker:
+  ///
+  ///   * a unit target: a `Sentry` only to a unit that `shoots`; nothing to
+  ///     a `RamUnit`;
+  ///   * a class that *is* `Fish`: never;
+  ///   * a building in a settlement: never a `FakeTower`. A `RamUnit` stops
+  ///     here: it may attack any building of a settlement whose centre is an
+  ///     `Outpost` or a `BaseShipyard`, and any `Gate`, and nothing else;
+  ///   * a `Catapult`: anyone but the five wild beasts;
+  ///   * everything else by the attacker's `damage_type` (`[class+0x2a4]`,
+  ///     loaded at 0x005a2200 as slash 0, pierce 1, siege 2, none 3): `slash`
+  ///     and `pierce` take a unit always and a building only when the
+  ///     attacker `shoots` (0x0053f5b0); `siege` takes anything; `none`
+  ///     nothing. **So a swordsman is refused every building, an archer,
+  ///     slinger or javelin thrower is not, and neither is `BritonHero`, whose
+  ///     class has a `projectile_class`.**
+  ///
+  /// True for anything that is not a unit: a tower's and a catapult's own
+  /// `CanAttack` are other virtuals (`Building::Attack` 0x004df650 and
+  /// `Catapult::Attack` 0x004e2d10 are their own entry points), not this
+  /// one, and are not reproduced. True, too, before `start` has seen a world:
+  /// whether a combatant is a unit or a building is the object model's to say.
+  ///
+  /// What it does not do, and why:
+  ///
+  ///   * **the range half is not here.** `Attack` and `CanAttack` both refuse
+  ///     a target out of reach in the original; this engine's `Attack` has
+  ///     always accepted one and let `act` hold the swing until it closes, and
+  ///     `GotoAttack`'s arrival is not measured the way 0x005a7800 measures
+  ///     (surface distance through an integer square root). Adding the half
+  ///     without the other would turn `while (.Attack(u))` after a short
+  ///     `GotoAttack` into a refusal that never suspends.
+  ///   * **the widening for non-enemies is not here.** The original lets a
+  ///     unit pass a target it is not hostile to if that target is training
+  ///     or is a building with health (0x005b1e3a-0x005b1e56), which would
+  ///     let an archer shoot its own walls. Every caller here keeps its own
+  ///     `is_enemy` test in front of this, so this only ever narrows.
+  ///   * the hero `Ceasefire` (0x005d37f0), the per-player visibility mask
+  ///     behind bit 21 of `[obj+0x2c]`, the class flag at `[class+0xb30]`,
+  ///     the object bit `0x4000000` and `[settlement+0x40]` are not modelled
+  ///     and pass; `sim/siege.cpp` adds the ceasefire for its own split.
+  ///   * a building at no health is refused before this is asked (see
+  ///     `targetable`), including the outpost-with-a-garrison exception the
+  ///     original makes at 0x005b1f69.
+  [[nodiscard]] bool unit_can_attack(const Combatant& self, const Combatant& target) const;
   /// Drop the current target and go idle.
   bool stop(ObjectId id);
   /// Drop the current target and nothing else: `gbr.exe`'s target setter
@@ -1290,8 +1377,9 @@ class CombatSystem final : public System {
 
   /// The four hard rejects every variant of the family shares, read off
   /// `0x005db650`: the candidate is alive and not dying, it is an enemy, its
-  /// class allows being attacked, and it is not `target_factor < 0`. Split out
-  /// so that the sweeping form and `best_target_among` cannot drift.
+  /// class allows being attacked, and it is not `target_factor < 0` -- and,
+  /// asked first there, the attacker's `CanAttack` (`unit_can_attack`). Split
+  /// out so that the sweeping form and `best_target_among` cannot drift.
   [[nodiscard]] bool targetable(const Combatant& self, const Combatant& other) const;
   /// `(distance^2 + 1) * target_factor / target_priority`, always measured from
   /// the attacker's own position. Smallest wins.
@@ -1369,6 +1457,10 @@ class CombatSystem final : public System {
   std::vector<std::pair<PlayerId, PlayerId>> allies_;
   /// The world's diplomacy, or null before `start`. Not owned.
   const PlayerTable* players_ = nullptr;
+  /// The world `start` saw, or null. Not owned, not state: `unit_can_attack`
+  /// reads the object model (unit or building, the settlement's centre)
+  /// through it.
+  World* world_ = nullptr;
 
   GameTime death_duration_ = kDefaultDeathDuration;
   bool world_bound_ = false;

@@ -328,13 +328,13 @@ def test_a_seed_is_one_game_and_another_seed_is_another(imrun, game_dir):
     assert field(first, "  hash") != field(default, "  hash")
 
 
-#: How long a run is asked to go before it must have seen a capture: the
-#: first length usually does on seed 1 (an outpost or village changed hands at
-#: turn 1,110 on main, 586 with exact wake-ups, 484 with the sentries fix as
-#: well), the second is the margin. When the computer players first take
-#: something is their business, and moves with every change to what they do;
-#: the claim is about the lines a run prints, whatever turn they come on.
-CAPTURE_TURNS = (1_500, 4_000)
+#: How far a run may go for its first capture. It stops on the turn the first
+#: comes (`IMRUN_UNTIL_CAPTURE`): turn 1,110 on seed 1 once, 586 with exact
+#: wake-ups, 484 with the sentries fix as well. When the computer players
+#: first take something is their business, and moves with every change to
+#: what they do; the claim is about the lines a run prints, whatever turn
+#: they come on, so the ceiling is generous and costs nothing unless needed.
+CAPTURE_CEILING = 4_000
 
 
 def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to_its_last(
@@ -355,7 +355,7 @@ def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to
         result = subprocess.run(
             [str(imrun), str(game_dir), str(crossroads), str(turns), "800", "--seed", "1"],
             capture_output=True, text=True, timeout=1800,
-            env={**os.environ, "IMRUN_SETTLEMENTS": "1", "IMRUN_CAPTURES": "1"},
+            env={**os.environ, "IMRUN_SETTLEMENTS": "1", "IMRUN_UNTIL_CAPTURE": "1"},
         )
         assert result.returncode == 0, result.stdout + result.stderr
         found = {int(m.group(1)): int(m.group(2)) for m in owner_line.finditer(result.stdout)}
@@ -363,15 +363,12 @@ def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to
         return found, result.stdout
 
     start, _ = owners(0)
-    for turns in CAPTURE_TURNS:
-        end, output = owners(turns)
-        if start != end:
-            break
+    end, output = owners(CAPTURE_CEILING)
     captures = re.findall(r"^  capture turn (\d+): #(\d+) kind \d+ p(-?\d+) -> p(-?\d+)$",
                           output, re.MULTILINE)
     assert start != end, (
-        f"no settlement changed hands in {CAPTURE_TURNS[-1]} turns on seed 1; "
-        "lengthen CAPTURE_TURNS so that this test has something to check")
+        f"no settlement changed hands in {CAPTURE_CEILING} turns on seed 1; "
+        "raise CAPTURE_CEILING so that this test has something to check")
     replayed = dict(start)
     last_turn = 0
     for turn, settlement, before, after in captures:
@@ -406,51 +403,40 @@ def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to
 #: `test_corpus_app_match.py` holds the app to the same world on the same turn.
 CROSSROADS_TURNS = 2_200
 
+#: The turn a walled town's sentries are looked at. Every wall has posted its
+#: sentries by then and they have walked their walkways for hundreds of turns
+#: -- p0 has its 50 of 50, the map 137 -- at a twelfth of the war's cost.
+SENTRY_TURNS = 600
 
-def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, game_dir):
-    """The vertical slice's claim, headless: nothing is ordered, the computer
-    players raise armies, march and fight, and the human seat's walled town
-    defends itself with the sentries its walls post -- on the walls, where
-    `WALL_PATROL.VS` and `GATE_PATROL.VS` send them, and nowhere else.
-    """
+
+def crossroads_walls(imrun: Path, game_dir: Path, turns: int, objects: str) -> str:
+    """`turns` of Crossroads with nothing ordered, listing settlements and
+    every object whose class names one of `objects`."""
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
         pytest.skip("Crossroads.BFHP is not in this installation")
     result = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS), "800"],
+        [str(imrun), str(game_dir), str(crossroads), str(turns), "800"],
         capture_output=True,
         text=True,
         timeout=1800,
-        env={**os.environ, "IMRUN_SETTLEMENTS": "1", "IMRUN_OBJECTS": "Sentry,Walls,Gate"},
+        env={**os.environ, "IMRUN_SETTLEMENTS": "1", "IMRUN_OBJECTS": objects},
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    output = result.stdout
+    return result.stdout
 
-    # Not decided: every stronghold still holds its town hall, and p0's -- the
-    # first settlement in the table -- is still p0's, its sentries at full.
-    assert field(output, "match").startswith("over=no"), output
-    lines = re.findall(r"^\s+#\d+ p\d+ kind 1 .*$", output, re.MULTILINE)
-    assert len(lines) == 4, lines
-    assert all("Townhall" in line for line in lines), lines
-    assert re.match(r"^\s+#0 p0 kind 1 .* sentries (\d+)/\1 ", lines[0]), lines[0]
 
-    # A war between the players: blows landed, men died, and a computer
-    # player's report counts kills of its own.
-    strikes = int(re.search(r"^\s+strikes\s+(\d+) blow", output, re.MULTILINE).group(1))
-    deaths = int(re.search(r"^\s+kills\s+(\d+) death", output, re.MULTILINE).group(1))
-    assert strikes > 1000, output
-    assert deaths > 0, output
-    killed = {int(p): int(k) for p, k in
-              re.findall(r"report p(\d+): units \d+ produced (\d+) killed", output)}
-    assert max(v for p, v in killed.items() if p != 0) > 0, killed
-
-    # Every sentry on the map stands by a wall or gate of its own side, and
-    # they are not stacked: none walked off across the map to a point a
-    # sixteen-bit multiply had wrapped (issue #7), and none is stuck where its
-    # wall placed it (#8, #11) -- before the fixes three stood on one point and
-    # a dozen points held two. Two may meet for a moment at a walkway's end.
-    # A wall's centre is up to half its length plus its radius from the ends
-    # of its walkway; 400 bounds both.
+def assert_sentries_stand_on_their_walls(imrun: Path, game_dir: Path, turns: int,
+                                         output: str) -> None:
+    """Every sentry on the map stands by a wall or gate of its own side, and
+    they are not stacked: none walked off across the map to a point a
+    sixteen-bit multiply had wrapped (issue #7), and none is stuck where its
+    wall placed it (#8, #11) -- before the fixes three stood on one point and
+    a dozen points held two. Two may meet for a moment at a walkway's end.
+    A wall's centre is up to half its length plus its radius from the ends
+    of its walkway; 400 bounds both. `output` is a `crossroads_walls` run of
+    `turns` listing `Sentry,Walls,Gate`.
+    """
     objects = re.findall(r"^\s+\d+ (\S+) p(\d+) at \((-?\d+),(-?\d+)\) .* order (\S+)$",
                          output, re.MULTILINE)
     sentries = [(p, int(x), int(y)) for cls, p, x, y, _ in objects if "Sentry" in cls]
@@ -473,16 +459,63 @@ def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, g
             at[(int(x), int(y))].add(int(i))
         return {spot: frozenset(ids) for spot, ids in at.items() if len(ids) > 1}
 
-    later = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS + 30), "800"],
-        capture_output=True, text=True, timeout=1800,
-        env={**os.environ, "IMRUN_OBJECTS": "Sentry"},
-    )
-    assert later.returncode == 0, later.stdout + later.stderr
-    then, now = stood(output), stood(later.stdout)
+    later = crossroads_walls(imrun, game_dir, turns + 30, "Sentry")
+    then, now = stood(output), stood(later)
     staying = {spot: sorted(ids) for spot, ids in then.items() if any(
         len(ids & others) > 1 for others in now.values())}
     assert all(len(ids) <= 2 for ids in staying.values()) and len(staying) <= 2, (staying, then)
+
+
+def test_a_walled_towns_sentries_stand_on_its_walls(imrun, game_dir):
+    """A walled town posts its sentries on its walls, where `WALL_PATROL.VS`
+    and `GATE_PATROL.VS` send them, and nowhere else; p0's are all posted, and
+    nothing a wall's scripts reach traps. The war test below holds the same of
+    the walls at 2,200 turns, in the slow tier.
+    """
+    output = crossroads_walls(imrun, game_dir, SENTRY_TURNS, "Sentry,Walls,Gate")
+    lines = re.findall(r"^\s+#\d+ p\d+ kind 1 .*$", output, re.MULTILINE)
+    assert re.match(r"^\s+#0 p0 kind 1 .* sentries (\d+)/\1 ", lines[0]), lines[0]
+    assert_sentries_stand_on_their_walls(imrun, game_dir, SENTRY_TURNS, output)
+    assert "no traps." in output, output[output.find("distinct traps"):]
+
+
+@pytest.mark.slow
+def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, game_dir):
+    """The vertical slice's claim, headless: nothing is ordered, the computer
+    players raise armies, march and fight, and the human seat's walled town
+    defends itself with the sentries its walls post -- on the walls, and
+    still there after 2,200 turns of war.
+
+    Slow (three minutes under the suite's load), and the most the AI's
+    behaviour moves, so it runs in `verify.py --slow`; the sentries' own
+    claims are held cheaply above.
+    """
+    output = crossroads_walls(imrun, game_dir, CROSSROADS_TURNS, "Sentry,Walls,Gate")
+
+    # Not decided: every stronghold still holds its town hall, and p0's -- the
+    # first settlement in the table -- is still p0's, its sentries at full.
+    assert field(output, "match").startswith("over=no"), output
+    lines = re.findall(r"^\s+#\d+ p\d+ kind 1 .*$", output, re.MULTILINE)
+    assert len(lines) == 4, lines
+    assert all("Townhall" in line for line in lines), lines
+    assert re.match(r"^\s+#0 p0 kind 1 .* sentries (\d+)/\1 ", lines[0]), lines[0]
+
+    # A war between the players: blows landed, men died, and a computer
+    # player's report counts kills of its own. Before any army marches, the
+    # sentries and the wildlife land 78 blows in 600 turns; the war has 706 by
+    # 1,200 and 871 by 2,200. The floor was 1,000 until a swordsman could no
+    # longer hit a building (playtest #24), which took the town-hall blows out
+    # of the count, and a hero's army marched at its pace (#22), which moved
+    # where and when the armies meet.
+    strikes = int(re.search(r"^\s+strikes\s+(\d+) blow", output, re.MULTILINE).group(1))
+    deaths = int(re.search(r"^\s+kills\s+(\d+) death", output, re.MULTILINE).group(1))
+    assert strikes > 500, output
+    assert deaths > 0, output
+    killed = {int(p): int(k) for p, k in
+              re.findall(r"report p(\d+): units \d+ produced (\d+) killed", output)}
+    assert max(v for p, v in killed.items() if p != 0) > 0, killed
+
+    assert_sentries_stand_on_their_walls(imrun, game_dir, CROSSROADS_TURNS, output)
 
     # Nothing the AI or a wall reached on the way traps: no unimplemented entry
     # point, and no script that runs its budget out.
@@ -620,6 +653,7 @@ AI_ARMIES = ("EGuardian,EArcher,EAxetrower,EAnubisWarrior,EHorusWarrior,ESwordsm
 HOME_RADIUS = 2_000
 
 
+@pytest.mark.slow
 def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game_dir):
     """A squad in its own town's garrison is in its town's node, and so the
     AI leaves it there.
@@ -650,6 +684,14 @@ def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game
     drew the tactic and had three line units here. So the claim is held over
     all three computer players: enough line units to say something, and
     almost none of them standing on `advance` near their own town.
+
+    Slow, and held in `verify.py --slow`: the fix itself is
+    `a_garrisoned_squad_is_filed_under_its_towns_node` in `core_tests`.
+
+    Once a hero's march walked at its formation's pace (playtest #22) rather
+    than at the hero's own, p3's armies met p1's and p2's in other places and
+    at other times, and 37 line units stood here on seed 1 where 63 had: the
+    floor is 30, which is still a sample.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
@@ -667,7 +709,7 @@ def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game
     army = [(int(p), int(x), int(y), holder, order) for cls, p, x, y, holder, order in listed
             if "Townhall" not in cls and int(p) in (1, 2, 3)]
     assert {1, 2, 3} <= set(halls), halls
-    assert len(army) > 40, output[-3000:]
+    assert len(army) > 30, output[-3000:]
 
     def home(p: int, x: int, y: int) -> bool:
         hx, hy = halls[p]
@@ -918,4 +960,124 @@ def test_an_enemy_sent_into_a_walled_town_is_not_routed_through_its_closed_gates
              if int(t) > ORDER_TURN]
     assert track, out[-3000:]
     assert not any(_inside(x, y) for _, x, y in track), track
+    assert "no traps." in out, out[out.find("distinct traps"):]
+
+
+NUMANTIA = Path("Adventures") / "GreatBattles" / "2_Great_Battles_Numantia.bfhp"
+#: North-west of the Roman camp, across open ground.
+NUMANTIA_MARCH = (13700, 14400)
+
+
+def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir):
+    """Playtest #22: a hero's army keeps its formation on a march.
+
+    Numantia's Roman hero starts with his army attached; his owner's
+    right-click sends him across open ground, which is `HERO_MOVE.VS`:
+    `FormSetupAndMoveTo`, `FormKeepMoving` while he has a route, and then the
+    army told to `stand_position`, whose first act is to `Stop` where it is.
+    The hero rides at 120 and his footmen walk at 60 to 80. He used to walk
+    at his own speed and the army chase stations laid where he had been, so he
+    arrived alone and the army was stood 300 to 700 units behind him. As in
+    `gbr.exe`, the march now walks at the formation's pace and lays its last
+    stations round the destination, so the army stands formed on him.
+    """
+    numantia = game_dir / NUMANTIA
+    if not numantia.is_file():
+        pytest.skip(f"{NUMANTIA} is not in this installation")
+    first = subprocess.run(
+        [str(imrun), str(game_dir), str(numantia), "1", "800", "--human", "0"],
+        capture_output=True, text=True, timeout=600, env={**os.environ, "IMRUN_OBJECTS": "RHero"},
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    # The one in the camp with the army: the map has two more, one of them not
+    # yet on it.
+    heroes = re.findall(r"^\s+(\d+) RHero1 p0 at \(-?\d+,-?\d+\) holder 0 health \d+ order",
+                        first.stdout, re.MULTILINE)
+    assert heroes, first.stdout[-3000:]
+    hero = int(heroes[0])
+
+    second = subprocess.run(
+        [str(imrun), str(game_dir), str(numantia), "50", "800", "--human", "0"],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_WATCH": str(hero),
+             "IMRUN_GOTO": f"5:{hero}:{NUMANTIA_MARCH[0]},{NUMANTIA_MARCH[1]}"},
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    out = second.stdout
+    assert re.search(rf"^\s+goto turn 5: {hero} to .*, 1 issued$", out, re.MULTILINE), out[-3000:]
+    # He gets there.
+    track = re.findall(rf"^\s+watch turn (\d+): {hero} at \((-?\d+),(-?\d+)\)$", out, re.MULTILINE)
+    assert track, out[-3000:]
+    assert (int(track[-1][1]), int(track[-1][2])) == NUMANTIA_MARCH, track
+    # On the way, as at the end, nobody of his army is left behind.
+    for turn in (20, 50):
+        army = [(int(m), int(dx), int(dy), order) for m, dx, dy, order in re.findall(
+            rf"^\s+army turn {turn}: (\d+) at \(-?\d+,-?\d+\) off \((-?\d+),(-?\d+)\) order (\S+)$",
+            out, re.MULTILINE)]
+        assert len(army) >= 20, out[-3000:]
+        far = [a for a in army if a[1] * a[1] + a[2] * a[2] > 300 * 300]
+        assert not far, (turn, far)
+    # The march is over, and the army stands where it was stood.
+    assert all(order == "stand_position" for *_, order in army), army
+
+
+# ---------------------------------------------------------------------------
+# who may attack a building (playtest #24)
+# ---------------------------------------------------------------------------
+
+#: Numantia, and the Iberian outpost nearest the Roman camp (radius 345).
+NUMANTIA_OUTPOST = (13681, 13531)
+#: Turn 10: the Roman army is out of its camp and following its heroes.
+SIEGE_TURN = 10
+
+
+@pytest.mark.parametrize("cls, stand, hurts", [
+    # 20 beyond the outpost's edge, inside a sword's 17 + 15 + 345.
+    ("RHastatus", (NUMANTIA_OUTPOST[0] + 365, NUMANTIA_OUTPOST[1]), False),
+    # 300 beyond it, inside a bow's reach.
+    ("RArcher", (NUMANTIA_OUTPOST[0] + 645, NUMANTIA_OUTPOST[1]), True),
+])
+def test_the_attack_button_on_a_fort_hurts_it_from_an_archer_and_not_from_a_sword(
+        imrun, game_dir, cls, stand, hurts):
+    """Playtest #24: a swordsman sent at a fort with the command bar's attack
+    row (A) hit it and its health fell. In `gbr.exe` `Unit::CanAttack`
+    (0x005b1da0) refuses a `slash` or `pierce` unit every building unless its
+    class has a `projectile_class`, and `Obj::IsValidTarget` (0x005aafd0) is
+    that virtual, so `MELEE_ATTACK.VS` leaves at its first test and the
+    hastatus stands idle beside a whole outpost. An archer is accepted, and the
+    outpost loses health. `IMRUN_PLACE` takes the unit out of its AI's hands;
+    the garrison may kill it, which does not matter to either answer.
+    """
+    numantia = game_dir / NUMANTIA
+    if not numantia.is_file():
+        pytest.skip(f"{NUMANTIA} is not in this installation")
+    first = subprocess.run(
+        [str(imrun), str(game_dir), str(numantia), str(SIEGE_TURN), "800"],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_OBJECTS": f"{cls},IOutpost"},
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    units = [int(i) for i in re.findall(
+        rf"^\s+(\d+) {cls} p0 at \(-?\d+,-?\d+\) holder 0 health \d+ order ",
+        first.stdout, re.MULTILINE)]
+    assert units, first.stdout[-3000:]
+    fort = re.search(rf"^\s+(\d+) IOutpost p3 at \({NUMANTIA_OUTPOST[0]},{NUMANTIA_OUTPOST[1]}\) "
+                     r"holder 0 health (\d+) ", first.stdout, re.MULTILINE)
+    assert fort, first.stdout[-3000:]
+    unit, outpost, before = units[0], int(fort.group(1)), int(fort.group(2))
+
+    second = subprocess.run(
+        [str(imrun), str(game_dir), str(numantia), str(SIEGE_TURN + 150), "800"],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_OBJECTS": "IOutpost",
+             "IMRUN_PLACE": f"{stand[0]},{stand[1]}", "IMRUN_ATTACK": str(outpost),
+             "IMRUN_GOTO": f"{SIEGE_TURN}:{unit}:{NUMANTIA_OUTPOST[0]},{NUMANTIA_OUTPOST[1]}"},
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    out = second.stdout
+    assert re.search(rf"^\s+goto turn {SIEGE_TURN}: {unit} to .*, 1 issued$", out, re.MULTILINE), \
+        out[-3000:]
+    after = re.search(rf"^\s+{outpost} IOutpost p3 at .* health (\d+) ", out, re.MULTILINE)
+    assert after, out[-3000:]
+    assert (int(after.group(1)) < before) == hurts, (cls, before, after.group(0))
     assert "no traps." in out, out[out.find("distinct traps"):]

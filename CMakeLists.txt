@@ -18,6 +18,22 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
+# A compiler cache, where one is installed. Every git worktree configures its
+# own build directories, and so built the whole engine from nothing -- half a
+# minute of every core for build-core, as long again for the app, five times
+# over when five worktrees start at once. `base_dir` makes the paths a compile
+# names relative to its directory, the same in every worktree, and `hash_dir`
+# leaves the directory out of the key, so a worktree's first build is the
+# others' cache hits. The cost is debug info that may name another worktree's
+# copy of a source file. Off with -DIMPERIVM_CCACHE=OFF.
+option(IMPERIVM_CCACHE "Compile through ccache when it is installed" ON)
+find_program(IMPERIVM_CCACHE_PROGRAM ccache)
+if(IMPERIVM_CCACHE AND IMPERIVM_CCACHE_PROGRAM AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+  set(CMAKE_C_COMPILER_LAUNCHER
+      "${IMPERIVM_CCACHE_PROGRAM}" "base_dir=${CMAKE_SOURCE_DIR}" "hash_dir=false")
+  set(CMAKE_CXX_COMPILER_LAUNCHER ${CMAKE_C_COMPILER_LAUNCHER})
+endif()
+
 option(IMPERIVM_BUILD_TESTS "Build the core test binary" ON)
 option(IMPERIVM_BUILD_APP   "Build the windowed application" ON)
 option(IMPERIVM_BUILD_TOOLS "Build imcheck, the cross-validation harness" ON)

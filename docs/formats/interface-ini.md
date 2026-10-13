@@ -740,9 +740,11 @@ several show `<R>PeasantMulti` for peasants of one race, else by the first selec
 `Wagons`, `Multi` (`MultiOneShip` for a ship) for a hero or a mixed selection not led by a
 sentry, and otherwise `MultiOne`, `MultiOneShip` or `MultiOneRanged`.
 
-The strips: `BuildingQueue` is the building's `train` rows behind its running command, by
-the row's `queueicon`, the running one in `TrainFrameImage` with the bar `Obj::Progress`
-stamped; `UIHolder` is the settlement's garrison, each unit's `icon`, level and health, in
+The strips: `BuildingQueue` is the building's whole command queue, a training and a
+research alike, one cell per entry by the row's `queueicon` (0x006ee810 never reads
+`traincommand`), the running one in `TrainFrameImage` with the bar `Obj::Progress`
+stamped; it is empty while the running command is `idle` or `broken`, or when an entry
+has no row; `UIHolder` is the settlement's garrison, each unit's `icon`, level and health, in
 `SelFrameImage` when it is also selected; `UIInventory` is the hero's items by `ITEMS.XML`'s
 `image`, glowing when the item has a `use_script`; `HeroSkills` the skills the hero's class
 offers, in `SKILLS.INI` order, with points and `PlusSign` when one can be spent;

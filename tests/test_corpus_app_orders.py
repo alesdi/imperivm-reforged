@@ -181,6 +181,35 @@ def test_a_press_on_a_queue_cell_released_off_it_cancels_nothing(app, game_dir):
     assert queues(out)[-1] == ["trainBSwordsman", "trainBBowman"], out
 
 
+def test_a_research_shows_in_the_queue_strip_with_its_bar_and_a_click_cancels_it(app, game_dir):
+    # Playtest #25. The strip's fill (0x006ee810) walks the building's whole
+    # queue and never reads `traincommand`, so a blacksmith's research is a
+    # cell like a barracks' training: its row's `queueicon`, the bar
+    # `research.vs`'s `.Progress()` stamps over the row's 30 s `execdelay`
+    # (0x006bfa94), and a click that cancels it and gives its cost back
+    # (0x006bf7c0, 0x004e63c0, 0x005b07d0). `l` is the British Fucina's
+    # Large Shields, 1,200 gold.
+    out = play(app, game_dir, ["select:class:BaseBlacksmith", "wait:3", "key:l", "wait:3",
+                               "key:P", "wait:120", "key:P", "wait:3",
+                               "press:Queue@0", "wait:3", "key:.", "wait:4"],
+               frames=200, where=CROSSROADS)
+    assert queues(out)[0] == ["Britain Large Shields"], out
+    cells = re.findall(r"^infobar: queue 0 icon (\S+) command (\d+) bar (-?\d+)$", out, re.M)
+    assert cells, out
+    assert {icon for icon, _, _ in cells} == {"gameres/icons/upgrades/shields.bmp"}, cells
+    bars = [int(bar) for _, _, bar in cells]
+    assert bars == sorted(bars) and bars[-1] > 0, bars
+    assert re.search(r"^queue:\s+cancel of command \d+ \(cell 0\) on object \d+ posted$", out, re.M), out
+    assert re.search(r"^cancel:\s+1 queued command\(s\) taken out", out, re.M), out
+    assert queues(out)[-1] == [], out
+    assert re.findall(r"^infobar: class \S+ .* queue (\d+) ", out, re.M)[-1] == "0", out
+    # Paid when it was queued, and all of it back on the cancel, though the
+    # research had run (the town's income came in meanwhile).
+    purse = gold(out)
+    assert purse[1] == purse[0] - 1200, purse
+    assert purse[-1] == purse[-2] + 1200, purse
+
+
 #: The world view's debug output (`IMPERIVM_DEBUG_VIEW=1`): the line ahead of
 #: each frame's placements, and a body's layer.
 FRAME = re.compile(r"^frame turn (\d+) time \d+ drawn \d+$")
@@ -235,3 +264,25 @@ def test_an_order_given_as_the_match_opens_is_walked(app, game_dir):
     assert order_turn is not None and order_turn >= 1, order_turn
     assert turn is not None and turn >= 3, turn
     assert len(places) > 10, f"the legionary did not walk: {sorted(places)}"
+
+
+#: `selected T of N under the cursor (player P holds H)`, after a release.
+SELECTED = re.compile(r"^selected (\d+) of (\d+) under the cursor \(player \d+ holds (\d+)\)$", re.M)
+
+
+def test_a_band_takes_no_building_and_a_click_still_does(app, game_dir):
+    """Playtest report #23: a drag box took buildings.
+
+    The band offers units only (0x005e1a60 refuses anything without
+    `SyncFlags` bit 22), so a box over Crossroads' opening view -- the
+    player's gate, towers, walls and well, and not one unit -- selects
+    nothing, where it used to select the gate. A click has its own test
+    (0x005e1b80), which takes a building, and still does.
+    """
+    out = play(app, game_dir, ["drag:5,60,1015,600", "wait:4", "click:480,250", "wait:4"],
+               frames=40, where=CROSSROADS)
+    band, click = [tuple(map(int, m.groups())) for m in SELECTED.finditer(out)]
+    taken, offered, holds = band
+    assert offered > 0 and taken == 0 and holds == 0, out[-2000:]
+    assert click == (1, 1, 1), out[-2000:]
+    assert re.search(r'^infobar: class BGate2 .* tags thumb building ', out, re.M), out[-2000:]

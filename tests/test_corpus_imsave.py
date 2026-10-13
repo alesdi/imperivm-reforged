@@ -102,10 +102,12 @@ def test_a_real_session_round_trips_through_a_save(imsave, game_dir, container):
 # `tools/save_sweep.py`'s `MID_WAR` runs this same command and requires the same
 # (ROUND TRIP OK, which `imsave` prints only when the hashes match at every
 # turn and the re-save is byte-identical, and a town fallen, broken or taken),
-# so `verify.py --full`, which runs the sweep, deselects it here.
+# so `verify.py --slow`, which runs the sweep's mid-war case, deselects it
+# here. 1,600 turns of war, so `slow` as well.
 @pytest.mark.swept
+@pytest.mark.slow
 def test_a_save_taken_mid_war_loads_back_into_the_same_game(imsave, game_dir):
-    """Crossroads at 1,600 turns: armies marching, towns broken and taken.
+    """Crossroads at 5,500 turns: armies marching, towns taken.
 
     Every other round trip here is saved in the first hundred turns, before
     anything has marched or fallen, and so none could see what this one
@@ -117,14 +119,17 @@ def test_a_save_taken_mid_war_loads_back_into_the_same_game(imsave, game_dir):
     Town halls are not razed any more -- a building at no health stands
     broken, as it does in `gbr.exe` -- so the war this save has to carry is
     the one `imsave` counts: central buildings standing broken (tier 3,
-    `IsBroken`) and settlements in other hands than the map's (3 and 1 at
+    `IsBroken`) and settlements in other hands than the map's (0 and 3 at
     this turn). At least one of those, or a fallen node, is asserted, so the
     test says when it has stopped saving a game at war: a change to the AI
-    that leaves every town whole and unowned past turn 1,600 would otherwise
-    leave this passing and blind. The node restore itself keeps its core
-    test, which erases a town hall outright. About fifteen seconds.
+    that leaves every town whole and unowned past this turn would otherwise
+    leave this passing and blind. It was 1,600 until a swordsman could no
+    longer hurt a building (playtest #24), then 2,700; with playtest #22's
+    march pacing as well nothing is broken or taken at 3,200, 3,800 or 4,500.
+    The node restore itself keeps its core test, which erases a town hall
+    outright.
     """
-    output = run(imsave, game_dir, "Scenarios/Crossroads.BFHP", "--turns", "1600", "--more", "10")
+    output = run(imsave, game_dir, "Scenarios/Crossroads.BFHP", "--turns", "5500", "--more", "10")
     war = 0
     for label in ("fallen", "broken", "taken"):
         found = re.search(rf"^{label}\s+(\d+) ", output, re.MULTILINE)

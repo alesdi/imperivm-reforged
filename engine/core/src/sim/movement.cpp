@@ -641,6 +641,9 @@ MoveOutcome MovementSystem::order_goto(World& world, ObjectId id, Point dest, st
   move.min_range = min_range;
   move.goto_active = true;
   move.party = party;
+  // An order that is not a march walks at the unit's own pace; a march's
+  // pace is `place_army`'s to set (`MoveState::march_rate`).
+  if (party == kNoObject) move.march_rate = 0;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
   // `SetDest` and `SetFormation` both clear the stop request (0x00417797).
   move.stop_requested = false;
@@ -661,6 +664,7 @@ MoveOutcome MovementSystem::order_goto_object(World& world, ObjectId id, ObjectI
   move.min_range = min_range;
   move.goto_active = true;
   move.party = kNoObject;
+  move.march_rate = 0;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
   move.stop_requested = false;
   return lay_path(world, id, move, position(world, target), range, world.time());
@@ -685,6 +689,7 @@ void MovementSystem::stop(World& world, ObjectId id) {
   move->free_spot_tried = false;
   move->free_spot_aimed = false;
   move->stop_requested = false;
+  move->march_rate = 0;
   move->last_outcome = MoveOutcome::idle;
 }
 
