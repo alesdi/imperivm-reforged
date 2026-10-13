@@ -54,14 +54,16 @@ RUN_TIMEOUT_SECONDS = 900
 #: Saves taken mid-war: (container, turns before the save, turns compared).
 #: The sweep above saves every map at turn 40, before anything has marched or
 #: fallen, and so could not see the node table a load rebuilt with a gone
-#: town hall's node in the map's corner. Crossroads at 1,600 turns has towns
-#: broken and taken and armies on the road; `imsave` prints how many nodes
+#: town hall's node in the map's corner. Crossroads at 2,700 turns has a
+#: town taken (p3 takes an independent village at turn 2,647) and armies on
+#: the road; it was 1,600 until a swordsman could no longer hurt a building
+#: (playtest #24) and the first town fell later. `imsave` prints how many nodes
 #: outlive their centre, how many centres stand broken and how many towns
 #: changed hands, and a run where all three are zero is reported as a failure
 #: of coverage, not a pass.
-#: About twenty seconds, which doubles the sweep.
+#: About half a minute, which doubles the sweep.
 MID_WAR = (
-    ("Scenarios/Crossroads.BFHP", 1600, 10),
+    ("Scenarios/Crossroads.BFHP", 2700, 10),
 )
 
 

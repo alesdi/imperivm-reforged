@@ -90,7 +90,9 @@ int main(int argc, char** argv) {
                  "IMRUN_GOTO=<turn>:<id>:<x>,<y> gives that object its owner's\n"
                  "right-click order to the point before that turn (1 or later: no\n"
                  "player orders before the first), IMRUN_PLACE=<x>,<y>\n"
-                 "first stands it there, out of its AI's hands, IMRUN_WATCH=<id>\n"
+                 "first stands it there, out of its AI's hands, IMRUN_ATTACK=<id>\n"
+                 "makes the order the command bar's attack row (A) aimed at that\n"
+                 "object instead of the right click, IMRUN_WATCH=<id>\n"
                  "prints where it stands every ten turns and every gate its route\n"
                  "crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
                  "and as it starts or stops letting units through, and every gate\n"
@@ -697,6 +699,13 @@ int main(int argc, char** argv) {
   if (const char* place = std::getenv("IMRUN_PLACE")) {
     place_wanted = std::sscanf(place, "%d,%d", &place_x, &place_y) == 2;
   }
+  // `IMRUN_ATTACK=<id>`: the order is the bar's `attack` row aimed at that
+  // object -- the button, which skips the right click's `<defaultcmd>` list
+  // and so reaches a fort a right click would only capture (playtest #24).
+  ObjectId attack_target = kNoObject;
+  if (const char* attack = std::getenv("IMRUN_ATTACK")) {
+    attack_target = static_cast<ObjectId>(std::strtoul(attack, nullptr, 10));
+  }
   ObjectId watched = kNoObject;
   if (const char* watch = std::getenv("IMRUN_WATCH")) watched = static_cast<ObjectId>(std::strtoul(watch, nullptr, 10));
   const bool show_gates = std::getenv("IMRUN_GATES") != nullptr;
@@ -766,7 +775,16 @@ int main(int argc, char** argv) {
       const ObjectId actors[] = {static_cast<ObjectId>(goto_id)};
       const sim::CommandTable* table = sim::order_command_table(run.world());
       sim::OrderReport made;
-      if (actor != nullptr && table != nullptr) {
+      if (actor != nullptr && table != nullptr && attack_target != kNoObject) {
+        sim::OrderTarget target;
+        target.point = sim::Point{goto_x, goto_y};
+        target.object = attack_target;
+        const sim::CommandDef* row = table->find("attack");
+        if (row != nullptr &&
+            sim::issue_order(run.world(), goto_id, *row, target, sim::OrderMode::replace) != 0) {
+          made.issued = 1;
+        }
+      } else if (actor != nullptr && table != nullptr) {
         sim::OrderTarget target;
         target.point = sim::Point{goto_x, goto_y};
         made = sim::issue_default_order(run.world(), *table, actors, target, sim::OrderMode::replace,
