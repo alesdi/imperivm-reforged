@@ -202,22 +202,39 @@ struct CommandBar::Impl {
   }
 
   /// `void f(ObjList objs, point pt, Obj obj, bool bReplace, bool bModifier,
-  /// int player)`: the row's own way of issuing itself, started on the
-  /// scheduler like any script.
+  /// int player)`: the row's own way of issuing itself, **run to its end
+  /// inside the press**.
+  ///
+  /// `gbr.exe`'s per-group issue (0x004ef3d0, from the row's execution
+  /// 0x004f1610) builds an `ObjList` of the actors, sets up an interpreter
+  /// context for the row's compiled dispatch (`[def+0x168]`, 0x0069d090 and
+  /// 0x0069d4a0), runs it with the synchronous budget `0x0fffffff`
+  /// (0x0069d4c0) and destroys the context (0x0069d390) before it returns.
+  /// So a dispatch is not a peer that runs on some later pass: what it does is
+  /// done when the press is, which is `Scheduler::call`. A dispatch that
+  /// sleeps would be abandoned where it stands, as `call` says of any
+  /// synchronous run (an inference there); none of the eleven shipped
+  /// `groupdispatch=` scripts sleeps, waits or loops on one.
+  ///
+  /// It used to be spawned, and its list was acquired under `kNoScript` and
+  /// left there for the script to take on its first pass. The app describes
+  /// the bar again after every press, and each verifier it runs releases the
+  /// `kNoScript` lists -- so on the way to that pass the list was freed, and
+  /// the dispatch found `objs` empty and did nothing (playtest #21:
+  /// `GROUP_DETACH.VS` never reached `DetachFrom`). Run inside the press, the
+  /// list lives exactly as long as the call and is released after it.
   bool dispatch(const CommandDef& def, std::span<const ObjectId> selection,
                 const OrderTarget& target, bool replace, bool modifier, PlayerId player) {
     HostContext& context = session->host_context();
     script::Scheduler& scheduler = session->scheduler();
     if (context.library == nullptr) return false;
     const std::uint32_t chunk_index = context.library->chunk_for(def.group_dispatch);
-    if (chunk_index == script::kNoChunk) return false;
+    if (chunk_index == script::kNoChunk || chunk_index >= scheduler.chunk_count()) return false;
     World& world = session->world();
     ObjListPool& pool = objlist_pool_of(world);
-    // The list belongs to the script that is about to run: acquired under
-    // `kNoScript` and handed over as an argument, it is released with the
-    // script's own temporaries only if the script takes it; a dispatch that
-    // never runs leaves it in the `kNoScript` slot, which the next verifier
-    // clears.
+    // The selection as a list the call is handed. 0x004ef3d0 puts in only the
+    // actors whose `vtbl+0xd8` accepts the row; `offered` already left the
+    // row off the bar unless every one of them does, so that is all of them.
     const ObjListId list = pool.acquire_temporary(script::kNoScript);
     if (std::vector<ObjectId>* items = pool.mutable_items(list)) {
       items->assign(selection.begin(), selection.end());
@@ -231,7 +248,15 @@ struct CommandBar::Impl {
         script::Value::boolean(modifier),
         script::Value::integer(static_cast<std::int32_t>(player) + 1),
     };
-    return scheduler.spawn(chunk_index, args, script::ObjectRef{}) != script::kNoScript;
+    const script::CallReport ran = scheduler.call(chunk_index, args);
+    // The call's own temporaries went with it; the list it was handed is
+    // `kNoScript`'s, as a verifier's is, and goes now.
+    pool.release_script(script::kNoScript);
+    if (ran.status == script::ExecStatus::failed) {
+      scheduler.report_trap(
+          script::FailedScript{ran.id, scheduler.chunk(chunk_index).source_name, ran.trap});
+    }
+    return ran.id != script::kNoScript;
   }
 };
 
