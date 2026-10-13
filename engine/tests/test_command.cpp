@@ -2152,6 +2152,215 @@ TEST(form_setup_moves_the_hero_and_keep_moving_carries_the_army) {
   }
 }
 
+TEST(a_fast_hero_marches_at_his_armys_pace_and_it_stands_formed_on_him_when_he_stops) {
+  // Playtest #22: a mounted hero stood alone on open grass with his army
+  // clumped some way off. The hero walked his own route at his own speed and
+  // the army chased stations laid round where he had been, so when he stopped
+  // `HERO_MOVE.VS` stood the army (`stand_position`, `Stop`) wherever it had
+  // got to. In `gbr.exe` the hero's route is aimed at the formation like the
+  // members' (0x0052e830): every unit walks at the formation's pace, timed to
+  // the sample's deadline (0x00419e52), and the last sample is laid round the
+  // destination.
+  Fixture f;
+  MovementSystem movement;
+  HeroSystem heroes;
+  movement.set_grid(ObstructionGrid(192, 64));
+  Result<FormationTable> formations = FormationTable::parse(bytes(R"(<Formations>
+      <Default Name="Block"/>
+      <FormationClass Name="Block" OffsetFrontLineByY="0" OffsetWingsByX="0"
+        OffsetWingsByY="0">
+        <Class Name="Unit" CentralBlock="1"/>
+      </FormationClass>
+    </Formations>)"));
+  REQUIRE(formations.ok());
+  movement.set_formations(std::move(formations.value()));
+  f.world.add_system(&movement);
+  f.world.add_system(&heroes);
+
+  HostRegistry registry;
+  register_movement_host(registry);
+  register_command_host(registry);
+
+  const Point start{300, 500};
+  const Point dest{2700, 500};
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.hero_class);
+  f.world.set_position(hero, start);
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 1000);
+  heroes.register_hero(f.world, hero);
+  movement.state(hero).speed = 480;  // mounted, eight times his footmen
+
+  std::vector<ObjectId> army;
+  for (int i = 0; i < 6; ++i) {
+    const ObjectId w = f.spawn(f.warrior_class, Point{start.x - 40 * (i % 3), start.y + 40 * (i / 3)});
+    heroes.register_unit(f.world, w);
+    CHECK(heroes.attach(f.world, w, hero));
+    movement.state(w).speed = 60;
+    (void)f.order(w, "idle");
+    army.push_back(w);
+  }
+
+  HostCall setup(f.world, {obj(hero), pack_point(dest), Value::integer(0), Value::integer(0),
+                           Value::boolean(true)});
+  REQUIRE(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, setup).status ==
+          HostStatus::ok);
+  // The formation's speed is the mean of all seven, (480 + 6 * 60) / 7 =
+  // 120, held to one and a half times the slowest's (0x005f5260): 90. With
+  // the army about as far from its stations as he is from his, the hero
+  // walks about that rather than his own 480; every pace lies between half
+  // and two and a half times it (0x005f2130).
+  const std::int64_t formation = 90 * kDefaultSpeedFactor;
+  CHECK(movement.find(hero)->march_rate >= formation * 4 / 5);
+  CHECK(movement.find(hero)->march_rate <= formation * 6 / 5);
+  for (const ObjectId w : army) {
+    CHECK(movement.find(w)->march_rate >= formation / 2);
+    CHECK(movement.find(w)->march_rate <= formation * 5 / 2);
+  }
+
+  // `HERO_MOVE.VS`: `while (.HasPath()) .FormKeepMoving(1500);`, the world
+  // run in 100 ms turns in between.
+  std::int32_t elapsed = 0;
+  std::int64_t widest = 0;
+  while (elapsed < 120000) {
+    HostCall has_path(f.world, {obj(hero)});
+    if (invoke(registry, CallKind::member, "HasPath", 0, has_path).value.as_integer() == 0) break;
+    HostCall keep(f.world, {obj(hero), Value::integer(1500)});
+    (void)invoke(registry, CallKind::member, "FormKeepMoving", 1, keep);
+    for (int t = 0; t < 15; ++t) f.world.advance(100);
+    elapsed += 1500;
+    // The hero never leaves his army behind on the way.
+    for (const ObjectId w : army) {
+      widest = std::max(widest, isqrt(dist_sq(f.world.resolve_position(w),
+                                              f.world.resolve_position(hero))));
+    }
+  }
+  REQUIRE(elapsed < 120000);
+  CHECK(f.world.resolve_position(hero) == dest);
+  CHECK(widest < 400);
+  // At his own 480 the 2,400 units take five seconds; at the formation's
+  // pace they take more than twenty.
+  CHECK(elapsed > 20000);
+
+  // And when he stops, the army stands formed on him: the end of
+  // `HERO_MOVE.VS` stops every member where it is (`stand_position`'s
+  // `Stop`), and every one of them is already on its station round the
+  // destination -- a block of three ranks of two, laid back from him.
+  for (const ObjectId w : army) {
+    CHECK(f.world.resolve_position(w) == movement.find(w)->target);
+    CHECK(!movement.find(w)->has_path);
+  }
+  for (const ObjectId w : army) movement.stop(f.world, w);
+  for (const ObjectId w : army) {
+    CHECK(isqrt(dist_sq(f.world.resolve_position(w), dest)) <= 3 * kDefaultFormationSpacing);
+    CHECK(movement.find(w)->march_rate == 0);
+  }
+  // An order that is not a march walks at the unit's own pace again.
+  (void)movement.order_goto(f.world, hero, start, 0);
+  CHECK(movement.find(hero)->march_rate == 0);
+  CHECK(movement.find(hero)->rate() == movement.find(hero)->own_rate());
+}
+
+namespace {
+
+/// A hero on open ground, a `Block` formation, and his army stood where the
+/// case puts it: the bench the march's pace is read on.
+struct MarchBench {
+  Fixture f;
+  MovementSystem movement;
+  HeroSystem heroes;
+  HostRegistry registry;
+  ObjectId hero = kNoObject;
+  std::vector<ObjectId> army;
+
+  MarchBench(Point from, std::int32_t hero_speed, std::span<const Point> at, std::int32_t speed) {
+    movement.set_grid(ObstructionGrid(448, 64));
+    Result<FormationTable> formations = FormationTable::parse(bytes(R"(<Formations>
+        <Default Name="Block"/>
+        <FormationClass Name="Block" OffsetFrontLineByY="0" OffsetWingsByX="0"
+          OffsetWingsByY="0">
+          <Class Name="Unit" CentralBlock="1"/>
+        </FormationClass>
+      </Formations>)"));
+    movement.set_formations(std::move(formations.value()));
+    f.world.add_system(&movement);
+    f.world.add_system(&heroes);
+    register_movement_host(registry);
+    register_command_host(registry);
+    hero = f.world.spawn(NativeClass::hero, nullptr, f.hero_class);
+    f.world.set_position(hero, from);
+    f.world.set_owner(hero, 1);
+    f.world.set_health(hero, 1000);
+    heroes.register_hero(f.world, hero);
+    movement.state(hero).speed = hero_speed;
+    for (const Point p : at) {
+      const ObjectId w = f.spawn(f.warrior_class, p);
+      heroes.register_unit(f.world, w);
+      (void)heroes.attach(f.world, w, hero);
+      movement.state(w).speed = speed;
+      army.push_back(w);
+    }
+  }
+
+  /// `FormSetupAndMoveTo(dest, 0, 0, true)`, east along the row.
+  void march(Point dest) {
+    HostCall setup(f.world, {obj(hero), pack_point(dest), Value::integer(0), Value::integer(0),
+                             Value::boolean(true)});
+    REQUIRE(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, setup).status ==
+            HostStatus::ok);
+  }
+  [[nodiscard]] std::int64_t pace(ObjectId id) const { return movement.find(id)->march_rate; }
+};
+
+}  // namespace
+
+TEST(a_marchs_pace_is_its_share_of_the_mean_deadline_short_of_133) {
+  // One member, 200 east of the hero on his route, and so 133 short of its
+  // station: the centre stands 333 ahead of him (one 200-unit sample beyond
+  // the 133 a unit is timed short of, 0x00419c78), and a lone member of a
+  // block stands on it. The deadline is the mean over both of the time to
+  // cover the straight distance less 133 (0x005f5850): (200 + 0) / 2 at the
+  // formation's 100, a second. The hero's route to the centre less 133 is
+  // 200, so he is paced at 200 a second -- twice the formation's speed, and
+  // twice his own. The member has nothing left to cover and takes the fast
+  // end of the clamp, two and a half times (0x00419e91, 0x005f2130).
+  const Point at[] = {Point{500, 500}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  b.march(Point{4000, 500});
+  CHECK(b.movement.find(b.army[0])->target == (Point{633, 500}));
+  CHECK(b.pace(b.hero) == 200 * kDefaultSpeedFactor);
+  CHECK(b.pace(b.army[0]) == 250 * kDefaultSpeedFactor);
+}
+
+TEST(the_last_sample_is_the_destination_and_nothing_is_taken_short_of_it) {
+  // The destination 200 east of the hero, nearer than a sample: the centre is
+  // the route's end, the formation's last sample (`[form+0x88]` cleared,
+  // 0x005f5cff), and no 133 comes off either distance. The member's station
+  // is the destination, 223 from it; the deadline is (2,000 + 2,230 + 1) / 2
+  // ms at the formation's 100, and the hero's pace his 200 over it.
+  const Point at[] = {Point{300, 600}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  b.march(Point{500, 500});
+  CHECK(b.movement.find(b.army[0])->target == (Point{500, 500}));
+  CHECK(b.pace(b.hero) == 200 * kSpeedScale / 2115);
+}
+
+TEST(a_straggler_is_hurried_and_the_hero_held_back_within_the_clamp) {
+  // Two members on the hero and one 3,000 behind him. The formation's speed
+  // is the mean of 400, 60, 60, 60 -- 145 -- held to 90, one and a half times
+  // the slowest. The straggler's share of the deadline would have it run at
+  // over five times that and the hero walk at a third of it; both are held
+  // to the clamp (0x005f2130): the straggler at two and a half times the
+  // formation's speed, the hero at half.
+  const Point at[] = {Point{3400, 540}, Point{3400, 460}, Point{400, 500}};
+  MarchBench b(Point{3400, 500}, 400, at, 60);
+  b.march(Point{6400, 500});
+  const std::int64_t formation = 90 * kDefaultSpeedFactor;
+  CHECK(b.pace(b.hero) == formation / 2);
+  CHECK(b.pace(b.army[2]) == formation * 5 / 2);
+  CHECK(b.pace(b.army[0]) >= formation / 2);
+  CHECK(b.pace(b.army[0]) <= formation * 5 / 2);
+}
+
 TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) {
   // `CVXFormObj::SetDest` (0x005f2cc0) that lays a route gives every member
   // `form_move` with the replace flag (0x005f2b50 -> 0x005b4e90 with 1), so

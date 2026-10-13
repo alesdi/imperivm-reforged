@@ -682,6 +682,11 @@ def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game
 
     Slow, and held in `verify.py --slow`: the fix itself is
     `a_garrisoned_squad_is_filed_under_its_towns_node` in `core_tests`.
+
+    Once a hero's march walked at its formation's pace (playtest #22) rather
+    than at the hero's own, p3's armies met p1's and p2's in other places and
+    at other times, and 37 line units stood here on seed 1 where 63 had: the
+    floor is 30, which is still a sample.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
@@ -699,7 +704,7 @@ def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game
     army = [(int(p), int(x), int(y), holder, order) for cls, p, x, y, holder, order in listed
             if "Townhall" not in cls and int(p) in (1, 2, 3)]
     assert {1, 2, 3} <= set(halls), halls
-    assert len(army) > 40, output[-3000:]
+    assert len(army) > 30, output[-3000:]
 
     def home(p: int, x: int, y: int) -> bool:
         hx, hy = halls[p]
@@ -951,3 +956,61 @@ def test_an_enemy_sent_into_a_walled_town_is_not_routed_through_its_closed_gates
     assert track, out[-3000:]
     assert not any(_inside(x, y) for _, x, y in track), track
     assert "no traps." in out, out[out.find("distinct traps"):]
+
+
+NUMANTIA = Path("Adventures") / "GreatBattles" / "2_Great_Battles_Numantia.bfhp"
+#: North-west of the Roman camp, across open ground.
+NUMANTIA_MARCH = (13700, 14400)
+
+
+def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir):
+    """Playtest #22: a hero's army keeps its formation on a march.
+
+    Numantia's Roman hero starts with his army attached; his owner's
+    right-click sends him across open ground, which is `HERO_MOVE.VS`:
+    `FormSetupAndMoveTo`, `FormKeepMoving` while he has a route, and then the
+    army told to `stand_position`, whose first act is to `Stop` where it is.
+    The hero rides at 120 and his footmen walk at 60 to 80. He used to walk
+    at his own speed and the army chase stations laid where he had been, so he
+    arrived alone and the army was stood 300 to 700 units behind him. As in
+    `gbr.exe`, the march now walks at the formation's pace and lays its last
+    stations round the destination, so the army stands formed on him.
+    """
+    numantia = game_dir / NUMANTIA
+    if not numantia.is_file():
+        pytest.skip(f"{NUMANTIA} is not in this installation")
+    first = subprocess.run(
+        [str(imrun), str(game_dir), str(numantia), "1", "800", "--human", "0"],
+        capture_output=True, text=True, timeout=600, env={**os.environ, "IMRUN_OBJECTS": "RHero"},
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    # The one in the camp with the army: the map has two more, one of them not
+    # yet on it.
+    heroes = re.findall(r"^\s+(\d+) RHero1 p0 at \(-?\d+,-?\d+\) holder 0 health \d+ order",
+                        first.stdout, re.MULTILINE)
+    assert heroes, first.stdout[-3000:]
+    hero = int(heroes[0])
+
+    second = subprocess.run(
+        [str(imrun), str(game_dir), str(numantia), "50", "800", "--human", "0"],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_WATCH": str(hero),
+             "IMRUN_GOTO": f"5:{hero}:{NUMANTIA_MARCH[0]},{NUMANTIA_MARCH[1]}"},
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    out = second.stdout
+    assert re.search(rf"^\s+goto turn 5: {hero} to .*, 1 issued$", out, re.MULTILINE), out[-3000:]
+    # He gets there.
+    track = re.findall(rf"^\s+watch turn (\d+): {hero} at \((-?\d+),(-?\d+)\)$", out, re.MULTILINE)
+    assert track, out[-3000:]
+    assert (int(track[-1][1]), int(track[-1][2])) == NUMANTIA_MARCH, track
+    # On the way, as at the end, nobody of his army is left behind.
+    for turn in (20, 50):
+        army = [(int(m), int(dx), int(dy), order) for m, dx, dy, order in re.findall(
+            rf"^\s+army turn {turn}: (\d+) at \(-?\d+,-?\d+\) off \((-?\d+),(-?\d+)\) order (\S+)$",
+            out, re.MULTILINE)]
+        assert len(army) >= 20, out[-3000:]
+        far = [a for a in army if a[1] * a[1] + a[2] * a[2] > 300 * 300]
+        assert not far, (turn, far)
+    # The march is over, and the army stands where it was stood.
+    assert all(order == "stand_position" for *_, order in army), army
