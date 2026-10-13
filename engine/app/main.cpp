@@ -7773,6 +7773,11 @@ void Application::refresh_infobar() {
     }
     std::printf(" queue %zu holder %zu items %zu skills %zu specials %zu\n", info.queue.size(),
                 info.holder.size(), info.items.size(), info.skills.size(), info.specials.size());
+    // The `BuildingQueue` cells, each with its command and its bar (-1 none).
+    for (std::size_t i = 0; i < info.queue.size(); ++i) {
+      std::printf("infobar: queue %zu icon %s command %u bar %d\n", i, info.queue[i].icon.c_str(),
+                  info.queue[i].command, info.queue[i].health);
+    }
     // The `UIHolder` portraits, each with its number and what a click on it
     // selects; and, for a hero, its army as the hero system keeps it, so
     // that the two can be compared.

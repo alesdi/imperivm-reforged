@@ -67,6 +67,9 @@ ClassGraph graph_of() {
       // A hero and the warriors that follow him, for the Detach row.
       R"(<class id="RVeles" parent="Unit" cpp_class="CVXUnit"/>)",
       R"(<class id="RHero" parent="Unit" cpp_class="CVXHero"/>)",
+      // The shipped `BaseTownBuilding` binds `research` with its `onfinish`;
+      // `BaseBlacksmith` carries the `queue` interface word.
+      R"(<class id="RBlacksmith" parent="Building" cpp_class="CVXBuilding"><properties maxhealth="3000" interface="thumb,building,queue"/><method sig="research" vs="research.vs" onfinish="onfinish_research.vs"/></class>)",
   };
   for (const char* doc : docs) graph.add(bytes_of(doc), "test_cmdbar.cpp");
   graph.link();
@@ -119,6 +122,10 @@ constexpr std::string_view kCommands = R"(<commands>
   <cmdtext target=""/>
   <src obj="RArena"/>
 </cmd>
+<cmd name="researchArmour" priority="2" button="research/armour.bmp" queueicon="gameres/icons/upgrades/armour.bmp"
+     researchcommand="yes" costgold="1000" execdelay="30000" method="research" param="NameSet,Armour">
+  <src obj="RBlacksmith"/>
+</cmd>
 <cmd name="showGamesMod" priority="5" button="actions/games.bmp" groupdispatch="dispatch_modifier.vs">
   <src obj="RArena"/>
 </cmd>
@@ -140,6 +147,7 @@ constexpr std::string_view kMap = R"(<mapobject>
 	<scriptobj class="RVeles" num="8" player="1" x="900" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
 	<scriptobj class="RVeles" num="9" player="1" x="1000" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
 	<scriptobj class="RHero" num="10" player="1" x="1100" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
+	<scriptobj class="RBlacksmith" num="11" player="1" x="1200" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
 </mapobject>)";
 
 /// An AI profile naming only its root script.
@@ -168,6 +176,12 @@ struct Fixture {
                 "if (cmdcost_gold != 50) { reasonText = 'wrong cost'; return false; }\n"
                 "return objs.count == 1;\n");
     scripts.add("repair.vs", "//void, Obj b\nSleep(100000);\n");
+    // `RESEARCH.VS`'s shape: it waits out the row's `execdelay` in
+    // `.Progress()`. Its `onfinish` records whether it was cancelled.
+    scripts.add("research.vs", "//void, Obj This\nThis.Progress();\n");
+    scripts.add("onfinish_research.vs",
+                "//void, Obj This, bool bCanceled\n"
+                "if (bCanceled) This.SetUser(2); else This.SetUser(1);\n");
     // `VERIFY_CMDCOST_BUILDING.VS`'s shape: it answers true on every path.
     scripts.add("verify_always.vs", "//bool, ObjList objs, str OUT reasonText\nreturn true;\n");
     scripts.add("verify_never.vs",
@@ -669,6 +683,73 @@ TEST(the_queue_strip_names_each_cell_by_its_command_and_a_cancel_takes_that_one)
   CHECK(info.queue[0].command == q->entries[0].id);
   CHECK(info.queue[1].command == q->entries[1].id);
   CHECK(info.queue[0].command != second && info.queue[1].command != second);
+}
+
+TEST(the_queue_strip_shows_a_research_with_its_bar_and_a_cancel_takes_it) {
+  // Playtest #25: a blacksmith's research ran and the strip stayed empty,
+  // because it kept only `traincommand` rows. `gbr.exe`'s fill (0x006ee810)
+  // walks the whole queue and never reads that flag: a research row -- which
+  // says `researchcommand`, not `traincommand` -- gets its `queueicon`, the
+  // train frame, and the bar `Obj::Progress` stamps over its `execdelay`.
+  Fixture f;
+  World& world = f.session->world();
+  const ObjectId smith = 12;
+  REQUIRE(world.find(smith) != nullptr);
+  CommandSystem* commands = command_system(world);
+  REQUIRE(commands != nullptr);
+  f.select({smith});
+  InfoBar infobar(*f.session, {}, {});
+  CHECK(infobar.describe(0).queue.empty());
+
+  CHECK(f.bar->press(0, "researchArmour", CommandBar::Keys{}) == CommandBar::Press::issued);
+  f.session->advance(1, 400);  // running, and `.Progress()` has stamped
+  REQUIRE(commands->command_name(smith, 0) == "research");
+  SelectionInfo info = infobar.describe(0);
+  REQUIRE(info.queue.size() == 1);
+  CHECK(info.queue[0].icon == "gameres/icons/upgrades/armour.bmp");
+  CHECK(info.queue[0].frame == InfoCell::Frame::train);
+  CHECK(info.queue[0].command == f.queue(smith)->entries[0].id);
+  CHECK(info.queue[0].health >= 0);
+  CHECK(info.queue[0].health < 5);
+  const std::int32_t early = info.queue[0].health;
+
+  // Half the 30 s later the bar stands about half full.
+  f.session->advance(37, 400);
+  REQUIRE(commands->command_name(smith, 0) == "research");
+  info = infobar.describe(0);
+  REQUIRE(info.queue.size() == 1);
+  CHECK(info.queue[0].health > early);
+  CHECK(info.queue[0].health >= 45);
+  CHECK(info.queue[0].health <= 55);
+
+  // A click on the cell posts a cancel by its command id (0x006bf7c0); the
+  // execution (0x004e63c0) ends it, its `onfinish` told it was cancelled.
+  NetTurn turn;
+  NetOrder cancel;
+  cancel.kind = NetOrderKind::cancel_command;
+  cancel.issuer = 0;
+  cancel.target.object = smith;
+  cancel.command_id = info.queue[0].command;
+  turn.orders = {cancel};
+  CHECK(apply_turn(world, turn).cancels == 1);
+  f.session->advance(2, 400);
+  CHECK(commands->command_name(smith, 0) != "research");
+  CHECK(world.find(smith)->state.user == 2);
+  CHECK(infobar.describe(0).queue.empty());
+
+  // Empty while entry 0 is `idle` or `broken`, whatever stands behind it.
+  Command row;
+  row.name = "researchArmour";
+  (void)commands->set_command(world, smith, "idle", Command{});
+  REQUIRE(commands->add_command(world, smith, false, "research", row) != 0);
+  CHECK(infobar.describe(0).queue.empty());
+  REQUIRE(commands->kill_command(world, smith));
+  REQUIRE(commands->command_name(smith, 0) == "research");
+  CHECK(infobar.describe(0).queue.size() == 1);
+  // And empty when any entry has no row: a script's `AddCommand` (0x005999f0
+  // leaves `[cmd+0x2c]` null and 0x006ee8ed drops every cell).
+  REQUIRE(commands->add_command(world, smith, false, "research", Command{}) != 0);
+  CHECK(infobar.describe(0).queue.empty());
 }
 
 TEST(issue_order_never_replaces_with_a_train_row) {

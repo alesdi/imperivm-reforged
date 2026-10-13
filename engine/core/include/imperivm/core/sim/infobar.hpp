@@ -50,7 +50,8 @@
 // The six widget classes that draw a row of cells -- `BuildingQueue`,
 // `UIHolder`, `UIInventory`, `HeroSkills`, `UnitSpecials`, and `Combiner`
 // over two of those -- are filled from the systems that hold what they show:
-// the building's command queue (its `train` rows, by `queueicon`), the
+// the building's command queue (every entry, a `train` or a `research`
+// alike, by its row's `queueicon`; see `queue_cells` in `infobar.cpp`), the
 // `UIHolder` list (below), the hero's items (`ITEMS.XML`'s `image`), the hero's
 // skills (`SKILLS.INI`, in file order, which the file itself says is the
 // icon order), and the class's `unit_specials` (`UNIT_SPECIALS.INI`). Each
@@ -126,7 +127,8 @@ struct InfoCell {
   /// charges, a skill's points. Empty for none.
   std::string number;
   /// A bar 0..100 at `HealthBarYPosition`: a `UIHolder` cell's summed health
-  /// over its summed maximum, a queue entry's training progress. -1 for none.
+  /// over its summed maximum, the running queue entry's progress (a training's
+  /// or a research's alike). -1 for none.
   std::int32_t health = -1;
   /// Which frame bitmap: `NoSelFrameImage`, `SelFrameImage` (a `UIHolder`
   /// cell the player has marked -- the application's to say, since the mark

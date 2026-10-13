@@ -78,6 +78,53 @@ std::int32_t health_percent(const World& world, ObjectId id) {
   return health * 100 / max;
 }
 
+/// The `BuildingQueue` strip's cells for `id`'s command queue, as `gbr.exe`
+/// fills it (refresh 0x006bf940, fill 0x006ee810).
+///
+///   * **Every entry, whatever its row.** The fill walks the object's whole
+///     command queue (`[obj+0x98]`, counted by 0x00641c30) and gives each
+///     entry its row's `queueicon` (`[def+0x178]`, loaded at 0x004f3f7a). It
+///     never reads `traincommand` (`[def+0x1b4]`), so a blacksmith's
+///     `research` shows exactly as a barracks' `train` does (playtest #25).
+///   * **Empty when entry 0 is `idle` or `broken`** -- the verb the entry
+///     was made with (`[cmd+0x30]`, compared with the two strings at
+///     0x007add84 and 0x007ba88c), so a resting building shows nothing.
+///   * **Empty when any entry has no row** (`[cmd+0x2c]` null, 0x006ee8ed):
+///     the fill drops every cell it has. A command a script queued with
+///     `AddCommand` / `SetCommand` is made with no row (0x005999f0 leaves
+///     `[cmd+0x2c]` zero); here that is a command with no `name`.
+///   * **The first cell's bar** is the pair `Obj::Progress` stamps
+///     (`[obj+0x128]`, `[obj+0x12c]`, read at 0x006bfa94), none when the end
+///     is not past the start. Only the first cell has one.
+///
+/// A row with no `queueicon` gets a cell with no icon: the fill reads
+/// nothing else. Every shipped building row that can be queued has one.
+void queue_cells(World& world, ObjectId id, GameTime now, std::vector<InfoCell>& out) {
+  CommandSystem* commands = command_system(world);
+  const CommandQueue* queue = commands == nullptr ? nullptr : commands->find(id);
+  if (queue == nullptr || queue->empty()) return;
+  const std::string_view head = queue->entries.front().verb;
+  if (same_fold(head, "idle") || same_fold(head, "broken")) return;
+  for (const Command& command : queue->entries) {
+    const CommandDef* def = command.name.empty() ? nullptr : commands->table().find(command.name);
+    if (def == nullptr) {
+      out.clear();
+      return;
+    }
+    InfoCell cell;
+    cell.icon = def->queue_icon;
+    const bool first = out.empty();
+    cell.frame = first ? InfoCell::Frame::train : InfoCell::Frame::wait;
+    cell.command = command.id;
+    if (first && queue->progress_end > queue->progress_start) {
+      const GameTime span = queue->progress_end - queue->progress_start;
+      const GameTime done = std::clamp<GameTime>(now - queue->progress_start, 0, span);
+      cell.health = static_cast<std::int32_t>(done * 100 / span);
+    }
+    out.push_back(std::move(cell));
+  }
+}
+
 }  // namespace
 
 // --------------------------------------------------------------------------
@@ -431,36 +478,12 @@ SelectionInfo InfoBar::describe(PlayerId player) {
   const WorldObject* slot = world.find(subject);
   const ClassIndex own = slot == nullptr ? kNoClass : slot->class_index;
 
-  // The training queue: the building's `train` rows behind its running
-  // command, by `queueicon`; the running one wears the train frame and the
-  // bar `Obj::Progress` stamped, the rest the wait frame.
-  if (CommandSystem* commands = command_system(world)) {
-    if (const CommandQueue* queue = commands->find(subject)) {
-      bool first = true;
-      for (const Command& command : queue->entries) {
-        const CommandDef* def = command.name.empty() ? nullptr : commands->table().find(command.name);
-        if (def == nullptr || !def->train_command) continue;
-        InfoCell cell;
-        cell.icon = def->queue_icon;
-        if (cell.icon.empty()) {
-          // A row with no `queueicon` falls back to the trained class's portrait.
-          const std::vector<std::string> fields = split_words(command.param);
-          const ClassIndex trained = fields.empty() ? kNoClass : graph->find(fields.front());
-          if (trained != kNoClass) cell.icon.assign(graph->property(trained, "icon"));
-        }
-        cell.frame = first ? InfoCell::Frame::train : InfoCell::Frame::wait;
-        cell.command = command.id;
-        if (first && &command == queue->running() && queue->progress_end > queue->progress_start) {
-          const GameTime now = session.scheduler().now();
-          const GameTime span = queue->progress_end - queue->progress_start;
-          const GameTime done = std::clamp<GameTime>(now - queue->progress_start, 0, span);
-          cell.health = static_cast<std::int32_t>(done * 100 / span);
-        }
-        first = false;
-        info.queue.push_back(std::move(cell));
-      }
-    }
-  }
+  // The `BuildingQueue`: the building's whole command queue, one cell per
+  // entry by its row's `queueicon` -- a barracks' training and a
+  // blacksmith's research alike (playtest #25). The running entry wears the
+  // train frame and the bar `Obj::Progress` stamped, the rest the wait frame.
+  // See `queue_cells` for the rule.
+  queue_cells(world, subject, session.scheduler().now(), info.queue);
 
   // The `UIHolder` strip: 0x006d2ad0's list, folded into cells by
   // 0x006d2d20's keys (see the header).

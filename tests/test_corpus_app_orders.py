@@ -181,6 +181,35 @@ def test_a_press_on_a_queue_cell_released_off_it_cancels_nothing(app, game_dir):
     assert queues(out)[-1] == ["trainBSwordsman", "trainBBowman"], out
 
 
+def test_a_research_shows_in_the_queue_strip_with_its_bar_and_a_click_cancels_it(app, game_dir):
+    # Playtest #25. The strip's fill (0x006ee810) walks the building's whole
+    # queue and never reads `traincommand`, so a blacksmith's research is a
+    # cell like a barracks' training: its row's `queueicon`, the bar
+    # `research.vs`'s `.Progress()` stamps over the row's 30 s `execdelay`
+    # (0x006bfa94), and a click that cancels it and gives its cost back
+    # (0x006bf7c0, 0x004e63c0, 0x005b07d0). `l` is the British Fucina's
+    # Large Shields, 1,200 gold.
+    out = play(app, game_dir, ["select:class:BaseBlacksmith", "wait:3", "key:l", "wait:3",
+                               "key:P", "wait:120", "key:P", "wait:3",
+                               "press:Queue@0", "wait:3", "key:.", "wait:4"],
+               frames=200, where=CROSSROADS)
+    assert queues(out)[0] == ["Britain Large Shields"], out
+    cells = re.findall(r"^infobar: queue 0 icon (\S+) command (\d+) bar (-?\d+)$", out, re.M)
+    assert cells, out
+    assert {icon for icon, _, _ in cells} == {"gameres/icons/upgrades/shields.bmp"}, cells
+    bars = [int(bar) for _, _, bar in cells]
+    assert bars == sorted(bars) and bars[-1] > 0, bars
+    assert re.search(r"^queue:\s+cancel of command \d+ \(cell 0\) on object \d+ posted$", out, re.M), out
+    assert re.search(r"^cancel:\s+1 queued command\(s\) taken out", out, re.M), out
+    assert queues(out)[-1] == [], out
+    assert re.findall(r"^infobar: class \S+ .* queue (\d+) ", out, re.M)[-1] == "0", out
+    # Paid when it was queued, and all of it back on the cancel, though the
+    # research had run (the town's income came in meanwhile).
+    purse = gold(out)
+    assert purse[1] == purse[0] - 1200, purse
+    assert purse[-1] == purse[-2] + 1200, purse
+
+
 #: The world view's debug output (`IMPERIVM_DEBUG_VIEW=1`): the line ahead of
 #: each frame's placements, and a body's layer.
 FRAME = re.compile(r"^frame turn (\d+) time \d+ drawn \d+$")
