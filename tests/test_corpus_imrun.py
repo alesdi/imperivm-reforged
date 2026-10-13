@@ -501,10 +501,15 @@ def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, g
     assert re.match(r"^\s+#0 p0 kind 1 .* sentries (\d+)/\1 ", lines[0]), lines[0]
 
     # A war between the players: blows landed, men died, and a computer
-    # player's report counts kills of its own.
+    # player's report counts kills of its own. Before any army marches, the
+    # sentries and the wildlife land 78 blows in 600 turns; the war has 706 by
+    # 1,200 and 871 by 2,200. The floor was 1,000 until a swordsman could no
+    # longer hit a building (playtest #24), which took the town-hall blows out
+    # of the count, and a hero's army marched at its pace (#22), which moved
+    # where and when the armies meet.
     strikes = int(re.search(r"^\s+strikes\s+(\d+) blow", output, re.MULTILINE).group(1))
     deaths = int(re.search(r"^\s+kills\s+(\d+) death", output, re.MULTILINE).group(1))
-    assert strikes > 1000, output
+    assert strikes > 500, output
     assert deaths > 0, output
     killed = {int(p): int(k) for p, k in
               re.findall(r"report p(\d+): units \d+ produced (\d+) killed", output)}
