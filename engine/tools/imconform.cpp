@@ -55,6 +55,7 @@
 #include "imperivm/core/sim/cmdbar.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/infobar.hpp"
 #include "imperivm/core/sim/match.hpp"
 #include "imperivm/gamedata/installation.hpp"
@@ -2283,13 +2284,19 @@ int run_map(const MapArgs& args) {
 /// health, whether it is built, and how many units its own settlement holds:
 /// playtest #19's question, whether an engine rises before its crew is
 /// inside, read turn by turn on a shipped map.
+///
+/// `--attach` attaches every selected object to the hero its owner owns
+/// nearest the first, before the bar is described, and after every step
+/// prints each selected object's hero (0 for none): playtest #21's
+/// question, whether the Detach button lets a hero's warriors go.
 struct ButtonStep {
   bool cancel = false;
   std::string arg;
 };
 
 int run_buttons(const MapArgs& args, const std::string& class_name, const char* health,
-                const std::vector<ButtonStep>& steps, std::size_t select, std::size_t watch) {
+                const std::vector<ButtonStep>& steps, std::size_t select, std::size_t watch,
+                bool attach) {
   using namespace imperivm::core::sim;
   Installation install;
   if (!load_installation(args.game, args.map, install)) return 1;
@@ -2351,6 +2358,41 @@ int run_buttons(const MapArgs& args, const std::string& class_name, const char* 
     }
     std::printf("selected  %zu\n", selected.size());
   }
+  HeroSystem* heroes = hero_system_of(world);
+  if (attach) {
+    const ClassIndex hero_class = graph->find("Hero");
+    const Point from = object->state.position;
+    ObjectId leader = kNoObject;
+    std::int64_t best = 0;
+    for (const WorldObject& other : world.objects()) {
+      if (other.state.owner != owner || hero_class == kNoClass ||
+          !world.class_is_a(other.id, hero_class)) {
+        continue;
+      }
+      const std::int64_t dx = other.state.position.x - from.x;
+      const std::int64_t dy = other.state.position.y - from.y;
+      const std::int64_t d = dx * dx + dy * dy;
+      if (leader == kNoObject || d < best) {
+        leader = other.id;
+        best = d;
+      }
+    }
+    if (heroes == nullptr || leader == kNoObject) {
+      std::fprintf(stderr, "player %u owns no hero to attach to\n", static_cast<unsigned>(owner));
+      return 1;
+    }
+    std::size_t joined = 0;
+    for (const ObjectId unit : selected) joined += heroes->attach(world, unit, leader) ? 1 : 0;
+    std::printf("attached  %zu to %u\n", joined, static_cast<unsigned>(leader));
+  }
+  const auto print_heroes = [&] {
+    if (!attach || heroes == nullptr) return;
+    for (const ObjectId unit : selected) {
+      std::printf("hero      %u %u\n", static_cast<unsigned>(unit),
+                  static_cast<unsigned>(heroes->hero_of(unit)));
+    }
+  };
+  print_heroes();
   session->selections().assign(owner, selected);
   CommandBar bar(*session);
   const std::vector<CommandButton> buttons = bar.describe(owner);
@@ -2444,8 +2486,12 @@ int run_buttons(const MapArgs& args, const std::string& class_name, const char* 
                        : verdict == CommandBar::Press::disabled ? "refused"
                                                                 : "unknown";
     std::printf("press     %s %s\n", spec.c_str(), said);
+    // The bar is described again before the turn, as the app redraws it
+    // after every press: its verifiers run in between.
+    (void)bar.describe(owner);
     run->advance(args.length);
     print_state();
+    print_heroes();
   }
   const CommandSystem* commands = command_system(world);
   EconomySystem* economy = economy_of(world);
@@ -2496,7 +2542,7 @@ void usage() {
                "       imconform netjoin  <game> <map> [turns] [net-seed]\n"
                "       imconform observe  <game> <map> [turns]\n"
                "       imconform buttons  <game> <map> <class> [health] [--press [ctrl+][shift+]NAME[@X,Y]]...\n"
-               "                          [--select N] [--watch TURNS]\n"
+               "                          [--select N] [--watch TURNS] [--attach]\n"
                "                          [--cancel CELL]...\n"
                "       imconform udp-host <game> <map> [--port P] [--turns N] [--delay D] [--drop M]\n"
                "                          [--peers N] [--silence MS] [--wait-join-at N]\n"
@@ -2711,7 +2757,12 @@ int main(int argc, char** argv) {
     std::vector<ButtonStep> presses;
     std::size_t select = 1;
     std::size_t watch = 0;
+    bool attach = false;
     for (int i = 5; i < argc; ++i) {
+      if (std::string_view(argv[i]) == "--attach") {
+        attach = true;
+        continue;
+      }
       if (std::string_view(argv[i]) == "--select" && i + 1 < argc) {
         select = static_cast<std::size_t>(std::strtoull(argv[++i], nullptr, 10));
         continue;
@@ -2731,7 +2782,7 @@ int main(int argc, char** argv) {
         return 2;
       }
     }
-    return run_buttons(args, argv[4], health, presses, select, watch);
+    return run_buttons(args, argv[4], health, presses, select, watch, attach);
   }
 
   if (command == "udp-host" || command == "udp-join") {

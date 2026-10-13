@@ -22,7 +22,8 @@
 // evaluates a `verify=` and an info-bar slot. `<cmdtext target="…">` says
 // what the row is aimed at: a row with none is issued when its button is
 // pressed, a row with any waits for a click on the map. `groupdispatch=`
-// names a script that issues the order itself for the whole group.
+// names a script that issues the order itself for the whole group, run to
+// its end inside the press (0x004ef3d0).
 //
 // ## Readings, labelled
 //
@@ -99,7 +100,7 @@ class CommandBar {
   [[nodiscard]] std::vector<CommandButton> describe(PlayerId player);
 
   enum class Press : std::uint8_t {
-    /// The row was issued to the selection, or its dispatch script started.
+    /// The row was issued to the selection, or its dispatch script ran.
     issued,
     /// The row wants a target; `aim` finishes it.
     waiting,

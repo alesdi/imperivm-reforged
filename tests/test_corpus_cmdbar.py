@@ -198,3 +198,29 @@ def test_a_cancelled_queue_cell_is_taken_out_and_refunded(imconform, game_dir):
     assert queues == [1, 6, 5, 4, 4], result.stdout
     start = gold[0]
     assert gold == [start, start - 100, start - 600, start - 500, start - 400, start - 400], result.stdout
+
+
+def test_detach_lets_a_heros_warriors_go(imconform, game_dir):
+    # Playtest #21: the Detach button (key D, `GROUP_DETACH.VS` behind the
+    # row's `groupdispatch=`) was pressed and the warriors stayed with their
+    # hero. The dispatch was spawned for a later pass, and the bar described
+    # again after the press released the list it was handed. `gbr.exe` runs it
+    # inside the press (0x004ef3d0 -> 0x0069d4c0, budget 0x0fffffff).
+    # `--attach` puts three of a player's units in the army of the hero of
+    # theirs nearest the first; the tool describes the bar again before the
+    # turn, as the app does.
+    path = game_dir / MAP
+    if not path.is_file():
+        pytest.skip(f"{MAP} is not in this installation")
+    result = subprocess.run(
+        [str(imconform), "buttons", str(game_dir), str(path), "Unit", "--select", "3",
+         "--attach", "--press", "detach"],
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    attached = re.search(r"^attached\s+(\d+) to (\d+)$", result.stdout, re.M)
+    assert attached and attached.group(1) == "3", result.stdout
+    assert re.search(r"^button\s+detach lit key=d ", result.stdout, re.M), result.stdout
+    assert re.search(r"^press\s+detach issued$", result.stdout, re.M), result.stdout
+    heroes = re.findall(r"^hero\s+\d+ (\d+)$", result.stdout, re.M)
+    leader = attached.group(2)
+    assert heroes == [leader] * 3 + ["0"] * 3, result.stdout

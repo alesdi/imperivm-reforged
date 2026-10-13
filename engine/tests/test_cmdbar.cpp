@@ -14,6 +14,7 @@
 #include "imperivm/core/sim/cmdbar.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/env.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/infobar.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/orders.hpp"
@@ -63,6 +64,9 @@ ClassGraph graph_of() {
       R"(<class id="RHouse" parent="RepairableBuilding" cpp_class="CVXBuilding"/>)",
       // A building whose rows issue themselves through a `groupdispatch=`.
       R"(<class id="RArena" parent="Building" cpp_class="CVXBuilding"><properties maxhealth="3000"/></class>)",
+      // A hero and the warriors that follow him, for the Detach row.
+      R"(<class id="RVeles" parent="Unit" cpp_class="CVXUnit"/>)",
+      R"(<class id="RHero" parent="Unit" cpp_class="CVXHero"/>)",
   };
   for (const char* doc : docs) graph.add(bytes_of(doc), "test_cmdbar.cpp");
   graph.link();
@@ -118,6 +122,10 @@ constexpr std::string_view kCommands = R"(<commands>
 <cmd name="showGamesMod" priority="5" button="actions/games.bmp" groupdispatch="dispatch_modifier.vs">
   <src obj="RArena"/>
 </cmd>
+<cmd name="detach" priority="7" button="actions/detach.bmp" key="d" groupverifier="verify_attached.vs"
+     voidgroupdispatch="1" groupdispatch="dispatch_detach.vs">
+  <src obj="RVeles"/>
+</cmd>
 </commands>)";
 
 constexpr std::string_view kMap = R"(<mapobject>
@@ -129,6 +137,9 @@ constexpr std::string_view kMap = R"(<mapobject>
 	<scriptobj class="RTownhall" num="5" player="1" x="600" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
 	<scriptobj class="RHouse" num="6" player="1" x="700" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
 	<scriptobj class="RArena" num="7" player="1" x="800" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
+	<scriptobj class="RVeles" num="8" player="1" x="900" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
+	<scriptobj class="RVeles" num="9" player="1" x="1000" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
+	<scriptobj class="RHero" num="10" player="1" x="1100" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
 </mapobject>)";
 
 /// An AI profile naming only its root script.
@@ -173,6 +184,20 @@ struct Fixture {
                 "//void, ObjList objs, point pt, Obj obj, bool bReplace, bool bModifier, int player\n"
                 "if (bModifier) objs.AddCommand(false, 'train');\n"
                 "else objs.AddCommand(false, 'idle');\n");
+    // The Detach row's two scripts, in the shipped ones' shape: lit while any
+    // of the selection follows a hero, and each that does leaves him.
+    scripts.add("verify_attached.vs",
+                "//bool, ObjList objs, str OUT reasonText\n"
+                "int k;\n"
+                "for (k = 0; k < objs.count(); k += 1) { if (objs[k].AsUnit.hero.IsValid) return true; }\n"
+                "reasonText = 'Not attached';\nreturn false;\n");
+    scripts.add("dispatch_detach.vs",
+                "//void, ObjList objs, point pt, Obj obj, bool bReplace, bool bModifier, int player\n"
+                "int k;\nUnit w;\n"
+                "for (k = 0; k < objs.count(); k += 1) {\n"
+                "  w = objs[k].AsUnit;\n"
+                "  if (w.hero.IsValid) w.DetachFrom(w.hero);\n"
+                "}\n");
     SessionInputs inputs;
     inputs.classes = &graph;
     inputs.scripts = &scripts;
@@ -537,6 +562,74 @@ TEST(cmdbar_ctrl_on_a_train_row_queues_train_multiple_count_of_it) {
   CHECK(f.bar->press(0, "hireGladiator", ctrl) == CommandBar::Press::issued);
   f.session->advance(1, 400);
   CHECK(commands->command_count(arena, "idle") >= idles + 4);
+}
+
+TEST(cmdbar_a_dispatch_runs_to_its_end_inside_the_press) {
+  // Playtest #21: the Detach button (`GROUP_DETACH.VS`) was pressed and the
+  // warriors stayed with their hero. The dispatch was spawned for a later
+  // pass with its `ObjList` parked under `kNoScript`, and the app describes
+  // the bar again after every press, whose verifier releases that slot: the
+  // script woke to an empty list. `gbr.exe` runs a row's dispatch inside the
+  // per-group issue with the synchronous budget (0x004ef3d0 calling
+  // 0x0069d4c0 with 0x0fffffff), so it has done its work when the press is.
+  Fixture f;
+  World& world = f.session->world();
+  HeroSystem* heroes = hero_system_of(world);
+  REQUIRE(heroes != nullptr);
+  const ObjectId first = 9;
+  const ObjectId second = 10;
+  const ObjectId leader = 11;
+  REQUIRE(heroes->hero(leader) != nullptr);
+
+  // Nobody attached: the row is drawn, unlit, with the verifier's reason.
+  f.select({first, second});
+  std::vector<CommandButton> buttons = f.bar->describe(0);
+  const auto detach = [&]() -> const CommandButton* {
+    for (const CommandButton& b : buttons) {
+      if (b.name == "detach") return &b;
+    }
+    return nullptr;
+  };
+  REQUIRE(detach() != nullptr);
+  CHECK(!detach()->enabled);
+  CHECK(detach()->reason == "Not attached");
+
+  REQUIRE(heroes->attach(world, first, leader));
+  REQUIRE(heroes->attach(world, second, leader));
+  buttons = f.bar->describe(0);
+  REQUIRE(detach() != nullptr);
+  CHECK(detach()->enabled);
+
+  // Done by the time the press returns, with no turn run.
+  CHECK(f.bar->press(0, "detach", CommandBar::Keys{}) == CommandBar::Press::issued);
+  CHECK(heroes->hero_of(first) == kNoObject);
+  CHECK(heroes->hero_of(second) == kNoObject);
+  CHECK(heroes->hero(leader)->army.empty());
+
+  // The app's order of things: press, describe the bar, run the turn.
+  REQUIRE(heroes->attach(world, first, leader));
+  REQUIRE(heroes->attach(world, second, leader));
+  f.select({first, second});
+  CHECK(f.bar->press(0, "detach", CommandBar::Keys{}) == CommandBar::Press::issued);
+  buttons = f.bar->describe(0);
+  f.session->advance(1, 400);
+  CHECK(heroes->hero_of(first) == kNoObject);
+  CHECK(heroes->hero_of(second) == kNoObject);
+  // And the verifier says so.
+  buttons = f.bar->describe(0);
+  REQUIRE(detach() != nullptr);
+  CHECK(!detach()->enabled);
+
+  // The lockstep path is the same press over the order's actors.
+  REQUIRE(heroes->attach(world, first, leader));
+  CommandBarSink sink(*f.session, *f.bar);
+  NetOrder order;
+  order.issuer = 0;
+  order.kind = NetOrderKind::command;
+  order.command = "detach";
+  order.actors = {first};
+  CHECK(sink.command(order));
+  CHECK(heroes->hero_of(first) == kNoObject);
 }
 
 TEST(the_queue_strip_names_each_cell_by_its_command_and_a_cancel_takes_that_one) {
