@@ -91,7 +91,8 @@ int main(int argc, char** argv) {
                  "right-click order to the point before that turn (1 or later: no\n"
                  "player orders before the first), IMRUN_PLACE=<x>,<y>\n"
                  "first stands it there, out of its AI's hands, IMRUN_WATCH=<id>\n"
-                 "prints where it stands every ten turns and every gate its route\n"
+                 "prints where it stands every ten turns -- a hero, each member of\n"
+                 "his army too, and what it runs -- and every gate its route\n"
                  "crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
                  "and as it starts or stops letting units through, and every gate\n"
                  "at the end.\n"
@@ -769,8 +770,12 @@ int main(int argc, char** argv) {
       if (actor != nullptr && table != nullptr) {
         sim::OrderTarget target;
         target.point = sim::Point{goto_x, goto_y};
+        // With the click's verifier over the run's own scripts, as the app
+        // and `imconform` give one: without it a candidate with a `verify=`
+        // -- a hero's `moveinfight` before his `move` -- blocks the order.
+        sim::ScriptOrderVerifier verifier(run.scheduler(), run.host_context());
         made = sim::issue_default_order(run.world(), *table, actors, target, sim::OrderMode::replace,
-                                        false, actor->state.owner, nullptr);
+                                        false, actor->state.owner, &verifier);
       }
       std::printf("  goto turn %llu: %u to (%d,%d), %zu issued\n", turn, goto_id, goto_x, goto_y,
                   made.issued);
@@ -836,6 +841,23 @@ int main(int argc, char** argv) {
       const sim::Point at = run.world().resolve_position(watched);
       std::printf("  watch turn %llu: %u at (%d,%d)\n", static_cast<unsigned long long>(turn + 1),
                   watched, at.x, at.y);
+      // A watched hero's army, member by member: where each stands relative
+      // to him and what it is running -- whether an army keeps its formation
+      // is a question about all of them at once.
+      if (const sim::HeroSystem* heroes = sim::hero_system_of(run.world())) {
+        if (const sim::HeroRecord* record = heroes->hero(watched)) {
+          const sim::CommandSystem* commands = sim::command_system(run.world());
+          for (const ObjectId member : record->army) {
+            const sim::Point m = run.world().resolve_position(member);
+            std::printf("  army turn %llu: %u at (%d,%d) off (%d,%d) order %s\n",
+                        static_cast<unsigned long long>(turn + 1), member, m.x, m.y, m.x - at.x,
+                        m.y - at.y,
+                        commands != nullptr && commands->command_count(member) > 0
+                            ? std::string(commands->command_name(member, 0)).c_str()
+                            : "-");
+          }
+        }
+      }
     }
     if (show_gates) {
       for (const sim::WorldObject& slot : run.world().objects()) {

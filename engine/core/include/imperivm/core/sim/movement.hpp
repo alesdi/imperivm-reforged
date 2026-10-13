@@ -108,6 +108,18 @@
 //      (`MovementSystem::marching`), and only then arrives -- on a free spot
 //      when the march's flag was set, which is when `0x004178d0` names the
 //      member an owner (`lock_owner`).
+//      **The pace is the formation's, and the hero walks it too.** The
+//      original aims the hero's own route at the formation as it does a
+//      member's (0x0052e830), times every step of such a route to reach the
+//      unit's station at the sample's deadline (0x00419e52) and lays each
+//      sample round a centre that steps ahead along the formation's route.
+//      Here the hero's route stands for the formation's, the stations are
+//      laid round a centre ahead of him on it, and each placement gives the
+//      hero and every marching member a pace (`MoveState::march_rate`); see
+//      `march_centre` and `pace_march` in `sim/command.cpp`. Before it, the
+//      hero walked at his own speed and the army chased stations laid where
+//      he stood, so a mounted hero arrived alone and his army was stood
+//      wherever it had got to (playtest #22).
 //      **Not reproduced: the original's claim on its stations.**
 //      `CVXFormObj::PlaceSample` (0x005f5a20) ends by moving every station
 //      its member cannot stand on (0x005f5b7b -> 0x005f3fe0): a flood from
@@ -392,10 +404,25 @@ struct MoveState {
   /// mover (`gate_waves_through`). **Saved, and not hashed**: path media,
   /// like the route it describes. See `sim/gate.hpp`, "The step".
   std::vector<GateCrossing> gate_crossings;
+  /// On a formation march, the hero's and every marching member's: the pace
+  /// the march gives it, in `rate()`'s units, or 0 for none -- the unit then
+  /// walks at its own `speed` and factor. The original times each step of a
+  /// route aimed at a formation to reach the unit's station at the sample's
+  /// deadline (0x00419e52 .. 0x00419ecd), so a member walks the formation's
+  /// pace and not its own, and so does the hero, whose route is aimed at the
+  /// formation too (0x0052e830). `place_army` sets it each time it lays the
+  /// stations (`MarchPace`); any order that is not a march clears it.
+  /// **Saved, and not hashed**: path media like the rest of this block, and
+  /// what it decides -- where the unit is -- is hashed.
+  std::int64_t march_rate = 0;
 
-  /// Effective speed in world units per second, after the factor.
-  [[nodiscard]] std::int64_t rate() const noexcept {
+  /// The unit's own speed in world units per second, after the factor.
+  [[nodiscard]] std::int64_t own_rate() const noexcept {
     return static_cast<std::int64_t>(speed) * speed_factor;
+  }
+  /// Effective speed: the march's pace while it sets one, else `own_rate()`.
+  [[nodiscard]] std::int64_t rate() const noexcept {
+    return march_rate > 0 ? march_rate : own_rate();
   }
   /// Distance covered along the route so far.
   [[nodiscard]] std::int64_t travelled() const noexcept { return progress / kSpeedScale; }

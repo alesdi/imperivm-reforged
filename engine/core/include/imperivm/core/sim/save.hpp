@@ -296,7 +296,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (`MoveState::form_extent`, `[form+0x34]`), which decides how far short of a
 /// gate the march stands. Hashed, so a version-30 file describes a world this
 /// build would hash differently.
-inline constexpr std::uint32_t kStateVectorVersion = 31;
+/// 32: the movement section carries the pace a formation march gives the hero
+/// and each marching member (`MoveState::march_rate`, 0x00419e52). Not hashed
+/// -- path media -- and a version-31 file would load a marching army walking
+/// at its own speeds, the hero out ahead of it, until his next placement.
+inline constexpr std::uint32_t kStateVectorVersion = 32;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

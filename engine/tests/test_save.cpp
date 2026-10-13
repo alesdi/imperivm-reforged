@@ -1004,6 +1004,9 @@ TEST(save_movement_section_round_trips) {
   first.path_generation = 7;
   first.path_complete = true;
   first.last_outcome = MoveOutcome::moving;
+  // The pace a march gives the unit: without it a loaded army walks at its
+  // own speeds, the hero out ahead of it, until he next lays the stations.
+  first.march_rate = 6900;
   movement.state(b).facing = Point{-1, 0};
 
   MovementSystem fresh;
@@ -1021,6 +1024,9 @@ TEST(save_movement_section_round_trips) {
   CHECK(!fresh.find(b)->walking);
   CHECK(restored->goto_failed_at == 31337);
   CHECK(fresh.find(b)->goto_failed_at == kNoGotoFailure);
+  CHECK(restored->march_rate == 6900);
+  CHECK(restored->rate() == 6900);
+  CHECK(fresh.find(b)->march_rate == 0);
   // The route is not hashed -- `pathfinder` is zero in all nine dumps -- and is
   // written anyway, because a route is not recomputable from the state around
   // it. A unit that came back with an empty path would silently stop.

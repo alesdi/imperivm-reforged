@@ -1901,7 +1901,144 @@ void march_member(World& world, MovementSystem& movement, ObjectId hero, ObjectI
   movement.order_goto(world, id, station, 0, 0, hero, lock);
 }
 
-/// Place a hero's army at its formation offsets around `anchor`.
+/// How far short of its station a unit on a formation route is timed to be
+/// while the formation's path goes on: 0x85, subtracted from every distance
+/// the sample's deadline (0x005f589e, 0x005f59a5) and each step's duration
+/// (0x00419e7a) are taken over, and nowhere once the path is spent.
+constexpr std::int32_t kSampleShort = 133;
+
+/// Where a march's formation is laid, and which way it faces.
+///
+/// The original's formation has a route of its own (`CVXFormObj::SetDest`,
+/// 0x005f2cc0, laid from where the hero stands) and a centre that steps along
+/// it a sample at a time (`CreateNextSample`, 0x005f5bd0, 200 units a step,
+/// `kFormationStride`). Each sample's stations are laid around the new centre
+/// facing the way it moved (`PlaceSample`, 0x005f5a20) -- the hero's own
+/// station *is* the centre (0x005f5a84) -- and a sample is made when a unit
+/// comes within 133 of its station (0x00419c78 .. 0x00419d72). So at the
+/// moment a sample is laid, the centre stands one step beyond the 133 its
+/// leader is timed short of: `kFormationStride + kSampleShort` ahead of him
+/// along the route, or at its end. The sample at the end is the last one
+/// (`[form+0x88]` cleared, 0x005f5cff), and no distance is taken short of it.
+///
+/// **Inferred onto this engine's march**, which has no formation route of its
+/// own: the hero's route stands for it, as it does in `MovementSystem::
+/// marching`, and the samples are laid whenever `place_army` runs -- the
+/// hero's every `FormKeepMoving` -- rather than when the first unit nears its
+/// station. Laying them around the hero where he stood made every station a
+/// place he had already left, and the last of them, laid up to a
+/// `FormKeepMoving` before he arrived, a place short of where he stopped.
+struct MarchCentre {
+  Point at;
+  Point facing;
+  /// Whether this is the route's end: the formation's last sample.
+  bool last = true;
+  /// How far along the hero's route the centre is from him.
+  std::int64_t along = 0;
+};
+
+[[nodiscard]] MarchCentre march_centre(World& world, MovementSystem& movement, ObjectId hero) {
+  const MoveState& lead = movement.state(hero);
+  MarchCentre centre{world.resolve_position(hero), lead.facing, true, 0};
+  if (!lead.has_path || lead.waypoints.size() < 2) return centre;
+  const std::int64_t travelled = std::min(lead.travelled(), lead.path_length);
+  const std::int64_t ahead = travelled + kFormationStride + kSampleShort;
+  const std::int64_t at = std::min(ahead, lead.path_length);
+  std::size_t segment = 0;
+  centre.at = point_along(lead.waypoints, at, &segment);
+  centre.last = ahead >= lead.path_length;
+  centre.along = at - travelled;
+  // The heading the centre moved in, which is the route's leg under it.
+  const std::size_t leg = std::min(segment, lead.waypoints.size() - 2);
+  const Point heading{lead.waypoints[leg + 1].x - lead.waypoints[leg].x,
+                      lead.waypoints[leg + 1].y - lead.waypoints[leg].y};
+  if (heading.x != 0 || heading.y != 0) centre.facing = heading;
+  return centre;
+}
+
+/// Pace a march: the speed each of its units walks at until the stations are
+/// laid again (`MoveState::march_rate`).
+///
+/// **The formation's speed** (`UpdateMinSpeed`, 0x005f5260) is the mean of
+/// the leader's and every member's own speed, held to at most one and a half
+/// times the slowest's (0x005f54c2 .. 0x005f54da). **The sample's deadline**
+/// (0x005f5850) is now plus the mean, over the hero and every member, of the
+/// time each needs at that speed to cover the straight distance to its
+/// station, less 133 while the path goes on. **Each unit's step** on a route
+/// aimed at the formation (0x00419e52) then takes the time left to the
+/// deadline shared over what is left of its route to its station, less the
+/// same 133 -- and is held to between 0.4 and 2 times the step's time at the
+/// formation's speed (0x005f2130), so a unit walks between half and two and a
+/// half times the formation's speed, whatever its own. The hero is one of
+/// them: his route is aimed at the formation (0x0052e830), so he walks its
+/// pace and not his own, and a straggler is hurried as he is held back. A
+/// unit already at its distance, or a deadline already past, takes the fast
+/// end (0x00419e91 writes a duration of 1, which the clamp lifts).
+///
+/// Integer here where the original averages the speeds in floating point
+/// (0x005f5419, 0x005f54b0); its slowest is tracked by step length alone
+/// (0x005f53d9 updates `[esp+0x10]` and not `[esp+0x14]`) where this takes the
+/// whole rate -- an inference that reads the quirk as a slip. Not reproduced:
+/// the time the unit's current animation has left (0x0053cef0), which the
+/// deadline adds per unit, and the snap of a step to the deadline within
+/// 100 ms (0x00419ec1).
+void pace_march(World& world, MovementSystem& movement, ObjectId hero, const MarchCentre& centre,
+                std::span<const ObjectId> marchers, std::span<const Point> stations) {
+  MoveState& lead = movement.state(hero);
+  struct Pacer {
+    MoveState* move;
+    std::int64_t straight;  ///< to its station, for the deadline
+    std::int64_t walk;      ///< along its route to its station, for its pace
+  };
+  std::vector<Pacer> pacers;
+  const std::int64_t short_of = centre.last ? 0 : kSampleShort;
+  const auto less_short = [&](std::int64_t d) { return d > short_of ? d - short_of : 0; };
+  // Only a route can be paced: a hero standing still leads no formation, and
+  // nothing he lays round himself is walked at any pace but its own.
+  if (lead.has_path && lead.own_rate() > 0) {
+    pacers.push_back({&lead,
+                      less_short(isqrt(dist_sq(world.resolve_position(hero), centre.at))),
+                      less_short(centre.along)});
+  }
+  for (std::size_t i = 0; i < marchers.size() && !pacers.empty(); ++i) {
+    MoveState& move = movement.state(marchers[i]);
+    if (move.own_rate() <= 0) continue;  // a unit that cannot walk sets no pace
+    const std::int64_t straight =
+        less_short(isqrt(dist_sq(world.resolve_position(marchers[i]), stations[i])));
+    const std::int64_t walk = move.has_path ? less_short(movement.remaining(marchers[i])) : 0;
+    pacers.push_back({&move, straight, walk});
+  }
+  if (pacers.empty()) {
+    lead.march_rate = 0;
+    return;
+  }
+
+  std::int64_t sum = 0;
+  std::int64_t slowest = pacers.front().move->own_rate();
+  for (const Pacer& p : pacers) {
+    sum += p.move->own_rate();
+    slowest = std::min(slowest, p.move->own_rate());
+  }
+  const auto n = static_cast<std::int64_t>(pacers.size());
+  std::int64_t speed = sum / n;
+  if (2 * speed > 3 * slowest) speed = 3 * slowest / 2;
+  if (speed <= 0) speed = 1;
+
+  std::int64_t total = 0;
+  for (const Pacer& p : pacers) total += p.straight * kSpeedScale / speed;
+  const std::int64_t deadline = (total + n / 2) / n;
+
+  const std::int64_t slow = speed / 2;
+  const std::int64_t fast = speed * 5 / 2;
+  for (const Pacer& p : pacers) {
+    std::int64_t rate = deadline > 0 ? p.walk * kSpeedScale / deadline : fast;
+    if (p.walk <= 0) rate = fast;
+    p.move->march_rate = std::clamp(rate, slow > 0 ? slow : 1, fast);
+  }
+}
+
+/// Place a hero's army at its formation offsets around the march's centre
+/// (`march_centre`), and pace the march (`pace_march`).
 ///
 /// **Only a member running `form_move` is on the march.** The original's
 /// members follow the formation object's samples through a route aimed at
@@ -1919,18 +2056,20 @@ void march_member(World& world, MovementSystem& movement, ObjectId hero, ObjectI
 /// `FormAcceptMove`, one per exit slot, and is sent to its station there.
 /// This used to step every held member out itself, the whole column through
 /// one door in one call.
-std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroes, ObjectId hero,
-                       Point anchor, Point facing) {
+std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroes,
+                       ObjectId hero) {
   const HeroRecord* record = heroes.hero(hero);
   if (record == nullptr || record->army.empty()) return 0;
 
   // The march is one party: its members and the hero leading it do not block
   // one another's steps (`sim/movement.hpp`, inference 3).
   movement.state(hero).party = hero;
+  const MarchCentre centre = march_centre(world, movement, hero);
+  const Point anchor = centre.at;
   std::vector<FormationMember> members;
   std::vector<Point> stations;
-  const std::size_t placed =
-      army_stations(world, movement, *record, hero, anchor, facing, members, stations);
+  const std::size_t placed = army_stations(world, movement, *record, hero, anchor, centre.facing,
+                                           members, stations);
   // The formation's radius, `[form+0x34]`: the layout (0x005f1f60) keeps the
   // largest squared offset of any station from the centre and stores its
   // square root (0x005f2062). The march's route reads it at a gate.
@@ -1939,6 +2078,8 @@ std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroe
     farthest = std::max(farthest, dist_sq(stations[i], anchor));
   }
   movement.state(hero).form_extent = static_cast<std::int32_t>(isqrt(farthest));
+  std::vector<ObjectId> marchers;
+  std::vector<Point> marching_to;
   for (std::size_t i = 0; i < placed; ++i) {
     if (!on_march(world, members[i].id)) continue;
     if (const ObjectState* state = world.state(members[i].id);
@@ -1946,7 +2087,10 @@ std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroe
       continue;
     }
     march_member(world, movement, hero, members[i].id, stations[i]);
+    marchers.push_back(members[i].id);
+    marching_to.push_back(stations[i]);
   }
+  pace_march(world, movement, hero, centre, marchers, marching_to);
   return placed;
 }
 
@@ -2015,9 +2159,7 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   }
   if (outcome == MoveOutcome::blocked) return HostOutcome::ok_void();
 
-  const MoveState& lead = self.movement->state(self.id);
-  place_army(*self.world, *self.movement, *heroes, self.id,
-             self.world->resolve_position(self.id), lead.facing);
+  place_army(*self.world, *self.movement, *heroes, self.id);
   return HostOutcome::ok_void();
 }
 
@@ -2088,9 +2230,9 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
     if (const ObjectState* lead = world->state(hero); lead != nullptr && !lead->is_held()) {
       std::vector<FormationMember> members;
       std::vector<Point> stations;
-      const std::size_t placed =
-          army_stations(*world, *movement, *record, hero, world->resolve_position(hero),
-                        movement->state(hero).facing, members, stations);
+      const MarchCentre centre = march_centre(*world, *movement, hero);
+      const std::size_t placed = army_stations(*world, *movement, *record, hero, centre.at,
+                                               centre.facing, members, stations);
       for (std::size_t i = 0; i < placed; ++i) {
         if (members[i].id == id) station = stations[i];
       }
@@ -2116,9 +2258,10 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
 /// `HERO_MOVE.VS` is the whole protocol -- `FormSetupAndMoveTo` once, then
 /// `while (.HasPath()) .FormKeepMoving(1500);` -- so this suspends and returns
 /// nothing, and the loop's exit condition is the hero's own path, not this
-/// call's result. Each call re-places the army around where the hero is *now*,
-/// which is what makes the formation follow him rather than pile up at the
-/// destination he was given.
+/// call's result. Each call lays the army's stations again round the march's
+/// centre ahead of him (`march_centre`) and paces every unit of it
+/// (`pace_march`), which is what makes the formation move with him rather
+/// than pile up at the destination he was given or trail behind him.
 ///
 /// **Two functions answer to this name, and only the unit's drops the
 /// target.** `Hero::FormKeepMoving` (0x0052eaf0) keeps the hero's formation
@@ -2140,11 +2283,7 @@ HostOutcome form_keep_moving_impl(CallContext& ctx) {
       (void)combat->drop_target(self.id);
     }
   }
-  if (heroes != nullptr) {
-    const MoveState& lead = self.movement->state(self.id);
-    place_army(*self.world, *self.movement, *heroes, self.id,
-               self.world->resolve_position(self.id), lead.facing);
-  }
+  if (heroes != nullptr) place_army(*self.world, *self.movement, *heroes, self.id);
 
   // **The full `ms`, never the ETA.** This used to clamp the wait to
   // `movement->eta(self.id)` and return immediately when there was nothing left
