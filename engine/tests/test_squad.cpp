@@ -47,6 +47,7 @@
 #include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/script/bytecode.hpp"
 #include "imperivm/core/sim/ai.hpp"
+#include "imperivm/core/sim/player_host.hpp"
 #include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
@@ -3552,7 +3553,8 @@ struct TrainFixture {
     register_squad_host(registry);
     // `maxtrainlevel` 5: the cap the body keeps is one less, so levels 1..3
     // train and level 4 does not.
-    env.env().write_int(EnvScope::for_player(1), "maxtrainlevel", 5);
+    // Units are owner 1, script player 2, whose ledger `.player` names.
+    env.env().write_int(EnvScope::for_player(player_to_script(1)), "maxtrainlevel", 5);
     world.advance(3000);
   }
 
@@ -3687,11 +3689,11 @@ TEST(train_reads_maxtrainlevel_from_the_players_scope_and_keeps_one_less) {
   const ObjectId one = f.spawn(f.warrior, 1);
   const SquadListId list = f.list_of({f.squad({one})});
   // 2 keeps a cap of 1, and level 1 is not below it.
-  f.env.env().write_int(EnvScope::for_player(1), "maxtrainlevel", 2);
+  f.env.env().write_int(EnvScope::for_player(player_to_script(1)), "maxtrainlevel", 2);
   CHECK(f.train(list, 4, 1) == 4);  // sent inside instead
   CHECK(f.verb_at(one, 0) == "enter");
   // 3 keeps 2, and level 1 is below it.
-  f.env.env().write_int(EnvScope::for_player(1), "maxtrainlevel", 3);
+  f.env.env().write_int(EnvScope::for_player(player_to_script(1)), "maxtrainlevel", 3);
   const ObjectId two = f.spawn(f.warrior, 1);
   CHECK(f.train(f.list_of({f.squad({two})}), 4, 1) == 1);
   CHECK(f.verb_at(two, 0) == "train");

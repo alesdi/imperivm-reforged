@@ -482,13 +482,16 @@ TEST(research_is_recorded_in_the_ledger_the_command_names) {
 
   // A `NamePlr` research lands on the *player's* ledger, and `IsResearched`
   // asked of the settlement still finds it -- which is what `ESH_NEEDTECH.VS`
-  // relies on when it asks `IsResearched(set, "Battle tactics")`.
+  // relies on when it asks `IsResearched(set, "Battle tactics")`. The ledger
+  // is the owner's **script number**, index 2 plus one: the one
+  // `EnvWriteString(.player, …)` writes and `IsResearched(idPlayer, …)` reads.
   CHECK(env.finish_research(set, "Battle tactics"));
-  CHECK(env.env().read_string(EnvScope::for_player(2), "Battle tactics") == "researched");
+  CHECK(env.env().read_string(EnvScope::for_player(3), "Battle tactics") == "researched");
+  CHECK(env.env().read_string(EnvScope::for_player(2), "Battle tactics").empty());
   CHECK(env.env().read_string(EnvScope::for_settlement(id), "Battle tactics").empty());
   CHECK(env.is_researched(set, "Battle tactics"));
-  CHECK(env.is_researched_for_player(2, "Battle tactics"));
-  CHECK(!env.is_researched_for_player(3, "Battle tactics"));
+  CHECK(env.is_researched_for_player(3, "Battle tactics"));
+  CHECK(!env.is_researched_for_player(2, "Battle tactics"));
 
   // Cancelling writes `""` back, which is what the cancelled branch does.
   CHECK(env.cancel_research(set, "Battle tactics"));
@@ -518,12 +521,14 @@ TEST(finishing_a_research_applies_its_env_writes) {
   economy.start(world);
   const Settlement& set = *economy.find(id);
 
-  CHECK(env.env().read_int(EnvScope::for_player(2), "maxtrainlevel") == 0);
+  // Owner index 2 is script player 3, whose ledger `.player` names.
+  CHECK(env.env().read_int(EnvScope::for_player(3), "maxtrainlevel") == 0);
   CHECK(env.finish_research(set, "Arena Drill 1"));
-  CHECK(env.env().read_int(EnvScope::for_player(2), "maxtrainlevel") == 4);
-  CHECK(env.env().read_string(EnvScope::for_player(2), "maxtrainlevel") == "4");
+  CHECK(env.env().read_int(EnvScope::for_player(3), "maxtrainlevel") == 4);
+  CHECK(env.env().read_string(EnvScope::for_player(3), "maxtrainlevel") == "4");
+  CHECK(env.env().read_int(EnvScope::for_player(2), "maxtrainlevel") == 0);
   // The ledger records `Drill`, not the command name.
-  CHECK(env.env().read_string(EnvScope::for_player(2), "Drill") == "researched");
+  CHECK(env.env().read_string(EnvScope::for_player(3), "Drill") == "researched");
   CHECK(env.is_researched(set, "Arena Drill 1"));
 }
 

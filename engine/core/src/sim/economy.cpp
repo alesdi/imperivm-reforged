@@ -2649,12 +2649,20 @@ constexpr std::string_view kTempleClasses[] = {
     "MTemple",     "BTempleOfThor", "ETempleOfHorusAndAnubis", "TTempleOfNeptus"};
 
 /// The race index a class declares, or -1.
+///
+/// **The shipped classes name their race** -- `<properties race="Iberia"/>`
+/// on `ITownhall` and `ITemple` alike -- and the descriptor's index at
+/// `+0xb48` is that name decoded, which is `race_from_name`'s table (Gaul 0
+/// ... Germany 7, the order of 0x0081a668's temples). This read a single
+/// digit for a long time, which no shipped class carries, so `BestTemple`
+/// and `TSGetAllTemples` found no temple on any map and every tactic script
+/// that recruits from one (`TSTempleRecruit`: the Gaul, Iberian, Carthaginian
+/// and Republican Roman tactics) waited for it forever, its army held.
 [[nodiscard]] std::int32_t race_of_class(World& world, ClassIndex which) {
   const ClassGraph* graph = world.class_graph();
   if (graph == nullptr || which == kNoClass) return -1;
-  const std::string_view text = graph->property(which, "race");
-  if (text.size() != 1 || text[0] < '0' || text[0] > '7') return -1;
-  return text[0] - '0';
+  const std::int32_t race = race_from_name(graph->property(which, "race"));
+  return race >= 0 && race < 8 ? race : -1;
 }
 
 [[nodiscard]] std::string_view temple_class_of(World& world, const Settlement& s) {

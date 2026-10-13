@@ -366,9 +366,13 @@ int main(int argc, char** argv) {
   // profile. Turned on here for every player, with `pr` routed to stdout,
   // the AI explains itself line by line, which is how "fifteen AIs, no army"
   // becomes a sentence naming the script that is waiting and for what.
+  // Each line carries the turn it was said on, so a decision can be placed
+  // beside the deaths and captures printed with theirs.
   struct StdoutSink final : sim::DebugSink {
+    std::uint64_t turn = 0;
     void write(std::string_view text) override {
-      std::printf("  pr  %.*s\n", static_cast<int>(text.size()), text.data());
+      std::printf("  pr  %llu  %.*s\n", static_cast<unsigned long long>(turn),
+                  static_cast<int>(text.size()), text.data());
     }
   };
   static StdoutSink sink;
@@ -384,6 +388,16 @@ int main(int argc, char** argv) {
               "AIV_LogFreezeArmy", "AIV_LogFlee", "AIV_LogFeed", "AIV_LogRush"}) {
           const std::int32_t id = env->ai_var_id(name);
           if (id >= 0) (void)env->ai_vars().set(player, id, 1);
+        }
+        // `AIV_LogGetGS` and `AIV_LogRecruit` are node ids, not switches:
+        // GETGAIKASTRAT.VS and RECRUITER.VS narrate the node they name, or
+        // every node at -1. The 1 above is node 1, p0's town on Crossroads;
+        // `IMRUN_AILOG_NODE=<id>` picks another, or -1 for all.
+        if (const char* node = std::getenv("IMRUN_AILOG_NODE")) {
+          for (const char* name : {"AIV_LogGetGS", "AIV_LogRecruit"}) {
+            const std::int32_t id = env->ai_var_id(name);
+            if (id >= 0) (void)env->ai_vars().set(player, id, std::atoi(node));
+          }
         }
       }
     }
@@ -740,6 +754,7 @@ int main(int argc, char** argv) {
   std::uint64_t orders_every = 0;
   if (const char* every = std::getenv("IMRUN_ORDERS")) orders_every = std::strtoull(every, nullptr, 10);
   for (std::uint64_t turn = 0; turn < turns; ++turn) {
+    sink.turn = turn;
     if (until_over && ended_at != 0) break;
     if (until_capture && captured) break;
     if (economy_every != 0 && turn % economy_every == 0) {
@@ -1046,11 +1061,12 @@ int main(int argc, char** argv) {
             classes[std::string(graph->at(slot.class_index).id)] += 1;
           }
           std::printf("            #%u p%d kind %d pop %d/%d gold %d food %d garrison %d/%d sentries %d/%d"
-                      " loyalty %d:",
+                      " loyalty %d gaika %d:",
                       set.id, static_cast<int>(set.owner), static_cast<int>(set.kind), set.population,
                       set.max_population,
                       set.warehouse.gold, set.warehouse.food, set.holder.count(),
-                      set.holder.max_units, set.sentries, set.max_sentries, set.loyalty);
+                      set.holder.max_units, set.sentries, set.max_sentries, set.loyalty,
+                      static_cast<int>(run.world().gaika().for_settlement(set.object)));
           for (const auto& [name, count] : classes) std::printf(" %s x%zu", name.c_str(), count);
           std::printf("\n");
         }

@@ -6025,3 +6025,86 @@ TEST(create_ship_spawns_the_class_into_the_settlements_holder) {
   CHECK(bad.status == script::HostStatus::ok);
   CHECK(bad.value.is_object() && bad.value.as_object().type == script::kNoType);
 }
+
+/// **A temple is found by the race its class names.** The shipped classes
+/// spell a race out -- `<properties race="Iberia"/>` on `ITownhall` and
+/// `ITemple` -- and `BestTemple` (0x00435750) indexes the per-race temple
+/// table with the central building's decoded race, `TSGetAllTemples`
+/// (0x004376f0) with each candidate's own. The lookup once read a single
+/// digit, which no shipped class carries, so neither ever found a temple and
+/// every tactic script waiting on `TSTempleRecruit` waited forever.
+TEST(best_temple_and_ts_get_all_temples_find_a_temple_by_its_named_race) {
+  ClassGraph graph;
+  const std::string docs[] = {
+      R"(<class id="Building" cpp_class="CVXBuilding"><properties maxhealth="3000"/></class>)",
+      R"(<class id="BaseBarracks" parent="Building" cpp_class="CVXBarrack"/>)",
+      R"(<class id="ITownhall" parent="Building" cpp_class="CVXBuilding">
+           <properties race="Iberia"/></class>)",
+      R"(<class id="ITemple" parent="BaseBarracks" cpp_class="CVXBarrack">
+           <properties race="Iberia"/></class>)",
+      // Another race's temple standing in the same town, as on a captured one.
+      R"(<class id="RTemple" parent="BaseBarracks" cpp_class="CVXBarrack">
+           <properties race="RepublicanRome"/></class>)",
+  };
+  const char* names[] = {"building.sc.xml", "basebarracks.sc.xml", "itownhall.sc.xml",
+                         "itemple.sc.xml", "rtemple.sc.xml"};
+  for (int i = 0; i < 5; ++i) graph.add(bytes_of(docs[i]), names[i]);
+  graph.link();
+
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  register_world_host(registry);
+  register_command_host(registry);
+  register_env_host(registry);
+  register_economy_hosts(registry);
+  World world;
+  world.set_class_graph(&graph);
+  CommandSystem commands;
+  EnvSystem env;
+  EconomySystem economy;
+  REQUIRE(world.add_system(&commands));
+  REQUIRE(world.add_system(&env));
+  REQUIRE(world.add_system(&economy));
+  economy.start(world);
+  env.start(world);
+
+  const ObjectId hall = world.spawn(NativeClass::building, nullptr, graph.find("ITownhall"));
+  world.set_position(hall, Point{1000, 1000});
+  SettlementInit init;
+  init.kind = SettlementKind::stronghold;
+  init.anchor = hall;
+  init.owner = 2;
+  init.max_units = 10000;
+  economy.create(world, init);
+  const Settlement* s = economy.settlements().for_object(hall);
+  REQUIRE(s != nullptr);
+  const SettlementId town = s->id;
+  const script::Value set = script::Value::object(kTypeSettlement, s->object);
+  const auto add = [&](ClassIndex which) {
+    const ObjectId id = world.spawn(NativeClass::barrack, nullptr, which);
+    world.set_position(id, Point{1100, 1000});
+    world.set_health(id, 3000);
+    CHECK(economy.add_building(world, town, id, 3000));
+    return id;
+  };
+  const ObjectId roman = add(graph.find("RTemple"));
+  const ObjectId iberian = add(graph.find("ITemple"));
+
+  const script::HostOutcome best =
+      call_host(registry, world, script::CallKind::member, "BestTemple", 0, {set});
+  CHECK(best.status == script::HostStatus::ok);
+  REQUIRE(best.value.is_object());
+  // The town's own race's temple, not the first temple in the roll.
+  CHECK(best.value.as_object().id == iberian);
+
+  const script::HostOutcome all =
+      call_host(registry, world, script::CallKind::member, "TSGetAllTemples", 0, {set});
+  CHECK(all.status == script::HostStatus::ok);
+  REQUIRE(is_objlist(all.value));
+  const std::span<const ObjectId> items = objlist_pool_of(world).items(objlist_of(all.value));
+  std::vector<ObjectId> ids(items.begin(), items.end());
+  // Both: each candidate is tested against the temple of its own race.
+  CHECK(ids.size() == 2);
+  CHECK(std::find(ids.begin(), ids.end(), roman) != ids.end());
+  CHECK(std::find(ids.begin(), ids.end(), iberian) != ids.end());
+}
