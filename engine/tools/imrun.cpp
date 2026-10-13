@@ -99,6 +99,12 @@ int main(int argc, char** argv) {
                  "crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
                  "and as it starts or stops letting units through, and every gate\n"
                  "at the end.\n"
+                 "IMRUN_AILOG=<node> turns on the AI's own narration; the two\n"
+                 "per-node switches log that node, or every node with -1, and each\n"
+                 "line carries the turn it was said on.\n"
+                 "IMRUN_SIEGE=<n> prints every n turns each stronghold -- hall,\n"
+                 "loyalty, garrison, gates -- the other players' squads in its node\n"
+                 "or ordered to it, and every siege engine.\n"
                  "IMRUN_ORDERS=<n> prints every n turns each AI's order queue: its\n"
                  "slots, the orders still waiting and the most urgent, and whether\n"
                  "the order it last carried out is still running.\n");
@@ -376,7 +382,13 @@ int main(int argc, char** argv) {
     }
   };
   static StdoutSink sink;
-  if (std::getenv("IMRUN_AILOG") != nullptr) {
+  // The value is the node the two per-node switches log, `AIV_LogRecruit` and
+  // `AIV_LogGetGS`, which the scripts read as a node id, or -1 for every node
+  // (`RECRUITER.VS`: `bLog = nLogRecruit < 0`, else `== g.ID`); `1` is p0's
+  // town on Crossroads, as it always was here.
+  const char* ailog = std::getenv("IMRUN_AILOG");
+  if (ailog != nullptr) {
+    const std::int32_t log_node = static_cast<std::int32_t>(std::strtol(ailog, nullptr, 10));
     run.set_debug_sink(&sink);
     if (sim::EnvSystem* env = sim::env_of(run.world())) {
       const std::int32_t mask = env->ai_var_id("AIV_LogPlayer");
@@ -387,17 +399,9 @@ int main(int argc, char** argv) {
               "AIV_LogHeroes", "AIV_LogArmy", "AIV_LogFoodSell", "AIV_LogGetGS",
               "AIV_LogFreezeArmy", "AIV_LogFlee", "AIV_LogFeed", "AIV_LogRush"}) {
           const std::int32_t id = env->ai_var_id(name);
-          if (id >= 0) (void)env->ai_vars().set(player, id, 1);
-        }
-        // `AIV_LogGetGS` and `AIV_LogRecruit` are node ids, not switches:
-        // GETGAIKASTRAT.VS and RECRUITER.VS narrate the node they name, or
-        // every node at -1. The 1 above is node 1, p0's town on Crossroads;
-        // `IMRUN_AILOG_NODE=<id>` picks another, or -1 for all.
-        if (const char* node = std::getenv("IMRUN_AILOG_NODE")) {
-          for (const char* name : {"AIV_LogGetGS", "AIV_LogRecruit"}) {
-            const std::int32_t id = env->ai_var_id(name);
-            if (id >= 0) (void)env->ai_vars().set(player, id, std::atoi(node));
-          }
+          const bool per_node =
+              std::strcmp(name, "AIV_LogRecruit") == 0 || std::strcmp(name, "AIV_LogGetGS") == 0;
+          if (id >= 0) (void)env->ai_vars().set(player, id, per_node && log_node != 0 ? log_node : 1);
         }
       }
     }
@@ -753,6 +757,10 @@ int main(int argc, char** argv) {
   // `IMRUN_ORDERS=<n>`: the AI order queues every n turns.
   std::uint64_t orders_every = 0;
   if (const char* every = std::getenv("IMRUN_ORDERS")) orders_every = std::strtoull(every, nullptr, 10);
+  // `IMRUN_SIEGE=<n>`: every stronghold and its besiegers every n turns.
+  std::uint64_t siege_every = 0;
+  std::map<std::pair<int, std::int32_t>, sim::GaikaId> besiegers;
+  if (const char* every = std::getenv("IMRUN_SIEGE")) siege_every = std::strtoull(every, nullptr, 10);
   for (std::uint64_t turn = 0; turn < turns; ++turn) {
     sink.turn = turn;
     if (until_over && ended_at != 0) break;
@@ -860,6 +868,79 @@ int main(int argc, char** argv) {
                       queue->todo.size(), waiting, top,
                       run.scheduler().alive(queue->runner) ? "running" : "free");
         }
+      }
+    }
+    if (siege_every > 0 && (turn + 1) % siege_every == 0) {
+      // Every stronghold, and what besieges it: the central building's
+      // health and tier, loyalty and garrison, each gate's health and tier,
+      // and every squad of another player filed in its node or ordered to
+      // it, with its state. Then every siege engine on the map. The siege is
+      // a chain -- chosen, gathered, engines built, a gate broken, the town
+      // entered, its hall taunted -- and this is where a run shows which
+      // link it stopped at.
+      const sim::EconomySystem* economy = sim::economy_of(run.world());
+      sim::HeroSystem* heroes = sim::hero_system_of(run.world());
+      const unsigned long long t = static_cast<unsigned long long>(turn + 1);
+      if (economy != nullptr) {
+        for (const sim::Settlement& set : economy->settlements().all()) {
+          if (set.kind != sim::SettlementKind::stronghold) continue;
+          const sim::GaikaId node = run.world().gaika().for_settlement(set.object);
+          const sim::WorldObject* hall = run.world().find(set.anchor);
+          std::printf("  siege turn %llu: #%u p%d node %d hall %d tier %d loyalty %d garrison %d sentries %d gates",
+                      t, set.id, static_cast<int>(set.owner), static_cast<int>(node),
+                      hall != nullptr ? hall->state.health : -1,
+                      hall != nullptr ? hall->state.damage_state : -1, set.loyalty_points(),
+                      static_cast<int>(set.holder.count()), set.sentries);
+          for (const sim::WorldObject& slot : run.world().objects()) {
+            if (slot.object == nullptr || !slot.object->is_a(NativeClass::gate)) continue;
+            if (slot.settlement != set.object) continue;
+            std::printf(" %u:%d/t%d", slot.id, slot.state.health, slot.state.damage_state);
+          }
+          std::printf("\n");
+          if (heroes == nullptr) continue;
+          for (const sim::Squad& squad : heroes->squads().squads()) {
+            if (squad.key.player == set.owner || squad.empty()) continue;
+            if (squad.gaika_in != node && squad.order_dest != node) continue;
+            std::printf("  siege turn %llu:   squad %d(p%d) size %zu state %d in %d orderdest %d leader %u\n",
+                        t, squad.key.index, static_cast<int>(squad.key.player), squad.size(),
+                        squad.state, static_cast<int>(squad.gaika_in),
+                        static_cast<int>(squad.order_dest), squad.leader);
+            besiegers[{static_cast<int>(squad.key.player), squad.key.index}] = node;
+          }
+        }
+        // And what became of every squad once bound for or standing in an
+        // enemy stronghold that the lines above no longer list: where it is
+        // and what it is doing now, or that it is gone.
+        for (auto it = besiegers.begin(); it != besiegers.end();) {
+          const sim::Squad* squad =
+              heroes == nullptr ? nullptr
+                                : heroes->squads().find(sim::SquadKey{it->first.second,
+                                                                      static_cast<sim::PlayerId>(it->first.first)});
+          if (squad == nullptr || squad->empty()) {
+            std::printf("  siege turn %llu:   was squad %d(p%d) for node %d: gone\n", t, it->first.second,
+                        it->first.first, static_cast<int>(it->second));
+            it = besiegers.erase(it);
+            continue;
+          }
+          if (squad->gaika_in != it->second && squad->order_dest != it->second) {
+            std::printf("  siege turn %llu:   was squad %d(p%d) for node %d: size %zu state %d in %d orderdest %d\n",
+                        t, it->first.second, it->first.first, static_cast<int>(it->second), squad->size(),
+                        squad->state, static_cast<int>(squad->gaika_in), static_cast<int>(squad->order_dest));
+          }
+          ++it;
+        }
+      }
+      for (const sim::WorldObject& slot : run.world().objects()) {
+        if (slot.object == nullptr || !slot.object->is_a(NativeClass::catapult)) continue;
+        std::size_t crew = 0;
+        if (economy != nullptr) {
+          for (const sim::Settlement& set : economy->settlements().all()) {
+            if (set.anchor == slot.id) crew = set.holder.count();
+          }
+        }
+        std::printf("  siege turn %llu:   engine %u p%d at (%d,%d) health %d crew %zu\n", t, slot.id,
+                    static_cast<int>(slot.state.owner), slot.state.position.x, slot.state.position.y,
+                    slot.state.health, crew);
       }
     }
     if (watched != kNoObject) {
@@ -1065,7 +1146,7 @@ int main(int argc, char** argv) {
                       set.id, static_cast<int>(set.owner), static_cast<int>(set.kind), set.population,
                       set.max_population,
                       set.warehouse.gold, set.warehouse.food, set.holder.count(),
-                      set.holder.max_units, set.sentries, set.max_sentries, set.loyalty,
+                      set.holder.max_units, set.sentries, set.max_sentries, set.loyalty_points(),
                       static_cast<int>(run.world().gaika().for_settlement(set.object)));
           for (const auto& [name, count] : classes) std::printf(" %s x%zu", name.c_str(), count);
           std::printf("\n");

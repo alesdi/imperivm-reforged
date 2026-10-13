@@ -101,8 +101,10 @@ void EconomySystem::finish_creation(SettlementId id, const SettlementInit& init)
   // its heirs, adds it with `AddMaxSentries` once it runs.
   s->max_sentries = init.extra_sentries;
 
-  s->loyalty = init.can_be_captured ? rules_.loyalty_settlements_initial : 0;
-  s->loyalty_decreased = 0;
+  // Every settlement, capturable or not: both constructors write it
+  // unconditionally (0x005c3fac, 0x005c4c4f).
+  s->loyalty_tenths = 10 * rules_.loyalty_settlements_initial;
+  s->loyalty_pending = 0;
 
   for (std::size_t i = 0; i < kSettlementTimerCount; ++i) {
     s->timers[i] = interval(static_cast<SettlementTimer>(i));
@@ -204,6 +206,7 @@ std::int32_t EconomySystem::interval(SettlementTimer which) const noexcept {
     case SettlementTimer::decrease: return rules_.population_decrease_interval;
     case SettlementTimer::burn: return rules_.burn_time;
     case SettlementTimer::repair: return rules_.repair_interval;
+    case SettlementTimer::loyalty_gain: return rules_.loyalty_interval;
     case SettlementTimer::loyalty: return rules_.loyalty_cap_interval;
     case SettlementTimer::outpost_trade: return rules_.outpost_refresh;
     case SettlementTimer::loan: return rules_.loan_interest_interval;
@@ -279,6 +282,7 @@ void EconomySystem::fire(World& world, Settlement& s, SettlementTimer which) {
     case SettlementTimer::decrease: trim_population(s); break;
     case SettlementTimer::burn: burn(s); break;
     case SettlementTimer::repair: repair(world, s); break;
+    case SettlementTimer::loyalty_gain: tick_loyalty_gain(world, s); break;
     case SettlementTimer::loyalty: tick_loyalty(s); break;
     case SettlementTimer::outpost_trade: tick_outpost_trade(world, s); break;
     case SettlementTimer::loan: tick_loan(s); break;
@@ -400,7 +404,54 @@ void EconomySystem::repair(World& world, Settlement& s) {
 // loyalty and capture
 // --------------------------------------------------------------------------
 
-void EconomySystem::tick_loyalty(Settlement& s) { s.loyalty_decreased = 0; }
+/// The cap tick, 0x005c0f00. See the loyalty note in `sim/economy.hpp`.
+void EconomySystem::tick_loyalty(Settlement& s) {
+  const std::int32_t cap = 10 * rules_.loyalty_change_cap;
+  const std::int32_t change = std::clamp(s.loyalty_pending, -cap, cap);
+  s.loyalty_tenths = std::clamp(s.loyalty_tenths + change, 0, 1000);
+  s.loyalty_pending = 0;
+}
+
+/// The gain tick, 0x005c5690. See the loyalty note in `sim/economy.hpp`.
+void EconomySystem::tick_loyalty_gain(World& world, Settlement& s) {
+  std::int32_t soldiers = 0;
+  const ClassGraph* graph = world.class_graph();
+  const ClassIndex military = graph == nullptr ? kNoClass : graph->lookup("Military");
+  const WorldObject* hall = world.find(s.anchor);
+  if (military != kNoClass && hall != nullptr && !hall->state.is_held()) {
+    const ClassIndex sentry = graph->lookup("Sentry");
+    const ClassIndex ram = graph->lookup("RamUnit");
+    const ClassIndex townhall = graph->lookup("BaseTownhall");
+    const std::int32_t radius = townhall != kNoClass && world.class_is_a(s.anchor, townhall)
+                                    ? rules_.loyalty_radius_townhall
+                                    : rules_.loyalty_radius;
+    std::vector<ObjectId> near;
+    // Held objects stand in no cell and unspawned ones are filtered, as the
+    // sweep's grid and its `[obj+0x2c] & 0x08200000` test leave them out.
+    (void)world.objects_in_radius(hall->state.position, radius, ClassFilter::of(military), near);
+    for (const ObjectId id : near) {
+      const WorldObject* unit = world.find(id);
+      if (unit == nullptr || unit->state.health <= 0 || unit->state.flags.hidden) continue;
+      if (!PlayerTable::is_valid(unit->state.owner)) continue;
+      // The owner's war word, complemented (`not [player+0x10]`): every
+      // player the owner is not at war with, the owner among them.
+      if (PlayerTable::is_valid(s.owner) && world.players().is_enemy(s.owner, unit->state.owner)) {
+        continue;
+      }
+      if (sentry != kNoClass && world.class_is_a(id, sentry)) continue;
+      if (ram != kNoClass && world.class_is_a(id, ram)) continue;
+      ++soldiers;
+    }
+  }
+  if (military != kNoClass) {
+    for (const ObjectId id : s.holder.units) {
+      const WorldObject* unit = world.find(id);
+      if (unit == nullptr || unit->state.health <= 0) continue;
+      if (world.class_is_a(id, military)) ++soldiers;
+    }
+  }
+  s.loyalty_pending += rules_.loyalty_increase_per_unit * soldiers + 3;
+}
 
 // --------------------------------------------------------------------------
 // outpost trade
@@ -623,24 +674,17 @@ bool EconomySystem::is_valid_capture_target(const World& world, SettlementId id)
   return state->health * 100 <= s->anchor_max_health * s->capture_health_percent;
 }
 
-std::int32_t EconomySystem::decrease_loyalty(SettlementId id, std::int32_t amount) {
+bool EconomySystem::decrease_loyalty(SettlementId id, std::int32_t amount) {
   Settlement* s = store_.find(id);
-  if (s == nullptr || amount <= 0 || s->loyalty <= 0) return 0;
-  std::int32_t allowed = amount;
-  if (rules_.loyalty_change_cap > 0) {
-    allowed = std::min(allowed, rules_.loyalty_change_cap - s->loyalty_decreased);
-  }
-  allowed = std::min(allowed, s->loyalty);
-  if (allowed <= 0) return 0;
-  s->loyalty -= allowed;
-  s->loyalty_decreased += allowed;
-  return allowed;
+  if (s == nullptr || amount < 0) return false;
+  s->loyalty_pending -= 10 * amount;
+  return true;
 }
 
 bool EconomySystem::set_loyalty(SettlementId id, std::int32_t value) {
   Settlement* s = store_.find(id);
-  if (s == nullptr) return false;
-  s->loyalty = std::max(0, value);
+  if (s == nullptr || value < 0 || value > 100) return false;
+  s->loyalty_tenths = 10 * value;
   return true;
 }
 
@@ -653,10 +697,9 @@ bool EconomySystem::set_loyalty(SettlementId id, std::int32_t value) {
 bool EconomySystem::capture(SettlementId id, PlayerId new_owner) {
   Settlement* s = store_.find(id);
   if (s == nullptr || !s->can_be_captured) return false;
-  if (s->loyalty != 0) return false;
+  if (s->loyalty_points() != 0) return false;
   s->owner = new_owner;
-  s->loyalty = rules_.loyalty_after_capture;
-  s->loyalty_decreased = 0;
+  s->loyalty_tenths = 10 * rules_.loyalty_after_capture;
   return true;
 }
 
@@ -669,23 +712,17 @@ bool EconomySystem::set_owner(SettlementId id, PlayerId new_owner) {
 
 bool EconomySystem::garrison_add(SettlementId id, ObjectId unit) {
   Settlement* s = store_.find(id);
-  if (s == nullptr || !s->holder.add(unit)) return false;
-  s->loyalty += rules_.loyalty_increase_per_unit;
-  return true;
+  return s != nullptr && s->holder.add(unit);
 }
 
 bool EconomySystem::garrison_force_add(SettlementId id, ObjectId unit) {
   Settlement* s = store_.find(id);
-  if (s == nullptr || !s->holder.force_add(unit)) return false;
-  s->loyalty += rules_.loyalty_increase_per_unit;
-  return true;
+  return s != nullptr && s->holder.force_add(unit);
 }
 
 bool EconomySystem::garrison_remove(SettlementId id, ObjectId unit) {
   Settlement* s = store_.find(id);
-  if (s == nullptr || !s->holder.remove(unit)) return false;
-  s->loyalty = std::max(0, s->loyalty - rules_.loyalty_increase_per_unit);
-  return true;
+  return s != nullptr && s->holder.remove(unit);
 }
 
 bool garrison_enter(World& world, SettlementId id, ObjectId unit, bool force) {
@@ -1740,6 +1777,9 @@ constexpr NamedConstant kEconomyConstants[] = {
     {"SentriesAddTime", &EconomyRules::sentries_add_time},
     {"SentriesAddCount", &EconomyRules::sentries_add_count},
     {"LoyaltyCapInterval", &EconomyRules::loyalty_cap_interval},
+    {"LoyaltyInterval", &EconomyRules::loyalty_interval},
+    {"LoyaltyRadius", &EconomyRules::loyalty_radius},
+    {"LoyaltyRadiusTownhall", &EconomyRules::loyalty_radius_townhall},
     {"LoyaltyChangeCap", &EconomyRules::loyalty_change_cap},
     {"LoyaltyIncreasePerUnit", &EconomyRules::loyalty_increase_per_unit},
     {"LoyaltySettlementsInitial", &EconomyRules::loyalty_settlements_initial},
@@ -3958,7 +3998,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     {CallKind::member, "loyalty", 0,  // 12 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
-       return s == nullptr ? no_settlement(ctx) : integer(s->loyalty);
+       return s == nullptr ? no_settlement(ctx) : integer(s->loyalty_points());
      }},
     // The `onenter` hook rides on these two and **not** on `garrison_add`
     // itself, which is the distinction the original's own placement makes:
@@ -4223,7 +4263,9 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        Settlement* s = receiver(ctx);
        EconomySystem* economy = host_economy(ctx);
        if (s == nullptr || economy == nullptr) return no_settlement(ctx);
-       return integer(economy->decrease_loyalty(s->id, int_arg(ctx, 1)));
+       // Void in the original (registered `[0, 2, 27, 1]`).
+       (void)economy->decrease_loyalty(s->id, int_arg(ctx, 1));
+       return HostOutcome::ok_void();
      }},
     {CallKind::member, "CanBeCaptured", 0,  // 2 sites
      +[](CallContext& ctx) -> HostOutcome {

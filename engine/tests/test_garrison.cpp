@@ -137,14 +137,14 @@ TEST(a_garrisoned_unit_is_inside_the_holder_and_off_the_map) {
   // In the open, the two would fight: the control for everything below.
   REQUIRE(g.combat.best_target(g.theirs) == g.mine);
   REQUIRE(g.combat.best_target(g.mine) == g.theirs);
-  const std::int32_t loyalty = g.town_row().loyalty;
+  const std::int32_t loyalty = g.town_row().loyalty_tenths;
   REQUIRE(garrison_enter(g.world, g.town_id, g.mine, /*force=*/false));
   const WorldObject* slot = g.world.find(g.mine);
   REQUIRE(slot != nullptr);
   CHECK(slot->state.holder == g.ids.holder);
   CHECK(slot->state.position == kHeldPosition);
   CHECK(g.town_row().holder.contains(g.mine));
-  CHECK(g.town_row().loyalty == loyalty + g.economy.rules().loyalty_increase_per_unit);
+  CHECK(g.town_row().loyalty_tenths == loyalty);  // entering writes no loyalty
   // Combat sees it where the world does at once, not at the top of its turn.
   CHECK(g.combat.find(g.mine)->position == kHeldPosition);
 
@@ -193,7 +193,7 @@ TEST(a_garrisoned_unit_steps_out_one_per_exit_interval_with_its_food) {
   REQUIRE(garrison_enter(g.world, g.town_id, g.mine, /*force=*/true));
   const ObjectId second = g.world.spawn(NativeClass::unit, nullptr, g.graph.find("Soldier"));
   REQUIRE(garrison_enter(g.world, g.town_id, second, /*force=*/true));
-  const std::int32_t loyalty = g.town_row().loyalty;
+  const std::int32_t loyalty = g.town_row().loyalty_tenths;
   const std::int32_t stored = g.town_row().warehouse.food;
 
   // The first goes at once, from the central building's door -- this class
@@ -206,7 +206,7 @@ TEST(a_garrisoned_unit_steps_out_one_per_exit_interval_with_its_food) {
   CHECK((out->state.position == Point{3000, 3000}));
   CHECK((g.combat.find(g.mine)->position == Point{3000, 3000}));
   CHECK(!g.town_row().holder.contains(g.mine));
-  CHECK(g.town_row().loyalty == loyalty - g.economy.rules().loyalty_increase_per_unit);
+  CHECK(g.town_row().loyalty_tenths == loyalty);  // nor does leaving
   CHECK(g.feeder.food(g.mine) == 100);
   CHECK(g.town_row().warehouse.food == stored - 70);
   CHECK(g.town_row().last_unit_exit_time == now);
@@ -510,4 +510,125 @@ TEST(the_dead_and_the_departed_leave_the_garrison) {
   CHECK(garrison_forget(g.world, g.mine));
   CHECK(g.town_row().holder.count() == 0);
   CHECK(!garrison_forget(g.world, g.mine));
+}
+
+namespace {
+
+/// Who keeps a town loyal: the gain tick's classes, and two central buildings
+/// that differ only in whether they are a `BaseTownhall`.
+ClassGraph loyalty_graph() {
+  ClassGraph graph;
+  for (const char* xml : {
+           R"(<class id="Object" cpp_class="CVXDecor"><properties sight="0"/></class>)",
+           R"(<class id="BaseTownhall" parent="Object" cpp_class="CVXTownHall">
+                <properties maxhealth="5000" radius="100" sight="600"/></class>)",
+           R"(<class id="Hall" parent="BaseTownhall" cpp_class="CVXTownHall"/>)",
+           R"(<class id="Hut" parent="Object" cpp_class="CVXBuilding">
+                <properties maxhealth="1000" radius="60" sight="400"/></class>)",
+           R"(<class id="Military" parent="Object" cpp_class="CVXUnit">
+                <properties maxhealth="100" radius="10" sight="400"/></class>)",
+           R"(<class id="Swordsman" parent="Military" cpp_class="CVXUnit"/>)",
+           R"(<class id="Sentry" parent="Military" cpp_class="CVXUnit"/>)",
+           R"(<class id="RamUnit" parent="Military" cpp_class="CVXUnit"/>)",
+           R"(<class id="Peasant" parent="Object" cpp_class="CVXUnit">
+                <properties maxhealth="50" radius="10" sight="300"/></class>)",
+       }) {
+    graph.add(bytes_of(xml), "test_garrison.cpp");
+  }
+  graph.link();
+  return graph;
+}
+
+}  // namespace
+
+/// The gain tick, 0x005c5690, and the cap tick it feeds, 0x005c0f00. Every
+/// `LoyaltyInterval` a settlement gains `LoyaltyIncreasePerUnit` tenths for
+/// each live, visible soldier -- an heir of `Military` that is neither a
+/// `Sentry` nor a `RamUnit` -- of a player its owner is not at war with,
+/// standing within `LoyaltyRadiusTownhall` (1,500) of a `BaseTownhall` or
+/// `LoyaltyRadius` (1,000) of any other central building, and for each live
+/// soldier in its holder; and 3 tenths besides. Taunts count against it in the
+/// same window, and the net moves at most `LoyaltyChangeCap` points.
+TEST(a_towns_loyalty_is_kept_by_the_soldiers_who_stand_by_it) {
+  ClassGraph graph = loyalty_graph();
+  World world;
+  world.set_class_graph(&graph);
+  EconomySystem economy;
+  REQUIRE(world.add_system(&economy));
+  const auto place = [&](const char* cls, PlayerId owner, Point at, std::int32_t health) {
+    const ObjectId id = world.spawn(NativeClass::unit, nullptr, graph.find(cls));
+    world.set_position(id, at);
+    world.set_owner(id, owner);
+    world.set_health(id, health);
+    return id;
+  };
+  const auto settle = [&](const char* cls, Point at, SettlementKind kind) {
+    const World::SettlementIds ids = world.spawn_settlement(0);
+    const ObjectId anchor = world.spawn(NativeClass::building, nullptr, graph.find(cls));
+    world.set_position(anchor, at);
+    world.set_owner(anchor, 0);
+    SettlementInit init;
+    init.kind = kind;
+    init.settlement_object = ids.settlement;
+    init.holder_object = ids.holder;
+    init.warehouse_object = ids.warehouse;
+    init.anchor = anchor;
+    init.owner = 0;
+    init.max_units = 10;
+    init.can_be_captured = true;
+    return economy.create(world, init);
+  };
+  const SettlementId town = settle("Hall", Point{5000, 5000}, SettlementKind::stronghold);
+  const SettlementId hamlet = settle("Hut", Point{9000, 5000}, SettlementKind::village);
+
+  // Player 0 keeps a truce with player 2 and none with 1 or 3; player 3
+  // keeps one with 0, which is 3's row and not the one the tick reads.
+  world.players().set(0, 2, Relation::ceasefire, true);
+  world.players().set(3, 0, Relation::ceasefire, true);
+
+  // Counted for the town: its own soldier 1,400 out, a friend's beside it,
+  // and one inside.
+  place("Swordsman", 0, Point{6400, 5000}, 100);
+  place("Swordsman", 2, Point{5050, 4950}, 100);
+  const ObjectId inside = place("Swordsman", 0, Point{5000, 5200}, 100);
+  REQUIRE(garrison_enter(world, town, inside, /*force=*/true));
+  // Not counted: too far, a sentry, a ram, no soldier, an enemy, an enemy
+  // that counts 0 a friend, a hidden one, a dead one.
+  place("Swordsman", 0, Point{5000, 6600}, 100);
+  place("Sentry", 0, Point{5100, 5000}, 100);
+  place("RamUnit", 0, Point{5000, 5100}, 100);
+  place("Peasant", 0, Point{4900, 5000}, 50);
+  place("Swordsman", 1, Point{5000, 4900}, 100);
+  // (two of 3's, so that reading the wrong row cannot come out even)
+  place("Swordsman", 3, Point{4950, 4950}, 100);
+  place("Swordsman", 3, Point{4950, 5050}, 100);
+  const ObjectId hidden = place("Swordsman", 0, Point{5000, 5050}, 100);
+  world.find(hidden)->state.flags.hidden = true;
+  place("Swordsman", 0, Point{4950, 5000}, 0);
+  // The hut is no town hall: 900 out counts for it, 1,200 out does not.
+  place("Swordsman", 0, Point{9000, 5900}, 100);
+  place("Swordsman", 0, Point{9000, 3800}, 100);
+
+  world.start();
+  const auto play = [&](std::int32_t ms) {
+    for (std::int32_t done = 0; done < ms; done += 100) {
+      const std::int32_t turn[] = {100};
+      world.advance(std::span<const std::int32_t>(turn));
+    }
+  };
+  const auto row = [&](SettlementId id) { return *economy.settlements().find(id); };
+  REQUIRE(row(town).loyalty_tenths == 100);
+  play(2000);
+  CHECK(row(town).loyalty_tenths == 100 + 3 * 10 + 3);
+  CHECK(row(hamlet).loyalty_tenths == 100 + 1 * 10 + 3);
+  CHECK(row(town).loyalty_pending == 0);
+
+  // Five taunts in a window outweigh three soldiers.
+  CHECK(economy.decrease_loyalty(town, 5));
+  play(2000);
+  CHECK(row(town).loyalty_tenths == 133 - 50 + 33);
+  // And a crowd of soldiers gains no more than the cap a window.
+  for (std::int32_t i = 0; i < 20; ++i) place("Swordsman", 0, Point{5200, 5000 + i * 10}, 100);
+  play(2000);
+  CHECK(row(town).loyalty_tenths == 116 + 100);
 }
