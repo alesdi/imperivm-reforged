@@ -61,3 +61,4 @@
 0x00435250	verified	fixed: the sweep 0x00423ef0 counts objects of exactly the class (descriptor equality), with no life test and nothing held; player outside 1..16 or an unknown class answers true; point clamped to the map; radius twice [cls+0x2dc]; owner in the complement of the enemy word
 0x005ab580	verified	the instance field [obj+0xec] (persisted as stamina_dec_time, seeded from the class; no map authors it), negative answers 0; no receiver test in the original
 0x005d8080	verified	the unit's [unit+0x17c], the same value at the unit offset; negative answers 0
+0x005aa8d0	verified	kind test on CVXBarrack (leaf under CVXBuilding in the image), handle or 0xffff
