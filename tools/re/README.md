@@ -1,6 +1,6 @@
 # Reverse-engineering tools
 
-Three contributor tools that were being **rewritten from scratch every session**
+Four contributor tools that were being **rewritten from scratch every session**
 before they were committed here. None of them ships game data, and none of them
 is needed to build, test or run the engine.
 
@@ -9,6 +9,7 @@ is needed to build, test or run the engine.
 | `gbr.py` | read the player's own `gbr.exe`: disassemble by address, find strings, find cross-references |
 | `hostregs.py` | every host entry point the executable registers, with body address and argument types |
 | `faultrun.py` | run a fault-injection sweep across N git worktrees in parallel |
+| `ledger.py` | the host audit's ledger: every registered entry point, where this engine implements it, and how far it has been checked against the body (`docs/audit/`) |
 
 ## The rule that governs all of this
 
