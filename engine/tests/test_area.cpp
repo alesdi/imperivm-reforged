@@ -30,6 +30,7 @@
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
+#include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/path.hpp"
 #include "imperivm/core/sim/query.hpp"
@@ -756,6 +757,78 @@ TEST(an_area_query_on_an_unknown_name_is_an_invalid_handle_not_a_trap) {
   const HostOutcome answer = invoke(registry, "AreaObjs", 2, call);
   CHECK(answer.status == HostStatus::ok);
   CHECK(!answer.value.as_object().valid());
+}
+
+/// 0x004d6d40 clamps the area's bounding box to the map rectangle before it
+/// draws. `Ring` is the circle (1000, 2000) r 300; on a map 2100 units square
+/// its box runs to y 2300 and is cut at 2099, so no draw lands past the edge.
+TEST(the_sampler_draws_only_over_the_part_of_an_area_on_the_map) {
+  Fixture fixture;
+  MatchSystem match;
+  REQUIRE(fixture.world.add_system(&match));
+  MatchRules rules;
+  rules.map_size = 2100;
+  (void)setup_match(fixture.world, match, rules, MatchOptions{});
+  const AreaShape circle = *area_named(fixture.world, "Ring");
+  for (int i = 0; i < 300; ++i) {
+    const Point p = random_point_in_area(fixture.world, circle);
+    CHECK(p.y <= 2099);
+    CHECK(circle.contains(p));
+  }
+}
+
+/// 0x0057a2e0 passes over a dead member (`vtbl+0x50`) before drawing its
+/// point: it is not ordered and costs the stream nothing.
+TEST(attack_area_passes_over_a_dead_member_before_its_draw) {
+  Fixture fixture;
+  Fixture twin;
+  const HostRegistry registry = area_registry();
+  std::vector<ObjectId> band;
+  fixture.world.objects_in_group(fixture.world.groups().find("Band"), ClassFilter{}, band);
+  REQUIRE(band.size() == 2);
+  for (const ObjectId id : band) fixture.world.set_health(id, 100);
+  fixture.world.set_health(band[0], 0);
+  const ObjectId query =
+      fixture.world.create_query(group_query(fixture.world.groups().find("Band")));
+  HostCall call(fixture.world, {Value::object(ObjectRef{kTypeQuery, query}), str("Yard")});
+  REQUIRE(invoke(registry, "AttackArea", 2, call).status == HostStatus::ok);
+  CHECK(fixture.command.command_name(band[0]) != "advance");
+  CHECK(fixture.command.command_name(band[1]) == "advance");
+  // Exactly one member's worth of draws.
+  (void)random_point_in_area(twin.world, *area_named(twin.world, "Yard"));
+  CHECK(fixture.world.rng().state() == twin.world.rng().state());
+}
+
+/// The invalid query a failed `ClassPlayerAreaObjs` answers is a message to
+/// `AttackArea`, not a trap: 0x0057a2e0 prints and orders nothing.
+TEST(attack_area_on_an_invalid_query_orders_nothing_and_does_not_trap) {
+  Fixture fixture;
+  const HostRegistry registry = area_registry();
+  HostCall call(fixture.world, {Value::object(ObjectRef{kNoType, 0}), str("Yard")});
+  CHECK(invoke(registry, "AttackArea", 2, call).status == HostStatus::ok);
+  CHECK(fixture.command.tracked() == 0);
+}
+
+/// Both area queries answer the invalid handle for a class name that is no
+/// class (0x00577218, 0x00573e60), and `ClassPlayerAreaObjs` for a player
+/// outside 1..16 -- not a query that finds nothing.
+TEST(an_area_query_with_no_such_class_or_player_is_an_invalid_handle) {
+  Fixture fixture;
+  fixture.world.set_class_graph(&fixture.graph);
+  const HostRegistry registry = area_registry();
+  const auto answer = [&](std::string_view name, std::initializer_list<Value> args) {
+    HostCall call(fixture.world, args);
+    const HostOutcome out =
+        invoke(registry, name, static_cast<std::uint16_t>(args.size()), call);
+    CHECK(out.status == HostStatus::ok);
+    return out.value.is_object() && out.value.as_object().valid();
+  };
+  CHECK(answer("AreaObjs", {str("Ring"), str("Unit")}));
+  CHECK(!answer("AreaObjs", {str("Ring"), str("Nonesuch")}));
+  CHECK(answer("ClassPlayerAreaObjs", {str("Unit"), Value::integer(2), str("Ring")}));
+  CHECK(!answer("ClassPlayerAreaObjs", {str("Nonesuch"), Value::integer(2), str("Ring")}));
+  CHECK(!answer("ClassPlayerAreaObjs", {str("Unit"), Value::integer(0), str("Ring")}));
+  CHECK(!answer("ClassPlayerAreaObjs", {str("Unit"), Value::integer(17), str("Ring")}));
 }
 
 TEST(every_area_entry_point_refuses_a_call_with_no_world) {

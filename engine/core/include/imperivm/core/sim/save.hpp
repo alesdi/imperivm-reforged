@@ -313,7 +313,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// `ObjsInRange` is a sight query, where it was an anchored circle. A
 /// version-33 file would load every union as an intersection and every sight
 /// query as one that sees only its own spot.
-inline constexpr std::uint32_t kStateVectorVersion = 34;
+/// 35: the script section (its own version 2) carries each script's arming
+/// order (`ScriptRecord::armed`) and `StartPlayerScript`'s slots. A
+/// version-34 file has neither: scripts due on the same millisecond would run
+/// in id order rather than the order they went to sleep, and a player script
+/// already running could be started a second time.
+inline constexpr std::uint32_t kStateVectorVersion = 35;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

@@ -24,6 +24,7 @@
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/script/ast.hpp"
 #include "imperivm/core/script/scheduler.hpp"
+#include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/globals.hpp"
 #include "imperivm/core/game/class_graph.hpp"
@@ -375,30 +376,67 @@ TEST(objlist_count_answers_for_a_list_and_for_a_query) {
 // the mutators
 // --------------------------------------------------------------------------
 
-TEST(objlist_add_appends_in_order_and_ignores_a_dead_handle) {
+TEST(objlist_add_appends_once_and_takes_the_handle_as_it_stands) {
   Fixture f;
   const ObjectId a = f.world.spawn(NativeClass::unit, nullptr);
-  (void)f.world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId b = f.world.spawn(NativeClass::unit, nullptr);
-  (void)f.world.set_health(b, 100);  // alive: see object_is_dead
+  const ObjectId c = f.world.spawn(NativeClass::unit, nullptr);
+  for (const ObjectId id : {a, b, c}) f.world.set_health(id, 10);
   const script::Value list = fresh_list(f.world);
+  const script::Value invalid = script::Value::object(script::ObjectRef{script::kNoType, 0});
+  const auto count = [&] {
+    return f.call(script::CallKind::member, "count", {list}).value.as_integer();
+  };
 
   f.call(script::CallKind::member, "Add", {list, f.obj(b)});
   f.call(script::CallKind::member, "Add", {list, f.obj(a)});
   // Insertion order, not id order: an ObjList is a list, and iteration order is
   // state.
-  const std::span<const ObjectId> items = objlist_pool_of(f.world).items(objlist_of(list));
+  std::span<const ObjectId> items = objlist_pool_of(f.world).items(objlist_of(list));
   REQUIRE(items.size() == 2);
   CHECK(items[0] == b);
   CHECK(items[1] == a);
 
-  // An invalid handle is a no-op, not an error: 331 files declare a handle and
-  // assign it several statements later.
+  // 0x005601a0 scans the deque for the handle and pushes only when it is not
+  // there: twice is once, and the first position is kept.
+  f.call(script::CallKind::member, "Add", {list, f.obj(b)});
+  CHECK(count() == 2);
+
+  // And it never asks whether the handle resolves. The invalid handle is a
+  // member like any other -- `count` counts it, `Contains` finds it, `ol[i]`
+  // reads it back as invalid -- and a despawned unit's handle is kept as it is.
+  f.call(script::CallKind::member, "Add", {list, invalid});
+  CHECK(count() == 3);
+  f.call(script::CallKind::member, "Add", {list, invalid});
+  CHECK(count() == 3);
+  CHECK(f.call(script::CallKind::member, "Contains", {list, invalid}).value.as_integer() != 0);
+  f.world.despawn(c);
+  f.call(script::CallKind::member, "Add", {list, f.obj(c)});
+  CHECK(count() == 4);
+  items = objlist_pool_of(f.world).items(objlist_of(list));
+  REQUIRE(items.size() == 4);
+  CHECK(items[2] == kNoObject);
+  CHECK(items[3] == c);
+
+  // `ClearDead` is what takes both out (0x0055f430: the handle does not
+  // resolve), and the survivors keep their order.
+  f.call(script::CallKind::member, "ClearDead", {list});
+  items = objlist_pool_of(f.world).items(objlist_of(list));
+  REQUIRE(items.size() == 2);
+  CHECK(items[0] == b);
+  CHECK(items[1] == a);
+}
+
+TEST(objlist_subscript_reads_a_stored_invalid_handle_back_as_invalid) {
+  Fixture f;
+  WorldHost host(f.world);
+  const script::Value list = fresh_list(f.world);
   f.call(script::CallKind::member, "Add",
          {list, script::Value::object(script::ObjectRef{script::kNoType, 0})});
-  f.world.despawn(a);
-  f.call(script::CallKind::member, "Add", {list, f.obj(a)});
-  CHECK(objlist_pool_of(f.world).items(objlist_of(list)).size() == 2);
+  const auto got = host.index_get(list, script::Value::integer(0));
+  REQUIRE(got.ok());
+  CHECK(got.value().is_object());
+  CHECK(got.value().as_object().type == script::kNoType);
 }
 
 TEST(objlist_a_declaration_binds_its_entry_at_the_declaration_site) {
@@ -464,21 +502,57 @@ TEST(objlist_addlist_and_removelist_are_set_moves_not_copies) {
   for (int i = 1; i < 4; ++i) f.call(script::CallKind::member, "Add", {right, f.obj(ids[i])});
 
   f.call(script::CallKind::member, "AddList", {left, right});
-  CHECK(f.call(script::CallKind::member, "count", {left}).value.as_integer() == 5);
+  // The union, in order (0x0055ff00 pushes a member only when the receiver
+  // does not hold it): ids[1] is in both and is there once.
+  std::span<const ObjectId> items = objlist_pool_of(f.world).items(objlist_of(left));
+  REQUIRE(items.size() == 4);
+  for (std::size_t i = 0; i < 4; ++i) CHECK(items[i] == ids[i]);
   // `right` is untouched: `AddList` reads it, and the two handles stay separate
   // lists.
   CHECK(f.call(script::CallKind::member, "count", {right}).value.as_integer() == 3);
 
   f.call(script::CallKind::member, "RemoveList", {left, right});
-  // Every occurrence goes, including the duplicate `AddList` introduced.
-  const std::span<const ObjectId> items = objlist_pool_of(f.world).items(objlist_of(left));
+  items = objlist_pool_of(f.world).items(objlist_of(left));
   REQUIRE(items.size() == 1);
   CHECK(items[0] == ids[0]);
 
-  // Self-append is legal in the language and must not read a vector it is
-  // growing.
+  // Self-append is legal in the language: every member is already present, so
+  // nothing is added.
   f.call(script::CallKind::member, "AddList", {left, left});
-  CHECK(f.call(script::CallKind::member, "count", {left}).value.as_integer() == 2);
+  CHECK(f.call(script::CallKind::member, "count", {left}).value.as_integer() == 1);
+}
+
+TEST(objlist_remove_and_removelist_take_one_occurrence_per_handle) {
+  Fixture f;
+  const ObjectId a = f.world.spawn(NativeClass::unit, nullptr);
+  const ObjectId b = f.world.spawn(NativeClass::unit, nullptr);
+  const script::Value list = fresh_list(f.world);
+  // A list holding a duplicate. `Add` cannot make one, so the test writes the
+  // pool directly -- the state a host function's own list could be in.
+  *objlist_pool_of(f.world).mutable_items(objlist_of(list)) = {a, b, a, b};
+
+  // 0x0041ee70: the first equal member, and only that one.
+  f.call(script::CallKind::member, "Remove", {list, f.obj(a)});
+  std::span<const ObjectId> items = objlist_pool_of(f.world).items(objlist_of(list));
+  REQUIRE(items.size() == 3);
+  CHECK(items[0] == b);
+  CHECK(items[1] == a);
+  CHECK(items[2] == b);
+
+  // 0x0055f100: one erase per member of the argument, first occurrence each.
+  const script::Value drop = fresh_list(f.world);
+  f.call(script::CallKind::member, "Add", {drop, f.obj(b)});
+  f.call(script::CallKind::member, "RemoveList", {list, drop});
+  items = objlist_pool_of(f.world).items(objlist_of(list));
+  REQUIRE(items.size() == 2);
+  CHECK(items[0] == a);
+  CHECK(items[1] == b);
+
+  // A handle the list lacks is a diagnostic, not a change.
+  const ObjectId stranger = f.world.spawn(NativeClass::unit, nullptr);
+  CHECK(f.call(script::CallKind::member, "Remove", {list, f.obj(stranger)}).status ==
+        script::HostStatus::ok);
+  CHECK(objlist_pool_of(f.world).items(objlist_of(list)).size() == 2);
 }
 
 TEST(objlist_remove_takes_an_object_or_a_list) {
@@ -572,6 +646,77 @@ TEST(objlist_cleardead_drops_missing_and_zero_health_objects) {
 }
 
 // --------------------------------------------------------------------------
+// Contains on a query
+// --------------------------------------------------------------------------
+
+/// `Query::Contains` (0x00578d20) refreshes the query and scans its result for
+/// the handle (0x00571870). The tutorial's `AreaObjs("EGate1", "Hero")
+/// .Contains(Caesar.obj)` is this shape, and it used to be refused as "not an
+/// ObjList", which trapped the sequence.
+TEST(objlist_contains_on_a_query_asks_the_refreshed_result) {
+  Fixture f;
+  const ObjectId inside = f.world.spawn(NativeClass::unit, nullptr);
+  const ObjectId outside = f.world.spawn(NativeClass::unit, nullptr);
+  f.world.set_position(inside, pt(10, 10));
+  f.world.set_position(outside, pt(5000, 5000));
+  const ObjectId query = f.world.create_query(objs_in_circle(pt(10, 10), 500, ClassFilter{}));
+  const script::Value q = script::Value::object(script::ObjectRef{kTypeQuery, query});
+  const auto contains = [&](const script::Value& receiver, ObjectId id) {
+    const script::HostOutcome out =
+        f.call(script::CallKind::member, "Contains", {receiver, f.obj(id)});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.as_integer() != 0;
+  };
+  CHECK(contains(q, inside));
+  CHECK(!contains(q, outside));
+  // Refreshed by the call, not frozen at creation.
+  f.world.set_position(outside, pt(20, 20));
+  CHECK(contains(q, outside));
+  // An invalid query prints and answers false (0x00578d20's fallthrough).
+  CHECK(!contains(script::Value::object(script::ObjectRef{script::kNoType, 0}), inside));
+}
+
+// --------------------------------------------------------------------------
+// GetUnitsInSameHolder in a settlement's holder
+// --------------------------------------------------------------------------
+
+/// In the original `GetUnitsInSameHolder` copies the holder's own deque, the
+/// very one `Settlement::Units` aliases -- so in a settlement's holder the
+/// answer is the garrison in garrison order, not in object id order. The
+/// roster here is whatever the pool's alias resolver says the holder keeps.
+TEST(objlist_get_units_in_same_holder_follows_the_holders_own_roster) {
+  Fixture f;
+  const ObjectId holder = f.world.spawn(NativeClass::building, nullptr);
+  const ObjectId first = f.world.spawn(NativeClass::unit, nullptr);
+  const ObjectId second = f.world.spawn(NativeClass::unit, nullptr);
+  REQUIRE(f.world.put_in_holder(first, holder));
+  REQUIRE(f.world.put_in_holder(second, holder));
+
+  // `second` entered the garrison first.
+  struct Roster {
+    ObjectId owner;
+    std::vector<ObjectId> units;
+  } roster{holder, {second, first}};
+  objlist_pool_of(f.world).set_alias_resolver(
+      [](void* user, ObjectId owner) -> std::vector<ObjectId>* {
+        auto* r = static_cast<Roster*>(user);
+        return owner == r->owner ? &r->units : nullptr;
+      },
+      &roster);
+
+  const script::HostOutcome out =
+      f.call(script::CallKind::member, "GetUnitsInSameHolder", {f.obj(first)});
+  REQUIRE(out.status == script::HostStatus::ok);
+  const std::span<const ObjectId> items = objlist_pool_of(f.world).items(objlist_of(out.value));
+  REQUIRE(items.size() == 2);
+  CHECK(items[0] == second);
+  CHECK(items[1] == first);
+  // A copy, not an alias: the script's list is its own.
+  f.call(script::CallKind::member, "Clear", {out.value});
+  CHECK(roster.units.size() == 2);
+}
+
+// --------------------------------------------------------------------------
 // GetObjList
 // --------------------------------------------------------------------------
 
@@ -607,7 +752,7 @@ TEST(objlist_getobjlist_is_a_snapshot_and_a_query_is_not) {
   CHECK(items[1] == b);
 }
 
-TEST(objlist_filterclosest_ranks_by_distance_then_by_id) {
+TEST(objlist_filterclosest_is_a_bounded_heap_whose_ties_keep_the_earlier_member) {
   Fixture f;
   const ObjectId near = f.world.spawn(NativeClass::unit, nullptr);
   (void)f.world.set_health(near, 100);  // alive: see object_is_dead
@@ -623,26 +768,33 @@ TEST(objlist_filterclosest_ranks_by_distance_then_by_id) {
   for (const ObjectId id : {far, tie, near}) {
     f.call(script::CallKind::member, "Add", {list, f.obj(id)});
   }
+  const auto closest = [&](std::int32_t n) {
+    const script::Value got =
+        f.call(script::CallKind::member, "FilterClosest",
+               {list, pack_point(pt(0, 0)), script::Value::integer(n)})
+            .value;
+    const std::span<const ObjectId> items = objlist_pool_of(f.world).items(objlist_of(got));
+    return std::vector<ObjectId>(items.begin(), items.end());
+  };
 
-  const script::Value one =
-      f.call(script::CallKind::member, "FilterClosest",
-             {list, pack_point(pt(0, 0)), script::Value::integer(1)})
-          .value;
-  const std::span<const ObjectId> best = objlist_pool_of(f.world).items(objlist_of(one));
-  REQUIRE(best.size() == 1);
-  // Two objects sit at the same distance; the lower id wins, because that is
-  // spawn order and every other collection here comes out in it.
-  CHECK(best[0] == near);
+  // n == 1, every shipped site: the first member, replaced only by one that is
+  // strictly nearer (0x0055df20 is a strict `>`). `tie` comes before `near` in
+  // the list and is as near, so `tie` stays -- though `near` has the lower id.
+  CHECK(closest(1) == std::vector<ObjectId>{tie});
 
-  const script::Value two =
-      f.call(script::CallKind::member, "FilterClosest",
-             {list, pack_point(pt(0, 0)), script::Value::integer(9)})
-          .value;
-  const std::span<const ObjectId> all = objlist_pool_of(f.world).items(objlist_of(two));
-  REQUIRE(all.size() == 3);
-  CHECK(all[0] == near);
-  CHECK(all[1] == tie);
-  CHECK(all[2] == far);
+  // n >= the list: every member, in heap order. far is slot 0; tie arrives at
+  // slot 1, its parent (far) is farther, so they swap; near arrives at slot 2,
+  // its parent (tie) is not farther, so it stays.
+  CHECK(closest(9) == (std::vector<ObjectId>{tie, far, near}));
+
+  // n == 2: far and tie fill the heap as above, [tie, far]. P is 4, so the
+  // challenger scan visits slots 2 -> (j=2 is not < 2 and even: skipped) and
+  // 1 -> slot 1, far, which is farther than near: near replaces it.
+  CHECK(closest(2) == (std::vector<ObjectId>{tie, near}));
+
+  // Nothing asked for, nothing answered.
+  CHECK(closest(0).empty());
+  CHECK(closest(-3).empty());
 
   // The receiver is untouched: FilterClosest returns a new list.
   CHECK(f.call(script::CallKind::member, "count", {list}).value.as_integer() == 3);
@@ -1573,4 +1725,47 @@ TEST(objlist_filters_mint_a_new_list_of_the_members_that_pass) {
   const script::HostOutcome two = f.call(member, "ObjInjured", {list});
   CHECK(objlist_of(one.value) != objlist_of(two.value));
   CHECK(objlist_of(one.value) != objlist_of(list));
+}
+
+/// `ObjInjured` (0x00561090) compares `[obj+0xc0] < [obj+0xc8]`: health against
+/// the object's **own** maximum, which a bonus raises. A unit at its class's
+/// maximum whose bonus has lifted its own is injured.
+TEST(objlist_obj_injured_measures_against_the_objects_own_maximum) {
+  Fixture f;
+  imperivm::core::ClassGraph graph;
+  const auto bytes_of = [](const std::string& text) {
+    return std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()),
+                                      text.size()};
+  };
+  graph.add(bytes_of(R"(<class id="Object" cpp_class="CVXDecor"><properties sight="0"/></class>)"),
+            "object.sc.xml");
+  graph.add(bytes_of(R"(<class id="Unit" parent="Object" cpp_class="CVXUnit"><properties maxhealth="100"/></class>)"),
+            "unit.sc.xml");
+  graph.link();
+  f.world.set_class_graph(&graph);
+  CombatSystem combat;
+  combat.set_class_graph(&graph);
+  REQUIRE(f.world.add_system(&combat));
+
+  const ObjectId whole = f.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  const ObjectId lifted = f.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  for (const ObjectId id : {whole, lifted}) {
+    f.world.set_health(id, 100);
+    Combatant c;
+    c.id = id;
+    c.class_index = graph.find("Unit");
+    c.health = 100;
+    combat.add(c);
+  }
+  StatBonus put;
+  put.max_health = 50;
+  REQUIRE(combat.add_bonus(lifted, put));
+
+  const script::Value list = fresh_list(f.world);
+  *objlist_pool_of(f.world).mutable_items(objlist_of(list)) = {whole, lifted};
+  const script::HostOutcome out = f.call(script::CallKind::member, "ObjInjured", {list});
+  REQUIRE(out.status == script::HostStatus::ok);
+  const std::span<const ObjectId> items = objlist_pool_of(f.world).items(objlist_of(out.value));
+  REQUIRE(items.size() == 1);
+  CHECK(items[0] == lifted);
 }

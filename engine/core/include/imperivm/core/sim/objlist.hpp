@@ -110,14 +110,17 @@
 ///    block. What would settle it: a save/reload conformance replay in which a
 ///    parent tactic script ends while its `TS_AttackAtWill` child still runs.
 ///
-/// 2. **`Add` may or may not deduplicate.** `DATA\TUTORIALS\BUILDINGSADVICE4.VS`
-///    guards `OL_UnattachedVillages.Add(...)` with `.Contains(...)`, which is
-///    consistent with either. Plain append is implemented, because that is what
-///    the guard would be redundant against and the script keeps the guard.
+/// Two things this note used to list as unknown are settled by the bodies:
+/// `Add` and `AddList` **do** deduplicate (0x005601a0 and 0x0055ff00 search the
+/// receiver before they push), and `FilterClosest` is a bounded heap whose ties
+/// keep the earlier member rather than the lower id (0x00561450). Both are
+/// described at their implementations in `sim/objlist.cpp`.
 ///
-/// 3. **`FilterClosest`'s tie-break is inferred.** Distance ascending, ties by
-///    ascending object id. All six corpus sites ask for one element, so only
-///    two objects at exactly equal distance could tell the difference.
+/// **Members are handles, not live objects.** The original's list is a deque
+/// of sixteen-bit object handles, and nothing that puts one in checks that it
+/// resolves: `Add` pushes the invalid handle as readily as a live one, and the
+/// list keeps a dead unit's handle until `ClearDead` or `Remove` takes it out.
+/// Here a member is an `ObjectId`, and the invalid handle is `kNoObject`.
 ///
 /// One thing that looked unknown and is not: the cursor protocol. `Cur` (72
 /// sites), `Next` (32) and `EOL` (27) never appear on an `ObjList` or a `Query`
@@ -217,6 +220,14 @@ class ObjListPool {
 
   /// The object an entry aliases, or `kNoObject` when it owns its storage.
   [[nodiscard]] ObjectId alias_of(ObjListId id) const noexcept;
+
+  /// The collection `owner` keeps -- what an alias of it would read -- without
+  /// minting a handle; null when the resolver knows no such owner.
+  ///
+  /// `Unit::GetUnitsInSameHolder` needs it: in the original that entry point
+  /// and `Settlement::Units` read **the same deque**, so a unit standing in a
+  /// settlement's holder must see the garrison in the garrison's own order.
+  [[nodiscard]] const std::vector<ObjectId>* roster_of(ObjectId owner) const noexcept;
 
   /// Drop every entry a script owns. Called when the scheduler tears it down.
   void release_script(script::ScriptId script);

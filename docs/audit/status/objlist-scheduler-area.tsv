@@ -1,0 +1,53 @@
+0x0055e0c0	verified	ObjList::count: the deque's size word, members counted not resolved; prose at m_count
+0x00577b90	verified	Query::count: Refresh, accessor, size; invalid receiver prints and answers 0; evaluation itself is the query system's
+0x00422300	partial	free Count(player, class): reads a per-player class-name counter map (0x004441e0/0x00444030) whose maintenance was not traced; engine counts live is-a objects
+0x00430a30	partial	GAIKA::Count/6: walk matches census_of<true>; gaps named in squad.cpp: GAIKA node table approximated (design), 0x0044eb80 fog-memory rewrite absent, settlement sentry tail (0x00420c00) left out
+0x004330b0	partial	GAIKA::Count/3: walk matches count_class_in_node; same node-table and 0x0044eb80 gaps; sentry tail gated on ready count only, not BaseTownhall (0x0043ffc0) plus strength > 0
+0x0053c660	partial	ItemHolder::count: vtbl+0x104 of the holder, not resolved; no shipped site reaches it, and m_count refuses an ItemHolder receiver
+0x00427980	verified	Squad::Count: is-a by name over the squad's members; comma-list acceptance labelled (no shipped site)
+0x0055f430	verified	ClearDead: unresolvable or vtbl+0x50 (IsDead) members erased in place; same rule as m_is_dead
+0x0057a7c0	verified	GetObjList: Refresh then ordered copy (0x00438230); invalid receiver is a fresh empty list
+0x005601a0	verified	ObjList::Add: FIXED -- dedup by handle (0x0050e2a0) and no validity test; test objlist_add_appends_once_and_takes_the_handle_as_it_stands
+0x004379b0	verified	SquadList::Add: FIXED -- plain append, no dedup (0x00437870 -> 0x00435d90); test squadlist_add_goes_through_the_objlist_domain
+0x00530580	partial	Hero::army: original pushes a live reference to [hero+0x1cc]; engine snapshots. Design: the pool's single AliasResolver serves settlement holders only
+0x005ab210	verified	Obj::Clear: writes the invalid handle through a by-reference receiver; prose corrected from "writes into the object"
+0x0055f590	verified	ObjList::Clear: empties the deque (0x006a3cc0), handle kept
+0x0055ff00	verified	AddList: FIXED -- ordered union, push only when absent; test objlist_addlist_and_removelist_are_set_moves_not_copies
+0x0055f370	verified	Remove: FIXED -- first occurrence only (0x0041ee70), diagnostic when absent; test objlist_remove_and_removelist_take_one_occurrence_per_handle
+0x0055f100	partial	RemoveList: FIXED -- one first-occurrence erase per member of the argument; test objlist_remove_and_removelist_take_one_occurrence_per_handle. Gap: RemoveList(self) walks the list it erases in the original (no shipped site)
+0x005c89f0	partial	GetUnitsOnBoard: copy of the ship holder's deque; engine answers id order since a ship holder keeps no roster here (differs after unload/reload)
+0x005794c0	verified	NearestObj (point): 10,000,000 start, strict less, edge distance 0x005a7900
+0x00579620	verified	NearestObj (object): as point form less the argument's radius (0x005a77b0); invalid argument answers invalid
+0x0055e490	verified	ObjList::Contains: handle scan, argument not resolved
+0x00578d20	verified	Query::Contains: FIXED -- Refresh then handle scan (0x00571870); was refused, trapping the tutorial; test objlist_contains_on_a_query_asks_the_refreshed_result
+0x005616c0	verified	FilterClosest: FIXED -- bounded heap (0x00561450, comparator 0x0055df20, sift 0x0055eb40); ties keep the earlier member; test objlist_filterclosest_is_a_bounded_heap_whose_ties_keep_the_earlier_member
+0x0042c780	partial	IdxToSet: slot table with holes reused first-free (0x005c3a80); engine never despawns a settlement so equal; load-time numbering not read
+0x005df620	partial	GetUnitsInSameHolder: FIXED -- a settlement holder's roster in garrison order (same deque as Settlement::Units); test objlist_get_units_in_same_holder_follows_the_holders_own_roster. Other holders fall back to id order
+0x00422f50	partial	MaxSetIdx: slot-table length, nulls included; see IdxToSet
+0x00560c10	verified	ObjClass: lookup 0x00409e40, is-a 0x0059a220; unknown name answers empty
+0x005607b0	verified	ObjEnemy: owner's relation bit 0 clear for the player record at player-1
+0x005609e0	verified	ObjAlly: complement of ObjEnemy's bit test
+0x00561090	verified	ObjInjured: FIXED -- per-object maximum (+0xc8, object_max_health) not the class's; test objlist_obj_injured_measures_against_the_objects_own_maximum
+0x006945e0	verified	Sleep: two-phase suspend, wait stored for the runner, re-armed at clock + wait (0x00688220); scheduler order FIXED to the wheel's arming order (0x00688060/0x006879a0), test vs_scripts_due_together_run_in_the_order_they_were_armed. Interpreter's 15,000-instruction yield is a separate VM gap, noted
+0x00421cd0	partial	AIBreakScript: stops the caller-player's thread id 3..51 (0x0041cdc0/0x0069fee0); engine kills by global script id. Design: AIRun handles are per-AI-player recycled ids the scheduler does not keep
+0x00421d20	partial	AIBreakScript(player, handle): as 0x00421cd0 with the player explicit; not bound, no shipped site
+0x00422f90	partial	AIRun(name): FIXED failure answers -1 (test vs_a_missing_script_is_survivable). Gap: per-player recycled handle 3..51 (design) and the caller's AI-player tag not checked
+0x00424a20	partial	AIRun(name, set, ol, obj, n): as 0x00422f90; binds four parameters; same handle gap
+0x00424c30	partial	AIRun(player, name, ...): read; not bound (engine binds free arity <= 5); no shipped site
+0x005098c0	partial	Conversation::Run: original polls with 1 ms suspends until finished, then deletes and clears the variable; engine plays inside the call (documented design in conversation.cpp)
+0x004c6e30	verified	Run(name): FIXED -- compile and run synchronously (0x006a0360), was a spawned peer; test vs_run_calls_the_script_to_its_end_and_answers_nothing
+0x004c6f00	verified	Run(name, i1): FIXED -- bound, synchronous, integers as parameters (same test shape)
+0x004c6fe0	verified	Run(name, i1, i2): FIXED -- bound, synchronous; no shipped site
+0x004c70c0	verified	Run(name, i1..i3): FIXED -- bound, synchronous; no shipped site
+0x004c71b0	verified	Run(name, i1..i4): FIXED -- bound, synchronous; no shipped site
+0x004c72c0	verified	Run(name, i1..i5): FIXED -- bound, synchronous; no shipped site
+0x004c81e0	verified	Settlement::Run(set, name): FIXED -- bound as member Run/1, synchronous with the settlement as parameter; no shipped site
+0x0061e730	verified	KillScript: answers status 2, the interpreter stops the calling thread; Scheduler::kill on the caller
+0x0056f970	verified	StartPlayerScript: FIXED -- eight name slots per player (0x0056f720), a second start of a name refused, slots saved; test vs_start_player_script_starts_a_name_once_per_player
+0x004d8bb0	verified	AreaCenter: first member of the named group; circle centre or truncated rectangle midpoints; (-1,-1) on a miss
+0x00573e60	verified	ClassPlayerAreaObjs: FIXED -- player outside 1..16 and a name that is no class answer the invalid query, before the area; test an_area_query_with_no_such_class_or_player_is_an_invalid_handle. The query (0x004fe730) is the query system's
+0x0057a510	verified	AttackArea ("advance" into 0x0057a2e0): FIXED -- dead members skipped before their draw, invalid query a message; tests attack_area_passes_over_a_dead_member_before_its_draw, attack_area_on_an_invalid_query_orders_nothing_and_does_not_trap
+0x00577090	verified	AreaObjs: FIXED -- a name that is no class answers the invalid query (0x00577218); test an_area_query_with_no_such_class_or_player_is_an_invalid_handle
+0x004d9100	verified	GetRandomPointInArea: sampler 0x004d6d40, 20 attempts; FIXED -- box clamped to the map rectangle before drawing; test the_sampler_draws_only_over_the_part_of_an_area_on_the_map
+0x0057a530	verified	MoveToArea ("move" into 0x0057a2e0): same body and fixes as AttackArea
+0x004d8970	verified	AreaDistTo: circle edge distance or rectangle Chebyshev, clamped at 0; -1 on a miss

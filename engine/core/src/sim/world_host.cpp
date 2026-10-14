@@ -1562,6 +1562,17 @@ HostOutcome fn_set_op(CallContext& ctx) {
 /// handle escapes, and minting a query per call would leak a handle per call
 /// and shift every later allocation. The dumps show no query type that would
 /// correspond to it.
+///
+/// **The original does not count; it reads a counter.** 0x00422300 takes the
+/// player record at `player - 1` (guarded only by `player - 1 < 16`, so 0 and
+/// below read a record that is not there) and asks 0x004441e0, which looks the
+/// class-name string up in a map the record keeps (0x00444030, tree header at
+/// `record+0x1c`) and answers the number stored in the node (`+0x10`), or 0
+/// when the name has no node. What fills that map -- whether it keeps a count
+/// for each class and each of its ancestors, and whether a unit leaves it on
+/// death or on removal -- was not traced. This engine counts the player's live
+/// objects that are the class or descend from it, which is the same number
+/// exactly when the map is kept that way.
 HostOutcome fn_count(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Count: no world");
@@ -6509,6 +6520,10 @@ constexpr Cardinal kCardinals[] = {
 
 }  // namespace
 
+std::int32_t object_max_health(World& world, const WorldObject& slot) {
+  return max_health_of_object(world, slot);
+}
+
 bool unit_has_freedom(World& world, ObjectId id) {
   const WorldObject* slot = world.find(id);
   if (slot == nullptr) return false;
@@ -7107,7 +7122,9 @@ Result<script::Value> WorldHost::index_get(const script::Value& container,
   if (index < 0 || static_cast<std::size_t>(index) >= items.size()) {
     return Value::object(ObjectRef{script::kNoType, 0});
   }
-  return Value::object(ObjectRef{kTypeObj, items[static_cast<std::size_t>(index)]});
+  // A list can hold the invalid handle -- `ObjList::Add` (0x005601a0) stores
+  // whatever it is given -- and reading it back is the invalid handle again.
+  return object_value(items[static_cast<std::size_t>(index)]);
 }
 
 Status WorldHost::index_set(script::Value& container, const script::Value& key,
