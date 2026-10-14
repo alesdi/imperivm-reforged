@@ -3346,7 +3346,7 @@ TEST(sim_parry_mode_needs_the_parry_special) {
     const script::HostOutcome out =
         b.call(script::CallKind::member, "GetParryMode", 0, {PredicateBench::obj(id)});
     CHECK(out.status == script::HostStatus::ok);
-    return out.value.is_integer() ? out.value.as_integer() : -1;
+    return out.value.is_integer() ? out.value.as_integer() : -99;
   };
 
   CHECK(get(shield) == 0);
@@ -3355,16 +3355,19 @@ TEST(sim_parry_mode_needs_the_parry_special) {
   set(shield, false);
   CHECK(get(shield) == 0);
 
-  // The archer's class does not offer `Parry`. The setter writes nothing.
+  // The archer's class does not offer `Parry`. The setter writes nothing, and
+  // the getter answers **-1** (0x005d9050 pushes 0xffffffff), so
+  // `UNIT_ENTER_PARRY_MODE_VERIFY.VS`'s `GetParryMode() == 0` does not offer
+  // parry to a selection of archers.
   set(archer, true);
-  CHECK(get(archer) == 0);
+  CHECK(get(archer) == -1);
   REQUIRE(b.world.find(archer) != nullptr);
   CHECK(b.world.find(archer)->state.parry_mode == 0);
 
   // And the *getter* is gated too, independently: a field written behind the
-  // setter's back still reads 0 on a unit that cannot parry.
+  // setter's back still reads -1 on a unit that cannot parry.
   b.world.find(archer)->state.parry_mode = 1;
-  CHECK(get(archer) == 0);
+  CHECK(get(archer) == -1);
   // While the same write on a unit that can parry reads back.
   b.world.find(shield)->state.parry_mode = 1;
   CHECK(get(shield) == 1);

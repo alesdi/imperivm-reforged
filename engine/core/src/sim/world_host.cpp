@@ -3317,20 +3317,21 @@ HostOutcome m_set_parry_mode(CallContext& ctx) {
 /// `Unit::GetParryMode()` -- 2 sites, and the reason the field is stored.
 ///
 /// `0x005d9050` carries **the same specials gate as the setter**, before it
-/// reads: a unit without `Parry` answers 0 whatever the field holds. That is
-/// not redundancy here either -- `UNIT_LEAVE_PARRY_MODE_VERIFY.VS` asks
-/// `u.GetParryMode() == 1` over a whole selection, and a unit that cannot parry
-/// must not answer yes.
+/// reads -- bit 0 of the 64-bit specials word at `[obj+0x198]` -- and a unit
+/// without `Parry` answers **-1** whatever the field `[obj+0x1a0]` holds. Both
+/// verifiers depend on that: `UNIT_LEAVE_PARRY_MODE_VERIFY.VS` asks
+/// `GetParryMode() == 1` and `UNIT_ENTER_PARRY_MODE_VERIFY.VS` asks `== 0` over
+/// a whole selection, so a unit that cannot parry must answer neither.
 ///
-/// An unresolvable receiver answers 0 through the discard sink, like every
-/// other getter in this file.
+/// An unresolvable receiver prints *"called for an uninitialized or invalid
+/// object"* and **pushes nothing**, so the caller reads whatever was on the
+/// stack; 0 stands in for that here.
 HostOutcome m_get_parry_mode(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetParryMode: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  if (slot == nullptr || !class_has_special(*world, *slot, 0)) {
-    return HostOutcome::ok_with(Value::integer(0));
-  }
+  if (slot == nullptr) return HostOutcome::ok_with(Value::integer(0));
+  if (!class_has_special(*world, *slot, 0)) return HostOutcome::ok_with(Value::integer(-1));
   return HostOutcome::ok_with(Value::integer(slot->state.parry_mode));
 }
 
