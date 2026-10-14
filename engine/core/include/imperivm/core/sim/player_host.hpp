@@ -36,21 +36,14 @@
 /// Every entry point here converts with `player_from_script` and
 /// `player_to_script` and never open-codes the adjustment.
 ///
-/// **`sim/world_host.cpp`'s `player` member does not do this**: it returns the
-/// raw 0-based owner. That is 531 call sites disagreeing with these by one, and
-/// it has to be fixed there, not worked around here -- a compensating
-/// off-by-one in this file would be invisible until the two were assembled.
-///
+
 /// ## What is not defined here, and why
 ///
 /// `player`/0 and `ClassPlayerObjs`/2 belong to `register_world_host`, and
-/// `IsEnemy`/1 is also defined by `define_combat_host`. A second `define()` of
-/// the same (kind, name, arity) silently replaces the first, so the first two
-/// are deliberately left alone. `IsEnemy` is defined here anyway because the
-/// combat version answers only the object-object form against a private
-/// alliance set, and the settlement-and-integer form -- `set.IsEnemy(AIPlayer)`
-/// -- is in the corpus too; whichever registration runs last wins, which is a
-/// hazard the report names.
+/// are deliberately not defined here: a second `define()` of the same (kind,
+/// name, arity) silently replaces the first. `IsEnemy`/1 is defined here alone
+/// and answers both receiver shapes the corpus uses -- `set.IsEnemy(AIPlayer)`
+/// (0x00425250) and `b.IsEnemy(u)` (0x005aa480) -- by the argument's type.
 
 #include <cstddef>
 #include <cstdint>
@@ -119,6 +112,17 @@ inline constexpr std::int32_t kNoRace = -1;
 /// empty string, or anything unrecognised: those are match-setup markers rather
 /// than races, and resolving them needs the RNG.
 [[nodiscard]] std::int32_t race_from_name(std::string_view name) noexcept;
+
+/// What a class descriptor's race slot (`+0xb48`) holds for `Mutable`: 9.
+inline constexpr std::int32_t kClassRaceMutable = 9;
+/// ...and for a race string the class loader does not know: 8.
+inline constexpr std::int32_t kClassRaceUnknown = 8;
+
+/// A class's `race` property as the class loader stores it (0x0059f540):
+/// a race name in any spelling `race_from_name` accepts, -1 for `None`, 9 for
+/// `Mutable`, 8 for anything else. Distinct from `race_from_name` because the
+/// map's `playerdata/@race` markers (`Random`, `Select`) mean something else.
+[[nodiscard]] std::int32_t class_race_from_name(std::string_view name) noexcept;
 
 /// The one-letter class-name prefix `GetRaceStrPref` answers -- `G`, `R`, `C`,
 /// `I`, `M`, `B`, `E`, `T` for races 0..7, lower-cased on request, and empty for

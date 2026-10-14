@@ -4795,6 +4795,79 @@ TEST(can_research_wants_an_idle_lab_and_skips_the_ledger_for_a_hire) {
 /// it -- through 0x004efc00 with the replace flag set -- and does not queue
 /// behind it. A lab's running command is its `idle`, which never returns, so
 /// an appended research never started: this is the shape that kept every
+/// The research entry points read the command row's own `param`, the way
+/// 0x00433790 (`IsResearched`), 0x00434000 (`IsResearching`) and 0x00434870
+/// (`CanResearch`) do: three tokens at a time, cut by 0x006ab970 (leading and
+/// trailing **spaces** only), until the **first** `NamePlr`/`NameSet` triple.
+/// No requirement is ever read, a name with no row is false whatever the
+/// ledger holds, the `int` forms read `Player%d` verbatim and refuse a
+/// `NameSet` row, and an invalid receiver is false rather than a trap.
+TEST(research_entry_points_read_the_rows_first_ledger_triple) {
+  static constexpr std::string_view kLedgerRows = "<commands>\n"
+      "<cmd name=\"Drill\" method=\"research\"\n"
+      "     param=\"ReqSet, Fights, , NamePlr, Drill Done, , NameSet, Drill Local, \">\n"
+      "  <src obj=\"RTemple\"/></cmd>\n"
+      "<cmd name=\"Tabbed\" method=\"research\" param=\"NameSet,\tTab Key, \">\n"
+      "  <src obj=\"RTemple\"/></cmd>\n"
+      "</commands>";
+  BarrackBench b;
+  CommandTable table;
+  REQUIRE(table.merge(bytes_of(kResearchXml)).ok());
+  REQUIRE(table.merge(bytes_of(kLedgerRows)).ok());
+  b.commands.set_table(std::move(table));
+  // The catalog -- the verifier scripts' reading -- sees the new rows too, so
+  // what differs below is the entry points' reading and nothing else.
+  b.env.research().build_from(b.commands.table());
+  (void)b.add(b.classes.temple, 0, NativeClass::building);
+
+  const auto free_call = [&](const char* name, std::vector<script::Value> args) {
+    return call_host(b.registry, b.world, script::CallKind::free_function, name,
+                     static_cast<std::uint16_t>(args.size()), std::move(args));
+  };
+  const auto yes = [](const script::HostOutcome& out) {
+    return out.status == script::HostStatus::ok && out.value.is_integer() &&
+           out.value.as_integer() != 0;
+  };
+  const script::Value set = b.settlement_value();
+  const EnvScope owner = EnvScope::for_player(3);  // owner 2, script number 3
+  const EnvScope town = EnvScope::for_settlement(b.town);
+
+  // `ReqSet, Fights` is unmet and `CanResearch` does not care.
+  CHECK(b.truth("CanResearch", {set, script::Value::string("Drill")}) == 1);
+
+  // The first ledger triple is `NamePlr, Drill Done`: the owner's ledger.
+  b.env.env().write_string(town, "Drill Local", "researched");
+  CHECK(!yes(free_call("IsResearched", {set, script::Value::string("Drill")})));
+  b.env.env().write_string(owner, "Drill Done", "researching");
+  CHECK(yes(free_call("IsResearching", {set, script::Value::string("Drill")})));
+  CHECK(b.truth("CanResearch", {set, script::Value::string("Drill")}) == 0);
+  b.env.env().write_string(owner, "Drill Done", "researched");
+  CHECK(yes(free_call("IsResearched", {set, script::Value::string("Drill")})));
+
+  // The `int` form reads the integer verbatim.
+  CHECK(yes(free_call("IsResearched", {script::Value::integer(3), script::Value::string("Drill")})));
+  CHECK(!yes(free_call("IsResearched", {script::Value::integer(2), script::Value::string("Drill")})));
+  // ...and a `NameSet` row is "not player upgrade", whatever that slot holds.
+  b.env.env().write_string(EnvScope::for_player(3), "Feast", "researched");
+  CHECK(!yes(free_call("IsResearched", {script::Value::integer(3), script::Value::string("Feast")})));
+
+  // No row, no answer: "No such upgrade".
+  b.env.env().write_string(town, "Mystery", "researched");
+  CHECK(!yes(free_call("IsResearched", {set, script::Value::string("Mystery")})));
+
+  // A tab is not a space to 0x006ab970: the key keeps it.
+  b.env.env().write_string(town, "\tTab Key", "researched");
+  CHECK(yes(free_call("IsResearched", {set, script::Value::string("Tabbed")})));
+
+  // An invalid receiver answers false and the script carries on.
+  const script::Value gone = script::Value::object(kTypeSettlement, 999999);
+  const script::HostOutcome researched = free_call("IsResearched", {gone, script::Value::string("Drill")});
+  CHECK(researched.status == script::HostStatus::ok);
+  CHECK(!yes(researched));
+  CHECK(b.truth("CanResearch", {gone, script::Value::string("Drill")}) == 0);
+  CHECK(b.truth("TSResearch", {gone, script::Value::string("Drill")}) == 0);
+}
+
 /// AI upgrade "queued" forever.
 TEST(economy_research_replaces_the_labs_running_idle) {
   LabBench b;
@@ -5092,6 +5165,24 @@ TEST(get_settlements_filters_by_class_and_treats_player_zero_as_a_wildcard) {
   // a class the graph cannot resolve does not silently widen to everything.
   CHECK(list_of("Tavern", 1).empty());
   CHECK(list_of("NoSuchClassAnywhere", 0).empty());
+  // The collector (0x00436ec0) takes every owner whenever the decremented
+  // number is negative, so every argument below 1 is the wildcard.
+  CHECK(list_of("Barracks", -1).size() == 1);
+  CHECK(list_of("Barracks", -7).size() == 1);
+  // One class name (0x0059c020 looks the string up whole): a list is no class.
+  CHECK(list_of("Barracks,Building", 0).empty());
+
+  // `Strongholds` asks the central building's class whether it is a
+  // `BaseTownhall` (0x0043ffc0), not the kind the settlement was made with:
+  // this one was created a stronghold around a barracks, and is not counted.
+  REQUIRE(town->kind == SettlementKind::stronghold);
+  const auto count = [&](const char* name, std::int64_t player) {
+    return call_host(registry, b.world, script::CallKind::free_function, name, 1,
+                     {script::Value::integer(player)})
+        .value.as_integer();
+  };
+  CHECK(count("Strongholds", 1) == 0);
+  CHECK(count("Outposts", 0) == 0);
 }
 
 /// `set.IsCity()` is two class names, and `set.PopulationDied()` is a zero.

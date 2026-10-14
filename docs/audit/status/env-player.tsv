@@ -1,0 +1,82 @@
+# env-player batch: engine/core/src/sim/env.cpp and engine/core/src/sim/player_host.cpp
+# body	status	note
+0x006adb20	verified	EnvReadInt(int plr): Player%d with the integer verbatim; atol of the stored text (0x006ac740, CRT 0x00763919)
+0x006ad3e0	verified	EnvReadInt(Settlement): invalid handle answers 0, no trap (fixed)
+0x006acc60	verified	EnvReadInt(Building): keyed by object id, not Settlement/Bld (invisible to script); invalid or dead handle answers 0 (fixed)
+0x006acb60	partial	EnvReadInt(str): MakePath context modelled for sequence threads only (0x005b9d40 sets '/'; fixed); object-attached and conversation contexts unmodelled, no root call reaches them
+0x006adeb0	verified	EnvWriteInt(int plr): ltoa(value,10) and map set (0x006ac4a0)
+0x006ad900	verified	EnvWriteInt(Settlement): invalid handle stores nothing, no trap (fixed)
+0x006ad1a0	verified	EnvWriteInt(Building): invalid or dead handle stores nothing (fixed)
+0x006ac920	partial	EnvWriteInt(str): sequence context modelled (fixed); other launchers' contexts not
+0x006adbd0	verified	EnvReadString(int plr): missing key is "" (0x007ab85a)
+0x006ad4d0	verified	EnvReadString(Settlement): invalid handle answers "" (fixed)
+0x006acd70	verified	EnvReadString(Building): invalid or dead handle answers "" (fixed)
+0x006aca60	partial	EnvReadString(str): sequence context modelled (fixed); other launchers' contexts not
+0x006adde0	verified	EnvWriteString(int plr): value stored as is, empty included
+0x006ad7e0	verified	EnvWriteString(Settlement): invalid handle stores nothing (fixed)
+0x006ad070	verified	EnvWriteString(Building): invalid or dead handle stores nothing (fixed)
+0x006ac890	partial	EnvWriteString(str): sequence context modelled (fixed); other launchers' contexts not
+0x006add10	partial	EnvReadObj(int plr): sscanf $$%d$$ rules and dead object -> invalid (fixed); original's 0..65535 index range not carried (32-bit never-reused ids, design)
+0x006ad6c0	partial	EnvReadObj(Settlement): as the int form; invalid scope -> invalid handle (fixed)
+0x006acf40	partial	EnvReadObj(Building): as the int form; invalid scope -> invalid handle (fixed)
+0x006acbd0	partial	EnvReadObj(str): root form now registered (fixed); context and id-space gaps as above
+0x006adf70	partial	EnvWriteObj(int plr): invalid object stored as $$0$$ where the original writes $$65535$$ (both read back as nothing; id-space design)
+0x006ada00	partial	EnvWriteObj(Settlement): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
+0x006ad2b0	partial	EnvWriteObj(Building): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
+0x006ac9b0	partial	EnvWriteObj(str): root form now registered (fixed); context and $$65535$$ gaps as above
+0x00433790	verified	IsResearched(Settlement): command row by name, first NamePlr/NameSet triple of its param (tokenizer 0x006ab970), owner+1 or settlement id; no row/no triple/invalid receiver -> false (fixed: was the research catalog, last triple, trap)
+0x00433b70	verified	IsResearched(int): Player%d verbatim (0x00433be6 -> 0x00433e39); NameSet row -> false (fixed)
+0x00434000	verified	IsResearching(Settlement): as IsResearched with "researching" (fixed)
+0x004343e0	verified	IsResearching(int): as IsResearched(int) with "researching" (fixed)
+0x00434870	partial	CanResearch: row, idle lab, first ledger triple; no requirement check (fixed); lab finder 0x0042d010 (state string "idle", class command list) modelled by settlement_lab_for from row sources
+0x00426ab0	partial	TSResearch: runs TSH_Research.vs on the owner's AI path; invalid receiver -> false (fixed); a helper that fails to run is a trap via the shared run_script_now where retail logs and answers false
+0x004c6270	partial	GetConst: INI integer getter 0x0063f200 (sign, 0x hex or decimal, stops at first misfit; fixed: a half-numeric value was 0); a missing key pushes the un-zeroed local (a stack address) where this answers 0 -- only RecallDistance reaches it, dead value; INI loader's own comment handling (0x0063f120 store) not read
+0x004c62f0	partial	GetConstStr: text or "" (fixed: numeric keys had no text); whether the INI store keeps inline comments not read (the two shipped keys have none)
+0x004243d0	partial	CheckUEnabled: 1-based player, type 0..5, max<0 set, max==0 clear, else set while Count(player, UType) < max (fixed: count was ignored); count shares Count's model (world_host) of the class-count map 0x004441e0
+0x00420d60	verified	UType: type 0..5 checked, race unchecked, table+race*6+type over the 184-pointer block (fixed: race>7 read next table); outside the block answers ""
+0x00420de0	verified	UTech: as UType from 0x0081a448
+0x00420e60	verified	UTrainCmd: as UType from 0x0081a508
+0x00420ee0	verified	UEnabled: bit & 31 (fixed: out-of-range bit was false)
+0x00420c90	verified	RUType: race 0..7 else -1, exact compare over the race's six types
+0x00422ad0	verified	ArenaUType: race 0..7 else ""; table checked entry by entry
+0x00420f10	verified	ArenaUTech: Egypt's slot is "Cult of Anubis" (fixed: was empty)
+0x00422a60	verified	ArenaTrainCmd: race 0..7 else ""
+0x00420f80	verified	TempleUType: race 0..7 else ""
+0x00420ff0	partial	TempleUTrain: seven strings for eight races, Britain trainEPriest, Egypt trainTEnchantress (fixed); Germany's slot is a null pointer the original faults on, answered ""
+0x00564c10	verified	DiplAreAllied: 1..16 else false; same player true; else both records' allied dword (+0x64, playerdata/@allied, PlayerSetup::allied_flag) and mutual bit 0 (fixed: allied flag was ignored)
+0x00564990	verified	DiplGetCeaseFire: row p1, column p2, bit 0 (disassembly 0x005649be..0x005649e5); out of range false
+0x00564a30	verified	DiplGetShareSupport: bit 2, as DiplGetCeaseFire
+0x00564ad0	verified	DiplGetShareView: bit 4, as DiplGetCeaseFire
+0x00564b70	verified	DiplGetShareControl: bit 5, as DiplGetCeaseFire
+0x00565500	verified	DiplCeaseFire: both 1..16 checked first, one row read-modify-write of mask 0x01 through SetRelation 0x005652f0 (self skipped); its UI notification is presentation
+0x005655a0	verified	DiplShareSupport: mask 0x04, as DiplCeaseFire
+0x00565700	verified	DiplShareControl: mask 0x20, as DiplCeaseFire
+0x00565640	partial	DiplShareView: mask 0x10 as DiplCeaseFire; the set path's exploration merge 0x00564fa0 is unread and not done
+0x00565480	verified	ClearDiplomacy: SetRelation(i,j, i==j ? 0x35 : 0) over 16x16, diagonal skipped by SetRelation
+0x005aa480	verified	Obj::IsEnemy: receiver owner's row, parameter owner's column, bit 0 clear; either invalid -> false
+0x00425250	verified	Settlement::IsEnemy: row idPlayer-1, column owner, bit 0 clear; the original has no range check (out of range answers false here)
+0x004252c0	verified	Settlement::IsOwn: owner id == idPlayer-1
+0x004251e0	verified	Settlement::IsAlly: row idPlayer-1, column owner, bit 0 set
+0x005756b0	partial	EnemyObjs: 1..16, one class by registry lookup, unknown class -> invalid handle (fixed); the factory 0x004fe990 interns (same player/type/class string returns the existing query) where this mints one per call (query-lifetime design); query evaluation is the query batch's
+0x00575ab0	partial	FriendlyObjs: type 1, as EnemyObjs
+0x005758b0	partial	ControllableObjs: type 3, as EnemyObjs
+0x005dea90	partial	GetPlayerUnits(player, class): members of the squads on the player's AI record (0x005de750, count gate 0x004441e0, Hero/BaseMage arms); this engine lists world objects of the class (squad-roster design)
+0x005debe0	partial	GetPlayerUnits(player): every member of every squad on the player's AI record; this engine lists Unit-class objects (squad-roster design)
+0x00421ee0	partial	MilUnits: members of squads with Squad::Eval != 0 and no 0x25 flag, neither Peaceful nor Animal (0x00443eb0); kept as a Military-class census because Squad::Eval is never written (squad design)
+0x0042d2f0	verified	Strongholds: settlements of idPlayer-1 whose central building's class is_a BaseTownhall now (0x0043ffc0) (fixed: was the creation-time kind)
+0x0042d770	verified	Outposts: as Strongholds with is_a Outpost (0x00440060); a negative decremented number counts every owner
+0x00436f50	verified	GetSettlements: one class lookup, is_a on the central building (0x0059c020); a decremented player below 0 is the wildcard (fixed: only 0 was); pushes central-building handles
+0x004ca9c0	partial	Party: copies the roster deque at globals+0x1030; this engine lists in_party objects in ascending id (roster order approximated)
+0x005731e0	partial	PartyQuery: the session's party query refreshed, invalid handle with no party; this engine answers an empty party query (no party object)
+0x00422900	verified	IsAIPlayer: record(idPlayer-1)+0x88 (the AI pointer AIStart builds and AIStop nulls) non-null, i.e. AiPlayer::active (fixed: was the slot's control)
+0x005a80e0	partial	GetPlayerRace: reads the session setup table at 0x00a87c48 [(p-1)*0xc0+0xa4], -1 when the table is absent; its writer was not read; this answers the race match setup resolved into PlayerSetup::race
+0x004d4310	verified	SetPlayerStatus(player, slot, text, important): writes only the HUD status table (0x005cd4f0 on 0x009bf87c); nothing in the simulation reads it, a no-op here
+0x004d43a0	verified	SetPlayerStatus(player, slot, important): as above (0x005cd570)
+0x004c8460	partial	RevealHiddenEnemyUnits: radius squared, hidden + unit, owner not in the revealer's seeflags (+0x18, kept by SetRelation from the owner's share-view bit) (fixed: was is_enemy); own units spared (self bit unread); the stealth stamp [obj+0x1a4] is not stored
+0x005ada20	partial	Obj::race: class descriptor +0xb48; invalid receiver 0 (fixed); class-loader numbers None -1, Mutable 9, unknown 8 (fixed); a class with no race in its chain reads -1, the descriptor default unrecovered
+0x005b26a0	verified	GetClassRace: registry lookup, unknown class -1, else the descriptor's race (class_race_from_name, fixed)
+0x005a7ce0	verified	GetRaceStr: the 0..7 name table 0x005a7b90, else ""
+0x005a7d40	verified	GetRaceStrPref: G R C I M B E T, else ""
+0x005aaa90	verified	Obj::raceStr: class race through 0x005a7b90; invalid receiver ""
+0x005aab60	verified	Obj::raceStrPref: upper-case letter table; invalid receiver ""
+0x005aac90	verified	Obj::raceStrPrefLow: lower-case letter table; invalid receiver ""

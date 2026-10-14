@@ -253,8 +253,13 @@ row, the same bit, the opposite branch.
 is in a mutual `0x15` pair — but so is player 0 of Egypt, which has `allied="0"`, and so are
 players 0 and 1 of `Tutorial.BFHP`, where no document sets it at all.
 
-So it correlates with `0x15` and does not determine it. It is a per-player editor marker
-(`players.xml` spells the same field `sharedvictory`); the matrix is the source of truth.
+So it correlates with `0x15` and does not determine it: the matrix is the source of truth
+for hostility. But it is not inert. The loader (0x00567ad0) copies it into the player
+record at offset `0x64`, which the player serialiser (0x00564780) names `allied`, the
+in-game diplomacy command (0x004e5f80) sets, and `DiplAreAllied` (0x00564c10) requires on
+**both** players before it answers yes. `players.xml` spells the same field `sharedvictory`,
+which is what it is: the four skirmish victory scripts count every player that is not
+`DiplAreAllied` with them as still to be beaten.
 
 #### Player numbers on the wire are 1..16
 
@@ -333,12 +338,6 @@ town hall still answers `Egypt`.
   masks they feed (`supportflags`, `controlflags`) are named by the serialiser, but no
   shipped map sets either off the diagonal, so there is no observed behaviour to reproduce.
   `share support` in particular has never been seen granted between two different players.
-- **The per-player dword at record offset `0x64`.** `DiplAreAllied` requires it to be
-  non-zero on *both* players before it will answer yes, so it gates every alliance. It is not
-  one of the nine fields the serialiser names, nothing in the shipped data reaches it, and
-  its meaning was not recovered. The reimplementation does not model it, which means it may
-  answer `true` where the original answers `false` for a player in whatever state that field
-  records.
 - **Which mask each `CVXPlayerFlagsQuery` type consults.** The three `type` values are
   proven; that type 2 filters on `enemyflags`, type 1 on its complement and type 3 on
   `controlflags` is inference from the function names. The query's match function was not
@@ -1426,7 +1425,7 @@ Cross-checks against the class graph, run separately because they need the packs
   race but do not match any index in the class graph or the interface `.ini` set exactly.
 - **The relations bits that no map sets.** The bit layout itself is no longer unknown — it is
   read out of `gbr.exe` in [The relations matrix](#the-relations-matrix) above — but bits 1
-  and 3, the upper 24 bits of each word, the gate at record offset `0x64`, and the behaviour
+  and 3, the upper 24 bits of each word, and the behaviour
   of `share support` and `share control` are all unexercised by the shipped content.
 - **`user_art/@explored`.** All 29 maps name `CurrentMap/zoommap.bmp` and **no container
   stores that file**. Either the engine generates the explored-map bitmap at run time and the

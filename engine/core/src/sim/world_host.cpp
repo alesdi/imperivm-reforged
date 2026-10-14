@@ -1574,6 +1574,18 @@ HostOutcome fn_count(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(n)));
 }
 
+}  // namespace
+
+std::int32_t player_class_count(World& world, PlayerId player, std::string_view class_name) {
+  if (player == kNoPlayer) return 0;
+  std::vector<ObjectId> found;
+  const std::size_t n = world.objects_of_class_for_player(
+      ClassFilter::parse(class_name, world.class_graph()), player, Point{}, 0, found);
+  return static_cast<std::int32_t>(n);
+}
+
+namespace {
+
 // --------------------------------------------------------------------------
 // named objects: `map.obj.xml`'s `<group type="0">`
 // --------------------------------------------------------------------------

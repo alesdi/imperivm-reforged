@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "imperivm/core/sim/ai.hpp"
+#include "imperivm/core/sim/campaign.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/player_host.hpp"
@@ -53,24 +54,47 @@ void fold_text(std::uint64_t& h, std::string_view text) noexcept {
 // value coercion
 // --------------------------------------------------------------------------
 
-std::int32_t env_parse_int(std::string_view text) noexcept {
-  std::size_t i = 0;
-  while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+namespace {
+
+/// The C locale's `isspace`: what the CRT's `atol` and `sscanf`'s `%d` skip.
+[[nodiscard]] constexpr bool c_space(char c) noexcept {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
+/// `atol` as the executable's CRT has it (Visual Studio 2003, linked at
+/// 0x00763919): skip leading C-locale white space, take one `+` or `-`, then
+/// accumulate decimal digits in a 32-bit register **with no overflow check**,
+/// negating at the end. `digits` says whether any digit was read, which is
+/// what `sscanf`'s `%d` needs and `atol` ignores.
+[[nodiscard]] std::int32_t crt_atol(std::string_view text, std::size_t& i, bool& digits) noexcept {
+  while (i < text.size() && c_space(text[i])) ++i;
   bool negative = false;
   if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
     negative = text[i] == '-';
     ++i;
   }
-  // 64-bit accumulation, saturating, so a runaway digit string cannot overflow
-  // signed arithmetic and become undefined behaviour in a deterministic core.
-  std::int64_t value = 0;
+  // Unsigned, so the wrap the original's `imul`/`add` performs is defined
+  // behaviour here rather than signed overflow.
+  std::uint32_t value = 0;
+  digits = false;
   while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
-    if (value < 0x7FFFFFFFll) value = value * 10 + (text[i] - '0');
+    value = value * 10u + static_cast<std::uint32_t>(text[i] - '0');
+    digits = true;
     ++i;
   }
-  if (value > 0x7FFFFFFFll) value = 0x7FFFFFFFll;
-  const std::int64_t signed_value = negative ? -value : value;
-  return static_cast<std::int32_t>(signed_value);
+  if (negative) value = 0u - value;
+  return static_cast<std::int32_t>(value);
+}
+
+}  // namespace
+
+std::int32_t env_parse_int(std::string_view text) noexcept {
+  // `EnvReadInt`'s read helper (0x006ac740) hands the stored string to `atol`
+  // and returns what it says: no digits is zero, and a digit string past 2^31
+  // wraps rather than saturating.
+  std::size_t i = 0;
+  bool digits = false;
+  return crt_atol(text, i, digits);
 }
 
 std::string env_format_int(std::int32_t value) {
@@ -97,11 +121,18 @@ std::string env_format_object(ObjectId id) {
 }
 
 ObjectId env_parse_object(std::string_view text) noexcept {
-  if (text.size() < 5) return kNoObject;
-  if (text[0] != '$' || text[1] != '$') return kNoObject;
-  if (text[text.size() - 1] != '$' || text[text.size() - 2] != '$') return kNoObject;
-  const std::int32_t id = env_parse_int(text.substr(2, text.size() - 4));
-  return id <= 0 ? kNoObject : static_cast<ObjectId>(id);
+  // 0x006ac790: `sscanf(value, "$$%d$$", &n)` and a test that **one**
+  // conversion happened. So the two leading dollars must be there literally,
+  // `%d` skips white space and takes a sign, and the trailing `$$` is never
+  // checked -- `"$$12"` is object 12. The original then refuses `n` outside
+  // 0..65535 and indexes its object table; this engine's ids are 32-bit and
+  // never reused, so only the lower bound carries over (0 is `kNoObject` here).
+  if (text.size() < 2 || text[0] != '$' || text[1] != '$') return kNoObject;
+  std::size_t i = 2;
+  bool digits = false;
+  const std::int32_t id = crt_atol(text, i, digits);
+  if (!digits || id <= 0) return kNoObject;
+  return static_cast<ObjectId>(id);
 }
 
 // --------------------------------------------------------------------------
@@ -387,6 +418,37 @@ const UnitRow* UnitCatalog::row(std::int32_t race_index, std::int32_t type) cons
   return index < units->rows.size() ? &units->rows[index] : nullptr;
 }
 
+std::string_view UnitCatalog::block(std::int64_t index) const noexcept {
+  constexpr std::int64_t kRaceCount = 8;
+  constexpr std::int64_t kTypes = 6;
+  if (index < 0 || races_.size() != static_cast<std::size_t>(kRaceCount)) return {};
+  // Three six-wide tables, then five one-per-race tables.
+  for (int column = 0; column < 3; ++column) {
+    if (index < kRaceCount * kTypes) {
+      const std::vector<UnitRow>& rows = races_[static_cast<std::size_t>(index / kTypes)].rows;
+      if (rows.size() != static_cast<std::size_t>(kTypes)) return {};
+      const UnitRow& row = rows[static_cast<std::size_t>(index % kTypes)];
+      return column == 0 ? std::string_view{row.type}
+                         : column == 1 ? std::string_view{row.tech} : std::string_view{row.train_cmd};
+    }
+    index -= kRaceCount * kTypes;
+  }
+  for (int column = 0; column < 5; ++column) {
+    if (index < kRaceCount) {
+      const RaceUnits& units = races_[static_cast<std::size_t>(index)];
+      switch (column) {
+        case 0: return units.arena.type;
+        case 1: return units.arena.train_cmd;
+        case 2: return units.arena.tech;
+        case 3: return units.temple.type;
+        default: return units.temple.train_cmd;
+      }
+    }
+    index -= kRaceCount;
+  }
+  return {};
+}
+
 std::int32_t UnitCatalog::index_of(std::int32_t race_index,
                                    std::string_view type) const noexcept {
   const RaceUnits* units = race(race_index);
@@ -473,10 +535,12 @@ constexpr RawRace kRaces[] = {
       {"BJavelineer", "Britain Javelins", "trainBJavelineer"},
       {"BHighlander", "Britain Swords", "trainBHighlander"}},
      {"BVikingLord", "Britain Fights", "Hire Viking Lord"},
-     // `trainBDruid` is the command in `BTEMPLEOFTHOR.XML`, but it is the one
-     // string of this table that `gbr.exe` does not carry. Reproduced as the
-     // hole it is rather than filled in.
-     {"BDruid", "", ""}},
+     // The temple-train table (0x0081a648) has **seven** strings for eight
+     // races: `trainBDruid` -- the command `BTEMPLEOFTHOR.XML` offers -- is
+     // missing, so everything after Iberia's Imperial Rome entry slides up one
+     // slot. Britain's slot holds `trainEPriest`, Egypt's `trainTEnchantress`,
+     // and Germany's is a null pointer. Reproduced as the executable has it.
+     {"BDruid", "", "trainEPriest"}},
     {"Egypt",
      {{"ESwordsman", "", "trainESwordsman"},
       {"EArcher", "", "trainEArcher"},
@@ -484,11 +548,14 @@ constexpr RawRace kRaces[] = {
       {"EAnubisWarrior", "Cult of Anubis", "trainEAnubisWarrior"},
       {"EHorusWarrior", "Cult of Horus", "trainEHorusWarrior"},
       {"EGuardian", "", "trainEGuardian"}},
-     // `ETEMPLEOFOSIRIS.XML` gates `Chariot of Osiris` on `Cult of Osiris`, but
-     // that string is absent from `gbr.exe` while the other seven races' arena
-     // techs are present, so the engine's Egyptian slot reads as empty here.
-     {"EChariot", "", "Chariot of Osiris"},
-     {"EPriest", "", "trainEPriest"}},
+     // `ETEMPLEOFOSIRIS.XML` gates `Chariot of Osiris` on `Cult of Osiris`,
+     // which `gbr.exe` does not carry; its arena-tech table (0x0081a608) holds
+     // `Cult of Anubis` in the Egyptian slot (0x0081a620), the same string as
+     // Egypt's fourth barrack tech. So an Egyptian AI's arena recruit waits on
+     // the Anubis cult, as it does in the retail game.
+     {"EChariot", "Cult of Anubis", "Chariot of Osiris"},
+     // The slid temple-train slot; see Britain.
+     {"EPriest", "", "trainTEnchantress"}},
     {"Germany",
      {{"TSwordsman", "", "trainTSwordsman"},
       {"TArcher", "", "trainTArcher"},
@@ -497,7 +564,9 @@ constexpr RawRace kRaces[] = {
       {"TTeutonRider", "", "trainTTeutonRider"},
       {"TMaceman", "", "trainTMaceman"}},
      {"TValkyrie", "TFights", "Call Valkyries"},
-     {"TEnchantress", "", "trainTEnchantress"}},
+     // A null pointer in the original (0x0081a664), which `TempleUTrain`
+     // hands to `strlen` (0x00695e10) -- a fault, not an answer. Empty here.
+     {"TEnchantress", "", ""}},
 };
 
 [[nodiscard]] UnitRow to_row(const RawRow& raw) {
@@ -560,20 +629,53 @@ void EnvSystem::hash(std::uint64_t& accumulator) const {
   mix(ai_vars_.hash());
 }
 
+std::int32_t ini_number(std::string_view text) noexcept {
+  // 0x0063f200, the INI's integer getter. Leading spaces and tabs go (the
+  // trailing trim it also calls, 0x0063ec30, starts on the terminator and so
+  // trims nothing -- harmless, because the parse stops at the first misfit).
+  std::size_t i = 0;
+  while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+  std::int32_t sign = 1;
+  if (i < text.size() && (text[i] == '-' || text[i] == '+')) {
+    if (text[i] == '-') sign = -1;
+    ++i;
+  }
+  // 32-bit arithmetic as the original's; unsigned so a wrap is defined here.
+  std::uint32_t value = 0;
+  if (i + 1 < text.size() && text[i] == '0' && text[i + 1] == 'x') {
+    for (i += 2; i < text.size(); ++i) {
+      const char c = text[i];
+      std::uint32_t digit = 0;
+      if (c >= '0' && c <= '9') {
+        digit = static_cast<std::uint32_t>(c - '0');
+      } else if (c >= 'a' && c <= 'f') {
+        digit = static_cast<std::uint32_t>(c - 'a' + 10);
+      } else if (c >= 'A' && c <= 'F') {
+        digit = static_cast<std::uint32_t>(c - 'A' + 10);
+      } else {
+        break;
+      }
+      value = value * 16u + digit;
+    }
+  } else {
+    for (; i < text.size() && text[i] >= '0' && text[i] <= '9'; ++i) {
+      value = value * 10u + static_cast<std::uint32_t>(text[i] - '0');
+    }
+  }
+  return static_cast<std::int32_t>(sign < 0 ? 0u - value : value);
+}
+
 std::size_t EnvSystem::load_constants(const IniDocument& document) {
   const SectionIndex section = document.section("GamePlay");
   if (section == kNoSection) return 0;
   std::size_t taken = 0;
   for (const IniEntry& entry : document.entries_of(section)) {
     if (!entry.has_key || entry.key.empty()) continue;  // a bare line is not a constant
-    std::int32_t value = 0;
-    if (parse_int(entry.value, value)) {
-      // `parse_int` refuses a value it can only read half of, which is the
-      // guard `ProductionInterval` needed: `2000` must never become `20`.
-      set_constant(entry.key, value);
-    } else {
-      set_constant_string(entry.key, entry.value);
-    }
+    // Every key has both readings, as the original's one INI store does:
+    // `GetConstStr` the text, `GetConst` (and every engine reader) the number
+    // `ini_number` makes of it -- `"500, 1000"` is 500 to the latter.
+    set_constant_string(entry.key, entry.value);
+    set_constant(entry.key, ini_number(entry.value));
     ++taken;
   }
   return taken;
@@ -851,57 +953,108 @@ using script::Value;
   return true;
 }
 
+/// How argument 0 of a scoped `Env*` call resolved.
+enum class ScopeArg : std::uint8_t {
+  ok,
+  /// A handle naming nothing: gbr.exe's "uninitialized or invalid object".
+  /// Not a trap -- see `env_target`.
+  invalid_object,
+  /// Neither an integer nor a handle. No overload of the original takes such
+  /// a value, so its compiler never emits the call; here it is a type error.
+  bad_shape,
+};
+
 /// Resolve argument 0 of an `Env*` call to a scope.
 ///
-/// Three of the four scope kinds are reachable from script, and the value's own
-/// shape says which:
+/// gbr.exe registers each name four times with a declared first-parameter
+/// type, and the path each body formats says what the scope is:
 ///
-///   * an **integer** is a player number — `EnvReadInt(AIPlayer, …)`,
-///     `EnvWriteInt(.player, …)`; 213 of the corpus's 550-odd `Env*` call sites;
-///   * a **`kTypeSettlement` handle** is a settlement — `EnvReadInt(set, …)`,
-///     `EnvReadString(.settlement, …)`;
-///   * any other **object handle** is a building — `EnvWriteString(this,
-///     "researching", "yes")` in `RESEARCH.VS`, where `this` is
-///     `This.AsBuilding()`.
+///   * `int plr` -- `/<map>/Player%d/<key>` with the integer **verbatim**, no
+///     range check and no adjustment (0x006adb20 and its five siblings). A
+///     script that passes `.player` therefore addresses the 1-based slot, and
+///     one that passes a raw owner index addresses the slot one below;
+///   * `Settlement set` -- `/<map>/Settlement%d/<key>` with the settlement's
+///     id (0x006ad3e0);
+///   * `Building b` -- `/<map>/Settlement%d/Bld%d/<key>`, the building's own
+///     settlement id and its object index (0x006acc60).
 ///
-/// Note that an ordinary object handle is *not* mapped back to its settlement
-/// even when it is that settlement's anchor. `ONFINISH_RESEARCH.VS` writes both
-/// `EnvWriteString(this, "researching", "no")` and
-/// `EnvWriteString(.settlement, name, "researched")` on the same town hall in
-/// the same run, and the two must not land in the same scope.
-[[nodiscard]] bool scope_arg(CallContext& ctx, EnvScope& out) {
-  if (ctx.count() == 0) return false;
+/// Here the value's shape picks the overload, as the original's compiler does
+/// from its static type: an integer is a player, a `kTypeSettlement` handle a
+/// settlement, any other handle a building. An ordinary object handle is
+/// **not** mapped back to its settlement even when it is that settlement's
+/// anchor: `ONFINISH_RESEARCH.VS` writes `EnvWriteString(this, "researching",
+/// "no")` and `EnvWriteString(.settlement, name, "researched")` on one town
+/// hall in one run, and the two paths differ.
+///
+/// The building scope is keyed by object id rather than by `Settlement/Bld`;
+/// see `EnvScope` for why the relabelling is invisible to script.
+///
+/// A handle is invalid when it names no live object (the original's table
+/// slot is empty) or, for a settlement, no settlement.
+[[nodiscard]] ScopeArg scope_arg(CallContext& ctx, EnvScope& out) {
+  if (ctx.count() == 0) return ScopeArg::bad_shape;
   const Value& value = ctx.arg(0);
   if (value.is_integer()) {
     out = EnvScope::for_player(value.as_integer());
-    return true;
+    return ScopeArg::ok;
   }
-  if (!value.is_object()) return false;
+  if (!value.is_object()) return ScopeArg::bad_shape;
   const ObjectRef ref = value.as_object();
-  if (!ref.valid()) return false;
+  if (!ref.valid()) return ScopeArg::invalid_object;
+  World* world = world_of(ctx);
   if (ref.type == kTypeSettlement) {
-    World* world = world_of(ctx);
     EconomySystem* economy = world == nullptr ? nullptr : economy_of(*world);
     const Settlement* s =
         economy == nullptr ? nullptr : economy->settlements().for_object(ref.id);
-    if (s == nullptr) return false;
+    if (s == nullptr) return ScopeArg::invalid_object;
     out = EnvScope::for_settlement(s->id);
-    return true;
+    return ScopeArg::ok;
   }
+  if (world != nullptr && world->find(ref.id) == nullptr) return ScopeArg::invalid_object;
   out = EnvScope::for_building(ref.id);
-  return true;
+  return ScopeArg::ok;
 }
 
 [[nodiscard]] HostOutcome bad_scope() {
-  // `gbr.exe` carries this sentence once per `Env*` overload, verbatim except
-  // for the parameter name. What the retail engine does *after* printing it is
-  // not recoverable from the binary; see env.hpp's unknowns.
-  return HostOutcome::failed(
-      "Parameter #Settlement in function 'Env*' is uninitialized or invalid object.");
+  return HostOutcome::failed("Env*: the scope argument is neither a player number nor a handle");
 }
 
 [[nodiscard]] HostOutcome bad_key() {
   return HostOutcome::failed("Env*: the key argument is not a string");
+}
+
+/// The running script thread's `Context`, which `MakePath` (0x006ab0e0)
+/// prepends to a root key that does not start with `/`.
+///
+/// The field is a string on the script thread (serialised as `Context`,
+/// 0x0069cc58), null by default, and three launchers set it:
+///
+///   * **the sequence runner** (`Start`, 0x005b9d40) -- after spawning a
+///     sequence's thread it looks that thread up and sets its context to the
+///     one-character string `/` (0x005b9da7 .. 0x005b9db7). So inside every
+///     campaign sequence a relative root key is made absolute: `"Bonus"` and
+///     `"/Bonus"` are **one** slot there;
+///   * the object-attached launcher (0x0041ccb0, 0x0041cd00), which sets the
+///     object's id formatted `%d`; and
+///   * the conversation phrase runner (0x0050aa90, 0x0050b070), which sets a
+///     name followed by `/`.
+///
+/// Only the first is modelled. Every root-form `Env*` call in the installation
+/// -- 381 literal sites -- is inside a `Sequences/` script, so the other two
+/// would prefix keys no shipped script ever passes them; they answer "no
+/// context" here, which is the null the original starts every thread with.
+///
+/// A sequence's thread is the one `CampaignSystem` records as running it,
+/// which is saved state already (`SequenceEntry::running`).
+[[nodiscard]] std::string_view thread_context(CallContext& ctx) {
+  if (ctx.script == script::kNoScript) return {};
+  World* world = world_of(ctx);
+  const CampaignSystem* campaign = world == nullptr ? nullptr : campaign_system_of(*world);
+  if (campaign == nullptr) return {};
+  for (const CampaignSystem::SequenceEntry& entry : campaign->sequences()) {
+    if (entry.running == ctx.script) return "/";
+  }
+  return {};
 }
 
 /// One resolved `Env*` call: which scope, which key, where a write's value sits.
@@ -910,19 +1063,19 @@ using script::Value;
 /// the scope argument. `gbr.exe` declares both — `int, str key` at 0x006ae7f7
 /// beside `int, int plr, str key` at 0x006ae983, and the same pairing for the
 /// other five — and the containers use the shorter form **403 times**, every one
-/// of them in a `Sequences/` script. `data.pak` never does, which is why the
-/// root form read as "declared and never called" for as long as the corpus
-/// inventory was built from the packs alone.
-///
-/// Resolution is by the *shape* of argument 0, which is exactly what the retail
-/// overload set allows: a scoped call's first argument is an `int`, a
-/// `Settlement` or a `Building`, and a root call's is the key string. There is
-/// no ambiguity to resolve.
+/// of them in a `Sequences/` script.
 struct EnvTarget {
   EnvScope scope;
-  std::string_view key;
+  std::string key;
   std::size_t value_index = 0;  ///< where a write's value argument sits
   bool ok = false;
+  /// The scope handle named nothing. The original prints "Parameter
+  /// #Settlement in function '...' is uninitialized or invalid object." (or
+  /// `#Building`) through the logger that is an empty function in the retail
+  /// build (0x00686eb0), then **returns normally**: a read pushes its type's
+  /// default -- 0, `""` (0x007ab85a) or the invalid handle -- and a write
+  /// stores nothing. Every one of the twelve scoped bodies does exactly that.
+  bool invalid_scope = false;
   HostOutcome failure;  ///< what to return when `ok` is false
 };
 
@@ -937,27 +1090,41 @@ struct EnvTarget {
       out.failure = bad_key();
       return out;
     }
-    // The root scope. The key is used **verbatim**: `MakePath` (0x006ab0e0)
-    // returns the path unchanged when it starts with `/`, and otherwise
-    // prepends the running script thread's `Context` string — which is set only
-    // when a script is launched attached to a scriptable object, and is then a
-    // decimal object id (0x0041ccb0). Sequences carry no context, so the two
-    // spellings of a key are two different slots and neither is rewritten.
-    // See env.hpp, "the root scope", for the two shipped scripts this convicts.
+    // The root scope. The six root thunks (0x006ac890 and siblings) pass the
+    // script's string straight to the registry, whose get (0x006ac5c0) and
+    // set (0x006ac4a0) both funnel it through `MakePath` (0x006ab0e0): a path
+    // whose first character is `/`, or a thread with no context, is used as
+    // it is; anything else gets the thread's context prepended with no
+    // separator. The registry is a `std::map` keyed by the resulting string
+    // with `std::string::compare` (0x00409350), so keys are case-sensitive.
     out.scope = EnvScope::root();
-    out.key = ctx.arg(0).as_string();
+    const std::string_view key = ctx.arg(0).as_string();
+    const std::string_view context = thread_context(ctx);
+    if (!context.empty() && (key.empty() || key.front() != '/')) {
+      out.key.reserve(context.size() + key.size());
+      out.key.append(context);
+    }
+    out.key.append(key);
     out.value_index = 1;
     out.ok = true;
     return out;
   }
-  if (!scope_arg(ctx, out.scope)) {
-    out.failure = bad_scope();
-    return out;
+  switch (scope_arg(ctx, out.scope)) {
+    case ScopeArg::ok:
+      break;
+    case ScopeArg::invalid_object:
+      out.invalid_scope = true;
+      break;
+    case ScopeArg::bad_shape:
+      out.failure = bad_scope();
+      return out;
   }
-  if (!key_arg(ctx, 1, out.key)) {
+  std::string_view key;
+  if (!key_arg(ctx, 1, key)) {
     out.failure = bad_key();
     return out;
   }
+  out.key.assign(key);
   out.value_index = 2;
   out.ok = true;
   return out;
@@ -982,17 +1149,39 @@ struct EnvTarget {
   return economy->settlements().for_object(ref.id);
 }
 
-[[nodiscard]] HostOutcome no_settlement() {
-  return HostOutcome::failed("receiver does not resolve to a settlement");
-}
-
 // -- the environment store ------------------------------------------------
+//
+// The twenty-four bodies are six names times four overloads (root, Settlement,
+// Building, int), registered at 0x006ae7b0 (root) and 0x006ae941 (scoped).
+// Each scoped body pops its arguments, resolves the scope (`scope_arg`), and
+// formats the path with the map's name in front -- `/%s/Player%d/%s` and its
+// two siblings -- which no script can observe, so the scope and key are kept
+// as a pair here instead. Then:
+//
+//   * `EnvReadInt` -- the read helper 0x006ac740: look the path up (0x006ac5c0;
+//     a missing key is `""`) and `atol` it (`env_parse_int`). Pushes an int.
+//   * `EnvWriteInt` -- `ltoa(value, 10)` and set (0x006ac4a0): `map[path] =
+//     text`. Decimal with a leading `-` is `env_format_int`.
+//   * `EnvReadString` / `EnvWriteString` -- the same get and set with the
+//     string as it is. An empty value is stored, never erased.
+//   * `EnvReadObj` -- 0x006ac790 (`env_parse_object`) and then the live object
+//     at that index; a key that decodes to nothing, or to an object no longer
+//     there, pushes the invalid handle.
+//   * `EnvWriteObj` -- `$$%d$$` of the object's index; an invalid handle is
+//     written as index 0xffff (`$$65535$$`), which reads back as nothing. This
+//     engine writes `$$0$$` for it (`env_format_object(kNoObject)`), which
+//     also reads back as nothing; the stored text differs only to a script
+//     that reads an object key with `EnvReadString`, which none does.
+//
+// No body suspends, draws a random number or touches anything but the
+// registry. An invalid scope handle is the default answer (`EnvTarget`).
 
 HostOutcome env_read_int(CallContext& ctx, bool root) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return integer(0);
   return integer(env->env().read_int(target.scope, target.key));
 }
 
@@ -1001,6 +1190,7 @@ HostOutcome env_write_int(CallContext& ctx, bool root) {
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return HostOutcome::ok_void();
   env->env().write_int(target.scope, target.key, int_arg(ctx, target.value_index));
   return HostOutcome::ok_void();
 }
@@ -1010,6 +1200,7 @@ HostOutcome env_read_string(CallContext& ctx, bool root) {
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return text({});
   return text(env->env().read_string(target.scope, target.key));
 }
 
@@ -1021,6 +1212,7 @@ HostOutcome env_write_string(CallContext& ctx, bool root) {
   if (ctx.count() <= target.value_index || !ctx.arg(target.value_index).is_string()) {
     return HostOutcome::failed("EnvWriteString: the value argument is not a string");
   }
+  if (target.invalid_scope) return HostOutcome::ok_void();
   env->env().write_string(target.scope, target.key, ctx.arg(target.value_index).as_string());
   return HostOutcome::ok_void();
 }
@@ -1030,8 +1222,15 @@ HostOutcome env_read_obj(CallContext& ctx, bool root) {
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return HostOutcome::ok_with(invalid_handle());
   const ObjectId id = env->env().read_object(target.scope, target.key);
   if (id == kNoObject) return HostOutcome::ok_with(invalid_handle());
+  // The original indexes its object table with the decoded number, so an
+  // object that has left the world reads as the invalid handle.
+  World* world = world_of(ctx);
+  if (world != nullptr && world->find(id) == nullptr) {
+    return HostOutcome::ok_with(invalid_handle());
+  }
   return HostOutcome::ok_with(Value::object(kTypeObj, id));
 }
 
@@ -1040,21 +1239,23 @@ HostOutcome env_write_obj(CallContext& ctx, bool root) {
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return HostOutcome::ok_void();
   ObjectId id = kNoObject;
   if (ctx.count() > target.value_index && ctx.arg(target.value_index).is_object()) {
     const ObjectRef ref = ctx.arg(target.value_index).as_object();
-    if (ref.valid()) id = ref.id;
+    World* world = world_of(ctx);
+    // A handle naming no live object is written as the invalid index.
+    if (ref.valid() && (world == nullptr || world->find(ref.id) != nullptr)) id = ref.id;
   }
   env->env().write_object(target.scope, target.key, id);
   return HostOutcome::ok_void();
 }
 
 // The registry dispatches on `(name, arity)`, and the retail engine registers
-// each of these six names twice — once with a scope argument and once without.
-// Both entries land on the same body; only the argument layout differs, and it
-// is decided here rather than sniffed at run time, so a scoped call that is
-// handed a string where a scope belongs still refuses instead of silently
-// becoming a root write.
+// each of these six names with and without a scope argument. Both entries land
+// on the same body here; only the argument layout differs, and it is decided
+// by the arity rather than sniffed at run time, so a scoped call handed a
+// string where a scope belongs still refuses instead of becoming a root write.
 HostOutcome env_read_int_scoped(CallContext& ctx) { return env_read_int(ctx, false); }
 HostOutcome env_read_int_root(CallContext& ctx) { return env_read_int(ctx, true); }
 HostOutcome env_write_int_scoped(CallContext& ctx) { return env_write_int(ctx, false); }
@@ -1064,7 +1265,9 @@ HostOutcome env_read_string_root(CallContext& ctx) { return env_read_string(ctx,
 HostOutcome env_write_string_scoped(CallContext& ctx) { return env_write_string(ctx, false); }
 HostOutcome env_write_string_root(CallContext& ctx) { return env_write_string(ctx, true); }
 HostOutcome env_read_obj_scoped(CallContext& ctx) { return env_read_obj(ctx, false); }
+HostOutcome env_read_obj_root(CallContext& ctx) { return env_read_obj(ctx, true); }
 HostOutcome env_write_obj_scoped(CallContext& ctx) { return env_write_obj(ctx, false); }
+HostOutcome env_write_obj_root(CallContext& ctx) { return env_write_obj(ctx, true); }
 
 
 // -- AI variables ---------------------------------------------------------
@@ -1098,72 +1301,162 @@ HostOutcome set_ai_var(CallContext& ctx) {
 }
 
 // -- research -------------------------------------------------------------
+//
+// `IsResearched`, `IsResearching` and `Settlement::CanResearch` do not consult
+// a research catalog: each looks the name up in the **command table**, any
+// row of any building (the vtable call at `[0x009969dc]+0x14`, which is what
+// `CommandTable::find` models), answers false with "No such upgrade %s" when
+// there is none, and then reads the row's `param` string itself, three tokens
+// at a time, until the **first** `NamePlr` or `NameSet` triple. That triple
+// names the ledger key and its scope; the other verbs (`ReqSet`, `SetsPlr`,
+// ...) are skipped without being read. A row with neither verb has no ledger.
+//
+// The settlement forms read a `NamePlr` key at the owner's script number (the
+// owner's index plus one: 0x00433a15, 0x00434a4f) and a `NameSet` key at the
+// settlement's id. The `int idPlayer` forms read `NamePlr` at the integer
+// **verbatim**, with no adjustment, and answer false for a `NameSet` row ("%s
+// is not player upgrade"). The disassembly settles the verbatim: the integer
+// is saved at 0x00433be6 and pushed unchanged at 0x00433e39.
+//
+// A world with no command system -- the tests' and the conformance fixtures'
+// -- falls back to `EnvSystem`'s catalog, which is the reading the shipped
+// verifier scripts make (`ParseStr` over the same attribute) and the only one
+// available without the table.
 
-HostOutcome is_researched(CallContext& ctx) {
+/// One token of a command row's `param`, as 0x006ab970 cuts it: skip leading
+/// **spaces** (not tabs), take everything up to the next comma, drop trailing
+/// spaces. `pos` becomes the index after the comma, or `npos` once the string
+/// is exhausted -- after which every further token is empty.
+[[nodiscard]] std::string_view param_token(std::string_view text, std::size_t& pos) noexcept {
+  if (pos == std::string_view::npos) return {};
+  const std::size_t start = text.find_first_not_of(' ', pos);
+  if (start == std::string_view::npos) {
+    pos = std::string_view::npos;
+    return {};
+  }
+  const std::size_t comma = text.find(',', start);
+  std::size_t end = text.size();
+  if (comma == std::string_view::npos) {
+    pos = std::string_view::npos;
+  } else {
+    end = comma;
+    pos = comma + 1;
+  }
+  while (end > start && text[end - 1] == ' ') --end;
+  return text.substr(start, end - start);
+}
+
+/// The ledger a command row names: the first `NamePlr`/`NameSet` triple.
+struct RowLedger {
+  ResearchScope scope = ResearchScope::none;
+  std::string_view key;
+};
+
+[[nodiscard]] RowLedger row_ledger(std::string_view param) noexcept {
+  std::size_t pos = 0;
+  do {
+    const std::string_view verb = param_token(param, pos);
+    const std::string_view subject = param_token(param, pos);
+    (void)param_token(param, pos);
+    // `std::string::compare(0, size, "NamePlr", 7)`: exact and case-sensitive.
+    if (verb == "NamePlr") return {ResearchScope::player, subject};
+    if (verb == "NameSet") return {ResearchScope::settlement, subject};
+  } while (pos != std::string_view::npos);
+  return {};
+}
+
+/// The command table, when the world has one.
+[[nodiscard]] const CommandTable* command_table(CallContext& ctx) noexcept {
+  World* world = world_of(ctx);
+  const CommandSystem* commands = world == nullptr ? nullptr : command_system(*world);
+  return commands == nullptr ? nullptr : &commands->table();
+}
+
+/// `IsResearched` and `IsResearching` -- 0x00433790 / 0x00433b70 and
+/// 0x00434000 / 0x004343e0, one body per receiver type, the two names
+/// differing only in the literal they compare the ledger value with
+/// (`"researched"`, `"researching"`; exact). An invalid settlement is false
+/// ("Parameter #1 ... is uninitialized or invalid object"), never a trap.
+/// Nothing is written, nothing suspends.
+HostOutcome ledger_state(CallContext& ctx, std::string_view state) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
   std::string_view name;
   if (!key_arg(ctx, 1, name)) return bad_key();
-  // `gbr.exe` declares both overloads at arity 2:
-  //   bool, Settlement set, str research
-  //   bool, int idPlayer,   str research
-  if (ctx.count() > 0 && ctx.arg(0).is_integer()) {
-    return boolean(env->is_researched_for_player(ctx.arg(0).as_integer(), name));
+  const bool by_player = ctx.count() > 0 && ctx.arg(0).is_integer();
+  const CommandTable* table = command_table(ctx);
+  if (table == nullptr) {
+    if (by_player) {
+      const std::int32_t player = ctx.arg(0).as_integer();
+      return boolean(state == kResearched ? env->is_researched_for_player(player, name)
+                                          : env->is_researching_for_player(player, name));
+    }
+    const Settlement* s = settlement_receiver(ctx);
+    if (s == nullptr) return boolean(false);
+    return boolean(state == kResearched ? env->is_researched(*s, name)
+                                        : env->is_researching(*s, name));
+  }
+  const CommandDef* row = table->find(name);
+  if (row == nullptr) return boolean(false);  // "No such upgrade %s"
+  const RowLedger ledger = row_ledger(row->param);
+  if (by_player) {
+    if (ledger.scope != ResearchScope::player) return boolean(false);
+    return boolean(env->env().read_string(EnvScope::for_player(ctx.arg(0).as_integer()),
+                                          ledger.key) == state);
   }
   const Settlement* s = settlement_receiver(ctx);
-  if (s == nullptr) return no_settlement();
-  return boolean(env->is_researched(*s, name));
+  if (s == nullptr) return boolean(false);
+  if (ledger.scope == ResearchScope::none) return boolean(false);
+  const EnvScope scope = ledger.scope == ResearchScope::player
+                             ? owner_scope(*s)
+                             : EnvScope::for_settlement(s->id);
+  return boolean(env->env().read_string(scope, ledger.key) == state);
 }
 
-HostOutcome is_researching(CallContext& ctx) {
-  EnvSystem* env = host_env(ctx);
-  if (env == nullptr) return no_env();
-  std::string_view name;
-  if (!key_arg(ctx, 1, name)) return bad_key();
-  if (ctx.count() > 0 && ctx.arg(0).is_integer()) {
-    return boolean(env->is_researching_for_player(ctx.arg(0).as_integer(), name));
-  }
-  const Settlement* s = settlement_receiver(ctx);
-  if (s == nullptr) return no_settlement();
-  return boolean(env->is_researching(*s, name));
-}
+HostOutcome is_researched(CallContext& ctx) { return ledger_state(ctx, kResearched); }
+HostOutcome is_researching(CallContext& ctx) { return ledger_state(ctx, kResearching); }
 
 /// `set.CanResearch(name)` -- 53 sites. 0x00434870, in its order:
 ///
-///   1. the `<cmd>` row by name, any building's, research or not; none is
+///   1. the receiver; an invalid one is false (no trap);
+///   2. the `<cmd>` row by name, any building's, research or not; none is
 ///      *"No such upgrade %s"* and false. `hireheroE` and `BuySlaves` are
-///      asked about as often as `Fights`, and neither is a research row.
-///   2. **an idle building of the settlement that offers the row**
-///      (0x0042d010 with the idle flag set); none is false. This is the test
-///      that makes the answer a settlement's rather than a ledger's, and it
-///      is why a stronghold with no temple cannot hire a hero.
-///   3. the ledger, only for a row that names `NamePlr` or `NameSet`: not
-///      `researched`, not `researching`. A row with neither -- a hire, a
-///      purchase -- skips this and is researchable whenever its lab is idle.
+///      asked about as often as `Fights`, and neither is a research row;
+///   3. **an idle building of the settlement that offers the row** (0x0042d010
+///      with its idle flag set: a member whose state string is exactly
+///      `"idle"` and whose class's command list holds the row); none is
+///      false. `settlement_lab_for` models it from the row's sources;
+///   4. the row's ledger (`row_ledger`), if it names one: true unless the value
+///      there is `"researched"` or `"researching"`. A row with no
+///      `NamePlr`/`NameSet` -- a hire, a purchase -- is true here.
 ///
-/// `EnvSystem::can_research` is the ledger half with the catalog's
-/// requirements on top, and answers the whole question for a world with no
-/// command system -- the tests' and the conformance fixtures' -- which is
-/// where the older reading lived: a name outside the research catalog was
-/// "no such upgrade" there, so every `CanResearch("hirehero…")` in the
-/// installation answered no and no computer player ever hired a hero.
+/// **No requirement is checked.** `ReqSet`, `ReqPlr` and `NReqSet` are never
+/// read by this body; they are `VERIFY_RESEARCH.VS`'s, which the command bar
+/// runs, and `EnvSystem::can_research` -- which does check them -- is that
+/// script's model, not this entry point's. A world with no command system
+/// falls back to it.
 HostOutcome can_research(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
   std::string_view name;
   if (!key_arg(ctx, 1, name)) return bad_key();
   const Settlement* s = settlement_receiver(ctx);
-  if (s == nullptr) return no_settlement();
+  if (s == nullptr) return boolean(false);
   World* world = world_of(ctx);
-  const CommandSystem* commands = world == nullptr ? nullptr : command_system(*world);
-  if (commands == nullptr) return boolean(env->can_research(*s, name));
-  const CommandDef* row = commands->table().find(name);
+  const CommandTable* table = command_table(ctx);
+  if (table == nullptr) return boolean(env->can_research(*s, name));
+  const CommandDef* row = table->find(name);
   if (row == nullptr) return boolean(false);
   if (settlement_lab_for(*world, *s, *row, /*must_be_idle=*/true) == kNoObject) {
     return boolean(false);
   }
-  if (env->research().find(name) == nullptr) return boolean(true);
-  return boolean(env->can_research(*s, name));
+  const RowLedger ledger = row_ledger(row->param);
+  if (ledger.scope == ResearchScope::none) return boolean(true);
+  const EnvScope scope = ledger.scope == ResearchScope::player
+                             ? owner_scope(*s)
+                             : EnvScope::for_settlement(s->id);
+  const std::string_view value = env->env().read_string(scope, ledger.key);
+  return boolean(value != kResearched && value != kResearching);
 }
 
 /// `Settlement::TSResearch(str)` -- 110 sites, the tactic scripts' poll loop:
@@ -1191,13 +1484,24 @@ HostOutcome can_research(CallContext& ctx) {
 /// tests'. The fallback is what this whole entry point was for a long time,
 /// and it is why a tactic script's `TSResearch("BuySlaves")` -- a market
 /// purchase, not a research row -- answered false on every map forever.
+///
+/// The body itself (0x00426ab0): an invalid receiver prints "The function
+/// 'TSResearch' called for an uninitialized or invalid object." and answers
+/// false; otherwise it registers a scratch out-value (0x0067b480), runs the
+/// helper synchronously through the AI's script launcher for the owner's
+/// player index (0x0043d030, then 0x006a0360) with the out-value, the
+/// settlement and the name, and answers whether the out-value came back
+/// non-zero. A helper that fails to run prints "TSResearch: Error running
+/// script!" and the out-value is still false; here that failure is
+/// `run_script_now`'s, which is shared with every `TS*` helper and reports it
+/// as the caller's trap (`sim/ai.cpp`).
 HostOutcome ts_research(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
   std::string_view name;
   if (!key_arg(ctx, 1, name)) return bad_key();
   const Settlement* s = settlement_receiver(ctx);
-  if (s == nullptr) return no_settlement();
+  if (s == nullptr) return boolean(false);
 
   World* world = world_of(ctx);
   if (world != nullptr && ctx.scheduler != nullptr && command_system(*world) != nullptr) {
@@ -1227,67 +1531,99 @@ HostOutcome ts_research(CallContext& ctx) {
 
 // -- unit availability ----------------------------------------------------
 
-/// `UEnabled(int mask, int bit)` -- `bool, int mask, int bit` in `gbr.exe`.
+/// `UEnabled(int mask, int bit)` -- `bool, int mask, int bit`, 0x00420ee0.
+///
+/// `(mask & (1 << (bit & 31))) != 0`: the shift count is masked to five bits
+/// as the processor's `shl` does, so `UEnabled(m, 33)` tests bit 1. No world,
+/// no range check, nothing else.
 ///
 /// Not a research test and not unit-specific despite the name: `SQUADMONITOR.VS`
 /// uses it on a flee-reason bitfield (`UEnabled(nFlee, 0)` .. `(nFlee, 3)`) and
 /// every AI script uses it on `AIV_LogPlayer`, a player mask.
 HostOutcome u_enabled(CallContext& ctx) {
-  const std::int32_t mask = int_arg(ctx, 0);
-  const std::int32_t bit = int_arg(ctx, 1);
-  if (bit < 0 || bit >= 32) return boolean(false);
-  return boolean(((mask >> bit) & 1) != 0);
+  const std::uint32_t mask = static_cast<std::uint32_t>(int_arg(ctx, 0));
+  const std::uint32_t bit = static_cast<std::uint32_t>(int_arg(ctx, 1)) & 31u;
+  return boolean(((mask >> bit) & 1u) != 0);
 }
 
-/// `CheckUEnabled(OUT int mask, int idPlayer, int max, int nType, int nRace)`.
-///
-/// `ESH_ENABLEDUNITS.VS` is the only real caller and it is the whole
-/// specification: zero the mask, then run one call per unit type passing that
-/// type's `AIV_Max*` value as `max`, then store the mask as
-/// `<Race>UnitsEnabled`. `AI.INI` documents the value space of those variables
-/// as `0 - disable, -1: no limit`, so a zero clears the bit and anything else
-/// sets it. `ESH_BUILDARMY.VS`'s single call, `CheckUEnabled(nEnabled,
-/// AIPlayer, 0, 5, Carthage)`, uses exactly the clearing half.
-HostOutcome check_u_enabled(CallContext& ctx) {
-  if (ctx.count() < 5) return HostOutcome::failed("CheckUEnabled: expects five arguments");
-  const std::int32_t max = int_arg(ctx, 2);
-  const std::int32_t type = int_arg(ctx, 3);
-  if (type < 0 || type >= 32) return boolean(false);
-  const std::int32_t bit = static_cast<std::int32_t>(1u << static_cast<unsigned>(type));
-  std::int32_t mask = int_arg(ctx, 0);
-  const bool enabled = max != 0;
-  mask = enabled ? (mask | bit) : (mask & ~bit);
-  ctx.out(0) = Value::integer(mask);
-  return boolean(enabled);
-}
-
-[[nodiscard]] const UnitRow* row_arg(CallContext& ctx, EnvSystem& env) {
-  return env.units().row(int_arg(ctx, 1), int_arg(ctx, 0));
+/// `UType(int nType, int nRace)`, `UTech`, `UTrainCmd` -- 0x00420d60,
+/// 0x00420de0, 0x00420e60. Each checks `nType` against 0..5 and answers `""`
+/// outside it; `nRace` is **not** checked, and the string is
+/// `table[nRace * 6 + nType]` -- so a race past Germany reads on into the next
+/// table, which `UnitCatalog::block` answers.
+[[nodiscard]] std::string_view unit_column(CallContext& ctx, EnvSystem& env, std::int64_t table) {
+  const std::int64_t type = int_arg(ctx, 0);
+  const std::int64_t race = int_arg(ctx, 1);
+  if (type < 0 || type > 5) return {};
+  return env.units().block(table + race * 6 + type);
 }
 
 HostOutcome u_type(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
-  const UnitRow* row = row_arg(ctx, *env);
-  return text(row == nullptr ? std::string_view{} : std::string_view{row->type});
+  return text(unit_column(ctx, *env, 0));
 }
 
 HostOutcome u_tech(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
-  const UnitRow* row = row_arg(ctx, *env);
-  return text(row == nullptr ? std::string_view{} : std::string_view{row->tech});
+  return text(unit_column(ctx, *env, 48));
 }
 
 HostOutcome u_train_cmd(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
-  const UnitRow* row = row_arg(ctx, *env);
-  return text(row == nullptr ? std::string_view{} : std::string_view{row->train_cmd});
+  return text(unit_column(ctx, *env, 96));
 }
 
-/// `RUType(str strClass, int nRace) -> int`. The class comes first here, which
-/// is the reverse of the other three; `TSH_RecruitArmy.vs` is the only caller.
+/// `CheckUEnabled(OUT int mask, int idPlayer, int max, int nType, int nRace)`
+/// -- 0x004243d0, 49 sites, `ESH_ENABLEDUNITS.VS` once per unit type.
+///
+/// In its order:
+///
+///   1. `idPlayer` is **1-based**: the body takes `idPlayer - 1` and refuses
+///      16 and above; `nType` outside 0..5 is refused too. A refusal answers
+///      false and leaves the mask as it was. (Below 1 the original reads the
+///      record before the table; that is answered as a refusal here.)
+///   2. `max < 0` -- `AI.INI`'s "no limit" -- sets bit `nType` and answers true.
+///   3. `max == 0` -- "disabled" -- clears it and answers false.
+///   4. otherwise it asks the player's class-count map (0x004441e0 on the
+///      player record's `[+0x8c]`) how many of `UType(nType, nRace)` the player
+///      has -- `Count(idPlayer, that class)`'s number -- and sets the bit and
+///      answers true while that is **below** `max`, clears it and answers
+///      false once it is not.
+///
+/// So the mask is "types this player may still train", not "types the profile
+/// allows": an AI that has reached `AIV_MaxGArcher` archers stops being
+/// offered them. `UType` here is the unchecked-race read above.
+HostOutcome check_u_enabled(CallContext& ctx) {
+  if (ctx.count() < 5) return HostOutcome::failed("CheckUEnabled: expects five arguments");
+  const std::int32_t player = int_arg(ctx, 1);
+  const std::int32_t max = int_arg(ctx, 2);
+  const std::int32_t type = int_arg(ctx, 3);
+  if (type < 0 || type > 5 || player < 1 || player > 16) return boolean(false);
+  const std::uint32_t bit = 1u << static_cast<unsigned>(type);
+  std::uint32_t mask = static_cast<std::uint32_t>(int_arg(ctx, 0));
+  bool enabled = false;
+  if (max < 0) {
+    enabled = true;
+  } else if (max > 0) {
+    World* world = world_of(ctx);
+    EnvSystem* env = world == nullptr ? nullptr : env_of(*world);
+    if (env == nullptr) return no_env();
+    const std::string_view cls =
+        env->units().block(static_cast<std::int64_t>(int_arg(ctx, 4)) * 6 + type);
+    enabled = player_class_count(*world, player_from_script(player), cls) < max;
+  }
+  mask = enabled ? (mask | bit) : (mask & ~bit);
+  ctx.out(0) = Value::integer(static_cast<std::int32_t>(mask));
+  return boolean(enabled);
+}
+
+/// `RUType(str strClass, int nRace) -> int` -- 0x00420c90. The class comes
+/// first here, the reverse of the other three; `TSH_RecruitArmy.vs` is the
+/// only caller. `nRace` **is** checked here (0..7, else -1), and the class is
+/// compared byte for byte against that race's six types; no match is -1.
 HostOutcome r_u_type(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
@@ -1300,6 +1636,12 @@ HostOutcome r_u_type(CallContext& ctx) {
 [[nodiscard]] const RaceUnits* race_arg(CallContext& ctx, EnvSystem& env) {
   return env.units().race(int_arg(ctx, 0));
 }
+
+// The five one-per-race tables -- `ArenaUType` 0x00422ad0, `ArenaTrainCmd`
+// 0x00422a60, `ArenaUTech` 0x00420f10, `TempleUType` 0x00420f80,
+// `TempleUTrain` 0x00420ff0 -- each check the race against 0..7 and answer
+// `""` outside it. `TempleUTrain(Germany)` is the null pointer described at
+// `kRaces`; the original faults on it and this answers `""`.
 
 HostOutcome arena_u_type(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
@@ -1338,25 +1680,26 @@ HostOutcome temple_u_train(CallContext& ctx) {
 
 // -- balance constants ----------------------------------------------------
 
-/// `GetConst(str) -> int` over `DATA\CONST.INI`'s `[GamePlay]` section.
+/// `GetConst(str) -> int` -- 0x004c6270, over `DATA\CONST.INI`'s `[GamePlay]`.
+///
+/// The body asks the INI's integer getter (0x0063f200) for `GamePlay`/key
+/// into a local and pushes the local. The getter finds the text (0x0063f120),
+/// skips leading spaces and tabs, takes one `-` or `+`, and then reads `0x`
+/// hexadecimal (lower-case `x`; both digit cases) or decimal, **stopping at
+/// the first character that does not fit and keeping what it has** -- so
+/// `"1,5 5,20"` is 1 and `"12.5"` is 12. `load_constants` stores that number
+/// for every key (`ini_number`).
 ///
 /// The economy's slice is asked first, so `EconomySystem::set_rules` stays
-/// authoritative for the ~40 keys it holds as fields; everything else comes
-/// from the generated table.
+/// authoritative for the ~40 keys it holds as fields.
 ///
-/// An unknown key reads **zero**, not an error. `DATA\SUBAI\HERO_DETACH_
-/// BEHAVIOR.VS` -- a shipped, live behaviour -- opens with
-/// `GetConst("RecallDistance")`, and `RecallDistance` is in no section of
-/// `CONST.INI`: of the 74 distinct literals the corpus passes to `GetConst`,
-/// 73 are `[GamePlay]` keys and that one is in no section of the file. Trapping there would kill a script the retail engine runs happily.
-/// (The value is dead -- that local is never read again -- so the *magnitude*
-/// of the fallback is unconstrained by the corpus, and zero is simply what an
-/// INI reader with no default returns.)
-///
-/// Zero is therefore also what every key reads as before `load_constants` has
-/// run, apart from the economy's slice. That is deliberate: this domain does
-/// not carry a second copy of `CONST.INI`, so a build with no game data has no
-/// balance numbers rather than plausible invented ones.
+/// **A key the section does not have.** The getter then leaves the local as
+/// it was, and `GetConst` never initialised it: it holds the VM stack pointer
+/// it was loaded from. That is an address, not a number anybody can
+/// reproduce; this answers zero. The one shipped key that reaches it --
+/// `RecallDistance`, opening `DATA\SUBAI\HERO_DETACH_BEHAVIOR.VS` -- is
+/// assigned to a local that is never read again, so no shipped behaviour
+/// depends on the value.
 HostOutcome get_const(CallContext& ctx) {
   if (ctx.count() < 1 || !ctx.arg(0).is_string()) {
     return HostOutcome::failed("GetConst: expects a constant name");
@@ -1375,9 +1718,11 @@ HostOutcome get_const(CallContext& ctx) {
   return integer(value);
 }
 
-/// `GetConstStr(str) -> str`. Two keys in the whole corpus, both of them
-/// comma-separated lists the scripts walk with `ParseStr`: `TributeTimes` and
-/// `TributeGold`.
+/// `GetConstStr(str) -> str` -- 0x004c62f0: the INI's text for
+/// `GamePlay`/key (0x0063f120), or `""` (0x007ab85a) for a key it does not
+/// have. Every key has its text, numeric ones included. Two keys in the whole
+/// corpus, both comma-separated lists the scripts walk with `ParseStr`:
+/// `TributeTimes` and `TributeGold`.
 HostOutcome get_const_str(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
@@ -1428,6 +1773,11 @@ constexpr EnvHostDef kEnvHosts[] = {
     {CallKind::free_function, "GetConstStr", 1, &get_const_str},  // 8
     {CallKind::free_function, "EnvReadObj", 2, &env_read_obj_scoped},    // 8
     {CallKind::free_function, "EnvWriteObj", 3, &env_write_obj_scoped},  // 6
+    // The root forms of the object pair: `Obj, str key` at 0x006ae823 and
+    // `void, str key, Obj o` at 0x006ae80d. No shipped script calls them;
+    // they are the same bodies as the other root forms and cost a row each.
+    {CallKind::free_function, "EnvReadObj", 1, &env_read_obj_root},
+    {CallKind::free_function, "EnvWriteObj", 2, &env_write_obj_root},
     {CallKind::free_function, "RUType", 2, &r_u_type},
     {CallKind::free_function, "ArenaUTech", 1, &arena_u_tech},
     {CallKind::free_function, "ArenaUType", 1, &arena_u_type},
