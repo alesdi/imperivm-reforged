@@ -911,6 +911,19 @@ HostOutcome set_actor_impl(CallContext& ctx) {
 
 /// `C_Conv.Run()` -- 54 sites. See `play_conversation` for why it finishes
 /// inside the call rather than suspending the way the original's does.
+///
+/// 0x005098c0 is registered with the suspending registrar and reads its
+/// receiver by reference. A variable holding no conversation prints "Use of
+/// uninitialized 'Conversation' object!" and carries on. One whose
+/// conversation has finished (`[conv+0x198]`) has the object's `vtbl+0x30`
+/// called with (0, 1), is deleted, and the variable is cleared -- so a second
+/// `Run` on it is the uninitialized message. Otherwise, unless 0x00996ac8 is
+/// set, it (re)starts the conversation (0x00509260, 0x005096b0), sets the wait
+/// to **1 ms** and suspends; the call is retried on every resumption until the
+/// conversation has finished. So the calling script polls the conversation
+/// one millisecond at a time and its next statement runs on the first
+/// millisecond after the dialogue closes. Here the dialogue is played inside
+/// the call and the next statement runs at once; the variable is not cleared.
 HostOutcome run_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);

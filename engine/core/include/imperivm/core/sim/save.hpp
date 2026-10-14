@@ -306,7 +306,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// settlement keeps one more timer (`LoyaltyInterval`'s gain tick). Hashed,
 /// and a version-32 file would load a garrisoned town at hundreds of
 /// tenths' worth of points over the 100 the original allows.
-inline constexpr std::uint32_t kStateVectorVersion = 33;
+/// 34: the script section (its own version 2) carries each script's arming
+/// order (`ScriptRecord::armed`) and `StartPlayerScript`'s slots. A
+/// version-33 file has neither: scripts due on the same millisecond would run
+/// in id order rather than the order they went to sleep, and a player script
+/// already running could be started a second time.
+inline constexpr std::uint32_t kStateVectorVersion = 34;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

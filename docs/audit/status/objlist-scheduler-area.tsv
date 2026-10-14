@@ -28,3 +28,19 @@
 0x005607b0	verified	ObjEnemy: owner's relation bit 0 clear for the player record at player-1
 0x005609e0	verified	ObjAlly: complement of ObjEnemy's bit test
 0x00561090	verified	ObjInjured: FIXED -- per-object maximum (+0xc8, object_max_health) not the class's; test objlist_obj_injured_measures_against_the_objects_own_maximum
+0x006945e0	verified	Sleep: two-phase suspend, wait stored for the runner, re-armed at clock + wait (0x00688220); scheduler order FIXED to the wheel's arming order (0x00688060/0x006879a0), test vs_scripts_due_together_run_in_the_order_they_were_armed. Interpreter's 15,000-instruction yield is a separate VM gap, noted
+0x00421cd0	partial	AIBreakScript: stops the caller-player's thread id 3..51 (0x0041cdc0/0x0069fee0); engine kills by global script id. Design: AIRun handles are per-AI-player recycled ids the scheduler does not keep
+0x00421d20	partial	AIBreakScript(player, handle): as 0x00421cd0 with the player explicit; not bound, no shipped site
+0x00422f90	partial	AIRun(name): FIXED failure answers -1 (test vs_a_missing_script_is_survivable). Gap: per-player recycled handle 3..51 (design) and the caller's AI-player tag not checked
+0x00424a20	partial	AIRun(name, set, ol, obj, n): as 0x00422f90; binds four parameters; same handle gap
+0x00424c30	partial	AIRun(player, name, ...): read; not bound (engine binds free arity <= 5); no shipped site
+0x005098c0	partial	Conversation::Run: original polls with 1 ms suspends until finished, then deletes and clears the variable; engine plays inside the call (documented design in conversation.cpp)
+0x004c6e30	verified	Run(name): FIXED -- compile and run synchronously (0x006a0360), was a spawned peer; test vs_run_calls_the_script_to_its_end_and_answers_nothing
+0x004c6f00	verified	Run(name, i1): FIXED -- bound, synchronous, integers as parameters (same test shape)
+0x004c6fe0	verified	Run(name, i1, i2): FIXED -- bound, synchronous; no shipped site
+0x004c70c0	verified	Run(name, i1..i3): FIXED -- bound, synchronous; no shipped site
+0x004c71b0	verified	Run(name, i1..i4): FIXED -- bound, synchronous; no shipped site
+0x004c72c0	verified	Run(name, i1..i5): FIXED -- bound, synchronous; no shipped site
+0x004c81e0	verified	Settlement::Run(set, name): FIXED -- bound as member Run/1, synchronous with the settlement as parameter; no shipped site
+0x0061e730	verified	KillScript: answers status 2, the interpreter stops the calling thread; Scheduler::kill on the caller
+0x0056f970	verified	StartPlayerScript: FIXED -- eight name slots per player (0x0056f720), a second start of a name refused, slots saved; test vs_start_player_script_starts_a_name_once_per_player

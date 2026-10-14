@@ -3,13 +3,14 @@
 #include <algorithm>
 #include <functional>
 #include <queue>
+#include <tuple>
 #include <utility>
 
 namespace imperivm::core::script {
 namespace {
 
 constexpr std::uint32_t kSaveMagic = 0x44484353u;  // "SCHD"
-constexpr std::uint32_t kSaveVersion = 1;
+constexpr std::uint32_t kSaveVersion = 2;  // 2: each record's arming order, and the player-script slots
 
 char lower(char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; }
 
@@ -70,16 +71,41 @@ bool get_string(ByteReader& reader, std::string& out) {
 // The only host entry points the runtime implements itself. Everything else in
 // the 705-entry inventory is simulation, and belongs to Part 5.
 
+/// `Sleep(ms)` -- 1,350 call sites, and the reason the whole VM is built the
+/// way it is: this returns, and the script continues thousands of ticks later.
+///
+/// 0x006945e0 is a two-phase call. The compiler emits it with a flag byte
+/// above the argument, and the interpreter's suspending-call opcode (`0x9e` in
+/// 0x0069d4c0) sets that flag the first time it reaches the call and clears it
+/// when it reaches the same call again. With the flag set the body stores the
+/// argument into the wait the runner handed the interpreter (0x00a77eac points
+/// at it for the slice) and answers 1, *suspend*, leaving both on the stack;
+/// the runner (0x0069f7a0) then re-arms the thread at the wheel's clock plus
+/// that wait (0x00688220). On the resumed pass the flag is clear, the body pops
+/// both and answers 0, and the script carries on. So `Sleep(ms)` is one
+/// suspension of exactly `ms`, counted from the instant the script ran at --
+/// which is `HostOutcome::sleep_for` and `Execution::wake_time` here. There is
+/// no clamp and no validation of the argument.
+///
+/// One gap, in the interpreter rather than here: a slice that ends without
+/// suspending -- the original yields after 15,000 instructions outside an
+/// atomic section (0x0069d4c0's first argument), re-arming the thread after
+/// its own default interval (`[context+8]`, 100 for an `AIRun` thread) --
+/// traps here after `instruction_budget` instead. No shipped script runs that
+/// long without a wait; the trap sweep would say so.
 HostOutcome builtin_sleep(CallContext& context) {
   if (context.count() != 1 || !context.arg(0).is_integer()) {
     return HostOutcome::failed("Sleep expects one integer of milliseconds");
   }
-  // 652 call sites in 236 files, and the reason the whole VM is built the way
-  // it is: this returns, and the script continues thousands of ticks later.
   return HostOutcome::sleep_for(context.arg(0).as_integer());
 }
 
-/// Shared by every shape of `AIRun`: a script name, then the arguments to bind.
+/// The handle every `AIRun` failure answers: 0x00422f90, 0x00424a20 and
+/// 0x00424c30 all start from -1 and keep it when 0x0041cd00 refuses.
+constexpr std::int32_t kNoAiScript = -1;
+
+/// Shared by every spawning shape of `AIRun`: a script name, then the
+/// arguments to bind.
 HostOutcome spawn_from(CallContext& context, const Value& name, std::span<const Value> args) {
   if (context.scheduler == nullptr) return HostOutcome::failed("AIRun needs a scheduler");
   if (!name.is_string()) return HostOutcome::failed("AIRun expects a script name");
@@ -87,22 +113,82 @@ HostOutcome spawn_from(CallContext& context, const Value& name, std::span<const 
                                                        context.script);
   // A missing script is survivable: four `<behavior script=...>` bindings in
   // the shipped class tree name files that are not in `data.pak` at all. The
-  // handle comes back zero and `AIBreakScript(0)` is a no-op.
+  // original prints "Cannot run '%s' script" and answers -1; `AIBreakScript`
+  // of -1 is a no-op in both.
+  if (id == kNoScript) return HostOutcome::ok_with(Value::integer(kNoAiScript));
   return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(id)));
 }
 
-/// `Run(name)` -- 1 site, `DBGRUNSCRIPT.VS`'s `Run("data/subai/" + choice)`.
-/// 0x004c6e30 spawns the named script with no arguments and prints a message
-/// when there is no such script; the handle is not returned. The name goes
-/// through the same resolution `AIRun` uses, which folds case and separators
-/// and falls back to the leaf name.
-HostOutcome builtin_run_free(CallContext& context) {
-  if (context.count() < 1) return HostOutcome::failed("Run expects a script name");
-  const HostOutcome spawned = spawn_from(context, context.arg(0), {});
-  if (spawned.status != HostStatus::ok) return spawned;
+/// `Run(name[, i1 .. i5])` and `set.Run(name)` -- **a call, not a spawn**.
+///
+/// The six free bodies (0x004c6e30 for the name alone, then 0x004c6f00,
+/// 0x004c6fe0, 0x004c70c0, 0x004c71b0 and 0x004c72c0 for one to five integers)
+/// and `Settlement::Run` (0x004c81e0) are one shape: compile the named file
+/// against a fixed signature (0x006a2110 -- `void`, `void, int i1`, ...,
+/// `void, Settlement set`) and, when that succeeds, run it to its end inside
+/// the caller through 0x006a0360, the synchronous launcher member `AIRun` and
+/// the class hooks use, with the integers (or the settlement) bound as its
+/// parameters. A file that does not compile prints "Error compiling %s: %s"
+/// and the caller carries on. Nothing is returned. The one shipped site is
+/// `DBGRUNSCRIPT.VS`'s `Run("data/subai/" + choice)`; this used to spawn a
+/// peer, so the script it ran started late and ran beside its caller.
+///
+/// The name goes through the library's resolution, which folds case and
+/// separators and falls back to the leaf name; the original compiles the path
+/// it is given.
+HostOutcome run_synchronously(CallContext& context, const Value& name,
+                              std::span<const Value> args) {
+  if (context.scheduler == nullptr) return HostOutcome::failed("Run needs a scheduler");
+  if (!name.is_string()) return HostOutcome::failed("Run expects a script name");
+  Scheduler& scheduler = *context.scheduler;
+  const std::uint32_t chunk = scheduler.find_chunk(name.as_string());
+  if (chunk == kNoChunk) return HostOutcome::ok_void();
+  const CallReport ran = scheduler.call(chunk, args);
+  if (ran.status == ExecStatus::failed) {
+    scheduler.report_trap(FailedScript{ran.id, scheduler.chunk(chunk).source_name, ran.trap});
+  }
   return HostOutcome::ok_void();
 }
 
+HostOutcome builtin_run_free(CallContext& context) {
+  if (context.count() < 1) return HostOutcome::failed("Run expects a script name");
+  return run_synchronously(context, context.arg(0), context.arguments.subspan(1));
+}
+
+/// `set.Run(name)`: the settlement is the script's one parameter.
+HostOutcome builtin_run_settlement(CallContext& context) {
+  if (context.count() < 2) return HostOutcome::failed("Run expects a script name");
+  return run_synchronously(context, context.arg(1), context.arguments.subspan(0, 1));
+}
+
+/// `AIRun(name)` and `AIRun(name, set, ol, obj, n)` -- 72 sites between the
+/// spellings, and **a thread, not a call**.
+///
+/// 0x00422f90 (name only) and 0x00424a20 (name and four parameters) take the
+/// calling thread's AI player from the context's player tag (0x0043caa0 reads
+/// `[context+0x44]` as a decimal string, -1 when there is none), reach that
+/// player's AI record (`+0x88`), and hand the script to 0x0041cd00. That checks
+/// the library holds it (0x006a0270), takes the **first free thread id from 3
+/// to 51** in the AI's own thread manager (0x0069f950 per id; -1 when all 49
+/// are taken), starts it with no delay and a default interval of 100
+/// (0x006a03d0 -> 0x0069fd80, through 0x00688240 at the wheel's clock), tags
+/// it with the same player, and answers the id. The four-parameter form binds
+/// the settlement and object as handles and the list as the caller's own list
+/// object, against the signature `void, Settlement set, ObjList ol, Obj obj,
+/// int nParam`. Every failure prints "Cannot run '%s' script" and answers -1.
+/// 0x00424c30 is the same with the player passed explicitly first (`player -
+/// 1` indexes the record); no shipped script calls it.
+///
+/// **What this does not reproduce is the handle.** The original's is a small
+/// per-player id that is reused as soon as its thread ends; this answers the
+/// scheduler's own monotonic id, which never is. The two differ only for an
+/// `AIBreakScript` of a handle whose script has already ended and whose id a
+/// later `AIRun` of the same player has taken -- the original then stops the
+/// newer script. The shipped tactic scripts break their `TS_AttackAtWill`
+/// child, which never ends on its own, once and then return, so they cannot
+/// reach that case. Matching it needs a per-player handle table the scheduler
+/// does not keep. Nor is the caller's player checked: every shipped caller is
+/// an AI script, which is the case the original lets through.
 HostOutcome builtin_airun_free(CallContext& context) {
   if (context.count() < 1) return HostOutcome::failed("AIRun expects a script name");
   return spawn_from(context, context.arg(0), context.arguments.subspan(1));
@@ -152,6 +238,15 @@ HostOutcome builtin_airun_member(CallContext& context) {
   return HostOutcome::ok_void();
 }
 
+/// `AIBreakScript(handle)` -- 74 sites. 0x00421cd0 takes the calling thread's
+/// AI player (0x0043caa0), and when that player has an AI record calls
+/// 0x0041cdc0, which acts only on a handle from 3 to 51: if the AI's thread
+/// manager holds that id (0x0069f950) it is stopped (0x0069fee0) -- at once,
+/// or, when it is the thread running right now, by flagging it (`[vm+0x40]`)
+/// so the interpreter stops after the current call. Anything else is silently
+/// nothing. 0x00421d20 is the same with the player passed first; no shipped
+/// script calls it. Here the handle is the scheduler's id (see `AIRun`) and
+/// `Scheduler::kill` is the stop, safe on the running script.
 HostOutcome builtin_break_script(CallContext& context) {
   if (context.scheduler == nullptr) return HostOutcome::failed("AIBreakScript needs a scheduler");
   if (context.count() != 1 || !context.arg(0).is_integer()) {
@@ -161,11 +256,20 @@ HostOutcome builtin_break_script(CallContext& context) {
   return HostOutcome::ok_void();
 }
 
+/// `StartPlayerScript(player, name)` -- 2 sites, `ONFINISH_RESEARCH.VS`'s two
+/// wisdom researches. 0x0056f970 pops the name and the player and hands
+/// `player - 1` and the name to 0x0056f720; `Scheduler::start_player_script`
+/// describes that and is it.
 HostOutcome builtin_start_player_script(CallContext& context) {
   if (context.count() != 2) return HostOutcome::failed("StartPlayerScript expects a player and a "
                                                       "script name");
-  const Value player = context.arg(0);
-  return spawn_from(context, context.arg(1), std::span<const Value>(&player, 1));
+  if (context.scheduler == nullptr) return HostOutcome::failed("StartPlayerScript needs a scheduler");
+  if (!context.arg(0).is_integer() || !context.arg(1).is_string()) {
+    return HostOutcome::failed("StartPlayerScript expects a player and a script name");
+  }
+  (void)context.scheduler->start_player_script(context.arg(0).as_integer(),
+                                               context.arg(1).as_string(), context.arg(0));
+  return HostOutcome::ok_void();
 }
 
 }  // namespace
@@ -211,6 +315,8 @@ ScriptId Scheduler::spawn(std::uint32_t chunk_index, std::span<const Value> args
   record.parent = parent;
   record.execution = start(chunks_[chunk_index], args, host_);
   record.execution.chunk_index = chunk_index;
+  // Armed at its spawn: 0x00688240 puts a new thread on the wheel at once.
+  record.armed = next_arm_++;
   // Ids are issued in order and this only ever appends, so the vector stays
   // sorted by id without anyone sorting it. That is the whole of the
   // deterministic iteration order.
@@ -223,6 +329,22 @@ ScriptId Scheduler::spawn_by_name(std::string_view name, std::span<const Value> 
   const std::uint32_t index = find_chunk(name);
   if (index == kNoChunk) return kNoScript;
   return spawn(index, args, owner, parent);
+}
+
+ScriptId Scheduler::start_player_script(std::int32_t player, std::string_view name,
+                                        const Value& argument) {
+  constexpr std::size_t kSlotsPerPlayer = 8;
+  std::size_t taken = 0;
+  for (const PlayerScriptSlot& slot : player_scripts_) {
+    if (slot.player != player) continue;
+    if (slot.name == name) return kNoScript;  // "for the second time"
+    ++taken;
+  }
+  if (taken >= kSlotsPerPlayer) return kNoScript;  // "No free slot"
+  const std::uint32_t index = find_chunk(name);
+  if (index == kNoChunk) return kNoScript;  // "Error compiling player script"
+  player_scripts_.push_back(PlayerScriptSlot{player, std::string(name)});
+  return spawn(index, std::span<const Value>(&argument, 1));
 }
 
 const ScriptRecord* Scheduler::find(ScriptId id) const {
@@ -301,10 +423,12 @@ RunReport Scheduler::run_ready() { return run_window(now_, now_); }
 RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
   RunReport report;
 
-  // The pass's queue, by `(instant, id)`. Transient: it is empty before and
+  // The pass's queue, by `(instant, armed)` -- the wheel's order: instants
+  // ascending, and within one the order the scripts were armed (see "Ties run
+  // in the order the scripts were armed"). Transient: it is empty before and
   // after every pass, so it is never saved -- between passes each script's
-  // wake time is the whole of its place in it.
-  using Due = std::pair<std::int64_t, ScriptId>;
+  // wake time and `armed` are the whole of its place in it.
+  using Due = std::tuple<std::int64_t, std::uint64_t, ScriptId>;
   std::priority_queue<Due, std::vector<Due>, std::greater<Due>> due;
 
   // What is runnable as the pass opens. Anything that became so outside a
@@ -314,14 +438,15 @@ RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
     if (record.dead) continue;
     const ExecStatus status = record.execution.status;
     if (status == ExecStatus::ready) {
-      due.emplace(to, record.id);
+      due.emplace(to, record.armed, record.id);
     } else if (status == ExecStatus::suspended && record.execution.wake_time <= to) {
-      due.emplace(record.execution.wake_time > from ? record.execution.wake_time : to, record.id);
+      due.emplace(record.execution.wake_time > from ? record.execution.wake_time : to, record.armed,
+                  record.id);
     }
   }
 
   while (!due.empty()) {
-    const auto [instant, id] = due.top();
+    const auto [instant, armed, id] = due.top();
     due.pop();
     ScriptRecord* queued = find(id);
     if (queued == nullptr || queued->dead) continue;
@@ -357,6 +482,11 @@ RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
         record->dead = true;
       }
       record->execution = std::move(execution);
+      // Re-armed as the slice ends, if it suspended (0x0069f7a0 -> 0x00688220):
+      // behind everything armed before it, including whatever it spawned.
+      if (!record->dead && record->execution.status == ExecStatus::suspended) {
+        record->armed = next_arm_++;
+      }
       // The slice is over and the record is whole again. See `StepHook`: this
       // is where the original performs a deferred `Erase`, and the reason it is
       // here rather than in the pass hook is that the next script must not see
@@ -370,11 +500,11 @@ RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
     if (const ScriptRecord* again = find(id);
         again != nullptr && !again->dead && again->execution.status == ExecStatus::suspended &&
         again->execution.wake_time > instant && again->execution.wake_time <= to) {
-      due.emplace(again->execution.wake_time, id);
+      due.emplace(again->execution.wake_time, again->armed, id);
     }
     for (std::size_t i = known; i < scripts_.size(); ++i) {
       if (!scripts_[i].dead && scripts_[i].execution.status == ExecStatus::ready) {
-        due.emplace(instant, scripts_[i].id);
+        due.emplace(instant, scripts_[i].armed, scripts_[i].id);
       }
     }
   }
@@ -438,6 +568,12 @@ void Scheduler::serialize(std::vector<std::byte>& out) const {
   put_u32(out, kSaveVersion);
   put_i64(out, now_);
   put_u32(out, next_id_);
+  put_i64(out, static_cast<std::int64_t>(next_arm_));
+  put_u32(out, static_cast<std::uint32_t>(player_scripts_.size()));
+  for (const PlayerScriptSlot& slot : player_scripts_) {
+    put_u32(out, static_cast<std::uint32_t>(slot.player));
+    put_string(out, slot.name);
+  }
 
   std::uint32_t live = 0;
   for (const ScriptRecord& record : scripts_) {
@@ -456,6 +592,7 @@ void Scheduler::serialize(std::vector<std::byte>& out) const {
     put_u16(out, record.owner.type);
     put_u32(out, record.owner.id);
     put_u32(out, record.parent);
+    put_i64(out, static_cast<std::int64_t>(record.armed));
 
     std::vector<std::byte> execution;
     script::serialize(record.execution, execution);
@@ -470,16 +607,28 @@ namespace {
 /// `deserialize` and `script_section_sources` -- and a header they parsed
 /// separately would be two chances to disagree about a format one of them
 /// writes.
-[[nodiscard]] Status read_section_header(ByteReader& reader, std::int64_t& now,
-                                         std::uint32_t& next_id, std::uint32_t& count) {
+[[nodiscard]] Status read_section_header(
+    ByteReader& reader, std::int64_t& now, std::uint32_t& next_id, std::int64_t& next_arm,
+    std::vector<std::pair<std::int32_t, std::string>>& player_scripts, std::uint32_t& count) {
   std::uint32_t magic = 0;
   std::uint32_t version = 0;
   if (!reader.u32(magic) || !reader.u32(version)) return FormatError::truncated;
   if (magic != kSaveMagic) return FormatError::bad_magic;
   if (version != kSaveVersion) return FormatError::unsupported;
-  if (!get_i64(reader, now) || !reader.u32(next_id) || !reader.u32(count)) {
+  std::uint32_t slots = 0;
+  if (!get_i64(reader, now) || !reader.u32(next_id) || !get_i64(reader, next_arm) ||
+      !reader.u32(slots)) {
     return FormatError::truncated;
   }
+  // Not reserved from `slots`: a hostile length must not allocate before the
+  // read that refuses it.
+  for (std::uint32_t i = 0; i < slots; ++i) {
+    std::uint32_t player = 0;
+    std::string name;
+    if (!reader.u32(player) || !get_string(reader, name)) return FormatError::truncated;
+    player_scripts.emplace_back(static_cast<std::int32_t>(player), std::move(name));
+  }
+  if (!reader.u32(count)) return FormatError::truncated;
   return Status{};
 }
 
@@ -488,14 +637,16 @@ namespace {
 /// wants one decodes it, and the caller that only wants the name skips it
 /// without having to understand a format that changes underneath it.
 [[nodiscard]] Status read_record_prefix(ByteReader& reader, ScriptId& id, std::string& source_name,
-                                        ObjectRef& owner, ScriptId& parent,
+                                        ObjectRef& owner, ScriptId& parent, std::uint64_t& armed,
                                         std::span<const std::byte>& payload) {
   std::uint16_t owner_type = 0;
   std::uint32_t owner_id = 0;
+  std::int64_t armed_bits = 0;
   if (!reader.u32(id) || !get_string(reader, source_name) || !reader.u16(owner_type) ||
-      !reader.u32(owner_id) || !reader.u32(parent)) {
+      !reader.u32(owner_id) || !reader.u32(parent) || !get_i64(reader, armed_bits)) {
     return FormatError::truncated;
   }
+  armed = static_cast<std::uint64_t>(armed_bits);
   owner = ObjectRef{owner_type, owner_id};
   std::uint32_t length = 0;
   if (!reader.u32(length) || !reader.bytes(length, payload)) return FormatError::truncated;
@@ -508,8 +659,12 @@ Result<std::vector<std::string>> script_section_sources(std::span<const std::byt
   ByteReader reader(bytes);
   std::int64_t now = 0;
   std::uint32_t next_id = 0;
+  std::int64_t next_arm = 0;
+  std::vector<std::pair<std::int32_t, std::string>> player_scripts;
   std::uint32_t count = 0;
-  if (const Status header = read_section_header(reader, now, next_id, count); !header.ok()) {
+  if (const Status header =
+          read_section_header(reader, now, next_id, next_arm, player_scripts, count);
+      !header.ok()) {
     return header.error();
   }
 
@@ -520,8 +675,10 @@ Result<std::vector<std::string>> script_section_sources(std::span<const std::byt
     std::string source_name;
     ObjectRef owner;
     ScriptId parent = kNoScript;
+    std::uint64_t armed = 0;
     std::span<const std::byte> payload;
-    if (const Status record = read_record_prefix(reader, id, source_name, owner, parent, payload);
+    if (const Status record =
+            read_record_prefix(reader, id, source_name, owner, parent, armed, payload);
         !record.ok()) {
       return record.error();
     }
@@ -534,8 +691,12 @@ Status Scheduler::deserialize(std::span<const std::byte> bytes) {
   ByteReader reader(bytes);
   std::int64_t now = 0;
   std::uint32_t next_id = 0;
+  std::int64_t next_arm = 0;
+  std::vector<std::pair<std::int32_t, std::string>> player_scripts;
   std::uint32_t count = 0;
-  if (const Status header = read_section_header(reader, now, next_id, count); !header.ok()) {
+  if (const Status header =
+          read_section_header(reader, now, next_id, next_arm, player_scripts, count);
+      !header.ok()) {
     return header;
   }
 
@@ -546,7 +707,7 @@ Status Scheduler::deserialize(std::span<const std::byte> bytes) {
     std::string source_name;
     std::span<const std::byte> payload;
     if (const Status prefix = read_record_prefix(reader, record.id, source_name, record.owner,
-                                                 record.parent, payload);
+                                                 record.parent, record.armed, payload);
         !prefix.ok()) {
       return prefix;
     }
@@ -574,6 +735,11 @@ Status Scheduler::deserialize(std::span<const std::byte> bytes) {
   scripts_ = std::move(restored);
   now_ = now;
   next_id_ = next_id;
+  next_arm_ = static_cast<std::uint64_t>(next_arm);
+  player_scripts_.clear();
+  for (auto& [player, name] : player_scripts) {
+    player_scripts_.push_back(PlayerScriptSlot{player, std::move(name)});
+  }
   return Status();
 }
 
@@ -611,7 +777,12 @@ void register_scheduler_builtins(HostRegistry& registry) {
   for (std::uint16_t arity = 1; arity <= 5; ++arity) {
     registry.define(CallKind::member, "AIRun", arity, &builtin_airun_member);
   }
-  registry.define(CallKind::free_function, "Run", 1, &builtin_run_free);
+  // `Run` with the name and up to five integers, and `set.Run(name)`. Member
+  // `Run/0` is `Conversation::Run`, in sim/conversation.cpp.
+  for (std::uint16_t arity = 1; arity <= 6; ++arity) {
+    registry.define(CallKind::free_function, "Run", arity, &builtin_run_free);
+  }
+  registry.define(CallKind::member, "Run", 1, &builtin_run_settlement);
   registry.define(CallKind::free_function, "AIBreakScript", 1, &builtin_break_script);
   registry.define(CallKind::free_function, "KillScript", 0, &builtin_kill_script);
   registry.define(CallKind::free_function, "StartPlayerScript", 2,

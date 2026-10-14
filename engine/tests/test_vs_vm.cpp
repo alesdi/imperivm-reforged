@@ -748,11 +748,11 @@ TEST(vs_the_shipped_surface_is_wired_even_though_it_is_not_written) {
   CHECK(registry.find(CallKind::member, "AddCommand", 3) != kUnresolvedHost);
   CHECK(shipped_global_names().size() == 245);
 
-  // The runtime implements fourteen of them itself: `Sleep`, `AIBreakScript`,
-  // `KillScript`, `StartPlayerScript`, `Run`, and `AIRun` in five free and five member
-  // arities.
+  // The runtime implements twenty-one of them itself: `Sleep`, `AIBreakScript`,
+  // `KillScript`, `StartPlayerScript`, `Run` in six free arities and the
+  // settlement's member one, and `AIRun` in five free and five member arities.
   register_scheduler_builtins(registry);
-  CHECK(registry.implemented() == 15);
+  CHECK(registry.implemented() == 21);
 }
 
 TEST(vs_a_runaway_loop_traps_instead_of_hanging) {
@@ -1056,26 +1056,102 @@ TEST(vs_a_missing_script_is_survivable) {
   const RunReport report = stage.scheduler.run_ready();
   CHECK(report.failed == 0);
   REQUIRE(stage.world.log.size() == 1);
-  CHECK(stage.world.log[0] == "0");
+  // "Cannot run '%s' script", and the handle every failed `AIRun` answers:
+  // 0x00422f90 starts from -1 and keeps it.
+  CHECK(stage.world.log[0] == "-1");
 }
 
-/// `Run(name)` is `AIRun` without a handle: the child runs, the caller gets
-/// nothing back, and a name with no script behind it is survivable.
-TEST(vs_run_spawns_a_peer_and_answers_nothing) {
+/// Two scripts due on the same millisecond run in the order they went to
+/// sleep, not by id: the original's wheel appends each armed thread at the
+/// tail of its instant's bucket (0x00688060) and sweeps it front to back
+/// (0x006879a0). Script 2 is armed for t=30 at t=0; script 1 is armed for t=30
+/// at t=20. So 2 runs first -- across a save as well.
+TEST(vs_scripts_due_together_run_in_the_order_they_were_armed) {
+  const char* source1 = "// void\nSleep(20);\nSleep(10);\nNote(1);\n";
+  const char* source2 = "// void\nSleep(30);\nNote(2);\n";
+  {
+    Stage stage;
+    REQUIRE(stage.add(source1, "one.vs"));
+    REQUIRE(stage.add(source2, "two.vs"));
+    CHECK(stage.scheduler.spawn(0) == 1);
+    CHECK(stage.scheduler.spawn(1) == 2);
+    stage.scheduler.run_ready();
+    stage.scheduler.advance(30);
+    REQUIRE(stage.world.log.size() == 2);
+    CHECK(stage.world.log[0] == "2");
+    CHECK(stage.world.log[1] == "1");
+  }
+  {
+    Stage stage;
+    REQUIRE(stage.add(source1, "one.vs"));
+    REQUIRE(stage.add(source2, "two.vs"));
+    stage.scheduler.spawn(0);
+    stage.scheduler.spawn(1);
+    stage.scheduler.run_ready();
+    stage.scheduler.advance(20);
+    std::vector<std::byte> saved;
+    stage.scheduler.serialize(saved);
+
+    Stage loaded;
+    REQUIRE(loaded.add(source1, "one.vs"));
+    REQUIRE(loaded.add(source2, "two.vs"));
+    REQUIRE(loaded.scheduler.deserialize(saved).ok());
+    loaded.scheduler.advance(10);
+    REQUIRE(loaded.world.log.size() == 2);
+    CHECK(loaded.world.log[0] == "2");
+    CHECK(loaded.world.log[1] == "1");
+  }
+}
+
+/// `StartPlayerScript` starts a name once per player: 0x0056f720 refuses a
+/// name already in one of the player's eight slots, and binds the 1-based
+/// player as the script's one argument.
+TEST(vs_start_player_script_starts_a_name_once_per_player) {
   Stage stage;
-  // The child declares a parameter so that a `Run` which forwarded its own
-  // arguments -- the name -- would be seen binding a string to it.
+  REQUIRE(stage.add("// void, int player\nNote(player);\nwhile (1) Sleep(60000);\n",
+                    "DATA\\SUBAI\\PLAYER_HEROES_WISDOM.VS"));
+  REQUIRE(stage.add("// void\nStartPlayerScript(2, \"data/subai/player_heroes_wisdom.vs\");\n"
+                    "StartPlayerScript(2, \"data/subai/player_heroes_wisdom.vs\");\n"
+                    "StartPlayerScript(3, \"data/subai/player_heroes_wisdom.vs\");\n",
+                    "ONFINISH_RESEARCH.VS"));
+  stage.scheduler.spawn(1);
+  const RunReport report = stage.scheduler.run_ready();
+  CHECK(report.failed == 0);
+  REQUIRE(stage.world.log.size() == 2);
+  CHECK(stage.world.log[0] == "2");
+  CHECK(stage.world.log[1] == "3");
+  CHECK(stage.scheduler.live_count() == 2);
+
+  // The slots are state: a reloaded game still refuses the second start.
+  std::vector<std::byte> saved;
+  stage.scheduler.serialize(saved);
+  Stage loaded;
+  REQUIRE(loaded.add("// void, int player\nNote(player);\nwhile (1) Sleep(60000);\n",
+                     "DATA\\SUBAI\\PLAYER_HEROES_WISDOM.VS"));
+  REQUIRE(loaded.scheduler.deserialize(saved).ok());
+  CHECK(loaded.scheduler.start_player_script(2, "data/subai/player_heroes_wisdom.vs",
+                                             Value::integer(2)) == kNoScript);
+}
+
+/// `Run(name[, ints])` is a **call**: 0x004c6e30 and its five siblings compile
+/// the file and run it through the synchronous launcher 0x006a0360, so the
+/// child has finished before the caller's next statement. A name with no
+/// script behind it is survivable, and nothing is answered.
+TEST(vs_run_calls_the_script_to_its_end_and_answers_nothing) {
+  Stage stage;
   REQUIRE(stage.add("// void, int n\nNote(n);\nTick();\n", "DATA\\SUBAI\\CHILD.VS"));
-  REQUIRE(stage.add("// void\nRun(\"data/subai/child.vs\");\nRun(\"data/subai/nonesuch.vs\");\nTick();\n",
+  REQUIRE(stage.add("// void\nRun(\"data/subai/child.vs\", 7);\nNote(99);\n"
+                    "Run(\"data/subai/nonesuch.vs\");\nTick();\n",
                     "DBGRUNSCRIPT.VS"));
   stage.scheduler.spawn(1);
   const RunReport report = stage.scheduler.run_ready();
   CHECK(report.failed == 0);
-  // The child ran in the same pass with nothing bound, and the missing one
-  // cost nothing.
+  // The child's line comes first: it ran inside the caller's `Run`, with the
+  // integer bound, and was gone before `Note(99)`.
   CHECK(stage.world.ticks == 2);
-  REQUIRE(stage.world.log.size() == 1);
-  CHECK(stage.world.log[0] == "0");
+  REQUIRE(stage.world.log.size() == 2);
+  CHECK(stage.world.log[0] == "7");
+  CHECK(stage.world.log[1] == "99");
   CHECK(stage.scheduler.live_count() == 0);
 
   // And it is `void`: the handle `AIRun` answers is not returned here.
