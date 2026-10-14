@@ -1,4 +1,0 @@
-# Host audit statuses: body<TAB>status<TAB>note, one line per gbr.exe body.
-# status: verified | partial | inferred | unread | unused -- see tools/re/ledger.py.
-# A body with no line is unread when a shipped script calls it, unused when none does.
-# After editing, run `python3 tools/re/ledger.py` to regenerate host-ledger.md.
