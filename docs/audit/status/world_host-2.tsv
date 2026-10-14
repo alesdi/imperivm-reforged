@@ -89,3 +89,6 @@
 0x005ac710	verified	a dead receiver complains and keeps its state; otherwise [obj+0x9c] = the bool (commands enabled)
 0x005abcb0	verified	vtbl+0xd4 with the bool, the debug overlay: presentation, dropped after resolving the receiver
 0x005b6920	verified	fixed: an empty name removes the object's name (0x005b6120 deletes its record [obj+0x84]), which the one shipped site, 2_Great_loses_Spain seq12, relies on; otherwise rebind; the rename arm for an object already named differently (0x00572a30) is not reproduced and no shipped site reaches it
+0x005b5890	verified	inserts the handle into the global store-bin set (0x005b5750), read only by a by-name search no entry point reaches; dropped
+0x005b0f10	verified	erases it from the same set (0x005b0e30); dropped
+0x005d86d0	verified	fixed: the command queue is not touched -- activity [obj+0x130] to 0, path dropped, animation reset, stood at (-1,-1) -- so the ambient villagers' queued errand behind disappear survives

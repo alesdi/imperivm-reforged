@@ -1968,19 +1968,22 @@ HostOutcome m_set_name(CallContext& ctx) {
 /// `u.Disappear()` -- 1 site, `UNIT_DISAPPEAR.VS`, which then sleeps two
 /// seconds and puts the unit back where it was.
 ///
-/// 0x005d86d0: the unit's command object is destroyed and the path flag
-/// cleared (0x005d3830), its record is reset, its animation is stopped
-/// (0x0053d730), and it is placed at the static point `(-1, -1)` -- off the
-/// map, which is what makes it vanish. Here that is: commands cleared, the
-/// movement state stopped, and the position set to `kHeldPosition`, which the
-/// world permits on an object that is not held.
+/// 0x005d86d0: the unit's transient activity (`[obj+0x130]`, not saved) goes
+/// to 0, its path is dropped (0x005d3830 with null), its sprite is told so
+/// (`[obj+0x40]`'s `vtbl+4`), its animation is reset (0x0053d730), and it is
+/// placed at the static point `(-1, -1)` -- off the map, which is what makes
+/// it vanish. **The command queue is not touched**: `disappear` is itself a
+/// queued command, and the ambient villagers queue their errand behind it
+/// (`grab_water`, then `moveenter` home), which a cleared queue lost. Here:
+/// the movement state stopped and the position set to `kHeldPosition`, which
+/// the world permits on an object that is not held. An unresolvable receiver
+/// prints and pushes a stray byte in the original; here it is silence.
 HostOutcome m_disappear(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Disappear: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_void();
   const ObjectId id = slot->id;
-  if (CommandSystem* commands = command_system(*world)) (void)commands->clear_commands(*world, id);
   if (MovementSystem* movement = movement_system(*world)) movement->stop(*world, id);
   if (ObjectState* state = world->mutable_state(id)) state->flags.has_active_path = false;
   if (!slot->state.is_held()) (void)world->set_position(id, kHeldPosition);
