@@ -361,9 +361,23 @@ void GroupTable::hash(std::uint64_t& accumulator) const noexcept {
 
 std::int32_t NamedObjectTable::find(std::string_view name) const noexcept {
   for (std::size_t i = 0; i < names_.size(); ++i) {
-    if (names_[i].name == name) return static_cast<std::int32_t>(i);
+    // An entry naming nothing was removed by `unbind_object`: its name is free.
+    if (names_[i].name == name && names_[i].object != kNoObject) {
+      return static_cast<std::int32_t>(i);
+    }
   }
   return kNoName;
+}
+
+std::size_t NamedObjectTable::unbind_object(ObjectId id) noexcept {
+  if (id == kNoObject) return 0;
+  std::size_t removed = 0;
+  for (Entry& entry : names_) {
+    if (entry.object != id) continue;
+    entry.object = kNoObject;
+    ++removed;
+  }
+  return removed;
 }
 
 bool NamedObjectTable::bind(std::string_view name, ObjectId id) {

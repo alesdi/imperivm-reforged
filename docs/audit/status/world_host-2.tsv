@@ -84,3 +84,8 @@
 0x004e37f0	partial	writes 0xffff to [bld+0x1fc] on every CatapultTower heir of the catapult settlement [cat+0x148]; the original does so only while [cat+0x22c] is set, a slot not modelled, and the clear here is unconditional; an invalid receiver pushes a stray 0 there
 0x004e3380	verified	fixed: a threat at zero distance falls through to the random direction (two draws), and a random direction on the origin answers (1000, 0) (0x004e26c0); nearest enemy Tower/Outpost building in sight by squared distance, first met keeps a tie (spawn order here, grid order there, labelled); invalid receiver pushes 4 bytes in the original, (0,0) stands in
 0x004e3dc0	verified	fixed: the env write of 1 under /<map>/Player<n>/CatapultBuilt that ends 0x004e3be0, which BUILDINGSADVICE5.VS polls; race table 0x004e3b30, owner n-1, the site revealed to CatapultBuildSight (here through FogSystem), its own settlement, health 1, unbuilt
+0x005134b0	verified	the handle at [self+0x1d0] when it resolves to a unit (kSyncUnit), else 0xffff; no receiver test in the original
+0x00513540	verified	stores the argument handle at [self+0x1d0], silent on an unresolvable receiver; the argument is not validated
+0x005ac710	verified	a dead receiver complains and keeps its state; otherwise [obj+0x9c] = the bool (commands enabled)
+0x005abcb0	verified	vtbl+0xd4 with the bool, the debug overlay: presentation, dropped after resolving the receiver
+0x005b6920	verified	fixed: an empty name removes the object's name (0x005b6120 deletes its record [obj+0x84]), which the one shipped site, 2_Great_loses_Spain seq12, relies on; otherwise rebind; the rename arm for an object already named differently (0x00572a30) is not reproduced and no shipped site reaches it

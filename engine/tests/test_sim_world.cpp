@@ -3848,8 +3848,8 @@ TEST(sim_enter_holder_joins_a_ship_a_settlement_or_a_units_own_holder) {
   (void)sailor;
 }
 
-/// `SetName` binds, and rebinds a name already taken; an empty name is
-/// nothing.
+/// `SetName` binds, and rebinds a name already taken; an empty name takes the
+/// object's name away (0x005b6120's first arm).
 TEST(sim_set_name_binds_and_moves_a_taken_name) {
   PredicateBench b;
   const ObjectId x = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
@@ -3860,9 +3860,19 @@ TEST(sim_set_name_binds_and_moves_a_taken_name) {
   b.call(script::CallKind::member, "SetName", 1,
          {PredicateBench::obj(y), script::Value::string("NO_Scipio")});
   CHECK(b.world.named_objects().object("NO_Scipio") == y);
-  const std::size_t names = b.world.named_objects().size();
+  // `x` no longer carries the name, so an empty name on it changes nothing.
   b.call(script::CallKind::member, "SetName", 1, {PredicateBench::obj(x), script::Value::string("")});
-  CHECK(b.world.named_objects().size() == names);
+  CHECK(b.world.named_objects().object("NO_Scipio") == y);
+  // On `y` it removes the name: `GetNamedObj` finds nothing, and the name is
+  // free to be given again.
+  const std::int32_t held = b.world.named_objects().find("NO_Scipio");
+  b.call(script::CallKind::member, "SetName", 1, {PredicateBench::obj(y), script::Value::string("")});
+  CHECK(b.world.named_objects().find("NO_Scipio") == NamedObjectTable::kNoName);
+  CHECK(b.world.named_objects().object("NO_Scipio") == kNoObject);
+  CHECK(b.world.named_objects().object(held) == kNoObject);
+  b.call(script::CallKind::member, "SetName", 1,
+         {PredicateBench::obj(x), script::Value::string("NO_Scipio")});
+  CHECK(b.world.named_objects().object("NO_Scipio") == x);
 }
 
 /// `Disappear` takes the unit off the map; `Disease` and `IsDiseased` are one

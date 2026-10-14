@@ -1934,13 +1934,31 @@ HostOutcome m_exit_holder(CallContext& ctx) {
 /// `o.SetName(str)` -- 1 site. 0x005b6920 hands the string to 0x005b6120, the
 /// worker `CVXGroup::Spawn` uses to carry a name onto a spawned copy, and
 /// `NamedObjectTable::rebind` is that worker's contract: a name already bound
-/// moves to this object. An empty string is refused by the worker's first
-/// test and changes nothing.
+/// moves to this object.
+///
+/// **An empty string removes the object's name.** The worker's first test
+/// takes the object's own name record at `[obj+0x84]`, unlinks it from the
+/// named-object manager (0x004fc150), deletes it and writes `0xffff` back --
+/// so `GetNamedObj` of that name answers nothing afterwards, and a later spawn
+/// of the template it came from is not named either. The one shipped site is
+/// exactly that: `2_Great_loses_Spain` seq12 renames nobody, it calls
+/// `GetNamedObj("RomeHero"+n).obj.SetName("")` once the hero has joined the
+/// army, and the `SetLevel` two lines on reaches nothing in the original.
+/// Here every name bound to the object is taken away (`unbind_object`); the
+/// original keeps one record per object, and a shipped object carrying two
+/// names is not known.
+///
+/// **One arm is not reproduced**: an object that already has a name and is
+/// given a different one has its record *renamed* (0x00572a30), so the old
+/// name stops resolving; here the old name stays bound beside the new. No
+/// shipped site names an object twice.
 HostOutcome m_set_name(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetName: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  if (slot == nullptr || !ctx.arg(1).is_string() || ctx.arg(1).as_string().empty()) {
+  if (slot == nullptr || !ctx.arg(1).is_string()) return HostOutcome::ok_void();
+  if (ctx.arg(1).as_string().empty()) {
+    (void)world->named_objects().unbind_object(slot->id);
     return HostOutcome::ok_void();
   }
   (void)world->named_objects().rebind(ctx.arg(1).as_string(), slot->id);
