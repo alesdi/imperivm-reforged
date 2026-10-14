@@ -3583,8 +3583,9 @@ HostOutcome m_consume(CallContext& ctx) {
 /// object within `[obj+0xd4]` of its position -- the object's **range**, the
 /// slot `Catapult::GetPointOnTarget` reads as the maximum range, which the
 /// `Mist` class declares as `range="200"` -- through the spatial query at
-/// 0x00542100 with the flag filter at 0x005c9f20, and for each collected
-/// object that is a unit (`[obj+0x2c] & 0x400000`) whose tag at `[unit+0x14c]`
+/// 0x00542100 with the filter at 0x005c9f20 -- a unit (`[obj+0x2c] &
+/// 0x400000`) that is not dead (`vtbl+0x50`) -- and for each one whose tag at
+/// `[unit+0x14c]`
 /// resolves to nothing or to this very mist: folds a 1,600 ms marker into the
 /// sync hash (0x005d2980, bookkeeping, not behaviour), writes its own handle
 /// into the tag, calls the unit's `vtbl+0xa8` with `damage` -- the same
@@ -3616,7 +3617,8 @@ HostOutcome m_mist_action(CallContext& ctx) {
                            ClassFilter{}, around);
   for (const ObjectId id : around) {
     const WorldObject* slot = world->find(id);
-    if (slot == nullptr || !slot->state.flags.is_unit) continue;
+    // The collection's filter (0x005c9f20): a unit, and not dead.
+    if (slot == nullptr || !slot->state.flags.is_unit || slot->state.health <= 0) continue;
     // Another live mist's unit is not this one's to burn.
     if (slot->state.mist != kNoObject && slot->state.mist != self &&
         world->find(slot->state.mist) != nullptr) {

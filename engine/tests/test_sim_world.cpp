@@ -6153,12 +6153,18 @@ TEST(mist_action_burns_the_untagged_units_in_range_and_tags_them) {
   const ObjectId fort = b.world.spawn(NativeClass::building, nullptr, graph.find("Fort"));
   b.world.set_position(fort, Point{50, 50});
   b.world.set_health(fort, 100);
+  // A corpse in the mist: the collection's filter (0x005c9f20) takes units
+  // that are not dead, so it is not tagged and not counted.
+  const ObjectId corpse = unit_at(Point{50, 0}, 4);
+  b.world.set_health(corpse, 0);
 
   const auto act = [&](script::Value receiver, std::int32_t damage) {
     return b.call(script::CallKind::member, "MistAction", 1, {receiver, script::Value::integer(damage)})
                .status == script::HostStatus::ok;
   };
   CHECK(act(PredicateBench::obj(mist), 30));
+  CHECK(b.world.state(corpse)->mist == kNoObject);
+  CHECK(match.score(4).damage_taken == 0);
   CHECK(combat.health(inside) == 70);
   CHECK(b.world.state(inside)->health == 70);     // published, as `Obj::Damage` publishes
   CHECK(b.world.state(inside)->mist == mist);
