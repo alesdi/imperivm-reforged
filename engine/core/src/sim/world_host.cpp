@@ -1040,7 +1040,7 @@ HostOutcome fn_is_protected(CallContext& ctx) {
 ///
 /// `0x004e3380` is registered `[6, 1, 38]`: a point, from a `Catapult`. An
 /// invalid receiver prints `The function 'Catapult::CalcEscapeDirection'
-/// called for an uninitialized or invalid object.` and answers `(0, 0)`.
+/// called for an uninitialized or invalid object.` (see below for its answer).
 /// Otherwise it runs a cell sweep (0x004e29c0) over the catapult's own sight
 /// (`[obj+0xd0]`, the number `.sight` reports) whose predicate (0x004e2620)
 /// keeps the **nearest** object that is a building (`[obj+0x2c] & 0x800000`,
@@ -1054,11 +1054,15 @@ HostOutcome fn_is_protected(CallContext& ctx) {
 /// table square root and truncating division -- so `SetLen` downstream
 /// only rescales a direction that already points away from the threat.
 ///
-/// With no such building in sight it is a random direction (0x004e26c0):
-/// `rand(0, 1000) - 500` on x, then the same on y, normalised to 1000 the
-/// same way; a draw that lands on the origin exactly stays `(0, 0)`, which
-/// `SetLen` then turns into `(0, len)` by its own zero rule. Two draws on the
-/// world RNG, in that order, every time no threat is found.
+/// With no such building in sight -- or one standing exactly on the
+/// catapult, whose zero-length vector has no direction -- it is a random
+/// direction (0x004e26c0): `rand(0, 1000) - 500` on x, then the same on y,
+/// normalised to 1000 the same way; a draw that lands on the origin exactly
+/// answers `(1000, 0)`, the worker's own fallback. Two draws on the world RNG,
+/// in that order, every time.
+///
+/// An invalid receiver's answer is the original's own fault: it pushes four
+/// bytes of zero where a point is eight, and `(0, 0)` stands in.
 ///
 /// **The tie rule is the one labelled divergence.** The original's sweep
 /// visits 256-unit cells row by row and the objects within a cell in the
@@ -1104,20 +1108,23 @@ HostOutcome m_calc_escape_direction(CallContext& ctx) {
     best = d2;
   }
 
-  std::int32_t dx = 0;
-  std::int32_t dy = 0;
+  // `isqrt` is the floored root the table at 0x0067c3d0 answers; see `Dist`.
+  const auto length = [](std::int32_t x, std::int32_t y) {
+    return static_cast<std::int32_t>(
+        isqrt(static_cast<std::int64_t>(x) * x + static_cast<std::int64_t>(y) * y));
+  };
   if (threat != nullptr) {
     const Point at = world->resolve_position(threat->id);
-    dx = here.x - at.x;
-    dy = here.y - at.y;
-  } else {
-    dx = world->rng().between(0, 1000) - 500;
-    dy = world->rng().between(0, 1000) - 500;
+    const std::int32_t dx = here.x - at.x;
+    const std::int32_t dy = here.y - at.y;
+    const std::int32_t len = length(dx, dy);
+    if (len > 0) return HostOutcome::ok_with(pack_point(Point{dx * 1000 / len, dy * 1000 / len}));
+    // A threat on the catapult's own point: on to the random direction.
   }
-  // `isqrt` is the floored root the table at 0x0067c3d0 answers; see `Dist`.
-  const auto len = static_cast<std::int32_t>(
-      isqrt(static_cast<std::int64_t>(dx) * dx + static_cast<std::int64_t>(dy) * dy));
-  if (len <= 0) return HostOutcome::ok_with(pack_point(Point{0, 0}));
+  const std::int32_t dx = world->rng().between(0, 1000) - 500;
+  const std::int32_t dy = world->rng().between(0, 1000) - 500;
+  const std::int32_t len = length(dx, dy);
+  if (len <= 0) return HostOutcome::ok_with(pack_point(Point{1000, 0}));
   return HostOutcome::ok_with(pack_point(Point{dx * 1000 / len, dy * 1000 / len}));
 }
 

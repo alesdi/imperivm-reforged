@@ -2845,10 +2845,33 @@ TEST(calc_escape_direction_points_away_from_the_nearest_enemy_tower) {
     const std::int32_t dx = model.between(0, 1000) - 500;
     const std::int32_t dy = model.between(0, 1000) - 500;
     const auto len = static_cast<std::int32_t>(isqrt(std::int64_t{dx} * dx + std::int64_t{dy} * dy));
-    const Point expected = len > 0 ? Point{dx * 1000 / len, dy * 1000 / len} : Point{0, 0};
+    const Point expected = len > 0 ? Point{dx * 1000 / len, dy * 1000 / len} : Point{1000, 0};
     CHECK(ask(cat) == expected);
     CHECK(f.world.rng().state() == model.state());
   }
+  // Two draws that land on the origin exactly answer (1000, 0): 0x004e26c0
+  // writes 1000 to x when the length is zero. A seed that draws 500 twice is
+  // searched for rather than hard-coded, so the test survives a change of
+  // generator.
+  std::uint32_t origin_seed = 0;
+  for (std::uint32_t seed = 1; seed < 50'000'000u && origin_seed == 0; ++seed) {
+    Rng probe(seed);
+    if (probe.between(0, 1000) == 500 && probe.between(0, 1000) == 500) origin_seed = seed;
+  }
+  REQUIRE(origin_seed != 0);
+  f.world.rng().seed(origin_seed);
+  CHECK(ask(cat) == (Point{1000, 0}));
+  // A threat standing exactly on the catapult has no direction to flee from:
+  // the original falls through to the random direction, two draws and all.
+  const ObjectId under = building("Tower", Point{2000, 2000}, 1);
+  f.world.rng().seed(7);
+  Rng model(7);
+  const std::int32_t ux = model.between(0, 1000) - 500;
+  const std::int32_t uy = model.between(0, 1000) - 500;
+  const auto ulen = static_cast<std::int32_t>(isqrt(std::int64_t{ux} * ux + std::int64_t{uy} * uy));
+  CHECK(ask(cat) == (Point{ux * 1000 / ulen, uy * 1000 / ulen}));
+  CHECK(f.world.rng().state() == model.state());
+  f.world.despawn(under);
   // A handle to nothing is `(0, 0)` and no draw.
   const std::uint32_t before = f.world.rng().state();
   CHECK(ask(999999) == (Point{0, 0}));
