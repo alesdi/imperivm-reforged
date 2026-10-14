@@ -317,6 +317,14 @@ constexpr Point kUnknownAreaPoint{1000, 1000};
 }
 
 /// `AreaCenter(name)`. 279 sites.
+///
+/// 0x004d8bb0 resolves the name to its named group (0x004c93c0) and takes the
+/// group's **first** member as the area -- which is `load_areas`' "first member
+/// of the alias" -- then answers the circle's centre (`+0x14c`, `+0x150`) or the
+/// rectangle's midpoints (`(left + right) / 2`, `(top + bottom) / 2`,
+/// truncating; 0x004d67a0 is the same rule for the sampler). The original
+/// takes the rectangle's corners as authored where `AreaShape` sorts them; the
+/// midpoint is the same either way.
 HostOutcome fn_area_centre(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
@@ -331,6 +339,11 @@ HostOutcome fn_area_centre(CallContext& ctx) {
 }
 
 /// `GetRandomPointInArea(name)`. 31 sites. Draws from `World::rng()`.
+///
+/// 0x004d9100: the area by name (0x004d9050), then the sampler 0x004d6d40 with
+/// **twenty** attempts (`kAreaSampleAttempts`); a missing area prints "Could
+/// not find area named '%s' in function 'RandomPointInArea'" and answers
+/// (1000, 1000) without drawing.
 HostOutcome fn_random_point_in_area(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
@@ -343,6 +356,12 @@ HostOutcome fn_random_point_in_area(CallContext& ctx) {
 }
 
 /// `AreaDistTo(point, name)`. 1 site.
+///
+/// 0x004d8970 resolves the area as `AreaCenter` does and measures with
+/// `AreaShape::distance_to`'s rule exactly: for a circle the truncated root of
+/// the squared distance to the centre less the radius; for a rectangle the
+/// larger of the two signed axis gaps (`left - x` when left of it, else
+/// `x - right`; the same for y); either clamped at 0.
 HostOutcome fn_area_dist_to(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);

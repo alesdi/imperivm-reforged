@@ -44,3 +44,10 @@
 0x004c81e0	verified	Settlement::Run(set, name): FIXED -- bound as member Run/1, synchronous with the settlement as parameter; no shipped site
 0x0061e730	verified	KillScript: answers status 2, the interpreter stops the calling thread; Scheduler::kill on the caller
 0x0056f970	verified	StartPlayerScript: FIXED -- eight name slots per player (0x0056f720), a second start of a name refused, slots saved; test vs_start_player_script_starts_a_name_once_per_player
+0x004d8bb0	verified	AreaCenter: first member of the named group; circle centre or truncated rectangle midpoints; (-1,-1) on a miss
+0x00573e60	verified	ClassPlayerAreaObjs: FIXED -- player outside 1..16 and a name that is no class answer the invalid query, before the area; test an_area_query_with_no_such_class_or_player_is_an_invalid_handle. The query (0x004fe730) is the query system's
+0x0057a510	verified	AttackArea ("advance" into 0x0057a2e0): FIXED -- dead members skipped before their draw, invalid query a message; tests attack_area_passes_over_a_dead_member_before_its_draw, attack_area_on_an_invalid_query_orders_nothing_and_does_not_trap
+0x00577090	verified	AreaObjs: FIXED -- a name that is no class answers the invalid query (0x00577218); test an_area_query_with_no_such_class_or_player_is_an_invalid_handle
+0x004d9100	verified	GetRandomPointInArea: sampler 0x004d6d40, 20 attempts; FIXED -- box clamped to the map rectangle before drawing; test the_sampler_draws_only_over_the_part_of_an_area_on_the_map
+0x0057a530	verified	MoveToArea ("move" into 0x0057a2e0): same body and fixes as AttackArea
+0x004d8970	verified	AreaDistTo: circle edge distance or rectangle Chebyshev, clamped at 0; -1 on a miss
