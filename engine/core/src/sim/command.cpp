@@ -6,6 +6,7 @@
 #include "imperivm/core/sim/host_context.hpp"
 
 #include <algorithm>
+#include <array>
 #include <optional>
 
 #include "imperivm/core/game/class_graph.hpp"
@@ -106,8 +107,17 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
     def.queue_icon.assign(doc.attribute(n, "queueicon"));
     def.key.assign(doc.attribute(n, "key"));
     {
-      const std::string_view train = doc.attribute(n, "traincommand");
-      def.train_command = train == "yes" || train == "1" || train == "true";
+      // Anything but `no` is yes, and absent is `no` (0x004f3f80..0x004f405a).
+      const auto flag = [&](std::string_view attribute) {
+        const std::string_view value = doc.attribute(n, attribute);
+        return !value.empty() && !equal_fold(value, "no");
+      };
+      def.train_command = flag("traincommand");
+      def.research_command = flag("researchcommand");
+      def.immediate = flag("immediate");
+      def.plr_research = flag("plrresearch");
+      // A player research is a research (0x004f406d).
+      if (def.plr_research) def.research_command = true;
     }
     def.cost_gold = doc.attribute_int(n, "costgold", 0);
     def.cost_food = doc.attribute_int(n, "costfood", 0);
@@ -115,7 +125,6 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
     def.cost_stamina = doc.attribute_int(n, "coststamina", 0);
     def.exec_delay = doc.attribute_int(n, "execdelay", 0);
     def.priority = doc.attribute_int(n, "priority", 0);
-    def.immediate = doc.attribute_int(n, "immediate", 0) != 0;
     def.offset = doc.attribute_int(n, "offset", 0) != 0;
     // The two display strings, which the `rollover` family formats and nothing
     // in the simulation reads. 384 of the 404 rows carry a `rollover` and 253
@@ -225,6 +234,7 @@ void CommandSystem::forget(ObjectId id) {
   if (disabled_at < disabled_.size() && disabled_[disabled_at].id == id) {
     disabled_.erase(disabled_.begin() + static_cast<std::ptrdiff_t>(disabled_at));
   }
+  set_commanded(id, false);
   const std::size_t at = lower_bound(id);
   if (at >= queues_.size() || queues_[at].id != id) return;
   for (Command& command : queues_[at].queue.entries) retire(command);
@@ -748,11 +758,37 @@ bool CommandSystem::run_add_remove(ObjectId id, const Command& command, bool add
 
 bool CommandSystem::accept(World& world, ObjectId id, const Command& command) {
   if (!charge(world, id, command)) return false;
-  if (run_add_remove(id, command, /*add=*/true)) return true;
-  // Refused by the row's script after it was paid for: the payment goes back
-  // (0x005b18bc, `vtbl+0x88`), and nothing is queued.
-  settle(world, id, command, /*refund=*/true);
-  return false;
+  if (!run_add_remove(id, command, /*add=*/true)) {
+    // Refused by the row's script after it was paid for: the payment goes back
+    // (0x005b18bc, `vtbl+0x88`), and nothing is queued.
+    settle(world, id, command, /*refund=*/true);
+    return false;
+  }
+  // **A `plrresearch` row is held once per player** (0x005b1883..0x005b18ad):
+  // after the payment and the script, a set on the owner's player record
+  // (`[obj+0x70]`, keyed by the row's index `[def+0x1e4]`) refuses the row
+  // while it is up and is raised otherwise; the release (0x005b18d0) and the
+  // pop of a finished head (0x005b5160) lower it. So a second tavern cannot
+  // start `Tribute` while the first has it queued. The refusal returns
+  // **without** putting the payment back -- the original's own order, kept.
+  //
+  // Derived here rather than stored: the set is up exactly while some object
+  // of that player holds a command of the row, which a walk of the queues
+  // answers. **One difference, labelled:** the original never lowers it for
+  // an object destroyed with the row queued (its queue is not released), and
+  // this walk forgets such an object with its queue.
+  const CommandDef* row = command.name.empty() ? nullptr : table_.find(command.name);
+  if (row == nullptr || !row->plr_research) return true;
+  const ObjectState* self = world.state(id);
+  const PlayerId owner = self == nullptr ? kNoPlayer : self->owner;
+  for (const Entry& entry : queues_) {
+    const ObjectState* other = world.state(entry.id);
+    if (other == nullptr || other->owner != owner) continue;
+    for (const Command& held : entry.queue.entries) {
+      if (equal_fold(held.name, row->name)) return false;
+    }
+  }
+  return true;
 }
 
 void CommandSystem::release(World& world, ObjectId id, const Command& command) {
@@ -930,10 +966,225 @@ const Command* CommandSystem::command_of_script(script::ScriptId script) const n
   for (const Command& command : finishing_) {
     if (command.script == script) return &command;
   }
-  // Inside a row's `onaddremovescript`, which is no command's own script: the
-  // row it was run for, as the original's ambient globals say for as long as
-  // the call lasts.
+  // Inside a row's `onaddremovescript`, `groupdispatch` or immediate method,
+  // none of which is a queued command's own script: the row it was run for,
+  // as the original's ambient globals say for as long as the call lasts.
   return hooked_;
+}
+
+std::size_t CommandSystem::command_count_named(ObjectId id, std::string_view row) const noexcept {
+  const CommandQueue* q = find(id);
+  if (q == nullptr) return 0;
+  std::size_t n = 0;
+  for (const Command& command : q->entries) {
+    if (!command.name.empty() && command.name == row) ++n;
+  }
+  return n;
+}
+
+bool CommandSystem::binds(World& world, ObjectId id, std::string_view verb, CommandArgKind kind) {
+  const std::string path(script_for(world, id, verb));
+  if (path.empty()) return false;
+  if (scheduler_ == nullptr) return true;
+  const std::uint32_t chunk_index = library_ != nullptr ? library_->chunk_for(path)
+                                                        : scheduler_->find_chunk(path);
+  if (chunk_index == script::kNoChunk || chunk_index >= scheduler_->chunk_count()) return true;
+  const script::Chunk& chunk = scheduler_->chunk(chunk_index);
+  // The receiver is parameter 0; the template's one argument, if any, is 1.
+  const auto second_is = [&](std::string_view type) {
+    return chunk.parameter_count == 2 && chunk.locals.size() > 1 &&
+           equal_fold(chunk.locals[1].type_name, type);
+  };
+  switch (kind) {
+    case CommandArgKind::none: return chunk.parameter_count == 1;
+    case CommandArgKind::point: return second_is("point");
+    case CommandArgKind::object: return second_is("Obj");
+  }
+  return false;
+}
+
+bool CommandSystem::commanded(ObjectId id) const noexcept {
+  return std::binary_search(commanded_.begin(), commanded_.end(), id);
+}
+
+void CommandSystem::set_commanded(ObjectId id, bool on) {
+  const auto at = std::lower_bound(commanded_.begin(), commanded_.end(), id);
+  const bool held = at != commanded_.end() && *at == id;
+  if (on && !held) commanded_.insert(at, id);
+  if (!on && held) commanded_.erase(at);
+}
+
+namespace {
+
+/// A command carrying `def` -- its name, parameter, costs and delay -- the
+/// shape the per-object issue gives every command it builds (`[cmd+0x2c]`).
+Command row_command(const CommandDef& def) {
+  Command command;
+  command.param = def.param;
+  command.name = def.name;
+  command.cost_gold = def.cost_gold;
+  command.cost_food = def.cost_food;
+  command.cost_pop = def.cost_pop;
+  command.cost_stamina = def.cost_stamina;
+  command.delay = def.exec_delay;
+  return command;
+}
+
+}  // namespace
+
+bool CommandSystem::dispatch(World& world, std::span<const ObjectId> actors, const CommandDef& def,
+                             Point point, ObjectId object, bool replace, bool modifier,
+                             std::int32_t player_arg) {
+  if (scheduler_ == nullptr || def.group_dispatch.empty()) return false;
+  const std::uint32_t chunk = library_ != nullptr ? library_->chunk_for(def.group_dispatch)
+                                                  : scheduler_->find_chunk(def.group_dispatch);
+  if (chunk == script::kNoChunk || chunk >= scheduler_->chunk_count()) return false;
+  ObjListPool& pool = objlist_pool_of(world);
+  // The actors the row is enabled for (0x004ef589's `vtbl+0xd8`), in order.
+  const ObjListId list = pool.acquire_temporary(script::kNoScript);
+  if (std::vector<ObjectId>* items = pool.mutable_items(list)) {
+    for (const ObjectId id : actors) {
+      if (world.find(id) != nullptr && command_enabled(world, id, def.name)) items->push_back(id);
+    }
+  }
+  const std::array<script::Value, 6> args{
+      make_objlist_value(list),
+      pack_point(point),
+      object != kNoObject ? script::Value::object(kTypeObj, object)
+                          : script::Value::object(script::ObjectRef{script::kNoType, 0}),
+      script::Value::boolean(replace),
+      script::Value::boolean(modifier),
+      script::Value::integer(player_arg),
+  };
+  // The row is ambient for exactly the call, and the outer one comes back.
+  const Command ambient = row_command(def);
+  const Command* outer = hooked_;
+  hooked_ = &ambient;
+  const script::CallReport ran = scheduler_->call(chunk, args);
+  hooked_ = outer;
+  // The list it was handed is `kNoScript`'s, as a verifier's is, and goes now.
+  pool.release_script(script::kNoScript);
+  if (ran.status == script::ExecStatus::failed) {
+    scheduler_->report_trap(
+        script::FailedScript{ran.id, scheduler_->chunk(chunk).source_name, ran.trap});
+  }
+  return ran.id != script::kNoScript;
+}
+
+void CommandSystem::run_immediate(World& world, ObjectId id, Command command) {
+  // The command was built, so it has its id (0x00599302), whatever follows.
+  command.id = world.next_command_id();
+  if (!accept(world, id, command)) return;
+  if (scheduler_ == nullptr) return;
+  const std::string path(script_for(world, id, command.verb));
+  const std::uint32_t chunk = path.empty()                ? script::kNoChunk
+                              : library_ != nullptr ? library_->chunk_for(path)
+                                                    : scheduler_->find_chunk(path);
+  if (chunk == script::kNoChunk || chunk >= scheduler_->chunk_count()) return;
+  script::Value args[2] = {script::Value::object(kTypeObj, id), command.argument()};
+  const std::span<const script::Value> window(
+      args, command.arg_kind == CommandArgKind::none ? std::size_t{1} : std::size_t{2});
+  // Run through the command's own `vtbl+0xc` (0x00598a70 -> 0x006a0360): to its
+  // end, now, with the row ambient (0x004ef917..0x004ef9df). Never queued, so
+  // never released: what it paid stays paid.
+  const Command* outer = hooked_;
+  hooked_ = &command;
+  const script::CallReport ran = scheduler_->call(chunk, window);
+  hooked_ = outer;
+  if (ran.status == script::ExecStatus::failed) {
+    scheduler_->report_trap(
+        script::FailedScript{ran.id, scheduler_->chunk(chunk).source_name, ran.trap});
+  }
+}
+
+bool CommandSystem::issue_research(World& world, ObjectId id, Command command) {
+  const CommandQueue* q = find(id);
+  // At most one command, and that one `idle` (case and all, 0x00429c60): an
+  // ordinary order. An empty queue here is an object still on the `idle` it
+  // was started with outside its queue.
+  if (q == nullptr || q->entries.empty()) return false;
+  if (q->entries.size() <= 1 && q->entries.front().verb == kDefaultCommandVerb) return false;
+
+  command.id = world.next_command_id();
+  const std::string head_name = q->entries.front().name;
+  const CommandDef* head_row = head_name.empty() ? nullptr : table_.find(head_name);
+  // Dropped unless the runner came in through a row that is not a research,
+  // and only then is the accept test asked (0x004efa45..0x004efa7c).
+  if (head_row == nullptr || head_row->research_command) return true;
+  if (!accept(world, id, command)) return true;
+  // The runner's script stops with no callback, its `onfinish` is told it was
+  // cancelled, and the research goes in front of it and starts
+  // (0x004efa82..0x004efaba). The runner keeps its place behind, unrefunded,
+  // and starts again from its beginning when it reaches the head.
+  CommandQueue& queue_ref = queue(id);
+  if (queue_ref.entries.empty()) {
+    queue_ref.entries.push_back(std::move(command));
+    return true;
+  }
+  Command& runner = queue_ref.entries.front();
+  retire(world, id, runner, /*canceled=*/true);
+  runner.started = false;
+  runner.script = script::kNoScript;
+  queue_ref.entries.insert(queue_ref.entries.begin(), std::move(command));
+  return true;
+}
+
+std::size_t CommandSystem::issue(World& world, std::span<const ObjectId> actors,
+                                 const CommandDef& def, Point point, ObjectId object, bool replace,
+                                 bool modifier, std::int32_t player_arg, bool user) {
+  // Every unit handed the order is marked commanded first, enabled or not
+  // (0x004ef410..0x004ef480): a unit by its own flag, a hero by his army's
+  // (0x005f5520 applying 0x004e7890 to his formation). **The hero himself is
+  // marked too -- an inference:** `TOWNHALL_AUTOTRAIN.VS` reads
+  // `u.hero.GetCommanded`, which only answers anything if he is.
+  const HeroSystem* heroes = hero_system_of(world);
+  for (const ObjectId id : actors) {
+    const WorldObject* slot = world.find(id);
+    if (slot == nullptr || !slot->state.flags.is_unit) continue;
+    set_commanded(id, true);
+    const HeroRecord* record = heroes == nullptr ? nullptr : heroes->hero(id);
+    if (record == nullptr) continue;
+    for (const ObjectId member : record->army) set_commanded(member, true);
+  }
+
+  if (!def.group_dispatch.empty()) {
+    return dispatch(world, actors, def, point, object, replace, modifier, player_arg) ? 1 : 0;
+  }
+
+  const std::string_view verb = def.method.empty() ? std::string_view{def.name} : def.method;
+  std::size_t issued = 0;
+  for (const ObjectId id : actors) {
+    if (world.find(id) == nullptr || !command_enabled(world, id, def.name)) continue;
+    Command command = row_command(def);
+    command.user = user;
+    command.verb.assign(verb);
+    // The method by shape: the object form when an object was given, then the
+    // point form, then the bare form; none of them, and the actor is skipped
+    // ("Cmd Not resolved to method").
+    if (object != kNoObject && binds(world, id, verb, CommandArgKind::object)) {
+      command.arg_kind = CommandArgKind::object;
+      command.object = object;
+    } else if (binds(world, id, verb, CommandArgKind::point)) {
+      command.arg_kind = CommandArgKind::point;
+      command.point = point;
+    } else if (!binds(world, id, verb, CommandArgKind::none)) {
+      continue;
+    }
+    if (def.immediate) {
+      run_immediate(world, id, std::move(command));
+      ++issued;
+      continue;
+    }
+    if (def.research_command && issue_research(world, id, command)) {
+      ++issued;
+      continue;
+    }
+    const std::uint32_t made = replace && !def.train_command
+                                   ? set_command(world, id, verb, command)
+                                   : append_order(world, id, verb, command);
+    if (made != 0) ++issued;
+  }
+  return issued;
 }
 
 CommandSystem* command_system(World& world) noexcept {

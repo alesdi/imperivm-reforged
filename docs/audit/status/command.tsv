@@ -1,0 +1,12 @@
+0x005d6030	partial	Unit::Idle: held wait and on-map target drop + ms budget read (0x005d2ca0); the idle activity's random draws (0x005a81b0 variant, rand(1,15) per 100 ms step) and animation not reproduced
+0x005d60f0	partial	Unit::Taunt: Idle's body with activity 5; same gap (rand(1,3) per step and the taunt animation not reproduced)
+0x005c6ea0	partial	Ship::Idle: duration should be the class idle animation's length (anim 12, record+0x4c), engine waits kDefaultIdleSlice; [ship+0x1cc] gate and the ship's activity dispatch not read; no held branch in the original
+0x005d88b0	partial	Unit::ForceIdle: [unit+0x1b8]=1; its only reader is the unmodelled idle animation activity (0x005d2ca0), so nothing is stored
+0x005d6620	partial	Unit::GotoEnter: answer-after-wait protocol (shared Goto design), destination clamp to the map rect, invalid-receiver answer true, taunt flag and animation remainder not reproduced
+0x005d6a90	partial	Unit::GotoAttack -> 0x005d40c0: combat target not set at entry, held/concealed targets not refused, invalid receiver/target answers, answer-after-wait (shared Goto design), 999/920 range caps
+0x0052eaf0	partial	Hero::FormKeepMoving: suspension matches; formation object approximated (UpdateMove -> place_army), resume-time arrival drop (0x00417c10 -> 0x005d3830) left to movement
+0x005d7a40	partial	Unit::FormKeepMoving: target drop and suspension match; resume's arrival-test route drop not reproduced (formation-aimed route approximated)
+0x0052e5e0	partial	Hero::FormSetupAndMoveTo(point): SetDest/hand-out/end-march read; range <=999 clamp absent; formation path approximated by the hero's route
+0x0052e890	partial	Hero::FormSetupAndMoveTo(Obj): non-unit targets route centre-to-centre with [formR+tR, formR+tR+range] ignoring min (0x0052e9a0..), engine measures edge gap; clamps absent; formation approximated
+0x0052ebc0	partial	Hero::FormPathLeft: formation path approximated by the hero's route; +32000 for a flagged (incomplete) path (0x004185a0) not reproduced
+0x005d7880	partial	Unit::FormAcceptMove: step-out and target drop match; formation-aimed route approximated by place_army/march_member
