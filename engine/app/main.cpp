@@ -177,6 +177,12 @@ struct Arguments {
   /// (0x00528a80: real length x speed / 1000). A fast-forward for a scripted
   /// run, and nothing a player can reach.
   int turn_length = 0;
+  /// `--seed N`: the world seed a match started here is built from, 1 by
+  /// default -- what `imrun --seed` sets. The seed draws, among much else,
+  /// the race a random seat plays, so a scripted run that needs one race
+  /// names the seed that gives it. A load and a networked match take theirs
+  /// from the save and the lobby.
+  std::uint32_t seed = 1;
   /// Which player slot the mouse commands. 0-based, like `PlayerId`.
   int player = 0;
   /// `--difficulty N`, 0 easy to 2 hard: this match's, over the options'
@@ -225,6 +231,7 @@ constexpr const char* kUsage = R"(usage: imperivm [--game DIR] [--map CONTAINER 
                         turn:N over select:WHAT look:WHAT, separated by ';' (turn:N waits for the N-th turn,
                         over for the end; WHAT is --select's words)
   --turn-length N       every turn N game-time units, whatever the speed
+  --seed N              the world seed a match started here is built from (1)
   --headless            no window: see below
   --help                this
 
@@ -301,6 +308,8 @@ Arguments parse_arguments(int argc, char** argv) {
       args.player = SDL_atoi(next().c_str());
     } else if (flag == "--difficulty") {
       args.difficulty = std::clamp(SDL_atoi(next().c_str()), 0, 2);
+    } else if (flag == "--seed") {
+      args.seed = static_cast<std::uint32_t>(SDL_strtoul(next().c_str(), nullptr, 10));
     } else if (flag == "--turn-length") {
       args.turn_length = SDL_atoi(next().c_str());
     } else if (flag == "--turn-interval") {
@@ -1782,6 +1791,7 @@ class Application {
 
 bool Application::start(const Arguments& args) {
   args_ = args;
+  seed_ = args.seed;
 
   const auto root = platform::Vfs::find_installation(args.game);
   if (!root) {
@@ -6939,7 +6949,7 @@ void Application::return_to_front() {
   fog_view_.reset();
   world_view_.reset_glide();
   pending_load_.reset();
-  seed_ = 1;
+  seed_ = args_.seed;
   zoom_ground_ = core::ui::Image{};
   play_mode_ = false;
   map_mode_ = false;
