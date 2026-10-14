@@ -750,13 +750,13 @@ TEST(add_command_offset_queues_the_same_spread_it_would_have_set) {
   CHECK(invoke(registry, CallKind::member, "AddCommandOffset", 3, behind).status ==
         HostStatus::ok);
   HostCall jumped(f.world, {make_objlist_value(list), Value::boolean(true),
-                            Value::string("siege"), pack_point(Point{7000, 1000})});
+                            Value::string("goto"), pack_point(Point{7000, 1000})});
   CHECK(invoke(registry, CallKind::member, "AddCommandOffset", 3, jumped).status ==
         HostStatus::ok);
 
   REQUIRE(f.commands.find(a)->entries.size() == 4);
   CHECK(f.verbs(a)[0] == "move");    // still running, never displaced
-  CHECK(f.verbs(a)[1] == "siege");   // the front insert, ahead of both
+  CHECK(f.verbs(a)[1] == "goto");    // the front insert, ahead of both
   CHECK(f.verbs(a)[2] == "advance");
   CHECK(f.verbs(a)[3] == "guard");   // the back insert, still last
   CHECK(f.commands.find(a)->entries[1].point == (Point{6900, 1000}));
@@ -2992,4 +2992,186 @@ TEST(form_accept_move_finishes_at_once_because_the_station_is_already_ordered) {
 
   HostCall stale(f.world, {obj(999999)});
   CHECK(invoke(registry, CallKind::member, "FormAcceptMove", 0, stale).status == HostStatus::ok);
+}
+
+// --------------------------------------------------------------------------
+// the host audit: the queue members against 0x005aef20 and their three forms
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// Compiles method scripts from a fixed table, as the session compiles from
+/// the installation, so that `CommandSystem::binds` can read their shapes.
+struct ShapeLibrary final : imperivm::core::sim::ScriptLibrary {
+  Scheduler* scheduler = nullptr;
+  const HostRegistry* registry = nullptr;
+  std::vector<std::pair<std::string, std::string>> sources;
+
+  std::uint32_t chunk_for(std::string_view path) override {
+    if (const std::uint32_t found = scheduler->find_chunk(path); found != kNoChunk) return found;
+    for (const auto& [name, source] : sources) {
+      if (name == path) return build(*scheduler, *registry, source, name.c_str());
+    }
+    return kNoChunk;
+  }
+};
+
+struct ShapeFixture : RunFixture {
+  ShapeLibrary library;
+  ShapeFixture() {
+    library.scheduler = &scheduler;
+    library.registry = &registry;
+    // `move` takes a point, `engage` an object, `guard` nothing -- the three
+    // shapes 0x005aef20 asks for by kind 1, 2 and 0.
+    library.sources.emplace_back("data/subai/unit_move.vs",
+                                 "// void, Obj This, point pt\nSleep(500);\n");
+    library.sources.emplace_back("data/subai/unit_engage.vs",
+                                 "// void, Obj This, Obj target\nSleep(500);\n");
+    library.sources.emplace_back("data/subai/unit_guard.vs", "// void, Obj This\nSleep(500);\n");
+    commands.set_library(&library);
+  }
+};
+
+}  // namespace
+
+/// 0x005aef20 finds a method by name **and** by its script's signature, so a
+/// verb given the wrong argument is not found: `AddCommand` queues nothing and,
+/// building no command, draws no id. `GDRUID_IDLE.VS`'s
+/// `AddCommand(true, "ghost", .pos)` against a `ghost` that takes no argument
+/// is the shipped case.
+TEST(add_command_queues_only_a_verb_bound_in_the_shape_it_is_given) {
+  ShapeFixture f;
+  const ObjectId u = f.spawn(f.unit_class);
+  f.world.set_command_id_seed(500);
+
+  HostCall bare(f.world, {obj(u), Value::boolean(true), Value::string("move")});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 2, bare).status == HostStatus::ok);
+  HostCall pointed(f.world, {obj(u), Value::boolean(true), Value::string("guard"),
+                             pack_point(Point{300, 300})});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, pointed).status ==
+          HostStatus::ok);
+  CHECK(f.commands.command_count(u) == 0);
+  CHECK(f.world.command_id_seed() == 500);
+
+  HostCall right(f.world, {obj(u), Value::boolean(true), Value::string("move"),
+                           pack_point(Point{300, 300})});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, right).status == HostStatus::ok);
+  HostCall at(f.world, {obj(u), Value::boolean(false), Value::string("engage"), obj(u)});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, at).status == HostStatus::ok);
+  CHECK(f.verbs(u) == (std::vector<std::string>{"move", "engage"}));
+  CHECK(f.world.command_id_seed() == 502);
+}
+
+/// A script's `SetCommand` clears the tail **before** it looks the verb up, and
+/// on a miss the `Obj` form leaves the head running (0x005b0aec returns) while
+/// the `ObjList` and `Query` forms end it anyway (0x00561d6a, 0x00577ef8).
+TEST(a_set_command_that_finds_no_method_clears_the_tail_and_only_a_list_ends_the_head) {
+  ShapeFixture f;
+  const ObjectId a = f.spawn(f.unit_class, Point{100, 100});
+  const ObjectId b = f.spawn(f.unit_class, Point{300, 100});
+  for (const ObjectId id : {a, b}) {
+    f.commands.set_command(f.world, id, "guard", Command{});
+    f.commands.add_command(f.world, id, false, "goto", Command{});
+  }
+
+  HostCall single(f.world, {obj(a), Value::string("move")});
+  REQUIRE(invoke(f.registry, CallKind::member, "SetCommand", 1, single).status == HostStatus::ok);
+  CHECK(f.verbs(a) == (std::vector<std::string>{"guard"}));
+
+  ObjListPool& pool = objlist_pool_of(f.world);
+  const ObjListId list = pool.acquire(1, 0);
+  *pool.mutable_items(list) = {b};
+  HostCall group(f.world, {make_objlist_value(list), Value::string("move")});
+  REQUIRE(invoke(f.registry, CallKind::member, "SetCommand", 1, group).status == HostStatus::ok);
+  CHECK(f.verbs(b).empty());
+}
+
+/// `Obj::KillCommand` and `Obj::ClearCommands` refuse a dead object
+/// (0x005b0d30, 0x005aa250 ask `vtbl+0x50` first); the `ObjList` forms skip a
+/// dead member of every queue call, `AddCommand` and `SetCommand` included,
+/// while `Obj::AddCommand` has no such test.
+TEST(the_queue_members_leave_a_dead_object_alone_as_each_form_does) {
+  ShapeFixture f;
+  const ObjectId corpse = f.spawn(f.unit_class);
+  const ObjectId live = f.spawn(f.unit_class, Point{300, 100});
+  for (const ObjectId id : {corpse, live}) {
+    f.commands.set_command(f.world, id, "guard", Command{});
+    f.commands.add_command(f.world, id, false, "goto", Command{});
+  }
+  f.world.set_health(corpse, 0);
+
+  HostCall kill(f.world, {obj(corpse)});
+  REQUIRE(invoke(f.registry, CallKind::member, "KillCommand", 0, kill).status == HostStatus::ok);
+  HostCall clear(f.world, {obj(corpse)});
+  REQUIRE(invoke(f.registry, CallKind::member, "ClearCommands", 0, clear).status ==
+          HostStatus::ok);
+  CHECK(f.verbs(corpse) == (std::vector<std::string>{"guard", "goto"}));
+
+  ObjListPool& pool = objlist_pool_of(f.world);
+  const ObjListId list = pool.acquire(1, 0);
+  *pool.mutable_items(list) = {corpse, live};
+  HostCall add(f.world, {make_objlist_value(list), Value::boolean(false), Value::string("guard")});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 2, add).status == HostStatus::ok);
+  CHECK(f.verbs(corpse) == (std::vector<std::string>{"guard", "goto"}));
+  CHECK(f.verbs(live) == (std::vector<std::string>{"guard", "goto", "guard"}));
+
+  HostCall listed_kill(f.world, {make_objlist_value(list)});
+  REQUIRE(invoke(f.registry, CallKind::member, "KillCommand", 0, listed_kill).status ==
+          HostStatus::ok);
+  CHECK(f.verbs(corpse) == (std::vector<std::string>{"guard", "goto"}));
+  CHECK(f.verbs(live) == (std::vector<std::string>{"goto", "guard"}));
+
+  // The `Obj` form of `AddCommand` asks nothing about health.
+  HostCall single(f.world, {obj(corpse), Value::boolean(false), Value::string("guard")});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 2, single).status == HostStatus::ok);
+  CHECK(f.verbs(corpse).size() == 3);
+}
+
+/// The offset forms hold each member's destination inside the map
+/// (0x00562667..0x005626a7, the rectangle `ClipDestToMap` clamps to).
+TEST(set_command_offset_holds_a_member_spread_off_the_map_inside_it) {
+  ShapeFixture f;
+  MovementSystem movement;
+  movement.mutable_grid() = ObstructionGrid(64, 64);
+  f.world.add_system(&movement);
+  const ObjectId a = f.spawn(f.unit_class, Point{100, 100});
+  const ObjectId b = f.spawn(f.unit_class, Point{500, 100});
+
+  ObjListPool& pool = objlist_pool_of(f.world);
+  const ObjListId list = pool.acquire(1, 0);
+  *pool.mutable_items(list) = {a, b};
+  HostCall call(f.world, {make_objlist_value(list), Value::string("move"), pack_point(Point{50, 50})});
+  REQUIRE(invoke(f.registry, CallKind::member, "SetCommandOffset", 2, call).status ==
+          HostStatus::ok);
+  REQUIRE(f.commands.find(a) != nullptr);
+  REQUIRE(f.commands.find(a)->entries.size() == 1);
+  // The centre is (300, 100), so `a` is sent to (-150, 50): held at x = 0.
+  CHECK(f.commands.find(a)->entries[0].point == (Point{0, 50}));
+  CHECK(f.commands.find(b)->entries[0].point == (Point{250, 50}));
+}
+
+/// A command that ends **itself** is not a cancelled one. 0x005b07d0 ends
+/// index 0 through 0x0069fee0, and when the script holding the command slot is
+/// the one making the call it only raises that script's stop flag
+/// (`[ctx+0x40]`); the script then ends the ordinary way and the head is popped
+/// with the cancel flag (0x009bdb18) down, so `onfinish` is told `false`. A
+/// `KillCommand` from any other script is a cancel, as before.
+TEST(a_command_that_kills_itself_is_told_it_finished_and_not_that_it_was_cancelled) {
+  RunFixture f;
+  (void)register_global_hosts(f.registry);
+  REQUIRE(f.add_script("// void, Obj This\nThis.KillCommand();\nSleep(100000);\n",
+                       "data/subai/research.vs"));
+  REQUIRE(f.add_script(
+      "// void, Obj This, bool bCanceled\n"
+      "if (bCanceled) This.SetUser(2); else This.SetUser(1);\n",
+      "data/subai/onfinish_research.vs"));
+  REQUIRE(f.add_script("// void, Obj me\nwhile (1) Sleep(1000);\n", "data/subai/unit_idle.vs"));
+  const ObjectId u = f.spawn(f.unit_class);
+  f.commands.set_command(f.world, u, "research", Command{});
+  for (int i = 0; i < 4; ++i) {
+    f.scheduler.advance(200);
+    f.world.advance(200);
+  }
+  CHECK(f.commands.command_name(u) != "research");
+  CHECK(f.world.find(u)->state.user == 1);
 }

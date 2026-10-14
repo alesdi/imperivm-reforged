@@ -618,6 +618,13 @@ class CommandSystem final : public System {
   /// the other side and fixed with the replace flag it really passes.
   std::uint32_t append_order(World& world, ObjectId id, std::string_view verb,
                              const Command& prototype);
+  /// The script a host call is made from, for the length of that call, and
+  /// the previous one back. A running command ended by its own script is not
+  /// a cancelled one (`remove_at`). Set by the queue entry points.
+  script::ScriptId set_caller(script::ScriptId script) noexcept {
+    return std::exchange(caller_, script);
+  }
+
   /// `KillCommand()`: end the running command. Returns false when there was
   /// none. The queue refills with the default verb if it would go empty.
   bool kill_command(World& world, ObjectId id);
@@ -950,6 +957,9 @@ class CommandSystem final : public System {
   /// the length of the call. Transient -- set and cleared inside one host
   /// call -- so never saved.
   const Command* hooked_ = nullptr;
+  /// The script whose host call is changing a queue, or `kNoScript`; see
+  /// `set_caller`. Transient, never saved.
+  script::ScriptId caller_ = script::kNoScript;
   std::vector<script::FailedScript> hook_traps_;
   std::string default_verb_{kDefaultCommandVerb};
   /// Sorted by class index. Derived from the class graph, never hashed.

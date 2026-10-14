@@ -10,3 +10,32 @@
 0x0052e890	partial	Hero::FormSetupAndMoveTo(Obj): non-unit targets route centre-to-centre with [formR+tR, formR+tR+range] ignoring min (0x0052e9a0..), engine measures edge gap; clamps absent; formation approximated
 0x0052ebc0	partial	Hero::FormPathLeft: formation path approximated by the hero's route; +32000 for a flagged (incomplete) path (0x004185a0) not reproduced
 0x005d7880	partial	Unit::FormAcceptMove: step-out and target drop match; formation-aimed route approximated by place_army/march_member
+0x005afe90	verified	Obj::AddCommand/void: 0x005aef20 lookup by name and shape (miss queues nothing, draws no id), insert vtbl+0xbc (accept 0x005b1760, index 1 / back); no dead test
+0x005aff70	verified	Obj::AddCommand/point: as the void form with kind 1
+0x005b0070	verified	Obj::AddCommand/Obj: as the void form with kind 2; the object handle is passed on unchecked
+0x00563020	verified	ObjList::AddCommand/void: list copy, dead members skipped, then Obj::AddCommand's rule per member
+0x00561e30	verified	ObjList::AddCommand/point: as the void list form, kind 1
+0x00562800	verified	ObjList::AddCommand/Obj: an object argument that names nothing does nothing at all; else as the void list form, kind 2
+0x00577c30	verified	Query::AddCommand/void: the query refreshed (vtbl+0x1c), every member, no dead test
+0x00577f30	verified	Query::AddCommand/point: as the void query form, kind 1
+0x00578690	verified	Query::AddCommand/Obj: invalid object argument does nothing; else as the void query form, kind 2
+0x005b0a50	partial	Obj::SetCommand/void: tail cleared first (0x005b1120), lookup (miss: head kept), vtbl+0xbc then 0x005b07d0(0); own-script end not a cancel (0x0069fee0 stop flag). Gap (design): the next command starts at the next command pass, not inside the call (0x005b5160 -> 0x005b4f20)
+0x005b0b30	partial	Obj::SetCommand/point: as the void form, kind 1; same deferred-launch gap
+0x005b0c30	partial	Obj::SetCommand/Obj: as the void form, kind 2; same deferred-launch gap
+0x00561c10	partial	ObjList::SetCommand/void: dead members skipped; a lookup miss ends the head too (0x00561d6a); same deferred-launch gap
+0x00562050	partial	ObjList::SetCommand/point: as the void list form, kind 1; same deferred-launch gap
+0x00562a70	partial	ObjList::SetCommand/Obj: invalid object argument does nothing; else as the void list form, kind 2; same deferred-launch gap
+0x00577db0	partial	Query::SetCommand/void: refreshed query, no dead test, a miss ends the head; same deferred-launch gap
+0x005780d0	partial	Query::SetCommand/point: as the void query form, kind 1; same deferred-launch gap
+0x00578870	partial	Query::SetCommand/Obj: invalid object argument does nothing; else as the void query form, kind 2; same deferred-launch gap
+0x005b0d30	partial	Obj::KillCommand: dead object refused; 0x005b07d0(0) (release for a costed row, onfinish cancelled unless the caller is the runner). Gaps: deferred launch of the next command; 0x005b07d0's no-op without a live slot-0 script (0x0069f950) -- here an unstarted head is ended
+0x00562d20	partial	ObjList::KillCommand: dead members skipped; otherwise as Obj::KillCommand, same gaps
+0x00578a80	partial	Query::KillCommand: refreshed query, no dead test; otherwise as Obj::KillCommand, same gaps
+0x005aa250	verified	Obj::ClearCommands: dead object refused; vtbl+0xc0(0) = 0x005b1120, last index down to 1 through 0x005b07d0 (release first)
+0x00562ea0	verified	ObjList::ClearCommands: dead members skipped; as Obj::ClearCommands
+0x00578b60	verified	Query::ClearCommands: refreshed query, no dead test; as Obj::ClearCommands
+0x005b0930	partial	Obj::SneakCommand: empty queue untouched, bare-form lookup, clone (0x00599c40) + verb both front-inserted, head ended. Gap: the clone keeps the runner's id in the original (0x00599cdb); here it is issued a fresh one before the verb's
+0x00562520	verified	ObjList::SetCommandOffset: centre = mean position (0x004cd1b0), each live member's position + (pt - centre) clamped to the map rect, then SetCommand's point-form rule per member
+0x00562280	verified	ObjList::AddCommandOffset: as SetCommandOffset without the clear and without the clamp, AddCommand's point-form rule
+0x00578460	verified	Query::SetCommandOffset: refreshed query, no dead test, otherwise ObjList::SetCommandOffset
+0x00578280	verified	Query::AddCommandOffset: refreshed query, no dead test, no clamp, AddCommand's point-form rule
