@@ -5648,26 +5648,67 @@ TEST(the_jupiter_anger_target_is_stored_raw_and_checked_on_the_way_out) {
   CHECK(back.state_hash() == world.state_hash());
 }
 
-/// `EnemyInRange(pt, range, who)` sweeps a **square**, not a circle.
-TEST(enemy_in_range_sweeps_a_square_around_the_point) {
+/// `EnemyInRange(pt, range, who)`: an enemy **unit** the asker can attack, not
+/// hidden, not of a negative `target_factor`, whose distance from the point
+/// less its class `radius` is within `range` (0x004dbea0's test, 0x005a7900's
+/// measure). The square the original sweeps only bounds the search.
+TEST(enemy_in_range_finds_an_attackable_enemy_unit_within_range_of_its_edge) {
+  ClassGraph graph;
+  const std::string docs[] = {
+      R"(<class id="Object" cpp_class="CVXDecor"><properties target_factor="100"/></class>)",
+      R"(<class id="Soldier" parent="Object" cpp_class="CVXUnit"><properties
+           maxhealth="100" damage="10" range="17"/></class>)",
+      R"(<class id="Elephant" parent="Soldier" cpp_class="CVXUnit"><properties
+           radius="100"/></class>)",
+      R"(<class id="Deer" parent="Soldier" cpp_class="CVXUnit"><properties
+           target_factor="-1"/></class>)",
+      R"(<class id="Hut" parent="Object" cpp_class="CVXBuilding"><properties
+           maxhealth="300"/></class>)",
+  };
+  const char* names[] = {"object.sc.xml", "soldier.sc.xml", "elephant.sc.xml", "deer.sc.xml",
+                         "hut.sc.xml"};
+  for (int i = 0; i < 5; ++i) graph.add(bytes_of(docs[i]), names[i]);
+  graph.link();
   World world;
+  world.set_class_graph(&graph);
+  CombatSystem combat;
+  combat.set_class_graph(&graph);
+  combat.set_world_bound(true);
+  REQUIRE(world.add_system(&combat));
   script::HostRegistry registry;
   (void)register_all_hosts(registry);
   HostContext context;
   context.world = &world;
   context.object_type = kTypeObj;
 
-  const ObjectId watcher = world.spawn(NativeClass::unit, nullptr);
-  REQUIRE(world.set_owner(watcher, 0));
-  REQUIRE(world.set_position(watcher, Point{5000, 5000}));
+  const auto spawn = [&](const char* cls, PlayerId owner, Point at,
+                         NativeClass native = NativeClass::unit) {
+    const ObjectId id = world.spawn(native, nullptr, graph.find(cls));
+    CHECK(world.set_owner(id, owner));
+    CHECK(world.set_health(id, 100));
+    CHECK(world.set_position(id, at));
+    return id;
+  };
+  // Everything spawned before the combat system starts, which is when it
+  // takes its combatants; the ones not wanted yet are parked far away.
+  const Point far{20000, 20000};
+  const ObjectId watcher = spawn("Soldier", 0, Point{5000, 5000});
+  const ObjectId hostile = spawn("Soldier", 1, far);
+  const ObjectId elephant = spawn("Elephant", 1, far);
+  const ObjectId deer = spawn("Deer", 1, far);
+  const ObjectId hut = spawn("Hut", 1, far, NativeClass::building);
+  const ObjectId friendly = spawn("Soldier", 2, far);
+  world.players().set_relation_word(0, 2, kRelationFriendly);
+  combat.start(world);
+  const auto park = [&](ObjectId id) { CHECK(world.set_position(id, far)); };
 
-  const auto ask = [&](Point at, std::int32_t range) {
+  const auto ask = [&](Point at, std::int32_t range, ObjectId who) {
     const std::uint32_t index =
         registry.find(script::CallKind::free_function, "EnemyInRange", 3);
     CHECK(index != script::kUnresolvedHost);
     if (index == script::kUnresolvedHost) return false;
     std::vector<script::Value> args{pack_point(at), script::Value::integer(range),
-                                    script::Value::object(kTypeObj, watcher)};
+                                    script::Value::object(kTypeObj, who)};
     script::CallContext ctx;
     ctx.arguments = args;
     ctx.user = &context;
@@ -5677,76 +5718,49 @@ TEST(enemy_in_range_sweeps_a_square_around_the_point) {
     CHECK(out.status == script::HostStatus::ok);
     return out.value.truthy_scalar();
   };
+  const Point here{5000, 5000};
+  CHECK(!ask(here, 500, watcher));
 
-  CHECK(!ask(Point{5000, 5000}, 500));
+  // An enemy soldier 400 east: in range 500, not 300.
+  CHECK(world.set_position(hostile, Point{5400, 5000}));
+  CHECK(ask(here, 500, watcher));
+  CHECK(!ask(here, 300, watcher));
+  // **Not a square.** The corner (400, 400) is 565 away: inside the square the
+  // sweep walks, outside the range the test measures.
+  CHECK(world.set_position(hostile, Point{5400, 5400}));
+  CHECK(!ask(here, 500, watcher));
+  park(hostile);
+  // An elephant at that corner is 565 - its radius 100 = 465 away: in.
+  CHECK(world.set_position(elephant, Point{5400, 5400}));
+  CHECK(ask(here, 500, watcher));
+  park(elephant);
 
-  // Player 0 grants player 1 nothing, so player 1 is its enemy by the default
-  // zero row; player 2 gets a ceasefire and is not.
-  const ObjectId hostile = world.spawn(NativeClass::unit, nullptr);
-  REQUIRE(world.set_owner(hostile, 1));
-  const ObjectId friendly = world.spawn(NativeClass::unit, nullptr);
-  REQUIRE(world.set_owner(friendly, 2));
-  world.players().set_relation_word(0, 2, kRelationFriendly);
+  // A deer (`target_factor` -1), a hidden soldier and an enemy building are
+  // none of them found, however close.
+  CHECK(world.set_position(deer, Point{5100, 5000}));
+  CHECK(!ask(here, 500, watcher));
+  park(deer);
+  CHECK(world.set_position(hut, Point{5100, 5000}));
+  CHECK(!ask(here, 500, watcher));
+  park(hut);
+  CHECK(world.set_position(hostile, Point{5100, 5000}));
+  world.mutable_state(hostile)->flags.hidden = true;
+  CHECK(!ask(here, 500, watcher));
+  world.mutable_state(hostile)->flags.hidden = false;
+  CHECK(ask(here, 500, watcher));
+  park(hostile);
 
-  REQUIRE(world.set_position(hostile, Point{5400, 5000}));
-  CHECK(ask(Point{5000, 5000}, 500));
-  CHECK(!ask(Point{5000, 5000}, 300));
+  // A player the asker has a ceasefire with is not an enemy.
+  CHECK(world.set_position(friendly, Point{5100, 5000}));
+  CHECK(!ask(here, 500, watcher));
+  park(friendly);
 
-  // **A square.** The corner is 400 out on each axis -- inside the square of
-  // half-side 500, and outside a circle of radius 500, which is 565 away.
-  REQUIRE(world.set_position(hostile, Point{5400, 5400}));
-  CHECK(ask(Point{5000, 5000}, 500));
-
-  // ...and one axis past the edge is out, however close the other is.
-  REQUIRE(world.set_position(hostile, Point{5501, 5000}));
-  CHECK(!ask(Point{5000, 5000}, 500));
-  REQUIRE(world.set_position(hostile, Point{5500, 5000}));
-  CHECK(ask(Point{5000, 5000}, 500));  // the edge itself is in
-
-  // ...and the **other** axis is tested too, which is the one thing a square
-  // written as two ranges can quietly lose half of.
-  REQUIRE(world.set_position(hostile, Point{5000, 5501}));
-  CHECK(!ask(Point{5000, 5000}, 500));
-  REQUIRE(world.set_position(hostile, Point{5000, 5500}));
-  CHECK(ask(Point{5000, 5000}, 500));
-  REQUIRE(world.set_position(hostile, Point{5000, 4499}));
-  CHECK(!ask(Point{5000, 5000}, 500));
-
-  // A player the asker has a ceasefire with is not an enemy, at any distance.
-  REQUIRE(world.set_position(hostile, Point{9000, 9000}));
-  REQUIRE(world.set_position(friendly, Point{5000, 5000}));
-  CHECK(!ask(Point{5000, 5000}, 500));
-  // ...and neither is the asker's own side.
-  const ObjectId mate = world.spawn(NativeClass::unit, nullptr);
-  REQUIRE(world.set_owner(mate, 0));
-  REQUIRE(world.set_position(mate, Point{5000, 5000}));
-  CHECK(!ask(Point{5000, 5000}, 500));
-
-  // An object with no owner is nobody's enemy.
-  const ObjectId rock = world.spawn(NativeClass::decor, nullptr);
-  REQUIRE(world.set_position(rock, Point{5000, 5000}));
-  CHECK(!ask(Point{5000, 5000}, 500));
-
-  // The point is the argument's, not the asking object's -- the shipped caller
-  // passes `.pos` and could not tell the two apart, so this does.
-  REQUIRE(world.set_position(hostile, Point{100, 100}));
-  CHECK(ask(Point{100, 100}, 200));
-  CHECK(!ask(Point{5000, 5000}, 200));
-
+  // The point is the argument's, not the asking object's.
+  CHECK(world.set_position(hostile, Point{100, 100}));
+  CHECK(ask(Point{100, 100}, 200, watcher));
+  CHECK(!ask(here, 200, watcher));
   // An asking object that does not resolve is false, not a refusal.
-  const std::uint32_t index =
-      registry.find(script::CallKind::free_function, "EnemyInRange", 3);
-  REQUIRE(index != script::kUnresolvedHost);
-  std::vector<script::Value> args{pack_point(Point{100, 100}), script::Value::integer(200),
-                                  script::Value::object(kTypeObj, 9999)};
-  script::CallContext ctx;
-  ctx.arguments = args;
-  ctx.user = &context;
-  ctx.name = "EnemyInRange";
-  ctx.kind = script::CallKind::free_function;
-  const script::HostOutcome out = registry.entry(index).fn(ctx);
-  CHECK(out.status == script::HostStatus::ok);
-  CHECK(!out.value.truthy_scalar());
+  CHECK(!ask(Point{100, 100}, 200, static_cast<ObjectId>(9999)));
 }
 
 // --------------------------------------------------------------------------

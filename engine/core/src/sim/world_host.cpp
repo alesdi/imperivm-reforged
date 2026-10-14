@@ -183,6 +183,33 @@ std::int32_t class_int(const World& world, const WorldObject& slot,
   return static_cast<std::int32_t>(negative ? -value : value);
 }
 
+/// Whether any class from `index` up the chain declares `key` -- the
+/// question `ClassGraph::property` folds into an empty answer.
+[[nodiscard]] bool class_declares(const ClassGraph& graph, ClassIndex index,
+                                  std::string_view key) noexcept {
+  for (ClassIndex at = index; at != kNoClass; at = graph.at(at).parent_index) {
+    for (const ClassProperty& property : graph.at(at).properties) {
+      if (property.key == key) return true;
+    }
+    if (graph.at(at).parent_index == at) break;
+  }
+  return false;
+}
+
+/// The class record's "absent" marker for an int slot (`0xff1b1e40`).
+constexpr std::int32_t kClassIntAbsent = -15000000;
+
+/// One class int that keeps the absent marker when nothing declares it.
+[[nodiscard]] std::int32_t class_int_or_marker(const World& world, const WorldObject& slot,
+                                               std::string_view key) noexcept {
+  const ClassGraph* graph = world.class_graph();
+  if (graph == nullptr || slot.class_index == kNoClass ||
+      !class_declares(*graph, slot.class_index, key)) {
+    return kClassIntAbsent;
+  }
+  return class_int(world, slot, key);
+}
+
 /// A class property as a flag, walking up the class tree.
 ///
 /// `gbr.exe` parses these into one `int` slot per key on the class descriptor
@@ -1798,32 +1825,34 @@ HostOutcome m_get_jupiter_target(CallContext& ctx) {
 }
 
 /// `EnemyInRange(pt, range, who)` -- 1 site, and the **sole blocker of
-/// `WALL_PATROL.VS` and its 158 call sites**, the largest single script left.
+/// `WALL_PATROL.VS` and its 158 call sites**, the largest single script left:
+/// `EnemyInRange(.pos, nWallRange, list[0])`, a wall deciding whether its
+/// patrol has anything to shoot at.
 ///
-/// 0x004dcb20 pops the three, refuses an object that does not resolve with
+/// 0x004dcb20 pops the three and refuses an object that does not resolve with
 /// *"The function 'EnemyInRange' called for an uninitialized or invalid
-/// object."* and `false`, and otherwise sweeps the object grid over
+/// object."* and `false`. Otherwise it sweeps the object grid (0x004dbea0)
+/// over the square `[x - range, x + range] x [y - range, y + range]`, built
+/// at 0x004dcba0, with a functor (0x00514080) holding the asker's owner's
+/// enemy word (`[record+0x10]`, `PlayerTable::is_enemy`'s complement of the
+/// ceasefire bit) and side mask (`[record+0x18]`), the point, the range and
+/// the asker. An object is found -- and the sweep stops -- when:
 ///
-///     [x - range, x + range] x [y - range, y + range]
+///   * its owner's bit is in the enemy word;
+///   * it is not hidden (bit 21 of `[obj+0x2c]`; the side mask lets a hidden
+///     object past the first test, and the second then refuses it anyway);
+///   * it is a **unit**: anything else is handed to the asker's `CanAttack`
+///     virtual (`vtbl+0xb4`) as null, and refused;
+///   * the asker can attack it -- that virtual, which is `unit_can_attack`;
+///   * its class's `target_factor` (`[cls+0xb2c]`) is not negative -- crows,
+///     deer, eagles, fish and hens declare -1, and the absent marker is
+///     negative too;
+///   * and **its distance from the point, less its class `radius`**
+///     (0x005a7900: `isqrt(dx^2 + dy^2) - [cls+0x2dc]`), is at most `range`.
 ///
-/// -- a **square**, built at 0x004dcba0 as four separate add/subtract pairs,
-/// not the circle every `ObjsInCircle`-shaped entry point here uses. The
-/// answer is whether the sweep found anything.
-///
-/// The per-object test is a functor 0x00514080 builds out of two words off the
-/// asking object's player record: `[+0x10]`, the **enemyflags** mask that
-/// `sim/player.hpp` records as the exact complement of the ceasefire bit, and
-/// `[+0x18]`, the side mask. The first is `PlayerTable::is_enemy` and is what
-/// this reproduces. **The second is carried and not modelled**: nothing
-/// recovered here says how the functor combines them, and the shipped call --
-/// a wall deciding whether to shoot, `EnemyInRange(.pos, nWallRange, list[0])`
-/// -- cannot separate the two readings, because a wall and its patrol are
-/// always on one side. Widening it if the mask turns out to narrow it would be
-/// the error to watch for.
-///
-/// An object with no owner is nobody's enemy and is not found; the receiver's
-/// own side is not searched for, because `is_enemy` is false for a player
-/// against itself.
+/// So the square only bounds the sweep: the test is a circle widened by the
+/// target's own radius. An asker or a candidate the combat system does not
+/// hold cannot answer `CanAttack` and finds nothing.
 HostOutcome fn_enemy_in_range(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("EnemyInRange: no world");
@@ -1831,25 +1860,32 @@ HostOutcome fn_enemy_in_range(CallContext& ctx) {
   if (ctx.count() < 3 || !is_point(ctx.arg(0)) || !ctx.arg(1).is_integer()) return no;
   const WorldObject* who = object_of(*world, ctx.arg(2));
   if (who == nullptr) return no;
+  const CombatSystem* combat = combat_system_of(*world);
+  const Combatant* asker = combat == nullptr ? nullptr : combat->find(who->id);
+  if (asker == nullptr) return no;
 
   const Point centre = unpack_point(ctx.arg(0));
   const std::int32_t range = ctx.arg(1).as_integer();
   const PlayerTable& players = world->players();
   const PlayerId asking = who->state.owner;
-  // The square, not a circle, over the object grid (0x004dbea0) -- so a held
-  // object, which stands in no cell, is not there to be found: a garrison
-  // resolved to its holder record at (0, 0) once made every wall near the
-  // map's corner see an enemy. Only whether anything answers is returned, so
-  // the order the sweep yields in cannot reach the result.
+  // The grid sweep: a held object stands in no cell and is not there to be
+  // found.
   std::vector<ObjectId> near;
   world->objects_located_in_rect(centre.x - range, centre.y - range, centre.x + range,
                                  centre.y + range, near);
   for (const ObjectId id : near) {
     const WorldObject* other = world->find(id);
     if (other == nullptr || other->state.flags.unspawned) continue;
-    // No `owner == kNoPlayer` guard: `is_enemy` refuses an invalid player on
-    // either side already, so one here could not be made to fail.
     if (!players.is_enemy(asking, other->state.owner)) continue;
+    if (other->state.flags.hidden || !other->state.flags.is_unit) continue;
+    const Combatant* target = combat->find(id);
+    if (target == nullptr || !combat->unit_can_attack(*asker, *target)) continue;
+    if (class_int_or_marker(*world, *other, "target_factor") < 0) continue;
+    const Point at = other->state.position;
+    const std::int64_t dx = static_cast<std::int64_t>(at.x) - centre.x;
+    const std::int64_t dy = static_cast<std::int64_t>(at.y) - centre.y;
+    const std::int64_t reach = isqrt(dx * dx + dy * dy) - class_int(*world, *other, "radius");
+    if (reach > range) continue;
     return HostOutcome::ok_with(Value::boolean(true));
   }
   return no;
@@ -2144,32 +2180,6 @@ HostOutcome m_is_central_building(CallContext& ctx) {
       Value::boolean(class_flag(*world, *slot, "is_central_building")));
 }
 
-/// Whether any class from `index` up the chain declares `key` -- the
-/// question `ClassGraph::property` folds into an empty answer.
-[[nodiscard]] bool class_declares(const ClassGraph& graph, ClassIndex index,
-                                  std::string_view key) noexcept {
-  for (ClassIndex at = index; at != kNoClass; at = graph.at(at).parent_index) {
-    for (const ClassProperty& property : graph.at(at).properties) {
-      if (property.key == key) return true;
-    }
-    if (graph.at(at).parent_index == at) break;
-  }
-  return false;
-}
-
-/// The class record's "absent" marker for an int slot (`0xff1b1e40`).
-constexpr std::int32_t kClassIntAbsent = -15000000;
-
-/// One class int that keeps the absent marker when nothing declares it.
-[[nodiscard]] std::int32_t class_int_or_marker(const World& world, const WorldObject& slot,
-                                               std::string_view key) noexcept {
-  const ClassGraph* graph = world.class_graph();
-  if (graph == nullptr || slot.class_index == kNoClass ||
-      !class_declares(*graph, slot.class_index, key)) {
-    return kClassIntAbsent;
-  }
-  return class_int(world, slot, key);
-}
 
 /// Five reads off the class descriptor, and two ancestry tests that carry
 /// their own name.
@@ -3726,6 +3736,14 @@ HostOutcome m_magic_action_end(CallContext& ctx) {
 /// `HostContext::local_player`. A session with no local player has no
 /// starving army, which is what a headless run of the original also reports,
 /// its notification list being the screen's.
+///
+/// **Two parts of the position form are not reproduced**, both of the
+/// registry this does not keep: on a hit `StarvingArmyPos` consumes the
+/// record (0x00559430) and answers, of the record's objects, the one nearest
+/// a point it holds, where this answers the first hungry unit. And
+/// `HasStarvingArmy` has a zero-argument form (0x0055a7c0) that answers
+/// whether the `army starving` key is in the registry at all; no shipped site
+/// calls it and it is not bound.
 template <bool kPosition>
 HostOutcome fn_starving_army(CallContext& ctx) {
   World* world = world_of(ctx);

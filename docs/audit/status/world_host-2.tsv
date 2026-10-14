@@ -99,3 +99,7 @@
 0x005c8710	verified	snapshot the holder's passengers, unboard them all (0x005c84b0), each distinct squad once (0x00442880) ordered on through 0x0043ec00 with its own state, SF_ADVCHOOSER cleared, the stored verb and point; then the order cleared
 0x005c7e10	verified	the order string to "" and the point to (-1,-1); silent on an unresolvable receiver
 0x005c6f20	verified	the point at [ship+0x228/0x22c], (-1,-1) for no order; no receiver test in the original
+0x0055a7c0	verified	the zero-argument form: whether the registry holds the "army starving" key; no shipped site calls it, not bound
+0x00559c20	partial	whether a record under "army starving" in the session notification registry is at least ms old; the registry is not kept here, the feeder's hungry_since over the local player's units stands in (labelled)
+0x00559d50	partial	the same walk; on a hit it consumes the record (0x00559430) and answers the nearest of its objects to a point it holds; here the first hungry unit of the local player, the registry not being kept
+0x004dcb20	verified	fixed: the square only bounds the grid sweep; found is an enemy-owned, unhidden unit the asker can attack (vtbl+0xb4, unit_can_attack), of target_factor >= 0, whose distance from the point less its class radius (0x005a7900) is within range -- this answered any enemy-owned object in the square
