@@ -476,8 +476,8 @@ def test_a_seat_left_and_taken_back_twice_through_the_war(imconform, game_dir):
 
 #: The capture run's game and ceiling: a seed whose computers take a
 #: settlement from one another inside it (see the test).
-CAPTURE_SEED = 2
-CAPTURE_TURNS = 2_200
+CAPTURE_SEED = 9
+CAPTURE_TURNS = 3_200
 
 @pytest.mark.slow
 def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
@@ -493,12 +493,16 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     # at 3,306 once a swordsman could not hit a building (playtest #24) and a
     # hero's army marched at its pace (#22); seed 5's came at 3,078 until a
     # tactic script handed its army back to the AI and a town's loyalty became
-    # gbr.exe's, after which seed 5 is a war p1 wins at 5,398. On that tree,
-    # over seeds 1 to 12 at 6,000 turns, a settlement changes hands between
-    # players on eight seeds, the first on seed 2, where p1 takes village #12
-    # from p3 at turn 1,785. The peers are held to a war in which that
-    # happens; which seed shows it is the AI's, and the capture is asserted on
-    # the solo run rather than assumed.
+    # gbr.exe's, after which seed 5 is a war p1 wins at 5,398, and seed 2 had
+    # p1 take village #12 from p3 at 1,785. Once rand became gbr.exe's LCG
+    # every seed plays another war: over seeds 1 to 12 at 6,000 turns a
+    # settlement changes hands between players on nine seeds. The first is on
+    # seed 12, at 1,498, but taken without a blow: no army of one player has
+    # struck another's by then, which `imconform` refuses as a war never
+    # started. Seed 9 has both: the first kill between players at 667, and p1
+    # takes village #12 from p3 at turn 3,099. The peers are held to a war in
+    # which that happens; which seed shows it is the AI's, and the capture is
+    # asserted on the solo run rather than assumed.
     solo = subprocess.run(
         [str(imrun), str(game_dir), str(path), str(CAPTURE_TURNS), str(LENGTH),
          "--seed", str(CAPTURE_SEED)],
