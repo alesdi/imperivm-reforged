@@ -2455,8 +2455,18 @@ TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) 
   CHECK(movement.find(army[1])->goto_active);
   CHECK(movement.find(army[2])->goto_active);
 
+  // A target that names nothing changes nothing (0x0052e890's parameter
+  // check comes first): no route, no `form_move` handed out again.
+  HostCall nothing(f.world, {obj(hero), obj(999999), Value::integer(0), Value::integer(0),
+                             Value::boolean(true)});
+  CHECK(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, nothing).status ==
+        HostStatus::ok);
+  CHECK(f.verbs(army[0]) == std::vector<std::string>{"idle"});
+  CHECK(movement.find(army[1])->goto_active);
+
   // A setup the hero cannot walk ends the march (0x005f2c10) and hands out
-  // nothing: the marchers lose their routes, and the idle one keeps its idle.
+  // nothing: the marchers lose their routes and their `form_move` (its script
+  // is stopped, 0x0069fee0), and the idle one keeps its idle.
   f.world.set_position(hero, Point{100 * 16 + 8, 100 * 16 + 8});
   for (std::int32_t y = 99; y <= 101; ++y) {
     for (std::int32_t x = 99; x <= 101; ++x) {
@@ -2468,6 +2478,8 @@ TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) 
   (void)invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, walled);
   REQUIRE(movement.find(hero)->last_outcome == MoveOutcome::blocked);
   CHECK(!movement.find(army[1])->goto_active);
+  CHECK(f.verbs(army[1]).empty());
+  CHECK(f.verbs(army[2]).empty());
   CHECK(f.verbs(army[0]) == std::vector<std::string>{"idle"});
 }
 
@@ -3414,4 +3426,21 @@ TEST(command_progress_without_an_argument_does_not_suspend_a_dead_object) {
   CHECK(invoke(registry, CallKind::member, "Progress", 0, bare).status == HostStatus::ok);
   HostCall timed(f.world, {obj(u), Value::integer(500)});
   CHECK(invoke(registry, CallKind::member, "Progress", 1, timed).status != HostStatus::ok);
+}
+
+/// `FormAcceptMove` on a unit with no hero, or no march, returns 2
+/// (0x005d7a1c): the calling script ends there, so `UNIT_FORM_MOVE.VS` never
+/// runs its `while (.HasPath())` or its closing `Face`.
+TEST(form_accept_move_ends_the_script_of_a_unit_with_no_march) {
+  Fixture f;
+  HeroSystem heroes;
+  MovementSystem movement;
+  f.world.add_system(&heroes);
+  f.world.add_system(&movement);
+  HostRegistry registry;
+  register_command_host(registry);
+  const ObjectId loner = f.spawn(f.warrior_class);
+  HostCall call(f.world, {obj(loner)});
+  CHECK(invoke(registry, CallKind::member, "FormAcceptMove", 0, call).status ==
+        HostStatus::finish);
 }

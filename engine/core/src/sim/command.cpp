@@ -2193,6 +2193,9 @@ HostOutcome goto_enter_impl(CallContext& ctx) {
   order.range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
   order.slice = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
   order.give_up = ctx.count() > 5 && ctx.arg(5).is_integer() ? ctx.arg(5).as_integer() : -1;
+  // 0x005d6620 drops the combat target on its first pass, once the unit is
+  // out of any holder (0x005d6810..0x005d6820), as `Goto`'s point form does.
+  order.drop_target = true;
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
 }
 
@@ -2500,6 +2503,10 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   if (is_point(ctx.arg(1))) {
     dest = unpack_point(ctx.arg(1));
   } else if ((target = object_of(ctx.arg(1))) != kNoObject) {
+    // The `Obj` form (0x0052e890) refuses a target that names nothing before
+    // anything else: "Parameter #3 ... invalid object", and the hero's route
+    // and his army are left exactly as they were.
+    if (self.world->find(target) == nullptr) return HostOutcome::ok_void();
     dest = self.world->resolve_position(target);
   } else {
     return HostOutcome::failed(kNoPoint);
@@ -2530,15 +2537,22 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   // member `form_move` (0x005f2b50): its route deleted (0x005d3830(0)) and the
   // command inserted with the replace flag (0x005b4e90 with 1), which ends
   // whatever it was running. One that lays none ends the march instead
-  // (0x005f2c10): every member running `form_move` loses its route, and
-  // `UNIT_FORM_MOVE.VS`'s `while (.HasPath())` lets it go.
+  // (0x005f2c10): every member running `form_move` loses its route and has
+  // that command ended.
   const HeroRecord* record = heroes->hero(self.id);
   CommandSystem* commands = command_system(*self.world);
   if (record != nullptr && commands != nullptr) {
     const std::vector<ObjectId> army = record->army;
     for (const ObjectId member : army) {
       if (outcome == MoveOutcome::blocked) {
-        if (on_march(*self.world, member)) self.movement->stop(*self.world, member);
+        // 0x005f2c10: a member running `form_move` loses its route and its
+        // command script is stopped (0x0069fee0), which pops `form_move` and
+        // starts the next -- `UNIT_FORM_MOVE.VS` does not run on to its
+        // closing `Face`. Here: the route stopped and the command ended.
+        if (on_march(*self.world, member)) {
+          self.movement->stop(*self.world, member);
+          (void)commands->kill_command(*self.world, member);
+        }
         continue;
       }
       self.movement->stop(*self.world, member);
@@ -2594,7 +2608,7 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
 ///
 /// **Every member that gets this far drops its combat target** (0x005d798b,
 /// `CombatSystem::drop_target`). A unit with no hero is the original's
-/// finished-at-once exit (0x005d7a1c), and so is one whose hero has no army
+/// script-ending exit (0x005d7a1c returns 2), and so is one whose hero has no army
 /// record here.
 HostOutcome form_accept_move_impl(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -2609,7 +2623,10 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
   }
   const ObjectId hero = heroes->hero_of(id);
   const HeroRecord* record = hero == kNoObject ? nullptr : heroes->hero(hero);
-  if (record == nullptr || world->find(hero) == nullptr) return HostOutcome::ok_void();
+  // No hero, or no march to take a place in: the body returns 2 (0x005d7a1c),
+  // which ends the calling script there -- `UNIT_FORM_MOVE.VS` never reaches
+  // its `while (.HasPath())` or its closing `Face`, and `form_move` is over.
+  if (record == nullptr || world->find(hero) == nullptr) return HostOutcome::end_script();
 
   if (const ObjectState* state = world->state(id); state != nullptr && state->is_held()) {
     // A hero back inside has no formation on the map to take a place in: the

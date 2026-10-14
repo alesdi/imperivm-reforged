@@ -27,6 +27,7 @@
 #include "imperivm/core/formats/grid.hpp"
 #include "imperivm/core/game/localization.hpp"
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/session.hpp"
@@ -2195,4 +2196,35 @@ TEST(the_carry_trio_is_the_walk_animation_slot) {
   CHECK(!carries_nothing(water));
   // And a handle to nothing answers false.
   CHECK(!carries_nothing(999999));
+}
+
+/// `GotoEnter` (0x005d6620) drops the combat target on its first pass once the
+/// unit is out of any holder (0x005d6810..0x005d6820), as the point `Goto` does.
+TEST(goto_enter_drops_the_combat_target) {
+  HostRegistry registry;
+  register_movement_host(registry);
+  (void)register_command_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(open_field(64));
+  CombatSystem combat;
+  world.add_system(&combat);
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{500, 500}, 100);
+  const ObjectId foe = spawn_unit(world, movement, Point{540, 500}, 100);
+  Combatant fighter;
+  fighter.id = unit;
+  fighter.owner = 0;
+  fighter.health = 100;
+  fighter.target = foe;
+  fighter.attacks = 3;
+  (void)combat.add(fighter);
+
+  HostCall enter(world, {Value::object(kTypeObj, unit), pack_point(Point{900, 500}),
+                         Value::integer(0), Value::integer(2000), Value::boolean(false),
+                         Value::integer(0)});
+  (void)invoke(registry, CallKind::member, "GotoEnter", 5, enter);
+  CHECK(combat.find(unit)->target == kNoObject);
+  CHECK(combat.find(unit)->attacks == 0);
 }
