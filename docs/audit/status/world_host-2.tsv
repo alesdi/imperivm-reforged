@@ -1,1 +1,12 @@
 0x005d8750	partial	fixed: the call before the write is the AI unregister 0x0041eee0 (not a deselect), and AddToSquad/the placement hook refuse the bit; the owner AI running tallies 0x004448a0 decrements are not kept here
+0x004dd330	verified	class record pair [cls+0xacc/0xad0], absent marker answers (-1,-1); pair inheritance 0x0059c310; the original invalid-receiver arm pushes one byte where a point belongs and is not reproducible, (-1,-1) stands in
+0x004ddd70	partial	fixed: the circle is the class sight [cls+0x2d0], not the instance radius SetSight moves; reference pinned to the local player so the walk order does not matter here, but the shared scan is in spawn order rather than grid order (design)
+0x005c6d40	verified	terrain layer type 13 at ((x+32)>>6, (y+32)>>6), out of the inclusive world rect false; equal bounds on every shipped map size
+0x005cdb50	verified	kind test on CVXTeleport (leaf under CVXBuilding in the chain read from the image), handle or 0xffff
+0x005ad680	verified	heir test of [obj+0x3c] up [cls+0xe4], self included, against Military (0x00540130/0x0059a220); invalid receiver false
+0x005ad500	verified	the same shape as IsMilitary with Sentry (0x005400c0)
+0x004216d0	verified	body read: arity 0, answers [squad+0x30]; every shipped GetFlags site passes a mask (Unit::GetFlags/1), so this form has no caller and is left unbound
+0x005d7e30	verified	[obj+0x194] & mask as bool, any resolving object, invalid false; only UNITFLAG_NOAI is passed by shipped sites, the three unmodelled bits are labelled
+0x00529cd0	partial	fixed: a call that repeats the current target writes nothing and leaves the move running (it used to restart it from a truncated position); building mode 3 is read as health <= 0, an inference (no building mode here)
+0x00529c50	partial	fixed: the same as CloseNow -- only a change of target writes it and clears the latch [gate+0x228]; mode 3 read as health <= 0
+0x005aa940	verified	kind test on CVXSacrifice (leaf under CVXScriptObj in the image), handle or 0xffff

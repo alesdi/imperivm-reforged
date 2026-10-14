@@ -4598,11 +4598,17 @@ TEST(sim_open_now_raises_the_portcullis_over_two_seconds_and_close_now_lowers_it
   CHECK(raise() == 0);  // it starts at the call
   b.world.advance(1000);
   CHECK(raise() == 35);
-  // A repeat, as GATE_IDLE.VS makes twice a second, restarts the move from
-  // where it is -- which leaves the trajectory where it was.
+  // A repeat, as GATE_IDLE.VS makes twice a second, **does nothing**: 0x00529c50
+  // writes the target and clears the move latch only when the target was not
+  // already open. So the move is not restarted from a truncated position --
+  // 43.75 of the way at 1,250 ms -- and stands at 52 at 1,500 ms, where a
+  // restart from 43 would stand at 51.
   REQUIRE(b.call("OpenNow", 0, {GateBench::obj(gate)}).status == script::HostStatus::ok);
   CHECK(raise() == 35);
-  b.world.advance(500);
+  b.world.advance(250);
+  CHECK(raise() == 43);
+  REQUIRE(b.call("OpenNow", 0, {GateBench::obj(gate)}).status == script::HostStatus::ok);
+  b.world.advance(250);
   CHECK(raise() == 52);
 
   // Reversed halfway: down from 52, 52 steps in 1,485 ms.
@@ -5035,6 +5041,13 @@ TEST(sim_the_stonehenge_count_is_one_alliances_mages_and_a_hostile_zeroes_it) {
   // Out of the henge's own sight, and it does not count.
   (void)b.unit(b.mage_class, Point{901, 0}, 1);
   CHECK(b.mages(henge) == 2);
+  // The circle is the *class's* sight (`[cls+0x2d0]`): an instance radius
+  // `SetSight` widened or narrowed moves neither edge.
+  b.world.find(henge)->sight = 2000;
+  CHECK(b.mages(henge) == 2);
+  b.world.find(henge)->sight = 150;
+  CHECK(b.mages(henge) == 2);
+  b.world.find(henge)->sight = 900;
 
   // A dead mage does not count, and neither does a spawn template -- the
   // visitor's second and third clauses, and neither was in this fixture until a

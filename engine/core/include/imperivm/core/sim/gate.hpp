@@ -32,9 +32,9 @@
 ///     duration`, clamped to 0..70;
 ///   * a move starts whenever the position is not already at the target and
 ///     the latch `[gate+0x228]` is clear, and `OpenNow`/`CloseNow` clear the
-///     latch -- so a call restarts the move from wherever the portcullis is.
-///     `GATE_IDLE.VS` calls one of them twice a second, which with this
-///     arithmetic changes nothing but rounding.
+///     latch **only when they change the target** (0x00529c50, 0x00529cd0) --
+///     so a reversal restarts the move from wherever the portcullis is, and
+///     the repeat `GATE_IDLE.VS` makes twice a second does nothing at all.
 ///
 /// **Inference:** the move here starts at the `OpenNow`/`CloseNow` call's own
 /// time. The original starts it at the gate's next tick after the call, which

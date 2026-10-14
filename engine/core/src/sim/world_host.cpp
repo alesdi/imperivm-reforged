@@ -2801,6 +2801,17 @@ HostOutcome m_is_valid_capture_target(CallContext& ctx) {
 /// class or derives from it, and an invalid handle otherwise. There is one
 /// runtime representation for all handle types, so a downcast is a test, not a
 /// conversion.
+///
+/// `AsTeleport` (0x005cdb50), `AsSacrifice` (0x005aa940) and `AsBarrack`
+/// (0x005aa8d0) are one body each and one shape: resolve the receiver through
+/// the object table, ask the script-object interface's kind test (its `vtbl+4`)
+/// for the native name, and push the result's handle with a zero offset word,
+/// or `0xffff` -- no complaint -- when the receiver does not resolve or the
+/// kind test refuses. The kind test compares the name *pointer* and tail-calls
+/// the parent's; in `gbr.exe` none of the three has a native child
+/// (`CVXTeleport` and `CVXBarrack` sit under `CVXBuilding`, `CVXSacrifice`
+/// under `CVXScriptObj`), so each admits exactly its own `cpp_class`, as
+/// `is_a` does here.
 template <NativeClass kClass>
 HostOutcome m_as(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -3694,10 +3705,14 @@ HostOutcome fn_clamp(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(value));
 }
 
-/// `Obj::IsMilitary` (0x005ad680) and `Obj::IsSentry` -- one shape twice.
+/// `Obj::IsMilitary` (0x005ad680) and `Obj::IsSentry` (0x005ad500) -- one
+/// shape twice.
 ///
-/// Each holds a lazily-cached class handle -- `"Military"` and `"Sentry"` --
-/// and runs an is-heir-of test against the receiver's class descriptor. An
+/// Each holds a lazily-cached class handle -- `"Military"` (0x00540130) and
+/// `"Sentry"` (0x005400c0), looked up by name once (0x00409e40) -- and runs the
+/// is-heir-of test (0x0059a220): the receiver's class descriptor `[obj+0x3c]`,
+/// itself included, then up `[cls+0xe4]`, compared against the handle; a name
+/// the lookup did not find is a null handle and false. No native-class test. An
 /// unresolvable receiver prints its own *"called for an uninitialized or invalid
 /// object"* into the discard sink and answers **false**, which is an ordinary
 /// return here.
@@ -3815,9 +3830,26 @@ HostOutcome m_teleport_destination(CallContext& ctx) {
 /// installation; this is the original's rule because a class that split them
 /// would be answered wrongly by the other one, and silently.
 ///
-/// A class that declares neither anywhere up its chain answers `(-1, -1)`, and
-/// so does a receiver that names nothing. That is a sentinel a caller could
-/// test, and no caller does: all eleven sites scale it and add it to a position.
+/// A class that declares neither anywhere up its chain answers `(-1, -1)`. That
+/// is a sentinel a caller could test, and no caller does: all eleven sites
+/// scale it and add it to a position.
+///
+/// **Read against the body (`0x004dd330`).** It resolves the receiver through
+/// the object table, takes the class record at `[obj+0x3c]` and answers
+/// `([cls+0xacc], [cls+0xad0])`, or `(-1, -1)` when the first is the absent
+/// marker. **No class test on the receiver**: anything with a class answers.
+/// The pair is filled by the class loader (0x0059f540, `atol` of each
+/// attribute) and inherited as a pair at 0x0059c310 -- either half absent,
+/// both copied from the parent. `atol` would take `"80px"` as 80 where the
+/// strict parse here skips to the parent; all ten shipped declarations are
+/// plain integers, so the two agree on the installation.
+///
+/// **An unresolvable receiver is the original's own fault, and `(-1, -1)` stands
+/// in for it.** That arm prints *"called for an uninitialized or invalid
+/// object"* into the discard sink and pushes a *one-byte* `1` where an
+/// eight-byte point belongs -- the bool-returning failure tail -- so the
+/// caller reads seven bytes of whatever was below the receiver. There is no
+/// value to reproduce.
 HostOutcome m_exit_vector(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("exit_vector: no world");
@@ -4226,6 +4258,15 @@ HostOutcome m_get_exit_point(CallContext& ctx) {
 /// answered `false` rather than correctly. That is a real limit and it is
 /// written down rather than hidden, on the evidence that no shipped script
 /// names one and that inventing a meaning for them would be worse.
+///
+/// **`Squad::GetFlags` is another entry point, and nothing reaches it.**
+/// `0x004216d0` takes no argument -- its signature is an int return and the
+/// squad receiver alone -- and answers the squad's flags word `[squad+0x30]`
+/// (`Squad::flags` here) widened to an int, through the squad table lookup
+/// 0x00443e30, with no validity test. All five shipped `GetFlags` sites pass a
+/// mask, on `squad.Leader` or a unit, so they are `Unit::GetFlags/1`; the
+/// zero-argument form has no caller and is not bound, as `UnitsGuardingSettlement`
+/// is not.
 [[nodiscard]] std::uint32_t pack_unit_flags(const ObjectFlags& flags) noexcept {
   return (flags.autocast ? 0x00000004u : 0u) |    // bit 2  Hero::SetAutocast
          (flags.no_ai ? 0x00040000u : 0u) |       // bit 18 UNITFLAG_NOAI
@@ -4633,6 +4674,13 @@ constexpr std::uint32_t kTerrainWater = 13;
 /// Note the cell size: 64 here, where the object grid the scans walk is 256 and
 /// the obstruction bitmap is 16. Three grids, three resolutions, and the number
 /// belongs to the layer rather than to the map.
+///
+/// The bounds test is on the *biased* point against the inclusive world
+/// rectangle `(0, 0, w - 1, h - 1)` at `[grid+0xb4..0xc0]`; the layer's extent
+/// is `w / 64` cells, so `cx < width` here is that same test on every shipped
+/// map, whose sizes (8192, 16384, 32768) are all multiples of 64. The cell is
+/// `((x + 32) >> 6, (y + 32) >> 6)`: one byte of a row of dwords, `[layer +
+/// 0x10a4]` dwords to a row.
 HostOutcome fn_is_point_in_water(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsPointInWater: no world");
@@ -4725,14 +4773,27 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
 //
 // `StonehengeNumControllingMages` (`0x004dde80`) and `IsStonehengeControlable`
 // (`0x004ddd70`) are byte-for-byte the same function but for two lines. Both
-// gate on the receiver's class being an heir of `Stonehenge`, both scan a circle
-// of the building's **own `sight`** -- `entityDef + 0x2d0`, which the class
-// reader fills from the `sight` property -- and both run the visitor at
-// `0x004db580`.
+// gate on the receiver being a `CVXTownHall` whose class is an heir of
+// `Stonehenge` (0x0059c020), both scan a circle of the building's **class
+// `sight`** -- `[cls+0x2d0]`, which the class reader fills from the `sight`
+// property, and not the instance radius `[obj+0xd0]` that `SetSight` moves --
+// and both run the visitor at `0x004db580` over the object grid (0x004dc6f0,
+// cells in row order, only objects carrying `kSyncUnit` -- the visitor's
+// first word, `0x400000`).
+//
+// **The visitor's state is three words** -- that mask, a player record, a
+// count -- and the two entry points differ only in the player word's seed: the
+// counter seeds none, the predicate the local player's record
+// (`[world+0x12c8]`, 0x004dddfa). Read in the disassembly; Ghidra's stack
+// slots overlap the query's there.
+//
+// A receiver that does not resolve, or is not a stonehenge, prints one of two
+// complaints into the discard sink and answers 0 or false.
 //
 // **The count is "mages of one alliance, provided nobody hostile is also
 // here".** The visitor skips the dead and the spawn templates, then requires an
-// heir of `Military` *or* `BaseMage`; the first qualifying object it meets sets
+// heir of `Military` *or* `BaseMage` (0x00540130, 0x005401a0; anything else is
+// passed over without a word); the first qualifying object it meets sets
 // the reference player, and after that each one's diplomacy row against that
 // reference decides:
 //
@@ -4766,6 +4827,14 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
 /// `reference` is the player the row is read against, or `kNoPlayer` to adopt
 /// the first qualifying object's owner -- which is the whole difference between
 /// the two entry points.
+///
+/// **A known gap, by design: the order of the walk.** The original visits the
+/// object grid's cells row by row and each cell's list in its own order; this
+/// engine's spatial queries answer in spawn order (`sim/spatial_index.hpp`:
+/// "the order the grid holds its entries in is not" state). The predicate is
+/// unaffected -- its reference is pinned -- but the counter adopts the *first*
+/// qualifying owner, and `share_control` is one-directional, so with two
+/// players' mages under a one-sided grant the two orders can count differently.
 [[nodiscard]] std::int32_t stonehenge_mages(World& world, const WorldObject& henge,
                                             PlayerId reference) {
   const ClassGraph* graph = world.class_graph();
@@ -4774,8 +4843,15 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
   const ClassFilter mage = ClassFilter::parse("BaseMage", graph);
   if (military.match_all && mage.match_all) return 0;
 
+  // The class record's sight (`[cls+0x2d0]`), not the instance's `[obj+0xd0]`
+  // that `SetSight` moves: the two start equal, and only the class's is read.
+  std::int32_t radius = 0;
+  if (henge.class_index == kNoClass ||
+      !parse_int(graph->property(henge.class_index, "sight"), radius)) {
+    radius = 0;
+  }
   std::vector<ObjectId> found;
-  world.objects_in_radius(world.resolve_position(henge.id), henge.sight, ClassFilter{}, found);
+  world.objects_in_radius(world.resolve_position(henge.id), radius, ClassFilter{}, found);
   std::int32_t count = 0;
   for (const ObjectId id : found) {
     const WorldObject* other = world.find(id);
@@ -5143,6 +5219,16 @@ HostOutcome m_gate_saw(CallContext& ctx) {
 
 /// `Gate::OpenNow` / `CloseNow` -- write the target and return. Neither
 /// suspends; see the section note.
+///
+/// `0x00529c50` (open) and `0x00529cd0` (close): an unresolvable receiver
+/// prints *"called for an uninitialized or invalid object"* into the discard
+/// sink. Otherwise, **only when the gate's building mode `[gate+0x204]` is not
+/// 3 and its target `[gate+0x208]` is not already the one asked for**, the
+/// target is written (1 open, 0 closed) and the move latch `[gate+0x228]` is
+/// cleared, which makes the gate's tick start a move from where the portcullis
+/// stands. A call that repeats the current target changes nothing -- not the
+/// target, not the latch, not the move in progress. No class test on the
+/// receiver: a non-gate's fields at those offsets would be written.
 template <bool kOpen>
 HostOutcome m_gate_set(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -5156,6 +5242,8 @@ HostOutcome m_gate_set(CallContext& ctx) {
   // health has reached zero, which is the nearest thing it can test and is
   // named as an inference rather than a transcription.
   if (slot->state.health <= 0) return HostOutcome::ok_void();
+  // Already the target: nothing is written and the move in progress runs on.
+  if (slot->state.flags.gate_open == kOpen) return HostOutcome::ok_void();
   // The target, and the portcullis's move towards it from wherever it stands
   // now -- the latch the original clears here restarts that move on its next
   // tick. Where the move has got to decides the barrier; see `sim/gate.hpp`.
