@@ -6345,6 +6345,11 @@ TEST(best_training_target_is_the_nearest_training_unit_unless_an_enemy_is_armed)
   // both end the sweep where they are met and the partner has the lower id.
   const ObjectId harmless = unit_at(Point{200, 200}, 3, "Peasant");
   CHECK(best(self) == competitor);
+  // An armed enemy *building* is not even visited: the sweep's mask is
+  // `kSyncUnit` (0x005d3c50), so a tower beside a lesson does not end it.
+  const ObjectId tower = unit_at(Point{0, 10}, 3, "Unit", NativeClass::building);
+  CHECK(!b.world.state(tower)->flags.is_unit);
+  CHECK(best(self) == competitor);
   const ObjectId foe = unit_at(Point{400, 0}, 3);
   CHECK(best(self) == competitor);
   REQUIRE(b.world.set_position(competitor, Point{5000, 0}));

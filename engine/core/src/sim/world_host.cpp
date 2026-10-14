@@ -2465,6 +2465,10 @@ HostOutcome m_set_training(CallContext& ctx) {
 ///     under 50 is taken at once, and otherwise gets 100 off. The lowest
 ///     score wins, an earlier candidate keeping a tie.
 ///
+/// The sweep visits **units only**: 0x005d3c50 seeds it with the `kSyncUnit`
+/// mask, so neither clause ever sees a building. And when the answer is a
+/// unit, 0x005d2850 adds one to that unit's `threat` (capped at 6).
+///
 /// `threat` is the decaying counter at `[unit+0x1b0]` (0x005d2800), which
 /// this engine does not model -- `sim/combat.hpp` says so for the target
 /// family that shares this formula -- so the term is 0 here and the score is
@@ -2492,11 +2496,15 @@ HostOutcome m_best_training_target(CallContext& ctx) {
     if (id == self->id) continue;
     const WorldObject* cand = world->find(id);
     if (cand == nullptr) continue;
+    // The sweep's mask (0x005d3c50 seeds it with `0x400000`, `kSyncUnit`):
+    // only units are visited at all, so an armed enemy *building* -- a tower
+    // -- neither ends the lesson nor is a partner.
+    if (!cand->state.flags.is_unit) continue;
     if (owner != kNoPlayer && cand->state.owner != kNoPlayer &&
         players.is_enemy(owner, cand->state.owner) && class_int(*world, *cand, "damage") > 0) {
       return HostOutcome::ok_with(object_value(id));
     }
-    if (!cand->state.flags.is_unit || !cand->state.flags.training) continue;
+    if (!cand->state.flags.training) continue;
     const Point there = world->resolve_position(id);
     const std::int64_t dx = there.x - at.x;
     const std::int64_t dy = there.y - at.y;
