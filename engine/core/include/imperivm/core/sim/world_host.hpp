@@ -349,6 +349,13 @@ void install_deferred_erase(script::Scheduler& scheduler) noexcept;
 [[nodiscard]] std::int32_t class_int(const World& world, const WorldObject& slot,
                                      std::string_view key) noexcept;
 
+/// One object's own maximum health -- the `[obj+0xc8]` `.maxhealth` reads.
+///
+/// Exported because `ObjList::ObjInjured` (0x00561090) compares health against
+/// that same field, and the two must agree about a unit whose bonuses have
+/// lifted its maximum above its class's. `m_max_health` documents the rule.
+[[nodiscard]] std::int32_t object_max_health(World& world, const WorldObject& slot);
+
 /// A class property as a flag: present, and not the string `"0"`.
 ///
 /// Exported for the same reason `class_int` is. `water_unit` has two readers

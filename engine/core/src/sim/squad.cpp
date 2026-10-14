@@ -716,6 +716,15 @@ HostOutcome gaika_field_impl(CallContext& ctx) {
 /// The matcher is `ClassFilter`, which is the same tree test every other class
 /// name in this engine goes through, and it carries the rule that matters here:
 /// **a name the graph cannot resolve counts nothing rather than everything.**
+///
+/// Read to the end: 0x00427980 splits the handle into its player nibble and
+/// index, walks the squad's member deque front to back, and for each member
+/// asks 0x0059c020 of the member's class (`[obj+0x3c]`) -- look the name up
+/// with 0x00409e40, then climb `[class+0xe4]` looking for it. No member is
+/// tested for death or for resolving (the original would dereference a null
+/// there; this skips it). One known difference: the name is **one** class
+/// there, while `ClassFilter` also reads a comma list; no shipped `Count/1`
+/// site passes one (all eight name a single class).
 HostOutcome count_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {

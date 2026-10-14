@@ -2996,9 +2996,10 @@ TEST(squadlist_add_goes_through_the_objlist_domain) {
   CHECK(add(pack_squad(b)) == HostStatus::ok);
   CHECK(items() == std::vector<SquadKey>({a, b}));
 
-  // Twice is once.
+  // Twice is twice: 0x004379b0 appends through 0x00437870 -> 0x00435d90 with
+  // no search for the squad already being there.
   CHECK(add(pack_squad(a)) == HostStatus::ok);
-  CHECK(items() == std::vector<SquadKey>({a, b}));
+  CHECK(items() == std::vector<SquadKey>({a, b, a}));
 
   // And the `ObjList` half of the same entry point still works, which is the
   // half a `SquadList` branch could have broken.
