@@ -10,6 +10,7 @@
 
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/host_context.hpp"
+#include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/path.hpp"
 #include "imperivm/core/sim/player_host.hpp"
@@ -218,13 +219,41 @@ const AreaShape* area_named(World& world, std::string_view name) noexcept {
   return areas->areas().find(world.named_object(name));
 }
 
+namespace {
+
+/// The map rectangle's inclusive high corner, or -1 when the world knows no
+/// map size. The rectangle the original keeps at `[0x009a721c]+0xb4 .. +0xc0`
+/// is `(0, 0, size-1, size-1)` -- `GetMapRect`'s, and `sim/flying.cpp`'s
+/// `map_high`, whose fallback to the height layer's extent this repeats for a
+/// world with no match system.
+[[nodiscard]] std::int32_t map_high_corner(const World& world) noexcept {
+  if (const MatchSystem* match = match_system_of(world); match != nullptr) {
+    if (match->rules().map_size > 0) return match->rules().map_size - 1;
+  }
+  const std::uint32_t extent = world.height().extent_x();
+  return extent > 0 ? static_cast<std::int32_t>(extent) - 1 : -1;
+}
+
+}  // namespace
+
 Point random_point_in_area(World& world, const AreaShape& shape, std::int32_t attempts) {
   // 1. No attempts at all is the centre, and draws nothing. 0x004d6ecb reaches
   //    the same return the successful path does, with the buffer still holding
   //    what the centre helper wrote into it.
   if (attempts <= 0) return shape.centre();
 
-  const AreaBounds box = shape.bounds();
+  // The box is the shape's bounds (0x004d6800) **clamped to the map**
+  // (0x004d6d5e .. 0x004d6dac): each low edge raised to the map's, each high
+  // edge lowered to the map's, before anything is drawn. So an area that
+  // overhangs the edge draws only over the part on the map, and the draws
+  // themselves -- world state -- are the original's.
+  AreaBounds box = shape.bounds();
+  if (const std::int32_t high = map_high_corner(world); high >= 0) {
+    box.left = std::max(box.left, 0);
+    box.top = std::max(box.top, 0);
+    box.right = std::min(box.right, high);
+    box.bottom = std::min(box.bottom, high);
+  }
   const MovementSystem* movement = movement_system(world);
   const ObstructionGrid* grid = movement != nullptr ? &movement->grid() : nullptr;
   if (grid != nullptr && grid->empty()) grid = nullptr;
@@ -331,12 +360,28 @@ HostOutcome fn_area_dist_to(CallContext& ctx) {
 ///
 /// 0x0057a2e0. Both entry points are two instructions that push a verb and
 /// tail into this, so there is one function here for the same reason.
+///
+/// A query that does not resolve prints "The function 'Query::AttackArea or
+/// Query::MoveToArea' called for an uninitialized or invalid object." and
+/// orders nothing -- an answer, not a trap; `ClassPlayerAreaObjs` with a bad
+/// player hands exactly that to these. A missing area prints its own message
+/// and orders nothing. Otherwise the query is `Refresh`ed and walked front to
+/// back, and a member is ordered only if it resolves **and is not dead** (its
+/// `vtbl+0x50`, `IsDead`): for each such member a point is drawn in the area
+/// (0x004d6d40, twenty attempts), the member's queue is cleared (`vtbl+0xc0`
+/// with 0) and the verb's command is built (0x005aef20) and set (`vtbl+0xbc`).
+/// The death test comes before the draw, so a dead member costs no draws.
 HostOutcome order_query_to_area(CallContext& ctx, std::string_view verb) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  if (!ctx.arg(0).is_object() || ctx.arg(0).as_object().type != kTypeQuery) {
+  if (!ctx.arg(0).is_object()) return HostOutcome::failed(kNoQuery);
+  if (ctx.arg(0).as_object().type != kTypeQuery) {
+    // The invalid handle -- what a failed `AreaObjs` or `ClassPlayerAreaObjs`
+    // answers -- is the original's "uninitialized or invalid object".
+    if (ctx.arg(0).as_object().type == script::kNoType) return HostOutcome::ok_void();
     return HostOutcome::failed(kNoQuery);
   }
+  if (world->query_spec(ctx.arg(0).as_object().id) == nullptr) return HostOutcome::ok_void();
   if (!ctx.arg(1).is_string()) return HostOutcome::failed(kNoName);
 
   const AreaShape* shape = area_arg(*world, ctx.arg(1));
@@ -352,6 +397,10 @@ HostOutcome order_query_to_area(CallContext& ctx, std::string_view verb) {
 
   const AreaShape region = *shape;
   for (const ObjectId member : members) {
+    // Dead members are passed over before the draw (0x0057a440's `vtbl+0x50`
+    // test), so they take nothing from the RNG.
+    const WorldObject* slot = world->find(member);
+    if (slot == nullptr || slot->state.health <= 0) continue;
     // One sample per member, so the query spreads out over the area instead of
     // stacking on its centre. That is the executable's shape, not a nicety:
     // the loop at 0x0057a440 calls the sampler inside the body.
@@ -387,6 +436,18 @@ HostOutcome fn_move_to_area(CallContext& ctx) { return order_query_to_area(ctx, 
   return Value::object(script::ObjectRef{script::kNoType, 0});
 }
 
+/// Whether a class argument names no class, the way 0x00409e40 asks it: the
+/// whole string as **one** class name, by id or altid. Both area queries
+/// answer the invalid handle for such a name ("Could not find class named
+/// '%s' in function ..."), rather than a query that finds nothing -- the
+/// difference is what `.IsValid` says. A world with no class graph (a
+/// synthetic one) cannot tell, and is let through to the filter.
+[[nodiscard]] bool names_no_class(const World& world, const Value& value) {
+  const ClassGraph* graph = world.class_graph();
+  if (graph == nullptr || !value.is_string()) return false;
+  return graph->lookup(value.as_string()) == kNoClass;
+}
+
 /// `AreaObjs("area", "class")`. 193 sites, of which 84 of the 187 whose name
 /// resolves in their own map declare a **rectangle**.
 ///
@@ -403,6 +464,9 @@ HostOutcome fn_area_objs(CallContext& ctx) {
   // 0x00577196 returns a Query handle whose id is 0xffff -- an invalid handle,
   // not a fault. `.count` on it is zero and `.IsEmpty` is true.
   if (shape == nullptr) return HostOutcome::ok_with(invalid_object());
+  // Then the class (0x00577204), and a name that is no class is the same
+  // invalid handle (0x00577218).
+  if (names_no_class(*world, ctx.arg(1))) return HostOutcome::ok_with(invalid_object());
 
   const ClassFilter filter = filter_arg(*world, ctx.arg(1));
   // The area's own corners, not its bounding box: `AreaShape::of_rectangle`
@@ -423,15 +487,27 @@ HostOutcome fn_area_objs(CallContext& ctx) {
 /// corpus site passes 1..5. Note that `ClassPlayerObjs/2` in
 /// `sim/world_host.cpp` reads the same argument as 0-based; that file records
 /// the disagreement as a bug of its own and it is not compensated for here.
+///
+/// 0x00573e60 checks three things, in this order, and each failure is a
+/// message and the **invalid handle**: the player must be 1..16 ("Player number
+/// should be between 1 and 16"), the class must name one class (0x00409e40),
+/// and the area must exist (0x004d9050). Only then is the query built
+/// (0x004fe730, over the player's record at `player - 1`). This used to check
+/// only the area, so a bad player built a query over a player that is not
+/// there rather than answering invalid.
 HostOutcome fn_class_player_area_objs(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
   if (!ctx.arg(2).is_string()) return HostOutcome::failed(kNoName);
+  if (!ctx.arg(1).is_integer() || ctx.arg(1).as_integer() < 1 ||
+      ctx.arg(1).as_integer() > static_cast<std::int32_t>(kPlayerCount)) {
+    return HostOutcome::ok_with(invalid_object());
+  }
+  if (names_no_class(*world, ctx.arg(0))) return HostOutcome::ok_with(invalid_object());
   const AreaShape* shape = area_arg(*world, ctx.arg(2));
   if (shape == nullptr) return HostOutcome::ok_with(invalid_object());
 
-  const PlayerId player =
-      ctx.arg(1).is_integer() ? player_from_script(ctx.arg(1).as_integer()) : kNoPlayer;
+  const PlayerId player = player_from_script(ctx.arg(1).as_integer());
   const ClassFilter filter = filter_arg(*world, ctx.arg(0));
   // One query type, two shapes. `CVXClassPlayerAreaQuery::Refresh` (0x004fe860)
   // reads the area's `[area+0x148]` discriminator and calls 0x004fd060 for a

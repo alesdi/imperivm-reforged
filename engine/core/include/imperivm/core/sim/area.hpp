@@ -333,7 +333,9 @@ AreaLoadReport load_areas(const MapObjectList& map, const World& world, AreaTabl
 ///
 ///   1. `attempts <= 0` returns the centre without drawing at all.
 ///   2. Otherwise draw `x` in `[left, right]` and `y` in `[top, bottom]` of the
-///      bounding box, in that order, two draws per attempt.
+///      bounding box **clamped to the map rectangle** (each low edge raised to
+///      0, each high edge lowered to the map's last unit), in that order, two
+///      draws per attempt.
 ///   3. For a circle, a point outside the circle is redrawn **without
 ///      consuming an attempt** -- the executable jumps back over the counter.
 ///   4. A point on blocked ground consumes an attempt and is redrawn.
