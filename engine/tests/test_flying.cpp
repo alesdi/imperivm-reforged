@@ -1383,7 +1383,8 @@ TEST(flying_get_average_direction_is_the_mean_heading) {
   CHECK(mean == pt(0, 0));
 
   // A query over both birds: the mean of (1024, 0) and (0, 1024).
-  const QuerySpec spec = objs_in_range(a, 900, ClassFilter::of(b.crow_class));
+  // A circle rather than `ObjsInRange`, which leaves its own anchor out.
+  const QuerySpec spec = objs_in_circle(pt(100, 100), 900, ClassFilter::of(b.crow_class));
   const ObjectId query = b.world.create_query(spec);
   const Point both = unpack_point(
       b.call(script::CallKind::member, "GetAverageDirection", 0,

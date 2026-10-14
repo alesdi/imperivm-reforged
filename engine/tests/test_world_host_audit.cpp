@@ -403,6 +403,158 @@ TEST(audit_set_no_ai_flag_regroups_the_unit_so_its_squad_carries_the_flag) {
   CHECK((squads.find(squads.squad_of(a))->flags & kSquadFlagNoAi) == 0);
 }
 
+// --------------------------------------------------------------------------
+// queries and groups
+// --------------------------------------------------------------------------
+
+namespace {
+
+std::vector<ObjectId> members_of(Host& h, const script::Value& query) {
+  std::vector<ObjectId> found;
+  if (query.is_object()) h.world.evaluate_query(query.as_object().id, found);
+  return found;
+}
+
+}  // namespace
+
+TEST(audit_set_op_ordinals_and_orders_are_the_refreshs) {
+  // `Union` passes 0 to 0x004fe490, `Intersect` 1, `Subtract` 2. Union is
+  // sorted (0x004fb510 + merge); subtract keeps the left operand's order;
+  // intersect walks the smaller operand in its own order.
+  Host h;
+  const ObjectId a = h.unit(1, Point{100, 100});
+  const ObjectId b = h.unit(1, Point{120, 100});
+  const ObjectId c = h.unit(1, Point{140, 100});
+  CHECK(h.member("AddToGroup", {obj(b), str("G")}).status == script::HostStatus::ok);
+  CHECK(h.member("AddToGroup", {obj(a), str("G")}).status == script::HostStatus::ok);
+  const script::Value g = h.free("Group", {str("G")}).value;
+  const script::Value empty = h.free("Group", {str("E")}).value;
+  const script::Value circle = h.free("ObjsInCircle", {pack_point(Point{100, 100}), num(100), str("")}).value;
+  REQUIRE(members_of(h, circle).size() == 3);
+  (void)c;
+
+  const script::Value u = h.free("Union", {g, empty}).value;
+  const script::Value i = h.free("Intersect", {g, circle}).value;
+  const script::Value d = h.free("Subtract", {g, empty}).value;
+  CHECK(static_cast<int>(h.world.query_spec(u.as_object().id)->op) == 0);
+  CHECK(static_cast<int>(h.world.query_spec(i.as_object().id)->op) == 1);
+  CHECK(static_cast<int>(h.world.query_spec(d.as_object().id)->op) == 2);
+
+  CHECK((members_of(h, u) == std::vector<ObjectId>{a, b}));
+  CHECK((members_of(h, d) == std::vector<ObjectId>{b, a}));
+  CHECK((members_of(h, i) == std::vector<ObjectId>{b, a}));
+}
+
+TEST(audit_area_queries_pass_over_the_dead_and_take_a_zero_radius_as_a_spot) {
+  // 0x004fc980 (the map-area sweeps) refuses a candidate `vtbl + 0x50` calls
+  // dead; the circle sweep 0x004fde60 is `dist² <= r²`, so r = 0 is the exact
+  // spot and r < 0 nothing.
+  Host h;
+  const ObjectId here = h.unit(1, Point{1000, 1000});
+  const ObjectId near = h.unit(1, Point{1005, 1000});
+  const ObjectId corpse = h.unit(1, Point{1050, 1000});
+  h.world.mutable_state(corpse)->health = 0;
+  const ObjectId ruin = h.spawn(NativeClass::building, 0);
+  REQUIRE(h.world.set_position(ruin, Point{1060, 1000}));
+
+  const auto circle = [&](std::int32_t r) {
+    return members_of(h, h.free("ObjsInCircle", {pack_point(Point{1000, 1000}), num(r), str("")}).value);
+  };
+  CHECK((circle(100) == std::vector<ObjectId>{here, near, ruin}));
+  CHECK((circle(0) == std::vector<ObjectId>{here}));
+  CHECK(circle(-5).empty());
+}
+
+TEST(audit_class_player_objs_never_lists_the_held_or_the_dead) {
+  // 0x004fe860 with no area sweeps the whole map through the grid (0x004fd2d0),
+  // where a held object has no cell, and 0x004fc6b0 refuses the dead.
+  Host h;
+  const ObjectId out = h.unit(0, Point{500, 500});
+  const ObjectId corpse = h.unit(0, Point{600, 500});
+  h.world.mutable_state(corpse)->health = 0;
+  const World::ShipIds ship = h.world.spawn_ship(nullptr);
+  const ObjectId aboard = h.unit(0, Point{0, 0});
+  REQUIRE(h.world.put_in_holder(aboard, ship.holder));
+  CHECK((members_of(h, h.free("ClassPlayerObjs", {str(""), num(1)}).value) ==
+         std::vector<ObjectId>{out}));
+}
+
+TEST(audit_objs_in_sight_freezes_sight_less_one_hundred_and_ignores_a_dead_eye) {
+  // 0x004fee10 turns radius -1 into `[obj+0xd0] - 100`, once; the refresh
+  // 0x004ff080 answers nothing for a dead observer.
+  Host h;
+  const ObjectId eye = h.unit(1, Point{1000, 1000});
+  h.world.find(eye)->sight = 300;
+  const ObjectId close = h.unit(2, Point{1150, 1000});
+  const ObjectId edge = h.unit(2, Point{1250, 1000});
+  const script::Value q = h.free("ObjsInSight", {obj(eye), str("")}).value;
+  CHECK((members_of(h, q) == std::vector<ObjectId>{close}));
+  h.world.find(eye)->sight = 1000;  // a later SetSight does not widen it
+  CHECK((members_of(h, q) == std::vector<ObjectId>{close}));
+  (void)edge;
+  h.world.mutable_state(eye)->health = 0;
+  CHECK(members_of(h, q).empty());
+}
+
+TEST(audit_objs_in_range_is_a_sight_query_that_leaves_its_object_out) {
+  // 0x00576130 calls 0x004fee10 with the script's radius.
+  Host h;
+  const ObjectId self = h.unit(1, Point{1000, 1000});
+  const ObjectId other = h.unit(1, Point{1100, 1000});
+  CHECK((members_of(h, h.free("ObjsInRange", {obj(self), str(""), num(500)}).value) ==
+         std::vector<ObjectId>{other}));
+  CHECK(members_of(h, h.free("ObjsInRange", {obj(self), str(""), num(0)}).value).empty());
+}
+
+TEST(audit_query_constructors_answer_invalid_for_a_class_that_does_not_resolve) {
+  // 0x00409e40 resolves the whole string; a miss makes the constructor answer
+  // the invalid handle. ObjsInSight and ObjsInCircle let a comma list through.
+  imperivm::core::ClassGraph graph;
+  const std::string doc = R"(<class id="Unit" cpp_class="CVXUnit"><properties/></class>)";
+  graph.add({reinterpret_cast<const std::byte*>(doc.data()), doc.size()}, "unit.sc.xml");
+  graph.link();
+  Host h;
+  h.world.set_class_graph(&graph);
+  const ObjectId self = h.unit(1, Point{1000, 1000});
+  const auto valid = [&](const script::HostOutcome& out) {
+    return out.status == script::HostStatus::ok && h.truthy("IsValid", {out.value});
+  };
+  CHECK(valid(h.free("ClassPlayerObjs", {str("Unit"), num(2)})));
+  CHECK(!valid(h.free("ClassPlayerObjs", {str("NoSuchClass"), num(2)})));
+  CHECK(!valid(h.free("ClassPlayerObjs", {str("Unit,Unit"), num(2)})));
+  CHECK(!valid(h.free("ObjsInRange", {obj(self), str("NoSuchClass"), num(100)})));
+  CHECK(!valid(h.free("ObjsInCircle", {pack_point(Point{0, 0}), num(100), str("NoSuchClass")})));
+  CHECK(valid(h.free("ObjsInCircle", {pack_point(Point{0, 0}), num(100), str("Unit,Nope")})));
+  CHECK(!valid(h.free("ObjsInSight", {obj(self), str("NoSuchClass")})));
+}
+
+TEST(audit_group_membership_checks_the_receiver_and_a_list_skips_the_dead) {
+  // `Obj::AddToGroup` (0x005b6730) returns on a bad handle before any group is
+  // made; the `ObjList` forms (0x00561970, 0x0055f720) act on members that
+  // resolve and are not dead.
+  Host h;
+  CHECK(h.member("AddToGroup", {obj(9999), str("Fresh")}).status == script::HostStatus::ok);
+  CHECK(h.world.groups().find("Fresh") == GroupTable::kNoGroup);
+
+  const ObjectId live = h.unit(1, Point{10, 10});
+  const ObjectId corpse = h.unit(1, Point{20, 10});
+  h.world.mutable_state(corpse)->health = 0;
+  ObjListPool& pool = objlist_pool_of(h.world);
+  const ObjListId list = pool.acquire(1, 0);
+  pool.mutable_items(list)->assign({live, corpse});
+  CHECK(h.member("AddToGroup", {make_objlist_value(list), str("L")}).status ==
+        script::HostStatus::ok);
+  CHECK(h.free("GetGroupSize", {str("L")}).value.as_integer() == 1);
+
+  // A corpse already in a group is not taken out by the list form.
+  CHECK(h.member("AddToGroup", {obj(corpse), str("L")}).status == script::HostStatus::ok);
+  CHECK(h.member("RemoveFromGroup", {make_objlist_value(list), str("L")}).status ==
+        script::HostStatus::ok);
+  const std::int32_t l = h.world.groups().find("L");
+  CHECK(h.world.groups().contains(l, corpse));
+  CHECK(!h.world.groups().contains(l, live));
+}
+
 TEST(audit_traverse_records_the_travellers_whole_view_sharing_side) {
   // `Teleport::Traverse` (0x005cdcb0) ORs the player record's word +0x18 --
   // the players who share view with the traveller, itself included -- into

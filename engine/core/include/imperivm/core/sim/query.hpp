@@ -107,15 +107,19 @@ enum class QueryKind : std::uint8_t {
 
 /// `CVXSetOpQuery.operation`.
 ///
-/// **The mapping is inferred, not proven.** The dumps show three values with a
-/// clean frequency ordering -- 0: 611, 1: 299, 2: 188 -- and the host API shows
-/// three set-algebra free functions with the same ordering: `Intersect` (64
-/// call sites), `Union` (36), `Subtract`/`Substract` (8 + 2). Lining the two up
-/// is the only evidence there is. Treat a mismatch here as a live suspect if
-/// conformance ever diverges on a set-op query.
+/// **Read from the bodies.** Each of the three entry points ends in one call
+/// to 0x004fe490 with its literal: `Union` (0x00573260) passes 0 (`edi`,
+/// zeroed at 0x0057327d, pushed at 0x0057336c), `Intersect` (0x005733f0)
+/// passes 1 (0x005734fc), `Subtract`/`Substract` (0x00573580) passes 2
+/// (0x0057368c); and the refresh (0x004ffbe0) makes op 0 the sort-and-merge
+/// union. This was inferred the other way round for a while, by lining the
+/// dumps' frequencies (0: 611, 1: 299, 2: 188) up with the call-site counts
+/// (`Intersect` 64, `Union` 36) -- which says only that the dumped sessions
+/// held more unions than intersections. The ordinal is saved and hashed, so
+/// the swap moved `kStateVectorVersion` to 34.
 enum class SetOp : std::uint8_t {
-  intersect = 0,
-  set_union = 1,
+  set_union = 0,
+  intersect = 1,
   subtract = 2,
 };
 
@@ -201,8 +205,9 @@ struct QuerySpec {
   /// `ObjsInRange` circle, and the settlement of a `units_in_settlement`.
   ObjectId subject = kNoObject;
 
-  /// The circle, in world units. For a sight query the radius is the subject's
-  /// own sight and this stays zero.
+  /// The circle, in world units. For a sight query the radius is the one the
+  /// query was made with (`[query+0x74]`), frozen: the observer's sight less
+  /// 100 at construction unless the script gave one (`ObjsInRange`).
   Point center;
   std::int32_t radius = 0;
 
@@ -287,7 +292,8 @@ struct QuerySpec {
   /// `CVXSetOpQuery`'s two operands, themselves query handles.
   ObjectId lhs = kNoObject;
   ObjectId rhs = kNoObject;
-  SetOp op = SetOp::intersect;
+  /// Ordinal 0 when unused, as every other unused field here is zero.
+  SetOp op = SetOp::set_union;
 
   friend bool operator==(const QuerySpec&, const QuerySpec&) noexcept = default;
 };
@@ -297,14 +303,19 @@ struct QuerySpec {
 // These build the spec only. Creating the *object* -- which is what takes a
 // handle -- is `World::create_query`.
 
-/// `ObjsInSight(observer, "class")` and `VisibleObjsInSight(observer, "class")`.
-[[nodiscard]] QuerySpec objs_in_sight(ObjectId observer, ClassFilter filter,
+/// `ObjsInSight(observer, "class")` and `VisibleObjsInSight(observer, "class")`
+/// -- and `ObjsInRange`, which is the same runtime type (0x004fee10). `radius`
+/// is frozen here: the host functions pass the observer's sight less 100 when
+/// the script gave none (see `fn_objs_in_sight`).
+[[nodiscard]] QuerySpec objs_in_sight(ObjectId observer, std::int32_t radius, ClassFilter filter,
                                       bool visible_only = false) noexcept;
 /// `ObjsInCircle(point, radius, "class")`.
 [[nodiscard]] QuerySpec objs_in_circle(Point center, std::int32_t radius,
                                        ClassFilter filter) noexcept;
-/// `ObjsInRange(object, "class", radius)` -- a circle centred on an object, so
-/// that it follows the object rather than the point it stood on.
+/// `ObjsInRange(object, "class", radius)` -- a sight query on the object with
+/// an explicit radius (0x00576130 calls 0x004fee10 as `ObjsInSight` does), so
+/// it follows the object, leaves the object itself out, and answers nothing
+/// once the object is dead.
 [[nodiscard]] QuerySpec objs_in_range(ObjectId anchor, std::int32_t radius,
                                       ClassFilter filter) noexcept;
 /// `AreaObjs("area", "class")` where the area is a rectangle.

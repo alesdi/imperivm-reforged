@@ -274,72 +274,119 @@ HostOutcome fn_rand(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(world->rng().below(bound.as_integer())));
 }
 
-/// `ObjsInSight(observer, "class")`.
+/// The class argument of the query constructors, as 0x00409e40 takes it: the
+/// **whole string as one class name** in the class map (the lookup
+/// `IsHeirOf` makes), and a miss prints *"Could not find class named '%s'"*
+/// and makes the entry point answer the invalid handle rather than a query.
+/// `ObjsInSight`, `VisibleObjsInSight` and `ObjsInCircle` skip the check when
+/// the string holds a comma (`strchr`), which is how `"Military,Tower"` gets
+/// through to the list parser; `ClassPlayerObjs`, `ObjsInRange` and the
+/// settlement forms do not, so a list there is an invalid handle. A world with
+/// no class graph (every synthetic test) resolves everything, as
+/// `ClassFilter::parse` does.
+[[nodiscard]] bool class_arg_resolves(const World& world, const Value& value, bool list_allowed) {
+  const ClassGraph* graph = world.class_graph();
+  if (graph == nullptr || !value.is_string()) return true;
+  const std::string_view name = value.as_string();
+  if (list_allowed && name.find(',') != std::string_view::npos) return true;
+  return graph->lookup(name) != kNoClass;
+}
+
+/// The radius a sight query is made with when the script gives none, or a
+/// negative one: 0x004fee10 stores **the observer's sight less 100**
+/// (`[obj+0xd0] - 100`), once, at construction -- a later `SetSight` does not
+/// widen a query already made.
+[[nodiscard]] std::int32_t sight_query_radius(const WorldObject& observer, std::int32_t given) {
+  return given < 0 ? observer.sight - 100 : given;
+}
+
+/// `ObjsInSight(observer, "class")` (0x00575cb0) and `VisibleObjsInSight`
+/// (0x00575ef0).
+///
+/// The observer is checked first (a miss prints and answers the invalid
+/// handle), then the class (`class_arg_resolves`, a comma list allowed), and
+/// then 0x004fee10 makes -- or finds, see `fn_set_op` -- a sight query with
+/// radius -1, which it turns into the observer's sight less 100. The query
+/// (`CVXObjsInSightQuery`, refreshed every second) answers nothing while its
+/// observer is gone or dead, and otherwise every living, spawned object of the
+/// class within the radius of the observer's stored position, inclusive, the
+/// observer itself excluded (`World::evaluate_query`). This read the live
+/// sight, whole, and swept the whole map when it was 0, until the host audit.
+///
+/// The visibility restriction of the `Visible` form is recorded on the spec and
+/// **not applied**: fog of war is one of the four hash channels the shipped
+/// build left at zero in all nine dumps, and filtering on it here would pull it
+/// back into hashed state.
+template <bool kVisible>
 HostOutcome fn_objs_in_sight(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("ObjsInSight: no world");
   const WorldObject* observer = object_of(*world, ctx.arg(0));
   if (observer == nullptr) return HostOutcome::ok_with(invalid_object());
-  const QuerySpec spec = objs_in_sight(observer->id, filter_arg(*world, ctx.arg(1)), false);
+  if (!class_arg_resolves(*world, ctx.arg(1), true)) return HostOutcome::ok_with(invalid_object());
+  const QuerySpec spec = objs_in_sight(observer->id, sight_query_radius(*observer, -1),
+                                       filter_arg(*world, ctx.arg(1)), kVisible);
   return HostOutcome::ok_with(query_value(world->create_query(spec)));
 }
 
-/// `VisibleObjsInSight(observer, "class")`. The visibility restriction is
-/// recorded on the spec and **not applied**: fog of war is one of the four hash
-/// channels the shipped build left at zero in all nine dumps, and filtering on
-/// it here would pull it back into hashed state.
-HostOutcome fn_visible_objs_in_sight(CallContext& ctx) {
-  World* world = world_of(ctx);
-  if (world == nullptr) return HostOutcome::failed("VisibleObjsInSight: no world");
-  const WorldObject* observer = object_of(*world, ctx.arg(0));
-  if (observer == nullptr) return HostOutcome::ok_with(invalid_object());
-  const QuerySpec spec = objs_in_sight(observer->id, filter_arg(*world, ctx.arg(1)), true);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
-}
-
-/// `ObjsInCircle(point, radius, "class")`.
+/// `ObjsInCircle(point, radius, "class")` (0x005775e0).
+///
+/// The class (a comma list allowed), then 0x004ff860 makes or finds a
+/// `CVXMapAreaQuery<TCircleArea>` keyed on `(x, y, r, class)` (0x004fac20
+/// stores `r` and `r²`). Its refresh sweeps every owner's objects with
+/// `dist² <= r²` (0x004fde60), the dead and the templates left out; a radius
+/// of 0 holds only the exact spot and a negative one nothing
+/// (`World::evaluate_query`).
 HostOutcome fn_objs_in_circle(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("ObjsInCircle: no world");
   if (!is_point(ctx.arg(0))) return HostOutcome::failed("ObjsInCircle: expected a point");
   if (!ctx.arg(1).is_integer()) return HostOutcome::failed("ObjsInCircle: expected a radius");
+  if (!class_arg_resolves(*world, ctx.arg(2), true)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_circle(unpack_point(ctx.arg(0)), ctx.arg(1).as_integer(),
                                         filter_arg(*world, ctx.arg(2)));
   return HostOutcome::ok_with(query_value(world->create_query(spec)));
 }
 
-/// `ObjsInRange(object, "class", radius)` -- a circle that follows an object
-/// rather than the point it happened to stand on.
+/// `ObjsInRange(object, "class", radius)` (0x00576130) -- **a sight query with
+/// the radius given**, not a circle: the body (whose diagnostics still say
+/// `ObjsInSight`) checks the object, then the class with **no** comma bypass,
+/// and calls 0x004fee10 exactly as `ObjsInSight` does but with the script's
+/// radius, a negative one again meaning sight less 100. So it follows the
+/// object, never lists the object itself, and answers nothing once the object
+/// is dead. It was a circle anchored on the object here, which listed the
+/// anchor and swept the whole map for a radius of 0.
 HostOutcome fn_objs_in_range(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("ObjsInRange: no world");
   const WorldObject* anchor = object_of(*world, ctx.arg(0));
   if (anchor == nullptr) return HostOutcome::ok_with(invalid_object());
   if (!ctx.arg(2).is_integer()) return HostOutcome::failed("ObjsInRange: expected a radius");
-  const QuerySpec spec =
-      objs_in_range(anchor->id, ctx.arg(2).as_integer(), filter_arg(*world, ctx.arg(1)));
+  if (!class_arg_resolves(*world, ctx.arg(1), false)) return HostOutcome::ok_with(invalid_object());
+  const QuerySpec spec = objs_in_range(anchor->id, sight_query_radius(*anchor, ctx.arg(2).as_integer()),
+                                       filter_arg(*world, ctx.arg(1)));
   return HostOutcome::ok_with(query_value(world->create_query(spec)));
 }
 
-/// `ClassPlayerObjs("class", player)`.
+/// `ClassPlayerObjs("class", player)` (0x005754b0).
 ///
-/// A player number that does not resolve selects **nothing**, and that is a
-/// deliberate departure from what `QuerySpec` means on its own: in
-/// `objects_of_class_for_player`, `kNoPlayer` means *any owner*. So passing an
-/// out-of-range number straight through would not answer "no such player" -- it
-/// would answer with **every object on the map**, which is a wrong set that
-/// composes, hashes, and looks entirely plausible. The same widening is the
-/// bug `EnemyObjs` shipped with. No shipped script passes an out-of-range
-/// number, so neither reading is observable on retail data; that is a reason to
-/// choose the safe one, not a reason not to choose.
+/// A player outside 1..16 prints and answers the invalid handle; so does a
+/// class that does not resolve whole (`class_arg_resolves`, no comma bypass).
+/// Then 0x004fe730 makes or finds a `CVXClassPlayerAreaQuery` with no area,
+/// whose refresh (0x004fe860) sweeps the whole map **through the grid** for
+/// objects carrying the player's owner bit: so the held -- a garrison, a
+/// ship's passengers -- and the dead are never in it (`World::evaluate_query`).
+///
+/// A player number that does not resolve selects **nothing** rather than
+/// minting a query with `kNoPlayer`, which in `objects_of_class_for_player`
+/// means *any owner* -- every object on the map, a wrong set that composes,
+/// hashes, and looks entirely plausible.
 HostOutcome fn_class_player_objs(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("ClassPlayerObjs: no world");
   const PlayerId player = player_arg(ctx.arg(1));
-  // An invalid handle, which is this file's established answer for a miss --
-  // `ObjsInRange` and `UnitsInSettlement` both use it when their anchor does
-  // not resolve. Minting a real query with no owner would be the widening.
   if (player == kNoPlayer) return HostOutcome::ok_with(invalid_object());
+  if (!class_arg_resolves(*world, ctx.arg(0), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = class_player_area(filter_arg(*world, ctx.arg(0)), player, Point{}, 0);
   return HostOutcome::ok_with(query_value(world->create_query(spec)));
 }
@@ -370,12 +417,11 @@ HostOutcome fn_class_player_objs(CallContext& ctx) {
 /// A name that matches no settlement is a printed diagnostic and an invalid
 /// handle, not a refusal: 0x00574c69 prints *"Could not find settlement named
 /// '%s' in function 'UnitsInSettlement'. Check the spelling."* and pushes the
-/// 0xffff sentinel. Same for a class name the graph does not know, which
-/// diverges here in a way worth naming: the original refuses the whole query
-/// (0x00574e73, *"Could not find class named '%s' ..."*), while
-/// `ClassFilter::parse` yields a filter that names classes and resolved none,
-/// which `matches_filter` reads as matching nothing. The two differ only
-/// through `.IsValid`, and no shipped site asks.
+/// 0xffff sentinel. The handle form checks its receiver the same way. So does a
+/// class name that does not resolve whole (0x00574e73, *"Could not find class
+/// named '%s' ..."*; `class_arg_resolves`, no comma bypass) -- this used to
+/// mint a query that matched nothing instead. Then 0x004fe080 makes or finds
+/// the query, refreshed every two seconds.
 template <SettlementScope kScope>
 HostOutcome fn_units_in_settlement(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -396,11 +442,20 @@ HostOutcome fn_units_in_settlement(CallContext& ctx) {
     settlement = slot->id;
   }
 
+  if (!class_arg_resolves(*world, ctx.arg(1), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = units_in_settlement(settlement, filter_arg(*world, ctx.arg(1)), kScope);
   return HostOutcome::ok_with(query_value(world->create_query(spec)));
 }
 
-/// `Group(n)`.
+/// `Group(n)` (0x005765a0).
+///
+/// Looks the name up in the group dictionary at `[0x009bdac8]` (0x004c93c0),
+/// creating a `CVXGroup` (0x005720c0) and inserting it (0x0049c0a0) on a miss,
+/// and answers **the group object's own handle** with a reference added -- the
+/// same handle for the same name every time, whose list is the live deque
+/// (0x005716f0, no cache). Here the name is interned the same way
+/// (`World::group_index`) but each call mints a fresh query over it: the
+/// members agree, the handles do not (the query-model gap at `fn_set_op`).
 ///
 /// **Every one of the nine call sites in the shipped corpus passes a string**,
 /// not an integer: `Group(GroupName)` in the four AI-helper scripts,
@@ -490,27 +545,67 @@ HostOutcome fn_set_inn_state(CallContext& ctx) {
 /// `ol.RemoveFromGroup("Q_Slingers")` and
 /// `Group("Oasis_Guards1").AddToGroup("Oasis_Guards")` all ship.
 ///
-/// The list and query forms apply to every member, in the order the receiver
-/// yields them -- which for a group query is the order they joined it.
-[[nodiscard]] std::vector<ObjectId> membership_receivers(CallContext& ctx, World& world) {
-  if (ctx.count() == 0) return {};
-  return receiver_objects(world, ctx.arg(0));
+/// The three bodies of each name differ in what they check, the same way for
+/// all three names:
+///
+///   * the **`Obj`** form (0x005b6730, 0x005b4630, 0x005b69b0) checks the
+///     handle and prints and returns on a miss -- before any group is looked
+///     up, so `AddToGroup` on a gone object creates nothing;
+///   * the **`ObjList`** form (0x00561970, 0x0055f720, 0x00563250) does no
+///     receiver check and applies the call to every member that resolves **and
+///     is not dead** (`vtbl + 0x50`, `object_is_dead`);
+///   * the **`Query`** form (0x0057a550, 0x0057a970, 0x0057ab80) checks the
+///     handle like the `Obj` form, then copies the query's list and applies the
+///     call to every member that resolves, dead or not.
+///
+/// `found` says whether the receiver passed its check; the list is the members
+/// the call applies to, in the receiver's order -- for a group query, the order
+/// they joined it.
+struct MembershipReceiver {
+  bool found = false;
+  std::vector<ObjectId> members;
+};
+
+[[nodiscard]] MembershipReceiver membership_receiver(CallContext& ctx, World& world) {
+  MembershipReceiver out;
+  if (ctx.count() == 0) return out;
+  const Value& receiver = ctx.arg(0);
+  if (is_objlist(receiver)) {
+    out.found = true;
+    for (const ObjectId id : receiver_objects(world, receiver)) {
+      const WorldObject* slot = world.find(id);
+      if (slot != nullptr && !object_is_dead(*slot)) out.members.push_back(id);
+    }
+    return out;
+  }
+  if (object_of(world, receiver) == nullptr) return out;
+  out.found = true;
+  out.members = receiver_objects(world, receiver);
+  return out;
 }
 
 /// `AddToGroup(name)` -- 179 member sites plus the free spellings.
 ///
-/// **Creates the group it cannot find**, which is the one asymmetry in this
-/// family: `gbr.exe` carries `Could not find group named '%s'` for every form
-/// of `RemoveFromGroup` and for the three spawn entry points, and for **no**
-/// form of `AddToGroup`. `Conquests\mediterranean` map 4 needs exactly that --
-/// it builds `Oasis_Guards`, a name no map file declares, out of twelve
+/// **Creates the group it cannot find** once the receiver has passed its
+/// check (`membership_receiver`), which is the one asymmetry in this family:
+/// `gbr.exe` carries `Could not find group named '%s'` for every form of
+/// `RemoveFromGroup` and for the three spawn entry points, and for **no** form
+/// of `AddToGroup`. `Conquests\mediterranean` map 4 needs exactly that -- it
+/// builds `Oasis_Guards`, a name no map file declares, out of twelve
 /// `AddToGroup` calls and then loops on `Group("Oasis_Guards").count`.
+///
+/// The add itself is `CVXGroup::Add` (vtbl+0x3c, 0x00572410): a linear find in
+/// the group's deque, then an append if absent. A template goes to a separate
+/// deque there (`+0x54`, when `[0x00a8734c]` is clear); here the one list keeps
+/// it and every reader leaves templates out, which `GroupTable` documents.
 HostOutcome fn_add_to_group(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("AddToGroup: no world");
   if (!ctx.arg(1).is_string()) return HostOutcome::failed("AddToGroup: expected a group name");
+  const MembershipReceiver receiver = membership_receiver(ctx, *world);
+  if (!receiver.found) return HostOutcome::ok_void();
   const std::int32_t group = world->group_index(ctx.arg(1).as_string());
-  for (const ObjectId id : membership_receivers(ctx, *world)) world->groups().add(group, id);
+  for (const ObjectId id : receiver.members) world->groups().add(group, id);
   return HostOutcome::ok_void();
 }
 
@@ -518,20 +613,25 @@ HostOutcome fn_add_to_group(CallContext& ctx) {
 ///
 /// Refuses the group it cannot find, and refusing means a printed diagnostic
 /// and nothing else: `find`, not `intern`, so a misspelling does not leave an
-/// empty group behind for a later `Group(...)` to resolve.
+/// empty group behind for a later `Group(...)` to resolve. The removal is
+/// `CVXGroup::Remove` (0x00572210): the first match in the live deque, erased
+/// in place, order kept.
 HostOutcome fn_remove_from_group(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RemoveFromGroup: no world");
   if (!ctx.arg(1).is_string()) {
     return HostOutcome::failed("RemoveFromGroup: expected a group name");
   }
+  const MembershipReceiver receiver = membership_receiver(ctx, *world);
+  if (!receiver.found) return HostOutcome::ok_void();
   const std::int32_t group = world->groups().find(ctx.arg(1).as_string());
   if (group == GroupTable::kNoGroup) return HostOutcome::ok_void();
-  for (const ObjectId id : membership_receivers(ctx, *world)) world->groups().remove(group, id);
+  for (const ObjectId id : receiver.members) world->groups().remove(group, id);
   return HostOutcome::ok_void();
 }
 
-/// `RemoveFromAllGroups()` -- 22 sites.
+/// `RemoveFromAllGroups()` -- 22 sites. Collects every group in the dictionary
+/// (0x004909f0) and applies `Remove` to each, under the receiver rules above.
 /// `Group("GoldMules" + idPlayer).RemoveFromAllGroups()` in
 /// `DATA\AI\ES_OUTPOSTSELLGOLD.VS` is the shipped shape, and it is why the
 /// query receiver has to be expanded before anything is removed: the query
@@ -539,7 +639,8 @@ HostOutcome fn_remove_from_group(CallContext& ctx) {
 HostOutcome fn_remove_from_all_groups(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RemoveFromAllGroups: no world");
-  for (const ObjectId id : membership_receivers(ctx, *world)) world->groups().remove_from_all(id);
+  const MembershipReceiver receiver = membership_receiver(ctx, *world);
+  for (const ObjectId id : receiver.members) world->groups().remove_from_all(id);
   return HostOutcome::ok_void();
 }
 
@@ -1301,8 +1402,38 @@ HostOutcome set_no_ai_flag(CallContext& ctx, std::size_t value_index) {
 HostOutcome fn_set_no_ai_flag(CallContext& ctx) { return set_no_ai_flag<true>(ctx, 1); }
 HostOutcome m_set_no_ai_flag(CallContext& ctx) { return set_no_ai_flag<false>(ctx, 1); }
 
-/// The three set-algebra functions. Both spellings of subtract ship -- 8 and 2
-/// call sites, in live scripts -- so both are the same entry point here.
+/// The three set-algebra functions: `Union` (0x00573260), `Intersect`
+/// (0x005733f0) and `Subtract`/`Substract` (0x00573580, both spellings ship, 8
+/// and 2 call sites). Each pops its second operand, then its first; an operand
+/// that is not a live query prints *"Parameter #N ..."* and answers the invalid
+/// handle (first operand checked first). Then 0x004fe490 makes the query with
+/// its op literal -- see `SetOp` -- taking a reference on each operand, and the
+/// refresh's per-op order is `World::evaluate_query`'s.
+///
+/// ## The query model this engine does not have (a known gap)
+///
+/// Every query constructor here -- these three, `ObjsInSight`, `ObjsInRange`,
+/// `ObjsInCircle`, `ClassPlayerObjs`, `UnitsInSettlement` -- does three things
+/// in `gbr.exe` that this engine's queries do not:
+///
+///   * **interning**: it scans a per-type pool first and answers the *existing*
+///     query when the key matches (set-op 0x00996a34 on `(op, a, b)`, class-
+///     player 0x00996a44, sight 0x00996a84 on `(observer, class, radius,
+///     visible)`, circle 0x00996aa4 on `(x, y, r, class)`, settlement 0x00996a70);
+///   * **a timed cache**: a query refreshes its list only when the game clock
+///     passes its next-due time (`+0x4c`), every 2000 ms for a set-op or
+///     settlement query and 1000 ms for the others (`GetList`, 0x004f9490), so
+///     a read can be a second or two stale; and
+///   * **a refcounted lifetime** (0x00571670 adds, 0x00571680 releases and
+///     destroys at zero).
+///
+/// Here every call mints a fresh query object, evaluated afresh on every read
+/// and never freed (`World::create_query`). The answers agree except for the
+/// staleness, and the handles a script sees are allocated differently. That is
+/// a design of its own -- a query pool keyed as the original keys it, a clock
+/// on each query, and a reference count the script VM maintains -- and is left
+/// for a round of its own. Results also come in ascending id order rather than
+/// the original's grid order (`sim/spatial_index.hpp`).
 template <SetOp kOp>
 HostOutcome fn_set_op(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -5998,12 +6129,6 @@ constexpr Cardinal kCardinals[] = {
 
 }  // namespace
 
-bool object_is_dead(const WorldObject& slot) noexcept {
-  if (slot.state.health > 0) return false;
-  if (!slot.state.flags.is_building) return true;
-  return slot.object != nullptr && slot.object->is_a(NativeClass::catapult);
-}
-
 bool unit_has_freedom(World& world, ObjectId id) {
   const WorldObject* slot = world.find(id);
   if (slot == nullptr) return false;
@@ -6674,7 +6799,7 @@ std::size_t register_world_host(script::HostRegistry& registry) {
   def(kFree, "Intersect", 2, &fn_set_op<SetOp::intersect>);  // 64
   def(kFree, "Count", 2, &fn_count);                         // 56
   def(kFree, "ClassPlayerObjs", 2, &fn_class_player_objs);   // 37
-  def(kFree, "ObjsInSight", 2, &fn_objs_in_sight);           // 36
+  def(kFree, "ObjsInSight", 2, &fn_objs_in_sight<false>);           // 36
   def(kFree, "Union", 2, &fn_set_op<SetOp::set_union>);      // 36
   def(kFree, "ObjsInCircle", 3, &fn_objs_in_circle);         // 32
   def(kFree, "ObjsInRange", 3, &fn_objs_in_range);           // 25
@@ -6714,7 +6839,7 @@ std::size_t register_world_host(script::HostRegistry& registry) {
   // builder (`0x005bc760`) writes a `GetNamedObj` call for each of them.
   def(kFree, "GetNamedObj", 1, &fn_get_named_obj);            // 67
   def(kFree, "Subtract", 2, &fn_set_op<SetOp::subtract>);    // 8
-  def(kFree, "VisibleObjsInSight", 2, &fn_visible_objs_in_sight);  // 4
+  def(kFree, "VisibleObjsInSight", 2, &fn_objs_in_sight<true>);  // 4
   // Both spellings ship, in live scripts, so both are bound to one behaviour.
   def(kFree, "Substract", 2, &fn_set_op<SetOp::subtract>);   // 2
   // The settlement-unit family: one runtime type in `gbr.exe`, three names, and

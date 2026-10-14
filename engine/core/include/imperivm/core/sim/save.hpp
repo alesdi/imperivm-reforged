@@ -306,7 +306,14 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// settlement keeps one more timer (`LoyaltyInterval`'s gain tick). Hashed,
 /// and a version-32 file would load a garrisoned town at hundreds of
 /// tenths' worth of points over the 100 the original allows.
-inline constexpr std::uint32_t kStateVectorVersion = 33;
+/// 34: two query fields change meaning. A set-op query's `op` is `gbr.exe`'s
+/// ordinal (0 union, 1 intersect, where 0 was intersect), and a sight query
+/// carries its radius (`QuerySpec::radius`, `sight - 100` frozen at
+/// construction, where it was 0 and the live sight was read) -- and
+/// `ObjsInRange` is a sight query, where it was an anchored circle. A
+/// version-33 file would load every union as an intersection and every sight
+/// query as one that sees only its own spot.
+inline constexpr std::uint32_t kStateVectorVersion = 34;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

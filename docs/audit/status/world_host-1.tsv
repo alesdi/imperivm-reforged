@@ -75,3 +75,22 @@
 0x005d87d0	verified	bit 0x4000000 of the unit flag word; miss no-op
 0x00435470	partial	bit 0x40000 of [+0x194] on live units only, then the whole list to the Squadize worker 0x00447330 at state 0 (fixed: the regroup was missing); non-units left out of the regroup (labelled; 0 shipped)
 0x005de600	verified	handle check, bit 0x40000 with no unit/death test, then a one-element list to 0x00447330 at state 0 (fixed)
+0x00573260	partial	op 0 (fixed: was 1), sort-by-handle merge (0x004ffbe0); query interning, 2000 ms cache and refcount are the query-model design gap (fn_set_op)
+0x005733f0	partial	op 1 (fixed: was 0), walks the smaller operand in its own order (fixed); query-model gap
+0x00573580	partial	op 2, left operand's order kept (fixed: was sorted); query-model gap
+0x005765a0	partial	interns the name in [0x009bdac8], creates on a miss, answers the group's own handle (live, no cache); engine mints a fresh query per call (query-model gap)
+0x005754b0	partial	player 1..16 else invalid; whole-string class else invalid (fixed); whole-map grid sweep: no held, no dead (fixed); query-model gap, grid order
+0x00576130	partial	a sight query with the given radius (negative: sight-100), no comma bypass (fixed: was an anchored circle listing its anchor); query-model gap
+0x00575cb0	partial	sight-100 frozen at construction, empty for a gone or dead observer, observer and dead excluded, inclusive (fixed); hidden-mask path is VisibleObjsInSight's; query-model gap
+0x005775e0	partial	(x,y,r,class) circle, dist²<=r²: r=0 the spot, r<0 nothing, dead excluded, comma list allowed (fixed); query-model gap
+0x00574160	partial	(str, str): exact name scan, miss invalid; whole-string class else invalid (fixed); query-model gap; garrison back-link gap labelled
+0x00574b80	partial	(Settlement, str): receiver check, then as above
+0x005b6730	partial	handle check before any group lookup (fixed: created the group anyway), then CVXGroup::Add; template-deque routing on [0x00a8734c] not read
+0x00561970	partial	no receiver check, group always made, members that resolve and are not dead (fixed); template routing not read
+0x0057a550	partial	handle check, then the query's cached list, every resolving member; query-model gap
+0x005b4630	partial	handle check; group miss does nothing; CVXGroup::Remove (0x00572210) on the live deque; template deque not read
+0x0055f720	partial	members that resolve and are not dead (fixed); as above
+0x0057a970	partial	handle check, the query's cached list; query-model gap
+0x005b69b0	partial	every group in the dictionary (0x004909f0), Remove on each; as the Obj form above
+0x00563250	partial	members that resolve and are not dead (fixed); as above
+0x0057ab80	partial	handle check, the query's cached list; query-model gap
