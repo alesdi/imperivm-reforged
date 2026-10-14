@@ -679,14 +679,42 @@ HostOutcome fn_get_group_size(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(live.size())));
 }
 
-/// The body behind both spawn entry points.
+/// Where a spawned copy goes. `holder` alone is a carrier's holder record --
+/// the copy is put in it (`put_in_holder`) as the template is spawned;
+/// `settlement` set means a settlement's garrison, entered after the spawn.
+struct SpawnDestination {
+  ObjectId holder = kNoObject;
+  SettlementId settlement = kNoSettlement;
+  ObjectId settlement_object = kNoObject;
+};
+
+/// The body behind both spawn entry points: `CVXGroup::Spawn` (0x00572760) and
+/// its holder twin (0x005724a0).
 ///
 /// `found` false means the name resolved to nothing -- an unknown group, an
 /// unknown settlement, an invalid holder. All three print a diagnostic in the
 /// original and hand back an empty list rather than refusing, so all three do
 /// that here; `sim/world.hpp` records the addresses.
+///
+/// The spawn walks the group's template deque in order and clones each
+/// template through its own `vtbl + 0x30`; the copy is cast to `CVXUnit`
+/// (class id 0x00824d10, at 0x0057280a) and **a copy that is not a unit is
+/// skipped** -- here, a template without the unit flag is not spawned. (All
+/// 15,601 grouped templates in the shipped maps carry it, so this is never
+/// reached on retail data.) No random draws.
+///
+/// The holder twin enters each copy through 0x005d3e10 with the force flag
+/// instead of placing it: out of any old holder, onto the holder's roster past
+/// its cap (0x00532160), timers, action and path dropped, the `(-1, -1)`
+/// marker, and the class's `onenter` hook against the holder's composite. For a
+/// settlement's holder that is `garrison_enter(..., force)` and the hook, as
+/// `Settlement::AddUnit`'s path fires it; a ship's holder keeps no roster
+/// here, so its copies are put in it and no hook runs (its composite is no
+/// settlement). The original enters the holder before it files the copy under
+/// the template's names and groups; here the names and groups come first,
+/// which no hook a shipped class binds can tell apart.
 HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_view name,
-                                  ObjectId holder, bool found = true) {
+                                  const SpawnDestination& to, bool found = true) {
   ObjListPool& pool = objlist_pool_of(world);
   const ObjListId list = pool.acquire_temporary(ctx.script);
   std::vector<ObjectId>* items = pool.mutable_items(list);
@@ -706,20 +734,18 @@ HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_vi
   // The original is safe from that for free: its two deques are separate
   // objects, so appending live members cannot disturb the template deque being
   // walked.
-  //
-  // The *filtering* half is redundant and is kept for shape rather than for
-  // effect: `World::spawn_from_template` refuses anything that is not a
-  // template, so passing it the group's whole membership selects the same set
-  // and returns the same list. Fault injection says so -- swapping this for
-  // `groups().members(group)` changes no test in the suite. Recorded rather
-  // than papered over, because a redundancy nothing can observe is exactly
-  // what stops being redundant the day one of the two rules moves.
   std::vector<ObjectId> templates;
   (void)world.templates_in_group(group, templates);
   items->reserve(templates.size());
   for (const ObjectId templ : templates) {
-    const ObjectId copy = world.spawn_from_template(templ, holder);
+    const WorldObject* source = world.find(templ);
+    if (source == nullptr || !source->state.flags.is_unit) continue;  // the CVXUnit cast
+    const bool garrison = to.settlement != kNoSettlement;
+    const ObjectId copy = world.spawn_from_template(templ, garrison ? kNoObject : to.holder);
     if (copy == kNoObject) continue;
+    if (garrison && garrison_enter(world, to.settlement, copy, /*force=*/true)) {
+      (void)fire_class_hook(world, ClassHook::on_enter, copy, to.settlement_object);
+    }
     // Same reason as `Place`: a reinforcement that arrives mid-turn must be in
     // the feeding chain before the sequence that spawned it starts giving it
     // orders and food. See `feed_from_now`.
@@ -729,11 +755,13 @@ HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_vi
   return HostOutcome::ok_with(make_objlist_value(list));
 }
 
-/// `SpawnGroup(name)` -- 187 call sites, all in the campaign containers.
+/// `SpawnGroup(name)` (0x00576790) -- 187 call sites, all in the campaign
+/// containers.
 ///
-/// Brings every template in the named group into play and hands back the
-/// copies as an `ObjList`, which is what the numeric registrar says: the
-/// registration at 0x00577814 declares the return type as 23, `ObjList`.
+/// Looks the name up in the group map at `[0x009bdac8]`, runs the group's spawn
+/// (`spawn_group_into_list`), and hands back the copies as an `ObjList` --
+/// the registration at 0x00577814 declares the return type as 23, `ObjList`,
+/// and the body assigns the group's spawned list into a fresh one (0x00438230).
 ///
 /// The miss is **not** a trap. `gbr.exe` prints `Could not find group named
 /// '%s' in function 'SpawnGroup'. Check the spelling.` through 0x00686eb0 --
@@ -742,11 +770,15 @@ HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_vi
 /// on the miss path exactly as the hit path does). A script that spawns a name
 /// no map declares gets an empty list and runs on, and `find` rather than
 /// `intern` is what keeps this from minting the group as a side effect.
+///
+/// **Partial:** each copy is also handed to 0x0041f310, which files it on a
+/// pending list behind global gates that no script reads (labelled at
+/// `place_object`), and its behaviours start at the next turn's sweep.
 HostOutcome fn_spawn_group(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SpawnGroup: no world");
   if (!ctx.arg(0).is_string()) return HostOutcome::failed("SpawnGroup: expected a group name");
-  return spawn_group_into_list(ctx, *world, ctx.arg(0).as_string(), kNoObject);
+  return spawn_group_into_list(ctx, *world, ctx.arg(0).as_string(), SpawnDestination{});
 }
 
 /// `SpawnNamed(name)` -- 3 call sites, and the sole blocker of the tutorial.
@@ -796,46 +828,78 @@ HostOutcome fn_spawn_named(CallContext& ctx) {
 ///
 /// **Registered twice at the same arity**, which is why one body answers both:
 /// 0x0057782f takes `(str, str)` and 0x00577847 takes `(str, Obj)`, and this
-/// engine's registry keys on `(kind, name, arity)`. The corpus reaches both --
-/// 124 sites pass a settlement name (`"S_Utica"`, `set.name`) and one passes
-/// an object (`5_Great_Battles_Britain` seq6's `SpawnGroupInHolder(sArmy,
-/// ol[a])`, loading a ship) -- so the argument's runtime type is the
-/// discriminator, exactly as it is for `GetGAIKA`.
+/// engine's registry keys on `(kind, name, arity)`. The argument's runtime type
+/// is the discriminator, exactly as it is for `GetGAIKA`.
 ///
-/// The second body's own diagnostic calls it `SpawnGroupInShip`, and there is
-/// no registration under that name anywhere in the image: the ship form ships
-/// registered as `SpawnGroupInHolder`.
+///   * **`(str, str)`** (0x005769b0): the group first (a miss: *"Could not find
+///     group named..."* and an empty list), then the first settlement in the
+///     settlement vector whose name equals the argument, compared exactly
+///     (0x00576bb8); a miss is *"Could not find settlement named..."* and an
+///     empty list. Then the holder spawn over the settlement's holder
+///     (`[settlement+0x5e]`), entering each copy into the garrison.
+///   * **`(str, Obj)`** (0x00576e00, whose own diagnostic calls it
+///     `SpawnGroupInShip`): the group first, then **the object's holder** --
+///     its `vtbl + 0xe4`, the virtual the `UIHolder` strip asks: a ship's
+///     holder record, the settlement holder of an object that belongs to a
+///     settlement, nothing otherwise. Nothing is *"SpawnGroupInHolder invalid
+///     holder"* and an empty list, **and nothing spawns**. An invalid handle
+///     faults the original; an empty list here.
+///
+/// The `Obj` form put the copies in the *ship object itself* for a while, so
+/// `GetUnitsOnBoard` (which reads the holder at ship + 1) never saw them --
+/// `4_Great_Battles_Egypt` seq2 hands the boarded army to player 1 that way --
+/// and it spawned into any object at all. A holder object passed directly
+/// answers itself here; that arm is inferred, and no shipped site takes it.
 HostOutcome fn_spawn_group_in_holder(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SpawnGroupInHolder: no world");
   if (!ctx.arg(0).is_string()) {
     return HostOutcome::failed("SpawnGroupInHolder: expected a group name");
   }
+  const std::string_view group = ctx.arg(0).as_string();
+  const auto nowhere = [&] {
+    return spawn_group_into_list(ctx, *world, group, SpawnDestination{}, false);
+  };
+  if (world->groups().find(group) == GroupTable::kNoGroup) return nowhere();
 
-  ObjectId holder = kNoObject;
+  EconomySystem* economy = economy_of(*world);
+  const auto into_settlement = [&](const Settlement& s) {
+    SpawnDestination to;
+    to.holder = s.holder.object;
+    to.settlement = s.id;
+    to.settlement_object = s.object;
+    return spawn_group_into_list(ctx, *world, group, to);
+  };
+
   if (ctx.arg(1).is_string()) {
-    // The settlement form. The name is the settlement's own, the same key
-    // `GetSettlement/1` and `WaitSettlementCapture` scan for, and the copies go
-    // into that settlement's holder rather than into the settlement object.
-    const std::string_view name = ctx.arg(1).as_string();
-    EconomySystem* economy = economy_of(*world);
     const Settlement* settlement =
-        economy == nullptr ? nullptr : economy->settlements().find_by_name(name);
-    if (settlement == nullptr) {
-      // `Could not find settlement named '%s' in function 'SpawnGroupInHolder'`
-      // -- a printed diagnostic and an empty list, not a refusal.
-      return spawn_group_into_list(ctx, *world, ctx.arg(0).as_string(), kNoObject, false);
-    }
-    holder = settlement->holder.object;
-  } else {
-    const WorldObject* target = object_of(*world, ctx.arg(1));
-    if (target == nullptr) {
-      // `SpawnGroupInHolder invalid holder` (0x007c55d3).
-      return spawn_group_into_list(ctx, *world, ctx.arg(0).as_string(), kNoObject, false);
-    }
-    holder = target->id;
+        economy == nullptr ? nullptr : economy->settlements().find_by_name(ctx.arg(1).as_string());
+    if (settlement == nullptr) return nowhere();
+    return into_settlement(*settlement);
   }
-  return spawn_group_into_list(ctx, *world, ctx.arg(0).as_string(), holder);
+
+  const WorldObject* target = object_of(*world, ctx.arg(1));
+  if (target == nullptr) return nowhere();
+  if (target->object != nullptr && target->object->is_a(NativeClass::ship)) {
+    // A ship's holder record is the internal object minted just after it
+    // (`World::spawn_ship`), as `holder_of_ship` in sim/boarding.cpp finds it.
+    const WorldObject* holder = world->find(target->id + 1);
+    if (holder == nullptr || holder->internal != InternalKind::holder) return nowhere();
+    SpawnDestination to;
+    to.holder = holder->id;
+    return spawn_group_into_list(ctx, *world, group, to);
+  }
+  if (target->internal == InternalKind::holder) {
+    SpawnDestination to;
+    to.holder = target->id;
+    return spawn_group_into_list(ctx, *world, group, to);
+  }
+  if (target->settlement != kNoObject && economy != nullptr) {
+    if (const Settlement* s = economy->settlements().for_object(target->settlement); s != nullptr) {
+      return into_settlement(*s);
+    }
+  }
+  return nowhere();
 }
 
 /// Whether `Place`'s cast to `CVXScriptObj` succeeds for a class.
@@ -5776,6 +5840,13 @@ HostOutcome m_query_is_empty(CallContext& ctx) {
 // members: point
 // --------------------------------------------------------------------------
 
+/// `pt.x` and `pt.y` -- four bodies over two names. `point::x` (0x006952b0) and
+/// `point::y` (0x006952e0) take the point by value and answer its first or
+/// second dword. `point::x`/`rect::left` (0x006950e0) and `point::y`/`rect::top`
+/// (0x00695290) are the by-reference forms -- the receiver reference itself, or
+/// it at `+4` -- that let `pt.x = ...` and `rc.top = ...` assign through them.
+/// Here a member answers the read, which is the same number; no shipped script
+/// assigns through `.x`, `.y`, `.left`, `.top`, `.right` or `.bottom`.
 HostOutcome m_point_x(CallContext& ctx) {
   if (!is_point(ctx.arg(0))) return HostOutcome::failed("x: receiver is not a point");
   return HostOutcome::ok_with(Value::integer(unpack_point(ctx.arg(0)).x));
@@ -5786,14 +5857,24 @@ HostOutcome m_point_y(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(unpack_point(ctx.arg(0)).y));
 }
 
-/// `pt.Set(x, y)` -- mutates the receiver, which is what the argument window's
-/// mutability is for: the VM copies argument 0 back into the caller's local.
+/// `pt.Set(x, y)` (0x00697c50) -- registered `point, point& , int, int`: it
+/// stores `y` and then `x` into the referenced point **and answers the new
+/// point**. The store is the argument window's copy-back (the VM copies
+/// argument 0 into the caller's local); every one of the 106 shipped sites is a
+/// bare statement, so the answer was never read -- and was nothing here until
+/// the host audit.
+///
+/// `rect::Set` (0x00697aa0) is a different entry point that the ledger joins to
+/// this name: `void, rect&, int, int, int, int`, arity **four**, storing
+/// left, top, right and bottom. No shipped site calls it and it is not bound,
+/// as this file does for every registered name the corpus never reaches.
 HostOutcome m_point_set(CallContext& ctx) {
   if (!ctx.arg(1).is_integer() || !ctx.arg(2).is_integer()) {
     return HostOutcome::failed("Set: expected two integers");
   }
-  ctx.out(0) = pack_point(Point{ctx.arg(1).as_integer(), ctx.arg(2).as_integer()});
-  return HostOutcome::ok_void();
+  const Value point = pack_point(Point{ctx.arg(1).as_integer(), ctx.arg(2).as_integer()});
+  ctx.out(0) = point;
+  return HostOutcome::ok_with(point);
 }
 
 // -- rectangles -------------------------------------------------------------
@@ -6241,12 +6322,57 @@ Point rotate_like_gbr(Point v, std::int32_t degrees) noexcept {
   const std::int64_t cos_q = kCosQ30[d];
   const std::int64_t sin_q = negate ? -static_cast<std::int64_t>(kSinQ30[d]) : kSinQ30[d];
   constexpr std::int64_t kOne = std::int64_t{1} << kQ30Shift;
-  // Integer division truncates toward zero, which is what `_ftol2` does.
-  return Point{static_cast<std::int32_t>((x * cos_q + y * sin_q) / kOne),
-               static_cast<std::int32_t>((y * cos_q - x * sin_q) / kOne)};
+  constexpr std::int64_t kHalf = kOne / 2;
+
+  // **The halves keep their residue too.** Where the true sine or cosine is
+  // exactly +/-1/2 -- sine at 30, 150, 210, 330, cosine at 60, 120, 240, 300
+  // -- the Q30 entry is exact, and the original's is not: its angle is `d * K`
+  // with K just under pi/180, so the value is off by about 1e-11 with the sign
+  // of `-cos(d)` for a sine and `+sin(d)` for a cosine (the derivative, times a
+  // short angle). That residue decides the truncation exactly when the product
+  // is an integer, which happens when the other term vanishes -- `Rot(30)` of
+  // `(0, 2)` is `(0, 1)` in the original, not `(1, 1)`. A negative angle
+  // flips the sine's residue with the sine. The guard on the other term keeps
+  // the sign from deciding a sum whose irrational half the table only
+  // approximates.
+  const auto sign_of_q = [](std::int64_t q) { return q > 0 ? 1 : (q < 0 ? -1 : 0); };
+  const std::int32_t sin_eps =
+      (kSinQ30[d] == kHalf || kSinQ30[d] == -kHalf) ? -sign_of_q(kCosQ30[d]) * (negate ? -1 : 1) : 0;
+  const std::int32_t cos_eps =
+      (kCosQ30[d] == kHalf || kCosQ30[d] == -kHalf) ? sign_of_q(kSinQ30[d]) : 0;
+  const auto component = [&](std::int64_t exact_q, std::int64_t residue,
+                             bool other_term_vanishes) -> std::int32_t {
+    // Integer division truncates toward zero, which is what `_ftol2` does.
+    if (residue != 0 && other_term_vanishes && exact_q % kOne == 0) {
+      return static_cast<std::int32_t>(truncate_with(exact_q / kOne, sign_of(residue)));
+    }
+    return static_cast<std::int32_t>(exact_q / kOne);
+  };
+  // x' = x cos + y sin: with the sine a half the cosine term must vanish (x
+  // = 0), with the cosine a half the sine term must (y = 0). The same for y'.
+  const std::int64_t x_residue = x * cos_eps + y * sin_eps;
+  const std::int64_t y_residue = y * cos_eps - x * sin_eps;
+  const bool x_exact = (sin_eps != 0 && x == 0) || (cos_eps != 0 && y == 0);
+  const bool y_exact = (sin_eps != 0 && y == 0) || (cos_eps != 0 && x == 0);
+  return Point{component(x * cos_q + y * sin_q, x_residue, x_exact),
+               component(y * cos_q - x * sin_q, y_residue, y_exact)};
 }
 
 namespace {
+
+/// The length of `(x, y)` as the point bodies compute it: each component
+/// squared with a 32-bit `imul`, the two added in 32 bits (0x00695373..
+/// 0x0069537d), and the sum handed to the square root at 0x0067c3d0 -- a
+/// table-seeded estimate with Newton steps that is exactly the floor root of
+/// the sum **read as unsigned**. So the arithmetic wraps where a 64-bit one
+/// would not: `(70000, 0)` has length 24597. Every map coordinate is far
+/// inside the range where the two agree.
+[[nodiscard]] std::int32_t wrapped_length(std::int32_t x, std::int32_t y) noexcept {
+  const std::uint32_t ux = static_cast<std::uint32_t>(x);
+  const std::uint32_t uy = static_cast<std::uint32_t>(y);
+  const std::uint32_t sum = ux * ux + uy * uy;
+  return static_cast<std::int32_t>(isqrt(static_cast<std::int64_t>(sum)));
+}
 
 /// `pt.SetLen(length)` -- rescale the receiver to `length`, in place.
 ///
@@ -6269,16 +6395,20 @@ HostOutcome m_point_set_len(CallContext& ctx) {
   if (!is_point(ctx.arg(0))) return HostOutcome::failed("SetLen: receiver is not a point");
   if (!ctx.arg(1).is_integer()) return HostOutcome::failed("SetLen: expected a length");
   const Point v = unpack_point(ctx.arg(0));
-  const std::int64_t length = ctx.arg(1).as_integer();
-  const std::int64_t x = v.x;
-  const std::int64_t y = v.y;
-  const std::int64_t current = isqrt(x * x + y * y);
+  const std::int32_t length = ctx.arg(1).as_integer();
+  const std::int32_t current = wrapped_length(v.x, v.y);
   if (current == 0) {
-    ctx.out(0) = pack_point(Point{0, static_cast<std::int32_t>(length)});
+    ctx.out(0) = pack_point(Point{0, length});
     return HostOutcome::ok_void();
   }
-  ctx.out(0) = pack_point(Point{static_cast<std::int32_t>(x * length / current),
-                                static_cast<std::int32_t>(y * length / current)});
+  // `x * L` with a 32-bit `imul`, then `idiv` by the length: the product
+  // wraps before the division, as it does there.
+  const auto scaled = [&](std::int32_t c) {
+    const auto product = static_cast<std::int32_t>(static_cast<std::uint32_t>(c) *
+                                                   static_cast<std::uint32_t>(length));
+    return static_cast<std::int32_t>(product / current);
+  };
+  ctx.out(0) = pack_point(Point{scaled(v.x), scaled(v.y)});
   return HostOutcome::ok_void();
 }
 
@@ -6306,9 +6436,7 @@ HostOutcome m_point_rot(CallContext& ctx) {
 HostOutcome m_point_len(CallContext& ctx) {
   if (!is_point(ctx.arg(0))) return HostOutcome::failed("Len: receiver is not a point");
   const Point v = unpack_point(ctx.arg(0));
-  const std::int64_t x = v.x;
-  const std::int64_t y = v.y;
-  return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(isqrt(x * x + y * y))));
+  return HostOutcome::ok_with(Value::integer(wrapped_length(v.x, v.y)));
 }
 
 /// `a.Dist(b)` and `Dist(a, b)` -- the distance between two points, floored.
@@ -6325,9 +6453,12 @@ HostOutcome fn_point_dist(CallContext& ctx) {
   }
   const Point a = unpack_point(ctx.arg(0));
   const Point b = unpack_point(ctx.arg(1));
-  const std::int64_t dx = static_cast<std::int64_t>(a.x) - b.x;
-  const std::int64_t dy = static_cast<std::int64_t>(a.y) - b.y;
-  return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(isqrt(dx * dx + dy * dy))));
+  // The difference in 32 bits too, then the same wrapped length.
+  const auto dx = static_cast<std::int32_t>(static_cast<std::uint32_t>(a.x) -
+                                            static_cast<std::uint32_t>(b.x));
+  const auto dy = static_cast<std::int32_t>(static_cast<std::uint32_t>(a.y) -
+                                            static_cast<std::uint32_t>(b.y));
+  return HostOutcome::ok_with(Value::integer(wrapped_length(dx, dy)));
 }
 
 /// `Point(x, y)`. Body 0x00696e50, and it is fifteen instructions with no

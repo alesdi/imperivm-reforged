@@ -14,6 +14,8 @@
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/settlement.hpp"
 #include "imperivm/core/sim/globals.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
@@ -553,6 +555,104 @@ TEST(audit_group_membership_checks_the_receiver_and_a_list_skips_the_dead) {
   const std::int32_t l = h.world.groups().find("L");
   CHECK(h.world.groups().contains(l, corpse));
   CHECK(!h.world.groups().contains(l, live));
+}
+
+// --------------------------------------------------------------------------
+// spawning and points
+// --------------------------------------------------------------------------
+
+TEST(audit_spawn_group_in_holder_enters_the_garrison_roster_past_its_cap) {
+  // 0x005769b0 spawns through 0x005724a0, which enters each copy with
+  // 0x005d3e10(holder, force = 1): onto the settlement's roster even when full.
+  Host h;
+  EconomySystem economy;
+  REQUIRE(h.world.add_system(&economy));
+  economy.start(h.world);
+  SettlementInit init;
+  init.owner = 0;
+  init.kind = SettlementKind::stronghold;
+  init.name = "S_T";
+  init.max_units = 0;
+  const SettlementId town = economy.create(h.world, init);
+  REQUIRE(town != kNoSettlement);
+
+  const ObjectId templ = h.unit(0, Point{300, 300});
+  h.world.mutable_state(templ)->flags.unspawned = true;
+  h.world.groups().add(h.world.group_index("G"), templ);
+
+  const script::HostOutcome out = h.free("SpawnGroupInHolder", {str("G"), str("S_T")});
+  REQUIRE(out.status == script::HostStatus::ok);
+  REQUIRE(is_objlist(out.value));
+  const std::span<const ObjectId> copies = objlist_pool_of(h.world).items(objlist_of(out.value));
+  REQUIRE(copies.size() == 1);
+  const Settlement* s = economy.settlements().find(town);
+  REQUIRE(s != nullptr);
+  CHECK(s->holder.contains(copies[0]));
+  CHECK(h.world.find(copies[0])->state.holder == s->holder.object);
+}
+
+TEST(audit_point_set_answers_the_point_and_lengths_wrap_at_32_bits) {
+  // `point::Set` (0x00697c50) returns the point it stores; `Len` (0x00695360),
+  // `Dist` (0x00695310) and `SetLen` (0x00697d10) square, add and multiply in
+  // 32 bits and take the root of the sum read as unsigned.
+  Host h;
+  const script::HostOutcome set = h.member("Set", {pack_point(Point{1, 2}), num(5), num(6)});
+  REQUIRE(set.status == script::HostStatus::ok);
+  REQUIRE(is_point(set.value));
+  CHECK(unpack_point(set.value) == (Point{5, 6}));
+
+  CHECK(h.integer("Len", {pack_point(Point{70000, 0})}) == 24597);
+  CHECK(h.free("Dist", {pack_point(Point{0, 0}), pack_point(Point{70000, 0})}).value.as_integer() ==
+        24597);
+  CHECK(h.integer("Len", {pack_point(Point{3, 4})}) == 5);
+  const auto set_len = [&](Point p, std::int32_t length) -> Point {
+    script::Value args[] = {pack_point(p), num(length)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &h.context;
+    ctx.name = "SetLen";
+    ctx.kind = script::CallKind::member;
+    const std::uint32_t index = h.registry.find(script::CallKind::member, "SetLen", 1);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return Point{};
+    (void)h.registry.entry(index).fn(ctx);
+    return unpack_point(args[0]);
+  };
+  CHECK(set_len(Point{16000, 0}, 200000) == (Point{-68435, 0}));
+  CHECK(set_len(Point{65536, 0}, 10) == (Point{0, 10}));
+  CHECK(set_len(Point{3, 4}, 10) == (Point{6, 8}));
+}
+
+TEST(audit_rot_keeps_the_residue_of_an_exact_half) {
+  // `point::Rot` (0x00697d90) works on `d * K` with K just under pi/180, so
+  // sin(30) is a hair under 1/2 and cos(120) a hair over -1/2.
+  Host h;
+  const auto rot = [&](Point p, std::int32_t degrees) -> Point {
+    script::Value args[] = {pack_point(p), num(degrees)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &h.context;
+    ctx.name = "Rot";
+    ctx.kind = script::CallKind::member;
+    const std::uint32_t index = h.registry.find(script::CallKind::member, "Rot", 1);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return Point{};
+    (void)h.registry.entry(index).fn(ctx);
+    return unpack_point(args[0]);
+  };
+  // Each of these from a double-precision emulation of the original's
+  // `trunc(x cos + y sin)`, `trunc(y cos - x sin)`.
+  CHECK(rot(Point{0, 2}, 30) == (Point{0, 1}));
+  CHECK(rot(Point{0, 2}, 210) == (Point{0, -1}));
+  CHECK(rot(Point{0, 2}, 120) == (Point{1, 0}));
+  CHECK(rot(Point{2, 0}, 60) == (Point{1, -1}));
+  CHECK(rot(Point{0, 4}, 150) == (Point{2, -3}));
+  CHECK(rot(Point{4, 0}, 300) == (Point{1, 3}));
+  CHECK(rot(Point{0, 2}, -30) == (Point{0, 1}));
+  CHECK(rot(Point{2, 0}, -60) == (Point{1, 1}));
+  CHECK(rot(Point{0, 2}, 330) == (Point{-1, 1}));
+  CHECK(rot(Point{2, 0}, 240) == (Point{-1, 1}));
+  CHECK(rot(Point{2, 0}, 120) == (Point{0, -1}));
 }
 
 TEST(audit_traverse_records_the_travellers_whole_view_sharing_side) {

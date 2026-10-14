@@ -94,3 +94,23 @@
 0x005b69b0	partial	every group in the dictionary (0x004909f0), Remove on each; as the Obj form above
 0x00563250	partial	members that resolve and are not dead (fixed); as above
 0x0057ab80	partial	handle check, the query's cached list; query-model gap
+0x00697cb0	verified	in place, low edge then high per axis, unnormalised
+0x00697d90	partial	x87 trunc(x cos + y sin), trunc(y cos - x sin) with K = 3.1415926535/180; cardinals and the eight +/-1/2 entries keep the residue's sign (fixed for the halves); other angles a Q30 table, at most one unit off where a product falls within ~3e-5 of an integer; 53-bit precision control assumed
+0x006950e0	verified	by-reference x / rect::left (offset 0) for assignment; the engine answers the read, 0 shipped sites assign
+0x006952b0	verified	by-value first dword
+0x00695290	verified	by-reference y / rect::top (offset +4); read only here, 0 shipped sites assign
+0x006952e0	verified	by-value second dword
+0x00697c50	verified	stores y then x in place and returns the point (fixed: returned nothing)
+0x00697aa0	partial	rect::Set(left, top, right, bottom), arity 4 -- not this engine's Set/2; unbound, 0 shipped sites
+0x00697d10	verified	32-bit imul/add, floor root of the unsigned sum; 0 -> (0, L); x*L wrapped then idiv (fixed: was 64-bit)
+0x00696e50	verified	(x, y) as given, no clamp or fixup
+0x00695310	verified	member and free, one body: 32-bit difference then the wrapped length (fixed: was 64-bit)
+0x00696f80	verified	inclusive on all four edges
+0x00695360	verified	32-bit squares and sum, floor root of the unsigned sum (fixed: was 64-bit)
+0x005bd3e0	verified	no world -> unchanged; x to [0, w-2], y to [0, h-2] (high corner from [world+0xbc/0xc0] - 1)
+0x004c6650	verified	(0, 0, w-1, h-1) copied from [world+0xb4]
+0x00576790	partial	group map lookup, miss -> empty list; clones templates in order, non-unit copies skipped (fixed); the 0x0041f310 hand-off and next-turn behaviour start are labelled
+0x005769b0	partial	group, then exact settlement name scan; copies enter the garrison forced (0x005d3e10) with the onenter hook (fixed: only the holder link was set); hook order vs. name/group filing differs (labelled)
+0x00576e00	partial	group, then the object's holder (vtbl+0xe4): ship -> ship+1, building -> its settlement's garrison; none -> empty list, no spawn (fixed: spawned into the object itself); a holder passed directly is inferred
+0x005a8710	partial	player 1..16, inclusive map rect unless (-1,-1), class, CVXScriptObj cast then SetPlayer/SetPos; the cast subtree is inferred (labelled), 0x0041f310 hand-off not modelled
+0x005a8980	partial	class first, clamp inset 48 low then high, no player check; same labelled gaps as Place
