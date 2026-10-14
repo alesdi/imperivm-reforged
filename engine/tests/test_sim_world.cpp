@@ -6231,10 +6231,16 @@ TEST(cover_of_mercy_action_shelters_the_friendly_units_under_it) {
                .status == script::HostStatus::ok;
   };
   const auto sheltered = [&](ObjectId id) { return b.world.state(id)->flags.half_damage; };
+  // A receiver that is not an area effect is nothing to cast: 0x005ca6a0's
+  // `CVXAreaEffect` test fails and nothing moves.
+  CHECK(act(own));
+  CHECK(!sheltered(ally));
   CHECK(act(cover));
   CHECK(sheltered(own));
   CHECK(sheltered(ally));
-  CHECK(sheltered(nobodys));
+  // An unowned unit carries no owner bit, so the friendly mask (0x005ca220
+  // tests `[obj+0x2c]`'s owner half against it) never takes it.
+  CHECK(!sheltered(nobodys));
   CHECK(sheltered(ring));
   CHECK(!sheltered(foe));
   CHECK(!sheltered(far));

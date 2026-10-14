@@ -3639,8 +3639,9 @@ HostOutcome m_mist_action(CallContext& ctx) {
 /// `Obj::CoverOfMercyAction()` -- 1 site, `COVEROFMERCY_IDLE.VS`, once per
 /// animation while the cover has stamina.
 ///
-/// `0x005ca6a0` resolves the receiver, casts it to the `CVXSacrifice` layout
-/// (the type descriptor at 0x00824bcc) and hands it to 0x005ca5a0, which:
+/// `0x005ca6a0` resolves the receiver, casts it to **`CVXAreaEffect`** (the
+/// name at 0x00824bcc) -- anything else does nothing -- and hands it to
+/// 0x005ca5a0, which:
 /// walks the list at `[cover+0x14c]`..`[+0x150]` of handles it sheltered last
 /// time and clears `0x10000000` -- `ObjectFlags::half_damage` -- on every one
 /// that still resolves; builds a player query (0x00514080) from the cover's
@@ -3655,13 +3656,21 @@ HostOutcome m_mist_action(CallContext& ctx) {
 /// Here the list is kept the other way round, one `ObjectState::sheltered_by`
 /// per unit -- see that field for the one arrangement where the two differ
 /// -- and the war test is `PlayerTable::is_enemy` from the owner's side, the
-/// one-directional reading `Obj::IsEnemy` proved. An unowned unit is nobody's
-/// enemy and is sheltered. An invalid receiver does nothing.
+/// one-directional reading `Obj::IsEnemy` proved. The collector (0x005ca220)
+/// tests each unit's owner bit, the low half of `[obj+0x2c]`, against that
+/// mask, so **an unowned unit, whose owner half is zero, is not sheltered**;
+/// it also skips templates and lets a hidden unit through only when its
+/// owner is in the cover owner's side mask (`[player+0x18]`), which is not
+/// modelled -- a hidden friendly unit is sheltered here. No life test. An
+/// invalid receiver does nothing.
 HostOutcome m_cover_of_mercy_action(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("CoverOfMercyAction: no world");
   const WorldObject* cover = object_of(*world, ctx.arg(0));
-  if (cover == nullptr) return HostOutcome::ok_void();
+  if (cover == nullptr || cover->object == nullptr ||
+      !cover->object->is_a(NativeClass::area_effect)) {
+    return HostOutcome::ok_void();
+  }
   const ObjectId self = cover->id;
   const PlayerId owner = cover->state.owner;
   const Point centre = world->resolve_position(self);
@@ -3682,10 +3691,10 @@ HostOutcome m_cover_of_mercy_action(CallContext& ctx) {
   for (const ObjectId id : around) {
     const WorldObject* slot = world->find(id);
     if (slot == nullptr || !slot->state.flags.is_unit) continue;
-    // `is_enemy` answers false for `kNoPlayer` on its own, so the guard is an
-    // equivalence the sweep labels; it is kept because the reading -- nobody's
-    // unit is nobody's enemy -- is the point, not the table's edge.
-    if (slot->state.owner != kNoPlayer && players.is_enemy(owner, slot->state.owner)) continue;
+    // The owner bit against the friendly mask: no owner, no bit, no shelter.
+    if (!PlayerTable::is_valid(slot->state.owner) || players.is_enemy(owner, slot->state.owner)) {
+      continue;
+    }
     if (ObjectState* state = world->mutable_state(id); state != nullptr) {
       state->flags.half_damage = true;
       state->sheltered_by = self;

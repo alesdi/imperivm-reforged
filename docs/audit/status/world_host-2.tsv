@@ -109,3 +109,4 @@
 0x005c9f40	verified	the receiver handle to 0x005d5aa0, a whole-map grid sweep clearing [unit+0x14c] wherever it names the receiver; invalid does nothing
 0x005ca050	verified	fixed: the collection's filter 0x005c9f20 takes living units only, so a corpse in the mist is neither tagged nor counted; units in [obj+0xd4] whose tag is free or this mist are tagged, damaged through vtbl+0xa8 and the argument booked to both damage counters
 0x00595360	verified	the same body over a Sacrifice receiver, with a resolve test first; shared implementation
+0x005ca6a0	partial	fixed: only a CVXAreaEffect receiver acts, and an unowned unit (owner half zero) is not sheltered; lowers the bit on last time's list, raises it on the units within the class radius whose owner bit is in the complement of the owner's war mask; a hidden unit needs the side mask [player+0x18], not modelled
