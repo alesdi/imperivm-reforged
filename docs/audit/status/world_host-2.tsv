@@ -55,3 +55,7 @@
 0x004c6610	partial	stores the byte in [0x00996ae4]; its only reader is the blow's special-stamina charge 0x0050ff30 (skips special 0x1000's cost), which this engine's combat does not model, so the flag is dropped
 0x005d30b0	verified	zeroes the regeneration-table scan cursor [0x009c0828]; there is no such cache here, a no-op is the same behaviour
 0x004db630	verified	[0x009969a8] != 0, whose only writer sets and clears it within one debug function: false
+0x005ad620	verified	0x0053f5b0: the class string [cls+0x960] non-empty and not **Invalid**; the projectile_class arm stores it (0x005a4254), settling the old inference
+0x005ac6b0	verified	class slot [cls+0xb30] (water_unit) non-zero; invalid false
+0x005c6fc0	verified	[ship+0x230] > 0, a construction counter, not a class test; invalid false
+0x00435250	verified	fixed: the sweep 0x00423ef0 counts objects of exactly the class (descriptor equality), with no life test and nothing held; player outside 1..16 or an unknown class answers true; point clamped to the map; radius twice [cls+0x2dc]; owner in the complement of the enemy word

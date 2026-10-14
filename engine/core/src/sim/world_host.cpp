@@ -971,15 +971,18 @@ HostOutcome fn_place_catapult(CallContext& ctx) {
 /// high per axis, `_PlaceEx`'s rule). Then a circle query (0x00423ef0, the
 /// same cell sweep `ObjsInCircle` rides on) over the clamped point with radius
 /// **twice the class's `radius`** attribute (`[class+0x2dc]`, squared as
-/// `(2r)^2` for the sweep), for objects of that class -- the sweep tests the
-/// class descriptor -- whose owner is in the player's **friendly mask**,
+/// `(2r)^2` for the sweep), for objects **of exactly that class** -- the sweep
+/// compares `[obj+0x3c]` with the descriptor for equality (0x0042403d,
+/// 0x0042408b), so an heir does not count -- with **no life test**, whose
+/// owner bit in `[obj+0x2c]` is in the player's **friendly mask**,
 /// `[record+0x10] ^ 0xffff`: the complement of the enemy word
 /// `PlayerTable::is_enemy` reads, as the caster searches in `sim/hero.cpp`
-/// already established. Any hit is true.
+/// already established. Any hit is true. A held object is not on the grid the
+/// sweep walks, so it is not found.
 ///
 /// A cover of mercy is placed by the script itself (`Place("CoverOfMercy",
 /// pt, .player)`), so unlike a sacrifice it can exist here, and the sweep is
-/// the engine's own: every live object of the class, the point inside its
+/// the engine's own: every object of the class, the point inside its
 /// doubled radius by the query circle rule (`contains_by_query_rule`, which is
 /// what the cell sweep answers), and an owner the player is not at war with.
 /// The doubling is the original's and is why a single effect covers a ring
@@ -1020,10 +1023,11 @@ HostOutcome fn_is_protected(CallContext& ctx) {
   const AreaShape ring = AreaShape::of_circle(at, reach);
   const auto viewer = static_cast<PlayerId>(player - 1);
   for (const WorldObject& other : world->objects()) {
-    if (other.state.health <= 0 || !world->class_is_a(other.id, wanted)) continue;
+    if (other.internal != InternalKind::none || other.class_index != wanted) continue;
     if (!PlayerTable::is_valid(other.state.owner)) continue;
     if (world->players().is_enemy(viewer, other.state.owner)) continue;
-    if (!ring.contains_by_query_rule(world->resolve_position(other.id))) continue;
+    if (other.state.position == kHeldPosition) continue;
+    if (!ring.contains_by_query_rule(other.state.position)) continue;
     return HostOutcome::ok_with(Value::boolean(true));
   }
   return HostOutcome::ok_with(Value::boolean(false));
@@ -2250,25 +2254,19 @@ HostOutcome m_is_peasant_ambient(CallContext& ctx) {
 /// at `+0x974`, the string's own length slot) must be non-zero, **and** its
 /// text must not be `"**Invalid**"` (0x007ae000, compared with 11 characters).
 ///
-/// **The string is a class name, and `projectile_class` is an inference.** What
-/// is read is settled: 0x005a6c9d initialises a run of `std::string`s at
-/// `+0x928`, `+0x944`, `+0x960`, `+0x97c`, `+0x998` (stride 0x1c) to that
-/// sentinel; 0x0059c7c8 inherits each from the parent class when it is still
-/// the sentinel; and 0x005b1d20 takes `+0x960`, looks it up **in the class
-/// registry**, and reads a range-like number off the class it finds. So it
-/// holds the name of another class. Which XML attribute fills it is *not*
-/// settled: the class reader writes `projectile_shadow` into `+0x97c` and
-/// `projectile_fire` into `+0x998`, and no instruction in the image writes
-/// `+0x960` with that displacement at all -- the nearest evidence is the
-/// literal `_projectile_class` at 0x007c8650, evidently composed with a prefix
-/// at run time. `projectile_class` is the attribute that sits beside those two
-/// in every shipped class that declares them, and it is what
-/// `CombatProfile::projectile` already resolves from the other side, so it is
-/// the reading taken here. The alternative worth naming is
-/// `building_projectile_class`, which four shipped classes declare *as well*;
-/// under that reading a tower would answer differently.
+/// **The string is a class name, and the attribute is `projectile_class`.**
+/// 0x005a6c9d initialises a run of `std::string`s at `+0x928`, `+0x944`,
+/// `+0x960`, `+0x97c`, `+0x998` (stride 0x1c) to the `"**Invalid**"`
+/// sentinel; the class reader's `projectile_class` arm (the compare at
+/// 0x005a421a, the store into `+0x960` at 0x005a4254) fills it; 0x0059c7c8
+/// inherits it from the parent class while it is still the sentinel; and
+/// 0x005b1d20 looks it up **in the class registry** and reads a range-like
+/// number off the class it finds. This used to be recorded as an inference,
+/// because the literal sits inside `_projectile_class` (0x007c8650) and a
+/// search for its address found nothing; the arm pushes 0x007c86c0, a
+/// separate copy. `building_projectile_class` is a different slot.
 ///
-/// Either way this is not a range comparison and not a weapon-type test: a unit
+/// This is not a range comparison and not a weapon-type test: a unit
 /// is ranged when it has something to throw.
 ///
 /// **`"**Invalid**"` is the original's uninitialised-string default, not an

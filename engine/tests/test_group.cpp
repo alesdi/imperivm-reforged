@@ -2232,7 +2232,7 @@ struct PlaceGraph {
         // The protective effect `IsProtected` looks for, with the radius it
         // doubles.
         R"(<class id="CoverOfMercy" parent="Object" cpp_class="CVXScriptObj"><properties sight="0" maxhealth="10" radius="400"/></class>)",
-        // A heir, because the sweep tests the class tree and not the leaf.
+        // An heir, which the sweep does not count: it compares the leaf.
         R"(<class id="GreaterCover" parent="CoverOfMercy" cpp_class="CVXScriptObj"/>)",
         // The two building families `CalcEscapeDirection` runs from, one of
         // them through an heir, and a building that is neither.
@@ -2717,7 +2717,7 @@ TEST(place_catapult_reveals_the_site_to_the_build_sight) {
   CHECK(!fog.map().explored(Point{500, 500}, mine));
 }
 
-/// `IsProtected(player, pos, class)`: a live object of the class, owned by
+/// `IsProtected(player, pos, class)`: an object of exactly the class, owned by
 /// somebody the player is not at war with, within twice the class's radius of
 /// the point by the query circle rule. The early exits all answer true.
 TEST(is_protected_finds_a_friendly_effect_within_twice_its_radius) {
@@ -2757,17 +2757,20 @@ TEST(is_protected_finds_a_friendly_effect_within_twice_its_radius) {
   CHECK(!ask(3, 9000, 1000, "CoverOfMercy"));
   f.world.set_position(cover, Point{8100, 1000});
   CHECK(ask(3, 9000, 1000, "CoverOfMercy"));
-  // A dead effect protects nobody.
+  // No life test in the sweep (0x00423ef0): an effect at zero health still
+  // stands on the grid and still protects.
   f.world.set_health(cover, 0);
-  CHECK(!ask(3, 8100, 1000, "CoverOfMercy"));
+  CHECK(ask(3, 8100, 1000, "CoverOfMercy"));
 
-  // A heir of the class counts: the sweep tests the class descriptor's tree.
+  // An heir of the class does **not** count: the sweep compares the object's
+  // class descriptor with the one it looked up, for equality.
   const script::HostOutcome greater =
       f.call("Place", {script::Value::string("GreaterCover"), PlaceFixture::point(3000, 3000),
                        script::Value::integer(4)});
   REQUIRE(greater.status == script::HostStatus::ok);
   REQUIRE(PlaceFixture::id_of(greater.value) != kNoObject);
-  CHECK(ask(3, 3000, 3000, "CoverOfMercy"));
+  CHECK(!ask(3, 3000, 3000, "CoverOfMercy"));
+  CHECK(ask(3, 3000, 3000, "GreaterCover"));
 
   // The early exits answer true: a class nothing declares, a player off the
   // table. The original prints for the first and writes 1 for both.
