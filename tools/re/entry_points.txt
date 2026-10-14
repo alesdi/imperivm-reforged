@@ -1,0 +1,6 @@
+# Code tools/re/decomp.py must make a function of even if Ghidra's analysis
+# does not: callbacks reached only through a pointer. One address per line,
+# then why. hostregs.py's host bodies are added on their own.
+0x005c5690  settlement loyalty gain tick (LoyaltyInterval)
+0x005c0f00  settlement loyalty cap tick (LoyaltyCapInterval)
+0x005eb9d0  loyalty count sweep
