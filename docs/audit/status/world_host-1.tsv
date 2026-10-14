@@ -54,3 +54,22 @@
 0x004dce60	verified	unit then receiver checked; nearest door (0x0056fba0) of the land/water list by the unit class's water_unit (+0xb30) from the unit's stored position; fallbacks unit pos / building pos / (0,0); no life test (fixed: health test, ship-class flag, holder walk)
 0x004dcfa0	partial	(Unit, point): miss -> the point; water from the unit class's water_unit (fixed, was ship class); one rand(0,10000) draw over 1/(d^4+1e-7) weights in double, fixed point here
 0x004dd080	partial	(point, bool): same worker 0x004db6c0; double-precision weights approximated in fixed point (core has no floats)
+0x005d7fc0	verified	game clock into [unit+0x1a4], read back by TimeWithoutAttack (0x005d7f50); stored on the combatant (was dropped on a census that missed the reader)
+0x005d8d70	partial	bit n<36 of [obj+0x198]; hero ctor 0x0052ffd0 sets bit 30 freedom on every hero (fixed); the class reader's 36-name table (0x00426df0) taken from the engine's existing reading, not re-read
+0x004dd150	verified	n-th class point slot of the type as (x, y*1448/1024), raw offsets; miss (-32768,-32768) silently; no life test
+0x005d8f80	partial	acts only with the Parry special and a changed mode [+0x1a0]; the effect object at [+0x1c8] (0x00518650 entry 4) is not modelled
+0x005d8240	verified	bit 0x100000 of [obj+0x194]; miss no-op
+0x005cdbc0	verified	stored handle [tp+0x208]; miss invalid
+0x00424f90	verified	no handle check; health < maxhealth / 20 (sar 3 confirmed), truncating
+0x005d7c80	verified	the int at [+0x164]; miss no-op
+0x004dd200	verified	damage tier [b+0x204] == 3; miss true
+0x004dd440	partial	town hall and spell 0..5, then the spell manager record (0x0052d3e0), message 0x184 and UI; dropped here (no reader); 0x0052c5a0 not read
+0x004dd4f0	partial	the same with a data argument; dropped likewise
+0x005d70f0	verified	no receiver check; holder [+0x154] resolves and its ship handle [holder+0x0e] resolves (0x005319a0)
+0x005d8bf0	verified	the int at [+0x164]; miss 0
+0x0051bd20	verified	bit 22 of [+0x194]
+0x005d7bc0	partial	base answers invalid; only the druid override reads [+0x1cc]; no sacrifice machinery here (design)
+0x005aaea0	verified	argument then receiver (false each); Military receiver; target a Building heir with a live settlement, not Tower/Wall/Gate/Catapult
+0x005cdcb0	verified	ORs the traveller's record word +0x18 (share-view side, self included) into [tp+0x214] (fixed: was the one bit); 1..16 only
+0x005cdc40	partial	instance fields [tp+0x20c/0x210] copied from the class by the loader 0x005cd950; miss pushes (0xffff|garbage, 0), (-1,-1) here; agree on every shipped class
+0x005d87d0	verified	bit 0x4000000 of the unit flag word; miss no-op

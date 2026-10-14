@@ -13,6 +13,7 @@
 
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/globals.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
@@ -326,4 +327,57 @@ TEST(audit_is_heir_of_takes_the_whole_string_as_one_class_name) {
   CHECK(!h.truthy("IsHeirOf", {obj(soldier), str("Fort,Unit")}));
   CHECK(!h.truthy("IsHeirOf", {obj(soldier), str(" Unit")}));
   CHECK(!h.truthy("IsHeirOf", {obj(9999), str("Unit")}));
+}
+
+// --------------------------------------------------------------------------
+// units and buildings: SetLastAttackTime, HasSpecial, Teleport::Traverse
+// --------------------------------------------------------------------------
+
+TEST(audit_set_last_attack_time_stamps_the_clock_time_without_attack_reads) {
+  // `Unit::SetLastAttackTime` (0x005d7fc0) writes the game clock into
+  // `[unit+0x1a4]`, which `TimeWithoutAttack` (0x005d7f50) reads back.
+  Host h;
+  CombatSystem combat;
+  const ObjectId sneak = h.unit(1, Point{100, 100});
+  Combatant record;
+  record.id = sneak;
+  record.owner = 1;
+  record.health = 10;
+  combat.add(record);
+  REQUIRE(h.world.add_system(&combat));
+  h.world.advance_turns(10);
+  const GameTime now = h.world.time();
+  REQUIRE(now > 0);
+
+  CHECK(h.integer("TimeWithoutAttack", {obj(sneak)}) == now);
+  CHECK(h.member("SetLastAttackTime", {obj(sneak)}).status == script::HostStatus::ok);
+  CHECK(combat.find(sneak)->last_attack_time == now);
+  CHECK(h.integer("TimeWithoutAttack", {obj(sneak)}) == 0);
+  CHECK(h.member("SetLastAttackTime", {obj(9999)}).status == script::HostStatus::ok);
+}
+
+TEST(audit_has_special_answers_freedom_for_every_hero) {
+  // `Unit::HasSpecial` (0x005d8d70) reads `[obj+0x198]`, where the hero
+  // constructor (0x0052ffd0) sets bit 30, `freedom`, whatever the class says.
+  Host h;
+  const ObjectId hero = h.spawn(NativeClass::hero, 10);
+  const ObjectId soldier = h.spawn(NativeClass::unit, 10);
+  REQUIRE(h.world.find(hero)->state.flags.is_hero);
+  CHECK(h.truthy("HasSpecial", {obj(hero), num(30)}));
+  CHECK(!h.truthy("HasSpecial", {obj(soldier), num(30)}));
+  CHECK(!h.truthy("HasSpecial", {obj(hero), num(31)}));
+}
+
+TEST(audit_traverse_records_the_travellers_whole_view_sharing_side) {
+  // `Teleport::Traverse` (0x005cdcb0) ORs the player record's word +0x18 --
+  // the players who share view with the traveller, itself included -- into
+  // `[teleport+0x214]`.
+  Host h;
+  const ObjectId gate = h.spawn(NativeClass::teleport, 10);
+  h.world.players().set_relation_word(1, 0, kRelationFriendly);  // 2 shares view with 1
+  h.world.players().set_relation_word(0, 2, kRelationFriendly);  // 1 toward 3: not it
+  CHECK(h.member("Traverse", {obj(gate), num(1)}).status == script::HostStatus::ok);
+  CHECK(h.world.find(gate)->state.traversed_by == 0b011u);
+  CHECK(h.member("Traverse", {obj(gate), num(0)}).status == script::HostStatus::ok);
+  CHECK(h.world.find(gate)->state.traversed_by == 0b011u);
 }

@@ -3171,9 +3171,12 @@ HostOutcome m_set_user(CallContext& ctx) {
 ///
 /// **Validated and dropped, the way `PlayMovie` is**, and the reason is that
 /// **nothing reads what they write.** The pair maintains a record on the global
-/// spell manager at `[0x009a70a4]`: `GlobalSpellStart` (0x004dd440) appends
-/// `{spell, player - 1, now, handle}` and `GlobalSpellStop` (0x004dd5b0)
-/// removes the receiver's. The only registered reader is
+/// spell manager at `[0x009a70a4]`: `GlobalSpellStart` (0x004dd440, and
+/// 0x004dd4f0 with a data argument besides) requires a town-hall receiver and
+/// a spell id 0..5, then appends `{spell, player - 1, now, handle}` through
+/// 0x0052d3e0, which also posts message 0x184 once, moves a UI panel, and sets
+/// a global flag while a bloodlust record (spell 4) is live -- a flag with no
+/// reader found. `GlobalSpellStop` (0x004dd5b0) removes the receiver's. The only registered reader is
 /// `Building::GetGlobalSpell` (0x004dd6a0), which has **zero call sites** in
 /// all 885 scripts -- and cannot distinguish "no spell" from `gsWindOfWisdom`
 /// anyway, because 0x0052c260 answers 0 for both. So storing the record would
