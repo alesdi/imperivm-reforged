@@ -262,6 +262,30 @@ HostOutcome fn_objs_in_sight(CallContext& ctx) {
 /// recorded on the spec and **not applied**: fog of war is one of the four hash
 /// channels the shipped build left at zero in all nine dumps, and filtering on
 /// it here would pull it back into hashed state.
+///
+/// **Read against the body (`0x00575ef0`)**, which is `ObjsInSight`'s
+/// (0x00575cb0) but for one argument. An unresolvable observer prints
+/// *"Parameter #1 ... is uninitialized or invalid object"* and answers the
+/// invalid query `0xffff`; so does a class string with no comma that names no
+/// class (*"Could not find class named ..."*), where this engine answers an
+/// empty query instead -- the four shipped sites, all `TTENT_BEHAVIOR.VS`, pass
+/// `"Unit"`. Otherwise the shared worker 0x004fee10 is called with radius `-1`
+/// and visibility `1` (`ObjsInSight` passes 0), and it:
+///
+///   * turns radius `-1` into **the observer's `[obj+0xd0]` sight minus 100**,
+///     fixed in the query at creation (`[query+0x74]`);
+///   * hands back an existing query when one with the same observer, class
+///     string, radius and visibility is live (an interning pool at
+///     `[0x996a84]`), else builds one (0x004fb290);
+///   * and the query's refresh (0x004ff080) answers nothing for a dead
+///     observer, and re-evaluates at most once every 1,000 ms.
+///
+/// **Known gaps, all in `World::objects_in_sight`, the helper this shares with
+/// `ObjsInSight`, and left for that entry point's audit so that two batches do
+/// not rewrite one helper at once:** the radius here is the observer's whole
+/// current sight, not `sight - 100` taken at creation; a dead observer still
+/// sees; the answer is not held for a second; and the visibility flag is not
+/// applied.
 HostOutcome fn_visible_objs_in_sight(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("VisibleObjsInSight: no world");
@@ -3739,6 +3763,10 @@ HostOutcome m_class_predicate(CallContext& ctx) {
 /// `target = .GetUITarget.AsUnit; if (target.IsAlive) ...`, so an invalid
 /// handle has to flow through `AsUnit` and fail `IsAlive` rather than trap.
 ///
+/// The setter (0x004ddbf0) resolves the argument first and the receiver
+/// second; an unresolvable receiver writes nothing and says nothing, and an
+/// unresolvable argument stores `0xffff`. Neither tests a class or a life.
+///
 /// See `ObjectState::ui_target` for why it is hashed.
 HostOutcome m_get_ui_target(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -4488,7 +4516,8 @@ HostOutcome m_set_last_attack_time(CallContext& ctx) {
 ///
 /// **Each name is registered twice in `gbr.exe`**, once over `(int, int)` at
 /// 0x00694a60 / 0x00694a90 and once over a second type at 0x00695020 /
-/// 0x00695050, and the second pair's type code is one the 35 `RegisterType`
+/// 0x00695060 -- `double`s, eight bytes each on the VM stack, the same
+/// comparisons -- and the second pair's type code is one the 35 `RegisterType`
 /// sites do not cover. This registry keys on `(kind, name, arity)` and the
 /// argument's runtime type discriminates -- the same arrangement
 /// `UnitsInSettlement` and `SpawnGroupInHolder` already use -- so one body

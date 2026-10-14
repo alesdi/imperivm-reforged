@@ -10,3 +10,24 @@
 0x00529cd0	partial	fixed: a call that repeats the current target writes nothing and leaves the move running (it used to restart it from a truncated position); building mode 3 is read as health <= 0, an inference (no building mode here)
 0x00529c50	partial	fixed: the same as CloseNow -- only a change of target writes it and clears the latch [gate+0x228]; mode 3 read as health <= 0
 0x005aa940	verified	kind test on CVXSacrifice (leaf under CVXScriptObj in the image), handle or 0xffff
+0x005ab360	verified	refuses n<100 and n>2048 without storing; a widening explores the new circle for the owner unless held; stores [obj+0xd0] either way
+0x004dde80	partial	fixed with IsStonehengeControlable (class sight); the counter adopts the first qualifying owner, and the shared spatial query answers in spawn order where 0x004dc6f0 walks grid cells (design)
+0x00594f10	verified	case-insensitive compare of the class name ([obj+0x3c] string) with Hide; false for every shipped class
+0x00575ef0	partial	body read; the shared sight worker 0x004fee10 fixes the radius at the observer sight minus 100, a dead observer sees nothing, refresh is once a second; World::objects_in_sight (shared with ObjsInSight, the other batch) uses the whole current sight, sees when dead, and visibility is not applied
+0x004ddc50	verified	[obj+0x1fc] handle with zero offset, invalid with no message on an unresolvable receiver
+0x004ddbf0	verified	stores the argument handle at [obj+0x1fc], 0xffff when it does not resolve; silent on an unresolvable receiver
+0x004dd2d0	verified	class slot [cls+0xa74] (atol of is_central_building) non-zero; invalid receiver answers true; shipped values are 0 and 1
+0x004dd250	verified	only at tier 3; auto_repair=yes classes only when the settlement central building [set+0x8c] is heir of BaseVillage (0x00440010); heals to (T2+H+1)% of [obj+0xc8] (0x004db520), the class figure for a building
+0x00696070	verified	v < lo answers lo before hi is compared, then v > hi answers hi
+0x00696bc0	verified	the double overload, same two branches; every shipped site passes integers, and the core has no floating point, so it is not bound
+0x00694a60	verified	a < b ? a : b over ints
+0x00695020	verified	the double overload of MIN; unreachable from the corpus, not bound
+0x00694a90	verified	b <= a ? a : b over ints
+0x00695060	verified	the double overload of MAX; unreachable from the corpus, not bound
+0x00694be0	verified	negate when negative; abs(INT32_MIN) is INT32_MIN
+0x004e32b0	partial	600000/(base+(crew-1)*add) less the attack animation, no crew or negative answers 0 (0x004e2030); the time left on a shot in progress (action state 4..7) is not added, there being no catapult action state here
+0x004e2dc0	verified	[obj+0x208] != 0, invalid receiver false
+0x004e2c50	partial	the point and the no-turn-in-progress gate are read; the original stores the point, sets action state 7 and suspends until the turn ends, this engine faces at once (no catapult turn rate)
+0x005135a0	verified	stores the bool byte at [obj+0x1d4], silent on an unresolvable receiver
+0x005135e0	verified	[obj+0x1d4] != 0, false and silent on an unresolvable receiver
+0x004e23d0	verified	CatapultVariationRadius from CONST.INI; no loop and offset (r, r) when isqrt(2r^2) <= r, else x then y drawn from [-r, r] until isqrt of the length <= r; clamped into the inclusive map rect
