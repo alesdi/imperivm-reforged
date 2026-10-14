@@ -369,6 +369,12 @@ std::int32_t NamedObjectTable::find(std::string_view name) const noexcept {
   return kNoName;
 }
 
+bool NamedObjectTable::restore(std::string_view name, ObjectId id) {
+  if (id != kNoObject && find(name) != kNoName) return false;
+  names_.push_back(Entry{std::string(name), id});
+  return true;
+}
+
 std::size_t NamedObjectTable::unbind_object(ObjectId id) noexcept {
   if (id == kNoObject) return 0;
   std::size_t removed = 0;
@@ -2658,7 +2664,9 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
     // First-wins on a repeat is the live table's rule, so a save carrying a
     // repeat would lose the second binding and come back smaller than it went
     // out. Refused instead.
-    if (!names.bind(name, id)) return FormatError::malformed;
+    // `restore`, not `bind`: an entry `SetName("")` emptied names nothing and
+    // comes back in its place.
+    if (!names.restore(name, id)) return FormatError::malformed;
   }
 
   std::uint32_t boarding_rows = 0;

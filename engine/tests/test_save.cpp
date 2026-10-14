@@ -245,6 +245,11 @@ void populate(World& world, std::uint32_t seed) {
   // A binding whose object is gone: `NamedObj::IsDead` exists, so this is a
   // legal state and the save must reproduce it rather than tidy it away.
   world.named_objects().bind("Fallen", units[5]);
+  // A name `SetName("")` took away, naming nothing, and the same name bound
+  // again after it: both entries come back, in their places.
+  world.named_objects().bind("Retired", units[1]);
+  (void)world.named_objects().unbind_object(units[1]);
+  world.named_objects().bind("Retired", units[3]);
 
   ClassFilter filter;
   filter.match_all = false;
