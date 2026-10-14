@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "imperivm/core/sim/ai.hpp"
+#include "imperivm/core/sim/campaign.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/player_host.hpp"
@@ -53,24 +54,47 @@ void fold_text(std::uint64_t& h, std::string_view text) noexcept {
 // value coercion
 // --------------------------------------------------------------------------
 
-std::int32_t env_parse_int(std::string_view text) noexcept {
-  std::size_t i = 0;
-  while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+namespace {
+
+/// The C locale's `isspace`: what the CRT's `atol` and `sscanf`'s `%d` skip.
+[[nodiscard]] constexpr bool c_space(char c) noexcept {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
+/// `atol` as the executable's CRT has it (Visual Studio 2003, linked at
+/// 0x00763919): skip leading C-locale white space, take one `+` or `-`, then
+/// accumulate decimal digits in a 32-bit register **with no overflow check**,
+/// negating at the end. `digits` says whether any digit was read, which is
+/// what `sscanf`'s `%d` needs and `atol` ignores.
+[[nodiscard]] std::int32_t crt_atol(std::string_view text, std::size_t& i, bool& digits) noexcept {
+  while (i < text.size() && c_space(text[i])) ++i;
   bool negative = false;
   if (i < text.size() && (text[i] == '+' || text[i] == '-')) {
     negative = text[i] == '-';
     ++i;
   }
-  // 64-bit accumulation, saturating, so a runaway digit string cannot overflow
-  // signed arithmetic and become undefined behaviour in a deterministic core.
-  std::int64_t value = 0;
+  // Unsigned, so the wrap the original's `imul`/`add` performs is defined
+  // behaviour here rather than signed overflow.
+  std::uint32_t value = 0;
+  digits = false;
   while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
-    if (value < 0x7FFFFFFFll) value = value * 10 + (text[i] - '0');
+    value = value * 10u + static_cast<std::uint32_t>(text[i] - '0');
+    digits = true;
     ++i;
   }
-  if (value > 0x7FFFFFFFll) value = 0x7FFFFFFFll;
-  const std::int64_t signed_value = negative ? -value : value;
-  return static_cast<std::int32_t>(signed_value);
+  if (negative) value = 0u - value;
+  return static_cast<std::int32_t>(value);
+}
+
+}  // namespace
+
+std::int32_t env_parse_int(std::string_view text) noexcept {
+  // `EnvReadInt`'s read helper (0x006ac740) hands the stored string to `atol`
+  // and returns what it says: no digits is zero, and a digit string past 2^31
+  // wraps rather than saturating.
+  std::size_t i = 0;
+  bool digits = false;
+  return crt_atol(text, i, digits);
 }
 
 std::string env_format_int(std::int32_t value) {
@@ -97,11 +121,18 @@ std::string env_format_object(ObjectId id) {
 }
 
 ObjectId env_parse_object(std::string_view text) noexcept {
-  if (text.size() < 5) return kNoObject;
-  if (text[0] != '$' || text[1] != '$') return kNoObject;
-  if (text[text.size() - 1] != '$' || text[text.size() - 2] != '$') return kNoObject;
-  const std::int32_t id = env_parse_int(text.substr(2, text.size() - 4));
-  return id <= 0 ? kNoObject : static_cast<ObjectId>(id);
+  // 0x006ac790: `sscanf(value, "$$%d$$", &n)` and a test that **one**
+  // conversion happened. So the two leading dollars must be there literally,
+  // `%d` skips white space and takes a sign, and the trailing `$$` is never
+  // checked -- `"$$12"` is object 12. The original then refuses `n` outside
+  // 0..65535 and indexes its object table; this engine's ids are 32-bit and
+  // never reused, so only the lower bound carries over (0 is `kNoObject` here).
+  if (text.size() < 2 || text[0] != '$' || text[1] != '$') return kNoObject;
+  std::size_t i = 2;
+  bool digits = false;
+  const std::int32_t id = crt_atol(text, i, digits);
+  if (!digits || id <= 0) return kNoObject;
+  return static_cast<ObjectId>(id);
 }
 
 // --------------------------------------------------------------------------
@@ -851,57 +882,108 @@ using script::Value;
   return true;
 }
 
+/// How argument 0 of a scoped `Env*` call resolved.
+enum class ScopeArg : std::uint8_t {
+  ok,
+  /// A handle naming nothing: gbr.exe's "uninitialized or invalid object".
+  /// Not a trap -- see `env_target`.
+  invalid_object,
+  /// Neither an integer nor a handle. No overload of the original takes such
+  /// a value, so its compiler never emits the call; here it is a type error.
+  bad_shape,
+};
+
 /// Resolve argument 0 of an `Env*` call to a scope.
 ///
-/// Three of the four scope kinds are reachable from script, and the value's own
-/// shape says which:
+/// gbr.exe registers each name four times with a declared first-parameter
+/// type, and the path each body formats says what the scope is:
 ///
-///   * an **integer** is a player number — `EnvReadInt(AIPlayer, …)`,
-///     `EnvWriteInt(.player, …)`; 213 of the corpus's 550-odd `Env*` call sites;
-///   * a **`kTypeSettlement` handle** is a settlement — `EnvReadInt(set, …)`,
-///     `EnvReadString(.settlement, …)`;
-///   * any other **object handle** is a building — `EnvWriteString(this,
-///     "researching", "yes")` in `RESEARCH.VS`, where `this` is
-///     `This.AsBuilding()`.
+///   * `int plr` -- `/<map>/Player%d/<key>` with the integer **verbatim**, no
+///     range check and no adjustment (0x006adb20 and its five siblings). A
+///     script that passes `.player` therefore addresses the 1-based slot, and
+///     one that passes a raw owner index addresses the slot one below;
+///   * `Settlement set` -- `/<map>/Settlement%d/<key>` with the settlement's
+///     id (0x006ad3e0);
+///   * `Building b` -- `/<map>/Settlement%d/Bld%d/<key>`, the building's own
+///     settlement id and its object index (0x006acc60).
 ///
-/// Note that an ordinary object handle is *not* mapped back to its settlement
-/// even when it is that settlement's anchor. `ONFINISH_RESEARCH.VS` writes both
-/// `EnvWriteString(this, "researching", "no")` and
-/// `EnvWriteString(.settlement, name, "researched")` on the same town hall in
-/// the same run, and the two must not land in the same scope.
-[[nodiscard]] bool scope_arg(CallContext& ctx, EnvScope& out) {
-  if (ctx.count() == 0) return false;
+/// Here the value's shape picks the overload, as the original's compiler does
+/// from its static type: an integer is a player, a `kTypeSettlement` handle a
+/// settlement, any other handle a building. An ordinary object handle is
+/// **not** mapped back to its settlement even when it is that settlement's
+/// anchor: `ONFINISH_RESEARCH.VS` writes `EnvWriteString(this, "researching",
+/// "no")` and `EnvWriteString(.settlement, name, "researched")` on one town
+/// hall in one run, and the two paths differ.
+///
+/// The building scope is keyed by object id rather than by `Settlement/Bld`;
+/// see `EnvScope` for why the relabelling is invisible to script.
+///
+/// A handle is invalid when it names no live object (the original's table
+/// slot is empty) or, for a settlement, no settlement.
+[[nodiscard]] ScopeArg scope_arg(CallContext& ctx, EnvScope& out) {
+  if (ctx.count() == 0) return ScopeArg::bad_shape;
   const Value& value = ctx.arg(0);
   if (value.is_integer()) {
     out = EnvScope::for_player(value.as_integer());
-    return true;
+    return ScopeArg::ok;
   }
-  if (!value.is_object()) return false;
+  if (!value.is_object()) return ScopeArg::bad_shape;
   const ObjectRef ref = value.as_object();
-  if (!ref.valid()) return false;
+  if (!ref.valid()) return ScopeArg::invalid_object;
+  World* world = world_of(ctx);
   if (ref.type == kTypeSettlement) {
-    World* world = world_of(ctx);
     EconomySystem* economy = world == nullptr ? nullptr : economy_of(*world);
     const Settlement* s =
         economy == nullptr ? nullptr : economy->settlements().for_object(ref.id);
-    if (s == nullptr) return false;
+    if (s == nullptr) return ScopeArg::invalid_object;
     out = EnvScope::for_settlement(s->id);
-    return true;
+    return ScopeArg::ok;
   }
+  if (world != nullptr && world->find(ref.id) == nullptr) return ScopeArg::invalid_object;
   out = EnvScope::for_building(ref.id);
-  return true;
+  return ScopeArg::ok;
 }
 
 [[nodiscard]] HostOutcome bad_scope() {
-  // `gbr.exe` carries this sentence once per `Env*` overload, verbatim except
-  // for the parameter name. What the retail engine does *after* printing it is
-  // not recoverable from the binary; see env.hpp's unknowns.
-  return HostOutcome::failed(
-      "Parameter #Settlement in function 'Env*' is uninitialized or invalid object.");
+  return HostOutcome::failed("Env*: the scope argument is neither a player number nor a handle");
 }
 
 [[nodiscard]] HostOutcome bad_key() {
   return HostOutcome::failed("Env*: the key argument is not a string");
+}
+
+/// The running script thread's `Context`, which `MakePath` (0x006ab0e0)
+/// prepends to a root key that does not start with `/`.
+///
+/// The field is a string on the script thread (serialised as `Context`,
+/// 0x0069cc58), null by default, and three launchers set it:
+///
+///   * **the sequence runner** (`Start`, 0x005b9d40) -- after spawning a
+///     sequence's thread it looks that thread up and sets its context to the
+///     one-character string `/` (0x005b9da7 .. 0x005b9db7). So inside every
+///     campaign sequence a relative root key is made absolute: `"Bonus"` and
+///     `"/Bonus"` are **one** slot there;
+///   * the object-attached launcher (0x0041ccb0, 0x0041cd00), which sets the
+///     object's id formatted `%d`; and
+///   * the conversation phrase runner (0x0050aa90, 0x0050b070), which sets a
+///     name followed by `/`.
+///
+/// Only the first is modelled. Every root-form `Env*` call in the installation
+/// -- 381 literal sites -- is inside a `Sequences/` script, so the other two
+/// would prefix keys no shipped script ever passes them; they answer "no
+/// context" here, which is the null the original starts every thread with.
+///
+/// A sequence's thread is the one `CampaignSystem` records as running it,
+/// which is saved state already (`SequenceEntry::running`).
+[[nodiscard]] std::string_view thread_context(CallContext& ctx) {
+  if (ctx.script == script::kNoScript) return {};
+  World* world = world_of(ctx);
+  const CampaignSystem* campaign = world == nullptr ? nullptr : campaign_system_of(*world);
+  if (campaign == nullptr) return {};
+  for (const CampaignSystem::SequenceEntry& entry : campaign->sequences()) {
+    if (entry.running == ctx.script) return "/";
+  }
+  return {};
 }
 
 /// One resolved `Env*` call: which scope, which key, where a write's value sits.
@@ -910,19 +992,19 @@ using script::Value;
 /// the scope argument. `gbr.exe` declares both — `int, str key` at 0x006ae7f7
 /// beside `int, int plr, str key` at 0x006ae983, and the same pairing for the
 /// other five — and the containers use the shorter form **403 times**, every one
-/// of them in a `Sequences/` script. `data.pak` never does, which is why the
-/// root form read as "declared and never called" for as long as the corpus
-/// inventory was built from the packs alone.
-///
-/// Resolution is by the *shape* of argument 0, which is exactly what the retail
-/// overload set allows: a scoped call's first argument is an `int`, a
-/// `Settlement` or a `Building`, and a root call's is the key string. There is
-/// no ambiguity to resolve.
+/// of them in a `Sequences/` script.
 struct EnvTarget {
   EnvScope scope;
-  std::string_view key;
+  std::string key;
   std::size_t value_index = 0;  ///< where a write's value argument sits
   bool ok = false;
+  /// The scope handle named nothing. The original prints "Parameter
+  /// #Settlement in function '...' is uninitialized or invalid object." (or
+  /// `#Building`) through the logger that is an empty function in the retail
+  /// build (0x00686eb0), then **returns normally**: a read pushes its type's
+  /// default -- 0, `""` (0x007ab85a) or the invalid handle -- and a write
+  /// stores nothing. Every one of the twelve scoped bodies does exactly that.
+  bool invalid_scope = false;
   HostOutcome failure;  ///< what to return when `ok` is false
 };
 
@@ -937,27 +1019,41 @@ struct EnvTarget {
       out.failure = bad_key();
       return out;
     }
-    // The root scope. The key is used **verbatim**: `MakePath` (0x006ab0e0)
-    // returns the path unchanged when it starts with `/`, and otherwise
-    // prepends the running script thread's `Context` string — which is set only
-    // when a script is launched attached to a scriptable object, and is then a
-    // decimal object id (0x0041ccb0). Sequences carry no context, so the two
-    // spellings of a key are two different slots and neither is rewritten.
-    // See env.hpp, "the root scope", for the two shipped scripts this convicts.
+    // The root scope. The six root thunks (0x006ac890 and siblings) pass the
+    // script's string straight to the registry, whose get (0x006ac5c0) and
+    // set (0x006ac4a0) both funnel it through `MakePath` (0x006ab0e0): a path
+    // whose first character is `/`, or a thread with no context, is used as
+    // it is; anything else gets the thread's context prepended with no
+    // separator. The registry is a `std::map` keyed by the resulting string
+    // with `std::string::compare` (0x00409350), so keys are case-sensitive.
     out.scope = EnvScope::root();
-    out.key = ctx.arg(0).as_string();
+    const std::string_view key = ctx.arg(0).as_string();
+    const std::string_view context = thread_context(ctx);
+    if (!context.empty() && (key.empty() || key.front() != '/')) {
+      out.key.reserve(context.size() + key.size());
+      out.key.append(context);
+    }
+    out.key.append(key);
     out.value_index = 1;
     out.ok = true;
     return out;
   }
-  if (!scope_arg(ctx, out.scope)) {
-    out.failure = bad_scope();
-    return out;
+  switch (scope_arg(ctx, out.scope)) {
+    case ScopeArg::ok:
+      break;
+    case ScopeArg::invalid_object:
+      out.invalid_scope = true;
+      break;
+    case ScopeArg::bad_shape:
+      out.failure = bad_scope();
+      return out;
   }
-  if (!key_arg(ctx, 1, out.key)) {
+  std::string_view key;
+  if (!key_arg(ctx, 1, key)) {
     out.failure = bad_key();
     return out;
   }
+  out.key.assign(key);
   out.value_index = 2;
   out.ok = true;
   return out;
@@ -987,12 +1083,38 @@ struct EnvTarget {
 }
 
 // -- the environment store ------------------------------------------------
+//
+// The twenty-four bodies are six names times four overloads (root, Settlement,
+// Building, int), registered at 0x006ae7b0 (root) and 0x006ae941 (scoped).
+// Each scoped body pops its arguments, resolves the scope (`scope_arg`), and
+// formats the path with the map's name in front -- `/%s/Player%d/%s` and its
+// two siblings -- which no script can observe, so the scope and key are kept
+// as a pair here instead. Then:
+//
+//   * `EnvReadInt` -- the read helper 0x006ac740: look the path up (0x006ac5c0;
+//     a missing key is `""`) and `atol` it (`env_parse_int`). Pushes an int.
+//   * `EnvWriteInt` -- `ltoa(value, 10)` and set (0x006ac4a0): `map[path] =
+//     text`. Decimal with a leading `-` is `env_format_int`.
+//   * `EnvReadString` / `EnvWriteString` -- the same get and set with the
+//     string as it is. An empty value is stored, never erased.
+//   * `EnvReadObj` -- 0x006ac790 (`env_parse_object`) and then the live object
+//     at that index; a key that decodes to nothing, or to an object no longer
+//     there, pushes the invalid handle.
+//   * `EnvWriteObj` -- `$$%d$$` of the object's index; an invalid handle is
+//     written as index 0xffff (`$$65535$$`), which reads back as nothing. This
+//     engine writes `$$0$$` for it (`env_format_object(kNoObject)`), which
+//     also reads back as nothing; the stored text differs only to a script
+//     that reads an object key with `EnvReadString`, which none does.
+//
+// No body suspends, draws a random number or touches anything but the
+// registry. An invalid scope handle is the default answer (`EnvTarget`).
 
 HostOutcome env_read_int(CallContext& ctx, bool root) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return integer(0);
   return integer(env->env().read_int(target.scope, target.key));
 }
 
@@ -1001,6 +1123,7 @@ HostOutcome env_write_int(CallContext& ctx, bool root) {
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return HostOutcome::ok_void();
   env->env().write_int(target.scope, target.key, int_arg(ctx, target.value_index));
   return HostOutcome::ok_void();
 }
@@ -1010,6 +1133,7 @@ HostOutcome env_read_string(CallContext& ctx, bool root) {
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return text({});
   return text(env->env().read_string(target.scope, target.key));
 }
 
@@ -1021,6 +1145,7 @@ HostOutcome env_write_string(CallContext& ctx, bool root) {
   if (ctx.count() <= target.value_index || !ctx.arg(target.value_index).is_string()) {
     return HostOutcome::failed("EnvWriteString: the value argument is not a string");
   }
+  if (target.invalid_scope) return HostOutcome::ok_void();
   env->env().write_string(target.scope, target.key, ctx.arg(target.value_index).as_string());
   return HostOutcome::ok_void();
 }
@@ -1030,8 +1155,15 @@ HostOutcome env_read_obj(CallContext& ctx, bool root) {
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return HostOutcome::ok_with(invalid_handle());
   const ObjectId id = env->env().read_object(target.scope, target.key);
   if (id == kNoObject) return HostOutcome::ok_with(invalid_handle());
+  // The original indexes its object table with the decoded number, so an
+  // object that has left the world reads as the invalid handle.
+  World* world = world_of(ctx);
+  if (world != nullptr && world->find(id) == nullptr) {
+    return HostOutcome::ok_with(invalid_handle());
+  }
   return HostOutcome::ok_with(Value::object(kTypeObj, id));
 }
 
@@ -1040,21 +1172,23 @@ HostOutcome env_write_obj(CallContext& ctx, bool root) {
   if (env == nullptr) return no_env();
   const EnvTarget target = env_target(ctx, root);
   if (!target.ok) return target.failure;
+  if (target.invalid_scope) return HostOutcome::ok_void();
   ObjectId id = kNoObject;
   if (ctx.count() > target.value_index && ctx.arg(target.value_index).is_object()) {
     const ObjectRef ref = ctx.arg(target.value_index).as_object();
-    if (ref.valid()) id = ref.id;
+    World* world = world_of(ctx);
+    // A handle naming no live object is written as the invalid index.
+    if (ref.valid() && (world == nullptr || world->find(ref.id) != nullptr)) id = ref.id;
   }
   env->env().write_object(target.scope, target.key, id);
   return HostOutcome::ok_void();
 }
 
 // The registry dispatches on `(name, arity)`, and the retail engine registers
-// each of these six names twice — once with a scope argument and once without.
-// Both entries land on the same body; only the argument layout differs, and it
-// is decided here rather than sniffed at run time, so a scoped call that is
-// handed a string where a scope belongs still refuses instead of silently
-// becoming a root write.
+// each of these six names with and without a scope argument. Both entries land
+// on the same body here; only the argument layout differs, and it is decided
+// by the arity rather than sniffed at run time, so a scoped call handed a
+// string where a scope belongs still refuses instead of becoming a root write.
 HostOutcome env_read_int_scoped(CallContext& ctx) { return env_read_int(ctx, false); }
 HostOutcome env_read_int_root(CallContext& ctx) { return env_read_int(ctx, true); }
 HostOutcome env_write_int_scoped(CallContext& ctx) { return env_write_int(ctx, false); }
@@ -1064,7 +1198,9 @@ HostOutcome env_read_string_root(CallContext& ctx) { return env_read_string(ctx,
 HostOutcome env_write_string_scoped(CallContext& ctx) { return env_write_string(ctx, false); }
 HostOutcome env_write_string_root(CallContext& ctx) { return env_write_string(ctx, true); }
 HostOutcome env_read_obj_scoped(CallContext& ctx) { return env_read_obj(ctx, false); }
+HostOutcome env_read_obj_root(CallContext& ctx) { return env_read_obj(ctx, true); }
 HostOutcome env_write_obj_scoped(CallContext& ctx) { return env_write_obj(ctx, false); }
+HostOutcome env_write_obj_root(CallContext& ctx) { return env_write_obj(ctx, true); }
 
 
 // -- AI variables ---------------------------------------------------------
@@ -1428,6 +1564,11 @@ constexpr EnvHostDef kEnvHosts[] = {
     {CallKind::free_function, "GetConstStr", 1, &get_const_str},  // 8
     {CallKind::free_function, "EnvReadObj", 2, &env_read_obj_scoped},    // 8
     {CallKind::free_function, "EnvWriteObj", 3, &env_write_obj_scoped},  // 6
+    // The root forms of the object pair: `Obj, str key` at 0x006ae823 and
+    // `void, str key, Obj o` at 0x006ae80d. No shipped script calls them;
+    // they are the same bodies as the other root forms and cost a row each.
+    {CallKind::free_function, "EnvReadObj", 1, &env_read_obj_root},
+    {CallKind::free_function, "EnvWriteObj", 2, &env_write_obj_root},
     {CallKind::free_function, "RUType", 2, &r_u_type},
     {CallKind::free_function, "ArenaUTech", 1, &arena_u_tech},
     {CallKind::free_function, "ArenaUType", 1, &arena_u_type},

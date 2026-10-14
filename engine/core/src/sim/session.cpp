@@ -1222,9 +1222,10 @@ std::size_t GameSession::start_sequences(std::span<const SequenceRef> manifest,
     if (chunk == script::kNoChunk) continue;
     if (!sequence.autorun_allowed) continue;
     // No receiver and no arguments. Every shipped sequence opens `//void` with
-    // an empty parameter list, and the retail engine runs them detached -- the
-    // script thread's environment `Context` is null, which is what makes a
-    // relative root-scope `Env*` key mean itself. See `sim/env.hpp`.
+    // an empty parameter list. The retail runner then sets the new thread's
+    // environment `Context` to `/` (0x005b9db7), which makes a relative
+    // root-scope `Env*` key absolute; the env host recognises a sequence's
+    // thread by the `running` id recorded below. See `sim/env.hpp`.
     const script::ScriptId id = impl.scheduler.spawn(chunk);
     if (id == script::kNoScript) continue;
     ++started;

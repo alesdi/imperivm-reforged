@@ -47,12 +47,15 @@
 ///      `EnvReadInt(set, "AIV_NoRepair") == 0` and
 ///      `EnvReadInt(this, "no_villagers") == 1` against keys nothing ever
 ///      writes.
-///   4. **An invalid scope handle is an error.** `gbr.exe` carries
-///      `Parameter #Settlement in function 'EnvWriteInt' is uninitialized or
-///      invalid object.` verbatim, once per overload. We trap; see the unknowns
-///      section for what we cannot tell from the binary.
+///   4. **An invalid scope handle is the default answer, not an error.**
+///      `gbr.exe` carries `Parameter #Settlement in function 'EnvWriteInt' is
+///      uninitialized or invalid object.` once per overload, and prints it
+///      through the logger that is an empty function in the retail build
+///      (0x00686eb0); every scoped body then pushes its type's default -- 0,
+///      `""`, the invalid handle -- or, for a write, stores nothing, and
+///      returns normally. See `EnvTarget` in env.cpp.
 ///
-/// ## The root scope, and why nothing normalises the path
+/// ## The root scope, and the context a sequence runs in
 ///
 /// The one-argument overloads are **not** dead. They are called 403 times, and
 /// all 403 sites are in the 24 `.bfhp` containers — 191 `EnvReadInt/1`, 164
@@ -61,50 +64,32 @@
 /// which is exactly why it read as unreachable while the inventory was built
 /// from the 577 pack scripts alone.
 ///
-/// 356 of those sites pass a string literal, and it was tempting to read them
-/// as needing normalisation, because two keys appear in both spellings:
-/// `Conquests/mediterranean.BFHP` writes `"/Bonus"` and reads `"Bonus"`, and
-/// `3_Great_Losses_Egypt.bfhp` writes `"En_Direction"` once where four other
-/// sites say `"/En_Direction"`. **The binary settles it, and the answer is
-/// that there is no normalisation.**
+/// Two keys appear in both spellings: `Conquests/mediterranean.BFHP` writes
+/// `"/Bonus"` and reads `"Bonus"`, and `3_Great_Losses_Egypt.bfhp` writes
+/// `"En_Direction"` once where four other sites say `"/En_Direction"`.
 ///
 /// `gbr.exe`'s six root thunks pass the script's string straight to the
-/// registry — no `sprintf`, no prefix (0x006ac890, `EnvWriteString(str, str)`).
-/// The registry's get and set both funnel the path through one helper,
-/// `MakePath` at 0x006ab0e0, which is four instructions of decision:
+/// registry (0x006ac890, `EnvWriteString(str, str)`), whose get and set both
+/// funnel it through `MakePath` (0x006ab0e0): a path whose first character is
+/// `/`, or a thread whose `Context` is null, is used as it is; otherwise the
+/// running script thread's `Context` string is prepended, with no separator.
 ///
-/// ```
-///   0x6ab0ff  mov  al, byte ptr [edi]     ; the path's first character
-///   0x6ab103  cmp  al, 0x2f               ; '/'
-///   0x6ab109  je   0x6ab113               ; absolute: prefix = ""
-///   0x6ab10b  mov  esi, [esp + 0x44]      ; else prefix = the thread's Context
-/// ```
+/// **And every sequence runs with a context of `/`.** The sequence runner
+/// (`Start`, 0x005b9d40) spawns the sequence's thread, looks it up and sets
+/// its context to the one-character string at 0x007b0cec, which is `/`. So
+/// inside a sequence `"Bonus"` becomes `"/Bonus"`: the two spellings are one
+/// slot, `mediterranean.BFHP`'s three bonus sequences -- `seq1.vs`
+/// (rBritain), `seq3.vs` (rEgypt), `seq6.vs` (rIberia), each opening `while
+/// (EnvReadString("Bonus") == "r…")` -- read what `seq0.vs` wrote, and the
+/// conquest bonuses they run work in the retail game. (An earlier reading of
+/// this note took the context to be null for sequences and concluded the three
+/// bonuses were dead; the runner's own store settles it the other way.)
 ///
-/// and then returns `prefix + path`. A leading `/` means *absolute*; anything
-/// else is relative to the running script thread's `Context` string, which is a
-/// `char*` field the thread serialises under exactly that attribute name
-/// (0x0069cc58). It is null by default, and the only code that ever sets it is
-/// the object-attached script launcher, which sets it to the object's id
-/// formatted `"%d"` (0x0041ccb0). So `"/Bonus"` and `"Bonus"` are two different
-/// slots under every possible context, and a sequence — which carries no
-/// context at all — simply gets its literal back.
-///
-/// The corpus agrees once it is counted rather than sampled. Of 77 distinct
-/// root literals, **75 use one spelling consistently**: 73 always absolute, and
-/// `"Waves"` always relative on both its write and its seven read sites, which
-/// works fine. Only the two named above mix, and both mix *one-sidedly* — the
-/// signature of a typo, not of a convention. Reproducing the retail engine
-/// therefore means storing the key verbatim, which is what `EnvScope::root()`
-/// plus the literal key already does.
-///
-/// The consequence is a real defect in shipped content, and it is worth naming
-/// because it will look like our bug: `mediterranean.BFHP`'s `Sequences/seq0.vs`
-/// writes `EnvWriteString("/Bonus", ConquestBonus())` and dispatches on it
-/// correctly, but the three bonus sequences that need to *keep* running —
-/// `seq1.vs` (rBritain), `seq3.vs` (rEgypt), `seq6.vs` (rIberia) — each open
-/// `while (EnvReadString("Bonus") == "r…")`, read a key nobody writes, get the
-/// empty string and fall straight through. Three of the seven conquest bonuses
-/// do nothing in the retail game. We reproduce that rather than repair it.
+/// The other two launchers that set a context -- the object-attached one
+/// (0x0041ccb0, the object's id as `%d`) and the conversation phrase runner
+/// (0x0050aa90) -- are not modelled, because no root-form call is reachable
+/// from either in the installation. `thread_context` in env.cpp says how a
+/// sequence's thread is recognised.
 ///
 /// ## Iteration order is state
 ///
@@ -201,19 +186,23 @@ struct EnvEntry {
   std::string value;
 };
 
-/// `Str2Int`-shaped parse: optional sign, then decimal digits, stopping at the
-/// first character that is not one. Everything else is zero, which is what a
-/// script that reads `"researched"` as an int must get.
+/// `EnvReadInt`'s parse, which is the executable's CRT `atol` (0x00763919):
+/// C-locale white space, one optional sign, decimal digits accumulated in 32
+/// bits **with wraparound**, stopping at the first character that is not one.
+/// No digits is zero, which is what a script that reads `"researched"` as an
+/// int gets.
 [[nodiscard]] std::int32_t env_parse_int(std::string_view text) noexcept;
 
 /// Decimal, with a leading `-`. The inverse of `env_parse_int` on its range.
 [[nodiscard]] std::string env_format_int(std::int32_t value);
 
-/// The `$$<id>$$` encoding `gbr.exe` uses for an object inside the registry.
-/// INFERRED: the literal `$$%d$$` sits next to `environment` and `env-item` in
-/// the binary's string pool, and no other consumer for it is visible.
+/// The `$$<id>$$` encoding `gbr.exe` uses for an object inside the registry:
+/// `EnvWriteObj` formats the object's index with `$$%d$$` (0x006ac9b0) and
+/// `EnvReadObj` reads it back with `sscanf` of the same format (0x006ac790).
 [[nodiscard]] std::string env_format_object(ObjectId id);
-/// Returns `kNoObject` when `text` is not an encoded object.
+/// Returns `kNoObject` when `text` is not an encoded object. `sscanf`'s rules:
+/// the leading `$$` is literal, the number may have white space and a sign
+/// before it, and the trailing `$$` is not checked.
 [[nodiscard]] ObjectId env_parse_object(std::string_view text) noexcept;
 
 /// The flat, sorted, scope-and-key-addressed store.
@@ -750,29 +739,8 @@ std::size_t register_env_host(script::HostRegistry& registry);
 // what is still unknown
 // --------------------------------------------------------------------------
 //
-// * **What the retail engine does after "uninitialized or invalid object".**
-//   The message is in the binary once per `Env*` overload, but whether it
-//   aborts the script, returns a default, or only prints is not recoverable
-//   from strings. We return `HostOutcome::failed`. Settling it needs either a
-//   disassembly of the six thunks or a live trace with a deliberately invalid
-//   handle.
-//
-// * **`EnvReadObj/1` and `EnvWriteObj/2`.** The other four root arities are now
-//   registered; these two are not. `gbr.exe` declares them at 0x006ae823 and
-//   0x006ae80d — `Obj, str key` and `void, str key, Obj o` — and no script in
-//   the installation calls either, so they follow the `SetAIVar/4` precedent
-//   and stay declared-only. `env_target` already handles them; adding the two
-//   rows is a one-line change if a witness ever turns up.
-//
-// * **`int` → `str` coercion.** `EnvWriteString` then `EnvReadInt` is proven by
-//   the arena training upgrades. The reverse — `EnvWriteInt` then
-//   `EnvReadString` — has no corpus witness. We format decimally, which is the
-//   only reading consistent with a string-valued store.
-//
-// * **The `$$%d$$` object encoding.** Inferred from the string pool's
-//   neighbourhood, not from a dump of a live registry. The only two object keys
-//   in the corpus are `TributeBuilding` and three siblings, and none of them is
-//   ever read as a string, so nothing observable depends on the spelling.
+// * **`int` → `str` coercion** is settled: `EnvWriteInt` stores `ltoa(value,
+//   10)` (0x006ac920) and `EnvReadInt` `atol`s whatever is there (0x006ac740).
 //
 // * **Whether `CheckUEnabled` consults anything but its `max` argument.** Its
 //   signature is `bool, int *mask, int idPlayer, int max, int nType, int nRace`

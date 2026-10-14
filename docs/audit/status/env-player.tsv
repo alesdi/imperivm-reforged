@@ -1,0 +1,26 @@
+# env-player batch: engine/core/src/sim/env.cpp and engine/core/src/sim/player_host.cpp
+# body	status	note
+0x006adb20	verified	EnvReadInt(int plr): Player%d with the integer verbatim; atol of the stored text (0x006ac740, CRT 0x00763919)
+0x006ad3e0	verified	EnvReadInt(Settlement): invalid handle answers 0, no trap (fixed)
+0x006acc60	verified	EnvReadInt(Building): keyed by object id, not Settlement/Bld (invisible to script); invalid or dead handle answers 0 (fixed)
+0x006acb60	partial	EnvReadInt(str): MakePath context modelled for sequence threads only (0x005b9d40 sets '/'; fixed); object-attached and conversation contexts unmodelled, no root call reaches them
+0x006adeb0	verified	EnvWriteInt(int plr): ltoa(value,10) and map set (0x006ac4a0)
+0x006ad900	verified	EnvWriteInt(Settlement): invalid handle stores nothing, no trap (fixed)
+0x006ad1a0	verified	EnvWriteInt(Building): invalid or dead handle stores nothing (fixed)
+0x006ac920	partial	EnvWriteInt(str): sequence context modelled (fixed); other launchers' contexts not
+0x006adbd0	verified	EnvReadString(int plr): missing key is "" (0x007ab85a)
+0x006ad4d0	verified	EnvReadString(Settlement): invalid handle answers "" (fixed)
+0x006acd70	verified	EnvReadString(Building): invalid or dead handle answers "" (fixed)
+0x006aca60	partial	EnvReadString(str): sequence context modelled (fixed); other launchers' contexts not
+0x006adde0	verified	EnvWriteString(int plr): value stored as is, empty included
+0x006ad7e0	verified	EnvWriteString(Settlement): invalid handle stores nothing (fixed)
+0x006ad070	verified	EnvWriteString(Building): invalid or dead handle stores nothing (fixed)
+0x006ac890	partial	EnvWriteString(str): sequence context modelled (fixed); other launchers' contexts not
+0x006add10	partial	EnvReadObj(int plr): sscanf $$%d$$ rules and dead object -> invalid (fixed); original's 0..65535 index range not carried (32-bit never-reused ids, design)
+0x006ad6c0	partial	EnvReadObj(Settlement): as the int form; invalid scope -> invalid handle (fixed)
+0x006acf40	partial	EnvReadObj(Building): as the int form; invalid scope -> invalid handle (fixed)
+0x006acbd0	partial	EnvReadObj(str): root form now registered (fixed); context and id-space gaps as above
+0x006adf70	partial	EnvWriteObj(int plr): invalid object stored as $$0$$ where the original writes $$65535$$ (both read back as nothing; id-space design)
+0x006ada00	partial	EnvWriteObj(Settlement): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
+0x006ad2b0	partial	EnvWriteObj(Building): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
+0x006ac9b0	partial	EnvWriteObj(str): root form now registered (fixed); context and $$65535$$ gaps as above
