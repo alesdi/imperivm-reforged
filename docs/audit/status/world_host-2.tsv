@@ -72,3 +72,11 @@
 0x005d5de0	verified	vtbl+0x44 sets SyncFlags bit 28 (training); invalid prints and returns
 0x005d5e30	verified	vtbl+0x48 clears SyncFlags bit 28; invalid prints and returns
 0x005d5d10	partial	the three refusals (held receiver silently, unresolvable partner with a message, health <= 1) then action state 2 and suspend until it clears; the wait here is one attack-animation cycle, the length of state 2 with no animation not read
+0x00696c90	verified	bottom - top + 1 over the by-value rect
+0x00696c50	verified	right - left + 1 over the by-value rect
+0x00695140	verified	the rect's first int, left
+0x00695180	verified	the rect's second int, top
+0x006951c0	verified	the rect's third int, right
+0x00695200	verified	the rect's fourth int, bottom
+0x00695100	verified	the reference form of right (field +8, an lvalue); no shipped site assigns it, and a read is the same number
+0x00695120	verified	the reference form of bottom (field +0xc, an lvalue); no shipped site assigns it, and a read is the same number

@@ -5718,6 +5718,15 @@ HostOutcome m_point_clamp_to_map(CallContext& ctx) {
 }
 
 /// The four edges, and the two extents that are one more than a difference.
+///
+/// A rect is four ints on the VM stack -- left, top, right, bottom. The
+/// by-value bodies (`left` 0x00695140, `top` 0x00695180, `right` 0x006951c0,
+/// `bottom` 0x00695200, `width` 0x00696c50, `height` 0x00696c90) push one int.
+/// `gbr.exe` registers a second form of each edge over a rect *reference*
+/// (`right` 0x00695100 and `bottom` 0x00695120 among them) that answers a
+/// reference to the field, so `rc.right = x` would write through it; no
+/// shipped script assigns an edge, every one of the sites reads, and a read of
+/// either form is the same number.
 HostOutcome m_rect_edge(CallContext& ctx, int which) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("rect: no world");
