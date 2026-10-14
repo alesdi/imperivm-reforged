@@ -872,6 +872,12 @@ class CommandSystem final : public System {
   /// actually binds.
   void service(World& world, Entry& entry, GameTime now);
   bool launch(World& world, ObjectId id, Command& command, GameTime now);
+  /// The compiled chunk `verb` runs on `id`, compiling it through the library
+  /// on a first use; `kNoChunk` when there is none, counted in
+  /// `launch_failures` when `count_miss`.
+  std::uint32_t chunk_of(World& world, ObjectId id, std::string_view verb, bool count_miss);
+  /// `launch`'s second half: spawn `command`'s script from `chunk`.
+  bool launch_chunk(World& world, ObjectId id, Command& command, std::uint32_t chunk);
   /// End the `idle` an object was started with outside its queue, now that a
   /// command holds the object's command slot. See `launch`.
   void end_resting_idle(World& world, ObjectId id);

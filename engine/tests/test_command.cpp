@@ -1484,6 +1484,39 @@ TEST(a_command_compiles_its_script_through_the_library_and_counts_the_misses) {
   CHECK(f.commands.launch_failures().empty());
 }
 
+/// **A `SetCommand` starts its command inside the call.** Ending the head
+/// (0x005b07d0) starts the next command there and then (0x005b4f20), its script
+/// a thread armed at the clock, so the order is running before the script that
+/// gave it next wakes. `OUTPOST_BEHAVIOR.VS` depends on it: it orders a
+/// garrisoned defender out, sleeps 200 ms and picks again from whoever is still
+/// inside; started a pass later, the same defender was still there, was ordered
+/// again -- cancelling the order that had not run -- and never left.
+TEST(set_command_starts_the_command_inside_the_call) {
+  RunFixture f;
+  REQUIRE(f.add_script("// void, Obj This, point pt\nSleep(500);\n", "data/subai/unit_move.vs"));
+  const ObjectId u = f.spawn(f.unit_class);
+  Command order;
+  order.arg_kind = CommandArgKind::point;
+  order.point = Point{300, 300};
+  f.commands.set_command(f.world, u, "move", order);
+
+  // No turn has run: the command has started and its script is alive.
+  const CommandQueue* q = f.commands.find(u);
+  REQUIRE(q != nullptr);
+  REQUIRE(q->running() != nullptr);
+  CHECK(q->running()->verb == "move");
+  CHECK(q->running()->script != kNoScript);
+  CHECK(f.scheduler.alive(q->running()->script));
+
+  // A verb with no script is left for the pass, which retires it.
+  f.commands.set_command(f.world, u, "guard", Command{});
+  q = f.commands.find(u);
+  REQUIRE(q != nullptr);
+  REQUIRE(!q->entries.empty());
+  CHECK(q->entries.front().verb == "guard");
+  CHECK(!q->entries.front().started);
+}
+
 TEST(an_order_behind_a_never_returning_idle_runs_and_the_idle_script_ends) {
   // The shape `ES_STRONGHOLD.VS` met on every barracks: the refill put
   // `BARRACK_IDLE.VS` -- `while (1) Sleep(...)` -- at the head, and a training
@@ -1689,12 +1722,15 @@ TEST(a_commands_onfinish_runs_with_the_cancel_flag_and_the_commands_param) {
   CHECK(f.world.find(u)->state.user == 1115);
 
   // A command that never started has no `onfinish`: two researches queued
-  // and replaced before the turn loop launched either.
+  // behind a running head and cleared with it before either reached the
+  // front. (A `SetCommand` starts its command inside the call, as 0x005b07d0
+  // does, so a research *set* and then replaced has started, and its
+  // `onfinish` is told it was cancelled.)
   f.world.find(u)->state.user = 0;
   f.commands.set_command(f.world, u, "idle", idle);
   step(200);
   f.world.find(u)->state.user = 0;
-  f.commands.set_command(f.world, u, "research", order);
+  f.commands.add_command(f.world, u, false, "research", order);
   f.commands.add_command(f.world, u, false, "research", order);
   f.commands.set_command(f.world, u, "idle", idle);
   step(200);
