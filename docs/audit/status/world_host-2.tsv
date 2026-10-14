@@ -1,0 +1,116 @@
+0x005d8750	partial	fixed: the call before the write is the AI unregister 0x0041eee0 (not a deselect), and AddToSquad/the placement hook refuse the bit; the owner AI running tallies 0x004448a0 decrements are not kept here
+0x004dd330	verified	class record pair [cls+0xacc/0xad0], absent marker answers (-1,-1); pair inheritance 0x0059c310; the original invalid-receiver arm pushes one byte where a point belongs and is not reproducible, (-1,-1) stands in
+0x004ddd70	partial	fixed: the circle is the class sight [cls+0x2d0], not the instance radius SetSight moves; reference pinned to the local player so the walk order does not matter here, but the shared scan is in spawn order rather than grid order (design)
+0x005c6d40	verified	terrain layer type 13 at ((x+32)>>6, (y+32)>>6), out of the inclusive world rect false; equal bounds on every shipped map size
+0x005cdb50	verified	kind test on CVXTeleport (leaf under CVXBuilding in the chain read from the image), handle or 0xffff
+0x005ad680	verified	heir test of [obj+0x3c] up [cls+0xe4], self included, against Military (0x00540130/0x0059a220); invalid receiver false
+0x005ad500	verified	the same shape as IsMilitary with Sentry (0x005400c0)
+0x004216d0	verified	body read: arity 0, answers [squad+0x30]; every shipped GetFlags site passes a mask (Unit::GetFlags/1), so this form has no caller and is left unbound
+0x005d7e30	verified	[obj+0x194] & mask as bool, any resolving object, invalid false; only UNITFLAG_NOAI is passed by shipped sites, the three unmodelled bits are labelled
+0x00529cd0	partial	fixed: a call that repeats the current target writes nothing and leaves the move running (it used to restart it from a truncated position); building mode 3 is read as health <= 0, an inference (no building mode here)
+0x00529c50	partial	fixed: the same as CloseNow -- only a change of target writes it and clears the latch [gate+0x228]; mode 3 read as health <= 0
+0x005aa940	verified	kind test on CVXSacrifice (leaf under CVXScriptObj in the image), handle or 0xffff
+0x005ab360	verified	refuses n<100 and n>2048 without storing; a widening explores the new circle for the owner unless held; stores [obj+0xd0] either way
+0x004dde80	partial	fixed with IsStonehengeControlable (class sight); the counter adopts the first qualifying owner, and the shared spatial query answers in spawn order where 0x004dc6f0 walks grid cells (design)
+0x00594f10	verified	case-insensitive compare of the class name ([obj+0x3c] string) with Hide; false for every shipped class
+0x00575ef0	partial	body read; the shared sight worker 0x004fee10 fixes the radius at the observer sight minus 100, a dead observer sees nothing, refresh is once a second; World::objects_in_sight (shared with ObjsInSight, the other batch) uses the whole current sight, sees when dead, and visibility is not applied
+0x004ddc50	verified	[obj+0x1fc] handle with zero offset, invalid with no message on an unresolvable receiver
+0x004ddbf0	verified	stores the argument handle at [obj+0x1fc], 0xffff when it does not resolve; silent on an unresolvable receiver
+0x004dd2d0	verified	class slot [cls+0xa74] (atol of is_central_building) non-zero; invalid receiver answers true; shipped values are 0 and 1
+0x004dd250	verified	only at tier 3; auto_repair=yes classes only when the settlement central building [set+0x8c] is heir of BaseVillage (0x00440010); heals to (T2+H+1)% of [obj+0xc8] (0x004db520), the class figure for a building
+0x00696070	verified	v < lo answers lo before hi is compared, then v > hi answers hi
+0x00696bc0	verified	the double overload, same two branches; every shipped site passes integers, and the core has no floating point, so it is not bound
+0x00694a60	verified	a < b ? a : b over ints
+0x00695020	verified	the double overload of MIN; unreachable from the corpus, not bound
+0x00694a90	verified	b <= a ? a : b over ints
+0x00695060	verified	the double overload of MAX; unreachable from the corpus, not bound
+0x00694be0	verified	negate when negative; abs(INT32_MIN) is INT32_MIN
+0x004e32b0	partial	600000/(base+(crew-1)*add) less the attack animation, no crew or negative answers 0 (0x004e2030); the time left on a shot in progress (action state 4..7) is not added, there being no catapult action state here
+0x004e2dc0	verified	[obj+0x208] != 0, invalid receiver false
+0x004e2c50	partial	the point and the no-turn-in-progress gate are read; the original stores the point, sets action state 7 and suspends until the turn ends, this engine faces at once (no catapult turn rate)
+0x005135a0	verified	stores the bool byte at [obj+0x1d4], silent on an unresolvable receiver
+0x005135e0	verified	[obj+0x1d4] != 0, false and silent on an unresolvable receiver
+0x004e23d0	verified	CatapultVariationRadius from CONST.INI; no loop and offset (r, r) when isqrt(2r^2) <= r, else x then y drawn from [-r, r] until isqrt of the length <= r; clamped into the inclusive map rect
+0x00533170	verified	(map, inn) string form: map list lookup, then the same clamped read; unknown map or inn answers 3; no shipped site passes strings, so it is not bound
+0x00533ae0	verified	fixed: the read clamps to 1..3 (0x00533050), not only up to 1; not an Inn or unresolvable answers 2; keyed by object id where the original mints an index into [inn+0x208], which no script reads back
+0x00533640	verified	(map, inn) string form of the setter, the same clamped write (0x005330e0) after the map and inn lookup; no caller, not bound
+0x00533c00	verified	clamped 1..3 write under /Inns/<n>/state for an Inn, silent otherwise beyond the discarded complaint
+0x005c7190	verified	the transport order string [ship+0x210] is non-empty; invalid receiver false
+0x005c6e40	verified	holder [ship+0x1dc] capacity +0x10, seeded once from max_units_to_board; invalid receiver 0
+0x00573c70	verified	named-object lookup, the shared template spawn 0x00571d40 (clone, clear the template bit, refile in group and name tables); unknown or gone name prints and answers 0xffff, a non-template answers the null handle
+0x005d90c0	verified	fixed: 0x005d4880(0) sets bit 27 only when clear (curing a blessing first) and arms the object timer 0x19ec6e2 for CurseTimeout ms, whose handler is the cure 0x005d4800; the curse now lifts after CurseTimeout (ObjectState::curse_until, world version 35); the feedback object is presentation
+0x005d8940	verified	fixed with Curse: bit 27 as it stands now (set and the cure not yet run); invalid receiver false
+0x005d9140	verified	sets bit 1 and spawns the disease feedback into [obj+0x1c4] when none; no timer
+0x005d89a0	verified	bit 1 of [obj+0x194]; invalid receiver false
+0x004dda10	verified	fixed: the class string at +0x6a0 is a list -- the reader (0x005a1d58) appends each repeated itemtype after ", ", so BaseRuins offers all twelve items, not the last (ClassGraph and gamedata.py); undeclared answers **Invalid** (inferred from the record constructor); invalid receiver "" under the name Building::Starvation
+0x004ddce0	verified	class string +0x2f8 (sentry_class_name), root default ""; no receiver test in the original (a null read), "" stands in
+0x004ddca0	verified	class int +0x2f4 (num_sentry_slots), root default 0; no receiver test in the original, 0 stands in
+0x004ddb50	verified	class int +0x6c0 (levelperitem); undeclared keeps the -15000000 marker; invalid receiver 0
+0x004ddaf0	verified	class int +0x6bc (minlevel); undeclared keeps the -15000000 marker; invalid receiver 0
+0x004dd3b0	verified	refuses a non-heir of Inn with a complaint, otherwise opens the transport window (0x006ffd20) -- presentation, dropped after resolving the receiver
+0x004e2ed0	verified	(frames-2)*(max-n-1)/(max-1)+1 into [obj+0x20c] and the sprite holds that frame; presentation, the object's maximum as maxhealth answers it
+0x00529af0	verified	[gate+0x210] != 0, as LookAround last left it; invalid false
+0x00529b50	verified	[gate+0x214] != 0, as LookAround last left it; invalid false
+0x00529bb0	verified	fixed: zeroes both fields, walks kSyncUnit objects in the circle (0x005296d0) through the visitor 0x00529510, which never stops the walk; an Animal is skipped only when its damage [obj+0xdc] (persist name, 0x005b5df0) is zero, so a wolf counts -- every Animal used to be skipped
+0x004c6610	partial	stores the byte in [0x00996ae4]; its only reader is the blow's special-stamina charge 0x0050ff30 (skips special 0x1000's cost), which this engine's combat does not model, so the flag is dropped
+0x005d30b0	verified	zeroes the regeneration-table scan cursor [0x009c0828]; there is no such cache here, a no-op is the same behaviour
+0x004db630	verified	[0x009969a8] != 0, whose only writer sets and clears it within one debug function: false
+0x005ad620	verified	0x0053f5b0: the class string [cls+0x960] non-empty and not **Invalid**; the projectile_class arm stores it (0x005a4254), settling the old inference
+0x005ac6b0	verified	class slot [cls+0xb30] (water_unit) non-zero; invalid false
+0x005c6fc0	verified	[ship+0x230] > 0, a construction counter, not a class test; invalid false
+0x00435250	verified	fixed: the sweep 0x00423ef0 counts objects of exactly the class (descriptor equality), with no life test and nothing held; player outside 1..16 or an unknown class answers true; point clamped to the map; radius twice [cls+0x2dc]; owner in the complement of the enemy word
+0x005ab580	verified	the instance field [obj+0xec] (persisted as stamina_dec_time, seeded from the class; no map authors it), negative answers 0; no receiver test in the original
+0x005d8080	verified	the unit's [unit+0x17c], the same value at the unit offset; negative answers 0
+0x005aa8d0	verified	kind test on CVXBarrack (leaf under CVXBuilding in the image), handle or 0xffff
+0x005ad740	verified	0x005402f0: heir of Peaceful or of Animal (0x00540280); invalid false
+0x005ad7a0	verified	heir of PeasantAmbient (0x005403f0); invalid false
+0x005ad5c0	verified	heir of RamUnit (0x00540460); invalid false
+0x005d9050	verified	fixed: without the Parry special (bit 0 of [obj+0x198]) the answer is -1, not 0, so ENTER_PARRY_MODE_VERIFY does not offer parry to units that cannot; else [obj+0x1a0]; an unresolvable receiver pushes nothing in the original, 0 stands in
+0x005d8120	verified	[unit+0x154] == [other+0x154] raw, so two units outside any holder answer true; an unresolvable handle reads through a null in the original, false stands in
+0x005df420	partial	class lookup by id then altid, a message for an unknown name or receiver; mutates at once where the original defers to the vtbl+0x24 hook when the running script owns the object (unobservable: Mutate ends both shipped branches); the squad is left and, the AI manager flag being cleared during the rebuild, not re-filed; the AI tallies moved by 0x004448a0/0x00447200 are not kept here
+0x005d5bf0	partial	fixed: the sweep visits units only (mask 0x400000 seeded at 0x005d3c50), so an armed enemy building no longer ends a lesson; the threat term and the +1 threat on the chosen unit (0x005d2850) are not modelled, and the sweep is in spawn order rather than grid order (design)
+0x005d5de0	verified	vtbl+0x44 sets SyncFlags bit 28 (training); invalid prints and returns
+0x005d5e30	verified	vtbl+0x48 clears SyncFlags bit 28; invalid prints and returns
+0x005d5d10	partial	the three refusals (held receiver silently, unresolvable partner with a message, health <= 1) then action state 2 and suspend until it clears; the wait here is one attack-animation cycle, the length of state 2 with no animation not read
+0x00696c90	verified	bottom - top + 1 over the by-value rect
+0x00696c50	verified	right - left + 1 over the by-value rect
+0x00695140	verified	the rect's first int, left
+0x00695180	verified	the rect's second int, top
+0x006951c0	verified	the rect's third int, right
+0x00695200	verified	the rect's fourth int, bottom
+0x00695100	verified	the reference form of right (field +8, an lvalue); no shipped site assigns it, and a read is the same number
+0x00695120	verified	the reference form of bottom (field +0xc, an lvalue); no shipped site assigns it, and a read is the same number
+0x004e2e20	verified	[cat+0x208] = 1 and the build frame to -1; the frozen-frame sprite bit 0x2000000 cleared and the idle animation restored (presentation)
+0x004e37f0	partial	writes 0xffff to [bld+0x1fc] on every CatapultTower heir of the catapult settlement [cat+0x148]; the original does so only while [cat+0x22c] is set, a slot not modelled, and the clear here is unconditional; an invalid receiver pushes a stray 0 there
+0x004e3380	verified	fixed: a threat at zero distance falls through to the random direction (two draws), and a random direction on the origin answers (1000, 0) (0x004e26c0); nearest enemy Tower/Outpost building in sight by squared distance, first met keeps a tie (spawn order here, grid order there, labelled); invalid receiver pushes 4 bytes in the original, (0,0) stands in
+0x004e3dc0	verified	fixed: the env write of 1 under /<map>/Player<n>/CatapultBuilt that ends 0x004e3be0, which BUILDINGSADVICE5.VS polls; race table 0x004e3b30, owner n-1, the site revealed to CatapultBuildSight (here through FogSystem), its own settlement, health 1, unbuilt
+0x005134b0	verified	the handle at [self+0x1d0] when it resolves to a unit (kSyncUnit), else 0xffff; no receiver test in the original
+0x00513540	verified	stores the argument handle at [self+0x1d0], silent on an unresolvable receiver; the argument is not validated
+0x005ac710	verified	a dead receiver complains and keeps its state; otherwise [obj+0x9c] = the bool (commands enabled)
+0x005abcb0	verified	vtbl+0xd4 with the bool, the debug overlay: presentation, dropped after resolving the receiver
+0x005b6920	verified	fixed: an empty name removes the object's name (0x005b6120 deletes its record [obj+0x84]), which the one shipped site, 2_Great_loses_Spain seq12, relies on; otherwise rebind; the rename arm for an object already named differently (0x00572a30) is not reproduced and no shipped site reaches it
+0x005b5890	verified	inserts the handle into the global store-bin set (0x005b5750), read only by a by-name search no entry point reaches; dropped
+0x005b0f10	verified	erases it from the same set (0x005b0e30); dropped
+0x005d86d0	verified	fixed: the command queue is not touched -- activity [obj+0x130] to 0, path dropped, animation reset, stood at (-1,-1) -- so the ambient villagers' queued errand behind disappear survives
+0x005d7210	verified	a held receiver is refused; the holder is a building's settlement holder ([bld+0x148] -> [set+0x5e]), else the one the object carries (vtbl+0xe4, a ship here), else the one it is in; then the enter routine 0x005d3e10
+0x005d71c0	partial	runs the unboarding routine 0x005d3f20 when the receiver is held; the three clauses of it sim/boarding.hpp labels as not reproduced stay so
+0x005d7b10	verified	SyncFlags bit 19 (party); invalid false
+0x005c6a60	partial	not presentation: a suspending routine that unboards the new ship at the shipyard exit, raises the build counter [ship+0x230] (IsBuilding), slides it along the exit vector over ShipBuildAnimTime with a float cosine easing, then zeroes the counter and hands the ship to the AI (0x0041f310); dropped here, the ship stays held until ordered out (design: a suspending entry with state and a fixed-point easing)
+0x005c8710	verified	snapshot the holder's passengers, unboard them all (0x005c84b0), each distinct squad once (0x00442880) ordered on through 0x0043ec00 with its own state, SF_ADVCHOOSER cleared, the stored verb and point; then the order cleared
+0x005c7e10	verified	the order string to "" and the point to (-1,-1); silent on an unresolvable receiver
+0x005c6f20	verified	the point at [ship+0x228/0x22c], (-1,-1) for no order; no receiver test in the original
+0x0055a7c0	verified	the zero-argument form: whether the registry holds the "army starving" key; no shipped site calls it, not bound
+0x00559c20	partial	whether a record under "army starving" in the session notification registry is at least ms old; the registry is not kept here, the feeder's hungry_since over the local player's units stands in (labelled)
+0x00559d50	partial	the same walk; on a hit it consumes the record (0x00559430) and answers the nearest of its objects to a point it holds; here the first hungry unit of the local player, the registry not being kept
+0x004dcb20	verified	fixed: the square only bounds the grid sweep; found is an enemy-owned, unhidden unit the asker can attack (vtbl+0xb4, unit_can_attack), of target_factor >= 0, whose distance from the point less its class radius (0x005a7900) is within range -- this answered any enemy-owned object in the square
+0x004dd5b0	verified	a CVXTownHall receiver has its record removed from the global spell manager (0x0052c4b0), anything else a complaint; nothing reads the record (GetGlobalSpell has no site), so it is dropped
+0x0051c0a0	partial	the first object of the same class pointer, not the receiver, within 2048 (r^2 0x400000) in the grid sweep 0x0051b840 with mask 0xffffffff, else 0xffff; first in cell order there, spawn order here (design: the spatial queries answer in id order)
+0x005d91c0	verified	buildings in sight+512 (0x005d56b0), best seeded at 1,000,000 squared; the predicate 0x005d4980: owner row names the ram an enemy, not broken (tier 3), heir of Gate/Outpost/BaseShipyard, strictly nearer; a tie keeps the first met (spawn order here, labelled)
+0x005c9f40	verified	the receiver handle to 0x005d5aa0, a whole-map grid sweep clearing [unit+0x14c] wherever it names the receiver; invalid does nothing
+0x005ca050	verified	fixed: the collection's filter 0x005c9f20 takes living units only, so a corpse in the mist is neither tagged nor counted; units in [obj+0xd4] whose tag is free or this mist are tagged, damaged through vtbl+0xa8 and the argument booked to both damage counters
+0x00595360	verified	the same body over a Sacrifice receiver, with a resolve test first; shared implementation
+0x005ca6a0	partial	fixed: only a CVXAreaEffect receiver acts, and an unowned unit (owner half zero) is not sheltered; lowers the bit on last time's list, raises it on the units within the class radius whose owner bit is in the complement of the owner's war mask; a hidden unit needs the side mask [player+0x18], not modelled
+0x00595af0	partial	one call into 0x00595a30 with the druid and now+time (a lease on the sacrifice's druid list, [druid+0x1cc] written); no sacrifice exists in this engine (the ritual machinery is not here), so the valid branch stores nothing (design)
+0x00596440	partial	suspending: a first call with the bool set sleeps period, then 0x00596050 spreads price over the listed druids' health; the wait is reproduced, the answer is an empty ritual's 0, there being no sacrifice machinery (design)
+0x005744c0	verified	settlement by name ([set+0xcc] string), class string checked when it has no comma, then the settlement-units query 0x004fe080 in mode 1: CollectUnits (0x005c58f0) ring pass only -- each building's own sight swept (0x005c5120), living, heir, not a template -- sorted and deduplicated; an unknown class answers the invalid query in the original, an empty one here, unreachable (the one site passes Unit)
+0x00574d90	verified	the same over a settlement object receiver argument; an unresolvable one prints and answers the invalid query

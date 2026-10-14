@@ -2044,8 +2044,12 @@ TEST(get_flags_tests_a_mask_against_the_second_flag_word) {
   state->flags.on_minimap = true;
   CHECK(only(0x04000000) == 1);
   CHECK(only(0x00800000) == 0);  // and the minimap bit is not that one
+  // Bit 27 is the curse as it stands now: set, and its timer not yet run.
   state->flags.cursed = true;
+  state->curse_until = world.time() + 1;
   CHECK(only(0x08000000) == 1);
+  state->curse_until = world.time();
+  CHECK(only(0x08000000) == 0);
 
   // An unresolvable receiver answers false rather than refusing. It is not a
   // liveness test: `SQUADMONITOR.VS` asks this of a squad leader that may have
@@ -2228,7 +2232,7 @@ struct PlaceGraph {
         // The protective effect `IsProtected` looks for, with the radius it
         // doubles.
         R"(<class id="CoverOfMercy" parent="Object" cpp_class="CVXScriptObj"><properties sight="0" maxhealth="10" radius="400"/></class>)",
-        // A heir, because the sweep tests the class tree and not the leaf.
+        // An heir, which the sweep does not count: it compares the leaf.
         R"(<class id="GreaterCover" parent="CoverOfMercy" cpp_class="CVXScriptObj"/>)",
         // The two building families `CalcEscapeDirection` runs from, one of
         // them through an heir, and a building that is neither.
@@ -2700,6 +2704,10 @@ TEST(place_catapult_reveals_the_site_to_the_build_sight) {
   REQUIRE(out.status == script::HostStatus::ok);
   REQUIRE(PlaceFixture::id_of(out.value) != kNoObject);
   CHECK(fog.map().explored(Point{4000, 4000}, mine));
+  // And the placing player's env scope says so (0x004e3d7a): the flag the
+  // tutorial's `EnvReadInt(playerid, "CatapultBuilt")` waits on.
+  CHECK(env.env().read_int(EnvScope::for_player(3), "CatapultBuilt") == 1);
+  CHECK(env.env().read_int(EnvScope::for_player(4), "CatapultBuilt") == 0);
   CHECK(fog.map().explored(Point{4000, 6500}, mine));    // within 3000
   CHECK(!fog.map().explored(Point{4000, 7800}, mine));   // past it
   CHECK(!fog.map().explored(Point{4000, 4000}, theirs));
@@ -2713,7 +2721,7 @@ TEST(place_catapult_reveals_the_site_to_the_build_sight) {
   CHECK(!fog.map().explored(Point{500, 500}, mine));
 }
 
-/// `IsProtected(player, pos, class)`: a live object of the class, owned by
+/// `IsProtected(player, pos, class)`: an object of exactly the class, owned by
 /// somebody the player is not at war with, within twice the class's radius of
 /// the point by the query circle rule. The early exits all answer true.
 TEST(is_protected_finds_a_friendly_effect_within_twice_its_radius) {
@@ -2753,17 +2761,20 @@ TEST(is_protected_finds_a_friendly_effect_within_twice_its_radius) {
   CHECK(!ask(3, 9000, 1000, "CoverOfMercy"));
   f.world.set_position(cover, Point{8100, 1000});
   CHECK(ask(3, 9000, 1000, "CoverOfMercy"));
-  // A dead effect protects nobody.
+  // No life test in the sweep (0x00423ef0): an effect at zero health still
+  // stands on the grid and still protects.
   f.world.set_health(cover, 0);
-  CHECK(!ask(3, 8100, 1000, "CoverOfMercy"));
+  CHECK(ask(3, 8100, 1000, "CoverOfMercy"));
 
-  // A heir of the class counts: the sweep tests the class descriptor's tree.
+  // An heir of the class does **not** count: the sweep compares the object's
+  // class descriptor with the one it looked up, for equality.
   const script::HostOutcome greater =
       f.call("Place", {script::Value::string("GreaterCover"), PlaceFixture::point(3000, 3000),
                        script::Value::integer(4)});
   REQUIRE(greater.status == script::HostStatus::ok);
   REQUIRE(PlaceFixture::id_of(greater.value) != kNoObject);
-  CHECK(ask(3, 3000, 3000, "CoverOfMercy"));
+  CHECK(!ask(3, 3000, 3000, "CoverOfMercy"));
+  CHECK(ask(3, 3000, 3000, "GreaterCover"));
 
   // The early exits answer true: a class nothing declares, a player off the
   // table. The original prints for the first and writes 1 for both.
@@ -2838,10 +2849,33 @@ TEST(calc_escape_direction_points_away_from_the_nearest_enemy_tower) {
     const std::int32_t dx = model.between(0, 1000) - 500;
     const std::int32_t dy = model.between(0, 1000) - 500;
     const auto len = static_cast<std::int32_t>(isqrt(std::int64_t{dx} * dx + std::int64_t{dy} * dy));
-    const Point expected = len > 0 ? Point{dx * 1000 / len, dy * 1000 / len} : Point{0, 0};
+    const Point expected = len > 0 ? Point{dx * 1000 / len, dy * 1000 / len} : Point{1000, 0};
     CHECK(ask(cat) == expected);
     CHECK(f.world.rng().state() == model.state());
   }
+  // Two draws that land on the origin exactly answer (1000, 0): 0x004e26c0
+  // writes 1000 to x when the length is zero. A seed that draws 500 twice is
+  // searched for rather than hard-coded, so the test survives a change of
+  // generator.
+  std::uint32_t origin_seed = 0;
+  for (std::uint32_t seed = 1; seed < 50'000'000u && origin_seed == 0; ++seed) {
+    Rng probe(seed);
+    if (probe.between(0, 1000) == 500 && probe.between(0, 1000) == 500) origin_seed = seed;
+  }
+  REQUIRE(origin_seed != 0);
+  f.world.rng().seed(origin_seed);
+  CHECK(ask(cat) == (Point{1000, 0}));
+  // A threat standing exactly on the catapult has no direction to flee from:
+  // the original falls through to the random direction, two draws and all.
+  const ObjectId under = building("Tower", Point{2000, 2000}, 1);
+  f.world.rng().seed(7);
+  Rng model(7);
+  const std::int32_t ux = model.between(0, 1000) - 500;
+  const std::int32_t uy = model.between(0, 1000) - 500;
+  const auto ulen = static_cast<std::int32_t>(isqrt(std::int64_t{ux} * ux + std::int64_t{uy} * uy));
+  CHECK(ask(cat) == (Point{ux * 1000 / ulen, uy * 1000 / ulen}));
+  CHECK(f.world.rng().state() == model.state());
+  f.world.despawn(under);
   // A handle to nothing is `(0, 0)` and no draw.
   const std::uint32_t before = f.world.rng().state();
   CHECK(ask(999999) == (Point{0, 0}));

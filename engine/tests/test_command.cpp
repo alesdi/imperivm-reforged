@@ -437,6 +437,26 @@ TEST(clear_commands_drops_the_tail_and_keeps_the_runner) {
   CHECK(f.verbs(u) == std::vector<std::string>{"move"});
 }
 
+/// `Unit::Disappear` (0x005d86d0) leaves the command queue alone. It idles the
+/// unit's activity (`[obj+0x130]`), drops its path, stops its animation and
+/// stands it at `(-1, -1)` -- and nothing else. The ambient villager depends on
+/// that: `SETTLEMENT_BEHAVIOR_AMBIENT.VS` queues `moveenter`, `disappear`,
+/// `grab_water`, `moveenter` home, and a disappear that emptied the queue left
+/// the villager at the well forever.
+TEST(disappear_keeps_the_commands_queued_behind_it) {
+  Fixture f;
+  HostRegistry hosts;
+  (void)imperivm::core::sim::register_world_host(hosts);
+  const ObjectId u = f.spawn(f.unit_class);
+  f.order(u, "idle");
+  f.add(u, false, "engage");
+  f.add(u, false, "guard");
+  HostCall call(f.world, {obj(u)});
+  CHECK(invoke(hosts, CallKind::member, "Disappear", 0, call).status == HostStatus::ok);
+  CHECK(f.world.resolve_position(u) == imperivm::core::sim::kHeldPosition);
+  CHECK(f.verbs(u) == (std::vector<std::string>{"idle", "engage", "guard"}));
+}
+
 TEST(cmd_count_counts_the_runner_and_counts_by_verb) {
   // `UNIT_STANDSTILL.VS` tests `.CmdCount != 1` and `HERO_MOVE.VS`
   // `.CmdCount == 1`: one command is the resting count, so the runner is in it.

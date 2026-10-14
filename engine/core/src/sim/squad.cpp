@@ -2380,16 +2380,17 @@ HostOutcome all_enemies_in_holder_impl(CallContext& ctx) {
 // `AddToSquad` (0x00446a70), about 1,900 bytes, which that worker calls once
 // per listed object and which nothing here had needed until now.
 //
-// ## The three things the original tests that this engine cannot
+// ## The bit it refuses first, and two things it tests that this engine cannot
+//
+//   * **`[obj+0x194] & 0x800000`** refuses an object outright, before anything
+//     else. It is `Unit::SetNoselectFlag`'s bit (0x005d8750), `ObjectFlags::
+//     noselect` here, which the six shipped sites set on ambient walkers --
+//     fish, hens, villagers, messengers -- and which the flag's own setter
+//     pairs with the AI unregister. So a walker is never in a squad: tested
+//     here and in `enrol_new_units_in_squads`.
 //
 // Named once, so that no reader has to wonder whether they were missed:
 //
-//   * **`[obj+0x194] & 0x800000`** refuses an object outright, before anything
-//     else. It is one of the three `UnitFlags` bits `docs/formats/map.md` still
-//     lists as open, and `World::populate_from_map` keeps only the two it can
-//     name -- so no object here carries it and the refusal can never fire. It
-//     is named rather than dropped, because the day the bit is understood this
-//     is where it goes.
 //   * **Bit 30 of `[obj+0x198]`/`[obj+0x19c]`**, a 64-bit per-object attribute
 //     word this engine has no counterpart for. The merge predicate requires two
 //     objects to *agree* on it, so with the word absent both sides read false
@@ -2563,8 +2564,8 @@ SquadKey hero_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest)
 /// The arms are the original's, in its order, and each is a different answer to
 /// *where does this body belong*:
 ///
-///   1. an object carrying the unnamed `UnitFlags` bit belongs nowhere -- a
-///      named no-op here; see the head of this section;
+///   1. an object carrying `SetNoselectFlag`'s bit belongs nowhere, and the
+///      answer is no squad at all; see the head of this section;
 ///   2. a **hero** leads its own squad and takes its army with it;
 ///   3. a unit **inside a holder** belongs wherever its holder belongs, and to
 ///      nothing at all when the holder belongs to nothing: a garrison moves as
@@ -2585,6 +2586,9 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   SquadTable& table = heroes.squads();
   const WorldObject* slot = world.find(id);
   if (slot == nullptr) return kNoSquad;
+
+  // 1.
+  if (slot->state.flags.noselect) return kNoSquad;
 
   // 2.
   if (slot->state.flags.is_hero) return hero_squad(world, heroes, id, dest);
@@ -2710,11 +2714,10 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   return add_to_squad(world, heroes, id, dest, 0);
 }
 
-/// See the declaration. The four tests are 0x0041e820's, in its order: the
+/// See the declaration. The five tests are 0x0041e820's, in its order: the
 /// manager exists, the unit is alive (`vtbl+0x50`, `IsDead`), it is not
-/// unspawned (`kSyncUnspawned`), it has an owner (`[obj+0x70]`). The
-/// `[obj+0x194] & 0x800000` test beside them is a `UnitFlags` bit this engine
-/// does not carry and no shipped map sets in its `UnitFlags=` attribute.
+/// unspawned (`kSyncUnspawned`), it does not carry `SetNoselectFlag`'s bit
+/// (`[obj+0x194] & 0x800000`), it has an owner (`[obj+0x70]`).
 ///
 /// **The node is the one under the unit** (0x0044e650, `GetGAIKA(pos)`), and
 /// a unit already in a squad is skipped rather than re-homed: the hook's own
@@ -2738,6 +2741,7 @@ ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId af
     if (slot.object == nullptr || !slot.state.flags.is_unit) continue;
     if (slot.state.health <= 0) continue;
     if (slot.state.flags.unspawned) continue;
+    if (slot.state.flags.noselect) continue;
     if (slot.state.owner == kNoPlayer) continue;
     fresh.push_back(slot.id);
   }

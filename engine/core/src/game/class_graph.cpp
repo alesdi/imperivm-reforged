@@ -8,6 +8,7 @@
 #include "imperivm/core/game/class_graph.hpp"
 
 #include <algorithm>
+#include <string>
 
 #include "imperivm/core/xml.hpp"
 
@@ -120,6 +121,23 @@ Status ClassGraph::add(std::span<const std::byte> document, std::string_view sou
                                                             : definition.sounds;
       for (std::uint32_t i = 0; i < element.attribute_count; ++i) {
         const XmlAttribute& attribute = doc.attributes()[element.attribute_begin + i];
+        // `itemtype` is the one property the class reader keeps as a list
+        // (0x005a1d58): while the slot still holds its `**Invalid**` marker the
+        // value is assigned, and after that each repeat is appended after
+        // ", ". `BASERUINS.SC.XML` writes it twelve times and `RUIN_BEHAVIOR.VS`
+        // walks the list with `ParseStr` to pick a reward.
+        if (tag == "properties" && attribute.name == "itemtype") {
+          const auto at = std::lower_bound(
+              bag.begin(), bag.end(), attribute.name,
+              [](const ClassProperty& entry, std::string_view needle) { return entry.key < needle; });
+          if (at != bag.end() && at->key == attribute.name) {
+            std::string joined(at->value);
+            joined += ", ";
+            joined += attribute.value;
+            at->value = arena_.intern(joined);
+            continue;
+          }
+        }
         upsert(bag, arena_.intern(attribute.name), arena_.intern(attribute.value));
       }
     } else if (tag == "method") {

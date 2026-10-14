@@ -183,6 +183,33 @@ std::int32_t class_int(const World& world, const WorldObject& slot,
   return static_cast<std::int32_t>(negative ? -value : value);
 }
 
+/// Whether any class from `index` up the chain declares `key` -- the
+/// question `ClassGraph::property` folds into an empty answer.
+[[nodiscard]] bool class_declares(const ClassGraph& graph, ClassIndex index,
+                                  std::string_view key) noexcept {
+  for (ClassIndex at = index; at != kNoClass; at = graph.at(at).parent_index) {
+    for (const ClassProperty& property : graph.at(at).properties) {
+      if (property.key == key) return true;
+    }
+    if (graph.at(at).parent_index == at) break;
+  }
+  return false;
+}
+
+/// The class record's "absent" marker for an int slot (`0xff1b1e40`).
+constexpr std::int32_t kClassIntAbsent = -15000000;
+
+/// One class int that keeps the absent marker when nothing declares it.
+[[nodiscard]] std::int32_t class_int_or_marker(const World& world, const WorldObject& slot,
+                                               std::string_view key) noexcept {
+  const ClassGraph* graph = world.class_graph();
+  if (graph == nullptr || slot.class_index == kNoClass ||
+      !class_declares(*graph, slot.class_index, key)) {
+    return kClassIntAbsent;
+  }
+  return class_int(world, slot, key);
+}
+
 /// A class property as a flag, walking up the class tree.
 ///
 /// `gbr.exe` parses these into one `int` slot per key on the class descriptor
@@ -262,6 +289,30 @@ HostOutcome fn_objs_in_sight(CallContext& ctx) {
 /// recorded on the spec and **not applied**: fog of war is one of the four hash
 /// channels the shipped build left at zero in all nine dumps, and filtering on
 /// it here would pull it back into hashed state.
+///
+/// **Read against the body (`0x00575ef0`)**, which is `ObjsInSight`'s
+/// (0x00575cb0) but for one argument. An unresolvable observer prints
+/// *"Parameter #1 ... is uninitialized or invalid object"* and answers the
+/// invalid query `0xffff`; so does a class string with no comma that names no
+/// class (*"Could not find class named ..."*), where this engine answers an
+/// empty query instead -- the four shipped sites, all `TTENT_BEHAVIOR.VS`, pass
+/// `"Unit"`. Otherwise the shared worker 0x004fee10 is called with radius `-1`
+/// and visibility `1` (`ObjsInSight` passes 0), and it:
+///
+///   * turns radius `-1` into **the observer's `[obj+0xd0]` sight minus 100**,
+///     fixed in the query at creation (`[query+0x74]`);
+///   * hands back an existing query when one with the same observer, class
+///     string, radius and visibility is live (an interning pool at
+///     `[0x996a84]`), else builds one (0x004fb290);
+///   * and the query's refresh (0x004ff080) answers nothing for a dead
+///     observer, and re-evaluates at most once every 1,000 ms.
+///
+/// **Known gaps, all in `World::objects_in_sight`, the helper this shares with
+/// `ObjsInSight`, and left for that entry point's audit so that two batches do
+/// not rewrite one helper at once:** the radius here is the observer's whole
+/// current sight, not `sight - 100` taken at creation; a dead observer still
+/// sees; the answer is not held for a second; and the visibility flag is not
+/// applied.
 HostOutcome fn_visible_objs_in_sight(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("VisibleObjsInSight: no world");
@@ -411,9 +462,10 @@ HostOutcome fn_group(CallContext& ctx) {
 /// `/Inns/<n>/state`: 0x00532780 formats `/Inns/%d` from the inn's index at
 /// `[inn+0x208]`, minting a fresh one into the same registry when the slot is
 /// `-1` (0x005327d0), and 0x00533050 / 0x005330e0 join `/state` (0x007b1428)
-/// and go through the registry's own int get and set. The read answers **1**
-/// for anything stored below 1 -- an inn nobody has touched is open -- and
-/// the write clamps to 1..3. What the scripts make of the numbers: 1 is open
+/// and go through the registry's own int get and set. **Both clamp to 1..3**:
+/// the read answers 1 for anything stored below 1 -- an inn nobody has touched
+/// is open -- and 3 for anything above, and the write stores the clamped
+/// value. What the scripts make of the numbers: 1 is open
 /// for transport (`UNIT_TRANSPORT_VERIFY.VS`, `INN_TRANSPORT_REQUEST.VS`), 3
 /// is what `INN_BEHAVIOR.VS` waits on before it announces the inn and sets 1.
 ///
@@ -421,7 +473,10 @@ HostOutcome fn_group(CallContext& ctx) {
 /// `[inn+0x208]`, and the path is spelt by nobody but these two -- no script
 /// reads it back through `EnvReadInt` -- so the observable is only that each
 /// inn's state is its own, which the id gives. The `(str, str)` forms
-/// `gbr.exe` registers beside these have no call site and stay unbound.
+/// `gbr.exe` registers beside these (0x00533170, 0x00533640: a map name and an
+/// inn name, looked up through the campaign's map list; an unknown map or inn
+/// prints and the read answers 3) have no call site -- all four shipped sites
+/// pass the inn object -- and stay unbound.
 [[nodiscard]] std::string inn_state_key(ObjectId inn) {
   return "/Inns/" + std::to_string(inn) + "/state";
 }
@@ -436,7 +491,7 @@ HostOutcome fn_get_inn_state(CallContext& ctx) {
   const EnvSystem* env = env_of(*world);
   const std::int32_t stored =
       env == nullptr ? 0 : env->env().read_int(EnvScope::root(), inn_state_key(slot->id));
-  return HostOutcome::ok_with(Value::integer(stored < 1 ? 1 : stored));
+  return HostOutcome::ok_with(Value::integer(stored < 1 ? 1 : (stored > 3 ? 3 : stored)));
 }
 
 HostOutcome fn_set_inn_state(CallContext& ctx) {
@@ -900,8 +955,12 @@ HostOutcome fn_place(CallContext& ctx) {
 /// `vtbl + 0x98`: an engine under construction, at one point of health, for
 /// the builders to raise. **No bounds test** on the point, unlike `Place`; and
 /// the `CVXCatapult` constructor leaves it unbuilt, which is what
-/// `ObjectFlags::built` defaults to. The handle is read from `word [obj+8]`
-/// and 0xffff answers a creation that failed.
+/// `ObjectFlags::built` defaults to. Between the two it builds the engine's
+/// own settlement (0x00541980; see `place_catapult`), and last it writes `1`
+/// to the env registry under `/<map>/Player<n>/CatapultBuilt`, `n` the
+/// script's player number -- the flag `BUILDINGSADVICE5.VS` polls with
+/// `EnvReadInt(playerid, "CatapultBuilt")`. The handle is read from `word
+/// [obj+8]` and 0xffff answers a creation that failed.
 ///
 /// The reveal is the one step reproduced by a different mechanism: this
 /// engine's `SetPos` does not explore, its fog is stamped by `FogSystem`, so
@@ -943,15 +1002,18 @@ HostOutcome fn_place_catapult(CallContext& ctx) {
 /// high per axis, `_PlaceEx`'s rule). Then a circle query (0x00423ef0, the
 /// same cell sweep `ObjsInCircle` rides on) over the clamped point with radius
 /// **twice the class's `radius`** attribute (`[class+0x2dc]`, squared as
-/// `(2r)^2` for the sweep), for objects of that class -- the sweep tests the
-/// class descriptor -- whose owner is in the player's **friendly mask**,
+/// `(2r)^2` for the sweep), for objects **of exactly that class** -- the sweep
+/// compares `[obj+0x3c]` with the descriptor for equality (0x0042403d,
+/// 0x0042408b), so an heir does not count -- with **no life test**, whose
+/// owner bit in `[obj+0x2c]` is in the player's **friendly mask**,
 /// `[record+0x10] ^ 0xffff`: the complement of the enemy word
 /// `PlayerTable::is_enemy` reads, as the caster searches in `sim/hero.cpp`
-/// already established. Any hit is true.
+/// already established. Any hit is true. A held object is not on the grid the
+/// sweep walks, so it is not found.
 ///
 /// A cover of mercy is placed by the script itself (`Place("CoverOfMercy",
 /// pt, .player)`), so unlike a sacrifice it can exist here, and the sweep is
-/// the engine's own: every live object of the class, the point inside its
+/// the engine's own: every object of the class, the point inside its
 /// doubled radius by the query circle rule (`contains_by_query_rule`, which is
 /// what the cell sweep answers), and an owner the player is not at war with.
 /// The doubling is the original's and is why a single effect covers a ring
@@ -992,10 +1054,11 @@ HostOutcome fn_is_protected(CallContext& ctx) {
   const AreaShape ring = AreaShape::of_circle(at, reach);
   const auto viewer = static_cast<PlayerId>(player - 1);
   for (const WorldObject& other : world->objects()) {
-    if (other.state.health <= 0 || !world->class_is_a(other.id, wanted)) continue;
+    if (other.internal != InternalKind::none || other.class_index != wanted) continue;
     if (!PlayerTable::is_valid(other.state.owner)) continue;
     if (world->players().is_enemy(viewer, other.state.owner)) continue;
-    if (!ring.contains_by_query_rule(world->resolve_position(other.id))) continue;
+    if (other.state.position == kHeldPosition) continue;
+    if (!ring.contains_by_query_rule(other.state.position)) continue;
     return HostOutcome::ok_with(Value::boolean(true));
   }
   return HostOutcome::ok_with(Value::boolean(false));
@@ -1008,7 +1071,7 @@ HostOutcome fn_is_protected(CallContext& ctx) {
 ///
 /// `0x004e3380` is registered `[6, 1, 38]`: a point, from a `Catapult`. An
 /// invalid receiver prints `The function 'Catapult::CalcEscapeDirection'
-/// called for an uninitialized or invalid object.` and answers `(0, 0)`.
+/// called for an uninitialized or invalid object.` (see below for its answer).
 /// Otherwise it runs a cell sweep (0x004e29c0) over the catapult's own sight
 /// (`[obj+0xd0]`, the number `.sight` reports) whose predicate (0x004e2620)
 /// keeps the **nearest** object that is a building (`[obj+0x2c] & 0x800000`,
@@ -1022,11 +1085,15 @@ HostOutcome fn_is_protected(CallContext& ctx) {
 /// table square root and truncating division -- so `SetLen` downstream
 /// only rescales a direction that already points away from the threat.
 ///
-/// With no such building in sight it is a random direction (0x004e26c0):
-/// `rand(0, 1000) - 500` on x, then the same on y, normalised to 1000 the
-/// same way; a draw that lands on the origin exactly stays `(0, 0)`, which
-/// `SetLen` then turns into `(0, len)` by its own zero rule. Two draws on the
-/// world RNG, in that order, every time no threat is found.
+/// With no such building in sight -- or one standing exactly on the
+/// catapult, whose zero-length vector has no direction -- it is a random
+/// direction (0x004e26c0): `rand(0, 1000) - 500` on x, then the same on y,
+/// normalised to 1000 the same way; a draw that lands on the origin exactly
+/// answers `(1000, 0)`, the worker's own fallback. Two draws on the world RNG,
+/// in that order, every time.
+///
+/// An invalid receiver's answer is the original's own fault: it pushes four
+/// bytes of zero where a point is eight, and `(0, 0)` stands in.
 ///
 /// **The tie rule is the one labelled divergence.** The original's sweep
 /// visits 256-unit cells row by row and the objects within a cell in the
@@ -1072,20 +1139,23 @@ HostOutcome m_calc_escape_direction(CallContext& ctx) {
     best = d2;
   }
 
-  std::int32_t dx = 0;
-  std::int32_t dy = 0;
+  // `isqrt` is the floored root the table at 0x0067c3d0 answers; see `Dist`.
+  const auto length = [](std::int32_t x, std::int32_t y) {
+    return static_cast<std::int32_t>(
+        isqrt(static_cast<std::int64_t>(x) * x + static_cast<std::int64_t>(y) * y));
+  };
   if (threat != nullptr) {
     const Point at = world->resolve_position(threat->id);
-    dx = here.x - at.x;
-    dy = here.y - at.y;
-  } else {
-    dx = world->rng().between(0, 1000) - 500;
-    dy = world->rng().between(0, 1000) - 500;
+    const std::int32_t dx = here.x - at.x;
+    const std::int32_t dy = here.y - at.y;
+    const std::int32_t len = length(dx, dy);
+    if (len > 0) return HostOutcome::ok_with(pack_point(Point{dx * 1000 / len, dy * 1000 / len}));
+    // A threat on the catapult's own point: on to the random direction.
   }
-  // `isqrt` is the floored root the table at 0x0067c3d0 answers; see `Dist`.
-  const auto len = static_cast<std::int32_t>(
-      isqrt(static_cast<std::int64_t>(dx) * dx + static_cast<std::int64_t>(dy) * dy));
-  if (len <= 0) return HostOutcome::ok_with(pack_point(Point{0, 0}));
+  const std::int32_t dx = world->rng().between(0, 1000) - 500;
+  const std::int32_t dy = world->rng().between(0, 1000) - 500;
+  const std::int32_t len = length(dx, dy);
+  if (len <= 0) return HostOutcome::ok_with(pack_point(Point{1000, 0}));
   return HostOutcome::ok_with(pack_point(Point{dx * 1000 / len, dy * 1000 / len}));
 }
 
@@ -1755,32 +1825,34 @@ HostOutcome m_get_jupiter_target(CallContext& ctx) {
 }
 
 /// `EnemyInRange(pt, range, who)` -- 1 site, and the **sole blocker of
-/// `WALL_PATROL.VS` and its 158 call sites**, the largest single script left.
+/// `WALL_PATROL.VS` and its 158 call sites**, the largest single script left:
+/// `EnemyInRange(.pos, nWallRange, list[0])`, a wall deciding whether its
+/// patrol has anything to shoot at.
 ///
-/// 0x004dcb20 pops the three, refuses an object that does not resolve with
+/// 0x004dcb20 pops the three and refuses an object that does not resolve with
 /// *"The function 'EnemyInRange' called for an uninitialized or invalid
-/// object."* and `false`, and otherwise sweeps the object grid over
+/// object."* and `false`. Otherwise it sweeps the object grid (0x004dbea0)
+/// over the square `[x - range, x + range] x [y - range, y + range]`, built
+/// at 0x004dcba0, with a functor (0x00514080) holding the asker's owner's
+/// enemy word (`[record+0x10]`, `PlayerTable::is_enemy`'s complement of the
+/// ceasefire bit) and side mask (`[record+0x18]`), the point, the range and
+/// the asker. An object is found -- and the sweep stops -- when:
 ///
-///     [x - range, x + range] x [y - range, y + range]
+///   * its owner's bit is in the enemy word;
+///   * it is not hidden (bit 21 of `[obj+0x2c]`; the side mask lets a hidden
+///     object past the first test, and the second then refuses it anyway);
+///   * it is a **unit**: anything else is handed to the asker's `CanAttack`
+///     virtual (`vtbl+0xb4`) as null, and refused;
+///   * the asker can attack it -- that virtual, which is `unit_can_attack`;
+///   * its class's `target_factor` (`[cls+0xb2c]`) is not negative -- crows,
+///     deer, eagles, fish and hens declare -1, and the absent marker is
+///     negative too;
+///   * and **its distance from the point, less its class `radius`**
+///     (0x005a7900: `isqrt(dx^2 + dy^2) - [cls+0x2dc]`), is at most `range`.
 ///
-/// -- a **square**, built at 0x004dcba0 as four separate add/subtract pairs,
-/// not the circle every `ObjsInCircle`-shaped entry point here uses. The
-/// answer is whether the sweep found anything.
-///
-/// The per-object test is a functor 0x00514080 builds out of two words off the
-/// asking object's player record: `[+0x10]`, the **enemyflags** mask that
-/// `sim/player.hpp` records as the exact complement of the ceasefire bit, and
-/// `[+0x18]`, the side mask. The first is `PlayerTable::is_enemy` and is what
-/// this reproduces. **The second is carried and not modelled**: nothing
-/// recovered here says how the functor combines them, and the shipped call --
-/// a wall deciding whether to shoot, `EnemyInRange(.pos, nWallRange, list[0])`
-/// -- cannot separate the two readings, because a wall and its patrol are
-/// always on one side. Widening it if the mask turns out to narrow it would be
-/// the error to watch for.
-///
-/// An object with no owner is nobody's enemy and is not found; the receiver's
-/// own side is not searched for, because `is_enemy` is false for a player
-/// against itself.
+/// So the square only bounds the sweep: the test is a circle widened by the
+/// target's own radius. An asker or a candidate the combat system does not
+/// hold cannot answer `CanAttack` and finds nothing.
 HostOutcome fn_enemy_in_range(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("EnemyInRange: no world");
@@ -1788,25 +1860,32 @@ HostOutcome fn_enemy_in_range(CallContext& ctx) {
   if (ctx.count() < 3 || !is_point(ctx.arg(0)) || !ctx.arg(1).is_integer()) return no;
   const WorldObject* who = object_of(*world, ctx.arg(2));
   if (who == nullptr) return no;
+  const CombatSystem* combat = combat_system_of(*world);
+  const Combatant* asker = combat == nullptr ? nullptr : combat->find(who->id);
+  if (asker == nullptr) return no;
 
   const Point centre = unpack_point(ctx.arg(0));
   const std::int32_t range = ctx.arg(1).as_integer();
   const PlayerTable& players = world->players();
   const PlayerId asking = who->state.owner;
-  // The square, not a circle, over the object grid (0x004dbea0) -- so a held
-  // object, which stands in no cell, is not there to be found: a garrison
-  // resolved to its holder record at (0, 0) once made every wall near the
-  // map's corner see an enemy. Only whether anything answers is returned, so
-  // the order the sweep yields in cannot reach the result.
+  // The grid sweep: a held object stands in no cell and is not there to be
+  // found.
   std::vector<ObjectId> near;
   world->objects_located_in_rect(centre.x - range, centre.y - range, centre.x + range,
                                  centre.y + range, near);
   for (const ObjectId id : near) {
     const WorldObject* other = world->find(id);
     if (other == nullptr || other->state.flags.unspawned) continue;
-    // No `owner == kNoPlayer` guard: `is_enemy` refuses an invalid player on
-    // either side already, so one here could not be made to fail.
     if (!players.is_enemy(asking, other->state.owner)) continue;
+    if (other->state.flags.hidden || !other->state.flags.is_unit) continue;
+    const Combatant* target = combat->find(id);
+    if (target == nullptr || !combat->unit_can_attack(*asker, *target)) continue;
+    if (class_int_or_marker(*world, *other, "target_factor") < 0) continue;
+    const Point at = other->state.position;
+    const std::int64_t dx = static_cast<std::int64_t>(at.x) - centre.x;
+    const std::int64_t dy = static_cast<std::int64_t>(at.y) - centre.y;
+    const std::int64_t reach = isqrt(dx * dx + dy * dy) - class_int(*world, *other, "radius");
+    if (reach > range) continue;
     return HostOutcome::ok_with(Value::boolean(true));
   }
   return no;
@@ -1891,13 +1970,31 @@ HostOutcome m_exit_holder(CallContext& ctx) {
 /// `o.SetName(str)` -- 1 site. 0x005b6920 hands the string to 0x005b6120, the
 /// worker `CVXGroup::Spawn` uses to carry a name onto a spawned copy, and
 /// `NamedObjectTable::rebind` is that worker's contract: a name already bound
-/// moves to this object. An empty string is refused by the worker's first
-/// test and changes nothing.
+/// moves to this object.
+///
+/// **An empty string removes the object's name.** The worker's first test
+/// takes the object's own name record at `[obj+0x84]`, unlinks it from the
+/// named-object manager (0x004fc150), deletes it and writes `0xffff` back --
+/// so `GetNamedObj` of that name answers nothing afterwards, and a later spawn
+/// of the template it came from is not named either. The one shipped site is
+/// exactly that: `2_Great_loses_Spain` seq12 renames nobody, it calls
+/// `GetNamedObj("RomeHero"+n).obj.SetName("")` once the hero has joined the
+/// army, and the `SetLevel` two lines on reaches nothing in the original.
+/// Here every name bound to the object is taken away (`unbind_object`); the
+/// original keeps one record per object, and a shipped object carrying two
+/// names is not known.
+///
+/// **One arm is not reproduced**: an object that already has a name and is
+/// given a different one has its record *renamed* (0x00572a30), so the old
+/// name stops resolving; here the old name stays bound beside the new. No
+/// shipped site names an object twice.
 HostOutcome m_set_name(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetName: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  if (slot == nullptr || !ctx.arg(1).is_string() || ctx.arg(1).as_string().empty()) {
+  if (slot == nullptr || !ctx.arg(1).is_string()) return HostOutcome::ok_void();
+  if (ctx.arg(1).as_string().empty()) {
+    (void)world->named_objects().unbind_object(slot->id);
     return HostOutcome::ok_void();
   }
   (void)world->named_objects().rebind(ctx.arg(1).as_string(), slot->id);
@@ -1907,19 +2004,22 @@ HostOutcome m_set_name(CallContext& ctx) {
 /// `u.Disappear()` -- 1 site, `UNIT_DISAPPEAR.VS`, which then sleeps two
 /// seconds and puts the unit back where it was.
 ///
-/// 0x005d86d0: the unit's command object is destroyed and the path flag
-/// cleared (0x005d3830), its record is reset, its animation is stopped
-/// (0x0053d730), and it is placed at the static point `(-1, -1)` -- off the
-/// map, which is what makes it vanish. Here that is: commands cleared, the
-/// movement state stopped, and the position set to `kHeldPosition`, which the
-/// world permits on an object that is not held.
+/// 0x005d86d0: the unit's transient activity (`[obj+0x130]`, not saved) goes
+/// to 0, its path is dropped (0x005d3830 with null), its sprite is told so
+/// (`[obj+0x40]`'s `vtbl+4`), its animation is reset (0x0053d730), and it is
+/// placed at the static point `(-1, -1)` -- off the map, which is what makes
+/// it vanish. **The command queue is not touched**: `disappear` is itself a
+/// queued command, and the ambient villagers queue their errand behind it
+/// (`grab_water`, then `moveenter` home), which a cleared queue lost. Here:
+/// the movement state stopped and the position set to `kHeldPosition`, which
+/// the world permits on an object that is not held. An unresolvable receiver
+/// prints and pushes a stray byte in the original; here it is silence.
 HostOutcome m_disappear(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Disappear: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_void();
   const ObjectId id = slot->id;
-  if (CommandSystem* commands = command_system(*world)) (void)commands->clear_commands(*world, id);
   if (MovementSystem* movement = movement_system(*world)) movement->stop(*world, id);
   if (ObjectState* state = world->mutable_state(id)) state->flags.has_active_path = false;
   if (!slot->state.is_held()) (void)world->set_position(id, kHeldPosition);
@@ -2080,6 +2180,7 @@ HostOutcome m_is_central_building(CallContext& ctx) {
       Value::boolean(class_flag(*world, *slot, "is_central_building")));
 }
 
+
 /// Five reads off the class descriptor, and two ancestry tests that carry
 /// their own name.
 ///
@@ -2087,31 +2188,46 @@ HostOutcome m_is_central_building(CallContext& ctx) {
 /// resolves the receiver, takes `obj + 0x3c`, and reads one slot the class
 /// reader filled from one XML attribute. None of them consults the object.
 ///
-///   * `Building::minlevel/0` -- descriptor `+0x6bc`, the `minlevel` attribute.
-///   * `Building::levelperitem/0` -- `+0x6c0`, `levelperitem`.
-///   * `Building::itemtypes/0` -- the `std::string` at `+0x6a0`, `itemtype`.
-///     The entry point is plural and the attribute is singular, because the
-///     value is a comma-separated *list*: `RUIN_BEHAVIOR.VS` calls it twice and
-///     runs `ParseStr` down it both times, once to count the entries and once
-///     to walk to a random one.
-///   * `Building::GetNumSentrySlots/0` -- `+0x2f4`, `num_sentry_slots`.
-///   * `Building::GetSentryClassName/0` -- the `std::string` at `+0x2f8`,
-///     `sentry_class_name`. The walls and gates declare it (`RSentry`,
-///     `GSentry1`, ...); everything else inherits nothing and answers empty.
+///   * `Building::minlevel/0` (0x004ddaf0) -- descriptor `+0x6bc`, the
+///     `minlevel` attribute.
+///   * `Building::levelperitem/0` (0x004ddb50) -- `+0x6c0`, `levelperitem`.
+///   * `Building::itemtypes/0` (0x004dda10) -- the `std::string` at `+0x6a0`,
+///     `itemtype`. The entry point is plural and the attribute is singular,
+///     because the value is a *list*: the class reader appends each repeated
+///     `itemtype` after `", "` (see `ClassGraph`), and `RUIN_BEHAVIOR.VS` calls
+///     this twice and runs `ParseStr` down it both times, once to count the
+///     entries and once to walk to a random one.
+///   * `Building::GetNumSentrySlots/0` (0x004ddca0) -- `+0x2f4`,
+///     `num_sentry_slots`.
+///   * `Building::GetSentryClassName/0` (0x004ddce0) -- the `std::string` at
+///     `+0x2f8`, `sentry_class_name`. The walls and gates declare it
+///     (`RSentry`, `GSentry1`, ...).
+///
+/// **A class that declares none of them up its whole chain** answers what the
+/// class record was built with, since inheritance (0x0059c310) copies only
+/// over the "absent" marker: the root branch there resets `num_sentry_slots`
+/// to 0 and `sentry_class_name` to `""`, but leaves `minlevel` and
+/// `levelperitem` at the marker `-15000000` (the record constructor 0x005a6820
+/// writes it) and `itemtype` at `"**Invalid**"` -- the last INFERRED from the
+/// constructor's run of `"**Invalid**"` strings, whose targets Ghidra does not
+/// keep. Every shipped call asks a ruin, a wall or a gate, which declare them.
 ///   * `Obj::IsRam/0` and `Obj::IsPeasantAmbient/0` are 0x00540460 and
 ///     0x005403f0, which are both one `IsHeirOf` against a class the function
 ///     looks up once and caches in a file-static: `"RamUnit"` and
 ///     `"PeasantAmbient"`. Ancestry, not name equality, so a subclass matches.
 ///
 /// **The invalid-receiver answers are the type's zero here, not `IsCentralBuliding`'s
-/// surprising `true`.** Each thunk reports through 0x00686eb0 -- a bare `ret` in
-/// retail -- and pushes 0, `false` or the empty string.
+/// surprising `true`.** `minlevel`, `levelperitem` and `itemtypes` report
+/// through 0x00686eb0 -- a bare `ret` in retail, and all three under the name
+/// `Building::Starvation` -- and push 0 or the empty string. **The two sentry
+/// readers do not test the receiver at all**: they read `+0x3c` of a null
+/// object and fault. 0 and the empty string stand in for that here.
 HostOutcome m_building_minlevel(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("minlevel: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   return HostOutcome::ok_with(
-      Value::integer(slot == nullptr ? 0 : class_int(*world, *slot, "minlevel")));
+      Value::integer(slot == nullptr ? 0 : class_int_or_marker(*world, *slot, "minlevel")));
 }
 
 HostOutcome m_building_level_per_item(CallContext& ctx) {
@@ -2119,7 +2235,7 @@ HostOutcome m_building_level_per_item(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed("levelperitem: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   return HostOutcome::ok_with(
-      Value::integer(slot == nullptr ? 0 : class_int(*world, *slot, "levelperitem")));
+      Value::integer(slot == nullptr ? 0 : class_int_or_marker(*world, *slot, "levelperitem")));
 }
 
 HostOutcome m_building_num_sentry_slots(CallContext& ctx) {
@@ -2130,9 +2246,11 @@ HostOutcome m_building_num_sentry_slots(CallContext& ctx) {
       Value::integer(slot == nullptr ? 0 : class_int(*world, *slot, "num_sentry_slots")));
 }
 
-/// One class property as a string, walking up the class tree, empty for
-/// anything the graph cannot answer.
-[[nodiscard]] HostOutcome class_text(CallContext& ctx, std::string_view key) {
+/// One class property as a string, walking up the class tree; `absent` when
+/// no class up the chain declares it, empty for a receiver that resolves to
+/// nothing.
+[[nodiscard]] HostOutcome class_text(CallContext& ctx, std::string_view key,
+                                     std::string_view absent) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::ok_with(Value::string(std::string()));
   const WorldObject* slot = object_of(*world, ctx.arg(0));
@@ -2140,14 +2258,19 @@ HostOutcome m_building_num_sentry_slots(CallContext& ctx) {
   if (slot == nullptr || graph == nullptr || slot->class_index == kNoClass) {
     return HostOutcome::ok_with(Value::string(std::string()));
   }
+  if (!class_declares(*graph, slot->class_index, key)) {
+    return HostOutcome::ok_with(Value::string(std::string(absent)));
+  }
   return HostOutcome::ok_with(
       Value::string(std::string(graph->property(slot->class_index, key))));
 }
 
-HostOutcome m_building_item_types(CallContext& ctx) { return class_text(ctx, "itemtype"); }
+HostOutcome m_building_item_types(CallContext& ctx) {
+  return class_text(ctx, "itemtype", "**Invalid**");
+}
 
 HostOutcome m_building_sentry_class_name(CallContext& ctx) {
-  return class_text(ctx, "sentry_class_name");
+  return class_text(ctx, "sentry_class_name", "");
 }
 
 HostOutcome m_is_ram(CallContext& ctx) {
@@ -2173,25 +2296,19 @@ HostOutcome m_is_peasant_ambient(CallContext& ctx) {
 /// at `+0x974`, the string's own length slot) must be non-zero, **and** its
 /// text must not be `"**Invalid**"` (0x007ae000, compared with 11 characters).
 ///
-/// **The string is a class name, and `projectile_class` is an inference.** What
-/// is read is settled: 0x005a6c9d initialises a run of `std::string`s at
-/// `+0x928`, `+0x944`, `+0x960`, `+0x97c`, `+0x998` (stride 0x1c) to that
-/// sentinel; 0x0059c7c8 inherits each from the parent class when it is still
-/// the sentinel; and 0x005b1d20 takes `+0x960`, looks it up **in the class
-/// registry**, and reads a range-like number off the class it finds. So it
-/// holds the name of another class. Which XML attribute fills it is *not*
-/// settled: the class reader writes `projectile_shadow` into `+0x97c` and
-/// `projectile_fire` into `+0x998`, and no instruction in the image writes
-/// `+0x960` with that displacement at all -- the nearest evidence is the
-/// literal `_projectile_class` at 0x007c8650, evidently composed with a prefix
-/// at run time. `projectile_class` is the attribute that sits beside those two
-/// in every shipped class that declares them, and it is what
-/// `CombatProfile::projectile` already resolves from the other side, so it is
-/// the reading taken here. The alternative worth naming is
-/// `building_projectile_class`, which four shipped classes declare *as well*;
-/// under that reading a tower would answer differently.
+/// **The string is a class name, and the attribute is `projectile_class`.**
+/// 0x005a6c9d initialises a run of `std::string`s at `+0x928`, `+0x944`,
+/// `+0x960`, `+0x97c`, `+0x998` (stride 0x1c) to the `"**Invalid**"`
+/// sentinel; the class reader's `projectile_class` arm (the compare at
+/// 0x005a421a, the store into `+0x960` at 0x005a4254) fills it; 0x0059c7c8
+/// inherits it from the parent class while it is still the sentinel; and
+/// 0x005b1d20 looks it up **in the class registry** and reads a range-like
+/// number off the class it finds. This used to be recorded as an inference,
+/// because the literal sits inside `_projectile_class` (0x007c8650) and a
+/// search for its address found nothing; the arm pushes 0x007c86c0, a
+/// separate copy. `building_projectile_class` is a different slot.
 ///
-/// Either way this is not a range comparison and not a weapon-type test: a unit
+/// This is not a range comparison and not a weapon-type test: a unit
 /// is ranged when it has something to throw.
 ///
 /// **`"**Invalid**"` is the original's uninitialised-string default, not an
@@ -2390,6 +2507,10 @@ HostOutcome m_set_training(CallContext& ctx) {
 ///     under 50 is taken at once, and otherwise gets 100 off. The lowest
 ///     score wins, an earlier candidate keeping a tie.
 ///
+/// The sweep visits **units only**: 0x005d3c50 seeds it with the `kSyncUnit`
+/// mask, so neither clause ever sees a building. And when the answer is a
+/// unit, 0x005d2850 adds one to that unit's `threat` (capped at 6).
+///
 /// `threat` is the decaying counter at `[unit+0x1b0]` (0x005d2800), which
 /// this engine does not model -- `sim/combat.hpp` says so for the target
 /// family that shares this formula -- so the term is 0 here and the score is
@@ -2417,11 +2538,15 @@ HostOutcome m_best_training_target(CallContext& ctx) {
     if (id == self->id) continue;
     const WorldObject* cand = world->find(id);
     if (cand == nullptr) continue;
+    // The sweep's mask (0x005d3c50 seeds it with `0x400000`, `kSyncUnit`):
+    // only units are visited at all, so an armed enemy *building* -- a tower
+    // -- neither ends the lesson nor is a partner.
+    if (!cand->state.flags.is_unit) continue;
     if (owner != kNoPlayer && cand->state.owner != kNoPlayer &&
         players.is_enemy(owner, cand->state.owner) && class_int(*world, *cand, "damage") > 0) {
       return HostOutcome::ok_with(object_value(id));
     }
-    if (!cand->state.flags.is_unit || !cand->state.flags.training) continue;
+    if (!cand->state.flags.training) continue;
     const Point there = world->resolve_position(id);
     const std::int64_t dx = there.x - at.x;
     const std::int64_t dy = there.y - at.y;
@@ -2801,6 +2926,17 @@ HostOutcome m_is_valid_capture_target(CallContext& ctx) {
 /// class or derives from it, and an invalid handle otherwise. There is one
 /// runtime representation for all handle types, so a downcast is a test, not a
 /// conversion.
+///
+/// `AsTeleport` (0x005cdb50), `AsSacrifice` (0x005aa940) and `AsBarrack`
+/// (0x005aa8d0) are one body each and one shape: resolve the receiver through
+/// the object table, ask the script-object interface's kind test (its `vtbl+4`)
+/// for the native name, and push the result's handle with a zero offset word,
+/// or `0xffff` -- no complaint -- when the receiver does not resolve or the
+/// kind test refuses. The kind test compares the name *pointer* and tail-calls
+/// the parent's; in `gbr.exe` none of the three has a native child
+/// (`CVXTeleport` and `CVXBarrack` sit under `CVXBuilding`, `CVXSacrifice`
+/// under `CVXScriptObj`), so each admits exactly its own `cpp_class`, as
+/// `is_a` does here.
 template <NativeClass kClass>
 HostOutcome m_as(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -3030,11 +3166,14 @@ HostOutcome m_global_spell(CallContext& ctx) {
 ///   * `SetGlobalBloodlust(bool)` -- 2 sites, both in
 ///     `STONEHENGE_BLOODLUST.VS`, and the sole blocker of it. 0x004c6610
 ///     writes the byte argument into the global at `0x00996ae4`. That global
-///     has exactly two readers and both are in 0x00510b80..0x00510e24, the
-///     block that prices a stonehenge spell against the caster: with the flag
-///     set, one subtraction of `[0x00996e10]` is skipped. This engine has no
-///     spell pricing to skip, so the flag would be state nothing could read --
-///     which is the test `ObjectState::user` passes and this fails.
+///     has exactly two readers and both are in 0x0050ff30, which the blow
+///     resolution 0x00511550 calls to decide which of the attacker's specials
+///     a blow uses and to charge each one's stamina cost: with the flag set,
+///     the special behind mask `0x1000` (effect code `0xe`) is never charged
+///     its `[0x00996e10]`. This engine's blows charge no special any stamina,
+///     so the flag would be state nothing could read -- which is the test
+///     `ObjectState::user` passes and this fails. **A known gap, by design**:
+///     it lands with the specials' stamina costs, not before.
 ///   * `GetResearchHack()` -- 1 site, and it is **false**. 0x004db630 answers
 ///     `[0x009969a8] != 0`, and the only writer of that global anywhere in the
 ///     image is 0x004dfdf0, a debug path that sets it and clears it again
@@ -3126,6 +3265,19 @@ HostOutcome m_set_build_frame(CallContext& ctx) {
 ///     0x006ffd20, which opens the transport window. A window.
 ///   * `Ship::ShowBuildAnimation/1` -- 1 site, `SHIPYARD_BUILD_SHIP.VS`, which
 ///     passes the shipyard's exit vector so the hull slides out along it.
+///     **Not only presentation, and a labelled gap.** 0x005c6a60 is a
+///     suspending entry point (it answers "again in 50 ms" until done): on
+///     its first pass it takes the new ship out of the shipyard's holder
+///     (0x005d3f20) at the holder's exit point (0x004db6c0), raises the build
+///     counter `[ship+0x230]` that `Ship::IsBuilding` reads, then slides the
+///     ship along the vector over `ShipBuildAnimTime` ms with a
+///     floating-point cosine easing, holding `[ship+0x230]` at the build
+///     frame; once the animation's last state has run it drops the counter
+///     to 0, restores the idle animation and hands the ship to the AI
+///     (0x0041f310). Here the ship stays in the holder `CreateShip` put it in
+///     until its first order takes it out, and `IsBuilding` is never true.
+///     Reproducing it needs a suspending entry with its own state and a
+///     fixed-point stand-in for the easing; recorded for a round of its own.
 ///   * `Obj::SetDebug/1` -- 1 site, and it is `DEBUG_SELECTION.VS` walking the
 ///     current selection to turn a debug overlay on. 0x005abcb0 normalises the
 ///     argument to 0 or 1 and calls the object's `vtbl+0xd4`.
@@ -3228,20 +3380,21 @@ HostOutcome m_set_parry_mode(CallContext& ctx) {
 /// `Unit::GetParryMode()` -- 2 sites, and the reason the field is stored.
 ///
 /// `0x005d9050` carries **the same specials gate as the setter**, before it
-/// reads: a unit without `Parry` answers 0 whatever the field holds. That is
-/// not redundancy here either -- `UNIT_LEAVE_PARRY_MODE_VERIFY.VS` asks
-/// `u.GetParryMode() == 1` over a whole selection, and a unit that cannot parry
-/// must not answer yes.
+/// reads -- bit 0 of the 64-bit specials word at `[obj+0x198]` -- and a unit
+/// without `Parry` answers **-1** whatever the field `[obj+0x1a0]` holds. Both
+/// verifiers depend on that: `UNIT_LEAVE_PARRY_MODE_VERIFY.VS` asks
+/// `GetParryMode() == 1` and `UNIT_ENTER_PARRY_MODE_VERIFY.VS` asks `== 0` over
+/// a whole selection, so a unit that cannot parry must answer neither.
 ///
-/// An unresolvable receiver answers 0 through the discard sink, like every
-/// other getter in this file.
+/// An unresolvable receiver prints *"called for an uninitialized or invalid
+/// object"* and **pushes nothing**, so the caller reads whatever was on the
+/// stack; 0 stands in for that here.
 HostOutcome m_get_parry_mode(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetParryMode: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  if (slot == nullptr || !class_has_special(*world, *slot, 0)) {
-    return HostOutcome::ok_with(Value::integer(0));
-  }
+  if (slot == nullptr) return HostOutcome::ok_with(Value::integer(0));
+  if (!class_has_special(*world, *slot, 0)) return HostOutcome::ok_with(Value::integer(-1));
   return HostOutcome::ok_with(Value::integer(slot->state.parry_mode));
 }
 
@@ -3430,8 +3583,9 @@ HostOutcome m_consume(CallContext& ctx) {
 /// object within `[obj+0xd4]` of its position -- the object's **range**, the
 /// slot `Catapult::GetPointOnTarget` reads as the maximum range, which the
 /// `Mist` class declares as `range="200"` -- through the spatial query at
-/// 0x00542100 with the flag filter at 0x005c9f20, and for each collected
-/// object that is a unit (`[obj+0x2c] & 0x400000`) whose tag at `[unit+0x14c]`
+/// 0x00542100 with the filter at 0x005c9f20 -- a unit (`[obj+0x2c] &
+/// 0x400000`) that is not dead (`vtbl+0x50`) -- and for each one whose tag at
+/// `[unit+0x14c]`
 /// resolves to nothing or to this very mist: folds a 1,600 ms marker into the
 /// sync hash (0x005d2980, bookkeeping, not behaviour), writes its own handle
 /// into the tag, calls the unit's `vtbl+0xa8` with `damage` -- the same
@@ -3463,7 +3617,8 @@ HostOutcome m_mist_action(CallContext& ctx) {
                            ClassFilter{}, around);
   for (const ObjectId id : around) {
     const WorldObject* slot = world->find(id);
-    if (slot == nullptr || !slot->state.flags.is_unit) continue;
+    // The collection's filter (0x005c9f20): a unit, and not dead.
+    if (slot == nullptr || !slot->state.flags.is_unit || slot->state.health <= 0) continue;
     // Another live mist's unit is not this one's to burn.
     if (slot->state.mist != kNoObject && slot->state.mist != self &&
         world->find(slot->state.mist) != nullptr) {
@@ -3484,8 +3639,9 @@ HostOutcome m_mist_action(CallContext& ctx) {
 /// `Obj::CoverOfMercyAction()` -- 1 site, `COVEROFMERCY_IDLE.VS`, once per
 /// animation while the cover has stamina.
 ///
-/// `0x005ca6a0` resolves the receiver, casts it to the `CVXSacrifice` layout
-/// (the type descriptor at 0x00824bcc) and hands it to 0x005ca5a0, which:
+/// `0x005ca6a0` resolves the receiver, casts it to **`CVXAreaEffect`** (the
+/// name at 0x00824bcc) -- anything else does nothing -- and hands it to
+/// 0x005ca5a0, which:
 /// walks the list at `[cover+0x14c]`..`[+0x150]` of handles it sheltered last
 /// time and clears `0x10000000` -- `ObjectFlags::half_damage` -- on every one
 /// that still resolves; builds a player query (0x00514080) from the cover's
@@ -3500,13 +3656,21 @@ HostOutcome m_mist_action(CallContext& ctx) {
 /// Here the list is kept the other way round, one `ObjectState::sheltered_by`
 /// per unit -- see that field for the one arrangement where the two differ
 /// -- and the war test is `PlayerTable::is_enemy` from the owner's side, the
-/// one-directional reading `Obj::IsEnemy` proved. An unowned unit is nobody's
-/// enemy and is sheltered. An invalid receiver does nothing.
+/// one-directional reading `Obj::IsEnemy` proved. The collector (0x005ca220)
+/// tests each unit's owner bit, the low half of `[obj+0x2c]`, against that
+/// mask, so **an unowned unit, whose owner half is zero, is not sheltered**;
+/// it also skips templates and lets a hidden unit through only when its
+/// owner is in the cover owner's side mask (`[player+0x18]`), which is not
+/// modelled -- a hidden friendly unit is sheltered here. No life test. An
+/// invalid receiver does nothing.
 HostOutcome m_cover_of_mercy_action(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("CoverOfMercyAction: no world");
   const WorldObject* cover = object_of(*world, ctx.arg(0));
-  if (cover == nullptr) return HostOutcome::ok_void();
+  if (cover == nullptr || cover->object == nullptr ||
+      !cover->object->is_a(NativeClass::area_effect)) {
+    return HostOutcome::ok_void();
+  }
   const ObjectId self = cover->id;
   const PlayerId owner = cover->state.owner;
   const Point centre = world->resolve_position(self);
@@ -3527,10 +3691,10 @@ HostOutcome m_cover_of_mercy_action(CallContext& ctx) {
   for (const ObjectId id : around) {
     const WorldObject* slot = world->find(id);
     if (slot == nullptr || !slot->state.flags.is_unit) continue;
-    // `is_enemy` answers false for `kNoPlayer` on its own, so the guard is an
-    // equivalence the sweep labels; it is kept because the reading -- nobody's
-    // unit is nobody's enemy -- is the point, not the table's edge.
-    if (slot->state.owner != kNoPlayer && players.is_enemy(owner, slot->state.owner)) continue;
+    // The owner bit against the friendly mask: no owner, no bit, no shelter.
+    if (!PlayerTable::is_valid(slot->state.owner) || players.is_enemy(owner, slot->state.owner)) {
+      continue;
+    }
     if (ObjectState* state = world->mutable_state(id); state != nullptr) {
       state->flags.half_damage = true;
       state->sheltered_by = self;
@@ -3583,6 +3747,14 @@ HostOutcome m_magic_action_end(CallContext& ctx) {
 /// `HostContext::local_player`. A session with no local player has no
 /// starving army, which is what a headless run of the original also reports,
 /// its notification list being the screen's.
+///
+/// **Two parts of the position form are not reproduced**, both of the
+/// registry this does not keep: on a hit `StarvingArmyPos` consumes the
+/// record (0x00559430) and answers, of the record's objects, the one nearest
+/// a point it holds, where this answers the first hungry unit. And
+/// `HasStarvingArmy` has a zero-argument form (0x0055a7c0) that answers
+/// whether the `army starving` key is in the registry at all; no shipped site
+/// calls it and it is not bound.
 template <bool kPosition>
 HostOutcome fn_starving_army(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -3694,10 +3866,14 @@ HostOutcome fn_clamp(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(value));
 }
 
-/// `Obj::IsMilitary` (0x005ad680) and `Obj::IsSentry` -- one shape twice.
+/// `Obj::IsMilitary` (0x005ad680) and `Obj::IsSentry` (0x005ad500) -- one
+/// shape twice.
 ///
-/// Each holds a lazily-cached class handle -- `"Military"` and `"Sentry"` --
-/// and runs an is-heir-of test against the receiver's class descriptor. An
+/// Each holds a lazily-cached class handle -- `"Military"` (0x00540130) and
+/// `"Sentry"` (0x005400c0), looked up by name once (0x00409e40) -- and runs the
+/// is-heir-of test (0x0059a220): the receiver's class descriptor `[obj+0x3c]`,
+/// itself included, then up `[cls+0xe4]`, compared against the handle; a name
+/// the lookup did not find is a null handle and false. No native-class test. An
 /// unresolvable receiver prints its own *"called for an uninitialized or invalid
 /// object"* into the discard sink and answers **false**, which is an ordinary
 /// return here.
@@ -3723,6 +3899,10 @@ HostOutcome m_class_predicate(CallContext& ctx) {
 /// tower scripts depend on it: `TOWER_GUARD.VS` writes
 /// `target = .GetUITarget.AsUnit; if (target.IsAlive) ...`, so an invalid
 /// handle has to flow through `AsUnit` and fail `IsAlive` rather than trap.
+///
+/// The setter (0x004ddbf0) resolves the argument first and the receiver
+/// second; an unresolvable receiver writes nothing and says nothing, and an
+/// unresolvable argument stores `0xffff`. Neither tests a class or a life.
 ///
 /// See `ObjectState::ui_target` for why it is hashed.
 HostOutcome m_get_ui_target(CallContext& ctx) {
@@ -3815,9 +3995,26 @@ HostOutcome m_teleport_destination(CallContext& ctx) {
 /// installation; this is the original's rule because a class that split them
 /// would be answered wrongly by the other one, and silently.
 ///
-/// A class that declares neither anywhere up its chain answers `(-1, -1)`, and
-/// so does a receiver that names nothing. That is a sentinel a caller could
-/// test, and no caller does: all eleven sites scale it and add it to a position.
+/// A class that declares neither anywhere up its chain answers `(-1, -1)`. That
+/// is a sentinel a caller could test, and no caller does: all eleven sites
+/// scale it and add it to a position.
+///
+/// **Read against the body (`0x004dd330`).** It resolves the receiver through
+/// the object table, takes the class record at `[obj+0x3c]` and answers
+/// `([cls+0xacc], [cls+0xad0])`, or `(-1, -1)` when the first is the absent
+/// marker. **No class test on the receiver**: anything with a class answers.
+/// The pair is filled by the class loader (0x0059f540, `atol` of each
+/// attribute) and inherited as a pair at 0x0059c310 -- either half absent,
+/// both copied from the parent. `atol` would take `"80px"` as 80 where the
+/// strict parse here skips to the parent; all ten shipped declarations are
+/// plain integers, so the two agree on the installation.
+///
+/// **An unresolvable receiver is the original's own fault, and `(-1, -1)` stands
+/// in for it.** That arm prints *"called for an uninitialized or invalid
+/// object"* into the discard sink and pushes a *one-byte* `1` where an
+/// eight-byte point belongs -- the bool-returning failure tail -- so the
+/// caller reads seven bytes of whatever was below the receiver. There is no
+/// value to reproduce.
 HostOutcome m_exit_vector(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("exit_vector: no world");
@@ -4226,14 +4423,24 @@ HostOutcome m_get_exit_point(CallContext& ctx) {
 /// answered `false` rather than correctly. That is a real limit and it is
 /// written down rather than hidden, on the evidence that no shipped script
 /// names one and that inventing a meaning for them would be worse.
-[[nodiscard]] std::uint32_t pack_unit_flags(const ObjectFlags& flags) noexcept {
+///
+/// **`Squad::GetFlags` is another entry point, and nothing reaches it.**
+/// `0x004216d0` takes no argument -- its signature is an int return and the
+/// squad receiver alone -- and answers the squad's flags word `[squad+0x30]`
+/// (`Squad::flags` here) widened to an int, through the squad table lookup
+/// 0x00443e30, with no validity test. All five shipped `GetFlags` sites pass a
+/// mask, on `squad.Leader` or a unit, so they are `Unit::GetFlags/1`; the
+/// zero-argument form has no caller and is not bound, as `UnitsGuardingSettlement`
+/// is not.
+[[nodiscard]] std::uint32_t pack_unit_flags(const ObjectState& state, GameTime now) noexcept {
+  const ObjectFlags& flags = state.flags;
   return (flags.autocast ? 0x00000004u : 0u) |    // bit 2  Hero::SetAutocast
          (flags.no_ai ? 0x00040000u : 0u) |       // bit 18 UNITFLAG_NOAI
          (flags.entering ? 0x00100000u : 0u) |    // bit 20 Unit::SetEntering
          (flags.in_air ? 0x00400000u : 0u) |      // bit 22 Flying::IsInAir
          (flags.noselect ? 0x00800000u : 0u) |    // bit 23 Unit::SetNoselectFlag
          (flags.on_minimap ? 0x04000000u : 0u) |  // bit 26 Unit::SetMinimapFlag
-         (flags.cursed ? 0x08000000u : 0u);       // bit 27 Unit::IsCursed
+         (state.cursed_at(now) ? 0x08000000u : 0u);  // bit 27 Unit::IsCursed
 }
 
 HostOutcome m_get_flags(CallContext& ctx) {
@@ -4246,41 +4453,56 @@ HostOutcome m_get_flags(CallContext& ctx) {
           ? static_cast<std::uint32_t>(static_cast<std::uint64_t>(ctx.arg(1).as_integer()))
           : 0u;
   return HostOutcome::ok_with(
-      Value::boolean((pack_unit_flags(found->state.flags) & mask) != 0));
+      Value::boolean((pack_unit_flags(found->state, world->time()) & mask) != 0));
 }
 
-/// `Unit::SetNoselectFlag(bool)` -- 6 sites, every one of them passing `true`.
+/// `Unit::SetNoselectFlag(bool)` -- 6 sites, every one of them passing `true`,
+/// and every one an ambient walker: `FISH_IDLE.VS` on its fish and
+/// `SETTLEMENT_BEHAVIOR_AMBIENT.VS` on the hens, villagers and messengers it
+/// places.
 ///
-/// `0x005d8750` writes bit 23 of `[obj+0x194]`, and **the mask is the same
-/// `0x00800000` the Building bit uses on the other word**, which is the sort of
-/// coincidence worth writing down once rather than rediscovering.
+/// `0x005d8750` pops a one-byte bool and the receiver handle, and resolves the
+/// handle through the object table; an unresolvable one prints *"called for an
+/// uninitialized or invalid object"* into the discard sink and returns. No
+/// class test, no `IsDead` probe. Otherwise it writes bit 23 of `[obj+0x194]`
+/// (`0x00800000`, the same mask the Building bit uses on the other word),
+/// set or cleared by the bool.
 ///
-/// It follows the *member* shape of `SetNoAIFlag` (0x005de600) and not the free
-/// one: the only gate is whether the receiver resolves. No class test, no
-/// `IsDead` probe.
+/// **What the bit means is "not the AI's".** Before it writes, and only when
+/// the bool is true and the bit is still clear, it calls 0x0041eee0 -- the
+/// same AI unregister the unit death virtual (0x005db270) and the erase
+/// (0x005db230) end with, and *not* a deselection. 0x0041eee0 does nothing
+/// unless the AI manager exists (`[0x8c8e58]`), the object is not a spawn
+/// template (`[obj+0x2c] & 0x8000000`), the bit is clear, it has an owner
+/// (`[obj+0x70]`) and a squad handle (`[obj+0x174]`); then 0x004448a0 clears
+/// the handle and takes the unit out of its squad (0x00444750), and takes its
+/// worth off the owner AI's running tallies. The bit then keeps it out: the
+/// placement hook (0x0041e820) and `AddToSquad` itself (0x00446a70, its first
+/// test) refuse an object carrying it, so a noselect walker never joins a
+/// squad again. That is `HeroSystem::ai_unregister` here, and the two
+/// refusals are in sim/squad.cpp.
 ///
-/// **One side effect is transcribed and one is not.** On a false-to-true
-/// transition the original calls `0x0041eee0`, which drops the object out of
-/// the current selection -- so flipping the bit on a selected unit deselects
-/// it, and an implementation that only wrote the bit would leave it selected.
-/// That is done here through `SelectionTable`. What is *not* done is the rest
-/// of `0x0041eee0`, which also touches the minimap and the interface; those are
-/// not this layer's.
+/// The selection is not touched: a selected unit stays selected. What keeps a
+/// flagged unit from being *picked* is the select paths' own test of the bit
+/// (sim/orders.cpp).
+///
+/// **One gap, labelled.** The owner AI's tallies 0x004448a0 decrements -- a
+/// count and a summed power per kind at `[[owner+0x8c]+0x24..0x30]`, and a
+/// count per class name -- are not running counters in this engine; nothing
+/// here keeps them for the unregister to correct.
 HostOutcome m_set_noselect_flag(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetNoselectFlag: no world");
   const WorldObject* found = object_of(*world, ctx.arg(0));
-  // An unresolvable receiver writes nothing and says nothing.
   if (found == nullptr) return HostOutcome::ok_void();
-  const bool set = ctx.count() > 1 && ctx.arg(1).is_integer() && ctx.arg(1).as_integer() != 0;
+  const bool set = ctx.count() > 1 && ctx.arg(1).truthy_scalar();
   ObjectState* state = world->mutable_state(found->id);
   if (state == nullptr) return HostOutcome::ok_void();
-  // The transition, not the value: `0x005d8750` tests the bit before it writes,
-  // so setting a flag that is already set deselects nothing.
-  if (set && !state->flags.noselect) {
-    if (HostContext* context = host_context_of(ctx);
-        context != nullptr && context->selections != nullptr) {
-      (void)context->selections->forget(found->id);
+  if (set && !state->flags.noselect && !state->flags.unspawned && state->owner != kNoPlayer) {
+    const AiSystem* ai = ai_system_of(*world);
+    HeroSystem* heroes = hero_system_of(*world);
+    if (ai != nullptr && ai->manager_started() && heroes != nullptr) {
+      heroes->ai_unregister(*world, found->id);
     }
   }
   state->flags.noselect = set;
@@ -4365,26 +4587,52 @@ HostOutcome fn_abs(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(out));
 }
 
-/// `Unit::Curse()` and `Unit::IsCursed()` -- 3 sites each, one script between
-/// them.
+/// `Unit::Curse()` and `Unit::IsCursed()` -- 3 sites each, all in the three
+/// `SHAMAN_*.VS` scripts, which round-trip them: `if (tgt.IsCursed) break;`
+/// guards the loop that later runs `tgt.Curse();`.
 ///
-/// `SHAMAN_IDLE.VS` is the entire corpus for both, and it round-trips them:
-/// `if (tgt.IsCursed) break;` guards the loop that eleven lines later runs
-/// `tgt.Curse();`. That is the behaviour reproduced here, and
-/// `ObjectFlags::cursed` says at length what is *not* established -- the
-/// original's `Curse` hands off to the spell machinery at 0x005d4880 and no
-/// write to the bit was found anywhere in `.text`.
+/// `Curse` (0x005d90c0) resolves the receiver -- an unresolvable one prints
+/// *"called for an uninitialized or invalid object"* and returns -- and calls
+/// 0x005d4880 with 0, the worker it shares with `Unit::Bless` (0x005d9100,
+/// which passes 1 and works bit 0). For a curse that worker, **only when bit
+/// 27 of `[obj+0x194]` is clear**:
 ///
-/// `IsCursed` on an unresolvable receiver answers **false** after a complaint,
-/// which is 0x005d896f writing a zero byte; the shaman's guard reads that as
-/// "not cursed, go ahead", which is the branch it wants for a target that has
-/// stopped existing.
+///   1. cures a blessing first: when bit 0 is set it runs the cure 0x005d4800,
+///      which clears it and drops the effect object at `[obj+0x1c6]`;
+///   2. sets bit 27 (a masked set, which is why a sweep for an `or` on the word
+///      found no writer);
+///   3. spawns the curse's feedback (class index 0x18) and keeps its handle at
+///      `[obj+0x1c6]` -- presentation, not reproduced;
+///   4. arms the object's timer `0x19ec6e2` for `CurseTimeout` ms (`[GamePlay]`
+///      in `CONST.INI`, 15,000, read once and cached), re-arming it if one is
+///      pending; its handler (0x00512090 -> 0x005d4970) is the cure, which
+///      clears bit 27 again.
+///
+/// So **a curse lasts fifteen seconds**, and a shaman whose target's curse
+/// has lifted curses it again. Here the timer is `ObjectState::curse_until`
+/// and the bit is live while the clock is short of it (`cursed_at`).
+/// `Bless` has no shipped site and is not bound, so step 1 never has a
+/// blessing to cure.
+///
+/// `IsCursed` (0x005d8940) answers bit 27, and **false** after a complaint on
+/// an unresolvable receiver; the shaman's guard reads that as "not cursed, go
+/// ahead", which is the branch it wants for a target that has stopped
+/// existing.
 HostOutcome m_curse(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Curse: no world");
-  for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
-    if (ObjectState* state = world->mutable_state(id); state != nullptr) state->flags.cursed = true;
+  const WorldObject* slot = object_of(*world, ctx.arg(0));
+  if (slot == nullptr) return HostOutcome::ok_void();
+  ObjectState* state = world->mutable_state(slot->id);
+  if (state == nullptr) return HostOutcome::ok_void();
+  const GameTime now = world->time();
+  if (state->cursed_at(now)) return HostOutcome::ok_void();
+  std::int32_t timeout = 0;
+  if (const EnvSystem* env = env_of(*world); env != nullptr) {
+    (void)env->constant("CurseTimeout", timeout);
   }
+  state->flags.cursed = true;
+  state->curse_until = now + timeout;
   return HostOutcome::ok_void();
 }
 
@@ -4392,7 +4640,8 @@ HostOutcome m_is_cursed(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsCursed: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  return HostOutcome::ok_with(Value::boolean(slot != nullptr && slot->state.flags.cursed));
+  return HostOutcome::ok_with(
+      Value::boolean(slot != nullptr && slot->state.cursed_at(world->time())));
 }
 
 /// `Unit::SetLastAttackTime()` -- 40 sites, and it stores nothing here.
@@ -4432,7 +4681,8 @@ HostOutcome m_set_last_attack_time(CallContext& ctx) {
 ///
 /// **Each name is registered twice in `gbr.exe`**, once over `(int, int)` at
 /// 0x00694a60 / 0x00694a90 and once over a second type at 0x00695020 /
-/// 0x00695050, and the second pair's type code is one the 35 `RegisterType`
+/// 0x00695060 -- `double`s, eight bytes each on the VM stack, the same
+/// comparisons -- and the second pair's type code is one the 35 `RegisterType`
 /// sites do not cover. This registry keys on `(kind, name, arity)` and the
 /// argument's runtime type discriminates -- the same arrangement
 /// `UnitsInSettlement` and `SpawnGroupInHolder` already use -- so one body
@@ -4618,6 +4868,13 @@ constexpr std::uint32_t kTerrainWater = 13;
 /// Note the cell size: 64 here, where the object grid the scans walk is 256 and
 /// the obstruction bitmap is 16. Three grids, three resolutions, and the number
 /// belongs to the layer rather than to the map.
+///
+/// The bounds test is on the *biased* point against the inclusive world
+/// rectangle `(0, 0, w - 1, h - 1)` at `[grid+0xb4..0xc0]`; the layer's extent
+/// is `w / 64` cells, so `cx < width` here is that same test on every shipped
+/// map, whose sizes (8192, 16384, 32768) are all multiples of 64. The cell is
+/// `((x + 32) >> 6, (y + 32) >> 6)`: one byte of a row of dwords, `[layer +
+/// 0x10a4]` dwords to a row.
 HostOutcome fn_is_point_in_water(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsPointInWater: no world");
@@ -4710,14 +4967,27 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
 //
 // `StonehengeNumControllingMages` (`0x004dde80`) and `IsStonehengeControlable`
 // (`0x004ddd70`) are byte-for-byte the same function but for two lines. Both
-// gate on the receiver's class being an heir of `Stonehenge`, both scan a circle
-// of the building's **own `sight`** -- `entityDef + 0x2d0`, which the class
-// reader fills from the `sight` property -- and both run the visitor at
-// `0x004db580`.
+// gate on the receiver being a `CVXTownHall` whose class is an heir of
+// `Stonehenge` (0x0059c020), both scan a circle of the building's **class
+// `sight`** -- `[cls+0x2d0]`, which the class reader fills from the `sight`
+// property, and not the instance radius `[obj+0xd0]` that `SetSight` moves --
+// and both run the visitor at `0x004db580` over the object grid (0x004dc6f0,
+// cells in row order, only objects carrying `kSyncUnit` -- the visitor's
+// first word, `0x400000`).
+//
+// **The visitor's state is three words** -- that mask, a player record, a
+// count -- and the two entry points differ only in the player word's seed: the
+// counter seeds none, the predicate the local player's record
+// (`[world+0x12c8]`, 0x004dddfa). Read in the disassembly; Ghidra's stack
+// slots overlap the query's there.
+//
+// A receiver that does not resolve, or is not a stonehenge, prints one of two
+// complaints into the discard sink and answers 0 or false.
 //
 // **The count is "mages of one alliance, provided nobody hostile is also
 // here".** The visitor skips the dead and the spawn templates, then requires an
-// heir of `Military` *or* `BaseMage`; the first qualifying object it meets sets
+// heir of `Military` *or* `BaseMage` (0x00540130, 0x005401a0; anything else is
+// passed over without a word); the first qualifying object it meets sets
 // the reference player, and after that each one's diplomacy row against that
 // reference decides:
 //
@@ -4751,6 +5021,14 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
 /// `reference` is the player the row is read against, or `kNoPlayer` to adopt
 /// the first qualifying object's owner -- which is the whole difference between
 /// the two entry points.
+///
+/// **A known gap, by design: the order of the walk.** The original visits the
+/// object grid's cells row by row and each cell's list in its own order; this
+/// engine's spatial queries answer in spawn order (`sim/spatial_index.hpp`:
+/// "the order the grid holds its entries in is not" state). The predicate is
+/// unaffected -- its reference is pinned -- but the counter adopts the *first*
+/// qualifying owner, and `share_control` is one-directional, so with two
+/// players' mages under a one-sided grant the two orders can count differently.
 [[nodiscard]] std::int32_t stonehenge_mages(World& world, const WorldObject& henge,
                                             PlayerId reference) {
   const ClassGraph* graph = world.class_graph();
@@ -4759,8 +5037,15 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
   const ClassFilter mage = ClassFilter::parse("BaseMage", graph);
   if (military.match_all && mage.match_all) return 0;
 
+  // The class record's sight (`[cls+0x2d0]`), not the instance's `[obj+0xd0]`
+  // that `SetSight` moves: the two start equal, and only the class's is read.
+  std::int32_t radius = 0;
+  if (henge.class_index == kNoClass ||
+      !parse_int(graph->property(henge.class_index, "sight"), radius)) {
+    radius = 0;
+  }
   std::vector<ObjectId> found;
-  world.objects_in_radius(world.resolve_position(henge.id), henge.sight, ClassFilter{}, found);
+  world.objects_in_radius(world.resolve_position(henge.id), radius, ClassFilter{}, found);
   std::int32_t count = 0;
   for (const ObjectId id : found) {
     const WorldObject* other = world.find(id);
@@ -5056,7 +5341,10 @@ HostOutcome m_apply_ai_transport(CallContext& ctx) {
 /// `0x00529510` is the visitor, and each of its clauses is here:
 ///
 ///   * skip the dead (`vtbl[0x50]`);
-///   * skip an heir of `PeasantAmbient`, and of `Animal` -- see below;
+///   * skip an heir of `PeasantAmbient`, and an heir of `Animal` **that does
+///     no damage** -- `[obj+0xdc]`, the instance field the object's persist
+///     table (0x005b5df0) names `damage` and `Obj::damage` reads: a deer is
+///     passed over, a wolf at the gate is somebody;
 ///   * skip a class whose `ignore_passability` property is set;
 ///   * **friend** when bit 0 of the gate's own diplomacy row for that owner is
 ///     set, which is `PlayerTable::is_enemy` negated and is not the transpose;
@@ -5066,12 +5354,18 @@ HostOutcome m_apply_ai_transport(CallContext& ctx) {
 /// Both fields are set to the literal 1 rather than incremented, so they are
 /// booleans in the original too and `!= 0` loses nothing.
 ///
-/// **One clause is widened, deliberately.** The original skips an `Animal` only
-/// when the dword at `[obj+0xdc]` is zero -- an animal with a non-zero one *is*
-/// counted -- and that field has two comparison sites in the whole executable
-/// and no identified meaning. Rather than invent a condition, every `Animal` is
-/// skipped here, which is the reading that agrees with the original wherever
-/// `[obj+0xdc]` is zero and is named where it might not be.
+/// `[obj+0xdc]`, the object's own damage: the combatant's, when the combat
+/// system holds the object, which is what `Obj::damage` answers; otherwise the
+/// class's `damage`, which is what the object was built with.
+[[nodiscard]] std::int32_t object_damage(World& world, const WorldObject& slot) {
+  if (const CombatSystem* combat = combat_system_of(world); combat != nullptr) {
+    if (const Combatant* unit = combat->find(slot.id); unit != nullptr) {
+      return combat->attack_of(*unit);
+    }
+  }
+  return class_int(world, slot, "damage");
+}
+
 void gate_look_around(World& world, const WorldObject& gate, std::int32_t radius) {
   ObjectState* state = world.mutable_state(gate.id);
   if (state == nullptr) return;
@@ -5090,7 +5384,7 @@ void gate_look_around(World& world, const WorldObject& gate, std::int32_t radius
     if (graph != nullptr && other->class_index != kNoClass) {
       const std::string_view ignores = graph->property(other->class_index, "ignore_passability");
       if (!ignores.empty() && ignores != "0") continue;
-      if (class_is(world, *other, "Animal")) continue;
+      if (class_is(world, *other, "Animal") && object_damage(world, *other) == 0) continue;
       if (class_is(world, *other, "PeasantAmbient")) continue;
     }
     if (!world.players().is_enemy(state->owner, other->state.owner)) {
@@ -5128,6 +5422,16 @@ HostOutcome m_gate_saw(CallContext& ctx) {
 
 /// `Gate::OpenNow` / `CloseNow` -- write the target and return. Neither
 /// suspends; see the section note.
+///
+/// `0x00529c50` (open) and `0x00529cd0` (close): an unresolvable receiver
+/// prints *"called for an uninitialized or invalid object"* into the discard
+/// sink. Otherwise, **only when the gate's building mode `[gate+0x204]` is not
+/// 3 and its target `[gate+0x208]` is not already the one asked for**, the
+/// target is written (1 open, 0 closed) and the move latch `[gate+0x228]` is
+/// cleared, which makes the gate's tick start a move from where the portcullis
+/// stands. A call that repeats the current target changes nothing -- not the
+/// target, not the latch, not the move in progress. No class test on the
+/// receiver: a non-gate's fields at those offsets would be written.
 template <bool kOpen>
 HostOutcome m_gate_set(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -5141,6 +5445,8 @@ HostOutcome m_gate_set(CallContext& ctx) {
   // health has reached zero, which is the nearest thing it can test and is
   // named as an inference rather than a transcription.
   if (slot->state.health <= 0) return HostOutcome::ok_void();
+  // Already the target: nothing is written and the move in progress runs on.
+  if (slot->state.flags.gate_open == kOpen) return HostOutcome::ok_void();
   // The target, and the portcullis's move towards it from wherever it stands
   // now -- the latch the original clears here restarts that move on its next
   // tick. Where the move has got to decides the barrier; see `sim/gate.hpp`.
@@ -5486,6 +5792,15 @@ HostOutcome m_point_clamp_to_map(CallContext& ctx) {
 }
 
 /// The four edges, and the two extents that are one more than a difference.
+///
+/// A rect is four ints on the VM stack -- left, top, right, bottom. The
+/// by-value bodies (`left` 0x00695140, `top` 0x00695180, `right` 0x006951c0,
+/// `bottom` 0x00695200, `width` 0x00696c50, `height` 0x00696c90) push one int.
+/// `gbr.exe` registers a second form of each edge over a rect *reference*
+/// (`right` 0x00695100 and `bottom` 0x00695120 among them) that answers a
+/// reference to the field, so `rc.right = x` would write through it; no
+/// shipped script assigns an edge, every one of the sites reads, and a read of
+/// either form is the same number.
 HostOutcome m_rect_edge(CallContext& ctx, int which) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("rect: no world");
@@ -5796,6 +6111,12 @@ ObjectId place_catapult(World& world, ClassIndex class_index, Point at, std::int
       const SettlementId town = economy->create(world, init);
       if (town != kNoSettlement) (void)economy->add_building(world, town, id, init.anchor_max_health);
     }
+  }
+  // The last thing 0x004e3be0 does: `1` into the player's env scope under
+  // `CatapultBuilt` (0x004e3d7a..0x004e3da1, `/%s/Player%d/%s` with the
+  // script's 1-based number). `BUILDINGSADVICE5.VS` waits on exactly that.
+  if (EnvSystem* env = env_of(world); env != nullptr) {
+    env->env().write_int(EnvScope::for_player(player), "CatapultBuilt", 1);
   }
   return id;
 }

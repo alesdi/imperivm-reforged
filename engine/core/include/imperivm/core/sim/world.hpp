@@ -812,6 +812,18 @@ class NamedObjectTable {
   /// to the spawned hero afterwards.
   bool rebind(std::string_view name, ObjectId id);
 
+  /// Take every name bound to `id` away from it -- `Obj::SetName("")`, whose
+  /// worker (0x005b6120) deletes the object's own name record. The entries
+  /// stay, naming nothing, so that an index a script already holds stays an
+  /// index; `find` treats them as absent, so the name is free again and
+  /// `GetNamedObj` answers the invalid handle for it. Returns how many.
+  std::size_t unbind_object(ObjectId id) noexcept;
+
+  /// Append an entry as a save holds it: a removed name (naming nothing) is
+  /// kept where it stood, so that indices survive the round trip. False only
+  /// for a second *live* binding of one name, which the table never holds.
+  bool restore(std::string_view name, ObjectId id);
+
   /// The name bound to `object`, or empty -- `Obj::name`'s answer.
   ///
   /// **Ascending name order, and that is not this table's own order.**
