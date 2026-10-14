@@ -1,0 +1,2 @@
+# world_host-1: the first 115 rows of world_host in host-ledger.md (Obj::player .. Unit::SetMinimapFlag)
+0x004c63a0	verified	Range(0, n-1) on the game LCG (0x0063ff00): no draw when low == high, swapped arm draws, high dword of (span+1)*state, no scramble; sim/rng.hpp

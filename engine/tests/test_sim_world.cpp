@@ -1380,17 +1380,35 @@ TEST(sim_rand_is_exclusive_of_its_bound) {
   CHECK(heads > 4000 && heads < 6000);
 }
 
-TEST(sim_rand_draws_even_when_the_bound_is_degenerate) {
-  // Whether a call advances the stream is itself synchronised state, so a bound
-  // of 1 or 0 must still move it -- otherwise the peers' stream positions
-  // depend on a value one of them computed differently.
-  Rng a(42);
-  Rng b(42);
-  CHECK(a.below(1) == 0);
-  CHECK(a.below(0) == 0);
-  b.next();
-  b.next();
-  CHECK(a.state() == b.state());
+TEST(sim_rand_is_gbr_exe_range_on_its_lcg) {
+  // `rand(n)` (0x004c63a0) is the game generator's Range(0, n - 1)
+  // (0x0063ff00): equal ends answer without drawing, a reversed range is
+  // swapped and draws, and a draw is the high dword of (span + 1) times the
+  // raw NR LCG state -- no output scramble. Whether a call advances the
+  // stream is synchronised state, so the no-draw case is part of the rule.
+  Rng a(12345);
+  const std::int32_t expected[] = {2, 1, 54, 63, 91};
+  for (const std::int32_t value : expected) CHECK(a.below(100) == value);
+  CHECK(a.state() == 0xe8f7b1b8u);
+
+  Rng one(12345);
+  CHECK(one.below(1) == 0);
+  CHECK(one.state() == 12345u);  // Range(0, 0): no draw
+  CHECK(one.between(7, 7) == 7);
+  CHECK(one.state() == 12345u);
+
+  Rng zero(12345);
+  CHECK(zero.below(0) == -1);  // Range(0, -1): swapped to [-1, 0], one draw
+  CHECK(zero.state() == 87628868u);
+
+  Rng swapped(12345);
+  Rng straight(12345);
+  CHECK(swapped.between(5, -5) == straight.between(-5, 5));
+  CHECK(swapped.state() == straight.state());
+
+  Rng first(0);
+  CHECK(first.below(360) == 84);
+  CHECK(first.state() == 1013904223u);
 }
 
 TEST(sim_rng_between_is_inclusive_at_both_ends) {

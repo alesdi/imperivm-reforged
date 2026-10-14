@@ -238,8 +238,15 @@ namespace {
 // free functions
 // --------------------------------------------------------------------------
 
-/// `rand(n)` -- uniform in `[0, n)`. See sim/rng.hpp for the three call sites
-/// in the shipped corpus that prove the bound is exclusive.
+/// `rand(n)` (0x004c63a0): pops the integer and answers the game generator's
+/// Range(0, n - 1) (`[game+0x12a0]`, vtable slot `+0x14`, 0x0063ff00) -- one
+/// call, nothing else. So `rand(n)` is uniform in `[0, n)` for `n >= 2`,
+/// `rand(1)` is 0 **without advancing the stream**, and `rand(0)` or a
+/// negative `n` is Range's swapped arm: it draws, and answers in `[n - 1, 0]`
+/// (`rand(0)` is -1 or 0). `Rng::below` is exactly this; sim/rng.hpp has the
+/// generator and the corpus evidence for the exclusive bound. A non-integer
+/// cannot reach the body (the compiler types the argument), so the refusal
+/// below is this engine's guard, not a behaviour.
 HostOutcome fn_rand(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("rand: no world");
@@ -5719,6 +5726,12 @@ constexpr Cardinal kCardinals[] = {
 }
 
 }  // namespace
+
+bool object_is_dead(const WorldObject& slot) noexcept {
+  if (slot.state.health > 0) return false;
+  if (!slot.state.flags.is_building) return true;
+  return slot.object != nullptr && slot.object->is_a(NativeClass::catapult);
+}
 
 bool unit_has_freedom(World& world, ObjectId id) {
   const WorldObject* slot = world.find(id);

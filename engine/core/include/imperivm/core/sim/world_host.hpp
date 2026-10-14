@@ -260,6 +260,23 @@ class WorldHost : public script::Host {
 /// inside the death that fired it (`sim/hooks.hpp`).
 std::size_t reap_departed(script::Scheduler& scheduler, World& world);
 
+/// Whether `gbr.exe` calls this object dead: its `vtbl + 0x50`, the one virtual
+/// `Obj::IsAlive` (0x005aae00), `Obj::IsDead` (0x005aae50), the named-object
+/// purge, every query sweep's candidate filter and the `ObjList` membership
+/// bodies all ask.
+///
+/// Across all 22 object vtables that slot is one of two functions. 0x004e1f50
+/// answers `[obj+0xc0] == 0` -- health gone -- and is what the unit vtables,
+/// the catapult's (0x007baee0) and the decor-like classes carry. 0x00746ea0
+/// answers "not dead", always, and is what exactly seven carry: the building
+/// family's -- building, town hall, outpost, barrack, tavern, gate, teleport --
+/// which is every building heir but the catapult. So a building at no health
+/// is broken but not dead, and a siege engine at no health is dead; the same
+/// split `CombatSystem` makes when a blow brings something to zero
+/// (`dies_at_no_health` in sim/combat.cpp). Health is clamped at zero by every
+/// writer, so `<= 0` here is the original's `== 0`.
+[[nodiscard]] bool object_is_dead(const WorldObject& slot) noexcept;
+
 /// `Unit::HasFreedom` (0x005d7d30): bit 30 of the unit's specials word
 /// (`[obj+0x198] & 0x40000000`, the `freedom` special, which the class's
 /// `unit_specials` fills at construction) **or** a class descended from
