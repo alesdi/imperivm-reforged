@@ -51,3 +51,6 @@
 0x005ad450	partial	whole string as one exact case-sensitive key (0x00409e40/0x00409350), then walk [class+0xe4]; fixed (was a comma list); altid keying of the map 0x009bdb00 not traced
 0x005aa350	verified	floor isqrt of the stored-position distance to the point, less own radius; miss -1 (was 0, and measured from the holder)
 0x005aa3e0	verified	argument then receiver checked (-1 each); 0x005a77b0: stored positions, less both radii
+0x004dce60	verified	unit then receiver checked; nearest door (0x0056fba0) of the land/water list by the unit class's water_unit (+0xb30) from the unit's stored position; fallbacks unit pos / building pos / (0,0); no life test (fixed: health test, ship-class flag, holder walk)
+0x004dcfa0	partial	(Unit, point): miss -> the point; water from the unit class's water_unit (fixed, was ship class); one rand(0,10000) draw over 1/(d^4+1e-7) weights in double, fixed point here
+0x004dd080	partial	(point, bool): same worker 0x004db6c0; double-precision weights approximated in fixed point (core has no floats)

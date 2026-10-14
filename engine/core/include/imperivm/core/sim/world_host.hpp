@@ -350,9 +350,15 @@ void install_deferred_erase(script::Scheduler& scheduler) noexcept;
 /// Exported because `Squad::UseTeleport` needs the same door: 0x005cda00 plus
 /// 0x004db650 is the same pair `0x004dce60` runs, and one derivation of the
 /// list is the point. `water` picks the deep-water list over the land one;
-/// `GetEnterPoint` passes whether the unit is a ship and `UseTeleport` passes a
-/// literal false.
+/// `GetEnterPoint` passes the unit class's `water_unit` and `UseTeleport`
+/// passes a literal false.
+///
+/// The id form measures from the unit's resolved position (the holder walk),
+/// which is `UseTeleport`'s; `GetEnterPoint` measures from the unit's stored
+/// position and uses the point form.
 [[nodiscard]] Point enter_point_near(const World& world, ObjectId building, ObjectId unit,
+                                     bool water);
+[[nodiscard]] Point enter_point_near(const World& world, ObjectId building, Point from,
                                      bool water);
 
 /// `Building::IsVeryBroken` -- `health < maxhealth / 20`, truncating.

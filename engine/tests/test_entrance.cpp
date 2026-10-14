@@ -192,6 +192,14 @@ struct Bench {
     graph.add(bytes_of(R"(<class id="RShipyard" cpp_class="CVXBuilding" parent="BaseShipyard"/>)"),
               "rshipyard.sc.xml");
     graph.add(bytes_of(R"(<class id="Hut" cpp_class="CVXBuilding" parent=""/>)"), "hut.sc.xml");
+    // What makes a mover water-borne to the door pickers: the class's
+    // `water_unit` (class +0xb30), not its native class.
+    graph.add(bytes_of(R"(<class id="Galley" cpp_class="CVXShip" parent="">
+      <properties water_unit="1"/></class>)"),
+              "galley.sc.xml");
+    graph.add(bytes_of(R"(<class id="Swimmer" cpp_class="CVXUnit" parent="">
+      <properties water_unit="1"/></class>)"),
+              "swimmer.sc.xml");
     // The exit-vector family: a class that declares the pair, one that inherits
     // it, one that overrides it, and one that declares only half.
     graph.add(bytes_of(R"(<class id="Dock" cpp_class="CVXBuilding" parent="">
@@ -215,7 +223,8 @@ struct Bench {
   }
 
   ObjectId walker(Point where, NativeClass kind = NativeClass::unit) {
-    const ObjectId id = world.spawn(kind, nullptr);
+    const ObjectId id =
+        world.spawn(kind, nullptr, kind == NativeClass::ship ? graph.find("Galley") : kNoClass);
     CHECK(world.set_position(id, where));
     CHECK(world.set_health(id, 100));
     return id;
@@ -543,6 +552,29 @@ TEST(get_enter_point_sends_a_ship_to_the_water_door) {
   CHECK(enter_point(b, b.gate, walker) == b.expected(-128, 0));
 }
 
+/// The water flag is the mover's class `water_unit` (class `+0xb30`, read by
+/// 0x004dce60 and 0x004dcfa0 alike), not whether it is a ship; and the enter
+/// door is picked from the mover's stored position, the `(-1, -1)` marker for
+/// a held one.
+TEST(get_enter_point_reads_water_unit_and_the_stored_position) {
+  Bench b;
+  const ObjectId swimmer =
+      b.world.spawn(NativeClass::unit, nullptr, b.graph.find("Swimmer"));
+  CHECK(b.world.set_position(swimmer, Point{100, 512}));
+  CHECK(enter_point(b, b.gate, swimmer) == b.expected(-320, 0));
+  const ObjectId plain_ship = b.world.spawn(NativeClass::ship, nullptr);
+  CHECK(b.world.set_position(plain_ship, Point{100, 512}));
+  CHECK(enter_point(b, b.gate, plain_ship) == b.expected(-128, 0));
+
+  // An invalid building answers the unit's stored position: (-1, -1) when it
+  // is held, not where its holder stands.
+  const World::ShipIds ship = b.world.spawn_ship(nullptr);
+  CHECK(b.world.set_position(ship.ship, Point{800, 800}));
+  const ObjectId passenger = b.walker(Point{0, 0});
+  REQUIRE(b.world.put_in_holder(passenger, ship.holder));
+  CHECK(enter_point(b, static_cast<ObjectId>(9999), passenger) == kHeldPosition);
+}
+
 /// **Every fallback is a real point**, which is why not one of the 18 shipped
 /// sites tests the result before walking to it.
 TEST(get_enter_point_falls_back_to_a_position_and_never_to_a_sentinel) {
@@ -551,17 +583,22 @@ TEST(get_enter_point_falls_back_to_a_position_and_never_to_a_sentinel) {
   const ObjectId dead = b.walker(Point{700, 300});
   CHECK(b.world.set_health(dead, 0));
 
-  // A building that names nothing, or is dead, answers the unit's position.
+  // A building that names nothing answers the unit's position.
   CHECK(enter_point(b, static_cast<ObjectId>(9999), unit) == (Point{900, 512}));
-  CHECK(b.world.set_health(b.gate, 0));
-  CHECK(enter_point(b, b.gate, unit) == (Point{900, 512}));
   // With the unit gone too there is nothing left to answer but the origin.
-  CHECK(enter_point(b, b.gate, dead) == (Point{0, 0}));
-  CHECK(b.world.set_health(b.gate, 1000));
-
-  // A unit that names nothing, or is dead, answers the building's position.
+  CHECK(enter_point(b, static_cast<ObjectId>(9999), static_cast<ObjectId>(9999)) ==
+        (Point{0, 0}));
+  // A unit that names nothing answers the building's position.
   CHECK(enter_point(b, b.gate, static_cast<ObjectId>(9999)) == (Point{512, 512}));
-  CHECK(enter_point(b, b.gate, dead) == (Point{512, 512}));
+
+  // **No life test** (0x004dce60): a broken building and a dead unit both
+  // still resolve, and the door is picked as for the living.
+  const ObjectId twin = b.walker(Point{700, 300});
+  CHECK(b.world.set_health(b.gate, 0));
+  CHECK(enter_point(b, b.gate, unit) == b.expected(128, 0));
+  CHECK(b.world.set_health(b.gate, 1000));
+  CHECK(enter_point(b, b.gate, dead) == enter_point(b, b.gate, twin));
+  CHECK(enter_point(b, b.gate, dead) != (Point{512, 512}));
 
   // And so does a building with no door of the kind asked for: the walker here
   // is a unit, whose class declares no points at all.

@@ -150,6 +150,10 @@ namespace {
 
 /// A class property as an integer, walking up the class tree.
 Point enter_point_near(const World& world, ObjectId building, ObjectId unit, bool water) {
+  return enter_point_near(world, building, world.resolve_position(unit), water);
+}
+
+Point enter_point_near(const World& world, ObjectId building, Point from, bool water) {
   const Point home = world.resolve_position(building);
   MovementSystem* movement = movement_system(const_cast<World&>(world));
   std::vector<Point> doors;
@@ -157,7 +161,6 @@ Point enter_point_near(const World& world, ObjectId building, ObjectId unit, boo
                  kEnterPointType, water, doors);
   if (doors.empty()) return home;
 
-  const Point from = world.resolve_position(unit);
   Point best = doors.front();
   std::int64_t nearest = -1;
   for (const Point& door : doors) {
@@ -3976,9 +3979,13 @@ HostOutcome m_teleport_destination(CallContext& ctx) {
 /// It is the odd one out in the entrance family and the header of
 /// `sim/entrance.hpp` sets the four side by side: this reads **nothing from the
 /// point table**. `0x004dd330` is a plain read of two consecutive scalars on the
-/// building's *class* record, and `Teleport::exit_vector` (0x005cda00) reads two
-/// instance fields that are copied verbatim from those same class scalars when
-/// the teleport loads. Same numbers, no scaling, two accessors.
+/// building's *class* record, and `Teleport::exit_vector` (0x005cdc40) reads two
+/// instance fields, `[tp+0x20c]`/`[tp+0x210]`, that the teleport loader
+/// (0x005cd950) copies verbatim from those same class scalars. Same numbers, no
+/// scaling, two accessors -- but the instance read has no absent-marker test,
+/// and a miss pushes a half-written point (0xffff in x's low half, whatever was
+/// on the stack above it, and y = 0) where this answers `(-1, -1)`. Every
+/// shipped teleport class declares the pair, so the two agree on retail data.
 ///
 /// **The class attributes are `exit_vector_x` and `exit_vector_y`**, and they
 /// are `.sc.xml`'s rather than `.ent.xml`'s -- which is why the entity format's
@@ -4111,21 +4118,28 @@ HostOutcome fn_get_catapult_attack_point(CallContext& ctx) {
 
 /// `Teleport::Traverse(player)` -- 6 sites, and **it moves nothing**.
 ///
-/// `0x005cdcb0` ORs the player's own bit into the mask at `[teleport+0x214]`.
-/// The scripts do the movement themselves and call this on *both* ends of the
+/// `0x005cdcb0` ORs the player record's word `+0x18` into the mask at
+/// `[teleport+0x214]` (0x005cdd2b..0x005cdd2e) -- not the player's one bit but
+/// the whole of that word, which is the set of players who share view with
+/// this one (SetRelation, 0x005652f0, fills it from bit 0x10 of each word
+/// *toward* the player; see `m_can_see`), its own bit included. Its reader,
+/// 0x005cda20, asks whether a player's word and the mask share a bit. So a
+/// traversal is recorded for the traveller's whole view-sharing side. The
+/// scripts do the movement themselves and call this on *both* ends of the
 /// pair afterwards, which is what says it is a record rather than an action:
 /// `HERO_TELEPORT.VS` writes `tel.Traverse(.player); tel.destination.Traverse
 /// (.player); .SetPos(pt);` on three consecutive lines.
 ///
 /// **The original's bounds check has no lower half.** `player - 1` is compared
 /// against 16 with a signed test only, so `Traverse(0)` indexes one stride
-/// below the player table. That is a fault and not a behaviour: this rejects
-/// anything outside 1..16 and does nothing, which is also what the out-of-range
-/// upper half does there.
+/// below the player table, and above 16 it reads through a null record. Both
+/// are faults and not behaviours: this rejects anything outside 1..16 and
+/// does nothing.
 ///
 /// A receiver that resolves to nothing is a no-op. The original prints on that
 /// path -- and prints `Teleport::exit_vector`'s message rather than its own,
-/// which is a copy-paste in the executable and not a clue about either.
+/// which is a copy-paste in the executable and not a clue about either. This
+/// ORed the player's own bit alone until the host audit read the body.
 HostOutcome m_teleport_traverse(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Traverse: no world");
@@ -4136,7 +4150,14 @@ HostOutcome m_teleport_traverse(CallContext& ctx) {
   if (player < 1 || player > 16) return HostOutcome::ok_void();
   ObjectState* state = world->mutable_state(slot->id);
   if (state == nullptr) return HostOutcome::ok_void();
-  state->traversed_by |= 1u << static_cast<std::uint32_t>(player - 1);
+  const PlayerId traveller = player_from_script(player);
+  std::uint32_t side = 0;
+  for (PlayerId other = 0; other < kPlayerCount; ++other) {
+    if (other == traveller || world->players().has(other, traveller, Relation::share_view)) {
+      side |= 1u << other;
+    }
+  }
+  state->traversed_by |= side;
   return HostOutcome::ok_void();
 }
 
@@ -4237,12 +4258,16 @@ HostOutcome m_get_point(CallContext& ctx) {
 
 /// `building.GetEnterPoint(unit)` -- **18 sites**, and the door a unit walks to.
 ///
-/// `0x004dce60` ensures the building's enter lists are built, picks the deep
-/// water list or the land list by whether the *unit* is water-borne, and returns
-/// **the element nearest the unit's current position**. The picker (0x0056fba0)
-/// is a linear scan taking an integer square root of each squared distance
-/// before an unsigned compare, which orders identically to comparing the squared
-/// distances -- so the root is cosmetic and is not reproduced.
+/// `0x004dce60` resolves the unit argument, then the receiver, and in the
+/// valid case ensures the building's enter lists are built (0x004db650), picks
+/// the deep-water list or the land list by the **unit class's `water_unit`**
+/// (class `+0xb30`, the field `IsWaterUnit` reads, 0x005ac6b0), and returns
+/// **the element nearest the unit's stored position** -- its `vtbl + 0x3c`,
+/// which for a unit as for everything else is `[obj+0x24]`/`[obj+0x28]`, the
+/// `(-1, -1)` marker for a held one. The picker (0x0056fba0) is a linear scan
+/// taking an integer square root of each squared distance before an unsigned
+/// strict compare, which orders identically to comparing the squared
+/// distances, ties to the first -- so the root is cosmetic and not reproduced.
 ///
 /// Where the list comes from is `sim/entrance.hpp`: the class's type-1 points,
 /// each run through the height-aware round trip, each discarded if it lands off
@@ -4253,46 +4278,37 @@ HostOutcome m_get_point(CallContext& ctx) {
 /// **Every fallback is a real point, never a sentinel**, which is why not one of
 /// the 18 sites tests the result before walking to it. In the original's order:
 ///
-///   * a building that names nothing or is dead answers **the unit's own
-///     position** -- or `(0, 0)` when the unit is gone too;
-///   * a unit argument that names nothing or is dead answers **the building's
-///     position**;
+///   * a receiver that names nothing answers **the unit's stored position** --
+///     or `(0, 0)` when the unit names nothing too;
+///   * a unit argument that names nothing answers **the building's position**;
 ///   * an empty list answers **the building's position**.
 ///
-/// The original prints a diagnostic on each of the first two and a third
-/// (`Buildilng::GetEnterPoint: No enter points found!`, the typo its own)
-/// through a sink that is a bare `ret` in retail, so all three are ordinary
-/// answers rather than failures.
+/// The original prints a diagnostic on each (`Buildilng::GetEnterPoint: No
+/// enter points found!`, the typo its own, for the third) through a sink that
+/// is a bare `ret` in retail, so all three are ordinary answers. **There is no
+/// life test**: a corpse or a broken building still resolves, and this tested
+/// `health > 0` on both until the host audit read the body.
 ///
 /// **A `Teleport` is a `Building` here**: `HERO_TELEPORT.VS` calls this on one,
 /// so the receiver test is "does this handle name an object", not a class test.
-///
-/// **Water-borne is read as "is a ship", and that is inferred.** The original
-/// tests an authored flag on the unit's class record; which `.ent.xml` attribute
-/// writes it is not recovered, and the native class is the only partition this
-/// engine has that agrees with it on every shipped class.
 ///
 /// Deterministic: no RNG anywhere on this path. Its sibling `GetExitPoint`
 /// draws one, which is why that name is not here.
 HostOutcome m_get_enter_point(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetEnterPoint: no world");
-  const auto living = [&](const script::Value& value) -> const WorldObject* {
-    const WorldObject* slot = object_of(*world, value);
-    return (slot != nullptr && slot->state.health > 0) ? slot : nullptr;
-  };
-  const WorldObject* building = living(ctx.arg(0));
-  const WorldObject* unit = ctx.count() > 1 ? living(ctx.arg(1)) : nullptr;
+  const WorldObject* unit = ctx.count() > 1 ? object_of(*world, ctx.arg(1)) : nullptr;
+  const WorldObject* building = object_of(*world, ctx.arg(0));
 
   if (building == nullptr) {
-    return HostOutcome::ok_with(
-        pack_point(unit == nullptr ? Point{0, 0} : world->resolve_position(unit->id)));
+    return HostOutcome::ok_with(pack_point(unit == nullptr ? Point{0, 0} : unit->state.position));
   }
-  const Point home = world->resolve_position(building->id);
+  const Point home = building->state.position;
   if (unit == nullptr) return HostOutcome::ok_with(pack_point(home));
 
-  const bool water = unit->object != nullptr && unit->object->is_a(NativeClass::ship);
-  return HostOutcome::ok_with(pack_point(enter_point_near(*world, building->id, unit->id, water)));
+  const bool water = class_flag(*world, *unit, "water_unit");
+  return HostOutcome::ok_with(
+      pack_point(enter_point_near(*world, building->id, unit->state.position, water)));
 }
 
 /// `building.GetExitPoint(...)` -- **7 sites**, and the door a unit leaves by.
@@ -4347,14 +4363,18 @@ HostOutcome m_get_enter_point(CallContext& ctx) {
 /// 0x004dd080 asks anything of the object once the handle resolves, so a dead
 /// building still answers with its doors.
 ///
-/// The enter half above tests health and this does not, which is a difference
-/// between two siblings and is left standing on purpose: 0x004dce60 has no such
-/// test either, so either the original's handle table stops resolving a dead
-/// object -- in which case both are right and the test is redundant -- or it does
-/// not, in which case `GetEnterPoint`'s is a divergence. Nothing recovered so far
-/// settles which. All 18 enter sites pass `this` as the unit -- the script's own
-/// object, which is alive because it is running -- so only the *building* side
-/// of that test is reachable at all from the shipped corpus.
+/// Neither does the enter half: 0x004dce60 has no life test either, and the
+/// handle table keeps resolving a dead object until it is destroyed.
+///
+/// **The water flag of the `(Obj, point)` form is the object's class
+/// `water_unit`** (class `+0xb30`, the field `IsWaterUnit` reads), dereferenced
+/// without checking the handle -- an unresolvable one faults the original and
+/// is land here.
+///
+/// **Partial: the weights.** The picker (0x0056fa40) takes one draw,
+/// `rand(0, 10000)`, and walks the doors summing `1 / (d^4 + 1e-7)` in double
+/// precision; `pick_door_by_distance` does the same in fixed point, because the
+/// core has no floating point, and is labelled there.
 HostOutcome m_get_exit_point(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetExitPoint: no world");
@@ -4372,13 +4392,11 @@ HostOutcome m_get_exit_point(CallContext& ctx) {
 
   bool water = false;
   if (by_object) {
-    // The same authored class flag `GetEnterPoint` reads, and the same
-    // inference standing in for it: the native class is the only partition this
-    // engine has that agrees with it on every shipped class. The original
+    // The same class flag `GetEnterPoint` reads, `water_unit`. The original
     // dereferences the argument's class record without checking the handle
     // first; an unresolvable one is land here rather than a crash.
     const WorldObject* mover = object_of(*world, ctx.arg(1));
-    water = mover != nullptr && mover->object != nullptr && mover->object->is_a(NativeClass::ship);
+    water = mover != nullptr && class_flag(*world, *mover, "water_unit");
   } else {
     water = ctx.arg(2).truthy_scalar();
   }
@@ -4588,36 +4606,34 @@ HostOutcome m_is_cursed(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(slot != nullptr && slot->state.flags.cursed));
 }
 
-/// `Unit::SetLastAttackTime()` -- 40 sites, and it stores nothing here.
+/// `Unit::SetLastAttackTime()` (0x005d7fc0) -- 40 sites.
 ///
-/// 0x005d7fc0 is `[obj+0x1a4] = now` and nothing else. The field has a second
-/// writer at 0x005d40ad -- the same `now`, on whatever path a unit actually
-/// attacks -- and, in the whole executable, **one reader: `Unit::Dump`**, which
-/// formats it into a diagnostic string (0x005d2bb0). No host entry point
-/// returns it, so no script can read it back; a byte-pattern sweep for
-/// `[reg+0x1a4]` across `.text` finds 42 references and every one that is on a
-/// unit is one of those three.
+/// The handle check (a miss prints and returns), then the game clock
+/// (`[0x00996ff4] + 0x1258`) into `[unit+0x1a4]`, and nothing else; the body
+/// does not check that the receiver is a unit. The same field is stamped with
+/// the same clock whenever a unit actually attacks (0x005d40ad), and
+/// **`Unit::TimeWithoutAttack` (0x005d7f50) reads it back** as the clock less
+/// the stamp -- `CombatSystem`'s `Combatant::last_attack_time`, which
+/// `host_time_without_attack` in sim/combat.cpp answers from. So the stamp is
+/// observable, and it is what the shipped sites rely on:
+/// `SNEAK_BEHAVIOR.VS` re-hides a sneak once `TimeWithoutAttack` reaches
+/// 20000, and `UNIT_GIVEITEM.VS`'s `if (.HasSpecial(sneak))
+/// .SetLastAttackTime(); // mountaineer patch` restarts that wait.
 ///
-/// So the field is unobservable from script, and storing it would be a hashed,
-/// serialised int that nothing could ever look at. `Unit::user` is stored for
-/// the opposite reason -- it has a registered getter, so a script writes it and
-/// reads it back -- and the two cases are worth keeping apart.
-///
-/// **What the shipped sites want is a stealth timer this engine does not
-/// have.** `UNIT_GIVEITEM.VS` writes `if (.HasSpecial(sneak))
-/// .SetLastAttackTime(); // mountaineer patch`, and `SQUADMONITOR.VS` pairs it
-/// with `SetVisible(true)` twice -- both of which read as *a unit that just
-/// attacked cannot stay hidden*. `Obj::CanSee` here is the `hidden` flag and
-/// nothing else (0x005ab9d0 is the same in retail), so there is no clock for
-/// this to feed. The day one exists, this is where it writes.
-///
-/// The receiver is still resolved, because the original resolves it and
-/// because an entry point that answers without looking is a test of nothing.
+/// This stored nothing for a while, on a census of `[reg+0x1a4]` that missed
+/// the reader. An object with no combat record has nothing to stamp here: in
+/// the original that is a non-unit receiver, whose `+0x1a4` is some other
+/// field, and no shipped site sends one.
 HostOutcome m_set_last_attack_time(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetLastAttackTime: no world");
-  // 0x005d7fe4 complains and returns for a receiver that does not resolve.
-  (void)object_of(*world, ctx.arg(0));
+  const WorldObject* slot = object_of(*world, ctx.arg(0));
+  if (slot == nullptr) return HostOutcome::ok_void();
+  if (CombatSystem* combat = combat_system_of(*world); combat != nullptr) {
+    if (Combatant* unit = combat->find(slot->id); unit != nullptr) {
+      unit->last_attack_time = world->time();
+    }
+  }
   return HostOutcome::ok_void();
 }
 
@@ -4701,6 +4717,9 @@ HostOutcome m_set_minimap_flag(CallContext& ctx) {
 /// the table rather than assumed -- a token that resolves to nothing is skipped
 /// in silence, which is what the reader must do with `revitalize`, the one
 /// special the corpus names that the executable's table does not have.
+/// `freedom`'s bit in the specials word, which the hero constructor sets.
+inline constexpr std::int32_t kSpecialFreedom = 30;
+
 [[nodiscard]] bool class_has_special(World& world, const WorldObject& slot,
                                      std::int32_t index) {
   const ClassGraph* graph = world.class_graph();
@@ -4731,7 +4750,19 @@ HostOutcome m_set_minimap_flag(CallContext& ctx) {
   return false;
 }
 
-/// `Unit::HasSpecial(int)` -- 205 hits in the corpus sweep over four scripts.
+/// `Unit::HasSpecial(int)` (0x005d8d70) -- 205 hits in the corpus sweep over
+/// four scripts.
+///
+/// The handle check (a miss prints and answers false), then bit `n`, for an
+/// unsigned `n` below 36, of the 64-bit specials word at `[obj+0x198]`. The
+/// unit constructor (0x005d3170) copies that word from the class's
+/// `unit_specials` (`class_has_special`), and **the hero constructor
+/// (0x0052ffd0) then sets bit 30, `freedom`, on every hero** whatever its class
+/// says. No shipped `HasSpecial` site asks for freedom -- they ask cripple,
+/// curse, healing, invisibility, parry, revitalize, sneak and teaching -- so
+/// that bit is invisible through this entry point, and is answered anyway.
+/// (`unit_has_freedom`, `HasFreedom`'s rule, reads the class alone and has the
+/// same gap; it is another entry point's.)
 HostOutcome m_has_special(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("HasSpecial: no world");
@@ -4751,6 +4782,9 @@ HostOutcome m_has_special(CallContext& ctx) {
   // representation that made the guard load-bearing again is one refactor
   // away.
   if (index < 0 || index >= kUnitSpecialsCount) return no;
+  if (index == kSpecialFreedom && slot->state.flags.is_hero) {
+    return HostOutcome::ok_with(Value::boolean(true));
+  }
   return HostOutcome::ok_with(Value::boolean(class_has_special(*world, *slot, index)));
 }
 
