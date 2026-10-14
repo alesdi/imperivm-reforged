@@ -1010,8 +1010,8 @@ struct GotoOrder {
   /// Whether the call drops the unit's combat target once the unit is out of
   /// any holder: the point form of `Goto` does, at 0x005d639a, after its
   /// step-out waits and before it measures anything. Not a field of the
-  /// original's; set by `Goto`'s entry point only, since `GotoAttack` and
-  /// `GotoEnter` were not read for it.
+  /// original's; set by `Goto` and `GotoEnter` (0x005d6810), not by
+  /// `GotoAttack`, whose entry point sets the target instead (0x005d6b20).
   bool drop_target = false;
 };
 

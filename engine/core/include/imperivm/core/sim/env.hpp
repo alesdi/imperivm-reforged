@@ -47,12 +47,15 @@
 ///      `EnvReadInt(set, "AIV_NoRepair") == 0` and
 ///      `EnvReadInt(this, "no_villagers") == 1` against keys nothing ever
 ///      writes.
-///   4. **An invalid scope handle is an error.** `gbr.exe` carries
-///      `Parameter #Settlement in function 'EnvWriteInt' is uninitialized or
-///      invalid object.` verbatim, once per overload. We trap; see the unknowns
-///      section for what we cannot tell from the binary.
+///   4. **An invalid scope handle is the default answer, not an error.**
+///      `gbr.exe` carries `Parameter #Settlement in function 'EnvWriteInt' is
+///      uninitialized or invalid object.` once per overload, and prints it
+///      through the logger that is an empty function in the retail build
+///      (0x00686eb0); every scoped body then pushes its type's default -- 0,
+///      `""`, the invalid handle -- or, for a write, stores nothing, and
+///      returns normally. See `EnvTarget` in env.cpp.
 ///
-/// ## The root scope, and why nothing normalises the path
+/// ## The root scope, and the context a sequence runs in
 ///
 /// The one-argument overloads are **not** dead. They are called 403 times, and
 /// all 403 sites are in the 24 `.bfhp` containers — 191 `EnvReadInt/1`, 164
@@ -61,50 +64,32 @@
 /// which is exactly why it read as unreachable while the inventory was built
 /// from the 577 pack scripts alone.
 ///
-/// 356 of those sites pass a string literal, and it was tempting to read them
-/// as needing normalisation, because two keys appear in both spellings:
-/// `Conquests/mediterranean.BFHP` writes `"/Bonus"` and reads `"Bonus"`, and
-/// `3_Great_Losses_Egypt.bfhp` writes `"En_Direction"` once where four other
-/// sites say `"/En_Direction"`. **The binary settles it, and the answer is
-/// that there is no normalisation.**
+/// Two keys appear in both spellings: `Conquests/mediterranean.BFHP` writes
+/// `"/Bonus"` and reads `"Bonus"`, and `3_Great_Losses_Egypt.bfhp` writes
+/// `"En_Direction"` once where four other sites say `"/En_Direction"`.
 ///
 /// `gbr.exe`'s six root thunks pass the script's string straight to the
-/// registry — no `sprintf`, no prefix (0x006ac890, `EnvWriteString(str, str)`).
-/// The registry's get and set both funnel the path through one helper,
-/// `MakePath` at 0x006ab0e0, which is four instructions of decision:
+/// registry (0x006ac890, `EnvWriteString(str, str)`), whose get and set both
+/// funnel it through `MakePath` (0x006ab0e0): a path whose first character is
+/// `/`, or a thread whose `Context` is null, is used as it is; otherwise the
+/// running script thread's `Context` string is prepended, with no separator.
 ///
-/// ```
-///   0x6ab0ff  mov  al, byte ptr [edi]     ; the path's first character
-///   0x6ab103  cmp  al, 0x2f               ; '/'
-///   0x6ab109  je   0x6ab113               ; absolute: prefix = ""
-///   0x6ab10b  mov  esi, [esp + 0x44]      ; else prefix = the thread's Context
-/// ```
+/// **And every sequence runs with a context of `/`.** The sequence runner
+/// (`Start`, 0x005b9d40) spawns the sequence's thread, looks it up and sets
+/// its context to the one-character string at 0x007b0cec, which is `/`. So
+/// inside a sequence `"Bonus"` becomes `"/Bonus"`: the two spellings are one
+/// slot, `mediterranean.BFHP`'s three bonus sequences -- `seq1.vs`
+/// (rBritain), `seq3.vs` (rEgypt), `seq6.vs` (rIberia), each opening `while
+/// (EnvReadString("Bonus") == "r…")` -- read what `seq0.vs` wrote, and the
+/// conquest bonuses they run work in the retail game. (An earlier reading of
+/// this note took the context to be null for sequences and concluded the three
+/// bonuses were dead; the runner's own store settles it the other way.)
 ///
-/// and then returns `prefix + path`. A leading `/` means *absolute*; anything
-/// else is relative to the running script thread's `Context` string, which is a
-/// `char*` field the thread serialises under exactly that attribute name
-/// (0x0069cc58). It is null by default, and the only code that ever sets it is
-/// the object-attached script launcher, which sets it to the object's id
-/// formatted `"%d"` (0x0041ccb0). So `"/Bonus"` and `"Bonus"` are two different
-/// slots under every possible context, and a sequence — which carries no
-/// context at all — simply gets its literal back.
-///
-/// The corpus agrees once it is counted rather than sampled. Of 77 distinct
-/// root literals, **75 use one spelling consistently**: 73 always absolute, and
-/// `"Waves"` always relative on both its write and its seven read sites, which
-/// works fine. Only the two named above mix, and both mix *one-sidedly* — the
-/// signature of a typo, not of a convention. Reproducing the retail engine
-/// therefore means storing the key verbatim, which is what `EnvScope::root()`
-/// plus the literal key already does.
-///
-/// The consequence is a real defect in shipped content, and it is worth naming
-/// because it will look like our bug: `mediterranean.BFHP`'s `Sequences/seq0.vs`
-/// writes `EnvWriteString("/Bonus", ConquestBonus())` and dispatches on it
-/// correctly, but the three bonus sequences that need to *keep* running —
-/// `seq1.vs` (rBritain), `seq3.vs` (rEgypt), `seq6.vs` (rIberia) — each open
-/// `while (EnvReadString("Bonus") == "r…")`, read a key nobody writes, get the
-/// empty string and fall straight through. Three of the seven conquest bonuses
-/// do nothing in the retail game. We reproduce that rather than repair it.
+/// The other two launchers that set a context -- the object-attached one
+/// (0x0041ccb0, the object's id as `%d`) and the conversation phrase runner
+/// (0x0050aa90) -- are not modelled, because no root-form call is reachable
+/// from either in the installation. `thread_context` in env.cpp says how a
+/// sequence's thread is recognised.
 ///
 /// ## Iteration order is state
 ///
@@ -201,19 +186,28 @@ struct EnvEntry {
   std::string value;
 };
 
-/// `Str2Int`-shaped parse: optional sign, then decimal digits, stopping at the
-/// first character that is not one. Everything else is zero, which is what a
-/// script that reads `"researched"` as an int must get.
+/// `EnvReadInt`'s parse, which is the executable's CRT `atol` (0x00763919):
+/// C-locale white space, one optional sign, decimal digits accumulated in 32
+/// bits **with wraparound**, stopping at the first character that is not one.
+/// No digits is zero, which is what a script that reads `"researched"` as an
+/// int gets.
 [[nodiscard]] std::int32_t env_parse_int(std::string_view text) noexcept;
 
 /// Decimal, with a leading `-`. The inverse of `env_parse_int` on its range.
 [[nodiscard]] std::string env_format_int(std::int32_t value);
 
-/// The `$$<id>$$` encoding `gbr.exe` uses for an object inside the registry.
-/// INFERRED: the literal `$$%d$$` sits next to `environment` and `env-item` in
-/// the binary's string pool, and no other consumer for it is visible.
+/// `CONST.INI`'s integer reading (0x0063f200): leading spaces and tabs, one
+/// sign, then `0x` hexadecimal or decimal, stopping at the first character
+/// that does not fit and keeping the digits read so far. No digits is 0.
+[[nodiscard]] std::int32_t ini_number(std::string_view text) noexcept;
+
+/// The `$$<id>$$` encoding `gbr.exe` uses for an object inside the registry:
+/// `EnvWriteObj` formats the object's index with `$$%d$$` (0x006ac9b0) and
+/// `EnvReadObj` reads it back with `sscanf` of the same format (0x006ac790).
 [[nodiscard]] std::string env_format_object(ObjectId id);
-/// Returns `kNoObject` when `text` is not an encoded object.
+/// Returns `kNoObject` when `text` is not an encoded object. `sscanf`'s rules:
+/// the leading `$$` is literal, the number may have white space and a sign
+/// before it, and the trailing `$$` is not checked.
 [[nodiscard]] ObjectId env_parse_object(std::string_view text) noexcept;
 
 /// The flat, sorted, scope-and-key-addressed store.
@@ -497,20 +491,29 @@ struct RaceUnits {
 
 /// The whole table, indexed by the race constant.
 ///
-/// **The race index is inferred.** The eight races appear in `gbr.exe`'s string
-/// pool in the order Gaul, RepublicanRome, Carthage, Iberia, ImperialRome,
-/// Britain, Egypt, Germany — five parallel runs agree on it (the unit classes,
-/// the train commands, the arena techs, the arena types and the temple building
-/// classes), and `ESH_NEEDTECH.VS` names the arena techs against races in its
-/// comments, which matches. What is *not* proven is that the race globals
-/// `Gaul`, `RepublicanRome`, … are literally 0..7 in that order; nothing in the
-/// shipped data states their numeric values. See "what is still unknown".
+/// The race index is the race constant: Gaul 0, RepublicanRome 1, Carthage 2,
+/// Iberia 3, ImperialRome 4, Britain 5, Egypt 6, Germany 7 -- the values the
+/// constants are registered with (0x005b70b2) and the values the class loader
+/// stores for those names (0x0059f540).
 class UnitCatalog {
  public:
   [[nodiscard]] const RaceUnits* race(std::int32_t race) const noexcept;
   [[nodiscard]] const UnitRow* row(std::int32_t race, std::int32_t type) const noexcept;
   /// The index of `type` within `race`'s rows, or -1.
   [[nodiscard]] std::int32_t index_of(std::int32_t race, std::string_view type) const noexcept;
+
+  /// The executable's eight tables read as the one block they are in memory.
+  ///
+  /// `gbr.exe` lays them out back to back: the unit types (0x0081a388, 48
+  /// entries), techs (0x0081a448, 48), train commands (0x0081a508, 48), arena
+  /// types (0x0081a5c8, 8), arena train commands (0x0081a5e8, 8), arena techs
+  /// (0x0081a608, 8), temple types (0x0081a628, 8) and temple train commands
+  /// (0x0081a648, 8) -- 184 pointers. `UType`, `UTech` and `UTrainCmd` index
+  /// `table + race*6 + type` with only `type` checked, so a race past 7 reads
+  /// on into the next table; this answers that read for any index inside the
+  /// block. Outside it -- the memory before the first table or after the
+  /// last -- and for a catalog that is not the eight-race shape, it is empty.
+  [[nodiscard]] std::string_view block(std::int64_t index) const noexcept;
 
   void set_races(std::vector<RaceUnits> races) { races_ = std::move(races); }
   [[nodiscard]] std::span<const RaceUnits> races() const noexcept { return races_; }
@@ -520,7 +523,8 @@ class UnitCatalog {
   std::vector<RaceUnits> races_;
 };
 
-/// The table as `gbr.exe` carries it.
+/// The table as `gbr.exe` carries it, checked entry by entry against the eight
+/// pointer tables `UnitCatalog::block` names.
 ///
 /// Every string below is in the retail binary, and every column is corroborated
 /// by a second shipped source:
@@ -750,45 +754,8 @@ std::size_t register_env_host(script::HostRegistry& registry);
 // what is still unknown
 // --------------------------------------------------------------------------
 //
-// * **What the retail engine does after "uninitialized or invalid object".**
-//   The message is in the binary once per `Env*` overload, but whether it
-//   aborts the script, returns a default, or only prints is not recoverable
-//   from strings. We return `HostOutcome::failed`. Settling it needs either a
-//   disassembly of the six thunks or a live trace with a deliberately invalid
-//   handle.
-//
-// * **`EnvReadObj/1` and `EnvWriteObj/2`.** The other four root arities are now
-//   registered; these two are not. `gbr.exe` declares them at 0x006ae823 and
-//   0x006ae80d — `Obj, str key` and `void, str key, Obj o` — and no script in
-//   the installation calls either, so they follow the `SetAIVar/4` precedent
-//   and stay declared-only. `env_target` already handles them; adding the two
-//   rows is a one-line change if a witness ever turns up.
-//
-// * **`int` → `str` coercion.** `EnvWriteString` then `EnvReadInt` is proven by
-//   the arena training upgrades. The reverse — `EnvWriteInt` then
-//   `EnvReadString` — has no corpus witness. We format decimally, which is the
-//   only reading consistent with a string-valued store.
-//
-// * **The `$$%d$$` object encoding.** Inferred from the string pool's
-//   neighbourhood, not from a dump of a live registry. The only two object keys
-//   in the corpus are `TributeBuilding` and three siblings, and none of them is
-//   ever read as a string, so nothing observable depends on the spelling.
-//
-// * **Whether `CheckUEnabled` consults anything but its `max` argument.** Its
-//   signature is `bool, int *mask, int idPlayer, int max, int nType, int nRace`
-//   and we set the bit iff `max != 0` — which is what `AI.INI`'s own comment
-//   (`0 - disable, -1: no limit`) says the value means, and what
-//   `ESH_BUILDARMY.VS`'s `CheckUEnabled(nEnabled, AIPlayer, 0, 5, Carthage)`
-//   uses it for. `idPlayer` and `nRace` are then unused, which is suspicious.
-//   What it is *not* is a research test: `ESH_BUILDARMY.VS` line 327 asks
-//   `UEnabled(nEnabled, i) && !IsResearched(set, UTech(i, nRace))`, which no
-//   unit could satisfy if the mask already required the tech.
-//
-// * **The numeric values of the race constants.** The unit table is ordered
-//   Gaul, RepublicanRome, Carthage, Iberia, ImperialRome, Britain, Egypt,
-//   Germany, corroborated five ways, but the constants themselves are host
-//   globals whose values no shipped file states. If they are not 0..7 in that
-//   order, `UnitCatalog` needs a remap and nothing else changes.
+// * **`int` → `str` coercion** is settled: `EnvWriteInt` stores `ltoa(value,
+//   10)` (0x006ac920) and `EnvReadInt` `atol`s whatever is there (0x006ac740).
 //
 // * **Germany's unit techs, and the temple/arena prerequisites.** `UTech(i,
 //   Germany)` is empty for every `i` in the shipped table — the four German
@@ -798,24 +765,14 @@ std::size_t register_env_host(script::HostRegistry& registry);
 //   of calling `UTech`. That is consistent, but it means the table has a hole
 //   we are reproducing rather than filling.
 //
-// * **`Settlement::TSResearch`.** The retail engine implements it by running
-//   `data/ai/TSH_Research.vs` (`gbr.exe`: `TSResearch: Error running script!` /
-//   `TSH_Research.vs`). That script is six lines and we transcribe it, but it
-//   calls `set.Research(tech)`, which queues a command on a research lab. We
-//   mark the ledger `researching` directly and charge nothing, because
-//   `Settlement::Research/1` is declared and implemented by nobody. When it
-//   lands, `TSResearch` should become a script dispatch and this native path
-//   should be deleted.
-//
 // * **Who answers `script::Host::global` for `AIV_*`.** `AIVar`'s second
 //   argument is an integer variable id, and `ai_var_id` is the only place the
 //   name-to-id mapping exists -- but nothing implements `global` yet, so no
 //   script can currently reach an `AIV_*` constant at all. Until it does, the
 //   757 `AIVar`/`SetAIVar` call sites are reachable only from C++.
 //
-// * **`CanResearch` and the command queue.** `ESH_NEEDTECH.VS` comments its
-//   failure as "researched, researching or impossible to research **or the
-//   Queue is not empty**". We cannot test the queue, so `can_research` is
-//   optimistic by exactly that one condition.
+// * **`CanResearch` and the command queue** is settled: the entry point wants
+//   an idle building of the settlement that offers the row (0x0042d010), and
+//   `can_research` here is only the verifier script's ledger half.
 
 }  // namespace imperivm::core::sim

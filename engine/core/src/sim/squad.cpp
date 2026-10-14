@@ -716,6 +716,15 @@ HostOutcome gaika_field_impl(CallContext& ctx) {
 /// The matcher is `ClassFilter`, which is the same tree test every other class
 /// name in this engine goes through, and it carries the rule that matters here:
 /// **a name the graph cannot resolve counts nothing rather than everything.**
+///
+/// Read to the end: 0x00427980 splits the handle into its player nibble and
+/// index, walks the squad's member deque front to back, and for each member
+/// asks 0x0059c020 of the member's class (`[obj+0x3c]`) -- look the name up
+/// with 0x00409e40, then climb `[class+0xe4]` looking for it. No member is
+/// tested for death or for resolving (the original would dereference a null
+/// there; this skips it). One known difference: the name is **one** class
+/// there, while `ClassFilter` also reads a comma list; no shipped `Count/1`
+/// site passes one (all eight name a single class).
 HostOutcome count_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {
@@ -2380,16 +2389,17 @@ HostOutcome all_enemies_in_holder_impl(CallContext& ctx) {
 // `AddToSquad` (0x00446a70), about 1,900 bytes, which that worker calls once
 // per listed object and which nothing here had needed until now.
 //
-// ## The three things the original tests that this engine cannot
+// ## The bit it refuses first, and two things it tests that this engine cannot
+//
+//   * **`[obj+0x194] & 0x800000`** refuses an object outright, before anything
+//     else. It is `Unit::SetNoselectFlag`'s bit (0x005d8750), `ObjectFlags::
+//     noselect` here, which the six shipped sites set on ambient walkers --
+//     fish, hens, villagers, messengers -- and which the flag's own setter
+//     pairs with the AI unregister. So a walker is never in a squad: tested
+//     here and in `enrol_new_units_in_squads`.
 //
 // Named once, so that no reader has to wonder whether they were missed:
 //
-//   * **`[obj+0x194] & 0x800000`** refuses an object outright, before anything
-//     else. It is one of the three `UnitFlags` bits `docs/formats/map.md` still
-//     lists as open, and `World::populate_from_map` keeps only the two it can
-//     name -- so no object here carries it and the refusal can never fire. It
-//     is named rather than dropped, because the day the bit is understood this
-//     is where it goes.
 //   * **Bit 30 of `[obj+0x198]`/`[obj+0x19c]`**, a 64-bit per-object attribute
 //     word this engine has no counterpart for. The merge predicate requires two
 //     objects to *agree* on it, so with the word absent both sides read false
@@ -2563,8 +2573,8 @@ SquadKey hero_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest)
 /// The arms are the original's, in its order, and each is a different answer to
 /// *where does this body belong*:
 ///
-///   1. an object carrying the unnamed `UnitFlags` bit belongs nowhere -- a
-///      named no-op here; see the head of this section;
+///   1. an object carrying `SetNoselectFlag`'s bit belongs nowhere, and the
+///      answer is no squad at all; see the head of this section;
 ///   2. a **hero** leads its own squad and takes its army with it;
 ///   3. a unit **inside a holder** belongs wherever its holder belongs, and to
 ///      nothing at all when the holder belongs to nothing: a garrison moves as
@@ -2585,6 +2595,9 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   SquadTable& table = heroes.squads();
   const WorldObject* slot = world.find(id);
   if (slot == nullptr) return kNoSquad;
+
+  // 1.
+  if (slot->state.flags.noselect) return kNoSquad;
 
   // 2.
   if (slot->state.flags.is_hero) return hero_squad(world, heroes, id, dest);
@@ -2710,11 +2723,10 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   return add_to_squad(world, heroes, id, dest, 0);
 }
 
-/// See the declaration. The four tests are 0x0041e820's, in its order: the
+/// See the declaration. The five tests are 0x0041e820's, in its order: the
 /// manager exists, the unit is alive (`vtbl+0x50`, `IsDead`), it is not
-/// unspawned (`kSyncUnspawned`), it has an owner (`[obj+0x70]`). The
-/// `[obj+0x194] & 0x800000` test beside them is a `UnitFlags` bit this engine
-/// does not carry and no shipped map sets in its `UnitFlags=` attribute.
+/// unspawned (`kSyncUnspawned`), it does not carry `SetNoselectFlag`'s bit
+/// (`[obj+0x194] & 0x800000`), it has an owner (`[obj+0x70]`).
 ///
 /// **The node is the one under the unit** (0x0044e650, `GetGAIKA(pos)`), and
 /// a unit already in a squad is skipped rather than re-homed: the hook's own
@@ -2738,6 +2750,7 @@ ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId af
     if (slot.object == nullptr || !slot.state.flags.is_unit) continue;
     if (slot.state.health <= 0) continue;
     if (slot.state.flags.unspawned) continue;
+    if (slot.state.flags.noselect) continue;
     if (slot.state.owner == kNoPlayer) continue;
     fresh.push_back(slot.id);
   }
@@ -3617,28 +3630,35 @@ HostOutcome squadize_impl(CallContext& ctx) {
   const SquadListId list = squadlist_of(ctx.arg(1));
   std::vector<SquadKey>* out = squadlist_pool_of(*world).mutable_items(list);
   if (out == nullptr) return HostOutcome::failed("Squadize: receiver is not a live SquadList");
-  out->clear();
   squadlist_pool_of(*world).set_cursor(list, 0);
 
   const std::int32_t wanted =
       ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
-  const GameTime now = world->time();
 
   // A copy: the walk creates and destroys squads, and one shipped site hands in
   // a list it goes on to read afterwards.
   const std::span<const ObjectId> items = objlist_pool_of(*world).items(objlist_of(ctx.arg(0)));
   const std::vector<ObjectId> bodies(items.begin(), items.end());
+  squadize_bodies(*world, *heroes, bodies, wanted, *out);
+  return HostOutcome::ok_void();
+}
 
-  SquadTable& table = heroes->squads();
+}  // namespace
+
+void squadize_bodies(World& world, HeroSystem& heroes, std::span<const ObjectId> bodies,
+                     std::int32_t state, std::vector<SquadKey>& out) {
+  out.clear();
+  const GameTime now = world.time();
+  SquadTable& table = heroes.squads();
   for (const ObjectId id : bodies) {
-    const WorldObject* slot = world->find(id);
+    const WorldObject* slot = world.find(id);
     if (slot == nullptr) continue;
     // `[obj+0x70]`, the owner record: an object nobody owns is skipped before
     // anything else, because the squad it would get would belong to nobody.
     if (slot->state.owner == kNoPlayer) continue;
 
     const ObjectId one[1] = {id};
-    regroup_into_fresh_squads(*world, *heroes, std::span<const ObjectId>(one, 1),
+    regroup_into_fresh_squads(world, heroes, std::span<const ObjectId>(one, 1),
                               kSquadizePlaceholder, now);
 
     // The destination the regrouper is asked for is the one step 1 just settled
@@ -3646,23 +3666,24 @@ HostOutcome squadize_impl(CallContext& ctx) {
     const Squad* fresh = table.find(table.squad_of(id));
     const GaikaId dest = fresh != nullptr ? fresh->dest_gaika : kNoGaika;
 
-    const SquadKey landed = add_to_squad(*world, *heroes, id, dest, 0);
+    const SquadKey landed = add_to_squad(world, heroes, id, dest, 0);
     const Squad* settled = table.find(landed);
     // Exactly one member, which is the original's whole test (0x00447572) and
     // needs no guard against listing a squad twice: a squad two bodies both
     // landed in has two members by the time the second one asks.
     if (settled == nullptr || settled->members.size() != 1) continue;
-    out->push_back(landed);
+    out.push_back(landed);
   }
 
-  for (const SquadKey key : *out) {
+  for (const SquadKey key : out) {
     if (Squad* squad = table.find(key); squad != nullptr) {
-      squad->state = wanted;
+      squad->state = state;
       squad->state_time = now;
     }
   }
-  return HostOutcome::ok_void();
 }
+
+namespace {
 
 /// The number of `define` calls `register_squad_host` makes. Kept next to the
 /// list so the two cannot drift.

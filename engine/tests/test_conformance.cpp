@@ -634,18 +634,18 @@ constexpr std::string_view kGoldenReferenceTrace =
     "seed 2a\n"
     "systems drift\n"
     "# turn length time slots threads netcmds extrahash ('=' repeats the line above)\n"
-    "t 1 400 400 bfcfa5977643c652 0 0 0\n"
-    "t 2 400 800 7eb69be123f939d5 = = =\n"
-    "t 3 400 1200 863faa0e40dfe7c6 = = =\n"
-    "t 4 400 1600 ffc68e923b61fbf0 = = =\n"
-    "t 5 400 2000 95eea27564e9075c = = =\n"
-    "t 6 400 2400 2c27fe29ebfd2465 = = =\n"
-    "t 7 400 2800 2e23c4858d45a677 = = =\n"
-    "t 8 400 3200 667b816ed7f7b883 = = =\n"
-    "t 9 400 3600 315f53d2096b004d = = =\n"
-    "t 10 400 4000 397ba6f201c8421a = = =\n"
-    "t 11 400 4400 76f3d2f88d23ab5f = = =\n"
-    "t 12 400 4800 a6972dc27a5df3c7 = = =\n";
+    "t 1 400 400 e3e5c5799807ef2 0 0 0\n"
+    "t 2 400 800 6c9b397fbfe19193 = = =\n"
+    "t 3 400 1200 4b69b0b87ae720e4 = = =\n"
+    "t 4 400 1600 b3012429c930262e = = =\n"
+    "t 5 400 2000 79a29e7475705a02 = = =\n"
+    "t 6 400 2400 e9b2076ac2accf94 = = =\n"
+    "t 7 400 2800 1bca074240feba6e = = =\n"
+    "t 8 400 3200 6cd34c1ba5d74c86 = = =\n"
+    "t 9 400 3600 8f1e6f8b3b2e5a36 = = =\n"
+    "t 10 400 4000 db462177d8fb00f9 = = =\n"
+    "t 11 400 4400 d786d6687da11d3d = = =\n"
+    "t 12 400 4800 d15c1c8be6de575d = = =\n";
 
 TEST(the_reference_scenario_still_matches_its_golden_trace) {
   const Result<conformance::Trace> golden = conformance::read_trace(kGoldenReferenceTrace);

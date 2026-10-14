@@ -47,6 +47,12 @@ pytestmark = requires_game
 
 NUMANTIA = "Adventures/GreatBattles/2_Great_Battles_Numantia.bfhp"
 CROSSROADS = "Scenarios/Crossroads.BFHP"
+# The seat whose barracks is British, a `Caserma` with `s` for a swordsman:
+# Crossroads' seats draw their faction from the world's generator, and on the
+# app's seed 1 Britain is seat 3. `gbr.exe`'s `rand` is the high dword of
+# (n x the LCG state), so the first draws from a small seed barely move with
+# it, and seat 0 draws RepublicanRome on every seed from 1 to 12.
+CROSSROADS_SEAT = ["--player", "3"]
 SIZE = ["--width", "1024", "--height", "768"]
 
 
@@ -92,7 +98,9 @@ def play(app: Path, game_dir: Path, steps: list[str], where: str, frames: int = 
         pytest.skip(f"{where} is not in this installation")
     script = ";".join(["wait:10", "key:P", "wait:2", *steps])
     assert "F5" not in script and "F9" not in script, "never touch the quick save"
-    return run(app, game_dir, ["--map", where, "--play", "--frames", str(frames), "--input", script],
+    seat = CROSSROADS_SEAT if where == CROSSROADS else []
+    return run(app, game_dir, ["--map", where, *seat, "--play", "--frames", str(frames),
+                               "--input", script],
                log=log, user_dir=user_dir)
 
 
@@ -233,15 +241,17 @@ def test_selecting_units_says_nothing(app, game_dir):
 def test_a_camera_move_moves_the_live_voice(app, game_dir):
     # The barracks' voice starts placed by the opening view; the view then
     # goes to the far side of the map, and the voice that is still playing
-    # is re-placed: off screen to its left, and at the bottom of the scale.
+    # is re-placed: off screen to its right, and at the bottom of the scale.
+    # Seat 0's barracks is the far side for seat 3 (`CROSSROADS_SEAT`); the
+    # view going there leaves the voice at the right edge, pan 10000.
     out = play(app, game_dir, ["select:class:BaseBarracks", "wait:2",
-                               "look:class:BaseBarracks@1", "wait:3"], CROSSROADS, frames=40)
+                               "look:class:BaseBarracks@0", "wait:3"], CROSSROADS, frames=40)
     played = sounds(out)
     assert len(played) == 1, out
     _, file, volume, pan = played[0]
     moved = [r for r in repans(out) if r[0] == file]
     assert moved, out
-    assert moved[-1][2] != pan and moved[-1][2] < 0, (pan, moved)
+    assert moved[-1][2] != pan and moved[-1][2] > pan, (pan, moved)
     assert moved[-1][1] <= volume, (volume, moved)
 
 

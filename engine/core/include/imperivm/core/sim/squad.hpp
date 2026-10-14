@@ -928,8 +928,8 @@ class HeroSystem;
 SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest);
 
 /// 0x0041e820, the hook the object manager runs when a unit enters the world,
-/// run over every unit with an id above `after` that is alive, owned and in no
-/// squad: each is put through `add_to_squad` toward the node under it. Only
+/// run over every unit with an id above `after` that is alive, owned, not
+/// flagged by `SetNoselectFlag` and in no squad: each is put through `add_to_squad` toward the node under it. Only
 /// while the AI manager exists (`AiSystem::manager_started`), which is the
 /// original's own gate. Returns the highest id looked at, for the caller to
 /// pass back next turn. `HeroSystem::advance` is the caller.
@@ -937,6 +937,14 @@ ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId af
 
 void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const ObjectId> units,
                                std::int32_t state, GameTime now);
+
+/// The Squadize worker, 0x00447330, whole: for each owned body in order, a
+/// fresh squad (placeholder state), `add_to_squad`, and the squad listed in
+/// `out` when it has exactly one member; then `state` and the current time on
+/// every listed squad. `out` is cleared first. `squadize_impl` documents the
+/// rule; `Squadize` and both `SetNoAIFlag` bodies (sim/world_host.cpp) call it.
+void squadize_bodies(World& world, HeroSystem& heroes, std::span<const ObjectId> bodies,
+                     std::int32_t state, std::vector<SquadKey>& out);
 
 std::size_t register_squad_host(script::HostRegistry& registry);
 

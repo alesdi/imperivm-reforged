@@ -197,6 +197,8 @@ void populate(World& world, std::uint32_t seed) {
     slot->state.z_from = 40 + i;
     slot->state.z_to = 900 - i;
     slot->state.damage_taken = 7 * i;
+    // When the curse lifts (version 35): a 64-bit time, so a value past 2^32.
+    slot->state.curse_until = 5'000'000'000LL + 1000 * i;
     // The two effect tags, for the same reason: handles nothing here resolves,
     // which is what a build that dropped either would have to get wrong.
     slot->state.mist = 500 + static_cast<ObjectId>(i);
@@ -243,6 +245,13 @@ void populate(World& world, std::uint32_t seed) {
   // A binding whose object is gone: `NamedObj::IsDead` exists, so this is a
   // legal state and the save must reproduce it rather than tidy it away.
   world.named_objects().bind("Fallen", units[5]);
+  // A name `SetName("")` took away, naming nothing, and the same name bound
+  // again after it: both entries come back, in their places.
+  world.named_objects().bind("Retired", units[1]);
+  (void)world.named_objects().unbind_object(units[1]);
+  world.named_objects().bind("Retired", units[3]);
+  // A name `GetNamedObj` minted before anything carried it.
+  (void)world.named_objects().intern("Awaited");
 
   ClassFilter filter;
   filter.match_all = false;
@@ -478,6 +487,7 @@ TEST(save_world_restores_every_field_it_claims) {
     CHECK(x.state.flags.messenger == y.state.flags.messenger);
     CHECK(x.state.flags.landing == y.state.flags.landing);
     CHECK(x.state.flags.cursed == y.state.flags.cursed);
+    CHECK(x.state.curse_until == y.state.curse_until);
     CHECK(x.state.flags.diseased == y.state.flags.diseased);
     CHECK(x.state.flags.ondie_fired == y.state.flags.ondie_fired);
     CHECK(x.state.flags.commands_disabled == y.state.flags.commands_disabled);
@@ -1288,16 +1298,16 @@ TEST(save_command_section_refuses_a_malformed_disabled_set) {
   writer.queue(7).entries.push_back(Command{});
   std::vector<std::byte> base;
   writer.serialize(base);
-  // The section ends with the disabled-set count and then the finishing
-  // list's count, and this system has neither.
-  REQUIRE(base.size() > 8);
-  base.resize(base.size() - 8);
+  // The section ends with the disabled-set count, the finishing list's count
+  // and the commanded set's count, and this system has none of them.
+  REQUIRE(base.size() > 12);
+  base.resize(base.size() - 12);
 
   const auto with_tail = [&base](const std::vector<std::byte>& tail) {
     std::vector<std::byte> out = base;
     out.insert(out.end(), tail.begin(), tail.end());
-    // No command is finishing.
-    for (int i = 0; i < 4; ++i) out.push_back(std::byte{0});
+    // No command is finishing, and no unit is commanded.
+    for (int i = 0; i < 8; ++i) out.push_back(std::byte{0});
     return out;
   };
   const auto u32 = [](std::vector<std::byte>& out, std::uint32_t value) {

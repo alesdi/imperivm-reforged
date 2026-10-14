@@ -276,6 +276,12 @@ envelope.
                            move the unit themselves and then call it on **both**
                            ends of the pair. What reads the mask is not settled;
                            `FindTeleport` is the likely consumer.
+      i64   curse_until    When `Unit::Curse`'s curse lifts, in game time; 0 if
+                           none was laid. Version 35. The original arms a
+                           per-object timer for `CurseTimeout` ms (0x005d4880)
+                           whose handler clears bit 27; here the bit is read as
+                           live while `time < curse_until`. Hashed: a shaman's
+                           `IsCursed` guard decides whether it curses again.
       u8    animating
       u8    repeat         AnimRepeat
       -- only when native_class != 0xFF --
@@ -388,10 +394,34 @@ Five of those deserve their reasons written down.
 
 ### `script`
 
-`script::Scheduler::serialize`, unchanged. Scripts are stored **by source name**, not by chunk
-index: the library is rebuilt from `data.pak` on load, and a rebuild that disagrees must be
-caught rather than silently resumed against the wrong script. The original does the same and
-fails the same way — `sequence from savegame does not compile : %s`.
+`script::Scheduler::serialize`, at its own version **2**. Scripts are stored **by source name**,
+not by chunk index: the library is rebuilt from `data.pak` on load, and a rebuild that disagrees
+must be caught rather than silently resumed against the wrong script. The original does the same
+and fails the same way — `sequence from savegame does not compile : %s`.
+
+```
+    u32     magic          "SCHD"
+    u32     version        2
+    i64     now            the scripts' clock, milliseconds
+    u32     next_id        the next script id to issue
+    i64     next_arm       the next position in the arming order
+    u32     slots          StartPlayerScript's slots, in the order they were filled
+      u32   player         as the script passed it
+      str   name           u32 length, then the bytes
+    u32     count          live scripts, ascending id
+    per script:
+      u32   id
+      str   source name
+      u16   owner type
+      u32   owner id
+      u32   parent
+      i64   armed          when it was last put on the wheel; orders scripts due together
+      u32   length, then the coroutine (`script::serialize`)
+```
+
+Version 2 added `next_arm`, `armed` and the player-script slots: scripts due on the same
+millisecond run in the order they were armed, as the original's timing wheel runs them, and a
+player script started once is refused a second start.
 
 ### `selection`
 

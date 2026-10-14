@@ -248,25 +248,13 @@ struct ObjectFlags {
   /// `Unit::IsCursed` -- bit 27 of `[obj+0x194]`, the same second flag word
   /// `no_ai`, `in_air`, `noselect`, `autocast` and `landing` live on.
   ///
-  /// **Written here on the strength of the script pair, not of a writer in
-  /// `gbr.exe`.** `SHAMAN_IDLE.VS` is the whole corpus for both entry points
-  /// and it round-trips them itself -- `if (tgt.IsCursed) break;` guards the
-  /// `tgt.Curse();` eleven lines later, so a shaman that could not read its own
-  /// write would curse the same target forever. That behaviour is what is
-  /// reproduced.
-  ///
-  /// What is *not* established is where the original sets it. `Unit::Curse`
-  /// (0x005d90c0) hands off to 0x005d4880, the spell machinery -- an SEH frame,
-  /// the global spell tables, a dozen callees -- and a byte-pattern sweep for
-  /// writes to bit 27 of `[reg+0x194]` finds none anywhere in `.text`: three
-  /// readers (`IsCursed`, 0x005107d1, and 0x005d477d, which is a
-  /// *already-cursed, skip* guard inside the curse path itself) and no `or`.
-  /// So either the write is an encoding the sweep missed or the original has
-  /// the same gap this engine's `in_air` had. Recorded rather than resolved.
-  ///
-  /// Whatever else 0x005d4880 does -- a stat penalty, a timer, an animation --
-  /// is not recovered and none of it is invented here. `Curse` sets this bit
-  /// and nothing more.
+  /// The writer is 0x005d4880, the worker `Unit::Curse` and `Unit::Bless`
+  /// share: a masked set of the bit (which is why a sweep for an `or` on the
+  /// word once found none), after curing a blessing, with a feedback object
+  /// and a timer that clears it again after `CurseTimeout` ms. The bit alone
+  /// is not the curse: see `ObjectState::curse_until` and `cursed_at`, which
+  /// every reader here goes through. Its other reader in `gbr.exe`, 0x005107d1,
+  /// is not read yet.
   bool cursed = false;
   /// `Unit::SetNoselectFlag` -- bit 23 of `[obj+0x194]`. **The same mask as the
   /// Building bit, on the other word**, which is worth saying out loud once.
@@ -685,6 +673,22 @@ struct ObjectState {
   /// reload that forgot which teleports a player had found would be a different
   /// game.
   std::uint32_t traversed_by = 0;
+
+  /// When the curse `Unit::Curse` laid on this unit lifts, in game time; 0
+  /// when none was ever laid. 0x005d4880 arms the object's timer `0x19ec6e2`
+  /// for `CurseTimeout` milliseconds (`[GamePlay]` in `CONST.INI`, 15,000)
+  /// when it sets bit 27, and that timer's handler (0x00512090 ->
+  /// 0x005d4970) is the cure 0x005d4800, which clears the bit. Here the bit
+  /// stays as written and the curse is live while `now < curse_until` --
+  /// the same lazy reading `GateMotion` and the hero's effects use, with no
+  /// tick to schedule. **Hashed and saved**: a shaman's `IsCursed` guard
+  /// decides whether it curses again.
+  GameTime curse_until = 0;
+
+  /// Bit 27 as the original holds it at `now`: set, and the cure not yet run.
+  [[nodiscard]] bool cursed_at(GameTime now) const noexcept {
+    return flags.cursed && now < curse_until;
+  }
 
   [[nodiscard]] bool is_held() const noexcept { return holder != kNoObject; }
 };

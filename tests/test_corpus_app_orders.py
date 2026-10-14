@@ -39,8 +39,15 @@ from conftest import requires_game
 pytestmark = requires_game
 
 NUMANTIA = "Adventures/GreatBattles/2_Great_Battles_Numantia.bfhp"
-# The player's own barracks (a British `Caserma`) stands at the start here.
+# The player's own barracks (a British `Caserma`) stands at the start here --
+# for the seat that plays Britain. Crossroads' seats draw their faction from
+# the world's generator, and on the app's seed 1 that is seat 3: `gbr.exe`'s
+# `rand` is the high dword of (n x the LCG state), so the first draws from a
+# small seed barely move with it, and seat 0 draws RepublicanRome on every
+# seed from 1 to 12. The tests here are about the British barracks' rows, so
+# they play seat 3.
 CROSSROADS = "Scenarios/Crossroads.BFHP"
+CROSSROADS_SEAT = ["--player", "3"]
 SIZE = ["--width", "1024", "--height", "768"]
 
 
@@ -71,8 +78,9 @@ def play(app: Path, game_dir: Path, steps: list[str], frames: int = 90, where: s
         pytest.skip(f"{where} is not in this installation")
     script = ";".join(["wait:10", "key:P", "wait:2", *steps])
     assert "F5" not in script and "F9" not in script, "never touch the quick save"
+    seat = CROSSROADS_SEAT if where == CROSSROADS else []
     done = subprocess.run(
-        [str(app), "--game", str(game_dir), *SIZE, "--map", where, "--play", "--frames",
+        [str(app), "--game", str(game_dir), *SIZE, "--map", where, *seat, "--play", "--frames",
          str(frames), "--input", script],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "IMPERIVM_INFOBAR": "1"},

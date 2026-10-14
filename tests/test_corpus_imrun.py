@@ -528,6 +528,15 @@ def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, g
 P0_OUTSIDE = (3950, 2700)
 P0_TOWNHALL = (2758, 2466)
 
+#: The seed whose Crossroads these coordinates describe. The seed draws each
+#: seat's race and each town's layout through the world's generator, and when
+#: that became `gbr.exe`'s own (sim/rng.hpp) the default seed's game changed:
+#: p1 was no longer the race that trains `ESwordsman`. Seed 1020 is a seed
+#: under the recovered generator whose p0 town hall, p1 gates and first p1
+#: swordsman outside the walls are where the default seed's were before
+#: (found by sweeping seeds 1..1200 for exactly those three facts).
+LAYOUT_SEED = 1020
+
 
 def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     """The walls fight, by placement rather than by waiting for the AI to
@@ -544,7 +553,8 @@ def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     if not crossroads.is_file():
         pytest.skip("Crossroads.BFHP is not in this installation")
     first = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "800"],
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "800",
+         "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_OBJECTS": "ESwordsman"},
     )
@@ -556,7 +566,8 @@ def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     unit = enemies[0]
 
     second = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "800"],
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "800",
+         "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_DEATHS": "1",
              "IMRUN_PLACE": f"{P0_OUTSIDE[0]},{P0_OUTSIDE[1]}",
@@ -825,7 +836,8 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
     # Which swordsman: the first of p1's standing outside its walls, well away
     # from every gate.
     first = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "100"],
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "100",
+         "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_OBJECTS": "ESwordsman", "IMRUN_GATES": "1"},
     )
@@ -848,7 +860,8 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
     assert any(target == "closed" and "near" not in rest for *_, target, rest in gates), gates
 
     second = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "100"],
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "100",
+         "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_GATES": "1", "IMRUN_WATCH": str(unit),
              "IMRUN_GOTO": f"{ORDER_TURN}:{unit}:{P1_INSIDE[0]},{P1_INSIDE[1]}"},
@@ -975,6 +988,11 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
     right-click sends him across open ground, which is `HERO_MOVE.VS`:
     `FormSetupAndMoveTo`, `FormKeepMoving` while he has a route, and then the
     army told to `stand_position`, whose first act is to `Stop` where it is.
+    The hero's own `AddCommand(false, "stand_position")` finds nothing -- his
+    `HERO_STAND_GROUND.VS` takes a point and the lookup is by name and
+    signature (0x005aef20) -- so he goes back to `HERO_IDLE.VS`, which on
+    Numantia engages the Iberians in sight. The formation is judged where the
+    march ends, before that.
     The hero rides at 120 and his footmen walk at 60 to 80. He used to walk
     at his own speed and the army chase stations laid where he had been, so he
     arrived alone and the army was stood 300 to 700 units behind him. As in
@@ -1008,9 +1026,10 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
     # He gets there.
     track = re.findall(rf"^\s+watch turn (\d+): {hero} at \((-?\d+),(-?\d+)\)$", out, re.MULTILINE)
     assert track, out[-3000:]
-    assert (int(track[-1][1]), int(track[-1][2])) == NUMANTIA_MARCH, track
+    arrived = [int(t) for t, x, y in track if (int(x), int(y)) == NUMANTIA_MARCH]
+    assert arrived, track
     # On the way, as at the end, nobody of his army is left behind.
-    for turn in (20, 50):
+    for turn in (20, arrived[0]):
         army = [(int(m), int(dx), int(dy), order) for m, dx, dy, order in re.findall(
             rf"^\s+army turn {turn}: (\d+) at \(-?\d+,-?\d+\) off \((-?\d+),(-?\d+)\) order (\S+)$",
             out, re.MULTILINE)]

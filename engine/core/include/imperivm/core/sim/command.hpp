@@ -210,9 +210,23 @@ struct CommandDef {
   /// `execdelay=`, in game-time milliseconds. What `.cmddelay` reports.
   std::int32_t exec_delay = 0;
   std::int32_t priority = 0;
-  /// `immediate="1"` -- 33 rows. Recorded and **not acted on**: no corpus site
-  /// distinguishes an immediate command from an ordinary one.
+  /// The loader's three other yes/no flags, each read as **anything but `no`**
+  /// (0x004f3f80..0x004f405a compare the attribute with `"no"` through
+  /// 0x00649c60, and an absent attribute is `"no"`), which is why `immediate`
+  /// -- shipped as `"yes"` on 30 rows -- used to read as false here through
+  /// `attribute_int`. Kept at `[def+0x1bc]`, `[def+0x1b8]` and `[def+4]`.
+  ///
+  ///   * `immediate` -- the per-object issue runs the row's method at once,
+  ///     synchronously, and never queues it (`CommandSystem::issue`);
+  ///   * `research_command` -- the issue's research arm, which jumps the queue
+  ///     ahead of a running command that has a row (`CommandSystem::issue`);
+  ///     159 rows. `plr_research` forces it on (0x004f406d);
+  ///   * `plr_research` -- one at a time per player: the accept test refuses a
+  ///     second while the owner's player already holds one (`accept`); the
+  ///     eight `Tribute` rows.
   bool immediate = false;
+  bool research_command = false;
+  bool plr_research = false;
 
   /// `offset="1"` -- 18 rows, and every one of them is a verb a *group* is
   /// given: `move`, `attack`, `advance`, `capture`, `patrol`, `explore`,
@@ -604,6 +618,13 @@ class CommandSystem final : public System {
   /// the other side and fixed with the replace flag it really passes.
   std::uint32_t append_order(World& world, ObjectId id, std::string_view verb,
                              const Command& prototype);
+  /// The script a host call is made from, for the length of that call, and
+  /// the previous one back. A running command ended by its own script is not
+  /// a cancelled one (`remove_at`). Set by the queue entry points.
+  script::ScriptId set_caller(script::ScriptId script) noexcept {
+    return std::exchange(caller_, script);
+  }
+
   /// `KillCommand()`: end the running command. Returns false when there was
   /// none. The queue refills with the default verb if it would go empty.
   bool kill_command(World& world, ObjectId id);
@@ -639,10 +660,96 @@ class CommandSystem final : public System {
   [[nodiscard]] std::string_view command_name(ObjectId id, std::size_t index = 0) const noexcept;
   /// `CmdCount()`: everything queued, the running command included.
   [[nodiscard]] std::size_t command_count(ObjectId id) const noexcept;
-  /// `CmdCount(verb)`: how many queued commands name that verb. Used on
-  /// barracks, where each `ExecCmd` appends one training order and the AI
-  /// counts them to decide whether to add another.
+  /// How many queued commands name that verb, case folded. Not `CmdCount`'s
+  /// rule; see `command_count_named`.
   [[nodiscard]] std::size_t command_count(ObjectId id, std::string_view verb) const noexcept;
+  /// `CmdCount(name)` (0x005ae4d0): how many queued commands, the running one
+  /// included, came in through the `<cmd>` row called `name` -- compared byte
+  /// for byte with the row's name (`[def+0xc]`), and a command with no row (a
+  /// script's own `AddCommand`) is never counted. Used on barracks, where each
+  /// `ExecCmd(cmd)` appends one training order and the AI counts them with the
+  /// same `cmd` to decide whether to add another; a train row's method is
+  /// `train`, so counting by verb answered 0 for every one of them.
+  [[nodiscard]] std::size_t command_count_named(ObjectId id, std::string_view row) const noexcept;
+
+  /// Whether `id`'s class binds `verb` to a method whose script takes exactly
+  /// the argument `kind` describes: 0x005aef20, the lookup every script
+  /// `SetCommand`, `AddCommand`, `SneakCommand` and the per-object issue make
+  /// before they build a command.
+  ///
+  /// The class's methods are a map keyed on the name **and the script's
+  /// signature** (0x0059ad40 searching `[class+0xec]`; the comparator 0x004857b0
+  /// orders by name, then 0x00485300 by parameter count and each parameter's
+  /// type), and the caller picks the signature by its argument: kind 0 is
+  /// `(Obj This)`, 1 `(Obj This, point)`, 2 `(Obj This, Obj)`. So
+  /// `AddCommand(true, "ghost", .pos)` on a druid whose `ghost` script takes no
+  /// argument finds nothing and queues nothing -- `GDRUID_IDLE.VS`'s ghoul
+  /// summoning, which this engine used to launch with a stray point.
+  ///
+  /// The shape is read off the compiled script's declared parameters; when no
+  /// chunk can be had (no scheduler, a file that will not compile) the name
+  /// alone decides, as it did before. Names fold here where the original
+  /// compares bytes; no shipped verb differs from its binding in case.
+  [[nodiscard]] bool binds(World& world, ObjectId id, std::string_view verb,
+                           CommandArgKind kind);
+
+  /// `Unit::GetCommanded` / `SetCommanded`: bit 0x80000 of `[unit+0x194]`, a
+  /// flag **on the unit**, not on any command. The per-object issue raises it
+  /// on every unit an order is issued to (0x004ef475; a hero's own army
+  /// through 0x005f5520 with 0x004e7890), `SetCommanded` writes it, and
+  /// nothing else in the simulation clears it -- so a unit the player once
+  /// ordered stays "commanded" after the order is over until a script says
+  /// otherwise, which is what `TOWNHALL_AUTOTRAIN.VS` and the outposts'
+  /// behaviours test. Sorted ids; saved.
+  [[nodiscard]] bool commanded(ObjectId id) const noexcept;
+  void set_commanded(ObjectId id, bool on);
+
+  /// The per-object issue, 0x004ef3d0: what `ExecCmd`, a command bar press
+  /// and a right click all reach with a `<cmd>` row, a point, an object and
+  /// the replace flag. Returns how many actors were given something.
+  ///
+  /// It raises the commanded flag on every unit among `actors` first. Then:
+  ///
+  ///   * **a row with a `groupdispatch`** runs that script instead, once, to
+  ///     its end (`dispatch`);
+  ///   * otherwise each actor the row is enabled for (`command_enabled`, its
+  ///     `vtbl+0xd8`) has the row's method looked up by shape (`binds`): the
+  ///     object form when an object was given, else the point form, else the
+  ///     bare form (0x004ef7d9..0x004ef8a1); an actor that binds none is
+  ///     skipped. The command carries the row. Then, by the row's flags:
+  ///   * **`immediate`**: the accept test, and if it passes the method runs
+  ///     now, synchronously, with the row's strings and costs ambient
+  ///     (0x004ef917..0x004ef9df) -- the command is never queued, and what it
+  ///     paid is not given back;
+  ///   * **`researchcommand`**: with at most one command queued and `idle`
+  ///     running, it is an ordinary order. Otherwise it jumps the queue when
+  ///     the running command came in through a row that is not a research
+  ///     and the accept test passes -- the runner's script is stopped, its
+  ///     `onfinish` told it was cancelled, and it goes back to index 1 to
+  ///     start again later, unrefunded (0x004efa05..0x004efad5) -- and is
+  ///     dropped in every other case;
+  ///   * **anything else** goes through the order insert (`vtbl+0xb8`,
+  ///     0x005b4e90): `set_command` when replacing and the row is not a train
+  ///     row (0x004efbbb), `append_order` otherwise.
+  ///
+  /// **Not reproduced**, and labelled where it is done: the first actor's
+  /// group-move set-up (0x004e9100, 0x004e8ae0, 0x004ef1c0) and an `offset`
+  /// row's per-actor spread of the point (0x004e81f0); callers that want a
+  /// spread hand each actor its own point, as the default order does.
+  std::size_t issue(World& world, std::span<const ObjectId> actors, const CommandDef& def,
+                    Point point, ObjectId object, bool replace, bool modifier,
+                    std::int32_t player_arg, bool user);
+  /// A row's `groupdispatch`, the issue's other arm (0x004ef4b1..0x004ef6f2):
+  /// an `ObjList` of the actors the row is enabled for, and the row's compiled
+  /// dispatch run to its end with `(objs, pt, obj, bReplace, bModifier,
+  /// player)` -- **with the row's `cmdparam` and `cmdcost_*` ambient for the
+  /// length of the call** (written into the globals at 0x004ef5c1..0x004ef632,
+  /// put back to nothing at 0x004ef6ad..0x004ef6f2). `ACTIVATE_HERO_SKILL.VS`,
+  /// the dispatch of the nine hero skill rows, reads both. False when the
+  /// script could not be had.
+  bool dispatch(World& world, std::span<const ObjectId> actors, const CommandDef& def,
+                Point point, ObjectId object, bool replace, bool modifier,
+                std::int32_t player_arg);
   /// The command a coroutine is running, or null. The hook the ambient
   /// `cmdparam` / `cmdcost_*` globals need; see the file header.
   [[nodiscard]] const Command* command_of_script(script::ScriptId script) const noexcept;
@@ -765,6 +872,12 @@ class CommandSystem final : public System {
   /// actually binds.
   void service(World& world, Entry& entry, GameTime now);
   bool launch(World& world, ObjectId id, Command& command, GameTime now);
+  /// The compiled chunk `verb` runs on `id`, compiling it through the library
+  /// on a first use; `kNoChunk` when there is none, counted in
+  /// `launch_failures` when `count_miss`.
+  std::uint32_t chunk_of(World& world, ObjectId id, std::string_view verb, bool count_miss);
+  /// `launch`'s second half: spawn `command`'s script from `chunk`.
+  bool launch_chunk(World& world, ObjectId id, Command& command, std::uint32_t chunk);
   /// End the `idle` an object was started with outside its queue, now that a
   /// command holds the object's command slot. See `launch`.
   void end_resting_idle(World& world, ObjectId id);
@@ -799,6 +912,11 @@ class CommandSystem final : public System {
   /// when it gives up was not traced, and the shipped script neither traps
   /// nor sleeps.
   [[nodiscard]] bool run_add_remove(ObjectId id, const Command& command, bool add);
+  /// The issue's immediate arm: accept, then run the method now. See `issue`.
+  void run_immediate(World& world, ObjectId id, Command command);
+  /// The issue's research arm. False when the row is to go through the order
+  /// insert as an ordinary order instead. See `issue`.
+  [[nodiscard]] bool issue_research(World& world, ObjectId id, Command command);
   /// 0x005b07d0: take the command at `index` out of `id`'s queue -- released
   /// first, while it is still in place, then ended (index 0, its `onfinish`
   /// told it was cancelled) or erased unrun. False when there is no such
@@ -833,6 +951,8 @@ class CommandSystem final : public System {
   /// Sorted by id, and only objects a script has taken a command from are in
   /// it: the set is empty on every map at turn zero.
   std::vector<DisabledEntry> disabled_;
+  /// The units whose commanded flag is up (`commanded`), sorted.
+  std::vector<ObjectId> commanded_;
   CommandTable table_;
   script::Scheduler* scheduler_ = nullptr;
   ScriptLibrary* library_ = nullptr;
@@ -843,6 +963,9 @@ class CommandSystem final : public System {
   /// the length of the call. Transient -- set and cleared inside one host
   /// call -- so never saved.
   const Command* hooked_ = nullptr;
+  /// The script whose host call is changing a queue, or `kNoScript`; see
+  /// `set_caller`. Transient, never saved.
+  script::ScriptId caller_ = script::kNoScript;
   std::vector<script::FailedScript> hook_traps_;
   std::string default_verb_{kDefaultCommandVerb};
   /// Sorted by class index. Derived from the class graph, never hashed.

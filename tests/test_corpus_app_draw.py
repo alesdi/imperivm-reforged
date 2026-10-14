@@ -119,12 +119,13 @@ def test_a_crow_in_the_air_is_drawn_above_its_shadow(app, game_dir):
     assert gap > 60
 
 
-#: p1's walled town in Balcans' south-west, with its four gates in one view.
-#: Its west gate opens for a unit walking out between turns 186 and 266 --
-#: the scan counts units only (playtest #16), so a gate with nobody near it
-#: stands closed, and the town in the south-east this used to watch opened
-#: only because its own walls were taken for friends.
-BALCANS_TOWN = "8400,22600"
+#: p14's walled town in the middle of Balcans, with its four gates in one view.
+#: Gate 684 opens at turn 151 and closes at 206, and
+#: gate 704 opens at 241 (`IMRUN_GATES=1`) -- the scan counts units only
+#: (playtest #16), so a gate with nobody near it stands closed. p1's town in
+#: the south-west, which this watched before `rand` became `gbr.exe`'s, opens
+#: no gate in this run since: the draws that lay the towns out moved.
+BALCANS_TOWN = "17150,14900"
 #: The same line, with what it takes to put the layer's canvas origin back.
 PLACED = re.compile(
     r"^id (\d+) sheet -?\d+ grid (\d+x\d+) .* lt -?\d+,(-?\d+) off -?\d+,(-?\d+) "

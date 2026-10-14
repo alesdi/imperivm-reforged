@@ -1,0 +1,116 @@
+# world_host-1: the first 115 rows of world_host in host-ledger.md (Obj::player .. Unit::SetMinimapFlag)
+0x004c63a0	verified	Range(0, n-1) on the game LCG (0x0063ff00): no draw when low == high, swapped arm draws, high dword of (span+1)*state, no scramble; sim/rng.hpp
+0x005ab290	verified	handle check, owner record index [[obj+0x70]+8] + 1; miss -1; NamedObj conversion now hides a dead named unit
+0x005c2340	verified	settlement owner record at +0x90, index + 1; miss -1
+0x004210c0	verified	handle low nibble + 1, no lookup
+0x005530a0	verified	purges dead (vtbl+0x50) then front object; empty -> invalid; also the NamedObj->Obj conversion (object_of)
+0x005add20	verified	raw [obj+0x24/0x28]; miss (0,0), not the held marker
+0x00422cf0	verified	front member's posRH, (-1,-1) for none; a handle naming no squad faults in the original, (-1,-1) here
+0x00577af0	partial	handle check then vtbl+0x2c "registered": named map (name exists), group map, sight queries 1; other query subclasses not enumerated, deregistration not read
+0x005ab1d0	verified	handle check only (table slot + offset non-null), no print; a corpse is valid
+0x00421a70	partial	index within the squad-list pool (0x0043ed70); engine asks for a live entry, which differs only for a released one (0 sites)
+0x00579320	partial	miss -> true (was a trap); refresh+count==0 evaluated on the spot -- the original's 1-2 s query cache is the query-model design gap
+0x00594eb0	partial	miss -> true; stop flag [+0x15c] never set here (no sacrifice machinery), so a sacrifice answers false
+0x005ad8a0	verified	vtbl+0xc8 (unit: unit_pos_rh, else raw); miss (0,0) silently
+0x00553000	verified	invalid -> dead; else purge then deque empty; a named building at no health is not dead
+0x005aae50	verified	invalid or vtbl+0x50 (health==0, never for the 7 non-catapult building vtables): object_is_dead
+0x005aae00	verified	valid and not vtbl+0x50 dead: object_is_dead
+0x00553230	verified	miss mints an empty named query under the name (0x005722a0): valid, dead, .obj invalid, filled by a later SetName
+0x005ab970	verified	not bit 21 of [obj+0x2c]; miss false
+0x005ab920	verified	bit 21 via vtbl+0x44/0x48; effect and refresh are presentation; miss is a no-op (was a trap)
+0x0055ea60	partial	every hero member's army, then every live member (0x005a7600); list arm tested, hero-army arm implemented but not tested; 0 sites
+0x005ab9d0	partial	argument first; visible -> true without the receiver; hidden -> target owner grants observer share_view (record+0x18, 0x005652f0); own bit inferred (initialiser not found)
+0x005ab250	partial	handle check then vtbl+0x94 destroy; miss no-op; holder-eviction gap already labelled at perform_erase
+0x00578c40	partial	walks the query's list skipping bit 23 (buildings), reads before refresh; query cache is the query-model gap
+0x006981d0	inferred	StrMap key erase; no StrMap type in the engine and 0 shipped sites -- the 47 are Obj/Query::Erase counted by folded name
+0x005aa520	verified	class +0x2dc from `radius`, inherited; miss 0
+0x005abda0	verified	class id string (+4 of [obj+0x3c]); miss ""
+0x005ab8d0	verified	bit 26 set/clear via vtbl+0x44/0x48, no life test; miss no-op
+0x00579c70	verified	every member that resolves and is not dead (vtbl+0x50); empty query does nothing
+0x005aa580	verified	sync bit 0x400000 (CVXUnit ctor 0x005d3170); miss or failed cast -> invalid handle; matches NativeObject::is_a
+0x005aa640	verified	sync bit 0x1000000; miss/failed -> invalid
+0x005aa5e0	verified	sync bit 0x800000 (CVXBuilding ctor 0x004e00d0), AsTower the same body; miss/failed -> invalid
+0x005aa9b0	verified	virtual cast to CVXShip (chain via unit 0x005d27d0); miss/failed -> invalid
+0x005aa6a0	verified	virtual cast to CVXDruid (a druid is not a hero); miss/failed -> invalid
+0x005aa780	verified	virtual cast to CVXCatapult (a building heir); miss/failed -> invalid
+0x005aa7f0	verified	virtual cast to CVXWagon (unit heir); miss/failed -> invalid
+0x00529980	verified	virtual cast to CVXGate (building heir); miss/failed -> invalid
+0x005aaa20	verified	virtual cast to CVXFlyingUnit (unit heir); miss/failed -> invalid
+0x005aa860	verified	virtual cast to CVXItemHolder (script-object heir); miss/failed -> invalid
+0x004dcdd0	verified	16-bit settlement slot [bld+0x148] as a handle; miss -> invalid; no 0xffff guard (faults) -> invalid here
+0x004219a0	verified	node at index*0x24 of 0x008c8e54, settlement pointer +0x14 or invalid; no print
+0x005ada80	verified	[obj+0xc0]; miss 0
+0x005c1e40	partial	garrison holder [settlement+0x5e] +0x1c; no writer found (ctor 0x00531de0 zeroes it); engine answers the settlement's own health, 0; 0 sites
+0x00427740	verified	sum of [+0xc0] over members with a live slot; no bounds check; empty 0
+0x005adae0	verified	[obj+0xc4]; miss 0; ctor seeds from class maxstamina, engine for combatants only (no other class declares one)
+0x005c1f00	partial	garrison holder +0x24; same as Settlement::health
+0x005d8b90	verified	[obj+0xc4], same field as Obj::stamina
+0x005adcc0	verified	[obj+0xd0] (WorldObject::sight); miss 0
+0x005adb40	verified	[obj+0xc8], class max plus bonuses (CombatSystem) or class maxhealth; miss 0
+0x00427800	verified	sum of [+0xc8] over live members
+0x005ad450	partial	whole string as one exact case-sensitive key (0x00409e40/0x00409350), then walk [class+0xe4]; fixed (was a comma list); altid keying of the map 0x009bdb00 not traced
+0x005aa350	verified	floor isqrt of the stored-position distance to the point, less own radius; miss -1 (was 0, and measured from the holder)
+0x005aa3e0	verified	argument then receiver checked (-1 each); 0x005a77b0: stored positions, less both radii
+0x004dce60	verified	unit then receiver checked; nearest door (0x0056fba0) of the land/water list by the unit class's water_unit (+0xb30) from the unit's stored position; fallbacks unit pos / building pos / (0,0); no life test (fixed: health test, ship-class flag, holder walk)
+0x004dcfa0	partial	(Unit, point): miss -> the point; water from the unit class's water_unit (fixed, was ship class); one rand(0,10000) draw over 1/(d^4+1e-7) weights in double, fixed point here
+0x004dd080	partial	(point, bool): same worker 0x004db6c0; double-precision weights approximated in fixed point (core has no floats)
+0x005d7fc0	verified	game clock into [unit+0x1a4], read back by TimeWithoutAttack (0x005d7f50); stored on the combatant (was dropped on a census that missed the reader)
+0x005d8d70	partial	bit n<36 of [obj+0x198]; hero ctor 0x0052ffd0 sets bit 30 freedom on every hero (fixed); the class reader's 36-name table (0x00426df0) taken from the engine's existing reading, not re-read
+0x004dd150	verified	n-th class point slot of the type as (x, y*1448/1024), raw offsets; miss (-32768,-32768) silently; no life test
+0x005d8f80	partial	acts only with the Parry special and a changed mode [+0x1a0]; the effect object at [+0x1c8] (0x00518650 entry 4) is not modelled
+0x005d8240	verified	bit 0x100000 of [obj+0x194]; miss no-op
+0x005cdbc0	verified	stored handle [tp+0x208]; miss invalid
+0x00424f90	verified	no handle check; health < maxhealth / 20 (sar 3 confirmed), truncating
+0x005d7c80	verified	the int at [+0x164]; miss no-op
+0x004dd200	verified	damage tier [b+0x204] == 3; miss true
+0x004dd440	partial	town hall and spell 0..5, then the spell manager record (0x0052d3e0), message 0x184 and UI; dropped here (no reader); 0x0052c5a0 not read
+0x004dd4f0	partial	the same with a data argument; dropped likewise
+0x005d70f0	verified	no receiver check; holder [+0x154] resolves and its ship handle [holder+0x0e] resolves (0x005319a0)
+0x005d8bf0	verified	the int at [+0x164]; miss 0
+0x0051bd20	verified	bit 22 of [+0x194]
+0x005d7bc0	partial	base answers invalid; only the druid override reads [+0x1cc]; no sacrifice machinery here (design)
+0x005aaea0	verified	argument then receiver (false each); Military receiver; target a Building heir with a live settlement, not Tower/Wall/Gate/Catapult
+0x005cdcb0	verified	ORs the traveller's record word +0x18 (share-view side, self included) into [tp+0x214] (fixed: was the one bit); 1..16 only
+0x005cdc40	partial	instance fields [tp+0x20c/0x210] copied from the class by the loader 0x005cd950; miss pushes (0xffff|garbage, 0), (-1,-1) here; agree on every shipped class
+0x005d87d0	verified	bit 0x4000000 of the unit flag word; miss no-op
+0x00435470	partial	bit 0x40000 of [+0x194] on live units only, then the whole list to the Squadize worker 0x00447330 at state 0 (fixed: the regroup was missing); non-units left out of the regroup (labelled; 0 shipped)
+0x005de600	verified	handle check, bit 0x40000 with no unit/death test, then a one-element list to 0x00447330 at state 0 (fixed)
+0x00573260	partial	op 0 (fixed: was 1), sort-by-handle merge (0x004ffbe0); query interning, 2000 ms cache and refcount are the query-model design gap (fn_set_op)
+0x005733f0	partial	op 1 (fixed: was 0), walks the smaller operand in its own order (fixed); query-model gap
+0x00573580	partial	op 2, left operand's order kept (fixed: was sorted); query-model gap
+0x005765a0	partial	interns the name in [0x009bdac8], creates on a miss, answers the group's own handle (live, no cache); engine mints a fresh query per call (query-model gap)
+0x005754b0	partial	player 1..16 else invalid; whole-string class else invalid (fixed); whole-map grid sweep: no held, no dead (fixed); query-model gap, grid order
+0x00576130	partial	a sight query with the given radius (negative: sight-100), no comma bypass (fixed: was an anchored circle listing its anchor); query-model gap
+0x00575cb0	partial	sight-100 frozen at construction, empty for a gone or dead observer, observer and dead excluded, inclusive (fixed); hidden-mask path is VisibleObjsInSight's; query-model gap
+0x005775e0	partial	(x,y,r,class) circle, dist²<=r²: r=0 the spot, r<0 nothing, dead excluded, comma list allowed (fixed); query-model gap
+0x00574160	partial	(str, str): exact name scan, miss invalid; whole-string class else invalid (fixed); query-model gap; garrison back-link gap labelled
+0x00574b80	partial	(Settlement, str): receiver check, then as above
+0x005b6730	partial	handle check before any group lookup (fixed: created the group anyway), then CVXGroup::Add; template-deque routing on [0x00a8734c] not read
+0x00561970	partial	no receiver check, group always made, members that resolve and are not dead (fixed); template routing not read
+0x0057a550	partial	handle check, then the query's cached list, every resolving member; query-model gap
+0x005b4630	partial	handle check; group miss does nothing; CVXGroup::Remove (0x00572210) on the live deque; template deque not read
+0x0055f720	partial	members that resolve and are not dead (fixed); as above
+0x0057a970	partial	handle check, the query's cached list; query-model gap
+0x005b69b0	partial	every group in the dictionary (0x004909f0), Remove on each; as the Obj form above
+0x00563250	partial	members that resolve and are not dead (fixed); as above
+0x0057ab80	partial	handle check, the query's cached list; query-model gap
+0x00697cb0	verified	in place, low edge then high per axis, unnormalised
+0x00697d90	partial	x87 trunc(x cos + y sin), trunc(y cos - x sin) with K = 3.1415926535/180; cardinals and the eight +/-1/2 entries keep the residue's sign (fixed for the halves); other angles a Q30 table, at most one unit off where a product falls within ~3e-5 of an integer; 53-bit precision control assumed
+0x006950e0	verified	by-reference x / rect::left (offset 0) for assignment; the engine answers the read, 0 shipped sites assign
+0x006952b0	verified	by-value first dword
+0x00695290	verified	by-reference y / rect::top (offset +4); read only here, 0 shipped sites assign
+0x006952e0	verified	by-value second dword
+0x00697c50	verified	stores y then x in place and returns the point (fixed: returned nothing)
+0x00697aa0	partial	rect::Set(left, top, right, bottom), arity 4 -- not this engine's Set/2; unbound, 0 shipped sites
+0x00697d10	verified	32-bit imul/add, floor root of the unsigned sum; 0 -> (0, L); x*L wrapped then idiv (fixed: was 64-bit)
+0x00696e50	verified	(x, y) as given, no clamp or fixup
+0x00695310	verified	member and free, one body: 32-bit difference then the wrapped length (fixed: was 64-bit)
+0x00696f80	verified	inclusive on all four edges
+0x00695360	verified	32-bit squares and sum, floor root of the unsigned sum (fixed: was 64-bit)
+0x005bd3e0	verified	no world -> unchanged; x to [0, w-2], y to [0, h-2] (high corner from [world+0xbc/0xc0] - 1)
+0x004c6650	verified	(0, 0, w-1, h-1) copied from [world+0xb4]
+0x00576790	partial	group map lookup, miss -> empty list; clones templates in order, non-unit copies skipped (fixed); the 0x0041f310 hand-off and next-turn behaviour start are labelled
+0x005769b0	partial	group, then exact settlement name scan; copies enter the garrison forced (0x005d3e10) with the onenter hook (fixed: only the holder link was set); hook order vs. name/group filing differs (labelled)
+0x00576e00	partial	group, then the object's holder (vtbl+0xe4): ship -> ship+1, building -> its settlement's garrison; none -> empty list, no spawn (fixed: spawned into the object itself); a holder passed directly is inferred
+0x005a8710	partial	player 1..16, inclusive map rect unless (-1,-1), class, CVXScriptObj cast then SetPlayer/SetPos; the cast subtree is inferred (labelled), 0x0041f310 hand-off not modelled
+0x005a8980	partial	class first, clamp inset 48 low then high, no player check; same labelled gaps as Place

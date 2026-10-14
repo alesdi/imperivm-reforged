@@ -6,6 +6,7 @@
 #include "imperivm/core/sim/host_context.hpp"
 
 #include <algorithm>
+#include <array>
 #include <optional>
 
 #include "imperivm/core/game/class_graph.hpp"
@@ -106,8 +107,17 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
     def.queue_icon.assign(doc.attribute(n, "queueicon"));
     def.key.assign(doc.attribute(n, "key"));
     {
-      const std::string_view train = doc.attribute(n, "traincommand");
-      def.train_command = train == "yes" || train == "1" || train == "true";
+      // Anything but `no` is yes, and absent is `no` (0x004f3f80..0x004f405a).
+      const auto flag = [&](std::string_view attribute) {
+        const std::string_view value = doc.attribute(n, attribute);
+        return !value.empty() && !equal_fold(value, "no");
+      };
+      def.train_command = flag("traincommand");
+      def.research_command = flag("researchcommand");
+      def.immediate = flag("immediate");
+      def.plr_research = flag("plrresearch");
+      // A player research is a research (0x004f406d).
+      if (def.plr_research) def.research_command = true;
     }
     def.cost_gold = doc.attribute_int(n, "costgold", 0);
     def.cost_food = doc.attribute_int(n, "costfood", 0);
@@ -115,7 +125,6 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
     def.cost_stamina = doc.attribute_int(n, "coststamina", 0);
     def.exec_delay = doc.attribute_int(n, "execdelay", 0);
     def.priority = doc.attribute_int(n, "priority", 0);
-    def.immediate = doc.attribute_int(n, "immediate", 0) != 0;
     def.offset = doc.attribute_int(n, "offset", 0) != 0;
     // The two display strings, which the `rollover` family formats and nothing
     // in the simulation reads. 384 of the 404 rows carry a `rollover` and 253
@@ -225,6 +234,7 @@ void CommandSystem::forget(ObjectId id) {
   if (disabled_at < disabled_.size() && disabled_[disabled_at].id == id) {
     disabled_.erase(disabled_.begin() + static_cast<std::ptrdiff_t>(disabled_at));
   }
+  set_commanded(id, false);
   const std::size_t at = lower_bound(id);
   if (at >= queues_.size() || queues_[at].id != id) return;
   for (Command& command : queues_[at].queue.entries) retire(command);
@@ -464,9 +474,13 @@ bool CommandSystem::launch(World& world, ObjectId id, Command& command, GameTime
   command.started = true;
   command.started_at = now;
   if (scheduler_ == nullptr) return true;  // queued, running, never retires
+  return launch_chunk(world, id, command, chunk_of(world, id, command.verb, /*count_miss=*/true));
+}
 
-  const std::string_view path = script_for(world, id, command.verb);
-  if (path.empty()) return false;
+std::uint32_t CommandSystem::chunk_of(World& world, ObjectId id, std::string_view verb,
+                                      bool count_miss) {
+  const std::string_view path = script_for(world, id, verb);
+  if (path.empty()) return script::kNoChunk;
 
   // **The file has to be compiled before it can be spawned, and nothing else
   // compiles it.** `Scheduler::spawn_by_name` is a lookup in the already-loaded
@@ -478,16 +492,20 @@ bool CommandSystem::launch(World& world, ObjectId id, Command& command, GameTime
   // failed to spawn, and was retired by `service` without a word.
   const std::uint32_t chunk = library_ != nullptr ? library_->chunk_for(path)
                                                   : scheduler_->find_chunk(path);
-  if (chunk == script::kNoChunk) {
+  if (chunk == script::kNoChunk && count_miss) {
     // Counted rather than dropped: a verb whose file will not compile is a
     // broken installation or a missing behaviour, and it used to be invisible.
-    if (const auto at = launch_failures_.find(command.verb); at != launch_failures_.end()) {
+    if (const auto at = launch_failures_.find(std::string(verb)); at != launch_failures_.end()) {
       ++at->second;
     } else {
-      launch_failures_.emplace(std::string(command.verb), std::size_t{1});
+      launch_failures_.emplace(std::string(verb), std::size_t{1});
     }
-    return false;
   }
+  return chunk;
+}
+
+bool CommandSystem::launch_chunk(World& world, ObjectId id, Command& command, std::uint32_t chunk) {
+  if (chunk == script::kNoChunk) return false;
 
   // The receiver first, the command's argument second: exactly what the
   // shipped scripts declare. `UNIT_MOVE.VS` opens `// void, Obj This, point pt`
@@ -748,11 +766,37 @@ bool CommandSystem::run_add_remove(ObjectId id, const Command& command, bool add
 
 bool CommandSystem::accept(World& world, ObjectId id, const Command& command) {
   if (!charge(world, id, command)) return false;
-  if (run_add_remove(id, command, /*add=*/true)) return true;
-  // Refused by the row's script after it was paid for: the payment goes back
-  // (0x005b18bc, `vtbl+0x88`), and nothing is queued.
-  settle(world, id, command, /*refund=*/true);
-  return false;
+  if (!run_add_remove(id, command, /*add=*/true)) {
+    // Refused by the row's script after it was paid for: the payment goes back
+    // (0x005b18bc, `vtbl+0x88`), and nothing is queued.
+    settle(world, id, command, /*refund=*/true);
+    return false;
+  }
+  // **A `plrresearch` row is held once per player** (0x005b1883..0x005b18ad):
+  // after the payment and the script, a set on the owner's player record
+  // (`[obj+0x70]`, keyed by the row's index `[def+0x1e4]`) refuses the row
+  // while it is up and is raised otherwise; the release (0x005b18d0) and the
+  // pop of a finished head (0x005b5160) lower it. So a second tavern cannot
+  // start `Tribute` while the first has it queued. The refusal returns
+  // **without** putting the payment back -- the original's own order, kept.
+  //
+  // Derived here rather than stored: the set is up exactly while some object
+  // of that player holds a command of the row, which a walk of the queues
+  // answers. **One difference, labelled:** the original never lowers it for
+  // an object destroyed with the row queued (its queue is not released), and
+  // this walk forgets such an object with its queue.
+  const CommandDef* row = command.name.empty() ? nullptr : table_.find(command.name);
+  if (row == nullptr || !row->plr_research) return true;
+  const ObjectState* self = world.state(id);
+  const PlayerId owner = self == nullptr ? kNoPlayer : self->owner;
+  for (const Entry& entry : queues_) {
+    const ObjectState* other = world.state(entry.id);
+    if (other == nullptr || other->owner != owner) continue;
+    for (const Command& held : entry.queue.entries) {
+      if (equal_fold(held.name, row->name)) return false;
+    }
+  }
+  return true;
 }
 
 void CommandSystem::release(World& world, ObjectId id, const Command& command) {
@@ -783,9 +827,15 @@ bool CommandSystem::remove_at(World& world, ObjectId id, std::size_t index) {
     at = static_cast<std::size_t>(found - q->entries.begin());
   }
   // Index 0 is ended as `KillCommand` ends it, its `onfinish` told it was
-  // cancelled; anything behind it never ran and is erased.
+  // cancelled; anything behind it never ran and is erased. **Unless the
+  // script ending it is its own**: 0x0069fee0 then only raises the script's
+  // stop flag (`[ctx+0x40]`) and leaves the rest to the script's ordinary
+  // end, which pops it with the cancel flag (0x009bdb18) down, so its
+  // `onfinish` is told `false`.
   if (at == 0) {
-    retire(world, id, q->entries.front(), /*canceled=*/true);
+    const Command& head = q->entries.front();
+    const bool own = head.script != script::kNoScript && head.script == caller_;
+    retire(world, id, q->entries.front(), /*canceled=*/!own);
   } else {
     retire(q->entries[at]);
   }
@@ -827,6 +877,35 @@ std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_
   q = find(id);
   if (had_head && q->entries.size() > 1 && q->entries.front().id == head) {
     (void)remove_at(world, id, 0);
+  }
+  // **And the new command starts now, inside the call.** Ending the head
+  // (0x005b07d0) starts the next command through 0x005b4f20 there and then,
+  // and the command's script is a thread armed at the wheel's clock
+  // (0x00688240), so it runs in this same pass as soon as the script that
+  // gave the order yields. Leaving the start to the next command pass, as
+  // this did, opened a window the shipped scripts walk into:
+  // `OUTPOST_BEHAVIOR.VS` orders a garrisoned defender out with
+  // `guardadvance`, `Sleep(200)`s and looks again for one still inside --
+  // and with the order not yet started the same defender was still there,
+  // was ordered again (which cancels the order that never ran), and never
+  // left. Every outpost on the map spun in that loop for good once
+  // `ObjList::Add` stopped taking a duplicate, and the war around them went
+  // quiet.
+  // A verb the class binds no compiled script for is left for the pass, which
+  // retires it as it always has.
+  if (scheduler_ != nullptr) {
+    if (CommandQueue* now_q = find(id); now_q != nullptr && !now_q->entries.empty() &&
+                                        now_q->entries.front().id == issued &&
+                                        !now_q->entries.front().started) {
+      Command& fresh = now_q->entries.front();
+      // A miss is left for the pass, which counts and retires it once.
+      const std::uint32_t chunk = chunk_of(world, id, fresh.verb, /*count_miss=*/false);
+      if (chunk != script::kNoChunk) {
+        fresh.started = true;
+        fresh.started_at = world.time();
+        (void)launch_chunk(world, id, fresh, chunk);
+      }
+    }
   }
   return issued;
 }
@@ -930,10 +1009,225 @@ const Command* CommandSystem::command_of_script(script::ScriptId script) const n
   for (const Command& command : finishing_) {
     if (command.script == script) return &command;
   }
-  // Inside a row's `onaddremovescript`, which is no command's own script: the
-  // row it was run for, as the original's ambient globals say for as long as
-  // the call lasts.
+  // Inside a row's `onaddremovescript`, `groupdispatch` or immediate method,
+  // none of which is a queued command's own script: the row it was run for,
+  // as the original's ambient globals say for as long as the call lasts.
   return hooked_;
+}
+
+std::size_t CommandSystem::command_count_named(ObjectId id, std::string_view row) const noexcept {
+  const CommandQueue* q = find(id);
+  if (q == nullptr) return 0;
+  std::size_t n = 0;
+  for (const Command& command : q->entries) {
+    if (!command.name.empty() && command.name == row) ++n;
+  }
+  return n;
+}
+
+bool CommandSystem::binds(World& world, ObjectId id, std::string_view verb, CommandArgKind kind) {
+  const std::string path(script_for(world, id, verb));
+  if (path.empty()) return false;
+  if (scheduler_ == nullptr) return true;
+  const std::uint32_t chunk_index = library_ != nullptr ? library_->chunk_for(path)
+                                                        : scheduler_->find_chunk(path);
+  if (chunk_index == script::kNoChunk || chunk_index >= scheduler_->chunk_count()) return true;
+  const script::Chunk& chunk = scheduler_->chunk(chunk_index);
+  // The receiver is parameter 0; the template's one argument, if any, is 1.
+  const auto second_is = [&](std::string_view type) {
+    return chunk.parameter_count == 2 && chunk.locals.size() > 1 &&
+           equal_fold(chunk.locals[1].type_name, type);
+  };
+  switch (kind) {
+    case CommandArgKind::none: return chunk.parameter_count == 1;
+    case CommandArgKind::point: return second_is("point");
+    case CommandArgKind::object: return second_is("Obj");
+  }
+  return false;
+}
+
+bool CommandSystem::commanded(ObjectId id) const noexcept {
+  return std::binary_search(commanded_.begin(), commanded_.end(), id);
+}
+
+void CommandSystem::set_commanded(ObjectId id, bool on) {
+  const auto at = std::lower_bound(commanded_.begin(), commanded_.end(), id);
+  const bool held = at != commanded_.end() && *at == id;
+  if (on && !held) commanded_.insert(at, id);
+  if (!on && held) commanded_.erase(at);
+}
+
+namespace {
+
+/// A command carrying `def` -- its name, parameter, costs and delay -- the
+/// shape the per-object issue gives every command it builds (`[cmd+0x2c]`).
+Command row_command(const CommandDef& def) {
+  Command command;
+  command.param = def.param;
+  command.name = def.name;
+  command.cost_gold = def.cost_gold;
+  command.cost_food = def.cost_food;
+  command.cost_pop = def.cost_pop;
+  command.cost_stamina = def.cost_stamina;
+  command.delay = def.exec_delay;
+  return command;
+}
+
+}  // namespace
+
+bool CommandSystem::dispatch(World& world, std::span<const ObjectId> actors, const CommandDef& def,
+                             Point point, ObjectId object, bool replace, bool modifier,
+                             std::int32_t player_arg) {
+  if (scheduler_ == nullptr || def.group_dispatch.empty()) return false;
+  const std::uint32_t chunk = library_ != nullptr ? library_->chunk_for(def.group_dispatch)
+                                                  : scheduler_->find_chunk(def.group_dispatch);
+  if (chunk == script::kNoChunk || chunk >= scheduler_->chunk_count()) return false;
+  ObjListPool& pool = objlist_pool_of(world);
+  // The actors the row is enabled for (0x004ef589's `vtbl+0xd8`), in order.
+  const ObjListId list = pool.acquire_temporary(script::kNoScript);
+  if (std::vector<ObjectId>* items = pool.mutable_items(list)) {
+    for (const ObjectId id : actors) {
+      if (world.find(id) != nullptr && command_enabled(world, id, def.name)) items->push_back(id);
+    }
+  }
+  const std::array<script::Value, 6> args{
+      make_objlist_value(list),
+      pack_point(point),
+      object != kNoObject ? script::Value::object(kTypeObj, object)
+                          : script::Value::object(script::ObjectRef{script::kNoType, 0}),
+      script::Value::boolean(replace),
+      script::Value::boolean(modifier),
+      script::Value::integer(player_arg),
+  };
+  // The row is ambient for exactly the call, and the outer one comes back.
+  const Command ambient = row_command(def);
+  const Command* outer = hooked_;
+  hooked_ = &ambient;
+  const script::CallReport ran = scheduler_->call(chunk, args);
+  hooked_ = outer;
+  // The list it was handed is `kNoScript`'s, as a verifier's is, and goes now.
+  pool.release_script(script::kNoScript);
+  if (ran.status == script::ExecStatus::failed) {
+    scheduler_->report_trap(
+        script::FailedScript{ran.id, scheduler_->chunk(chunk).source_name, ran.trap});
+  }
+  return ran.id != script::kNoScript;
+}
+
+void CommandSystem::run_immediate(World& world, ObjectId id, Command command) {
+  // The command was built, so it has its id (0x00599302), whatever follows.
+  command.id = world.next_command_id();
+  if (!accept(world, id, command)) return;
+  if (scheduler_ == nullptr) return;
+  const std::string path(script_for(world, id, command.verb));
+  const std::uint32_t chunk = path.empty()                ? script::kNoChunk
+                              : library_ != nullptr ? library_->chunk_for(path)
+                                                    : scheduler_->find_chunk(path);
+  if (chunk == script::kNoChunk || chunk >= scheduler_->chunk_count()) return;
+  script::Value args[2] = {script::Value::object(kTypeObj, id), command.argument()};
+  const std::span<const script::Value> window(
+      args, command.arg_kind == CommandArgKind::none ? std::size_t{1} : std::size_t{2});
+  // Run through the command's own `vtbl+0xc` (0x00598a70 -> 0x006a0360): to its
+  // end, now, with the row ambient (0x004ef917..0x004ef9df). Never queued, so
+  // never released: what it paid stays paid.
+  const Command* outer = hooked_;
+  hooked_ = &command;
+  const script::CallReport ran = scheduler_->call(chunk, window);
+  hooked_ = outer;
+  if (ran.status == script::ExecStatus::failed) {
+    scheduler_->report_trap(
+        script::FailedScript{ran.id, scheduler_->chunk(chunk).source_name, ran.trap});
+  }
+}
+
+bool CommandSystem::issue_research(World& world, ObjectId id, Command command) {
+  const CommandQueue* q = find(id);
+  // At most one command, and that one `idle` (case and all, 0x00429c60): an
+  // ordinary order. An empty queue here is an object still on the `idle` it
+  // was started with outside its queue.
+  if (q == nullptr || q->entries.empty()) return false;
+  if (q->entries.size() <= 1 && q->entries.front().verb == kDefaultCommandVerb) return false;
+
+  command.id = world.next_command_id();
+  const std::string head_name = q->entries.front().name;
+  const CommandDef* head_row = head_name.empty() ? nullptr : table_.find(head_name);
+  // Dropped unless the runner came in through a row that is not a research,
+  // and only then is the accept test asked (0x004efa45..0x004efa7c).
+  if (head_row == nullptr || head_row->research_command) return true;
+  if (!accept(world, id, command)) return true;
+  // The runner's script stops with no callback, its `onfinish` is told it was
+  // cancelled, and the research goes in front of it and starts
+  // (0x004efa82..0x004efaba). The runner keeps its place behind, unrefunded,
+  // and starts again from its beginning when it reaches the head.
+  CommandQueue& queue_ref = queue(id);
+  if (queue_ref.entries.empty()) {
+    queue_ref.entries.push_back(std::move(command));
+    return true;
+  }
+  Command& runner = queue_ref.entries.front();
+  retire(world, id, runner, /*canceled=*/true);
+  runner.started = false;
+  runner.script = script::kNoScript;
+  queue_ref.entries.insert(queue_ref.entries.begin(), std::move(command));
+  return true;
+}
+
+std::size_t CommandSystem::issue(World& world, std::span<const ObjectId> actors,
+                                 const CommandDef& def, Point point, ObjectId object, bool replace,
+                                 bool modifier, std::int32_t player_arg, bool user) {
+  // Every unit handed the order is marked commanded first, enabled or not
+  // (0x004ef410..0x004ef480): a unit by its own flag, a hero by his army's
+  // (0x005f5520 applying 0x004e7890 to his formation). **The hero himself is
+  // marked too -- an inference:** `TOWNHALL_AUTOTRAIN.VS` reads
+  // `u.hero.GetCommanded`, which only answers anything if he is.
+  const HeroSystem* heroes = hero_system_of(world);
+  for (const ObjectId id : actors) {
+    const WorldObject* slot = world.find(id);
+    if (slot == nullptr || !slot->state.flags.is_unit) continue;
+    set_commanded(id, true);
+    const HeroRecord* record = heroes == nullptr ? nullptr : heroes->hero(id);
+    if (record == nullptr) continue;
+    for (const ObjectId member : record->army) set_commanded(member, true);
+  }
+
+  if (!def.group_dispatch.empty()) {
+    return dispatch(world, actors, def, point, object, replace, modifier, player_arg) ? 1 : 0;
+  }
+
+  const std::string_view verb = def.method.empty() ? std::string_view{def.name} : def.method;
+  std::size_t issued = 0;
+  for (const ObjectId id : actors) {
+    if (world.find(id) == nullptr || !command_enabled(world, id, def.name)) continue;
+    Command command = row_command(def);
+    command.user = user;
+    command.verb.assign(verb);
+    // The method by shape: the object form when an object was given, then the
+    // point form, then the bare form; none of them, and the actor is skipped
+    // ("Cmd Not resolved to method").
+    if (object != kNoObject && binds(world, id, verb, CommandArgKind::object)) {
+      command.arg_kind = CommandArgKind::object;
+      command.object = object;
+    } else if (binds(world, id, verb, CommandArgKind::point)) {
+      command.arg_kind = CommandArgKind::point;
+      command.point = point;
+    } else if (!binds(world, id, verb, CommandArgKind::none)) {
+      continue;
+    }
+    if (def.immediate) {
+      run_immediate(world, id, std::move(command));
+      ++issued;
+      continue;
+    }
+    if (def.research_command && issue_research(world, id, command)) {
+      ++issued;
+      continue;
+    }
+    const std::uint32_t made = replace && !def.train_command
+                                   ? set_command(world, id, verb, command)
+                                   : append_order(world, id, verb, command);
+    if (made != 0) ++issued;
+  }
+  return issued;
 }
 
 CommandSystem* command_system(World& world) noexcept {
@@ -1030,6 +1324,18 @@ struct Receivers {
   return out;
 }
 
+/// Records the calling script on the command system for one queue call
+/// (`CommandSystem::set_caller`), and puts the previous one back.
+struct CallerScope {
+  CommandSystem& commands;
+  script::ScriptId previous;
+  CallerScope(CommandSystem& system, script::ScriptId script)
+      : commands(system), previous(system.set_caller(script)) {}
+  ~CallerScope() { (void)commands.set_caller(previous); }
+  CallerScope(const CallerScope&) = delete;
+  CallerScope& operator=(const CallerScope&) = delete;
+};
+
 /// The single-object form: everything that reads rather than orders.
 struct Self {
   World* world = nullptr;
@@ -1081,17 +1387,79 @@ struct Self {
 
 // -- the queue -------------------------------------------------------------
 
+/// Which of the three registrations a receiver reaches: `gbr.exe` registers
+/// every queue member on `Obj`, `ObjList` and `Query` with bodies that differ
+/// in how they treat a dead member and a missing method (below). A named
+/// object orders the object it names, so it takes the `Obj` form; a bare
+/// `<group>` name resolves to a query.
+enum class ReceiverForm : std::uint8_t { object, list, query };
+
+[[nodiscard]] ReceiverForm receiver_form(const Value& receiver) noexcept {
+  if (receiver.is_string()) return ReceiverForm::query;
+  if (!receiver.is_object()) return ReceiverForm::object;
+  const script::TypeId type = receiver.as_object().type;
+  if (type == kTypeObjList) return ReceiverForm::list;
+  if (type == kTypeQuery) return ReceiverForm::query;
+  return ReceiverForm::object;
+}
+
+/// `vtbl+0x50` on the base object (0x004e1f50): health `[obj+0xc0]` is zero.
+[[nodiscard]] bool dead(const World& world, ObjectId id) noexcept {
+  const ObjectState* state = world.state(id);
+  return state == nullptr || state->health <= 0;
+}
+
+/// The list and query forms refuse the whole call when their object argument
+/// names nothing ("Parameter #N ... is uninitialized or invalid object",
+/// 0x00562800, 0x00578690, 0x00578870); the `Obj` form passes the handle on.
+[[nodiscard]] bool object_argument_missing(World& world, ReceiverForm form,
+                                           const Command& prototype) {
+  return form != ReceiverForm::object && prototype.arg_kind == CommandArgKind::object &&
+         world.find(prototype.object) == nullptr;
+}
+
+/// A script's `SetCommand` on one object (0x005b0a50 and its eight siblings):
+/// the pending tail is cleared first (`vtbl+0xc0` with 0, 0x005b1120)
+/// whatever follows; then the method is looked up by shape (`binds`); found,
+/// the command is appended through `vtbl+0xbc` and the head ended (0x005b07d0
+/// with 0) -- which is `CommandSystem::set_command` on the emptied tail. Not
+/// found, the `Obj` form stops there and the head keeps running, while the
+/// list and query forms end the head anyway (`end_head_on_miss`).
+void script_set(World& world, CommandSystem& commands, ObjectId id, std::string_view verb,
+                const Command& prototype, bool end_head_on_miss) {
+  (void)commands.clear_commands(world, id);
+  if (!commands.binds(world, id, verb, prototype.arg_kind)) {
+    if (end_head_on_miss) (void)commands.kill_command(world, id);
+    return;
+  }
+  (void)commands.set_command(world, id, verb, prototype);
+}
+
 /// `AddCommand(front, verb[, arg])`. 215 sites, the most used order in the
 /// corpus.
+///
+/// `Obj::AddCommand` (0x005afe90, 0x005aff70, 0x005b0070, for no argument, a
+/// point and an object) looks the verb up by shape (0x005aef20 with kind 0, 1
+/// or 2; `CommandSystem::binds`) and on a miss queues nothing -- no command is
+/// built, so no id is drawn. Found, it inserts through `vtbl+0xbc`
+/// (0x005b5c30): the accept test, then index 1 for `front` and the back
+/// otherwise. No dead test. The `ObjList` forms (0x00563020, 0x00561e30,
+/// 0x00562800) skip a dead member; the `Query` forms (0x00577c30,
+/// 0x00577f30, 0x00578690) refresh the query and take every member. Both list
+/// forms do nothing at all when their object argument names nothing.
 HostOutcome add_command_impl(CallContext& ctx) {
   Receivers targets = receivers_of(ctx);
   if (!targets.ok()) return HostOutcome::failed(targets.error);
+  const CallerScope caller(*targets.commands, ctx.script);
   if (ctx.count() < 3 || !ctx.arg(2).is_string()) return HostOutcome::failed(kNoVerb);
   const bool front = ctx.arg(1).truthy_scalar();
   const std::string& verb = ctx.arg(2).as_string();
-  const Command prototype =
-      ctx.count() > 3 ? prototype_from(ctx.arg(3)) : Command{};
+  const Command prototype = ctx.count() > 3 ? prototype_from(ctx.arg(3)) : Command{};
+  const ReceiverForm form = receiver_form(ctx.arg(0));
+  if (object_argument_missing(*targets.world, form, prototype)) return HostOutcome::ok_void();
   for (const ObjectId id : targets.ids) {
+    if (form == ReceiverForm::list && dead(*targets.world, id)) continue;
+    if (!targets.commands->binds(*targets.world, id, verb, prototype.arg_kind)) continue;
     targets.commands->add_command(*targets.world, id, front, verb, prototype);
   }
   return HostOutcome::ok_void();
@@ -1106,31 +1474,40 @@ HostOutcome add_command_impl(CallContext& ctx) {
 /// nothing at all while the session flag at 0x00a8734c is raised -- the loader
 /// raises it (0x006d890c) and lowers it (0x006e9bd9), and no script runs
 /// under it here -- or while the object's queue is empty (`[obj+0x98]`).
-/// Otherwise it looks the verb up among the class's own methods (0x005aef20
-/// with kind 0; a miss prints `SneakCommand: This object does not have a '%s'
+/// Otherwise it looks the verb up in its bare form (0x005aef20 with kind 0,
+/// `binds`; a miss prints `SneakCommand: This object does not have a '%s'
 /// command! Command not added.` and returns), and then: clones the running
-/// command (its `vtbl+0x14`) and pushes the clone to the front (`vtbl+0xbc`
-/// with 1), pushes the new command to the front the same way, and ends the
-/// command at index 0 (0x005b07d0 with 0) -- the one that was running. So
-/// `[run, rest...]` becomes `[verb, run', rest...]`: *do this now, then pick
-/// up where you were*, which is what lets `convert` interrupt a march and the
-/// march resume once the warrior is a peasant.
+/// command (its `vtbl+0x14`, 0x00599c40) and pushes the clone to the front
+/// (`vtbl+0xbc` with 1), pushes the new command to the front the same way, and
+/// ends the command at index 0 (0x005b07d0 with 0) -- the one that was
+/// running. So `[run, rest...]` becomes `[verb, run', rest...]`: *do this now,
+/// then pick up where you were*, which is what lets `convert` interrupt a march
+/// and the march resume once the warrior is a peasant.
 ///
-/// Here: `script_for` is the method lookup; the clone is a copy of the running
-/// `Command` less its id and coroutine, which `add_command` reissues anyway;
-/// `add_command(front)` twice is the two front pushes -- each lands at index 1,
-/// behind the runner, so the second goes ahead of the first -- and
+/// Here: the clone is a copy of the running `Command` less its coroutine;
+/// `add_command(front)` twice is the two front pushes -- each lands at index
+/// 1, behind the runner, so the second goes ahead of the first -- and
 /// `kill_command` ends the runner. An empty queue is left empty, as the
 /// original leaves it.
+///
+/// **Known gap, the ids.** The original builds the new command first (its id
+/// drawn then) and the clone second, and the clone, having drawn an id of its
+/// own, takes the runner's id and row (0x00599cdb). Here the clone is issued a
+/// fresh id ahead of the new command's. The counter ends in the same place;
+/// only a cancel by id of the resumed command could tell, and no shipped
+/// script reaches one.
 HostOutcome sneak_command_impl(CallContext& ctx) {
   Receivers targets = receivers_of(ctx);
   if (!targets.ok()) return HostOutcome::failed(targets.error);
+  const CallerScope caller(*targets.commands, ctx.script);
   if (ctx.count() < 2 || !ctx.arg(1).is_string()) return HostOutcome::failed(kNoVerb);
   const std::string& verb = ctx.arg(1).as_string();
   for (const ObjectId id : targets.ids) {
     const CommandQueue* q = targets.commands->find(id);
     if (q == nullptr || q->entries.empty()) continue;
-    if (targets.commands->script_for(*targets.world, id, verb).empty()) continue;
+    if (!targets.commands->binds(*targets.world, id, verb, CommandArgKind::none)) continue;
+    q = targets.commands->find(id);
+    if (q == nullptr || q->entries.empty()) continue;
     const Command clone = q->entries.front();
     const std::string running = clone.verb;
     (void)targets.commands->add_command(*targets.world, id, /*front=*/true, running, clone);
@@ -1141,31 +1518,45 @@ HostOutcome sneak_command_impl(CallContext& ctx) {
 }
 
 /// `SetCommand(verb[, arg])`. Replaces the queue outright, running command
-/// included.
+/// included; see `script_set` for the order and for what a verb the class
+/// does not bind in that shape does. `Obj::SetCommand` (0x005b0a50,
+/// 0x005b0b30, 0x005b0c30) has no dead test; the `ObjList` forms (0x00561c10,
+/// 0x00562050, 0x00562a70) skip a dead member; the `Query` forms (0x00577db0,
+/// 0x005780d0, 0x00578870) take every member of the refreshed query. The list
+/// forms do nothing when their object argument names nothing.
 HostOutcome set_command_impl(CallContext& ctx) {
   Receivers targets = receivers_of(ctx);
   if (!targets.ok()) return HostOutcome::failed(targets.error);
+  const CallerScope caller(*targets.commands, ctx.script);
   if (ctx.count() < 2 || !ctx.arg(1).is_string()) return HostOutcome::failed(kNoVerb);
   const std::string& verb = ctx.arg(1).as_string();
   const Command prototype = ctx.count() > 2 ? prototype_from(ctx.arg(2)) : Command{};
+  const ReceiverForm form = receiver_form(ctx.arg(0));
+  if (object_argument_missing(*targets.world, form, prototype)) return HostOutcome::ok_void();
   for (const ObjectId id : targets.ids) {
-    targets.commands->set_command(*targets.world, id, verb, prototype);
+    if (form == ReceiverForm::list && dead(*targets.world, id)) continue;
+    script_set(*targets.world, *targets.commands, id, verb, prototype,
+               /*end_head_on_miss=*/form != ReceiverForm::object);
   }
   return HostOutcome::ok_void();
 }
 
-/// `ObjList.SetCommandOffset(verb, pt)`: the group-move spread.
+/// `SetCommandOffset(verb, pt)` / `AddCommandOffset(front, verb, pt)`: the
+/// group-move spread. `ObjList` and `Query` only, six sites and two.
 ///
-/// **Inferred.** Six sites, all on an `ObjList`, all with a point, and all
-/// paired with a single-unit `AddCommand` to the same point --
-/// `ol.SetCommandOffset("move", ptCenter); .AddCommand(true, "move", ptCenter);`
-/// in `WOLF_ENGAGE.VS`. Read as `SetCommand` where each member keeps its
-/// current offset from the group's centre, so a pack that scatters arrives
-/// scattered rather than stacked on one cell. The `<cmd ... offset="1">`
-/// attribute on exactly the verbs it is used with (`move`, `advance`) is what
-/// suggested the reading; nothing proves the offset is measured from the
-/// centroid rather than from the caller.
-/// The spread both offset entry points give their members.
+/// **Read** (0x00562520 and 0x00562280 on `ObjList`, 0x00578460 and
+/// 0x00578280 on `Query`): the list's centre is the plain mean of its members'
+/// positions (0x004cd1b0, each member's `vtbl+0xc8`; members that name nothing
+/// are left out of the count) and the offset is `pt` less that centre. Each
+/// live member is then given its own position plus the offset, **held inside
+/// the map rectangle** (`[0x009a721c]+0xb4..0xc0`, the one `ClipDestToMap`
+/// clamps to, here `clamp_to_map`), and ordered there exactly as the point
+/// form of `SetCommand` / `AddCommand` orders it: the tail cleared, the method
+/// looked up in its point form, and on a miss the head ended anyway. **Two
+/// differences between the four bodies:** only the `Set` forms clamp -- the
+/// `Add` forms (0x00562280, 0x00578280) hand on the raw position plus offset --
+/// and only the `ObjList` forms skip a dead member; the `Query` forms refresh
+/// the query (`vtbl+0x1c`) and take every member it holds.
 ///
 /// `verb_at` is the argument index of the verb; the point follows it.
 /// `front` is `std::nullopt` for the `Set` form, which replaces the queue, and
@@ -1174,6 +1565,7 @@ HostOutcome command_offset(CallContext& ctx, std::size_t verb_at,
                            std::optional<bool> front) {
   Receivers targets = receivers_of(ctx);
   if (!targets.ok()) return HostOutcome::failed(targets.error);
+  const CallerScope caller(*targets.commands, ctx.script);
   if (ctx.count() < verb_at + 2 || !ctx.arg(verb_at).is_string()) {
     return HostOutcome::failed(kNoVerb);
   }
@@ -1192,15 +1584,23 @@ HostOutcome command_offset(CallContext& ctx, std::size_t verb_at,
   }
   const Point centre{static_cast<std::int32_t>(sx / static_cast<std::int64_t>(targets.ids.size())),
                      static_cast<std::int32_t>(sy / static_cast<std::int64_t>(targets.ids.size()))};
+  const MovementSystem* movement = movement_system(world);
+  const bool skip_dead = receiver_form(ctx.arg(0)) == ReceiverForm::list;
   for (const ObjectId id : targets.ids) {
+    if (skip_dead && dead(world, id)) continue;
     const Point at = world.resolve_position(id);
     Command prototype;
     prototype.arg_kind = CommandArgKind::point;
     prototype.point = Point{anchor.x + at.x - centre.x, anchor.y + at.y - centre.y};
+    if (!front.has_value() && movement != nullptr) {
+      prototype.point = movement->grid().clamp_to_map(prototype.point);
+    }
     if (front.has_value()) {
-      targets.commands->add_command(world, id, *front, verb, prototype);
+      if (targets.commands->binds(world, id, verb, CommandArgKind::point)) {
+        targets.commands->add_command(world, id, *front, verb, prototype);
+      }
     } else {
-      targets.commands->set_command(world, id, verb, prototype);
+      script_set(world, *targets.commands, id, verb, prototype, /*end_head_on_miss=*/true);
     }
   }
   return HostOutcome::ok_void();
@@ -1211,20 +1611,9 @@ HostOutcome set_command_offset_impl(CallContext& ctx) {
 }
 
 /// `ObjList.AddCommandOffset(front, verb, pt)` -- the queueing form, and the
-/// only difference is the queueing.
-///
-/// Two sites, both in `6_Great_loses_Boudicca` map 1 sequence 16, and both
-/// immediately after a `SetCommandOffset` to a different point: the sequence
-/// lays out a three-leg advance for a group of Roman besiegers, one leg per
-/// call. That is the shape `SetCommand`/`AddCommand` already have, and
-/// `gbr.exe` registers the pair the same way -- 0x00562280 and 0x00562520 on
-/// `ObjList`, 0x00578280 and 0x00578460 on `Query`, differing in the two calls
-/// to 0x005b07d0 that only the `Set` form makes, which is the clear.
-///
-/// **It inherits the `Set` form's inference and its caveat.** The spread is
-/// measured from the group's centroid, which nothing proves; see above. Both
-/// call `front` with `true` at every shipped site, so the back-insert is
-/// transcribed from the registration's `bool` rather than exercised.
+/// only difference is the queueing. Two sites, both in
+/// `6_Great_loses_Boudicca` map 1 sequence 16, laying out a three-leg advance
+/// one leg per call.
 HostOutcome add_command_offset_impl(CallContext& ctx) {
   return command_offset(ctx, 2, ctx.count() > 1 && ctx.arg(1).truthy_scalar());
 }
@@ -1236,20 +1625,40 @@ HostOutcome add_command_offset_impl(CallContext& ctx) {
 /// the mule there would destroy the gold it was just loaded with -- and
 /// `AI HELPERS\GUARD.VS` pairs it with `AddCommand(true, ...)` as the explicit
 /// two-step form of what `SetCommand` does in one.
+///
+/// `Obj::KillCommand` (0x005b0d30) refuses a dead object ("called for a dead
+/// object") and otherwise ends index 0 through 0x005b07d0; the `ObjList` form
+/// (0x00562d20) skips dead members; the `Query` form (0x00578a80) takes every
+/// member. 0x005b07d0 itself does nothing unless the object has a live script
+/// in its command slot (0x0069f950), which in the original is every live
+/// object's head; here a head queued this pass and not yet started is ended
+/// all the same.
 HostOutcome kill_command_impl(CallContext& ctx) {
   Receivers targets = receivers_of(ctx);
   if (!targets.ok()) return HostOutcome::failed(targets.error);
+  const CallerScope caller(*targets.commands, ctx.script);
+  const bool skip_dead = receiver_form(ctx.arg(0)) != ReceiverForm::query;
   for (const ObjectId id : targets.ids) {
+    if (skip_dead && dead(*targets.world, id)) continue;
     targets.commands->kill_command(*targets.world, id);
   }
   return HostOutcome::ok_void();
 }
 
-/// `ClearCommands()`: drop the pending tail, leave the runner.
+/// `ClearCommands()`: drop the pending tail, leave the runner (`vtbl+0xc0`
+/// with 0, 0x005b1120: every index from the last down to 1 through
+/// 0x005b07d0). The same dead rule as `KillCommand`: `Obj` (0x005aa250)
+/// refuses a dead object, `ObjList` (0x00562ea0) skips one, `Query`
+/// (0x00578b60) does not ask.
 HostOutcome clear_commands_impl(CallContext& ctx) {
   Receivers targets = receivers_of(ctx);
   if (!targets.ok()) return HostOutcome::failed(targets.error);
-  for (const ObjectId id : targets.ids) targets.commands->clear_commands(*targets.world, id);
+  const CallerScope caller(*targets.commands, ctx.script);
+  const bool skip_dead = receiver_form(ctx.arg(0)) != ReceiverForm::query;
+  for (const ObjectId id : targets.ids) {
+    if (skip_dead && dead(*targets.world, id)) continue;
+    targets.commands->clear_commands(*targets.world, id);
+  }
   return HostOutcome::ok_void();
 }
 
@@ -1278,12 +1687,21 @@ HostOutcome command_impl(CallContext& ctx) {
       std::string(self.commands->command_name(self.id, static_cast<std::size_t>(index)))));
 }
 
-/// `CmdCount()` / `CmdCount(verb)`.
+/// `CmdCount()` / `CmdCount(name)`.
+///
+/// `Obj::CmdCount/0` (0x005aa2c0) answers the queue's length, `[obj+0x98]`,
+/// the running command included. `Obj::CmdCount/1` (0x005ae4d0) walks the
+/// queue and counts the commands whose `<cmd>` row is called `name`, byte for
+/// byte (`CommandSystem::command_count_named`) -- **by row, not by verb**: the
+/// AI writes `barrack.CmdCount(cmd)` beside `barrack.ExecCmd(cmd, ...)` with the
+/// one row name, and a train row's verb is `train`. A dead receiver of the bare
+/// form prints and leaves the answer slot unwritten in the original; the count
+/// is answered here.
 HostOutcome cmd_count_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   const std::size_t n = ctx.count() > 1 && ctx.arg(1).is_string()
-                            ? self.commands->command_count(self.id, ctx.arg(1).as_string())
+                            ? self.commands->command_count_named(self.id, ctx.arg(1).as_string())
                             : self.commands->command_count(self.id);
   return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(n)));
 }
@@ -1343,6 +1761,12 @@ template <bool kExplicitDuration>
 HostOutcome progress_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
+  // `Progress()` (0x005ae890) refuses a dead receiver -- prints and returns 0,
+  // no bar and no suspend. `Progress(ms)` (0x005ac530) asks nothing about
+  // health.
+  if constexpr (!kExplicitDuration) {
+    if (dead(*self.world, self.id)) return HostOutcome::ok_void();
+  }
 
   std::int64_t duration = 0;
   if constexpr (kExplicitDuration) {
@@ -1372,7 +1796,9 @@ HostOutcome progress_impl(CallContext& ctx) {
   return HostOutcome::sleep_for(duration);
 }
 
-/// `GetCommanded()`: whether the running command came from the player.
+/// `GetCommanded()`: whether the unit has been given an order since a script
+/// last cleared the flag -- the unit's own bit, raised by the per-object issue
+/// on every unit an order reaches (`CommandSystem::commanded`).
 ///
 /// The corpus annotates the setter for us -- `u.SetCommanded(false); /// clear
 /// user commanded flag` in `TOWNHALL_AUTOTRAIN.VS` -- and reads it to decide
@@ -1395,9 +1821,8 @@ HostOutcome get_commanded_impl(CallContext& ctx) {
     if (self.error == kNoReceiver) return HostOutcome::ok_with(Value::boolean(false));
     return HostOutcome::failed(self.error);
   }
-  const CommandQueue* q = self.commands->find(self.id);
-  const Command* running = q == nullptr ? nullptr : q->running();
-  return HostOutcome::ok_with(Value::boolean(running != nullptr && running->user));
+  // Bit 0x80000 of `[unit+0x194]` (0x005d81e0): the unit's, not a command's.
+  return HostOutcome::ok_with(Value::boolean(self.commands->commanded(self.id)));
 }
 
 HostOutcome set_commanded_impl(CallContext& ctx) {
@@ -1406,93 +1831,89 @@ HostOutcome set_commanded_impl(CallContext& ctx) {
     if (self.error == kNoReceiver) return HostOutcome::ok_void();
     return HostOutcome::failed(self.error);
   }
-  CommandQueue* q = self.commands->find(self.id);
-  if (q == nullptr || q->entries.empty()) return HostOutcome::ok_void();
-  q->entries.front().user = ctx.count() > 1 && ctx.arg(1).truthy_scalar();
+  // 0x005d8180 writes the bit, queue or no queue.
+  self.commands->set_commanded(self.id, ctx.count() > 1 && ctx.arg(1).truthy_scalar());
   return HostOutcome::ok_void();
 }
 
 // -- the player-facing command table ---------------------------------------
 
-/// `ExecCmd(name, pt, obj, replace)`: run a `DATA\COMMANDS` row.
+/// `ExecCmd(name, pt, obj, replace)`: issue a `DATA\COMMANDS` row as the
+/// player's interface issues it. 22 sites: the AI's training, its market and
+/// village orders, a hero's skill autocast, a siege's `advance`.
 ///
-/// The fourth argument is `replace`, which `GROUP_UNITSOUT.VS` names for us: it
-/// forwards its own parameters as `l.ExecDefaultCmd(pt, obj, bReplace,
-/// bModifier)`, the same position in the sibling entry point. Every one of the
-/// 22 `ExecCmd` sites passes `false`, and they are right to: a barracks queues
-/// `n` training commands with `for (i = 0; i < n; i += 1) b.ExecCmd(cmd, ...)`
-/// and then counts them with `CmdCount(cmd)`, which only works if each call
-/// appends. It appends as an order, though (`CommandSystem::append_order`): a
-/// barracks resting on `idle` stops resting, where a script's `AddCommand`
-/// would have queued behind an `idle` that never returns.
+/// `Obj::ExecCmd` (0x005b5470) refuses a receiver that names nothing and a
+/// dead one ("called for a dead object"), looks the row up by name (a miss
+/// prints "Invalid command" and returns), and hands the per-object issue
+/// (0x004ef3d0, `CommandSystem::issue`) a one-member list, the row, the point,
+/// the object, `bReplace`, no modifier and the receiver's player.
+/// `ObjList::ExecCmd` (0x0055e240) hands it the list itself and no player
+/// (-1). Both are registered **void**: no script can read an answer.
 ///
-/// Returns whether the row exists, so that a caller can tell a misspelt command
-/// from one it simply cannot afford. **The cost is not charged here**: the
-/// shipped AI charges it itself (`set.SpentGoldOnArmy(gold + food / 2)` right
-/// before the call), and double-charging would be a silent economy bug.
+/// What the issue does with a row is all of its own -- a `groupdispatch` run
+/// with the row ambient, an `immediate` method run at once, a research that
+/// jumps the queue, an ordinary order through the order insert, a train row
+/// never replacing -- and so is the commanded flag it raises on every unit.
+/// The cost is charged there, by the accept test, as for a player's press:
+/// the shipped AI's `SpentGoldOnArmy` beside the call is a counter of its
+/// own, not a payment.
+///
+/// **The fourth argument is `replace`**, which `GROUP_UNITSOUT.VS` names for us:
+/// it forwards its own parameters as `l.ExecDefaultCmd(pt, obj, bReplace,
+/// bModifier)`. Every shipped site passes `false`.
 HostOutcome exec_cmd_impl(CallContext& ctx) {
   Receivers targets = receivers_of(ctx, /*accept_query=*/false);
   if (!targets.ok()) return HostOutcome::failed(targets.error);
+  const CallerScope caller(*targets.commands, ctx.script);
   if (ctx.count() < 2 || !ctx.arg(1).is_string()) return HostOutcome::failed(kNoVerb);
+  World& world = *targets.world;
+  const ReceiverForm form = receiver_form(ctx.arg(0));
+  std::int32_t player_arg = 0;  // `ObjList::ExecCmd` passes -1, plus one
+  if (form == ReceiverForm::object) {
+    if (targets.ids.empty() || dead(world, targets.ids.front())) return HostOutcome::ok_void();
+    const ObjectState* state = world.state(targets.ids.front());
+    player_arg = state == nullptr || state->owner == kNoPlayer
+                     ? 0
+                     : static_cast<std::int32_t>(state->owner) + 1;
+  }
   const CommandDef* def = targets.commands->table().find(ctx.arg(1).as_string());
-  if (def == nullptr) return HostOutcome::ok_with(Value::boolean(false));
-
-  // `Obj::ExecCmd` (0x005b5470) and `ObjList::ExecCmd` (0x0055e240) both reach
-  // the per-object issue 0x004ef3d0, which masks the flag off for a
-  // `traincommand="yes"` row (0x004efbbb): a train row appends even when told
-  // to replace. No shipped site asks, and `issue_order` does the same.
-  const bool replace = ctx.count() > 4 && ctx.arg(4).truthy_scalar() && !def->train_command;
-  Command prototype;
-  // The object argument wins over the point when both are given: a command with
-  // a target ("enter", "capture") is aimed at the object, and the shipped sites
-  // pass a dummy point beside it.
-  if (ctx.count() > 3 && object_of(ctx.arg(3)) != kNoObject) {
-    prototype.arg_kind = CommandArgKind::object;
-    prototype.object = object_of(ctx.arg(3));
-  } else if (ctx.count() > 2 && is_point(ctx.arg(2))) {
-    prototype.arg_kind = CommandArgKind::point;
-    prototype.point = unpack_point(ctx.arg(2));
-  }
-  prototype.param = def->param;
-  prototype.name = def->name;
-  prototype.cost_gold = def->cost_gold;
-  prototype.cost_food = def->cost_food;
-  prototype.cost_pop = def->cost_pop;
-  prototype.cost_stamina = def->cost_stamina;
-  prototype.delay = def->exec_delay;
-
-  for (const ObjectId id : targets.ids) {
-    if (replace) {
-      targets.commands->set_command(*targets.world, id, def->method, prototype);
-    } else {
-      targets.commands->append_order(*targets.world, id, def->method, prototype);
-    }
-  }
-  return HostOutcome::ok_with(Value::boolean(true));
+  if (def == nullptr) return HostOutcome::ok_void();
+  const Point point = ctx.count() > 2 && is_point(ctx.arg(2)) ? unpack_point(ctx.arg(2)) : Point{};
+  const ObjectId object = ctx.count() > 3 ? object_of(ctx.arg(3)) : kNoObject;
+  const bool replace = ctx.count() > 4 && ctx.arg(4).truthy_scalar();
+  (void)targets.commands->issue(world, targets.ids, *def, point, object, replace,
+                                /*modifier=*/false, player_arg, /*user=*/false);
+  return HostOutcome::ok_void();
 }
 
-/// `GetCanExecCmd(name)`: the row exists, this object's class binds its method,
-/// and nothing has taken the command away. One site, on a unit, for
-/// "build_catapult".
+/// `ObjList::GetCanExecCmd(name)` -> `ObjList`: the members the row is
+/// enabled for. One site, `BUILD_CATAPULT_VERIFY.VS`'s
+/// `builders = _GetSelection().GetCanExecCmd("build_catapult");`.
 ///
-/// **The third clause is the original's own.** 0x00560461, inside
-/// `ObjList::GetCanExecCmd` (0x00560300), calls the object's `vtbl+0xd8` -- the
-/// predicate that reads `[obj+0x9c]` and then walks the disabled list at
-/// `[obj+0x78]`. `CommandSystem::command_enabled` is that predicate, and this
-/// is one of its two shipped readers; the other is the interface's own button
-/// availability (0x005e787b), which `CommandBar` now asks it of every selected
-/// object.
+/// 0x00560300 makes a new list, looks the row's index up by name (a negative
+/// one leaves the list empty), and appends every member whose `vtbl+0xd8`
+/// accepts that index (0x00560461) -- `CommandSystem::command_enabled`, the
+/// whole-object flag then the disabled set. **It does not ask whether the
+/// class binds the row's method**; that is the issue's question, not this
+/// one's. The list is the calling script's temporary. This used to answer a
+/// bool for a single object, which is neither the receiver nor the answer the
+/// one shipped site is written for.
 HostOutcome get_can_exec_cmd_impl(CallContext& ctx) {
-  const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  Receivers targets = receivers_of(ctx);
+  if (!targets.ok()) return HostOutcome::failed(targets.error);
   if (ctx.count() < 2 || !ctx.arg(1).is_string()) return HostOutcome::failed(kNoVerb);
-  const CommandDef* def = self.commands->table().find(ctx.arg(1).as_string());
-  if (def == nullptr) return HostOutcome::ok_with(Value::boolean(false));
-  if (!self.commands->command_enabled(*self.world, self.id, def->name)) {
-    return HostOutcome::ok_with(Value::boolean(false));
+  World& world = *targets.world;
+  ObjListPool& pool = objlist_pool_of(world);
+  const ObjListId list = pool.acquire_temporary(ctx.script);
+  const CommandDef* def = targets.commands->table().find(ctx.arg(1).as_string());
+  if (def != nullptr) {
+    if (std::vector<ObjectId>* items = pool.mutable_items(list)) {
+      for (const ObjectId id : targets.ids) {
+        if (targets.commands->command_enabled(world, id, def->name)) items->push_back(id);
+      }
+    }
   }
-  return HostOutcome::ok_with(
-      Value::boolean(!self.commands->script_for(*self.world, self.id, def->method).empty()));
+  return HostOutcome::ok_with(make_objlist_value(list));
 }
 
 /// `Obj::CmdDisable(name)` -- 2 sites, and with `Unit::AddBonus` it finishes
@@ -1530,10 +1951,14 @@ HostOutcome get_cmd_cost_impl(CallContext& ctx) {
   CommandSystem* commands = command_system(*world);
   if (commands == nullptr) return HostOutcome::failed(kNoSystem);
   if (ctx.count() < 3 || !ctx.arg(0).is_string()) return HostOutcome::failed(kNoVerb);
+  // 0x00425630: the row by name (the registry's `+0x14`); a miss answers false
+  // and **writes neither argument**, which keep what the caller had in them.
+  // A hit writes `costfood` (`[def+0x1ec]`) and `costgold` (`[def+0x1e8]`).
   const CommandDef* def = commands->table().find(ctx.arg(0).as_string());
-  ctx.out(1) = Value::integer(def == nullptr ? 0 : def->cost_gold);
-  ctx.out(2) = Value::integer(def == nullptr ? 0 : def->cost_food);
-  return HostOutcome::ok_with(Value::boolean(def != nullptr));
+  if (def == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  ctx.out(1) = Value::integer(def->cost_gold);
+  ctx.out(2) = Value::integer(def->cost_food);
+  return HostOutcome::ok_with(Value::boolean(true));
 }
 
 /// `GetCmdStaminaCost(name)` -> `<cmd coststamina>`. 42 sites, all druid and
@@ -1805,6 +2230,9 @@ HostOutcome goto_enter_impl(CallContext& ctx) {
   order.range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
   order.slice = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
   order.give_up = ctx.count() > 5 && ctx.arg(5).is_integer() ? ctx.arg(5).as_integer() : -1;
+  // 0x005d6620 drops the combat target on its first pass, once the unit is
+  // out of any holder (0x005d6810..0x005d6820), as `Goto`'s point form does.
+  order.drop_target = true;
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
 }
 
@@ -2112,6 +2540,10 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   if (is_point(ctx.arg(1))) {
     dest = unpack_point(ctx.arg(1));
   } else if ((target = object_of(ctx.arg(1))) != kNoObject) {
+    // The `Obj` form (0x0052e890) refuses a target that names nothing before
+    // anything else: "Parameter #3 ... invalid object", and the hero's route
+    // and his army are left exactly as they were.
+    if (self.world->find(target) == nullptr) return HostOutcome::ok_void();
     dest = self.world->resolve_position(target);
   } else {
     return HostOutcome::failed(kNoPoint);
@@ -2142,15 +2574,22 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   // member `form_move` (0x005f2b50): its route deleted (0x005d3830(0)) and the
   // command inserted with the replace flag (0x005b4e90 with 1), which ends
   // whatever it was running. One that lays none ends the march instead
-  // (0x005f2c10): every member running `form_move` loses its route, and
-  // `UNIT_FORM_MOVE.VS`'s `while (.HasPath())` lets it go.
+  // (0x005f2c10): every member running `form_move` loses its route and has
+  // that command ended.
   const HeroRecord* record = heroes->hero(self.id);
   CommandSystem* commands = command_system(*self.world);
   if (record != nullptr && commands != nullptr) {
     const std::vector<ObjectId> army = record->army;
     for (const ObjectId member : army) {
       if (outcome == MoveOutcome::blocked) {
-        if (on_march(*self.world, member)) self.movement->stop(*self.world, member);
+        // 0x005f2c10: a member running `form_move` loses its route and its
+        // command script is stopped (0x0069fee0), which pops `form_move` and
+        // starts the next -- `UNIT_FORM_MOVE.VS` does not run on to its
+        // closing `Face`. Here: the route stopped and the command ended.
+        if (on_march(*self.world, member)) {
+          self.movement->stop(*self.world, member);
+          (void)commands->kill_command(*self.world, member);
+        }
         continue;
       }
       self.movement->stop(*self.world, member);
@@ -2206,7 +2645,7 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
 ///
 /// **Every member that gets this far drops its combat target** (0x005d798b,
 /// `CombatSystem::drop_target`). A unit with no hero is the original's
-/// finished-at-once exit (0x005d7a1c), and so is one whose hero has no army
+/// script-ending exit (0x005d7a1c returns 2), and so is one whose hero has no army
 /// record here.
 HostOutcome form_accept_move_impl(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -2221,7 +2660,10 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
   }
   const ObjectId hero = heroes->hero_of(id);
   const HeroRecord* record = hero == kNoObject ? nullptr : heroes->hero(hero);
-  if (record == nullptr || world->find(hero) == nullptr) return HostOutcome::ok_void();
+  // No hero, or no march to take a place in: the body returns 2 (0x005d7a1c),
+  // which ends the calling script there -- `UNIT_FORM_MOVE.VS` never reaches
+  // its `while (.HasPath())` or its closing `Face`, and `form_move` is over.
+  if (record == nullptr || world->find(hero) == nullptr) return HostOutcome::end_script();
 
   if (const ObjectState* state = world->state(id); state != nullptr && state->is_held()) {
     // A hero back inside has no formation on the map to take a place in: the

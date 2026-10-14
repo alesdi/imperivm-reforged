@@ -600,6 +600,15 @@ class HeroSystem final : public System {
   /// holder exception: an erase detaches whatever it erases.
   void on_erase(World& world, ObjectId id);
 
+  /// The AI unregister alone (0x0041eee0 -> 0x004448a0): the unit leaves
+  /// whatever squad holds it, by its record and by the table's listing, its
+  /// squad handle is cleared, and an emptied squad is dropped. The last step of
+  /// `on_death`, and the whole of what `Unit::SetNoselectFlag(true)` does
+  /// beyond writing its bit. The callers own 0x0041eee0's gates (the manager,
+  /// not unspawned, the bit not already set, an owner); see
+  /// `m_set_noselect_flag` in sim/world_host.cpp.
+  void ai_unregister(World& world, ObjectId id);
+
   /// `Hero.IsHeroArmyFull()`.
   [[nodiscard]] bool army_full(ObjectId hero) const;
   /// `Hero.HasArmy()`.

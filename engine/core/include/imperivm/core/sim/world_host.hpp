@@ -260,6 +260,9 @@ class WorldHost : public script::Host {
 /// inside the death that fired it (`sim/hooks.hpp`).
 std::size_t reap_departed(script::Scheduler& scheduler, World& world);
 
+/// `object_is_dead` -- `vtbl + 0x50` -- is in sim/world.hpp.
+
+
 /// `Unit::HasFreedom` (0x005d7d30): bit 30 of the unit's specials word
 /// (`[obj+0x198] & 0x40000000`, the `freedom` special, which the class's
 /// `unit_specials` fills at construction) **or** a class descended from
@@ -299,6 +302,13 @@ std::size_t start_behaviors(script::Scheduler& scheduler, ScriptLibrary& library
 std::size_t stop_behaviors(script::Scheduler& scheduler, ScriptLibrary& library,
                            const World& world, ObjectId id, ClassIndex class_index);
 
+/// How many objects of a class `player` owns: `Count(idPlayer, class)`'s
+/// answer, shared with `CheckUEnabled`, which asks the original's same
+/// per-player class-count map (0x004441e0 on `[record+0x8c]`) for the same
+/// number. `player` is a `PlayerId`; `kNoPlayer` counts nothing.
+[[nodiscard]] std::int32_t player_class_count(World& world, PlayerId player,
+                                              std::string_view class_name);
+
 std::size_t register_world_host(script::HostRegistry& registry);
 
 /// Install the scheduler hook that drains `World::deferred_erase`.
@@ -333,9 +343,15 @@ void install_deferred_erase(script::Scheduler& scheduler) noexcept;
 /// Exported because `Squad::UseTeleport` needs the same door: 0x005cda00 plus
 /// 0x004db650 is the same pair `0x004dce60` runs, and one derivation of the
 /// list is the point. `water` picks the deep-water list over the land one;
-/// `GetEnterPoint` passes whether the unit is a ship and `UseTeleport` passes a
-/// literal false.
+/// `GetEnterPoint` passes the unit class's `water_unit` and `UseTeleport`
+/// passes a literal false.
+///
+/// The id form measures from the unit's resolved position (the holder walk),
+/// which is `UseTeleport`'s; `GetEnterPoint` measures from the unit's stored
+/// position and uses the point form.
 [[nodiscard]] Point enter_point_near(const World& world, ObjectId building, ObjectId unit,
+                                     bool water);
+[[nodiscard]] Point enter_point_near(const World& world, ObjectId building, Point from,
                                      bool water);
 
 /// `Building::IsVeryBroken` -- `health < maxhealth / 20`, truncating.
@@ -348,6 +364,13 @@ void install_deferred_erase(script::Scheduler& scheduler) noexcept;
 
 [[nodiscard]] std::int32_t class_int(const World& world, const WorldObject& slot,
                                      std::string_view key) noexcept;
+
+/// One object's own maximum health -- the `[obj+0xc8]` `.maxhealth` reads.
+///
+/// Exported because `ObjList::ObjInjured` (0x00561090) compares health against
+/// that same field, and the two must agree about a unit whose bonuses have
+/// lifted its maximum above its class's. `m_max_health` documents the rule.
+[[nodiscard]] std::int32_t object_max_health(World& world, const WorldObject& slot);
 
 /// A class property as a flag: present, and not the string `"0"`.
 ///

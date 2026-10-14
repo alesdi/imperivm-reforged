@@ -30,6 +30,7 @@
 #include "imperivm/core/formats/ini.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/ai_profile.hpp"
+#include "imperivm/core/sim/campaign.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/env.hpp"
@@ -72,7 +73,8 @@ namespace {
 script::HostOutcome call_host(script::HostRegistry& registry, World* world,
                               script::CallKind kind, const char* name, std::uint16_t arity,
                               std::vector<script::Value> arguments,
-                              std::vector<script::Value>* out = nullptr) {
+                              std::vector<script::Value>* out = nullptr,
+                              script::ScriptId script_id = script::kNoScript) {
   const std::uint32_t index = registry.find(kind, name, arity);
   if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
   const script::HostEntry& entry = registry.entry(index);
@@ -86,6 +88,7 @@ script::HostOutcome call_host(script::HostRegistry& registry, World* world,
   ctx.user = world == nullptr ? nullptr : &state;
   ctx.name = name;
   ctx.kind = kind;
+  ctx.script = script_id;
   const script::HostOutcome outcome = entry.fn(ctx);
   // The argument window is the out-parameter mechanism; `CheckUEnabled` writes
   // through argument 0.
@@ -148,9 +151,13 @@ TEST(env_parse_int_stops_at_the_first_non_digit) {
   // `TributeTimes` this way through `Str2Int`.
   CHECK(env_parse_int("0,   10,   20,   30") == 0);
   CHECK(env_parse_int("500, 1000") == 500);
-  // Saturating rather than wrapping: a deterministic core may not have signed
-  // overflow in it.
-  CHECK(env_parse_int("999999999999") == 2147483647);
+  // The executable's CRT `atol` (0x00763919): C-locale white space, one sign,
+  // and digits accumulated in 32 bits with no overflow check -- it wraps.
+  CHECK(env_parse_int("\n\r\v\f 12") == 12);
+  CHECK(env_parse_int("4294967297") == 1);
+  CHECK(env_parse_int("2147483648") == -2147483647 - 1);
+  CHECK(env_parse_int("-4294967295") == 1);
+  CHECK(env_parse_int("+-3") == 0);
 
   CHECK(env_format_int(0) == "0");
   CHECK(env_format_int(-2147483647 - 1) == "-2147483648");
@@ -168,6 +175,15 @@ TEST(env_object_values_round_trip_through_the_dollar_encoding) {
   CHECK(store.read_string(player, "TributeBuilding") == "$$4242$$");
   CHECK(env_parse_object("4242") == sim::kNoObject);
   CHECK(env_parse_object("$$0$$") == sim::kNoObject);
+  // 0x006ac790 is `sscanf("$$%d$$")` with a count of one conversion: the
+  // leading dollars are literal, `%d` skips white space, and the trailing
+  // dollars are never checked.
+  CHECK(env_parse_object("$$12") == 12);
+  CHECK(env_parse_object("$$ 7$$") == 7);
+  CHECK(env_parse_object("$$7x") == 7);
+  CHECK(env_parse_object("x$$7$$") == sim::kNoObject);
+  CHECK(env_parse_object("$$$$") == sim::kNoObject);
+  CHECK(env_parse_object("$$-5$$") == sim::kNoObject);
 
   store.write_object(player, "TributeBuilding", sim::kNoObject);
   CHECK(store.read_object(player, "TributeBuilding") == sim::kNoObject);
@@ -674,13 +690,31 @@ TEST(the_shipped_unit_catalog_is_the_table_the_binary_carries) {
   CHECK(catalog.races()[0].arena.train_cmd == "Hire Trident warrior");
   CHECK(catalog.races()[4].arena.train_cmd == "Hire Liberati");
   CHECK(catalog.races()[7].arena.train_cmd == "Call Valkyries");
-  // Egypt's arena tech is the one string of the table `gbr.exe` does not
-  // carry; reproduced as the hole it is.
-  CHECK(catalog.races()[6].arena.tech.empty());
+  // Egypt's arena tech slot (0x0081a620) holds `Cult of Anubis`.
+  CHECK(catalog.races()[6].arena.tech == "Cult of Anubis");
 
   CHECK(catalog.races()[0].temple.type == "GDruid");
   CHECK(catalog.races()[4].temple.type == "RPriest");  // shares Rome's temple
-  CHECK(catalog.races()[5].temple.train_cmd.empty());  // Britain's is absent too
+  // The temple-train table has seven strings for eight races: Britain's
+  // `trainBDruid` is missing and the last three slots slide up one.
+  CHECK(catalog.races()[4].temple.train_cmd == "trainRPriest");
+  CHECK(catalog.races()[5].temple.train_cmd == "trainEPriest");
+  CHECK(catalog.races()[6].temple.train_cmd == "trainTEnchantress");
+  CHECK(catalog.races()[7].temple.train_cmd.empty());  // a null pointer there
+
+  // The eight tables are one block of 184 pointers, in this order.
+  CHECK(catalog.block(0) == "GSwordsman");
+  CHECK(catalog.block(47) == "TMaceman");
+  CHECK(catalog.block(48 + 2) == "Gaul Iron Axes");
+  CHECK(catalog.block(96) == "trainGSwordsman");
+  CHECK(catalog.block(144) == "GTridentWarrior");
+  CHECK(catalog.block(152) == "Hire Trident warrior");
+  CHECK(catalog.block(160) == "Fights");
+  CHECK(catalog.block(168) == "GDruid");
+  CHECK(catalog.block(176) == "trainGDruid");
+  CHECK(catalog.block(183).empty());
+  CHECK(catalog.block(184).empty());
+  CHECK(catalog.block(-1).empty());
 }
 
 TEST(u_enabled_is_a_bit_test_and_check_u_enabled_writes_the_mask) {
@@ -703,6 +737,10 @@ TEST(u_enabled_is_a_bit_test_and_check_u_enabled_writes_the_mask) {
   CHECK(enabled(0b1010, 0) == 0);
   CHECK(enabled(0b1010, 3) == 1);
   CHECK(enabled(0b1010, 40) == 0);
+  // The shift count is masked to five bits (0x00420ee0), as `shl` does.
+  CHECK(enabled(0b1010, 33) == 1);
+  CHECK(enabled(0b1010, 35) == 1);
+  CHECK(enabled(0b1010, -29) == 1);  // -29 & 31 == 3
 
   // `ESH_ENABLEDUNITS.VS`: zero the mask, one call per unit type carrying that
   // type's `AIV_Max*` value. `AI.INI` documents that value space as
@@ -727,6 +765,43 @@ TEST(u_enabled_is_a_bit_test_and_check_u_enabled_writes_the_mask) {
       &out);
   CHECK(cleared.value.as_integer() == 0);
   CHECK(out[0].as_integer() == 0b001000);
+
+  // A positive `max` is a ceiling on what the player already has: the bit is
+  // set while `Count(idPlayer, UType(nType, nRace))` is below it (0x004243d0
+  // through 0x004441e0). `idPlayer` is 1-based.
+  ClassGraph graph;
+  REQUIRE(graph.add(bytes_of(R"(<class id="GArcher" cpp_class="CVXUnit"/>)"), "garcher.sc.xml")
+              .ok());
+  graph.link();
+  world.set_class_graph(&graph);
+  env.units() = shipped_unit_catalog();
+  const ClassIndex archer = graph.find("GArcher");
+  REQUIRE(archer != kNoClass);
+  for (int i = 0; i < 2; ++i) {
+    const ObjectId id = world.spawn(NativeClass::unit, nullptr, archer);
+    world.set_owner(id, 1);  // script player 2
+  }
+  const auto check = [&](std::int32_t player, std::int32_t max, std::int32_t type) {
+    std::vector<script::Value> window;
+    const script::HostOutcome got = call_host(
+        registry, &world, script::CallKind::free_function, "CheckUEnabled", 5,
+        {script::Value::integer(0b100), script::Value::integer(player), script::Value::integer(max),
+         script::Value::integer(type), script::Value::integer(0)},
+        &window);
+    // The answer and the mask in one number: 1000 for true, plus the mask.
+    if (got.status != script::HostStatus::ok) return -1;
+    return (got.value.as_integer() != 0 ? 1000 : 0) + window[0].as_integer();
+  };
+  // Two archers, a ceiling of three: still enabled. GArcher is Gaul's type 1.
+  CHECK(check(2, 3, 1) == 1000 + 0b110);
+  // A ceiling of two: reached, so the bit is cleared.
+  CHECK(check(2, 2, 1) == 0b100);
+  // Player 3 has none.
+  CHECK(check(3, 1, 1) == 1000 + 0b110);
+  // A type outside 0..5 or a player outside 1..16 is refused and the mask is
+  // left as it was.
+  CHECK(check(2, -1, 6) == 0b100);
+  CHECK(check(17, -1, 1) == 0b100);
 }
 
 TEST(the_unit_table_entry_points_answer_from_the_catalog) {
@@ -763,6 +838,15 @@ TEST(the_unit_table_entry_points_answer_from_the_catalog) {
   CHECK(str("UTech", 2, {script::Value::integer(0), script::Value::integer(0)}).empty());
   CHECK(str("UType", 2, {script::Value::integer(99), script::Value::integer(0)}).empty());
   CHECK(str("UType", 2, {script::Value::integer(0), script::Value::integer(99)}).empty());
+  // The race is not checked: race 8 is the next table along, `UTech`'s first
+  // row, and race 16 the train commands'.
+  CHECK(str("UType", 2, {script::Value::integer(2), script::Value::integer(8)}) ==
+        "Gaul Iron Axes");
+  CHECK(str("UType", 2, {script::Value::integer(0), script::Value::integer(16)}) ==
+        "trainGSwordsman");
+  CHECK(str("UTech", 2, {script::Value::integer(0), script::Value::integer(16)}) ==
+        "GTridentWarrior");
+  CHECK(str("UType", 2, {script::Value::integer(0), script::Value::integer(-1)}).empty());
 
   // `TSH_ArenaRecruit.vs` and `TSH_TempleRecruit.vs`.
   CHECK(str("ArenaUType", 1, {script::Value::integer(3)}) == "IMountaineer");
@@ -770,6 +854,9 @@ TEST(the_unit_table_entry_points_answer_from_the_catalog) {
   CHECK(str("ArenaTrainCmd", 1, {script::Value::integer(3)}) == "Call Mountaineer");
   CHECK(str("TempleUType", 1, {script::Value::integer(2)}) == "CShaman");
   CHECK(str("TempleUTrain", 1, {script::Value::integer(2)}) == "trainCShaman");
+  CHECK(str("TempleUTrain", 1, {script::Value::integer(5)}) == "trainEPriest");
+  CHECK(str("ArenaUTech", 1, {script::Value::integer(6)}) == "Cult of Anubis");
+  CHECK(str("ArenaUTech", 1, {script::Value::integer(8)}).empty());
 
   // With no catalog at all every one of them is empty rather than wrong.
   World bare_world;
@@ -818,8 +905,8 @@ TEST(constants_are_read_from_the_ini_rather_than_transcribed) {
   CHECK(!env.constant("id1", value));           // a different section
   CHECK(!env.constant("RecallDistance", value));  // in no section at all
 
-  // A value that is not entirely an integer is a string constant, which is
-  // what `GetConstStr`'s only two corpus keys are.
+  // Every key has its text, and its number as 0x0063f200 reads it: a prefix
+  // of digits, whatever follows.
   std::string_view text;
   REQUIRE(env.constant_string("TributeTimes", text));
   CHECK(text == "0,   10,   20,   30");
@@ -827,8 +914,19 @@ TEST(constants_are_read_from_the_ini_rather_than_transcribed) {
   CHECK(text == "500, 1000, 1500, 2000");
   REQUIRE(env.constant_string("DeathBlowFeedback", text));
   CHECK(text == "DeathBlow");
-  CHECK(!env.constant_string("MinPopulation", text));
-  CHECK(!env.constant("TributeTimes", value));
+  REQUIRE(env.constant_string("MinPopulation", text));
+  CHECK(text == "10");
+  REQUIRE(env.constant("TributeGold", value));
+  CHECK(value == 500);
+  REQUIRE(env.constant("DeathBlowFeedback", value));
+  CHECK(value == 0);
+
+  CHECK(ini_number("12.5") == 12);
+  CHECK(ini_number(" \t-0x1F") == -31);
+  CHECK(ini_number("0xg") == 0);
+  CHECK(ini_number("0X10") == 0);  // only a lower-case x opens hexadecimal
+  CHECK(ini_number("+7 ; comment") == 7);
+  CHECK(ini_number("") == 0);
 }
 
 TEST(get_const_asks_the_economy_first_and_reads_zero_for_a_key_nobody_defines) {
@@ -955,78 +1053,83 @@ TEST(env_host_functions_resolve_the_scope_from_the_value_shape) {
 
 // The root scope: the one-argument overloads the containers use 403 times.
 //
-// Two things are asserted here that the header argues at length. First, the
-// root form is *reachable* — before the shorter arities were registered every
-// one of those 403 sites trapped as "declared but not implemented", which is
-// this project's recurring failure mode: a store that works, a path nothing
-// takes. Second, the key is stored **verbatim**: `"/Bonus"` and `"Bonus"` are
-// two slots, because `gbr.exe`'s `MakePath` only ever *prepends* a context and
-// never strips a slash. Reproducing that reproduces the shipped conquest's bug,
-// which is the point.
-TEST(env_root_scope_is_reachable_and_stores_the_key_verbatim) {
+// `MakePath` (0x006ab0e0) prepends the running thread's `Context` to a key that
+// does not start with `/`, and the sequence runner (0x005b9d40) sets every
+// sequence thread's context to `/`. So inside a sequence `"Bonus"` and
+// `"/Bonus"` are one slot -- which is what makes `mediterranean.BFHP`'s three
+// `while (EnvReadString("Bonus") == ...)` bonus sequences see what `seq0.vs`
+// wrote with `EnvWriteString("/Bonus", ...)`. Outside a sequence the key is
+// used as it is.
+TEST(env_root_scope_resolves_a_relative_key_against_the_sequence_context) {
   script::HostRegistry registry;
   script::declare_shipped_surface(registry);
   register_env_host(registry);
   World world;
   EnvSystem env;
+  CampaignSystem campaign;
   REQUIRE(world.add_system(&env));
+  REQUIRE(world.add_system(&campaign));
+  campaign.add_sequence("Seq1", "Sequences/seq1.vs");
+  campaign.find_sequence("Seq1")->running = 42;
+  constexpr script::ScriptId kSequence = 42;
+  constexpr script::ScriptId kOther = 43;
+  const auto call = [&](const char* name, std::uint16_t arity,
+                        std::vector<script::Value> args, script::ScriptId who) {
+    return call_host(registry, &world, script::CallKind::free_function, name, arity,
+                     std::move(args), nullptr, who);
+  };
 
-  // `Conquests/mediterranean.BFHP:Sequences/seq0.vs`, verbatim.
-  REQUIRE(call_host(registry, &world, script::CallKind::free_function, "EnvWriteString", 2,
-                    {script::Value::string("/Bonus"), script::Value::string("rBritain")})
+  // `Conquests/mediterranean.BFHP:Sequences/seq0.vs` writes the absolute key.
+  REQUIRE(call("EnvWriteString", 2,
+               {script::Value::string("/Bonus"), script::Value::string("rBritain")}, kSequence)
               .status == script::HostStatus::ok);
-  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvReadString", 1,
-                  {script::Value::string("/Bonus")})
+  // `seq1.vs` reads the relative one, from a sequence thread: the same slot.
+  CHECK(call("EnvReadString", 1, {script::Value::string("Bonus")}, kSequence)
             .value.as_string() == "rBritain");
-  // `seq1.vs`, also verbatim -- and this is the slot it actually reads.
-  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvReadString", 1,
-                  {script::Value::string("Bonus")})
-            .value.as_string().empty());
+  // From a thread with no context the relative key means itself.
+  CHECK(call("EnvReadString", 1, {script::Value::string("Bonus")}, kOther)
+            .value.as_string()
+            .empty());
   CHECK(env.env().size() == 1);
 
-  // `3_Great_Losses_Egypt.bfhp:Maps/1/Sequences/seq1.vs`: the integer form,
-  // relative on both sides, which is the spelling that works.
-  REQUIRE(call_host(registry, &world, script::CallKind::free_function, "EnvWriteInt", 2,
-                    {script::Value::string("Waves"), script::Value::integer(7)})
+  // `3_Great_Losses_Egypt.bfhp`'s one relative `En_Direction` write lands on
+  // the absolute key its four readers use.
+  REQUIRE(call("EnvWriteInt", 2,
+               {script::Value::string("En_Direction"), script::Value::integer(3)}, kSequence)
               .status == script::HostStatus::ok);
-  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvReadInt", 1,
-                  {script::Value::string("Waves")})
-            .value.as_integer() == 7);
-  CHECK(env.env().read_int(EnvScope::root(), "Waves") == 7);
+  CHECK(env.env().read_int(EnvScope::root(), "/En_Direction") == 3);
+  CHECK(env.env().find(EnvScope::root(), "En_Direction") == nullptr);
 
   // The root scope is a scope, not the player-0 scope wearing a disguise.
-  CHECK(env.env().read_int(EnvScope::for_player(0), "Waves") == 0);
-
+  CHECK(env.env().read_int(EnvScope::for_player(0), "/En_Direction") == 0);
   // A missing key still reads as zero rather than trapping.
-  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvReadInt", 1,
-                  {script::Value::string("/En_NoSuchThing")})
+  CHECK(call("EnvReadInt", 1, {script::Value::string("/En_NoSuchThing")}, kSequence)
             .value.as_integer() == 0);
 
   // The arity decides the layout; it is never sniffed. A scoped call handed a
   // string where the scope belongs must refuse, not quietly write to the root.
-  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvWriteInt", 3,
-                  {script::Value::string("Waves"), script::Value::string("k"),
-                   script::Value::integer(9)})
+  CHECK(call("EnvWriteInt", 3,
+             {script::Value::string("Waves"), script::Value::string("k"),
+              script::Value::integer(9)},
+             kOther)
             .status == script::HostStatus::error);
-  CHECK(env.env().read_int(EnvScope::root(), "Waves") == 7);
-
   // ...and the root form must refuse a non-string key rather than collide
   // every miswritten call onto one slot.
-  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvReadInt", 1,
-                  {script::Value::integer(3)})
-            .status == script::HostStatus::error);
+  CHECK(call("EnvReadInt", 1, {script::Value::integer(3)}, kOther).status ==
+        script::HostStatus::error);
 
-  // All four root arities the corpus calls are registered and implemented.
+  // All six root arities `gbr.exe` registers are implemented, the object
+  // pair included.
   for (const auto& [name, arity] : std::initializer_list<std::pair<const char*, std::uint16_t>>{
-           {"EnvReadInt", 1}, {"EnvWriteInt", 2}, {"EnvReadString", 1}, {"EnvWriteString", 2}}) {
-    const std::uint32_t index =
-        registry.find(script::CallKind::free_function, name, arity);
+           {"EnvReadInt", 1}, {"EnvWriteInt", 2}, {"EnvReadString", 1}, {"EnvWriteString", 2},
+           {"EnvReadObj", 1}, {"EnvWriteObj", 2}}) {
+    const std::uint32_t index = registry.find(script::CallKind::free_function, name, arity);
     REQUIRE(index != script::kUnresolvedHost);
     CHECK(registry.entry(index).fn != nullptr);
   }
 }
 
-TEST(env_host_functions_refuse_an_invalid_scope_and_a_null_world) {
+TEST(env_host_functions_answer_an_invalid_scope_with_the_default_and_refuse_a_null_world) {
   script::HostRegistry registry;
   script::declare_shipped_surface(registry);
   register_env_host(registry);
@@ -1035,14 +1138,53 @@ TEST(env_host_functions_refuse_an_invalid_scope_and_a_null_world) {
   EnvSystem env;
   REQUIRE(world.add_system(&env));
 
-  // `gbr.exe` carries "Parameter #Settlement in function 'EnvWriteInt' is
-  // uninitialized or invalid object." once per overload. An invalid handle is
-  // that case.
-  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvReadInt", 2,
-                  {script::Value::object(script::ObjectRef{}), script::Value::string("k")})
-            .status == script::HostStatus::error);
-  // So is a key that is not a string, and a scope that is neither an integer
-  // nor a handle.
+  // An invalid scope handle is "Parameter #Settlement in function '...' is
+  // uninitialized or invalid object." through the logger that is an empty
+  // function in retail (0x00686eb0), and then the default answer: 0, "" or the
+  // invalid handle, and a write that stores nothing. Not a trap.
+  const script::Value nothing = script::Value::object(script::ObjectRef{});
+  const script::HostOutcome read_int =
+      call_host(registry, &world, script::CallKind::free_function, "EnvReadInt", 2,
+                {nothing, script::Value::string("k")});
+  CHECK(read_int.status == script::HostStatus::ok);
+  CHECK(read_int.value.as_integer() == 0);
+  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvReadString", 2,
+                  {nothing, script::Value::string("k")})
+            .value.as_string()
+            .empty());
+  CHECK(!call_host(registry, &world, script::CallKind::free_function, "EnvReadObj", 2,
+                   {nothing, script::Value::string("k")})
+             .value.as_object()
+             .valid());
+  // A building handle naming an object that is not in the world is the same
+  // case: the original's object-table slot is empty.
+  const script::Value gone = script::Value::object(kTypeObj, 999);
+  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvWriteInt", 3,
+                  {gone, script::Value::string("k"), script::Value::integer(5)})
+            .status == script::HostStatus::ok);
+  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvWriteString", 3,
+                  {nothing, script::Value::string("k"), script::Value::string("v")})
+            .status == script::HostStatus::ok);
+  CHECK(env.env().size() == 0);
+
+  // An object written and then gone reads back as the invalid handle.
+  const ObjectId doomed = world.spawn(NativeClass::town_hall, nullptr);
+  REQUIRE(call_host(registry, &world, script::CallKind::free_function, "EnvWriteObj", 3,
+                    {script::Value::integer(1), script::Value::string("o"),
+                     script::Value::object(kTypeObj, doomed)})
+              .status == script::HostStatus::ok);
+  CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvReadObj", 2,
+                  {script::Value::integer(1), script::Value::string("o")})
+            .value.as_object()
+            .id == doomed);
+  REQUIRE(world.despawn(doomed));
+  CHECK(!call_host(registry, &world, script::CallKind::free_function, "EnvReadObj", 2,
+                   {script::Value::integer(1), script::Value::string("o")})
+             .value.as_object()
+             .valid());
+
+  // A key that is not a string, and a scope that is neither an integer nor a
+  // handle, are type errors no overload of the original accepts.
   CHECK(call_host(registry, &world, script::CallKind::free_function, "EnvReadInt", 2,
                   {script::Value::integer(2), script::Value::integer(7)})
             .status == script::HostStatus::error);

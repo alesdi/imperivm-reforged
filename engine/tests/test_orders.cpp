@@ -188,6 +188,7 @@ ClassGraph fixture_graph() {
 
   graph.add(bytes(R"(<class id="Building" cpp_class="CVXTownHall" parent="Object">
       <properties maxhealth="1000"/>
+      <method sig="train" vs="data/subai/barrack_train.vs"/>
     </class>)"),
             "building.sc.xml");
   // `TOWER.SC.XML` really does ship `non_selectable="1"`; so do `Wall` and

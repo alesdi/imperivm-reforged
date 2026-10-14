@@ -211,9 +211,13 @@ properties.
 <properties itemtype="Gem of Wisdom"/>
 ```
 
-Under last-wins only `Gem of Wisdom` survives, which makes the other ten dead data. This is
-probably a list the authors expected to accumulate. **Whether the engine keeps a list or the last
-value is unknown** and matters only for `BaseRuins`; flagged for the Part 3 loader.
+**`itemtype` accumulates; nothing else does.** `gbr.exe`'s class reader (the `itemtype` arm at
+0x005a1d58, inside 0x0059f540) assigns the value while the class's slot still holds its
+`**Invalid**` marker and otherwise appends `", "` and the value, so `BaseRuins` carries the whole
+list, `"Elephant Tusk, Boar teeth, …, Gem of Wisdom"` -- the list `Building::itemtypes` answers
+and `RUIN_BEHAVIOR.VS` walks with `ParseStr`. Every other attribute is one slot written once per
+appearance, so the last wins. A class that does not write `itemtype` at all inherits its parent's
+string whole (0x0059c310).
 
 ### Inheritance
 
@@ -640,8 +644,6 @@ essentially clean:
 - **Duplicate `<method sig>`.** 14 cases, clustered on `attack`. Last-wins is assumed but
   unproven, and under last-wins the `verify` script on `Unit.attack` is discarded, which looks
   wrong.
-- **Repeated `<properties itemtype>` on `BaseRuins`.** Eleven values; last-wins discards ten.
-  A list semantics is plausible and would need a different merge rule for that one property.
 - **The `onfinish` attribute.** 10 elements over 6 distinct files, and the fourth member of the
   engine-fired family the three `on*` sigs belong to. When the engine runs it, what it is handed,
   and whether it fires on a method that was interrupted as well as one that ran out, are all

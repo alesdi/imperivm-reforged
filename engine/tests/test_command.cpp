@@ -437,6 +437,26 @@ TEST(clear_commands_drops_the_tail_and_keeps_the_runner) {
   CHECK(f.verbs(u) == std::vector<std::string>{"move"});
 }
 
+/// `Unit::Disappear` (0x005d86d0) leaves the command queue alone. It idles the
+/// unit's activity (`[obj+0x130]`), drops its path, stops its animation and
+/// stands it at `(-1, -1)` -- and nothing else. The ambient villager depends on
+/// that: `SETTLEMENT_BEHAVIOR_AMBIENT.VS` queues `moveenter`, `disappear`,
+/// `grab_water`, `moveenter` home, and a disappear that emptied the queue left
+/// the villager at the well forever.
+TEST(disappear_keeps_the_commands_queued_behind_it) {
+  Fixture f;
+  HostRegistry hosts;
+  (void)imperivm::core::sim::register_world_host(hosts);
+  const ObjectId u = f.spawn(f.unit_class);
+  f.order(u, "idle");
+  f.add(u, false, "engage");
+  f.add(u, false, "guard");
+  HostCall call(f.world, {obj(u)});
+  CHECK(invoke(hosts, CallKind::member, "Disappear", 0, call).status == HostStatus::ok);
+  CHECK(f.world.resolve_position(u) == imperivm::core::sim::kHeldPosition);
+  CHECK(f.verbs(u) == (std::vector<std::string>{"idle", "engage", "guard"}));
+}
+
 TEST(cmd_count_counts_the_runner_and_counts_by_verb) {
   // `UNIT_STANDSTILL.VS` tests `.CmdCount != 1` and `HERO_MOVE.VS`
   // `.CmdCount == 1`: one command is the resting count, so the runner is in it.
@@ -750,13 +770,13 @@ TEST(add_command_offset_queues_the_same_spread_it_would_have_set) {
   CHECK(invoke(registry, CallKind::member, "AddCommandOffset", 3, behind).status ==
         HostStatus::ok);
   HostCall jumped(f.world, {make_objlist_value(list), Value::boolean(true),
-                            Value::string("siege"), pack_point(Point{7000, 1000})});
+                            Value::string("goto"), pack_point(Point{7000, 1000})});
   CHECK(invoke(registry, CallKind::member, "AddCommandOffset", 3, jumped).status ==
         HostStatus::ok);
 
   REQUIRE(f.commands.find(a)->entries.size() == 4);
   CHECK(f.verbs(a)[0] == "move");    // still running, never displaced
-  CHECK(f.verbs(a)[1] == "siege");   // the front insert, ahead of both
+  CHECK(f.verbs(a)[1] == "goto");    // the front insert, ahead of both
   CHECK(f.verbs(a)[2] == "advance");
   CHECK(f.verbs(a)[3] == "guard");   // the back insert, still last
   CHECK(f.commands.find(a)->entries[1].point == (Point{6900, 1000}));
@@ -786,7 +806,9 @@ TEST(get_cmd_cost_writes_through_its_arguments_and_reports_existence) {
                    {Value::string("no_such_command"), Value::integer(-1), Value::integer(-1)});
   const HostOutcome miss = invoke(registry, CallKind::free_function, "GetCmdCost", 3, unknown);
   CHECK(miss.value.as_integer() == 0);
-  CHECK(unknown.context.arg(1).as_integer() == 0);
+  // A miss writes neither argument (0x004256b8): they keep what was in them.
+  CHECK(unknown.context.arg(1).as_integer() == -1);
+  CHECK(unknown.context.arg(2).as_integer() == -1);
 
   HostCall stamina(f.world, {Value::string("heal")});
   CHECK(invoke(registry, CallKind::free_function, "GetCmdStaminaCost", 1, stamina)
@@ -809,7 +831,7 @@ TEST(exec_cmd_appends_so_a_barracks_queue_counts_up) {
   for (int i = 0; i < 3; ++i) {
     HostCall call(f.world, {obj(barracks), Value::string("trainhastatus"), Value::nil(),
                             Value::nil(), Value::boolean(false)});
-    CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, call).value.as_integer() == 1);
+    CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
   }
   // Queued under the *method*, which is what `AddCommand` would have named --
   // and the resting `idle` is gone: an order does not wait behind it
@@ -826,17 +848,18 @@ TEST(exec_cmd_appends_so_a_barracks_queue_counts_up) {
   CHECK(f.commands.find(barracks)->entries[0].param == "RHastatus");
   CHECK(f.commands.find(barracks)->entries[0].cost_gold == 60);
 
-  // A name the table does not carry is reported, not queued.
+  // A name the table does not carry queues nothing ("Invalid command",
+  // 0x005b5554), and `ExecCmd` is void: there is no answer to read.
   HostCall bogus(f.world, {obj(barracks), Value::string("nope"), Value::nil(), Value::nil(),
                            Value::boolean(false)});
-  CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, bogus).value.as_integer() == 0);
+  CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, bogus).status == HostStatus::ok);
   CHECK(f.commands.command_count(barracks) == 2);
 
   // `replace` is the other half of the argument `GROUP_UNITSOUT.VS` names
   // `bReplace`.
   HostCall replace(f.world, {obj(barracks), Value::string("move"), pack_point(Point{5, 6}),
                              Value::nil(), Value::boolean(true)});
-  CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, replace).value.as_integer() == 1);
+  CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, replace).status == HostStatus::ok);
   CHECK(f.verbs(barracks) == std::vector<std::string>{"move"});
 }
 
@@ -851,13 +874,19 @@ TEST(exec_cmd_never_replaces_with_a_train_row) {
   f.order(barracks, "move");
   HostCall call(f.world, {obj(barracks), Value::string("trainhastatus"), Value::nil(),
                           Value::nil(), Value::boolean(true)});
-  CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, call).value.as_integer() == 1);
+  CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
   CHECK((f.verbs(barracks) == std::vector<std::string>{"move", "train"}));
   // A row without the flag replaces, as before.
-  HostCall replace(f.world, {obj(barracks), Value::string("repair village"), Value::nil(),
+  HostCall replace(f.world, {obj(barracks), Value::string("move"), pack_point(Point{5, 6}),
                              Value::nil(), Value::boolean(true)});
-  CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, replace).value.as_integer() == 1);
+  CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, replace).status == HostStatus::ok);
   CHECK(f.commands.command_count(barracks) == 1);
+  // And a row whose method the class does not bind issues nothing ("Cmd Not
+  // resolved to method", 0x004ef8a6): `repair village` is no `Unit` method.
+  HostCall unbound(f.world, {obj(barracks), Value::string("repair village"), Value::nil(),
+                             Value::nil(), Value::boolean(true)});
+  CHECK(invoke(registry, CallKind::member, "ExecCmd", 4, unbound).status == HostStatus::ok);
+  CHECK(f.verbs(barracks) == std::vector<std::string>{"move"});
 }
 
 TEST(an_order_ends_a_resting_idle_and_waits_behind_anything_else) {
@@ -873,7 +902,7 @@ TEST(an_order_ends_a_resting_idle_and_waits_behind_anything_else) {
   const auto exec = [&](ObjectId who) {
     HostCall call(f.world, {obj(who), Value::string("trainhastatus"), Value::nil(), Value::nil(),
                             Value::boolean(false)});
-    return invoke(registry, CallKind::member, "ExecCmd", 4, call).value.as_integer();
+    return invoke(registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok ? 1 : 0;
   };
 
   const ObjectId barracks = f.spawn(f.unit_class);
@@ -938,22 +967,31 @@ TEST(a_scripts_add_command_still_leaves_a_resting_idle_for_kill_command) {
   CHECK((f.verbs(wagon) == std::vector<std::string>{"unload"}));
 }
 
-TEST(get_can_exec_cmd_wants_both_a_row_and_a_bound_method) {
+/// `ObjList::GetCanExecCmd(name)` (0x00560300) is a filter: a new list of the
+/// members the row is enabled for (`vtbl+0xd8`). It does not ask whether the
+/// class binds the method, and an unknown row gives an empty list.
+TEST(get_can_exec_cmd_lists_the_members_the_row_is_enabled_for) {
   Fixture f;
   HostRegistry registry;
   register_command_host(registry);
   const ObjectId u = f.spawn(f.unit_class);
-  const ObjectId rock = f.spawn(f.rock_class);
+  const ObjectId v = f.spawn(f.unit_class, Point{300, 100});
+  const ObjectId rock = f.spawn(f.rock_class, Point{500, 100});
+  ObjListPool& pool = objlist_pool_of(f.world);
+  const ObjListId list = pool.acquire(1, 0);
+  *pool.mutable_items(list) = {u, v, rock};
+  CHECK(f.commands.disable_command(f.world, v, "move"));
 
-  HostCall yes(f.world, {obj(u), Value::string("move")});
-  CHECK(invoke(registry, CallKind::member, "GetCanExecCmd", 1, yes).value.as_integer() == 1);
-  // The row exists but `Rock` binds no `<method sig="move">`.
-  HostCall no_method(f.world, {obj(rock), Value::string("move")});
-  CHECK(invoke(registry, CallKind::member, "GetCanExecCmd", 1, no_method).value.as_integer() ==
-        0);
-  // The method exists but there is no `<cmd>` row for it.
-  HostCall no_row(f.world, {obj(u), Value::string("engage")});
-  CHECK(invoke(registry, CallKind::member, "GetCanExecCmd", 1, no_row).value.as_integer() == 0);
+  const auto members = [&](std::string_view name) -> std::vector<ObjectId> {
+    HostCall call(f.world, {make_objlist_value(list), Value::string(std::string(name))});
+    const HostOutcome out = invoke(registry, CallKind::member, "GetCanExecCmd", 1, call);
+    if (out.status != HostStatus::ok) return {};
+    const std::span<const ObjectId> items = pool.items(objlist_of(out.value));
+    return std::vector<ObjectId>(items.begin(), items.end());
+  };
+  // `Rock` binds no `move`, and is listed all the same; `v` has lost it.
+  CHECK((members("move") == std::vector<ObjectId>{u, rock}));
+  CHECK(members("no such row").empty());
 }
 
 TEST(cmd_disable_takes_one_command_and_cmd_enable_gives_it_back) {
@@ -1103,21 +1141,32 @@ TEST(cmd_disable_neither_refuses_a_dead_receiver_nor_survives_it) {
   CHECK(!f.commands.command_enabled(f.world, 999999, "move"));
 }
 
-TEST(get_and_set_commanded_ride_on_the_running_command) {
+TEST(get_and_set_commanded_are_the_units_own_flag_raised_by_every_issue) {
   // `TOWNHALL_AUTOTRAIN.VS` annotates the setter itself:
   // `u.SetCommanded(false); /// clear user commanded flag`, and reads it to
-  // decide whether it may take a unit over.
+  // decide whether it may take a unit over. The flag is bit 0x80000 of
+  // `[unit+0x194]` (0x005d81e0, 0x005d8180): the per-object issue raises it
+  // on every unit an order reaches (0x004ef475), `ExecCmd` included, and it
+  // outlives the order -- nothing but `SetCommanded` lowers it.
   Fixture f;
   HostRegistry registry;
   register_command_host(registry);
   const ObjectId u = f.spawn(f.unit_class);
+  f.world.mutable_state(u)->flags.is_unit = true;
 
   HostCall none(f.world, {obj(u)});
   CHECK(invoke(registry, CallKind::member, "GetCommanded", 0, none).value.as_integer() == 0);
 
-  Command player_order;
-  player_order.user = true;
-  f.commands.set_command(f.world, u, "move", player_order);
+  // A script's own `SetCommand` does not raise it; an issued row does.
+  f.commands.set_command(f.world, u, "move", Command{});
+  HostCall plain(f.world, {obj(u)});
+  CHECK(invoke(registry, CallKind::member, "GetCommanded", 0, plain).value.as_integer() == 0);
+  HostCall exec(f.world, {obj(u), Value::string("move"), pack_point(Point{5, 6}), Value::nil(),
+                          Value::boolean(false)});
+  REQUIRE(invoke(registry, CallKind::member, "ExecCmd", 4, exec).status == HostStatus::ok);
+  // And it stays up when the order is over.
+  f.commands.kill_command(f.world, u);
+  f.commands.set_command(f.world, u, "idle", Command{});
   HostCall set(f.world, {obj(u)});
   CHECK(invoke(registry, CallKind::member, "GetCommanded", 0, set).value.as_integer() == 1);
 
@@ -1137,9 +1186,7 @@ TEST(get_and_set_commanded_answer_false_for_a_handle_that_names_nothing) {
   HostRegistry registry;
   register_command_host(registry);
   const ObjectId u = f.spawn(f.unit_class);
-  Command player_order;
-  player_order.user = true;
-  f.commands.set_command(f.world, u, "move", player_order);
+  f.commands.set_commanded(u, true);
 
   const Value invalid = Value::object(ObjectRef{script::kNoType, 0});
   HostCall get(f.world, {invalid});
@@ -1437,6 +1484,39 @@ TEST(a_command_compiles_its_script_through_the_library_and_counts_the_misses) {
   CHECK(f.commands.launch_failures().empty());
 }
 
+/// **A `SetCommand` starts its command inside the call.** Ending the head
+/// (0x005b07d0) starts the next command there and then (0x005b4f20), its script
+/// a thread armed at the clock, so the order is running before the script that
+/// gave it next wakes. `OUTPOST_BEHAVIOR.VS` depends on it: it orders a
+/// garrisoned defender out, sleeps 200 ms and picks again from whoever is still
+/// inside; started a pass later, the same defender was still there, was ordered
+/// again -- cancelling the order that had not run -- and never left.
+TEST(set_command_starts_the_command_inside_the_call) {
+  RunFixture f;
+  REQUIRE(f.add_script("// void, Obj This, point pt\nSleep(500);\n", "data/subai/unit_move.vs"));
+  const ObjectId u = f.spawn(f.unit_class);
+  Command order;
+  order.arg_kind = CommandArgKind::point;
+  order.point = Point{300, 300};
+  f.commands.set_command(f.world, u, "move", order);
+
+  // No turn has run: the command has started and its script is alive.
+  const CommandQueue* q = f.commands.find(u);
+  REQUIRE(q != nullptr);
+  REQUIRE(q->running() != nullptr);
+  CHECK(q->running()->verb == "move");
+  CHECK(q->running()->script != kNoScript);
+  CHECK(f.scheduler.alive(q->running()->script));
+
+  // A verb with no script is left for the pass, which retires it.
+  f.commands.set_command(f.world, u, "guard", Command{});
+  q = f.commands.find(u);
+  REQUIRE(q != nullptr);
+  REQUIRE(!q->entries.empty());
+  CHECK(q->entries.front().verb == "guard");
+  CHECK(!q->entries.front().started);
+}
+
 TEST(an_order_behind_a_never_returning_idle_runs_and_the_idle_script_ends) {
   // The shape `ES_STRONGHOLD.VS` met on every barracks: the refill put
   // `BARRACK_IDLE.VS` -- `while (1) Sleep(...)` -- at the head, and a training
@@ -1642,12 +1722,15 @@ TEST(a_commands_onfinish_runs_with_the_cancel_flag_and_the_commands_param) {
   CHECK(f.world.find(u)->state.user == 1115);
 
   // A command that never started has no `onfinish`: two researches queued
-  // and replaced before the turn loop launched either.
+  // behind a running head and cleared with it before either reached the
+  // front. (A `SetCommand` starts its command inside the call, as 0x005b07d0
+  // does, so a research *set* and then replaced has started, and its
+  // `onfinish` is told it was cancelled.)
   f.world.find(u)->state.user = 0;
   f.commands.set_command(f.world, u, "idle", idle);
   step(200);
   f.world.find(u)->state.user = 0;
-  f.commands.set_command(f.world, u, "research", order);
+  f.commands.add_command(f.world, u, false, "research", order);
   f.commands.add_command(f.world, u, false, "research", order);
   f.commands.set_command(f.world, u, "idle", idle);
   step(200);
@@ -2428,8 +2511,18 @@ TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) 
   CHECK(movement.find(army[1])->goto_active);
   CHECK(movement.find(army[2])->goto_active);
 
+  // A target that names nothing changes nothing (0x0052e890's parameter
+  // check comes first): no route, no `form_move` handed out again.
+  HostCall nothing(f.world, {obj(hero), obj(999999), Value::integer(0), Value::integer(0),
+                             Value::boolean(true)});
+  CHECK(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, nothing).status ==
+        HostStatus::ok);
+  CHECK(f.verbs(army[0]) == std::vector<std::string>{"idle"});
+  CHECK(movement.find(army[1])->goto_active);
+
   // A setup the hero cannot walk ends the march (0x005f2c10) and hands out
-  // nothing: the marchers lose their routes, and the idle one keeps its idle.
+  // nothing: the marchers lose their routes and their `form_move` (its script
+  // is stopped, 0x0069fee0), and the idle one keeps its idle.
   f.world.set_position(hero, Point{100 * 16 + 8, 100 * 16 + 8});
   for (std::int32_t y = 99; y <= 101; ++y) {
     for (std::int32_t x = 99; x <= 101; ++x) {
@@ -2441,6 +2534,8 @@ TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) 
   (void)invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, walled);
   REQUIRE(movement.find(hero)->last_outcome == MoveOutcome::blocked);
   CHECK(!movement.find(army[1])->goto_active);
+  CHECK(f.verbs(army[1]).empty());
+  CHECK(f.verbs(army[2]).empty());
   CHECK(f.verbs(army[0]) == std::vector<std::string>{"idle"});
 }
 
@@ -2992,4 +3087,416 @@ TEST(form_accept_move_finishes_at_once_because_the_station_is_already_ordered) {
 
   HostCall stale(f.world, {obj(999999)});
   CHECK(invoke(registry, CallKind::member, "FormAcceptMove", 0, stale).status == HostStatus::ok);
+}
+
+// --------------------------------------------------------------------------
+// the host audit: the queue members against 0x005aef20 and their three forms
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// Compiles method scripts from a fixed table, as the session compiles from
+/// the installation, so that `CommandSystem::binds` can read their shapes.
+struct ShapeLibrary final : imperivm::core::sim::ScriptLibrary {
+  Scheduler* scheduler = nullptr;
+  const HostRegistry* registry = nullptr;
+  std::vector<std::pair<std::string, std::string>> sources;
+
+  std::uint32_t chunk_for(std::string_view path) override {
+    if (const std::uint32_t found = scheduler->find_chunk(path); found != kNoChunk) return found;
+    for (const auto& [name, source] : sources) {
+      if (name == path) return build(*scheduler, *registry, source, name.c_str());
+    }
+    return kNoChunk;
+  }
+};
+
+struct ShapeFixture : RunFixture {
+  ShapeLibrary library;
+  ShapeFixture() {
+    library.scheduler = &scheduler;
+    library.registry = &registry;
+    // `move` takes a point, `engage` an object, `guard` nothing -- the three
+    // shapes 0x005aef20 asks for by kind 1, 2 and 0.
+    library.sources.emplace_back("data/subai/unit_move.vs",
+                                 "// void, Obj This, point pt\nSleep(500);\n");
+    library.sources.emplace_back("data/subai/unit_engage.vs",
+                                 "// void, Obj This, Obj target\nSleep(500);\n");
+    library.sources.emplace_back("data/subai/unit_guard.vs", "// void, Obj This\nSleep(500);\n");
+    commands.set_library(&library);
+  }
+};
+
+}  // namespace
+
+/// 0x005aef20 finds a method by name **and** by its script's signature, so a
+/// verb given the wrong argument is not found: `AddCommand` queues nothing and,
+/// building no command, draws no id. `GDRUID_IDLE.VS`'s
+/// `AddCommand(true, "ghost", .pos)` against a `ghost` that takes no argument
+/// is the shipped case.
+TEST(add_command_queues_only_a_verb_bound_in_the_shape_it_is_given) {
+  ShapeFixture f;
+  const ObjectId u = f.spawn(f.unit_class);
+  f.world.set_command_id_seed(500);
+
+  HostCall bare(f.world, {obj(u), Value::boolean(true), Value::string("move")});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 2, bare).status == HostStatus::ok);
+  HostCall pointed(f.world, {obj(u), Value::boolean(true), Value::string("guard"),
+                             pack_point(Point{300, 300})});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, pointed).status ==
+          HostStatus::ok);
+  CHECK(f.commands.command_count(u) == 0);
+  CHECK(f.world.command_id_seed() == 500);
+
+  HostCall right(f.world, {obj(u), Value::boolean(true), Value::string("move"),
+                           pack_point(Point{300, 300})});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, right).status == HostStatus::ok);
+  HostCall at(f.world, {obj(u), Value::boolean(false), Value::string("engage"), obj(u)});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, at).status == HostStatus::ok);
+  CHECK(f.verbs(u) == (std::vector<std::string>{"move", "engage"}));
+  CHECK(f.world.command_id_seed() == 502);
+}
+
+/// A script's `SetCommand` clears the tail **before** it looks the verb up, and
+/// on a miss the `Obj` form leaves the head running (0x005b0aec returns) while
+/// the `ObjList` and `Query` forms end it anyway (0x00561d6a, 0x00577ef8).
+TEST(a_set_command_that_finds_no_method_clears_the_tail_and_only_a_list_ends_the_head) {
+  ShapeFixture f;
+  const ObjectId a = f.spawn(f.unit_class, Point{100, 100});
+  const ObjectId b = f.spawn(f.unit_class, Point{300, 100});
+  for (const ObjectId id : {a, b}) {
+    f.commands.set_command(f.world, id, "guard", Command{});
+    f.commands.add_command(f.world, id, false, "goto", Command{});
+  }
+
+  HostCall single(f.world, {obj(a), Value::string("move")});
+  REQUIRE(invoke(f.registry, CallKind::member, "SetCommand", 1, single).status == HostStatus::ok);
+  CHECK(f.verbs(a) == (std::vector<std::string>{"guard"}));
+
+  ObjListPool& pool = objlist_pool_of(f.world);
+  const ObjListId list = pool.acquire(1, 0);
+  *pool.mutable_items(list) = {b};
+  HostCall group(f.world, {make_objlist_value(list), Value::string("move")});
+  REQUIRE(invoke(f.registry, CallKind::member, "SetCommand", 1, group).status == HostStatus::ok);
+  CHECK(f.verbs(b).empty());
+}
+
+/// `Obj::KillCommand` and `Obj::ClearCommands` refuse a dead object
+/// (0x005b0d30, 0x005aa250 ask `vtbl+0x50` first); the `ObjList` forms skip a
+/// dead member of every queue call, `AddCommand` and `SetCommand` included,
+/// while `Obj::AddCommand` has no such test.
+TEST(the_queue_members_leave_a_dead_object_alone_as_each_form_does) {
+  ShapeFixture f;
+  const ObjectId corpse = f.spawn(f.unit_class);
+  const ObjectId live = f.spawn(f.unit_class, Point{300, 100});
+  for (const ObjectId id : {corpse, live}) {
+    f.commands.set_command(f.world, id, "guard", Command{});
+    f.commands.add_command(f.world, id, false, "goto", Command{});
+  }
+  f.world.set_health(corpse, 0);
+
+  HostCall kill(f.world, {obj(corpse)});
+  REQUIRE(invoke(f.registry, CallKind::member, "KillCommand", 0, kill).status == HostStatus::ok);
+  HostCall clear(f.world, {obj(corpse)});
+  REQUIRE(invoke(f.registry, CallKind::member, "ClearCommands", 0, clear).status ==
+          HostStatus::ok);
+  CHECK(f.verbs(corpse) == (std::vector<std::string>{"guard", "goto"}));
+
+  ObjListPool& pool = objlist_pool_of(f.world);
+  const ObjListId list = pool.acquire(1, 0);
+  *pool.mutable_items(list) = {corpse, live};
+  HostCall add(f.world, {make_objlist_value(list), Value::boolean(false), Value::string("guard")});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 2, add).status == HostStatus::ok);
+  CHECK(f.verbs(corpse) == (std::vector<std::string>{"guard", "goto"}));
+  CHECK(f.verbs(live) == (std::vector<std::string>{"guard", "goto", "guard"}));
+
+  HostCall listed_kill(f.world, {make_objlist_value(list)});
+  REQUIRE(invoke(f.registry, CallKind::member, "KillCommand", 0, listed_kill).status ==
+          HostStatus::ok);
+  CHECK(f.verbs(corpse) == (std::vector<std::string>{"guard", "goto"}));
+  CHECK(f.verbs(live) == (std::vector<std::string>{"goto", "guard"}));
+
+  // The `Obj` form of `AddCommand` asks nothing about health.
+  HostCall single(f.world, {obj(corpse), Value::boolean(false), Value::string("guard")});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 2, single).status == HostStatus::ok);
+  CHECK(f.verbs(corpse).size() == 3);
+}
+
+/// The offset forms hold each member's destination inside the map
+/// (0x00562667..0x005626a7, the rectangle `ClipDestToMap` clamps to).
+TEST(set_command_offset_holds_a_member_spread_off_the_map_inside_it) {
+  ShapeFixture f;
+  MovementSystem movement;
+  movement.mutable_grid() = ObstructionGrid(64, 64);
+  f.world.add_system(&movement);
+  const ObjectId a = f.spawn(f.unit_class, Point{100, 100});
+  const ObjectId b = f.spawn(f.unit_class, Point{500, 100});
+
+  ObjListPool& pool = objlist_pool_of(f.world);
+  const ObjListId list = pool.acquire(1, 0);
+  *pool.mutable_items(list) = {a, b};
+  HostCall call(f.world, {make_objlist_value(list), Value::string("move"), pack_point(Point{50, 50})});
+  REQUIRE(invoke(f.registry, CallKind::member, "SetCommandOffset", 2, call).status ==
+          HostStatus::ok);
+  REQUIRE(f.commands.find(a) != nullptr);
+  REQUIRE(f.commands.find(a)->entries.size() == 1);
+  // The centre is (300, 100), so `a` is sent to (-150, 50): held at x = 0.
+  CHECK(f.commands.find(a)->entries[0].point == (Point{0, 50}));
+  CHECK(f.commands.find(b)->entries[0].point == (Point{250, 50}));
+}
+
+/// A command that ends **itself** is not a cancelled one. 0x005b07d0 ends
+/// index 0 through 0x0069fee0, and when the script holding the command slot is
+/// the one making the call it only raises that script's stop flag
+/// (`[ctx+0x40]`); the script then ends the ordinary way and the head is popped
+/// with the cancel flag (0x009bdb18) down, so `onfinish` is told `false`. A
+/// `KillCommand` from any other script is a cancel, as before.
+TEST(a_command_that_kills_itself_is_told_it_finished_and_not_that_it_was_cancelled) {
+  RunFixture f;
+  (void)register_global_hosts(f.registry);
+  REQUIRE(f.add_script("// void, Obj This\nThis.KillCommand();\nSleep(100000);\n",
+                       "data/subai/research.vs"));
+  REQUIRE(f.add_script(
+      "// void, Obj This, bool bCanceled\n"
+      "if (bCanceled) This.SetUser(2); else This.SetUser(1);\n",
+      "data/subai/onfinish_research.vs"));
+  REQUIRE(f.add_script("// void, Obj me\nwhile (1) Sleep(1000);\n", "data/subai/unit_idle.vs"));
+  const ObjectId u = f.spawn(f.unit_class);
+  f.commands.set_command(f.world, u, "research", Command{});
+  for (int i = 0; i < 4; ++i) {
+    f.scheduler.advance(200);
+    f.world.advance(200);
+  }
+  CHECK(f.commands.command_name(u) != "research");
+  CHECK(f.world.find(u)->state.user == 1);
+}
+
+// --------------------------------------------------------------------------
+// the host audit: ExecCmd through the per-object issue, 0x004ef3d0
+// --------------------------------------------------------------------------
+
+/// `CmdCount(name)` (0x005ae4d0) counts the queued commands that came in
+/// through the row called `name` -- not the ones running its verb. A train
+/// row's verb is `train`, so the AI's `barrack.CmdCount(cmd)` beside
+/// `barrack.ExecCmd(cmd, ...)` read 0 for every barracks and never stopped
+/// queueing.
+TEST(cmd_count_with_a_name_counts_the_rows_commands_not_the_verbs) {
+  Fixture f;
+  HostRegistry registry;
+  register_command_host(registry);
+  const ObjectId barracks = f.spawn(f.unit_class);
+  for (int i = 0; i < 2; ++i) {
+    HostCall call(f.world, {obj(barracks), Value::string("trainhastatus"), Value::nil(),
+                            Value::nil(), Value::boolean(false)});
+    REQUIRE(invoke(registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
+  }
+  f.add(barracks, false, "train");  // a script's own: no row, never counted
+  const auto count = [&](std::string_view name) {
+    HostCall call(f.world, {obj(barracks), Value::string(std::string(name))});
+    return invoke(registry, CallKind::member, "CmdCount", 1, call).value.as_integer();
+  };
+  CHECK(count("trainhastatus") == 2);
+  CHECK(count("train") == 0);
+  CHECK(count("TrainHastatus") == 0);  // byte for byte
+  HostCall all(f.world, {obj(barracks)});
+  CHECK(invoke(registry, CallKind::member, "CmdCount", 0, all).value.as_integer() == 3);
+}
+
+/// The loader reads `traincommand`, `researchcommand`, `immediate` and
+/// `plrresearch` as anything but `no` (0x004f3f80..0x004f405a), so the
+/// shipped `immediate="yes"` is true, and a player research is a research.
+TEST(the_command_tables_yes_no_flags_are_anything_but_no) {
+  CommandTable table;
+  REQUIRE(table.merge(bytes(R"(<commands>
+<cmd name="a" immediate="yes" traincommand="no"/>
+<cmd name="b" plrresearch="yes"/>
+<cmd name="c" researchcommand="Yes" immediate="NO"/>
+</commands>)"))
+              .ok());
+  CHECK(table.find("a")->immediate);
+  CHECK(!table.find("a")->train_command);
+  CHECK(table.find("b")->plr_research);
+  CHECK(table.find("b")->research_command);
+  CHECK(table.find("c")->research_command);
+  CHECK(!table.find("c")->immediate);
+}
+
+/// A row with a `groupdispatch` is not queued: its dispatch runs once, to its
+/// end, with the row's `cmdparam` and `cmdcost_*` ambient for the call
+/// (0x004ef5c1..0x004ef632, cleared at 0x004ef6ad..0x004ef6f2). The AI's hero
+/// autocast reaches `ACTIVATE_HERO_SKILL.VS` this way, which reads both, and
+/// used to queue an unbound verb instead.
+TEST(exec_cmd_runs_a_rows_group_dispatch_with_the_row_ambient) {
+  ShapeFixture f;
+  (void)register_global_hosts(f.registry);
+  (void)register_text_host(f.registry);
+  f.library.sources.emplace_back(
+      "data/subai/activate_test.vs",
+      "// void, ObjList objs, point pt, Obj obj, bool bReplace, bool bModifier, int player\n"
+      "obj.SetUser(StrLen(cmdparam) * 100 + cmdcost_stamina * 10);\n");
+  CommandDef skill;
+  skill.name = "skill_battle_cry";
+  skill.method = "skill_battle_cry";
+  skill.param = "Battle cry";
+  skill.cost_stamina = 6;
+  skill.group_dispatch = "data/subai/activate_test.vs";
+  f.commands.mutable_table().set(skill);
+
+  const ObjectId hero = f.spawn(f.hero_class);
+  HostCall call(f.world, {obj(hero), Value::string("skill_battle_cry"), pack_point(Point{}),
+                          obj(hero), Value::boolean(false)});
+  REQUIRE(invoke(f.registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
+  CHECK(f.world.find(hero)->state.user == 1060);
+  CHECK(f.commands.command_count(hero) == 0);
+  // And the row is ambient no longer once the call is over.
+  CHECK(f.commands.command_of_script(script::kNoScript) == nullptr);
+}
+
+/// An `immediate` row runs its method now, synchronously, with the row
+/// ambient, and is never queued (0x004ef917..0x004ef9df).
+TEST(exec_cmd_runs_an_immediate_rows_method_at_once_and_queues_nothing) {
+  ShapeFixture f;
+  (void)register_global_hosts(f.registry);
+  (void)register_text_host(f.registry);
+  f.library.sources.clear();
+  f.library.sources.emplace_back("data/subai/unit_guard.vs",
+                                 "// void, Obj This\nThis.SetUser(StrLen(cmdparam));\n");
+  CommandDef now;
+  now.name = "guard_now";
+  now.method = "guard";
+  now.param = "seven c";
+  now.immediate = true;
+  f.commands.mutable_table().set(now);
+
+  const ObjectId u = f.spawn(f.unit_class);
+  f.commands.set_command(f.world, u, "move", Command{});
+  HostCall call(f.world, {obj(u), Value::string("guard_now"), Value::nil(), Value::nil(),
+                          Value::boolean(false)});
+  REQUIRE(invoke(f.registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
+  CHECK(f.world.find(u)->state.user == 7);
+  CHECK(f.verbs(u) == (std::vector<std::string>{"move"}));
+}
+
+/// A research row (0x004efa05..0x004efad5): an ordinary order on an object
+/// with at most one command and that one `idle`; otherwise it jumps ahead of
+/// a running command that came in through a non-research row, which goes
+/// back to index 1 to start again; and it is dropped behind a research or a
+/// row-less command.
+TEST(exec_cmd_a_research_jumps_a_running_rows_command_and_never_queues_behind_one) {
+  Fixture f;
+  HostRegistry registry;
+  register_command_host(registry);
+  CommandDef study;
+  study.name = "researchArmour";
+  study.method = "research";
+  study.research_command = true;
+  f.commands.mutable_table().set(study);
+  const auto exec = [&](ObjectId who, std::string_view row) {
+    HostCall call(f.world, {obj(who), Value::string(std::string(row)), Value::nil(), Value::nil(),
+                            Value::boolean(false)});
+    (void)invoke(registry, CallKind::member, "ExecCmd", 4, call);
+  };
+
+  const ObjectId busy = f.spawn(f.unit_class);
+  exec(busy, "trainhastatus");
+  REQUIRE(f.verbs(busy) == (std::vector<std::string>{"train"}));
+  exec(busy, "researchArmour");
+  CHECK(f.verbs(busy) == (std::vector<std::string>{"research", "train"}));
+  CHECK(!f.commands.find(busy)->entries[1].started);
+  // Behind a research it is dropped, though its command was made.
+  const std::uint32_t seed = f.world.command_id_seed();
+  exec(busy, "researchArmour");
+  CHECK(f.verbs(busy) == (std::vector<std::string>{"research", "train"}));
+  CHECK(f.world.command_id_seed() == seed + 1);
+
+  // Resting on `idle`: an ordinary order, which ends the resting head.
+  const ObjectId resting = f.spawn(f.unit_class);
+  f.order(resting, "idle");
+  exec(resting, "researchArmour");
+  CHECK(f.verbs(resting) == (std::vector<std::string>{"research"}));
+
+  // A row-less command running with something behind it: dropped.
+  const ObjectId scripted = f.spawn(f.unit_class);
+  f.order(scripted, "move");
+  f.add(scripted, false, "guard");
+  exec(scripted, "researchArmour");
+  CHECK(f.verbs(scripted) == (std::vector<std::string>{"move", "guard"}));
+}
+
+/// A `plrresearch` row is held once per player (0x005b1883..0x005b18ad).
+TEST(a_player_research_is_refused_while_another_of_the_players_objects_holds_it) {
+  Fixture f;
+  HostRegistry registry;
+  register_command_host(registry);
+  CommandDef tribute;
+  tribute.name = "RTribute";
+  tribute.method = "research";
+  tribute.research_command = true;
+  tribute.plr_research = true;
+  f.commands.mutable_table().set(tribute);
+  const auto exec = [&](ObjectId who) {
+    HostCall call(f.world, {obj(who), Value::string("RTribute"), Value::nil(), Value::nil(),
+                            Value::boolean(false)});
+    (void)invoke(registry, CallKind::member, "ExecCmd", 4, call);
+  };
+  const ObjectId first = f.spawn(f.unit_class, Point{100, 100}, 1);
+  const ObjectId second = f.spawn(f.unit_class, Point{300, 100}, 1);
+  const ObjectId rival = f.spawn(f.unit_class, Point{500, 100}, 2);
+  exec(first);
+  exec(second);
+  exec(rival);
+  CHECK(f.commands.command_count_named(first, "RTribute") == 1);
+  CHECK(f.commands.command_count_named(second, "RTribute") == 0);
+  CHECK(f.commands.command_count_named(rival, "RTribute") == 1);
+  // Once the first lets go, the second may have it.
+  CHECK(f.commands.kill_command(f.world, first));
+  exec(second);
+  CHECK(f.commands.command_count_named(second, "RTribute") == 1);
+}
+
+/// `ExecCmd` refuses a dead receiver (0x005b5520).
+TEST(exec_cmd_gives_a_dead_object_nothing) {
+  Fixture f;
+  HostRegistry registry;
+  register_command_host(registry);
+  const ObjectId barracks = f.spawn(f.unit_class);
+  f.world.set_health(barracks, 0);
+  HostCall call(f.world, {obj(barracks), Value::string("trainhastatus"), Value::nil(),
+                          Value::nil(), Value::boolean(false)});
+  REQUIRE(invoke(registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
+  CHECK(f.commands.command_count(barracks) == 0);
+}
+
+/// `Progress()` (0x005ae890) refuses a dead receiver -- no bar, no suspend --
+/// while `Progress(ms)` (0x005ac530) asks nothing about health.
+TEST(command_progress_without_an_argument_does_not_suspend_a_dead_object) {
+  Fixture f;
+  HostRegistry registry;
+  register_command_host(registry);
+  const ObjectId u = f.spawn(f.unit_class);
+  Command slow;
+  slow.delay = 9000;
+  f.commands.set_command(f.world, u, "train", slow);
+  f.world.set_health(u, 0);
+  HostCall bare(f.world, {obj(u)});
+  CHECK(invoke(registry, CallKind::member, "Progress", 0, bare).status == HostStatus::ok);
+  HostCall timed(f.world, {obj(u), Value::integer(500)});
+  CHECK(invoke(registry, CallKind::member, "Progress", 1, timed).status != HostStatus::ok);
+}
+
+/// `FormAcceptMove` on a unit with no hero, or no march, returns 2
+/// (0x005d7a1c): the calling script ends there, so `UNIT_FORM_MOVE.VS` never
+/// runs its `while (.HasPath())` or its closing `Face`.
+TEST(form_accept_move_ends_the_script_of_a_unit_with_no_march) {
+  Fixture f;
+  HeroSystem heroes;
+  MovementSystem movement;
+  f.world.add_system(&heroes);
+  f.world.add_system(&movement);
+  HostRegistry registry;
+  register_command_host(registry);
+  const ObjectId loner = f.spawn(f.warrior_class);
+  HostCall call(f.world, {obj(loner)});
+  CHECK(invoke(registry, CallKind::member, "FormAcceptMove", 0, call).status ==
+        HostStatus::finish);
 }

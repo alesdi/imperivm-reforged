@@ -37,6 +37,7 @@
 #include "imperivm/core/sim/heading.hpp"
 #include "imperivm/core/sim/gaika.hpp"
 #include "imperivm/core/sim/objlist.hpp"
+#include "imperivm/core/sim/orders.hpp"
 #include "imperivm/core/sim/player.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/item.hpp"
@@ -2996,9 +2997,10 @@ TEST(squadlist_add_goes_through_the_objlist_domain) {
   CHECK(add(pack_squad(b)) == HostStatus::ok);
   CHECK(items() == std::vector<SquadKey>({a, b}));
 
-  // Twice is once.
+  // Twice is twice: 0x004379b0 appends through 0x00437870 -> 0x00435d90 with
+  // no search for the squad already being there.
   CHECK(add(pack_squad(a)) == HostStatus::ok);
-  CHECK(items() == std::vector<SquadKey>({a, b}));
+  CHECK(items() == std::vector<SquadKey>({a, b, a}));
 
   // And the `ObjList` half of the same entry point still works, which is the
   // half a `SquadList` branch could have broken.
@@ -4062,6 +4064,66 @@ TEST(units_placed_while_the_manager_exists_join_squads_with_their_class_flags) {
   REQUIRE(f.heroes.squads().leave(first, late));
   f.world.advance(1000);
   CHECK(f.heroes.squads().squad_of(late) == kNoSquad);
+}
+
+// `Unit::SetNoselectFlag(true)` (0x005d8750) is the AI unregister (0x0041eee0),
+// not a deselection, and the bit keeps the unit out of every squad after it:
+// the placement hook (0x0041e820) and `AddToSquad` (0x00446a70) both refuse it.
+TEST(set_noselect_flag_takes_a_unit_out_of_its_squad_and_no_squad_takes_it_again) {
+  TrainFixture f;
+  AiSystem ai;
+  f.world.add_system(&ai);
+  HostRegistry hosts;
+  (void)register_world_host(hosts);
+  SelectionTable selections;
+  const auto set_noselect = [&](ObjectId id, bool on) {
+    HostCall call(f.world, {obj(id), Value::boolean(on)});
+    call.context_state.selections = &selections;
+    return invoke(hosts, CallKind::member, "SetNoselectFlag", 1, call);
+  };
+
+  // Before the manager exists the unregister does not run (`[0x8c8e58]`), and
+  // the bit is written all the same.
+  const ObjectId early = f.spawn(f.warrior);
+  const SquadKey early_squad = f.squad({early});
+  CHECK(set_noselect(early, true).status == HostStatus::ok);
+  CHECK(f.world.find(early)->state.flags.noselect);
+  CHECK(f.heroes.squads().squad_of(early) == early_squad);
+
+  ai.start_manager();
+  const ObjectId soldier = f.spawn(f.warrior);
+  const ObjectId walker = f.spawn(f.warrior);
+  const SquadKey both = f.squad({soldier, walker});
+  REQUIRE(selections.select(1, walker));
+  CHECK(set_noselect(walker, true).status == HostStatus::ok);
+  // Out of the squad, by the table and by its record; the squad mate stays.
+  CHECK(f.heroes.squads().squad_of(walker) == kNoSquad);
+  CHECK(f.heroes.unit(walker)->squad == kNoSquad);
+  CHECK(f.heroes.squads().squad_of(soldier) == both);
+  // And still selected: 0x005d8750 never touches the selection.
+  CHECK(selections.player(1).contains(walker));
+  // `AddToSquad` refuses it outright, before the hero and holder arms.
+  CHECK(add_to_squad(f.world, f.heroes, walker, kNoGaika) == kNoSquad);
+  CHECK(f.heroes.squads().squad_of(walker) == kNoSquad);
+
+  // Clearing the bit writes it and nothing else; setting it again is the
+  // transition 0x0041eee0 requires, so an already-flagged unit put back in a
+  // squad by hand is not unregistered a second time.
+  CHECK(set_noselect(early, true).status == HostStatus::ok);
+  CHECK(f.heroes.squads().squad_of(early) == early_squad);
+  CHECK(set_noselect(walker, false).status == HostStatus::ok);
+  CHECK(!f.world.find(walker)->state.flags.noselect);
+
+  // A unit flagged on the turn it was placed is never enrolled: the hook's
+  // test of the bit, which is what makes the six ambient sites' walkers
+  // squadless in the original, where the placement enrols and the flag
+  // unregisters on the same line.
+  const ObjectId hen = f.spawn(f.graph.find("Animal"));
+  CHECK(set_noselect(hen, true).status == HostStatus::ok);
+  f.world.advance(1000);
+  CHECK(f.heroes.squads().squad_of(hen) == kNoSquad);
+  // An unresolvable receiver is silence.
+  CHECK(set_noselect(ObjectId{999999}, true).status == HostStatus::ok);
 }
 
 TEST(a_unit_enrolled_at_placement_is_filed_under_the_node_it_stands_in) {

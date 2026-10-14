@@ -125,8 +125,9 @@ TEST(class_graph_rejects_documents_that_are_not_class_definitions) {
 }
 
 TEST(class_graph_merges_repeated_properties_within_a_class) {
-  // `Object` uses 19 separate <properties> elements; BASERUINS writes
-  // `itemtype` eleven times and, under last-wins, keeps the eleventh.
+  // `Object` uses 19 separate <properties> elements, and every attribute but
+  // one is last-wins. BASERUINS writes `itemtype` twelve times and keeps them
+  // all: gbr.exe's reader (0x005a1d58) appends each repeat after ", ".
   ClassGraph graph;
   REQUIRE(add(graph,
               R"(<class id="BaseRuins" cpp_class="CVXItemHolder" parent="">
@@ -141,7 +142,8 @@ TEST(class_graph_merges_repeated_properties_within_a_class) {
               .ok());
   graph.link();
   REQUIRE(graph.size() == 1);
-  CHECK(value_of(graph.at(0).properties, "itemtype") == "Gem of Wisdom");
+  CHECK(value_of(graph.at(0).properties, "itemtype") ==
+        "Elephant Tusk, Boar teeth, Gem of Wisdom");
   CHECK(value_of(graph.at(0).properties, "radius") == "45");
   CHECK(value_of(graph.at(0).sounds, "select") == "b");
   CHECK(value_of(graph.at(0).sounds, "die") == "c");

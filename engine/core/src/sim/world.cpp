@@ -360,10 +360,51 @@ void GroupTable::hash(std::uint64_t& accumulator) const noexcept {
 }
 
 std::int32_t NamedObjectTable::find(std::string_view name) const noexcept {
+  // An entry `unbind_object` removed has an empty name, so no lookup finds it;
+  // nor does one for the empty name itself.
+  if (name.empty()) return kNoName;
   for (std::size_t i = 0; i < names_.size(); ++i) {
     if (names_[i].name == name) return static_cast<std::int32_t>(i);
   }
   return kNoName;
+}
+
+bool object_is_dead(const WorldObject& slot) noexcept {
+  if (slot.state.health > 0) return false;
+  if (!slot.state.flags.is_building) return true;
+  return slot.object != nullptr && slot.object->is_a(NativeClass::catapult);
+}
+
+std::int32_t NamedObjectTable::intern(std::string_view name) {
+  if (name.empty()) return kNoName;
+  const std::int32_t at = find(name);
+  if (at != kNoName) return at;
+  names_.push_back(Entry{std::string(name), kNoObject});
+  return static_cast<std::int32_t>(names_.size() - 1);
+}
+
+bool NamedObjectTable::restore(std::string_view name, ObjectId id) {
+  // A removed entry is an empty name naming nothing; anything else is a name,
+  // bound or minted, and the table never holds one name twice.
+  if (name.empty()) {
+    if (id != kNoObject) return false;
+  } else if (find(name) != kNoName) {
+    return false;
+  }
+  names_.push_back(Entry{std::string(name), id});
+  return true;
+}
+
+std::size_t NamedObjectTable::unbind_object(ObjectId id) noexcept {
+  if (id == kNoObject) return 0;
+  std::size_t removed = 0;
+  for (Entry& entry : names_) {
+    if (entry.object != id) continue;
+    entry.name.clear();
+    entry.object = kNoObject;
+    ++removed;
+  }
+  return removed;
 }
 
 bool NamedObjectTable::bind(std::string_view name, ObjectId id) {
@@ -1035,26 +1076,20 @@ std::size_t World::objects_located_in_rect(std::int32_t left, std::int32_t top,
                [&](const WorldObject&, Point at) { return box.contains(at); });
 }
 
-std::size_t World::objects_in_sight(ObjectId observer, const ClassFilter& filter,
-                                    std::vector<ObjectId>& out) const {
+std::size_t World::objects_in_sight(ObjectId observer, std::int32_t radius,
+                                    const ClassFilter& filter, std::vector<ObjectId>& out) const {
   out.clear();
   const WorldObject* watcher = find(observer);
-  if (watcher == nullptr) return 0;
+  if (watcher == nullptr || radius < 0) return 0;
   // The observer's own stored position, as 0x004ff080 reads it through
   // `vtbl+0x3c` (0x004ff133) -- so a held observer looks out from `(-1, -1)`,
   // the map's corner, and not from its holder; nothing it stands in is asked.
   const Point eye = watcher->state.position;
-
-  const std::int32_t sight = watcher->sight;
-  const auto seen = [&](const WorldObject& slot, Point at) {
-    if (slot.id == observer) return false;  // nobody sees themselves
-    return at != kHeldPosition;
-  };
-  if (sight <= 0) return scan(filter, true, out, seen);
-  const std::int64_t limit = static_cast<std::int64_t>(sight) * static_cast<std::int64_t>(sight);
-  return sweep(box_around(eye, sight), filter, true, out,
+  const std::int64_t limit = static_cast<std::int64_t>(radius) * static_cast<std::int64_t>(radius);
+  return sweep(box_around(eye, radius), filter, true, out,
                [&](const WorldObject& slot, Point at) {
-                 return seen(slot, at) && dist2(at, eye) <= limit;
+                 // Nobody sees themselves (0x004fcc30 refuses the observer).
+                 return slot.id != observer && at != kHeldPosition && dist2(at, eye) <= limit;
                });
 }
 
@@ -1201,8 +1236,10 @@ std::size_t World::units_in_settlement(ObjectId settlement, const ClassFilter& f
   // (`vtbl + 0x50`, the slot `Obj::IsAlive` negates), `IsHeirOf` against the
   // class argument, and **not a spawn template** (`test [obj+0x2c],
   // 0x8000000`). `collect` makes the last one for every sweep in this file;
-  // the dead test is made here rather than there because no other sweep in
-  // `gbr.exe` makes it and widening `collect` would apply it to all of them.
+  // the dead test is made here rather than there because `collect` serves
+  // engine callers that ask questions of their own. (The query sweeps make it
+  // too -- 0x004fc6b0, 0x004fc980 and 0x004fcc30 all ask `vtbl + 0x50` -- and
+  // `evaluate_query` applies it to those.)
   //
   // Held objects are skipped, as every area sweep skips them: a garrisoned
   // unit holds `(-1, -1)` and occupies no grid cell in the original, so it
@@ -1343,9 +1380,34 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
   const QuerySpec* spec = query_spec(id);
   if (spec == nullptr) return 0;
 
+  // **Every area, rectangle and sight sweep refuses the dead.** The three
+  // candidate filters the original's query sweeps run -- 0x004fc6b0 (the
+  // class-player circle and rectangle, 0x004fd060/0x004fd2d0), 0x004fc980
+  // (the map-area circle and rectangle, 0x004fde60/0x004fdc20) and 0x004fcc30
+  // (the sight sweep, 0x004fd9c0) -- each ask the candidate's `vtbl + 0x50`
+  // and pass over one that answers dead (`object_is_dead`), beside the
+  // template bit `collect` already tests. Applied here, after the geometric
+  // sweep, rather than in the sweep helpers, which other engine code uses for
+  // questions of its own.
+  const auto living = [&](std::size_t) {
+    out.erase(std::remove_if(out.begin(), out.end(),
+                             [&](ObjectId member) {
+                               const WorldObject* slot = find(member);
+                               return slot == nullptr || object_is_dead(*slot);
+                             }),
+              out.end());
+    return out.size();
+  };
+
   switch (spec->kind) {
-    case QueryKind::objs_in_sight:
-      return objects_in_sight(spec->subject, spec->filter, out);
+    case QueryKind::objs_in_sight: {
+      // `ObjsInSight`, `VisibleObjsInSight` and `ObjsInRange` are all this
+      // type (0x004fee10). The refresh (0x004ff080) answers nothing for an
+      // observer that is gone **or dead** (0x004ff0cd, 0x004ff0dc).
+      const WorldObject* watcher = find(spec->subject);
+      if (watcher == nullptr || object_is_dead(*watcher)) return 0;
+      return living(objects_in_sight(spec->subject, spec->radius, spec->filter, out));
+    }
 
     case QueryKind::map_area_circle: {
       // `ObjsInRange` anchors on an object and `ObjsInCircle` on a point; the
@@ -1360,21 +1422,45 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
         if (anchor == nullptr) return 0;
         center = anchor->state.position;
       }
-      return objects_in_radius(center, spec->radius, spec->filter, out);
+      // The circle sweep (0x004fde60) is `dist² <= r²` over a box of
+      // half-side `r` and nothing else: a radius of 0 holds only its own
+      // spot, and a negative one holds nothing. `objects_in_radius` reads
+      // `r <= 0` as the whole map for its other callers, so the two edges are
+      // taken here.
+      if (spec->radius < 0) return 0;
+      if (spec->radius == 0) {
+        return living(objects_in_rect(center.x, center.y, center.x, center.y, spec->filter, out));
+      }
+      return living(objects_in_radius(center, spec->radius, spec->filter, out));
     }
 
     case QueryKind::map_area_rect:
-      return objects_in_rect(spec->left, spec->top, spec->right, spec->bottom, spec->filter, out);
+      return living(
+          objects_in_rect(spec->left, spec->top, spec->right, spec->bottom, spec->filter, out));
 
     case QueryKind::class_player_area:
       // One kind, two shapes -- see `QuerySpec::area_is_rect` for why this is a
       // branch here and two kinds above.
       if (spec->area_is_rect) {
-        return objects_of_class_for_player_in_rect(spec->filter, spec->player, spec->left,
-                                                   spec->top, spec->right, spec->bottom, out);
+        return living(objects_of_class_for_player_in_rect(spec->filter, spec->player, spec->left,
+                                                          spec->top, spec->right, spec->bottom,
+                                                          out));
       }
-      return objects_of_class_for_player(spec->filter, spec->player, spec->center, spec->radius,
-                                         out);
+      objects_of_class_for_player(spec->filter, spec->player, spec->center, spec->radius, out);
+      if (spec->radius <= 0) {
+        // No area: the refresh (0x004fe860) sweeps the whole map's rectangle
+        // (`[world+0xb4]`) **through the grid** (0x004fd2d0), and a held object
+        // is in no cell -- so `ClassPlayerObjs` never lists one, garrison or
+        // passenger. `objects_of_class_for_player` keeps them for its other
+        // callers.
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [&](ObjectId member) {
+                                   const WorldObject* slot = find(member);
+                                   return slot == nullptr || slot->state.is_held();
+                                 }),
+                  out.end());
+      }
+      return living(out.size());
 
     case QueryKind::player_flags:
       return objects_by_relation(spec->filter, spec->player, spec->flags_type, out);
@@ -1422,24 +1508,44 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
       // there keeps that order where it is observable and pays for it only in
       // the branch that cannot use it.
       //
-      // The result is therefore ascending, which the original's `CVXSetOpQuery`
-      // is not: it composes two unsorted deques with a linear `Contains` and
-      // yields neither operand's order. A labelled divergence, affordable
-      // because none of the 759 `Union`/`Intersect`/`Subtract` sites in the
-      // shipped scripts indexes what it gets back.
-      std::sort(lhs.begin(), lhs.end());
-      std::sort(rhs.begin(), rhs.end());
+      // The order is the refresh's (0x004ffbe0), arm by arm:
+      //
+      //   * union sorts both operands by handle (0x004fb510) and merges them
+      //     (0x004f98c0), so it is ascending;
+      //   * subtract walks the left operand in its own order and keeps what the
+      //     right one does not contain;
+      //   * intersect walks whichever operand is **smaller** (`a.count <
+      //     b.count`, so a tie walks the right), in its own order, and keeps
+      //     what the other contains.
+      //
+      // Each operand's own order is this engine's (ascending id for the area
+      // kinds, joining order for a group) rather than the original's grid
+      // order; see `sim/spatial_index.hpp`.
+      std::vector<ObjectId> lhs_sorted = lhs;
+      std::vector<ObjectId> rhs_sorted = rhs;
+      std::sort(lhs_sorted.begin(), lhs_sorted.end());
+      std::sort(rhs_sorted.begin(), rhs_sorted.end());
+      const auto contains = [](const std::vector<ObjectId>& sorted, ObjectId member) {
+        return std::binary_search(sorted.begin(), sorted.end(), member);
+      };
       switch (spec->op) {
-        case SetOp::intersect:
-          std::set_intersection(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
-                                std::back_inserter(out));
-          break;
         case SetOp::set_union:
-          std::set_union(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), std::back_inserter(out));
+          std::set_union(lhs_sorted.begin(), lhs_sorted.end(), rhs_sorted.begin(), rhs_sorted.end(),
+                         std::back_inserter(out));
           break;
+        case SetOp::intersect: {
+          const bool walk_left = lhs.size() < rhs.size();
+          const std::vector<ObjectId>& walked = walk_left ? lhs : rhs;
+          const std::vector<ObjectId>& other = walk_left ? rhs_sorted : lhs_sorted;
+          for (const ObjectId member : walked) {
+            if (contains(other, member)) out.push_back(member);
+          }
+          break;
+        }
         case SetOp::subtract:
-          std::set_difference(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
-                              std::back_inserter(out));
+          for (const ObjectId member : lhs) {
+            if (!contains(rhs_sorted, member)) out.push_back(member);
+          }
           break;
       }
       return out.size();
@@ -1948,6 +2054,8 @@ std::uint64_t World::state_hash() const noexcept {
     // somewhere else. See `ObjectState::teleport_destination`.
     hash_u64(state, slot.state.teleport_destination);
     hash_u64(state, slot.state.traversed_by);
+    // When the unit's curse lifts: `IsCursed` reads it. See `ObjectState`.
+    hash_u64(state, static_cast<std::uint64_t>(slot.state.curse_until));
     // A gate's portcullis motion: where it stands decides whether units pass.
     if (slot.object != nullptr && slot.object->is_a(NativeClass::gate)) {
       hash_u64(state, static_cast<std::uint64_t>(slot.gate.start));
@@ -2065,7 +2173,7 @@ WorldHashes World::hashes() const noexcept {
 namespace {
 
 constexpr std::uint32_t kWorldMagic = 0x444C5749u;  // "IWLD"
-constexpr std::uint32_t kWorldVersion = 34;  // 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
+constexpr std::uint32_t kWorldVersion = 35;  // 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
 
 /// `0xFF` for a slot with no native object -- every internal kind.
 /// `NativeClass` is a `std::uint8_t` enum with 26 values, so the sentinel
@@ -2288,6 +2396,8 @@ void World::serialize(std::vector<std::byte>& out) const {
     bytes::put_u32(out, slot.state.sheltered_by);
     bytes::put_u32(out, slot.state.teleport_destination);
     bytes::put_u32(out, slot.state.traversed_by);
+    // World version 35: when the unit's curse lifts.
+    bytes::put_i64(out, slot.state.curse_until);
 
     // The animation cursor. `AnimTimeline` is not written: it is re-resolved
     // from the entity on load, and a timeline in a file would be a copy of game
@@ -2494,7 +2604,8 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
         !reader.u32(slot.state.ui_target) || !reader.u32(slot.state.mist) ||
         !reader.u32(slot.state.sheltered_by) ||
         !reader.u32(slot.state.teleport_destination) ||
-        !reader.u32(slot.state.traversed_by) || !reader.u8(animating) ||
+        !reader.u32(slot.state.traversed_by) ||
+        !bytes::get_i64(reader, slot.state.curse_until) || !reader.u8(animating) ||
         !reader.u8(repeat) || !bytes::get_string(reader, slot.display_name)) {
       return FormatError::truncated;
     }
@@ -2638,8 +2749,10 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
     if (!bytes::get_string(reader, name) || !reader.u32(id)) return FormatError::truncated;
     // First-wins on a repeat is the live table's rule, so a save carrying a
     // repeat would lose the second binding and come back smaller than it went
-    // out. Refused instead.
-    if (!names.bind(name, id)) return FormatError::malformed;
+    // out. Refused instead. `restore`, not `bind`: an entry `GetNamedObj`
+    // minted names nothing yet, and one `SetName("")` removed is an empty name
+    // naming nothing; both come back in their places.
+    if (!names.restore(name, id)) return FormatError::malformed;
   }
 
   std::uint32_t boarding_rows = 0;

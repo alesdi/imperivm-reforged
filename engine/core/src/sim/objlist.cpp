@@ -11,6 +11,7 @@
 #include "imperivm/core/sim/array.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <vector>
 
 #include "imperivm/core/game/class_graph.hpp"
@@ -167,6 +168,11 @@ void ObjListPool::set_alias_resolver(AliasResolver resolver, void* user) noexcep
 ObjectId ObjListPool::alias_of(ObjListId id) const noexcept {
   if (!contains(id)) return kNoObject;
   return entries_[index_of_id(id)].alias;
+}
+
+const std::vector<ObjectId>* ObjListPool::roster_of(ObjectId owner) const noexcept {
+  if (owner == kNoObject || alias_resolver_ == nullptr) return nullptr;
+  return alias_resolver_(alias_user_, owner);
 }
 
 script::ScriptId ObjListPool::owner_of(ObjListId id) const noexcept {
@@ -356,6 +362,28 @@ constexpr script::CallKind kMember = script::CallKind::member;
 /// arity) and there is exactly one `count/0`. `sel.Count()` in
 /// `DATA\SUBAI\DEBUG_DUMP.VS` is the same entry: member lookup is
 /// case-insensitive and parentheses are optional.
+///
+/// **The bodies.** The original's `ObjList` is a deque of sixteen-bit object
+/// handles with its size at `+0x18`, and a list value on the VM stack is a
+/// handle, an offset and a cached pointer.
+///
+///   * `ObjList::count` (0x0055e0c0) resolves the list and answers that size
+///     word -- members are counted, not resolved, so a dead unit's handle and
+///     the invalid handle both count until something removes them. It then
+///     drops the reference the call held (`[+0x1c]`), deleting a temporary
+///     whose count reaches zero. It does not test the receiver: a list that
+///     does not resolve is a null dereference there and a zero here.
+///   * `Query::count` (0x00577b90) resolves the query, calls its `Refresh`
+///     (`vtbl+0x1c`) and its result accessor (`vtbl+0x20`, the embedded list at
+///     `+0x1c`, 0x005716f0) and answers that list's size, so a query is
+///     re-evaluated by every `count`. An unresolvable receiver prints
+///     `The function 'Query::count' called for an uninitialized or invalid
+///     object.` and answers **0** (0x00577be4).
+///   * `ItemHolder::count` (0x0053c660) is a third registration of the name: an
+///     item holder's virtual at `vtbl+0x104`, 0 with the same diagnostic for an
+///     invalid receiver. No shipped script calls `count` on an `ItemHolder`, and
+///     a live object that is neither a list nor a query is refused below rather
+///     than guessed at.
 HostOutcome m_count(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("count: no world");
@@ -407,6 +435,13 @@ HostOutcome m_count(CallContext& ctx) {
 /// -- a query re-evaluates and an `ObjList` needs `ClearDead` -- and it is why
 /// `DATA\AI HELPERS\GUARD.VS` re-reads `ol = qryDef.GetObjList();` at the top of
 /// every pass of its `while (1)` loop.
+///
+/// 0x0057a7c0: resolve the query, `Refresh` it (`vtbl+0x1c`), allocate a fresh
+/// list (0x0041edd0) and copy the query's result deque into it whole and in
+/// order (0x00438230 over the accessor's `+8`), then push it as a new value
+/// with no owning handle. No member is tested, so the copy is exactly the
+/// query's own order -- `World::evaluate_query`'s, which is the query system's
+/// to answer for.
 HostOutcome m_get_objlist(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetObjList: no world");
@@ -503,10 +538,16 @@ HostOutcome m_get_units_on_board(CallContext& ctx) {
 /// ("called for an uninitialized or invalid object") is for a receiver that
 /// does not resolve at all, and it also yields an empty list.
 ///
-/// Membership is the `ObjectState::holder` back-link, in ascending object id,
-/// for the reason `GetUnitsOnBoard` above records: this engine keeps no
-/// per-holder list outside `Settlement`, and the two orders differ only for a
-/// holder that has been emptied and refilled.
+/// **The order is the holder's.** 0x00438230 copies the holder's deque at
+/// `+0x30` front to back, and for a settlement's holder that deque is the very
+/// one `Settlement::Units` aliases (0x005c3c70). So where this engine keeps that
+/// roster -- `Holder::units`, reached through `ObjListPool::roster_of` -- the
+/// answer is a copy of it, in garrison order: two of the four shipped sites
+/// pick a member with `ol[rand(ol.count)]`, so the order is the answer. Any
+/// other holder has no roster here, and membership falls back to the
+/// `ObjectState::holder` back-link in ascending object id, for the reason
+/// `GetUnitsOnBoard` above records; that fallback differs from the original
+/// only for such a holder that has been emptied and refilled.
 HostOutcome m_get_units_in_same_holder(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetUnitsInSameHolder: no world");
@@ -518,7 +559,16 @@ HostOutcome m_get_units_in_same_holder(CallContext& ctx) {
   }
   const ObjectId self = live_object_of(*world, ctx.arg(0));
   const WorldObject* slot = self == kNoObject ? nullptr : world->find(self);
-  if (slot != nullptr) (void)world->contents_of(slot->state.holder, *out);
+  if (slot == nullptr) return HostOutcome::ok_with(make_objlist_value(list));
+  if (const std::vector<ObjectId>* roster = pool.roster_of(slot->state.holder);
+      roster != nullptr) {
+    // Copied rather than assigned from a reference held across the call: the
+    // roster lives in a settlement store that may move, and `out` is the pool's.
+    const std::vector<ObjectId> copy = *roster;
+    if (std::vector<ObjectId>* again = pool.mutable_items(list); again != nullptr) *again = copy;
+    return HostOutcome::ok_with(make_objlist_value(list));
+  }
+  (void)world->contents_of(slot->state.holder, *out);
   return HostOutcome::ok_with(make_objlist_value(list));
 }
 
@@ -546,6 +596,13 @@ HostOutcome m_get_units_in_same_holder(CallContext& ctx) {
 ///
 /// An invalid receiver is **not** a refusal: 0x005305ad diagnoses and then
 /// allocates a fresh empty list, so `h.army.count` on a dead hero is 0.
+///
+/// **Why it is still a snapshot.** Making it the live list is the alias
+/// `Settlement::Units` already is, and the pool's one `AliasResolver` is
+/// installed by `EconomySystem` and knows settlement holders only. A hero's
+/// army needs that seam to serve a second kind of owner -- a resolver per
+/// owner kind, or one that asks each system in turn -- which is a change to
+/// the pool's design rather than to this entry point.
 HostOutcome m_army(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("army: no world");
@@ -573,6 +630,15 @@ HostOutcome m_army(CallContext& ctx) {
 ///
 /// Order is preserved among the survivors -- there is nothing in the corpus
 /// that would justify disturbing it, and iteration order is state.
+///
+/// 0x0055f430 walks the deque front to back and erases a member (0x0041ecc0,
+/// continuing at the element that slid into its place) when its handle no
+/// longer resolves, or when the object's virtual at `vtbl+0x50` answers
+/// nonzero -- the slot `Obj::IsDead` (0x005aae50) asks and `Obj::IsAlive`
+/// negates, which this engine reads as health at or below zero everywhere it
+/// meets it. So this is exactly "drop what `IsDead` would call dead", and the
+/// invalid handle -- which resolves to nothing -- goes with them. Erasing in
+/// place keeps the survivors' order.
 HostOutcome m_clear_dead(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("ClearDead: no world");
@@ -593,13 +659,35 @@ HostOutcome m_clear_dead(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `ol.Add(o)` -- 83 sites. Plain append; see the header on deduplication.
+/// An object argument as the handle a list member would hold, or nothing.
 ///
-/// An invalid or stale handle is a no-op rather than an error. 331 files
-/// declare a handle and assign it several statements later, and
-/// `TS_CARTHAGETACTIC.VS` guards its `ol.Add(hero)` with `hero.IsValid()`
-/// precisely because the handle can be dead -- entering `kNoObject` would make
-/// `count` lie and `ClearDead` the only cure.
+/// What the original's list stores is the argument's sixteen-bit handle word,
+/// taken as it stands: no member-adding body tests that it resolves. So a dead
+/// object's id is kept as it is, and the invalid handle -- the `kNoType`
+/// sentinel `Obj::Clear` and every failed lookup answer -- is `kNoObject`,
+/// which is what `0xffff` is to this engine. Anything that is not an object
+/// handle (a point, an integer) is not a member at all.
+[[nodiscard]] std::optional<ObjectId> member_handle(const Value& value) noexcept {
+  if (!value.is_object()) return std::nullopt;
+  const ObjectRef ref = value.as_object();
+  if (ref.type == script::kNoType) return kNoObject;
+  if (ref.type != kTypeObj && ref.type != kTypeQuery && ref.type != kTypeSettlement) {
+    return std::nullopt;
+  }
+  return ref.id;
+}
+
+/// `ol.Add(o)` -- 83 sites. **Appends `o` unless the list already holds it.**
+///
+/// 0x005601a0 pops the argument's handle, resolves the receiver, searches the
+/// whole deque for an equal handle (0x0050e2a0, a front-to-back scan comparing
+/// the sixteen-bit word) and pushes it at the back (0x0041f290) only when the
+/// scan reaches the end; then it drops the call's reference to the list. There
+/// is **no validity test on the argument**: the invalid handle and a dead
+/// unit's handle are added like any other, `count` counts them, and
+/// `ClearDead` is what removes them. `TS_CARTHAGETACTIC.VS` guards its
+/// `ol.Add(hero)` with `hero.IsValid()` for exactly that reason. The header's
+/// old guess that `Add` might not deduplicate is settled: it does.
 HostOutcome m_add(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Add: no world");
@@ -609,12 +697,17 @@ HostOutcome m_add(CallContext& ctx) {
   // keys on `(kind, name, arity)`, so a second `define` in `sim/squad.cpp`
   // would have replaced this body rather than joined it. 27 of the 29 shipped
   // receivers are `ObjList`s and two -- `slTrain.Add`, in `DATA\AI` -- are
-  // `SquadList`s. The comment here used to say refusing a `SquadList` "names
-  // that gap"; the gap is closed and this is what closing it looks like.
+  // `SquadList`s.
   //
-  // A squad already in the list is not added twice: the corpus builds these to
-  // walk with a cursor, and a duplicate would be visited twice by something
-  // that has no way to tell.
+  // 0x004379b0: the receiver is the list *variable*; when it holds no live
+  // list (0x0043ed70) a fresh slot is claimed (0x0043ed10) and stored into it,
+  // and then the squad's handle is appended at the back (0x00437870 ->
+  // 0x00435d90) -- **with no search for a duplicate** and no test that the
+  // squad exists. Both shipped sites add the squad their own cursor walk is
+  // standing on, so a duplicate never arises there; the rule is the binary's
+  // all the same. A value that is not a squad handle at all (the invalid
+  // handle `pack_squad` makes of a missing squad) carries no key here and adds
+  // nothing.
   if (ctx.count() > 0 && is_squadlist(ctx.arg(0))) {
     std::vector<SquadKey>* squads =
         squadlist_pool_of(*world).mutable_items(squadlist_of(ctx.arg(0)));
@@ -622,19 +715,26 @@ HostOutcome m_add(CallContext& ctx) {
     if (ctx.count() < 2 || !is_squad(ctx.arg(1))) return HostOutcome::ok_void();
     const SquadKey key = unpack_squad(ctx.arg(1));
     if (!key.valid()) return HostOutcome::ok_void();
-    if (std::find(squads->begin(), squads->end(), key) == squads->end()) squads->push_back(key);
+    squads->push_back(key);
     return HostOutcome::ok_void();
   }
 
   std::vector<ObjectId>* items = mutable_receiver(ctx, objlist_pool_of(*world));
   if (items == nullptr) return HostOutcome::failed("Add: receiver is not a live ObjList");
-  const ObjectId id = live_object_of(*world, ctx.arg(1));
-  if (id == kNoObject) return HostOutcome::ok_void();
-  items->push_back(id);
+  const std::optional<ObjectId> id = member_handle(ctx.arg(1));
+  if (!id.has_value()) return HostOutcome::ok_void();
+  if (std::find(items->begin(), items->end(), *id) == items->end()) items->push_back(*id);
   return HostOutcome::ok_void();
 }
 
-/// `ol.AddList(other)` -- 67 sites. Appends `other`'s ids, in `other`'s order.
+/// `ol.AddList(other)` -- 67 sites. **The union, in order**: each of `other`'s
+/// members the receiver does not already hold is appended, in `other`'s order.
+///
+/// 0x0055ff00 walks `other` front to back and, for each member, scans the
+/// receiver (0x0050e2a0) and pushes the member at the back (0x0041f290) only
+/// when the scan finds no equal handle. The scan runs against the receiver as
+/// it grows, so a member `other` holds twice is added once; and
+/// `ol.AddList(ol)` finds every member already present and changes nothing.
 ///
 /// Every argument in the corpus is an `ObjList`: another local (`ol2`,
 /// `lToHealOut`), or one a host function returned
@@ -650,11 +750,13 @@ HostOutcome m_add_list(CallContext& ctx) {
   std::vector<ObjectId>* items = mutable_receiver(ctx, pool);
   if (items == nullptr) return HostOutcome::failed("AddList: receiver is not a live ObjList");
   // Copied before the append: `ol.AddList(ol)` is legal in the language, and
-  // appending a span of a vector to itself is a dangling read the moment it
-  // reallocates.
+  // reading a span of a vector while appending to it is a dangling read the
+  // moment it reallocates.
   const std::span<const ObjectId> source = pool.items(objlist_of(ctx.arg(1)));
   const std::vector<ObjectId> copy(source.begin(), source.end());
-  items->insert(items->end(), copy.begin(), copy.end());
+  for (const ObjectId id : copy) {
+    if (std::find(items->begin(), items->end(), id) == items->end()) items->push_back(id);
+  }
   return HostOutcome::ok_void();
 }
 
@@ -662,7 +764,9 @@ HostOutcome m_add_list(CallContext& ctx) {
 /// handful on an object.
 ///
 /// `ol.Clear()` empties the list and leaves the handle bound, because
-/// `TSH_RECRUITARMY.VS` says the caller is holding the same one.
+/// `TSH_RECRUITARMY.VS` says the caller is holding the same one. 0x0055f590
+/// resolves the list, empties its deque (0x006a3cc0, which frees every block)
+/// and drops the call's reference.
 ///
 /// `Obj::Clear` (`gbr.exe` 0x005ab210) makes the *handle* invalid, and it does
 /// it by writing back through the argument -- which this VM supports, because
@@ -678,16 +782,16 @@ HostOutcome m_add_list(CallContext& ctx) {
 /// receiver was refused by name, 207 times in one corpus pass, and the comment
 /// that used to stand here named the gap without closing it.
 ///
-/// **The retail body writes to the wrong place.** It pops the receiver,
-/// resolves the handle through the object table, and then stores the `0xFFFF`
-/// sentinel and a zero at `[object]` and `[object+4]` -- into the *object*,
-/// not into the stack slot it just popped, whose address it overwrote two
-/// instructions earlier. On a handle that does not resolve the pointer is null
-/// and the write is to address zero. Whatever that does in retail, it is not
-/// what the shipped script needs and it is not what `IsValid` reads, so this
-/// writes the sentinel into the slot. Transcribing the fault would make
-/// `CROW_IDLE.VS` either corrupt an object or crash, and the corpus proves it
-/// does neither.
+/// **The receiver is a reference, and the body writes through it.** 0x005ab210
+/// pops an eight-byte receiver -- a handle word and an offset -- resolves the
+/// handle through the object table, adds the offset and stores the invalid
+/// handle (`0xffff`, then a zero offset) at that address. That is the shape of
+/// every by-reference value in this VM (`Hero::army` pushes its own as the hero
+/// handle and the offset `0x1cc`): the pair names the *variable*, so the store
+/// lands in it. This note used to read the same instructions as a write into
+/// the object itself; `CROW_IDLE.VS` running in retail is what says the
+/// reference reading is the right one. A receiver that resolves to nothing is
+/// a store to a null address there and a plain invalidation here.
 HostOutcome m_clear(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Clear: no world");
@@ -706,7 +810,25 @@ HostOutcome m_clear(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `ol.RemoveList(other)` -- 29 sites. Drops every id `other` holds.
+/// Erase the first member equal to `id`, front to back; whether one was found.
+/// 0x0041ee70: the scan is 0x0050e2a0 and the erase 0x0041ecc0, one element.
+bool erase_first(std::vector<ObjectId>& items, ObjectId id) {
+  const auto it = std::find(items.begin(), items.end(), id);
+  if (it == items.end()) return false;
+  items.erase(it);
+  return true;
+}
+
+/// `ol.RemoveList(other)` -- 29 sites. **One occurrence per member of `other`.**
+///
+/// 0x0055f100 walks `other` front to back and, for each of its members, scans
+/// the receiver for an equal handle and erases the first one it finds
+/// (0x0041ecc0); a member the receiver lacks is passed over silently. So a
+/// handle the receiver holds twice and `other` once survives once -- which
+/// `Add`'s deduplication makes rare, and which is the rule all the same. Order
+/// among the survivors is kept. `ol.RemoveList(ol)` walks the list it is
+/// erasing from in the original, a case no shipped script writes; here the
+/// argument is copied first, so it empties the list.
 HostOutcome m_remove_list(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RemoveList: no world");
@@ -719,15 +841,19 @@ HostOutcome m_remove_list(CallContext& ctx) {
   const std::vector<ObjectId> drop(source.begin(), source.end());
   std::vector<ObjectId>* items = pool.mutable_items(objlist_of(ctx.arg(0)));
   if (items == nullptr) return HostOutcome::ok_void();
-  items->erase(std::remove_if(items->begin(), items->end(),
-                              [&drop](ObjectId id) {
-                                return std::find(drop.begin(), drop.end(), id) != drop.end();
-                              }),
-               items->end());
+  for (const ObjectId id : drop) (void)erase_first(*items, id);
   return HostOutcome::ok_void();
 }
 
-/// `ol.Remove(o)` -- 17 sites. Drops every occurrence of one object.
+/// `ol.Remove(o)` -- 17 sites. **The first occurrence of one handle.**
+///
+/// 0x0055f370 pops the argument's handle word and hands it to 0x0041ee70, which
+/// scans the deque front to back, erases the first equal member and answers
+/// whether it found one; when it did not, the body prints `ObjList::Remove:
+/// this element does not exist in the list!` and carries on. The argument is
+/// not resolved, so removing an object that has already been despawned --
+/// exactly what a script does between two `ClearDead`s -- works, and so does
+/// removing the invalid handle.
 ///
 /// Two of the 17 pass an `ObjList` rather than an object
 /// (`ol.Remove(ol.ObjEnemy(AIPlayer))`, `DATA\AI\ESH_MARKET.VS:80`), and both
@@ -746,33 +872,59 @@ HostOutcome m_remove(CallContext& ctx) {
     const std::span<const ObjectId> source = pool.items(objlist_of(ctx.arg(1)));
     drop.assign(source.begin(), source.end());
   } else {
-    if (!ctx.arg(1).is_object()) return HostOutcome::failed("Remove: expected an object");
-    // Not `live_object_of`: removing an object that has already been despawned
-    // is exactly what a script does between two `ClearDead`s.
-    drop.push_back(ctx.arg(1).as_object().id);
+    const std::optional<ObjectId> id = member_handle(ctx.arg(1));
+    if (!id.has_value()) return HostOutcome::failed("Remove: expected an object");
+    drop.push_back(*id);
   }
 
   std::vector<ObjectId>* items = pool.mutable_items(objlist_of(ctx.arg(0)));
   if (items == nullptr) return HostOutcome::ok_void();
-  items->erase(std::remove_if(items->begin(), items->end(),
-                              [&drop](ObjectId id) {
-                                return std::find(drop.begin(), drop.end(), id) != drop.end();
-                              }),
-               items->end());
+  for (const ObjectId id : drop) (void)erase_first(*items, id);
   return HostOutcome::ok_void();
 }
 
-/// `ol.Contains(o)` -- 12 sites, all of them a membership test whose answer
-/// decides a branch (`DATA\TUTORIALS\BUILDINGSADVICE4.VS`).
+/// `ol.Contains(o)` and `q.Contains(o)` -- 15 sites, all of them a membership
+/// test whose answer decides a branch, and **two registrations**:
+///
+///   * `ObjList::Contains` (0x0055e490) scans the deque front to back for the
+///     argument's handle word and answers whether it met it. The argument is
+///     not resolved, so a dead unit's handle and the invalid handle are found
+///     when the list holds them.
+///   * `Query::Contains` (0x00578d20) resolves the query, `Refresh`es it
+///     (`vtbl+0x1c`) and asks its `vtbl+0x24`, which is 0x00571870: the same
+///     front-to-back handle scan over the freshly evaluated result. An
+///     unresolvable query prints `The function 'Query::Contains' called for an
+///     uninitialized or invalid object.` and answers **false**.
+///
+/// The query form is not hypothetical: the tutorial's first sequence asks
+/// `AreaObjs("EGate1", "Hero").Contains(Caesar.obj)`, and refusing it trapped
+/// the sequence. A `NamedObj` receiver is the one-member query `count` already
+/// serves.
 HostOutcome m_contains(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Contains: no world");
-  if (!is_objlist(ctx.arg(0))) return HostOutcome::failed("Contains: receiver is not an ObjList");
-  if (!ctx.arg(1).is_object()) return HostOutcome::ok_with(Value::boolean(false));
-  const std::uint32_t wanted = ctx.arg(1).as_object().id;
-  const std::span<const ObjectId> items = objlist_pool_of(*world).items(objlist_of(ctx.arg(0)));
+  const std::optional<ObjectId> wanted = member_handle(ctx.arg(1));
+  if (is_objlist(ctx.arg(0))) {
+    if (!wanted.has_value()) return HostOutcome::ok_with(Value::boolean(false));
+    const std::span<const ObjectId> items = objlist_pool_of(*world).items(objlist_of(ctx.arg(0)));
+    return HostOutcome::ok_with(
+        Value::boolean(std::find(items.begin(), items.end(), *wanted) != items.end()));
+  }
+  std::vector<ObjectId> members;
+  if (is_named_obj(ctx.arg(0))) {
+    members = named_obj_members(*world, ctx.arg(0));
+  } else {
+    const ObjectId id = live_object_of(*world, ctx.arg(0));
+    const WorldObject* slot = id == kNoObject ? nullptr : world->find(id);
+    if (slot == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+    if (slot->internal != InternalKind::query) {
+      return HostOutcome::failed("Contains: receiver is neither an ObjList nor a Query");
+    }
+    world->evaluate_query(id, members);
+  }
+  if (!wanted.has_value()) return HostOutcome::ok_with(Value::boolean(false));
   return HostOutcome::ok_with(
-      Value::boolean(std::find(items.begin(), items.end(), wanted) != items.end()));
+      Value::boolean(std::find(members.begin(), members.end(), *wanted) != members.end()));
 }
 
 // --------------------------------------------------------------------------
@@ -782,7 +934,10 @@ HostOutcome m_contains(CallContext& ctx) {
 // `ObjEnemy(player)`, `ObjAlly(player)`, `ObjClass(name)` and `ObjInjured()`
 // each mint a **new** list (0x0041edd0, the same constructor `Party` uses) and
 // copy in the members that pass one test, in the receiver's order. The
-// receiver is left alone. Seven sites in four scripts between them.
+// receiver is left alone. Seven sites in four scripts between them. All four
+// walk the receiver front to back, skip a member whose handle does not
+// resolve, push a passing member at the back (0x0041f290), drop the call's
+// reference to the receiver and push the new list as an ownerless value.
 
 /// A fresh list to fill, or `kNoObjList` with the outcome to answer.
 [[nodiscard]] ObjListId fresh_list(CallContext& ctx, World& world, std::vector<ObjectId>*& items) {
@@ -813,8 +968,11 @@ HostOutcome filter_list(CallContext& ctx, const char* what, Keep keep) {
 /// `ol.ObjEnemy(player)` -- 2 sites. 0x005607b0 keeps a member when **its
 /// owner's** relation row has bit 0 clear for `player`: the owner considers
 /// the player an enemy, the direction `PlayerTable::is_enemy(owner, player)`
-/// reads. A player outside 1..16 dereferences a null record in the original;
-/// here it keeps nothing.
+/// reads. Precisely: the player record is the one at `player - 1` (guarded only
+/// by `player - 1 < 16`), its index word is `[record+8]`, and the member passes
+/// when bit 0 of `[owner_record + 0x24 + index*4]` is clear, `owner_record`
+/// being the member's `[obj+0x70]`. A player outside 1..16 reads a record that
+/// is not there in the original; here it keeps nothing.
 HostOutcome m_obj_enemy(CallContext& ctx) {
   const PlayerId player =
       ctx.arg(1).is_integer() ? player_from_script(ctx.arg(1).as_integer()) : kNoPlayer;
@@ -835,9 +993,10 @@ HostOutcome m_obj_ally(CallContext& ctx) {
   });
 }
 
-/// `ol.ObjClass(name)` -- 2 sites. 0x00560c10 looks the class up by name and
-/// keeps every member that **is a** that class (0x0059a220, the ancestry
-/// walk); a name no class carries keeps nothing.
+/// `ol.ObjClass(name)` -- 2 sites. 0x00560c10 looks the class up by name
+/// (0x00409e40) and keeps every member that **is a** that class (0x0059a220,
+/// the walk up `[class+0xe4]`); a name no class carries skips the walk and
+/// answers the empty list. The name string is released either way (0x00695e70).
 HostOutcome m_obj_class(CallContext& ctx) {
   World* world = world_of(ctx);
   const ClassGraph* graph = world == nullptr ? nullptr : world->class_graph();
@@ -855,10 +1014,15 @@ HostOutcome m_obj_class(CallContext& ctx) {
 
 /// `ol.ObjInjured()` -- 1 site. 0x00561090 keeps a member whose health is
 /// below its maxhealth -- `[obj+0xc0] < [obj+0xc8]`, the pair `Obj::health`
-/// and `Obj::maxhealth` read.
+/// and `Obj::maxhealth` read. `[obj+0xc8]` is the object's **own** maximum,
+/// which `Unit::RecalcBonuses` rebuilds from the class plus whatever bonuses
+/// the unit carries, so it is `object_max_health` here -- the same number
+/// `.maxhealth` answers -- and not the class property: a unit whose bonus has
+/// lifted its maximum above the class's is injured until it reaches the new
+/// one.
 HostOutcome m_obj_injured(CallContext& ctx) {
   return filter_list(ctx, "ObjInjured: receiver is not an ObjList", [&](const WorldObject& slot) {
-    return slot.state.health < class_int(*world_of(ctx), slot, "maxhealth");
+    return slot.state.health < object_max_health(*world_of(ctx), slot);
   });
 }
 
@@ -883,7 +1047,11 @@ HostOutcome m_obj_injured(CallContext& ctx) {
 /// scores with `0x005a7900`, which is `isqrt(dx*dx + dy*dy) - candidate.radius`;
 /// the object form scores with `0x005a77b0`, the same thing less the *other*
 /// object's radius as well. Both are integer square roots of an integer sum,
-/// so nothing here needs a float.
+/// so nothing here needs a float. The radius is the class's `[class+0x2dc]`;
+/// the position is the object's own `[+0x24]`/`[+0x28]`, which this engine
+/// answers with `resolve_position` -- the same for every object a query can
+/// return, since a query's members stand on the map. The object argument is
+/// resolved but not tested for death: a dead origin still measures.
 ///
 /// Three details of the scan are read straight off the loop and reproduced:
 ///
@@ -897,7 +1065,11 @@ HostOutcome m_obj_injured(CallContext& ctx) {
 ///   * a member whose handle no longer resolves is skipped, not counted.
 ///   * an unresolvable *receiver* prints a diagnostic and pushes the invalid
 ///     object (`0x0057952c`), so a dead query is an answer and not a refusal.
-///     A missing argument is the same at `0x005796a6`.
+///     An unresolvable object argument is the same, with `Parameter #1 in
+///     function 'Query::NearestObj' is uninitialized or invalid object.`
+///     (0x00579620 tests the receiver first, then the argument).
+///   * the receiver is `Refresh`ed before the scan (`vtbl+0x1c`) and the
+///     reference the call held on it is dropped after (0x00571680).
 HostOutcome m_nearest_obj(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("NearestObj: no world");
@@ -961,13 +1133,32 @@ HostOutcome m_nearest_obj(CallContext& ctx) {
 
 /// `ol.FilterClosest(pt, n)` -- 6 sites, `n` is 1 at every one of them.
 ///
-/// Returns a new list of the `n` entries nearest `pt`. **The ordering rule is
-/// inferred**: distance ascending, ties broken by ascending object id, which is
-/// spawn order and the order every other collection in this engine comes out
-/// in. With `n == 1` the tie-break is the only part that could be wrong, and it
-/// would take two objects at exactly equal distance to notice.
+/// A new list of (at most) `n` members near `pt`. **It is a bounded heap, not a
+/// sort**, and the answer's order is the heap's (0x005616c0, whose work is
+/// 0x00561450):
 ///
-/// Distances are compared squared, so no square root and no rounding enters.
+///   1. `n <= 0` answers the empty list. Otherwise an array of `n` slots is
+///      made, and `P` is the smallest power of two **above** `n` (1 -> 2,
+///      3 -> 4, 4 -> 8).
+///   2. The comparator (0x0055df20) asks whether slot `a` is **strictly
+///      farther** from `pt` than `b`, by squared distance from each object's
+///      position (`vtbl+0xc8`). A `b` that does not resolve is never nearer
+///      (false); an `a` that does not resolve is always farther (true).
+///   3. The receiver is walked front to back. While slots remain, the member
+///      goes into the next one and is sifted up (0x0055eb40): while it is not
+///      the root and its parent `(i-1)/2` is farther than it, the two swap. So
+///      slot 0 holds the nearest.
+///   4. Once the slots are full, each further member is a challenger. Indices
+///      `P-2` down to `(P-1)/2` are visited; an index below `n`, or an odd one,
+///      names slot `j` if `j < n` and slot `j/2` otherwise. Each named slot
+///      that is farther than the current challenger becomes the challenger and
+///      remembers its slot. If any slot did, the member is written over the
+///      last one remembered and sifted up from there; otherwise it is dropped.
+///   5. The answer is the filled slots in slot order.
+///
+/// With `n == 1` -- every shipped site -- that is: the first member, replaced
+/// by each later one that is strictly nearer. **Ties keep the earlier member**,
+/// not the lower id, which is what this used to infer.
 HostOutcome m_filter_closest(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("FilterClosest: no world");
@@ -979,35 +1170,69 @@ HostOutcome m_filter_closest(CallContext& ctx) {
 
   const Point origin = unpack_point(ctx.arg(1));
   ObjListPool& pool = objlist_pool_of(*world);
-  const std::span<const ObjectId> items = pool.items(objlist_of(ctx.arg(0)));
-
-  struct Ranked {
-    std::int64_t distance_squared;
-    ObjectId id;
-  };
-  std::vector<Ranked> ranked;
-  ranked.reserve(items.size());
-  for (const ObjectId id : items) {
-    if (world->find(id) == nullptr) continue;
-    const Point at = world->resolve_position(id);
-    const std::int64_t dx = static_cast<std::int64_t>(at.x) - origin.x;
-    const std::int64_t dy = static_cast<std::int64_t>(at.y) - origin.y;
-    ranked.push_back(Ranked{dx * dx + dy * dy, id});
-  }
-  std::sort(ranked.begin(), ranked.end(), [](const Ranked& a, const Ranked& b) {
-    if (a.distance_squared != b.distance_squared) return a.distance_squared < b.distance_squared;
-    return a.id < b.id;
-  });
-
+  const std::span<const ObjectId> view = pool.items(objlist_of(ctx.arg(0)));
+  const std::vector<ObjectId> members(view.begin(), view.end());
   const std::int32_t wanted = ctx.arg(2).as_integer();
-  const std::size_t take =
-      wanted <= 0 ? 0u : std::min<std::size_t>(static_cast<std::size_t>(wanted), ranked.size());
+
+  // Step 2. Squared distance as a 64-bit sum; the original's is 32-bit, and
+  // the two agree for every distance on a map.
+  const auto farther = [&](ObjectId a, ObjectId b) {
+    if (world->find(b) == nullptr) return false;
+    if (world->find(a) == nullptr) return true;
+    const auto d2 = [&](ObjectId id) {
+      const Point at = world->resolve_position(id);
+      const std::int64_t dx = static_cast<std::int64_t>(at.x) - origin.x;
+      const std::int64_t dy = static_cast<std::int64_t>(at.y) - origin.y;
+      return dx * dx + dy * dy;
+    };
+    return d2(a) > d2(b);
+  };
+
+  std::vector<ObjectId> slots;
+  if (wanted > 0) {
+    const std::size_t n = static_cast<std::size_t>(wanted);
+    std::size_t span = 1;  // step 1: P
+    for (std::size_t k = n; k > 1; k /= 2) span *= 2;
+    if (span <= n) span *= 2;
+    slots.reserve(std::min(n, members.size()));
+    const auto sift_up = [&](std::size_t i) {  // step 3
+      while (i >= 1) {
+        const std::size_t parent = (i - 1) / 2;
+        if (!farther(slots[parent], slots[i])) break;
+        std::swap(slots[parent], slots[i]);
+        i = parent;
+      }
+    };
+    for (const ObjectId member : members) {
+      if (slots.size() < n) {
+        slots.push_back(member);
+        sift_up(slots.size() - 1);
+        continue;
+      }
+      // Step 4. `span - 2` is at least 0, since `span` is at least 2.
+      ObjectId challenger = member;
+      std::ptrdiff_t at = -1;
+      const auto low = static_cast<std::ptrdiff_t>((span - 1) / 2);
+      for (auto j = static_cast<std::ptrdiff_t>(span) - 2; j >= low; --j) {
+        const auto uj = static_cast<std::size_t>(j);
+        if (!(uj < n || (uj & 1u) != 0)) continue;
+        const std::size_t k = uj < n ? uj : uj / 2;
+        if (farther(slots[k], challenger)) {
+          challenger = slots[k];
+          at = static_cast<std::ptrdiff_t>(k);
+        }
+      }
+      if (at >= 0) {
+        slots[static_cast<std::size_t>(at)] = member;
+        sift_up(static_cast<std::size_t>(at));
+      }
+    }
+  }
+
   const ObjListId list = pool.acquire_temporary(ctx.script);
   std::vector<ObjectId>* out = pool.mutable_items(list);
   if (out == nullptr) return HostOutcome::failed("FilterClosest: the pool refused a new list");
-  out->clear();
-  out->reserve(take);
-  for (std::size_t i = 0; i < take; ++i) out->push_back(ranked[i].id);
+  *out = std::move(slots);  // step 5
   return HostOutcome::ok_with(make_objlist_value(list));
 }
 
@@ -1033,18 +1258,22 @@ HostOutcome fn_max_set_idx(CallContext& ctx) {
 /// `IdxToSet(i)` -- the `i`th settlement, in ascending object id order, which
 /// is creation order.
 ///
-/// **The index space is inferred**, and the corpus leans against this reading.
-/// `DATA\SUBAI\HEN_IDLE.VS` guards its result with `if (!set.IsValid)
-/// continue;` and is the only one of the five sites that could ever see an
-/// invalid settlement -- which is what a table with holes looks like, a
-/// destroyed settlement leaving its index behind, rather than a dense
-/// enumeration nobody would guard. Set against that, this world's object vector
-/// has no holes, so an index in range always names a settlement and the two
-/// readings cannot be told apart from inside the engine.
+/// **The original keeps a slot table, and this reproduces it while no
+/// settlement has died.** Both entry points read one pointer vector, at
+/// `[0x009a721c]+0x4c .. +0x50`:
 ///
-/// What would settle it is a dump taken after a settlement was destroyed: if
-/// the surviving settlements' `IdxToSet` positions do not shift, the original
-/// keeps a slot table and this is wrong.
+///   * `MaxSetIdx` (0x00422f50) answers its length, null slots included;
+///   * `IdxToSet` (0x0042c780) answers the settlement in slot `i`, and the
+///     invalid handle when `i` is negative, past the end, or names a null slot.
+///
+/// A new settlement takes the **first null slot**, or appends when there is
+/// none (0x005c3a80, called by both creators of a settlement at run time), so
+/// a destroyed settlement leaves a hole that the next one fills. That is why
+/// `DATA\SUBAI\HEN_IDLE.VS` guards its result with `if (!set.IsValid)
+/// continue;`. This engine never despawns a settlement object, so the table
+/// here has no holes and creation order is slot order. Not read: how the map
+/// loader numbers the settlements it creates, which is assumed to be the map's
+/// own order -- the order they are spawned in here.
 ///
 /// `sim/economy.cpp` implemented this too, reading the argument as a
 /// `SettlementId`. That copy is gone, because `MaxSetIdx` and `IdxToSet` have

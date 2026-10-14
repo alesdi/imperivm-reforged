@@ -5,6 +5,7 @@
 
 #include <vector>
 
+#include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/objlist.hpp"
@@ -85,15 +86,30 @@ HostOutcome fn_dipl_get(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(world->players().has(from, to, kRelation)));
 }
 
-/// `DiplAreAllied(p1, p2)` -- the *mutual* reading of the same bit
-/// `DiplGetCeaseFire` reads one way round. See `sim/player.cpp`.
+/// `DiplAreAllied(p1, p2)` -- 0x00564c10, the four skirmish victory scripts'
+/// test of who still has to be beaten (`if (i != player &&
+/// !DiplAreAllied(i, player))`).
+///
+/// In its order: either number outside 1..16 prints and answers false; the
+/// same number twice is true; otherwise it is true only when **both** player
+/// records' `allied` dword (`+0x64`, which the player serialiser 0x00564780
+/// names `allied`, the loader 0x00567ad0 copies from `playerdata/@allied`, and
+/// the in-game diplomacy command 0x004e5f80 sets) is non-zero **and** each
+/// player's relation word for the other has bit 0. So a mutual ceasefire is
+/// not an alliance for victory unless both sides have also declared the shared
+/// victory flag -- `PlayerSetup::allied_flag` here.
 HostOutcome fn_dipl_are_allied(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("DiplAreAllied: no world");
   const PlayerId a = player_arg(ctx.arg(0));
   const PlayerId b = player_arg(ctx.arg(1));
   if (a == kNoPlayer || b == kNoPlayer) return HostOutcome::ok_with(Value::boolean(false));
-  return HostOutcome::ok_with(Value::boolean(world->players().are_allied(a, b)));
+  if (a == b) return HostOutcome::ok_with(Value::boolean(true));
+  const PlayerTable& players = world->players();
+  if (!players.setup(a).allied_flag || !players.setup(b).allied_flag) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
+  return HostOutcome::ok_with(Value::boolean(players.are_allied(a, b)));
 }
 
 // --------------------------------------------------------------------------
@@ -231,12 +247,36 @@ HostOutcome fn_clear_diplomacy(CallContext& ctx) {
 //
 // so the handle has to survive as an object that re-evaluates.
 
+/// `EnemyObjs` (0x005756b0), `FriendlyObjs` (0x00575ab0) and
+/// `ControllableObjs` (0x005758b0): one body with the type pushed (2, 1, 3).
+///
+/// A player outside 1..16 prints and pushes the invalid handle. The class is
+/// **one** name looked up in the class registry (0x00409e40, id then altid --
+/// `ClassGraph::lookup`); a name it does not know prints "Could not find class
+/// named '%s' in function 'EnemyObjs'" and also pushes the invalid handle,
+/// not an empty query. Otherwise the query factory (0x004fe990) is asked for
+/// (the player record's id, type, class string) and the query refreshed
+/// (0x00571670).
+///
+/// **The factory interns.** It walks every query it has made and hands back
+/// the one with the same player, type and class string (`std::string`
+/// compare) rather than making another, so a script that calls
+/// `EnemyObjs(.player, "Military")` every pass gets one object for the whole
+/// match. This engine mints a fresh query each call -- a different handle and
+/// a different object-id sequence afterwards, the same members. Query
+/// lifetime is the query system's design and is left to it; no shipped script
+/// compares two of these handles.
 template <std::int32_t kType>
 HostOutcome fn_player_flags_query(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("EnemyObjs/FriendlyObjs: no world");
   const PlayerId player = player_arg(ctx.arg(0));
   if (player == kNoPlayer) return HostOutcome::ok_with(invalid_object());
+  if (const ClassGraph* graph = world->class_graph();
+      graph != nullptr && ctx.arg(1).is_string() &&
+      graph->lookup(ctx.arg(1).as_string()) == kNoClass) {
+    return HostOutcome::ok_with(invalid_object());
+  }
   const QuerySpec spec = player_flags(player, filter_arg(*world, ctx.arg(1)), kType);
   return HostOutcome::ok_with(query_value(world->create_query(spec)));
 }
@@ -356,13 +396,25 @@ HostOutcome fn_get_settlements(CallContext& ctx) {
   const EconomySystem* economy = economy_of(*world);
   if (economy == nullptr) return HostOutcome::ok_with(make_objlist_value(list));
 
-  const ClassFilter filter = filter_arg(*world, ctx.arg(0));
-  // Not `player_arg`: this one's zero is the wildcard rather than "no player",
-  // and the two would be indistinguishable through a helper that maps both to
-  // `kNoPlayer`. Anything outside 1..16 matches nothing, which is what
-  // decrementing into an array bound comes to.
+  // One class name, looked up in the registry and tested with `is_a` against
+  // the central building's class (0x0059c020 on `[central+0x3c]`). A name the
+  // registry does not know matches nothing.
+  ClassFilter filter = filter_arg(*world, ctx.arg(0));
+  if (const ClassGraph* graph = world->class_graph(); graph != nullptr && ctx.arg(0).is_string()) {
+    const ClassIndex index = graph->lookup(ctx.arg(0).as_string());
+    if (index == kNoClass) {
+      filter = ClassFilter{};
+      filter.match_all = false;  // names a class, resolves none: matches nothing
+    } else {
+      filter = ClassFilter::of(index);
+    }
+  }
+  // Not `player_arg`: this one's decremented number is tested for **sign**
+  // (the collector 0x00436ec0 takes every owner when it is negative), so 0 and
+  // every negative number are the wildcard. Above 16 matches nothing, since no
+  // owner id equals it.
   const std::int64_t asked = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  const bool any_player = asked == 0;
+  const bool any_player = asked <= 0;
   const PlayerId wanted =
       any_player ? kNoPlayer : static_cast<PlayerId>(asked - 1);
 
@@ -381,16 +433,31 @@ HostOutcome fn_get_settlements(CallContext& ctx) {
 // --------------------------------------------------------------------------
 
 /// Settlements of one kind belonging to one player.
+///
+/// The kind is asked of the settlement's central building **as it is now**:
+/// `Strongholds` tests its class `is_a BaseTownhall` (0x0043ffc0) and
+/// `Outposts` `is_a Outpost` (0x00440060), each walking the class's parent
+/// chain (0x0059a220). A world with no class graph falls back to the kind
+/// the settlement was created with, which is the same test made once.
 [[nodiscard]] std::int32_t count_settlements(World& world, PlayerId player,
-                                             SettlementKind kind) noexcept {
+                                             SettlementKind kind) {
   const EconomySystem* economy = economy_of(world);
   if (economy == nullptr) return 0;
+  const ClassGraph* graph = world.class_graph();
+  const std::string_view base = kind == SettlementKind::stronghold ? "BaseTownhall" : "Outpost";
+  const ClassIndex base_class = graph == nullptr ? kNoClass : graph->lookup(base);
   std::int32_t total = 0;
   // `ID` order, which is the store's array order. Iteration order is state.
   for (const Settlement& settlement : economy->settlements().all()) {
-    if (settlement.kind != kind) continue;
     if (player != kNoPlayer && settlement.owner != player) continue;
-    ++total;
+    if (graph == nullptr) {
+      if (settlement.kind == kind) ++total;
+      continue;
+    }
+    if (base_class == kNoClass) continue;
+    const WorldObject* central = world.find(settlement.anchor);
+    if (central == nullptr) continue;
+    if (world.matches_filter(*central, ClassFilter::of(base_class))) ++total;
   }
   return total;
 }
@@ -430,11 +497,21 @@ HostOutcome fn_outposts(CallContext& ctx) {
       Value::integer(count_settlements(*world, player, SettlementKind::outpost)));
 }
 
-/// `MilUnits(idPlayer)` -- how many military units the player has alive.
+/// `MilUnits(idPlayer)` -- 0x00421ee0, and a known gap.
 ///
-/// The original reads a per-player cached unit list (`CVXPlayer+0x8c`) and
-/// counts the military ones; counting the world's objects under the `Military`
-/// class filter is the same answer without the cache.
+/// The body takes `idPlayer - 1`, answers 0 at 16 and above, and calls
+/// 0x00443eb0 on the player record's AI object (`[record+0x8c]`), which walks
+/// that player's **squads**: it skips a squad whose `Squad::Eval` (`+0x1c`) is
+/// zero or whose flags have any of 0x25 set (no-AI, peaceful, sentries), and
+/// counts the members still in the object table that are neither `Peaceful`
+/// nor `Animal` (0x005402f0, 0x00540280). So it is the size of the player's
+/// *fielded* armies, not a census of military classes.
+///
+/// **This engine counts every `Military`-class object the player owns.** The
+/// faithful walk needs `Squad::Eval`, which nothing here writes yet
+/// (`sim/squad.hpp`'s standing gap): with it at zero every squad would be
+/// skipped and every AI would read an empty army. The census stands in until
+/// the squad model carries the strength the original keeps.
 HostOutcome fn_mil_units(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("MilUnits: no world");
@@ -451,19 +528,24 @@ HostOutcome fn_mil_units(CallContext& ctx) {
 // per-player facts
 // --------------------------------------------------------------------------
 
-/// `IsAIPlayer(idPlayer)`.
+/// `IsAIPlayer(idPlayer)` -- 0x00422900: whether the player record's AI
+/// pointer (`[record+0x88]`) is non-null, for `idPlayer - 1` below 16.
 ///
-/// True for `control="Computer"` only. `Both` is a slot a human *may* take and
-/// the shipped multiplayer packs give every slot that value, so resolving it
-/// belongs to match setup; until it is resolved, treating it as an AI would
-/// make an AI script run for a human.
+/// That pointer is what `AIStart` builds (0x00434ca0) and `AIStop` deletes and
+/// nulls (0x00422720 at `player*0x320 + 0x1034`, the same field), so the
+/// question is "is this player's AI running", not "does the slot say
+/// Computer": a computer slot whose mission never starts its AI is false, and
+/// a stopped AI is false from the moment it stops. `AiSystem` keeps exactly
+/// that as `AiPlayer::active`. (Below 1 the original reads before the table;
+/// that answers false here.)
 HostOutcome fn_is_ai_player(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsAIPlayer: no world");
   const PlayerId player = player_arg(ctx.arg(0));
   if (player == kNoPlayer) return HostOutcome::ok_with(Value::boolean(false));
-  return HostOutcome::ok_with(
-      Value::boolean(world->players().setup(player).control == PlayerControl::computer));
+  const AiSystem* ai = ai_system_of(*world);
+  const AiPlayer* record = ai == nullptr ? nullptr : ai->player_ai(player);
+  return HostOutcome::ok_with(Value::boolean(record != nullptr && record->active));
 }
 
 /// `GetPlayerRace(idPlayer)`.
@@ -571,17 +653,23 @@ HostOutcome m_is_enemy(CallContext& ctx) {
 /// `Obj::race` (0x005ada20) is `[obj+0x3c]` (the class descriptor) `+0xb48`, so
 /// it never touches the owner. That matters at the call sites, which are almost
 /// all of the form `set.GetCentralBuilding.race`: a captured Egyptian town hall
-/// reads `Egypt` whoever holds it.
+/// reads `Egypt` whoever holds it. The descriptor's number is
+/// `class_race_from_name`'s.
+///
+/// **An invalid receiver answers 0** -- Gaul -- after "The function 'scObjRace'
+/// called for an uninitialized or invalid object.": the body pushes a zero,
+/// not -1.
 HostOutcome m_race(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("race: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
+  if (slot == nullptr) return HostOutcome::ok_with(Value::integer(0));
   const ClassGraph* graph = world->class_graph();
-  if (slot == nullptr || graph == nullptr || slot->class_index == kNoClass) {
+  if (graph == nullptr || slot->class_index == kNoClass) {
     return HostOutcome::ok_with(Value::integer(kNoRace));
   }
   return HostOutcome::ok_with(
-      Value::integer(race_from_name(graph->property(slot->class_index, "race"))));
+      Value::integer(class_race_from_name(graph->property(slot->class_index, "race"))));
 }
 
 /// `GetClassRace(str)` -- 1 site, and the **sole blocker of `BARRACK_TRAIN.VS`**
@@ -611,7 +699,8 @@ HostOutcome f_get_class_race(CallContext& ctx) {
   }
   const ClassIndex index = graph->lookup(ctx.arg(0).as_string());
   if (index == kNoClass) return HostOutcome::ok_with(Value::integer(kNoRace));
-  return HostOutcome::ok_with(Value::integer(race_from_name(graph->property(index, "race"))));
+  return HostOutcome::ok_with(
+      Value::integer(class_race_from_name(graph->property(index, "race"))));
 }
 
 /// The race **name** and the two **class-name prefixes**, which are three
@@ -668,7 +757,7 @@ namespace {
   const WorldObject* slot = object_of(world, ctx.arg(0));
   const ClassGraph* graph = world.class_graph();
   if (slot == nullptr || graph == nullptr || slot->class_index == kNoClass) return kNoRace;
-  return race_from_name(graph->property(slot->class_index, "race"));
+  return class_race_from_name(graph->property(slot->class_index, "race"));
 }
 
 [[nodiscard]] std::int32_t race_arg(CallContext& ctx) noexcept {
@@ -727,15 +816,21 @@ HostOutcome m_race_str_pref(CallContext& ctx) {
 ///   4. It then calls 0x005a7600 with `true`, which is `SetVisible`: notify,
 ///      clear bit 21 through the object's own `vtbl + 0x48`, and refresh.
 ///
-/// **The side mask is the relations matrix, reached the long way round.**
-/// Nothing in `.text` writes `record + 0x18` by that displacement -- a sweep
-/// for the constant finds two readers, this and 0x004d7e10, and no writer -- so
-/// the mask is built through a record pointer this search cannot follow. What
-/// it holds is legible from its other reader: 0x004d7e10 falls back to all-ones
-/// when the player number is 0 or above 16, and otherwise ANDs it with a
-/// one-hot owner exactly as this does. That is `PlayerTable::is_enemy` with the
-/// bits precomputed, and `is_enemy` is what this asks -- one-directional, from
-/// the revealing player's own row, which is the direction the mask has too.
+/// **The side mask is `seeflags`, the shared-vision mask -- not hostility.**
+/// The player serialiser (0x00564780) names `record + 0x18` `seeflags`, and
+/// `SetRelation` (0x005652f0) is its writer, through the *other* record's
+/// pointer: when player A's word for player B carries share-view (0x10), A's
+/// bit is set in B's `seeflags`, and cleared when it does not. So the scan
+/// reveals a hidden unit unless its owner shares its view with the revealing
+/// player -- `!has(owner, player, share_view)`, read from the **owner's** row.
+/// On the shipped matrices share-view travels with the ceasefire words 0x11,
+/// 0x15 and 0x35 and not with the bare 0x01, so a one-sided truce of 0x01 is
+/// revealed where the old `is_enemy` reading spared it.
+///
+/// The revealing player's own units: `SetRelation` never writes the diagonal,
+/// so whether `seeflags` holds the player's own bit is the record
+/// constructor's, which was not located. They are spared here, which is the
+/// reading under which a spy running this does not unmask itself.
 ///
 /// **A number outside 1..16 does nothing here rather than reading a mask that
 /// is not there.** This entry point, unlike `ExploreCircle` and `ExploreArea`,
@@ -748,12 +843,11 @@ HostOutcome m_race_str_pref(CallContext& ctx) {
 /// **The stealth clock is the one thing left out, and it is left out
 /// elsewhere.** Between the side test and the reveal, the original stamps
 /// `[obj+0x1a4]` with the current game time for objects carrying bit 26 of
-/// `[obj+0x198]`. That field is `Unit::SetLastAttackTime`'s, and `m_set_last_
-/// attack_time` in `world_host.cpp` records why this engine does not store it:
-/// no registered entry point reads it back, so it would be hashed, serialised
-/// state that no script could observe. That comment ends "the day one exists,
-/// this is where it writes" -- and this is now the second writer waiting on the
-/// same day.
+/// `[obj+0x198]`. That field is `Unit::SetLastAttackTime`'s -- the combatant's
+/// `last_attack_time`, which `Unit::TimeWithoutAttack` reads back, so the
+/// premise this was left out on ("no entry point reads it") was wrong, and
+/// `m_set_last_attack_time` in `world_host.cpp` now stores it. This writer is
+/// still left out: a known gap, for whoever audits this entry point.
 HostOutcome fn_reveal_hidden_enemy_units(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RevealHiddenEnemyUnits: no world");
@@ -780,7 +874,9 @@ HostOutcome fn_reveal_hidden_enemy_units(CallContext& ctx) {
     // The three tests the scan applies, in the order 0x004c80b2 applies them.
     if (!other->state.flags.hidden) continue;
     if (!other->state.flags.is_unit) continue;
-    if (!world->players().is_enemy(player, other->state.owner)) continue;
+    const PlayerId owner = other->state.owner;
+    if (!PlayerTable::is_valid(owner) || owner == player) continue;
+    if (world->players().has(owner, player, Relation::share_view)) continue;
     other->state.flags.hidden = false;
   }
   return HostOutcome::ok_void();
@@ -851,6 +947,19 @@ std::int32_t race_from_name(std::string_view name) noexcept {
   // The first is a class with no race; the other three are match-setup markers
   // that only the RNG and the lobby can turn into a race.
   return kNoRace;
+}
+
+std::int32_t class_race_from_name(std::string_view name) noexcept {
+  // 0x0059f540's `race` arm: the eight races in their accepted spellings,
+  // `None`/`none` -1, `Mutable`/`mutable` 9, and anything else 8 after a
+  // diagnostic. A class whose chain declares no `race` at all never reaches
+  // that arm; what its descriptor then holds was not recovered, and it reads
+  // as `kNoRace` here.
+  if (name.empty()) return kNoRace;
+  if (name == "None" || name == "none") return kNoRace;
+  if (name == "Mutable" || name == "mutable") return kClassRaceMutable;
+  const std::int32_t race = race_from_name(name);
+  return race == kNoRace ? kClassRaceUnknown : race;
 }
 
 std::string_view race_to_name(std::int32_t race) noexcept {

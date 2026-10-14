@@ -54,8 +54,19 @@
 // So a pass over a turn `(from, to]` runs scripts in **wake-time order**,
 // each at its own wake time: `now()` reads that instant while it runs, its
 // next wait counts from it, and whatever falls due again before `to` runs
-// again in the same pass. Ties keep the order they always had, ascending id.
-// `now()` is `to` again when the pass ends.
+// again in the same pass. `now()` is `to` again when the pass ends.
+//
+// **Ties run in the order the scripts were armed, not by id.** The wheel is a
+// ring of buckets indexed by wake time modulo its size; arming a thread
+// (0x006880f0, after 0x00688220 has added the wait to the wheel's clock)
+// unlinks it and appends it at the **tail** of its bucket (0x00688060 through
+// 0x0047a650), and the sweep at 0x006879a0 walks each instant's bucket front to
+// back, running every node whose time is that instant. So two scripts due on
+// the same millisecond run in the order they went to sleep -- the one that
+// slept first runs first, whatever their ids. `ScriptRecord::armed` is that
+// order. A script spawned during a slice is armed at its spawn and so runs,
+// at the spawner's instant, after everything armed before it; the spawner,
+// re-armed when its slice ends, comes after both.
 //
 // What this clock is *not* is the world's. The world has already been
 // advanced to `to` when a pass runs (`GameSession::advance`): every position,
@@ -99,6 +110,13 @@ struct ScriptRecord {
   ObjectRef owner;
   ScriptId parent = kNoScript;
   Execution execution;
+  /// When this script was last put on the wheel, as a position in the
+  /// scheduler's arming sequence: its spawn, or the end of its last slice if
+  /// that slice suspended. Scripts due on the same millisecond run in this
+  /// order -- the original's timing wheel appends each armed thread at the
+  /// tail of its instant's bucket (0x00688060) and sweeps the bucket front to
+  /// back (0x006879a0). State: saved, because it orders the next pass.
+  std::uint64_t armed = 0;
   /// Killed, and awaiting compaction at the end of the pass. Killing during a
   /// run must not disturb the vector a pass is walking.
   bool dead = false;
@@ -327,8 +345,25 @@ class Scheduler {
   [[nodiscard]] std::int64_t now() const { return now_; }
   void set_now(std::int64_t milliseconds) { now_ = milliseconds; }
 
+  /// `StartPlayerScript(player, name)`: start `name` for `player` unless that
+  /// player has already started a script of that name. `kNoScript` when it was
+  /// refused or there is no such script.
+  ///
+  /// 0x0056f720 keeps **eight name slots per player** (records of `0xe0` bytes
+  /// at `+0x38`, one per player). A name equal to one already in a slot --
+  /// byte for byte, as the script wrote it -- is refused with "Trying to start
+  /// a player script for the second time"; otherwise the first empty slot
+  /// takes it, the script is compiled with the signature `void, int player`,
+  /// and it is started (0x006a07e0) with no delay, a default interval of 100,
+  /// and the 1-based player as its one argument. With all eight taken the call
+  /// prints "No free slot for running script %s for player %d" and starts
+  /// nothing. Nothing empties a slot when its script ends: the shipped player
+  /// scripts never end, and a second `Heroes' Wisdom` research finishing for
+  /// the same player must not start a second copy of its loop.
+  ScriptId start_player_script(std::int32_t player, std::string_view name, const Value& argument);
+
   /// Advance game time by `delta` milliseconds and run everything that falls
-  /// due on the way, each at its own wake time, in `(wake time, id)` order.
+  /// due on the way, each at its own wake time, in `(wake time, armed)` order.
   ///
   /// A script spawned during the pass runs at its spawner's instant, after
   /// whatever else is due then. A script that sleeps runs again in the same
@@ -336,8 +371,8 @@ class Scheduler {
   /// the pass began, runs at the end.
   RunReport advance(std::int64_t delta);
 
-  /// Run everything runnable at the current time, in id order, without moving
-  /// the clock: `advance(0)`.
+  /// Run everything runnable at the current time, in arming order, without
+  /// moving the clock: `advance(0)`.
   ///
   /// Each script is resumed at most once per call, so a script that sleeps for
   /// zero milliseconds yields the rest of the tick rather than spinning the
@@ -373,6 +408,14 @@ class Scheduler {
   std::vector<FailedScript> call_traps_;
   ScriptId next_id_ = 1;
   std::int64_t now_ = 0;
+  /// The arming sequence; see `ScriptRecord::armed`.
+  std::uint64_t next_arm_ = 1;
+  /// `start_player_script`'s slots, in the order they were filled.
+  struct PlayerScriptSlot {
+    std::int32_t player = 0;
+    std::string name;
+  };
+  std::vector<PlayerScriptSlot> player_scripts_;
 
   const HostRegistry* registry_ = nullptr;
   Host* host_ = nullptr;

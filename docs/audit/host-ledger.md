@@ -8,393 +8,393 @@ its implementation, never here (`docs/legal.md` rule 2).
 ```
 bodies    1474 registered by gbr.exe (1498 registrations)
 called    983 reached by a shipped script (33,965 call sites in all)
-cited     521 of those 983 have their address cited under engine/core
-status    verified 0, partial 0, inferred 0, unread 983, unused 491
-called    verified 0, partial 0, inferred 0, unread 983
+cited     688 of those 983 have their address cited under engine/core
+status    verified 280, partial 139, inferred 1, unread 563, unused 491
+called    verified 280, partial 139, inferred 1, unread 563
 ```
 
 Entry points no shipped script calls are counted above and not listed.
 Batches are by the file that implements them, most-called file first.
 
-## world_host -- 0 of 231 verified, 24,835 call sites
+## world_host -- 163 of 231 verified, 24,835 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Obj::player` | `0x005ab290` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:6455` | yes | unread |  |
-| `Settlement::player` | `0x005c2340` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:6455` | yes | unread |  |
-| `Squad::Player` | `0x004210c0` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:6455` | yes | unread |  |
-| `NamedObj::obj` | `0x005530a0` | 1,174 | member/0 | `engine/core/src/sim/world_host.cpp:6620` |  | unread |  |
-| `Obj::pos` | `0x005add20` | 1,057 | member/0 | `engine/core/src/sim/world_host.cpp:6456` | yes | unread |  |
-| `Squad::pos` | `0x00422cf0` | 1,057 | member/0 | `engine/core/src/sim/world_host.cpp:6456` | yes | unread |  |
-| `NamedObj::IsValid` / `Query::IsValid` | `0x00577af0` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:6454` | yes | unread |  |
-| `Item::IsValid` / `Obj::IsValid` / `Settlement::IsValid` | `0x005ab1d0` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:6454` |  | unread |  |
-| `SquadList::IsValid` | `0x00421a70` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:6454` |  | unread |  |
-| `Query::IsEmpty` | `0x00579320` | 805 | member/0 | `engine/core/src/sim/world_host.cpp:6640` |  | unread |  |
-| `Sacrifice::IsEmpty` | `0x00594eb0` | 805 | member/0 | `engine/core/src/sim/world_host.cpp:6640` |  | unread |  |
-| `Obj::AsUnit` | `0x005aa580` | 717 | member/0 | `engine/core/src/sim/world_host.cpp:6659` |  | unread |  |
-| `Building::settlement` | `0x004dcdd0` | 671 | member/0 | `engine/core/src/sim/world_host.cpp:6459` |  | unread |  |
-| `GAIKA::settlement` | `0x004219a0` | 671 | member/0 | `engine/core/src/sim/world_host.cpp:6459` | yes | unread |  |
-| `Intersect` | `0x005733f0` | 556 | free/2 | `engine/core/src/sim/world_host.cpp:6390` |  | unread |  |
-| `rand` | `0x004c63a0` | 428 | free/1 | `engine/core/src/sim/world_host.cpp:6389` | yes | unread |  |
-| `point::IntoRect` | `0x00697cb0` | 398 | member/1 | `engine/core/src/sim/world_host.cpp:6624` | yes | unread |  |
-| `point::Rot` | `0x00697d90` | 385 | member/1 | `engine/core/src/sim/world_host.cpp:6622` | yes | unread |  |
-| `Obj::AsHero` | `0x005aa640` | 379 | member/0 | `engine/core/src/sim/world_host.cpp:6662` |  | unread |  |
-| `Obj::IsAlive` | `0x005aae00` | 378 | member/0 | `engine/core/src/sim/world_host.cpp:6460` | yes | unread |  |
-| `Obj::AsBuilding` / `Obj::AsTower` | `0x005aa5e0` | 322 | member/0 | `engine/core/src/sim/world_host.cpp:6660` | yes | unread |  |
-| `SetNoAIFlag` | `0x00435470` | 230 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:6402` | yes | unread |  |
-| `Unit::SetNoAIFlag` | `0x005de600` | 230 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:6402` | yes | unread |  |
-| `Group` | `0x005765a0` | 216 | free/1 | `engine/core/src/sim/world_host.cpp:6397` |  | unread |  |
-| `Union` | `0x00573260` | 191 | free/2 | `engine/core/src/sim/world_host.cpp:6394` |  | unread |  |
-| `Obj::AddToGroup` | `0x005b6730` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:6423` |  | unread |  |
-| `ObjList::AddToGroup` | `0x00561970` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:6423` |  | unread |  |
-| `Query::AddToGroup` | `0x0057a550` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:6423` |  | unread |  |
-| `SpawnGroup` | `0x00576790` | 181 | free/1 | `engine/core/src/sim/world_host.cpp:6406` |  | unread |  |
-| `GetNamedObj` | `0x00553230` | 177 | free/1 | `engine/core/src/sim/world_host.cpp:6431` |  | unread |  |
-| `Obj::health` | `0x005ada80` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:6475` |  | unread |  |
-| `Settlement::health` | `0x005c1e40` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:6475` |  | unread |  |
-| `Squad::health` | `0x00427740` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:6475` | yes | unread |  |
-| `ClassPlayerObjs` | `0x005754b0` | 159 | free/2 | `engine/core/src/sim/world_host.cpp:6392` |  | unread |  |
-| `Obj::IsHeirOf` | `0x005ad450` | 154 | member/1 | `engine/core/src/sim/world_host.cpp:6480` |  | unread |  |
-| `Obj::stamina` | `0x005adae0` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:6473` |  | unread |  |
-| `ObjsInRange` | `0x00576130` | 151 | free/3 | `engine/core/src/sim/world_host.cpp:6396` |  | unread |  |
-| `Settlement::stamina` | `0x005c1f00` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:6473` |  | unread |  |
-| `Unit::stamina` | `0x005d8b90` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:6473` |  | unread |  |
-| `point::x` / `rect::left` | `0x006950e0` | 143 | member/0 | `engine/core/src/sim/world_host.cpp:6628` |  | unread |  |
-| `point::x` | `0x006952b0` | 142 | member/0 | `engine/core/src/sim/world_host.cpp:6474` |  | unread |  |
-| `Obj::posRH` | `0x005ad8a0` | 141 | member/0 | `engine/core/src/sim/world_host.cpp:6457` | yes | unread |  |
-| `Obj::RemoveFromGroup` | `0x005b4630` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:6424` |  | unread |  |
-| `ObjList::RemoveFromGroup` | `0x0055f720` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:6424` |  | unread |  |
-| `Query::RemoveFromGroup` | `0x0057a970` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:6424` |  | unread |  |
-| `Obj::DistTo` | `0x005aa350` | 134 | member/1 | `engine/core/src/sim/world_host.cpp:6479` | yes | unread |  |
-| `Obj::DistTo` | `0x005aa3e0` | 134 | member/1 | `engine/core/src/sim/world_host.cpp:6479` | yes | unread |  |
-| `Place` | `0x005a8710` | 131 | free/3 | `engine/core/src/sim/world_host.cpp:6414` | yes | unread |  |
-| `SpawnGroupInHolder` | `0x005769b0` | 127 | free/2 | `engine/core/src/sim/world_host.cpp:6407` |  | unread |  |
-| `SpawnGroupInHolder` | `0x00576e00` | 127 | free/2 | `engine/core/src/sim/world_host.cpp:6407` |  | unread |  |
-| `Obj::sight` | `0x005adcc0` | 118 | member/0 | `engine/core/src/sim/world_host.cpp:6476` |  | unread |  |
-| `Obj::maxhealth` | `0x005adb40` | 117 | member/0 | `engine/core/src/sim/world_host.cpp:6477` |  | unread |  |
-| `Squad::maxhealth` | `0x00427800` | 117 | member/0 | `engine/core/src/sim/world_host.cpp:6477` | yes | unread |  |
-| `point::y` / `rect::top` | `0x00695290` | 112 | member/0 | `engine/core/src/sim/world_host.cpp:6629` |  | unread |  |
-| `point::y` | `0x006952e0` | 111 | member/0 | `engine/core/src/sim/world_host.cpp:6478` |  | unread |  |
-| `point::Set` | `0x00697c50` | 103 | member/2 | `engine/core/src/sim/world_host.cpp:6621` |  | unread |  |
-| `rect::Set` | `0x00697aa0` | 103 | member/2 | `engine/core/src/sim/world_host.cpp:6621` |  | unread |  |
-| `UnitsInSettlement` | `0x00574160` | 93 | free/2 | `engine/core/src/sim/world_host.cpp:6448` |  | unread |  |
-| `UnitsInSettlement` | `0x00574b80` | 93 | free/2 | `engine/core/src/sim/world_host.cpp:6448` |  | unread |  |
-| `_PlaceEx` | `0x005a8980` | 89 | free/4 | `engine/core/src/sim/world_host.cpp:6415` | yes | unread |  |
-| `NamedObj::IsDead` | `0x00553000` | 81 | member/0 | `engine/core/src/sim/world_host.cpp:6526` |  | unread |  |
-| `Obj::IsDead` | `0x005aae50` | 81 | member/0 | `engine/core/src/sim/world_host.cpp:6526` |  | unread |  |
-| `point::SetLen` | `0x00697d10` | 73 | member/1 | `engine/core/src/sim/world_host.cpp:6623` | yes | unread |  |
-| `Obj::AsShip` | `0x005aa9b0` | 64 | member/0 | `engine/core/src/sim/world_host.cpp:6664` |  | unread |  |
-| `Obj::CanSee` | `0x005ab9d0` | 57 | member/1 | `engine/core/src/sim/world_host.cpp:6592` | yes | unread |  |
-| `Obj::IsVisible` | `0x005ab970` | 56 | member/0 | `engine/core/src/sim/world_host.cpp:6461` | yes | unread |  |
-| `Obj::SetVisible` | `0x005ab920` | 56 | member/1 | `engine/core/src/sim/world_host.cpp:6462` |  | unread |  |
-| `ObjList::SetVisible` | `0x0055ea60` | 56 | member/1 | `engine/core/src/sim/world_host.cpp:6462` |  | unread |  |
-| `Point` | `0x00696e50` | 53 | free/2 | `engine/core/src/sim/world_host.cpp:6637` | yes | unread |  |
-| `Obj::AsDruid` | `0x005aa6a0` | 49 | member/0 | `engine/core/src/sim/world_host.cpp:6663` |  | unread |  |
-| `Obj::Erase` | `0x005ab250` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:6530` | yes | unread |  |
-| `Query::Erase` | `0x00578c40` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:6530` | yes | unread |  |
-| `StrMap::erase` | `0x006981d0` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:6530` |  | unread |  |
-| `Unit::SetLastAttackTime` | `0x005d7fc0` | 40 | member/0 | `engine/core/src/sim/world_host.cpp:6577` | yes | unread |  |
-| `Substract` / `Subtract` | `0x00573580` | 38 | free/2 | `engine/core/src/sim/world_host.cpp:6435` |  | unread |  |
-| `ObjsInSight` | `0x00575cb0` | 37 | free/2 | `engine/core/src/sim/world_host.cpp:6393` |  | unread |  |
-| `Dist` / `point::Dist` | `0x00695310` | 37 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:6635` | yes | unread |  |
-| `Obj::radius` | `0x005aa520` | 36 | member/0 | `engine/core/src/sim/world_host.cpp:6638` |  | unread |  |
-| `Unit::HasSpecial` | `0x005d8d70` | 33 | member/1 | `engine/core/src/sim/world_host.cpp:6595` | yes | unread |  |
-| `Building::GetPoint` | `0x004dd150` | 32 | member/2 | `engine/core/src/sim/world_host.cpp:6536` | yes | unread |  |
-| `ObjsInCircle` | `0x005775e0` | 32 | free/3 | `engine/core/src/sim/world_host.cpp:6395` |  | unread |  |
-| `Unit::SetParryMode` | `0x005d8f80` | 31 | member/1 | `engine/core/src/sim/world_host.cpp:6565` | yes | unread |  |
-| `Obj::SetMessengerStatus` | `0x005ab8d0` | 26 | member/1 | `engine/core/src/sim/world_host.cpp:6593` |  | unread |  |
-| `Query::SetMessengerStatus` | `0x00579c70` | 26 | member/1 | `engine/core/src/sim/world_host.cpp:6593` | yes | unread |  |
-| `Obj::RemoveFromAllGroups` | `0x005b69b0` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:6425` |  | unread |  |
-| `ObjList::RemoveFromAllGroups` | `0x00563250` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:6425` |  | unread |  |
-| `Query::RemoveFromAllGroups` | `0x0057ab80` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:6425` |  | unread |  |
-| `GetMapRect` | `0x004c6650` | 21 | free/0 | `engine/core/src/sim/world_host.cpp:6625` | yes | unread |  |
-| `Unit::SetEntering` | `0x005d8240` | 21 | member/1 | `engine/core/src/sim/world_host.cpp:6564` | yes | unread |  |
-| `Obj::AsCatapult` | `0x005aa780` | 20 | member/0 | `engine/core/src/sim/world_host.cpp:6665` |  | unread |  |
-| `Teleport::destination` | `0x005cdbc0` | 20 | member/0 | `engine/core/src/sim/world_host.cpp:6543` | yes | unread |  |
-| `Building::GetEnterPoint` | `0x004dce60` | 18 | member/1 | `engine/core/src/sim/world_host.cpp:6537` | yes | unread |  |
-| `Obj::AsWagon` | `0x005aa7f0` | 17 | member/0 | `engine/core/src/sim/world_host.cpp:6666` |  | unread |  |
-| `point::InRect` | `0x00696f80` | 14 | member/1 | `engine/core/src/sim/world_host.cpp:6626` | yes | unread |  |
-| `Building::IsVeryBroken` | `0x00424f90` | 13 | member/0 | `engine/core/src/sim/world_host.cpp:6568` | yes | unread |  |
-| `Unit::SetUser` | `0x005d7c80` | 13 | member/1 | `engine/core/src/sim/world_host.cpp:6554` | yes | unread |  |
-| `Obj::AsGate` | `0x00529980` | 12 | member/0 | `engine/core/src/sim/world_host.cpp:6667` |  | unread |  |
-| `Obj::class` | `0x005abda0` | 12 | member/0 | `engine/core/src/sim/world_host.cpp:6557` | yes | unread |  |
-| `Building::IsBroken` | `0x004dd200` | 11 | member/0 | `engine/core/src/sim/world_host.cpp:6567` | yes | unread |  |
-| `point::Len` | `0x00695360` | 11 | member/0 | `engine/core/src/sim/world_host.cpp:6634` | yes | unread |  |
-| `Building::GlobalSpellStart` | `0x004dd440` | 9 | member/2 | `engine/core/src/sim/world_host.cpp:6558` | yes | unread |  |
-| `Building::GlobalSpellStart` | `0x004dd4f0` | 9 | member/2 | `engine/core/src/sim/world_host.cpp:6558` |  | unread |  |
-| `Obj::AsFlying` | `0x005aaa20` | 9 | member/0 | `engine/core/src/sim/world_host.cpp:6668` |  | unread |  |
-| `Unit::InShip` | `0x005d70f0` | 9 | member/0 | `engine/core/src/sim/world_host.cpp:6535` | yes | unread |  |
-| `Obj::AsItemHolder` | `0x005aa860` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:6671` |  | unread |  |
-| `Unit::user` | `0x005d8bf0` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:6556` | yes | unread |  |
-| `point::ClampToMap` | `0x005bd3e0` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:6627` | yes | unread |  |
-| `Building::GetExitPoint` | `0x004dcfa0` | 7 | member/2 | `engine/core/src/sim/world_host.cpp:6538` | yes | unread |  |
-| `Building::GetExitPoint` | `0x004dd080` | 7 | member/2 | `engine/core/src/sim/world_host.cpp:6538` | yes | unread |  |
-| `Flying::IsInAir` | `0x0051bd20` | 7 | member/0 | `engine/core/src/sim/world_host.cpp:6533` | yes | unread |  |
-| `Unit::GetSacrifice` | `0x005d7bc0` | 7 | member/0 | `engine/core/src/sim/world_host.cpp:6569` | yes | unread |  |
-| `Obj::IsValidCaptureTarget` | `0x005aaea0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:6485` | yes | unread |  |
-| `Teleport::Traverse` | `0x005cdcb0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:6544` | yes | unread |  |
-| `Teleport::exit_vector` | `0x005cdc40` | 6 | member/0 | `engine/core/src/sim/world_host.cpp:6542` |  | unread |  |
-| `Unit::SetMinimapFlag` | `0x005d87d0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:6594` | yes | unread |  |
-| `Unit::SetNoselectFlag` | `0x005d8750` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:6552` | yes | unread |  |
-| `Building::GetExitVector` | `0x004dd330` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:6540` | yes | unread |  |
-| `Building::IsStonehengeControlable` | `0x004ddd70` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:6591` | yes | unread |  |
-| `IsPointInWater` | `0x005c6d40` | 5 | free/1 | `engine/core/src/sim/world_host.cpp:6583` | yes | unread |  |
-| `Obj::AsTeleport` | `0x005cdb50` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:6669` |  | unread |  |
-| `Obj::IsMilitary` | `0x005ad680` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:6549` | yes | unread |  |
-| `Obj::IsSentry` | `0x005ad500` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:6550` |  | unread |  |
-| `Squad::GetFlags` | `0x004216d0` | 5 | member/1 | `engine/core/src/sim/world_host.cpp:6551` | yes | unread |  |
-| `Unit::GetFlags` | `0x005d7e30` | 5 | member/1 | `engine/core/src/sim/world_host.cpp:6551` | yes | unread |  |
-| `Gate::CloseNow` | `0x00529cd0` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:6602` |  | unread |  |
-| `Obj::AsSacrifice` | `0x005aa940` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:6670` |  | unread |  |
-| `Obj::SetSight` | `0x005ab360` | 4 | member/1 | `engine/core/src/sim/world_host.cpp:6508` | yes | unread |  |
-| `Sacrifice::IsInvisibility` | `0x00594f10` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:6570` | yes | unread |  |
-| `VisibleObjsInSight` | `0x00575ef0` | 4 | free/2 | `engine/core/src/sim/world_host.cpp:6433` |  | unread |  |
-| `Building::GetUITarget` | `0x004ddc50` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6545` | yes | unread |  |
-| `Building::IsCentralBuliding` | `0x004dd2d0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6486` | yes | unread |  |
-| `Building::RRepair` | `0x004dd250` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6509` | yes | unread |  |
-| `CLAMP` | `0x00696070` | 3 | free/3 | `engine/core/src/sim/world_host.cpp:6580` | yes | unread |  |
-| `CLAMP` | `0x00696bc0` | 3 | free/3 | `engine/core/src/sim/world_host.cpp:6580` | yes | unread |  |
-| `Catapult::AttackWait` | `0x004e32b0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6615` | yes | unread |  |
-| `Catapult::IsBuilt` | `0x004e2dc0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6607` | yes | unread |  |
-| `Catapult::RotateTo` | `0x004e2c50` | 3 | member/1 | `engine/core/src/sim/world_host.cpp:6617` | yes | unread |  |
-| `Druid::SetSummoningDeath` | `0x005135a0` | 3 | member/1 | `engine/core/src/sim/world_host.cpp:6547` | yes | unread |  |
-| `Gate::OpenNow` | `0x00529c50` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6601` |  | unread |  |
-| `GetCatapultAttackPoint` | `0x004e23d0` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:6541` | yes | unread |  |
-| `GetInnState` | `0x00533170` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:6398` |  | unread |  |
-| `GetInnState` | `0x00533ae0` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:6398` | yes | unread |  |
-| `MIN` | `0x00694a60` | 3 | free/2 | `engine/core/src/sim/world_host.cpp:6581` | yes | unread |  |
-| `MIN` | `0x00695020` | 3 | free/2 | `engine/core/src/sim/world_host.cpp:6581` | yes | unread |  |
-| `Ship::HasAiTransport` | `0x005c7190` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6585` | yes | unread |  |
-| `Ship::UnitsMax` | `0x005c6e40` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6524` | yes | unread |  |
-| `SpawnNamed` | `0x00573c70` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:6410` | yes | unread |  |
-| `Unit::Curse` | `0x005d90c0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6578` | yes | unread |  |
-| `Unit::IsCursed` | `0x005d8940` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:6579` |  | unread |  |
-| `Building::GetSentryClassName` | `0x004ddce0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6493` |  | unread |  |
-| `Building::PopTransportationUI` | `0x004dd3b0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6503` | yes | unread |  |
-| `Building::itemtypes` | `0x004dda10` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6492` |  | unread |  |
-| `Catapult::SetBuildFrame` | `0x004e2ed0` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:6504` | yes | unread |  |
-| `Druid::IsSummoningDeath` | `0x005135e0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6548` |  | unread |  |
-| `Gate::AreEnemiesAround` | `0x00529af0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6599` |  | unread |  |
-| `InvalidateRegenConsts` | `0x005d30b0` | 2 | free/0 | `engine/core/src/sim/world_host.cpp:6500` | yes | unread |  |
-| `IsProtected` | `0x00435250` | 2 | free/3 | `engine/core/src/sim/world_host.cpp:6417` | yes | unread |  |
-| `MAX` | `0x00694a90` | 2 | free/2 | `engine/core/src/sim/world_host.cpp:6582` | yes | unread |  |
-| `MAX` | `0x00695060` | 2 | free/2 | `engine/core/src/sim/world_host.cpp:6582` |  | unread |  |
-| `Obj::GetStaminaDecTime` | `0x005ab580` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6613` | yes | unread |  |
-| `Obj::IsRanged` | `0x005ad620` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6488` | yes | unread |  |
-| `Obj::IsWaterUnit` | `0x005ac6b0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6487` | yes | unread |  |
-| `SetGlobalBloodlust` | `0x004c6610` | 2 | free/1 | `engine/core/src/sim/world_host.cpp:6499` | yes | unread |  |
-| `Ship::IsBuilding` | `0x005c6fc0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6534` | yes | unread |  |
-| `Unit::BestTrainingTarget` | `0x005d5bf0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6611` | yes | unread |  |
-| `Unit::GetParryMode` | `0x005d9050` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6566` | yes | unread |  |
-| `Unit::GetStaminaDecTime` | `0x005d8080` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6613` | yes | unread |  |
-| `Unit::Mutate` | `0x005df420` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:6555` | yes | unread |  |
-| `Unit::SameHolderAs` | `0x005d8120` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:6472` | yes | unread |  |
-| `abs` | `0x00694be0` | 2 | free/1 | `engine/core/src/sim/world_host.cpp:6576` | yes | unread |  |
-| `rect::height` | `0x00696c90` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:6633` |  | unread |  |
-| `Building::GetNumSentrySlots` | `0x004ddca0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6496` |  | unread |  |
-| `Building::GlobalSpellStop` | `0x004dd5b0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6559` | yes | unread |  |
-| `Building::SetUITarget` | `0x004ddbf0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6546` |  | unread |  |
-| `Building::StonehengeNumControllingMages` | `0x004dde80` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6590` | yes | unread |  |
-| `Building::levelperitem` | `0x004ddb50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6495` |  | unread |  |
-| `Building::minlevel` | `0x004ddaf0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6494` |  | unread |  |
-| `Catapult::CalcEscapeDirection` | `0x004e3380` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6418` | yes | unread |  |
-| `Catapult::ClearTowerTarget` | `0x004e37f0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6616` | yes | unread |  |
-| `Catapult::SetBuilt` | `0x004e2e20` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6614` | yes | unread |  |
-| `Druid::GetJupiterAngerTarget` | `0x005134b0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6511` | yes | unread |  |
-| `Druid::SetJupiterAngerTarget` | `0x00513540` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6510` | yes | unread |  |
-| `EnemyInRange` | `0x004dcb20` | 1 | free/3 | `engine/core/src/sim/world_host.cpp:6512` | yes | unread |  |
-| `Flying::FindNearBird` | `0x0051c0a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6596` | yes | unread |  |
-| `Gate::AreFriendsAround` | `0x00529b50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6600` |  | unread |  |
-| `Gate::LookAround` | `0x00529bb0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6598` | yes | unread |  |
-| `GetResearchHack` | `0x004db630` | 1 | free/0 | `engine/core/src/sim/world_host.cpp:6501` | yes | unread |  |
-| `HasStarvingArmy` | `0x0055a7c0` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:6399` |  | unread |  |
-| `HasStarvingArmy` | `0x00559c20` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:6399` | yes | unread |  |
-| `Obj::AddToStoreBin` | `0x005b5890` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6470` |  | unread |  |
-| `Obj::AsBarrack` | `0x005aa8d0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6672` |  | unread |  |
-| `Obj::CoverOfMercyAction` | `0x005ca6a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6574` | yes | unread |  |
-| `Obj::IsPeaceful` | `0x005ad740` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6515` | yes | unread |  |
-| `Obj::IsPeasantAmbient` | `0x005ad7a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6507` |  | unread |  |
-| `Obj::IsRam` | `0x005ad5c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6497` |  | unread |  |
-| `Obj::MagicActionEnd` | `0x005c9f40` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6575` | yes | unread |  |
-| `Obj::MistAction` | `0x005ca050` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6573` | yes | unread |  |
-| `Obj::RemoveFromStoreBin` | `0x005b0f10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6471` |  | unread |  |
-| `Obj::SetCmdEnable` | `0x005ac710` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6608` | yes | unread |  |
-| `Obj::SetDebug` | `0x005abcb0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6506` | yes | unread |  |
-| `Obj::SetName` | `0x005b6920` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6466` | yes | unread |  |
-| `PlaceCatapult` | `0x004e3dc0` | 1 | free/4 | `engine/core/src/sim/world_host.cpp:6416` | yes | unread |  |
-| `Sacrifice::AddDruid` | `0x00595af0` | 1 | member/2 | `engine/core/src/sim/world_host.cpp:6571` | yes | unread |  |
-| `Sacrifice::Consume` | `0x00596440` | 1 | member/3 | `engine/core/src/sim/world_host.cpp:6572` | yes | unread |  |
-| `Sacrifice::MistAction` | `0x00595360` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6573` | yes | unread |  |
-| `SetInnState` | `0x00533640` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:6401` |  | unread |  |
-| `SetInnState` | `0x00533c00` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:6401` | yes | unread |  |
-| `Ship::ApplyAiTransport` | `0x005c8710` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6588` | yes | unread |  |
-| `Ship::ClearAiTransport` | `0x005c7e10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6586` | yes | unread |  |
-| `Ship::GetTransPt` | `0x005c6f20` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6587` |  | unread |  |
-| `Ship::ShowBuildAnimation` | `0x005c6a60` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6505` |  | unread |  |
-| `StarvingArmyPos` | `0x00559d50` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:6400` | yes | unread |  |
-| `Unit::Disappear` | `0x005d86d0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6467` | yes | unread |  |
-| `Unit::Disease` | `0x005d9140` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6469` | yes | unread |  |
-| `Unit::EnterHolder` | `0x005d7210` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6464` | yes | unread |  |
-| `Unit::ExitHolder` | `0x005d71c0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6465` | yes | unread |  |
-| `Unit::GetParty` | `0x005d7b10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6525` | yes | unread |  |
-| `Unit::IsDiseased` | `0x005d89a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6468` | yes | unread |  |
-| `Unit::RamBestTarget` | `0x005d91c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6419` | yes | unread |  |
-| `Unit::StartTraining` | `0x005d5de0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6609` | yes | unread |  |
-| `Unit::StopTraining` | `0x005d5e30` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6610` | yes | unread |  |
-| `Unit::TrainAttack` | `0x005d5d10` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:6612` | yes | unread |  |
-| `UnitsAroundSettlement` | `0x005744c0` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:6450` |  | unread |  |
-| `UnitsAroundSettlement` | `0x00574d90` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:6450` |  | unread |  |
-| `rect::bottom` | `0x00695200` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6631` |  | unread |  |
-| `rect::bottom` | `0x00695120` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6631` |  | unread |  |
-| `rect::left` | `0x00695140` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6628` | yes | unread |  |
-| `rect::right` | `0x006951c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6630` |  | unread |  |
-| `rect::right` | `0x00695100` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6630` |  | unread |  |
-| `rect::top` | `0x00695180` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6629` |  | unread |  |
-| `rect::width` | `0x00696c50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:6632` |  | unread |  |
+| `Obj::player` | `0x005ab290` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:7317` | yes | verified | handle check, owner record index [[obj+0x70]+8] + 1; miss -1; NamedObj conversion now hides a dead named unit |
+| `Settlement::player` | `0x005c2340` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:7317` | yes | verified | settlement owner record at +0x90, index + 1; miss -1 |
+| `Squad::Player` | `0x004210c0` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:7317` | yes | verified | handle low nibble + 1, no lookup |
+| `NamedObj::obj` | `0x005530a0` | 1,174 | member/0 | `engine/core/src/sim/world_host.cpp:7482` | yes | verified | purges dead (vtbl+0x50) then front object; empty -> invalid; also the NamedObj->Obj conversion (object_of) |
+| `Obj::pos` | `0x005add20` | 1,057 | member/0 | `engine/core/src/sim/world_host.cpp:7318` | yes | verified | raw [obj+0x24/0x28]; miss (0,0), not the held marker |
+| `Squad::pos` | `0x00422cf0` | 1,057 | member/0 | `engine/core/src/sim/world_host.cpp:7318` | yes | verified | front member's posRH, (-1,-1) for none; a handle naming no squad faults in the original, (-1,-1) here |
+| `NamedObj::IsValid` / `Query::IsValid` | `0x00577af0` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:7316` | yes | partial | handle check then vtbl+0x2c "registered": named map (name exists), group map, sight queries 1; other query subclasses not enumerated, deregistration not read |
+| `Item::IsValid` / `Obj::IsValid` / `Settlement::IsValid` | `0x005ab1d0` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:7316` | yes | verified | handle check only (table slot + offset non-null), no print; a corpse is valid |
+| `SquadList::IsValid` | `0x00421a70` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:7316` | yes | partial | index within the squad-list pool (0x0043ed70); engine asks for a live entry, which differs only for a released one (0 sites) |
+| `Query::IsEmpty` | `0x00579320` | 805 | member/0 | `engine/core/src/sim/world_host.cpp:7502` | yes | partial | miss -> true (was a trap); refresh+count==0 evaluated on the spot -- the original's 1-2 s query cache is the query-model design gap |
+| `Sacrifice::IsEmpty` | `0x00594eb0` | 805 | member/0 | `engine/core/src/sim/world_host.cpp:7502` | yes | partial | miss -> true; stop flag [+0x15c] never set here (no sacrifice machinery), so a sacrifice answers false |
+| `Obj::AsUnit` | `0x005aa580` | 717 | member/0 | `engine/core/src/sim/world_host.cpp:7521` | yes | verified | sync bit 0x400000 (CVXUnit ctor 0x005d3170); miss or failed cast -> invalid handle; matches NativeObject::is_a |
+| `Building::settlement` | `0x004dcdd0` | 671 | member/0 | `engine/core/src/sim/world_host.cpp:7321` | yes | verified | 16-bit settlement slot [bld+0x148] as a handle; miss -> invalid; no 0xffff guard (faults) -> invalid here |
+| `GAIKA::settlement` | `0x004219a0` | 671 | member/0 | `engine/core/src/sim/world_host.cpp:7321` | yes | verified | node at index*0x24 of 0x008c8e54, settlement pointer +0x14 or invalid; no print |
+| `Intersect` | `0x005733f0` | 556 | free/2 | `engine/core/src/sim/world_host.cpp:7252` | yes | partial | op 1 (fixed: was 0), walks the smaller operand in its own order (fixed); query-model gap |
+| `rand` | `0x004c63a0` | 428 | free/1 | `engine/core/src/sim/world_host.cpp:7251` | yes | verified | Range(0, n-1) on the game LCG (0x0063ff00): no draw when low == high, swapped arm draws, high dword of (span+1)*state, no scramble; sim/rng.hpp |
+| `point::IntoRect` | `0x00697cb0` | 398 | member/1 | `engine/core/src/sim/world_host.cpp:7486` | yes | verified | in place, low edge then high per axis, unnormalised |
+| `point::Rot` | `0x00697d90` | 385 | member/1 | `engine/core/src/sim/world_host.cpp:7484` | yes | partial | x87 trunc(x cos + y sin), trunc(y cos - x sin) with K = 3.1415926535/180; cardinals and the eight +/-1/2 entries keep the residue's sign (fixed for the halves); other angles a Q30 table, at most one unit off where a product falls within ~3e-5 of an integer; 53-bit precision control assumed |
+| `Obj::AsHero` | `0x005aa640` | 379 | member/0 | `engine/core/src/sim/world_host.cpp:7524` | yes | verified | sync bit 0x1000000; miss/failed -> invalid |
+| `Obj::IsAlive` | `0x005aae00` | 378 | member/0 | `engine/core/src/sim/world_host.cpp:7322` | yes | verified | valid and not vtbl+0x50 dead: object_is_dead |
+| `Obj::AsBuilding` / `Obj::AsTower` | `0x005aa5e0` | 322 | member/0 | `engine/core/src/sim/world_host.cpp:7522` | yes | verified | sync bit 0x800000 (CVXBuilding ctor 0x004e00d0), AsTower the same body; miss/failed -> invalid |
+| `SetNoAIFlag` | `0x00435470` | 230 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:7264` | yes | partial | bit 0x40000 of [+0x194] on live units only, then the whole list to the Squadize worker 0x00447330 at state 0 (fixed: the regroup was missing); non-units left out of the regroup (labelled; 0 shipped) |
+| `Unit::SetNoAIFlag` | `0x005de600` | 230 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:7264` | yes | verified | handle check, bit 0x40000 with no unit/death test, then a one-element list to 0x00447330 at state 0 (fixed) |
+| `Group` | `0x005765a0` | 216 | free/1 | `engine/core/src/sim/world_host.cpp:7259` | yes | partial | interns the name in [0x009bdac8], creates on a miss, answers the group's own handle (live, no cache); engine mints a fresh query per call (query-model gap) |
+| `Union` | `0x00573260` | 191 | free/2 | `engine/core/src/sim/world_host.cpp:7256` | yes | partial | op 0 (fixed: was 1), sort-by-handle merge (0x004ffbe0); query interning, 2000 ms cache and refcount are the query-model design gap (fn_set_op) |
+| `Obj::AddToGroup` | `0x005b6730` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:7285` | yes | partial | handle check before any group lookup (fixed: created the group anyway), then CVXGroup::Add; template-deque routing on [0x00a8734c] not read |
+| `ObjList::AddToGroup` | `0x00561970` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:7285` | yes | partial | no receiver check, group always made, members that resolve and are not dead (fixed); template routing not read |
+| `Query::AddToGroup` | `0x0057a550` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:7285` | yes | partial | handle check, then the query's cached list, every resolving member; query-model gap |
+| `SpawnGroup` | `0x00576790` | 181 | free/1 | `engine/core/src/sim/world_host.cpp:7268` | yes | partial | group map lookup, miss -> empty list; clones templates in order, non-unit copies skipped (fixed); the 0x0041f310 hand-off and next-turn behaviour start are labelled |
+| `GetNamedObj` | `0x00553230` | 177 | free/1 | `engine/core/src/sim/world_host.cpp:7293` | yes | verified | miss mints an empty named query under the name (0x005722a0): valid, dead, .obj invalid, filled by a later SetName |
+| `Obj::health` | `0x005ada80` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:7337` | yes | verified | [obj+0xc0]; miss 0 |
+| `Settlement::health` | `0x005c1e40` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:7337` | yes | partial | garrison holder [settlement+0x5e] +0x1c; no writer found (ctor 0x00531de0 zeroes it); engine answers the settlement's own health, 0; 0 sites |
+| `Squad::health` | `0x00427740` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:7337` | yes | verified | sum of [+0xc0] over members with a live slot; no bounds check; empty 0 |
+| `ClassPlayerObjs` | `0x005754b0` | 159 | free/2 | `engine/core/src/sim/world_host.cpp:7254` | yes | partial | player 1..16 else invalid; whole-string class else invalid (fixed); whole-map grid sweep: no held, no dead (fixed); query-model gap, grid order |
+| `Obj::IsHeirOf` | `0x005ad450` | 154 | member/1 | `engine/core/src/sim/world_host.cpp:7342` | yes | partial | whole string as one exact case-sensitive key (0x00409e40/0x00409350), then walk [class+0xe4]; fixed (was a comma list); altid keying of the map 0x009bdb00 not traced |
+| `Obj::stamina` | `0x005adae0` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:7335` | yes | verified | [obj+0xc4]; miss 0; ctor seeds from class maxstamina, engine for combatants only (no other class declares one) |
+| `ObjsInRange` | `0x00576130` | 151 | free/3 | `engine/core/src/sim/world_host.cpp:7258` | yes | partial | a sight query with the given radius (negative: sight-100), no comma bypass (fixed: was an anchored circle listing its anchor); query-model gap |
+| `Settlement::stamina` | `0x005c1f00` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:7335` | yes | partial | garrison holder +0x24; same as Settlement::health |
+| `Unit::stamina` | `0x005d8b90` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:7335` | yes | verified | [obj+0xc4], same field as Obj::stamina |
+| `point::x` / `rect::left` | `0x006950e0` | 143 | member/0 | `engine/core/src/sim/world_host.cpp:7490` | yes | verified | by-reference x / rect::left (offset 0) for assignment; the engine answers the read, 0 shipped sites assign |
+| `point::x` | `0x006952b0` | 142 | member/0 | `engine/core/src/sim/world_host.cpp:7336` | yes | verified | by-value first dword |
+| `Obj::posRH` | `0x005ad8a0` | 141 | member/0 | `engine/core/src/sim/world_host.cpp:7319` | yes | verified | vtbl+0xc8 (unit: unit_pos_rh, else raw); miss (0,0) silently |
+| `Obj::RemoveFromGroup` | `0x005b4630` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:7286` | yes | partial | handle check; group miss does nothing; CVXGroup::Remove (0x00572210) on the live deque; template deque not read |
+| `ObjList::RemoveFromGroup` | `0x0055f720` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:7286` | yes | partial | members that resolve and are not dead (fixed); as above |
+| `Query::RemoveFromGroup` | `0x0057a970` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:7286` | yes | partial | handle check, the query's cached list; query-model gap |
+| `Obj::DistTo` | `0x005aa350` | 134 | member/1 | `engine/core/src/sim/world_host.cpp:7341` | yes | verified | floor isqrt of the stored-position distance to the point, less own radius; miss -1 (was 0, and measured from the holder) |
+| `Obj::DistTo` | `0x005aa3e0` | 134 | member/1 | `engine/core/src/sim/world_host.cpp:7341` | yes | verified | argument then receiver checked (-1 each); 0x005a77b0: stored positions, less both radii |
+| `Place` | `0x005a8710` | 131 | free/3 | `engine/core/src/sim/world_host.cpp:7276` | yes | partial | player 1..16, inclusive map rect unless (-1,-1), class, CVXScriptObj cast then SetPlayer/SetPos; the cast subtree is inferred (labelled), 0x0041f310 hand-off not modelled |
+| `SpawnGroupInHolder` | `0x005769b0` | 127 | free/2 | `engine/core/src/sim/world_host.cpp:7269` | yes | partial | group, then exact settlement name scan; copies enter the garrison forced (0x005d3e10) with the onenter hook (fixed: only the holder link was set); hook order vs. name/group filing differs (labelled) |
+| `SpawnGroupInHolder` | `0x00576e00` | 127 | free/2 | `engine/core/src/sim/world_host.cpp:7269` | yes | partial | group, then the object's holder (vtbl+0xe4): ship -> ship+1, building -> its settlement's garrison; none -> empty list, no spawn (fixed: spawned into the object itself); a holder passed directly is inferred |
+| `Obj::sight` | `0x005adcc0` | 118 | member/0 | `engine/core/src/sim/world_host.cpp:7338` | yes | verified | [obj+0xd0] (WorldObject::sight); miss 0 |
+| `Obj::maxhealth` | `0x005adb40` | 117 | member/0 | `engine/core/src/sim/world_host.cpp:7339` | yes | verified | [obj+0xc8], class max plus bonuses (CombatSystem) or class maxhealth; miss 0 |
+| `Squad::maxhealth` | `0x00427800` | 117 | member/0 | `engine/core/src/sim/world_host.cpp:7339` | yes | verified | sum of [+0xc8] over live members |
+| `point::y` / `rect::top` | `0x00695290` | 112 | member/0 | `engine/core/src/sim/world_host.cpp:7491` | yes | verified | by-reference y / rect::top (offset +4); read only here, 0 shipped sites assign |
+| `point::y` | `0x006952e0` | 111 | member/0 | `engine/core/src/sim/world_host.cpp:7340` | yes | verified | by-value second dword |
+| `point::Set` | `0x00697c50` | 103 | member/2 | `engine/core/src/sim/world_host.cpp:7483` | yes | verified | stores y then x in place and returns the point (fixed: returned nothing) |
+| `rect::Set` | `0x00697aa0` | 103 | member/2 | `engine/core/src/sim/world_host.cpp:7483` | yes | partial | rect::Set(left, top, right, bottom), arity 4 -- not this engine's Set/2; unbound, 0 shipped sites |
+| `UnitsInSettlement` | `0x00574160` | 93 | free/2 | `engine/core/src/sim/world_host.cpp:7310` |  | partial | (str, str): exact name scan, miss invalid; whole-string class else invalid (fixed); query-model gap; garrison back-link gap labelled |
+| `UnitsInSettlement` | `0x00574b80` | 93 | free/2 | `engine/core/src/sim/world_host.cpp:7310` |  | partial | (Settlement, str): receiver check, then as above |
+| `_PlaceEx` | `0x005a8980` | 89 | free/4 | `engine/core/src/sim/world_host.cpp:7277` | yes | partial | class first, clamp inset 48 low then high, no player check; same labelled gaps as Place |
+| `NamedObj::IsDead` | `0x00553000` | 81 | member/0 | `engine/core/src/sim/world_host.cpp:7388` | yes | verified | invalid -> dead; else purge then deque empty; a named building at no health is not dead |
+| `Obj::IsDead` | `0x005aae50` | 81 | member/0 | `engine/core/src/sim/world_host.cpp:7388` | yes | verified | invalid or vtbl+0x50 (health==0, never for the 7 non-catapult building vtables): object_is_dead |
+| `point::SetLen` | `0x00697d10` | 73 | member/1 | `engine/core/src/sim/world_host.cpp:7485` | yes | verified | 32-bit imul/add, floor root of the unsigned sum; 0 -> (0, L); x*L wrapped then idiv (fixed: was 64-bit) |
+| `Obj::AsShip` | `0x005aa9b0` | 64 | member/0 | `engine/core/src/sim/world_host.cpp:7526` | yes | verified | virtual cast to CVXShip (chain via unit 0x005d27d0); miss/failed -> invalid |
+| `Obj::CanSee` | `0x005ab9d0` | 57 | member/1 | `engine/core/src/sim/world_host.cpp:7454` | yes | partial | argument first; visible -> true without the receiver; hidden -> target owner grants observer share_view (record+0x18, 0x005652f0); own bit inferred (initialiser not found) |
+| `Obj::IsVisible` | `0x005ab970` | 56 | member/0 | `engine/core/src/sim/world_host.cpp:7323` | yes | verified | not bit 21 of [obj+0x2c]; miss false |
+| `Obj::SetVisible` | `0x005ab920` | 56 | member/1 | `engine/core/src/sim/world_host.cpp:7324` | yes | verified | bit 21 via vtbl+0x44/0x48; effect and refresh are presentation; miss is a no-op (was a trap) |
+| `ObjList::SetVisible` | `0x0055ea60` | 56 | member/1 | `engine/core/src/sim/world_host.cpp:7324` | yes | partial | every hero member's army, then every live member (0x005a7600); list arm tested, hero-army arm implemented but not tested; 0 sites |
+| `Point` | `0x00696e50` | 53 | free/2 | `engine/core/src/sim/world_host.cpp:7499` | yes | verified | (x, y) as given, no clamp or fixup |
+| `Obj::AsDruid` | `0x005aa6a0` | 49 | member/0 | `engine/core/src/sim/world_host.cpp:7525` | yes | verified | virtual cast to CVXDruid (a druid is not a hero); miss/failed -> invalid |
+| `Obj::Erase` | `0x005ab250` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:7392` | yes | partial | handle check then vtbl+0x94 destroy; miss no-op; holder-eviction gap already labelled at perform_erase |
+| `Query::Erase` | `0x00578c40` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:7392` | yes | partial | walks the query's list skipping bit 23 (buildings), reads before refresh; query cache is the query-model gap |
+| `StrMap::erase` | `0x006981d0` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:7392` |  | inferred | StrMap key erase; no StrMap type in the engine and 0 shipped sites -- the 47 are Obj/Query::Erase counted by folded name |
+| `Unit::SetLastAttackTime` | `0x005d7fc0` | 40 | member/0 | `engine/core/src/sim/world_host.cpp:7439` | yes | verified | game clock into [unit+0x1a4], read back by TimeWithoutAttack (0x005d7f50); stored on the combatant (was dropped on a census that missed the reader) |
+| `Substract` / `Subtract` | `0x00573580` | 38 | free/2 | `engine/core/src/sim/world_host.cpp:7297` | yes | partial | op 2, left operand's order kept (fixed: was sorted); query-model gap |
+| `ObjsInSight` | `0x00575cb0` | 37 | free/2 | `engine/core/src/sim/world_host.cpp:7255` | yes | partial | sight-100 frozen at construction, empty for a gone or dead observer, observer and dead excluded, inclusive (fixed); hidden-mask path is VisibleObjsInSight's; query-model gap |
+| `Dist` / `point::Dist` | `0x00695310` | 37 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:7497` | yes | verified | member and free, one body: 32-bit difference then the wrapped length (fixed: was 64-bit) |
+| `Obj::radius` | `0x005aa520` | 36 | member/0 | `engine/core/src/sim/world_host.cpp:7500` | yes | verified | class +0x2dc from `radius`, inherited; miss 0 |
+| `Unit::HasSpecial` | `0x005d8d70` | 33 | member/1 | `engine/core/src/sim/world_host.cpp:7457` | yes | partial | bit n<36 of [obj+0x198]; hero ctor 0x0052ffd0 sets bit 30 freedom on every hero (fixed); the class reader's 36-name table (0x00426df0) taken from the engine's existing reading, not re-read |
+| `Building::GetPoint` | `0x004dd150` | 32 | member/2 | `engine/core/src/sim/world_host.cpp:7398` | yes | verified | n-th class point slot of the type as (x, y*1448/1024), raw offsets; miss (-32768,-32768) silently; no life test |
+| `ObjsInCircle` | `0x005775e0` | 32 | free/3 | `engine/core/src/sim/world_host.cpp:7257` | yes | partial | (x,y,r,class) circle, dist²<=r²: r=0 the spot, r<0 nothing, dead excluded, comma list allowed (fixed); query-model gap |
+| `Unit::SetParryMode` | `0x005d8f80` | 31 | member/1 | `engine/core/src/sim/world_host.cpp:7427` | yes | partial | acts only with the Parry special and a changed mode [+0x1a0]; the effect object at [+0x1c8] (0x00518650 entry 4) is not modelled |
+| `Obj::SetMessengerStatus` | `0x005ab8d0` | 26 | member/1 | `engine/core/src/sim/world_host.cpp:7455` | yes | verified | bit 26 set/clear via vtbl+0x44/0x48, no life test; miss no-op |
+| `Query::SetMessengerStatus` | `0x00579c70` | 26 | member/1 | `engine/core/src/sim/world_host.cpp:7455` | yes | verified | every member that resolves and is not dead (vtbl+0x50); empty query does nothing |
+| `Obj::RemoveFromAllGroups` | `0x005b69b0` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:7287` | yes | partial | every group in the dictionary (0x004909f0), Remove on each; as the Obj form above |
+| `ObjList::RemoveFromAllGroups` | `0x00563250` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:7287` | yes | partial | members that resolve and are not dead (fixed); as above |
+| `Query::RemoveFromAllGroups` | `0x0057ab80` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:7287` | yes | partial | handle check, the query's cached list; query-model gap |
+| `GetMapRect` | `0x004c6650` | 21 | free/0 | `engine/core/src/sim/world_host.cpp:7487` | yes | verified | (0, 0, w-1, h-1) copied from [world+0xb4] |
+| `Unit::SetEntering` | `0x005d8240` | 21 | member/1 | `engine/core/src/sim/world_host.cpp:7426` | yes | verified | bit 0x100000 of [obj+0x194]; miss no-op |
+| `Obj::AsCatapult` | `0x005aa780` | 20 | member/0 | `engine/core/src/sim/world_host.cpp:7527` | yes | verified | virtual cast to CVXCatapult (a building heir); miss/failed -> invalid |
+| `Teleport::destination` | `0x005cdbc0` | 20 | member/0 | `engine/core/src/sim/world_host.cpp:7405` | yes | verified | stored handle [tp+0x208]; miss invalid |
+| `Building::GetEnterPoint` | `0x004dce60` | 18 | member/1 | `engine/core/src/sim/world_host.cpp:7399` | yes | verified | unit then receiver checked; nearest door (0x0056fba0) of the land/water list by the unit class's water_unit (+0xb30) from the unit's stored position; fallbacks unit pos / building pos / (0,0); no life test (fixed: health test, ship-class flag, holder walk) |
+| `Obj::AsWagon` | `0x005aa7f0` | 17 | member/0 | `engine/core/src/sim/world_host.cpp:7528` | yes | verified | virtual cast to CVXWagon (unit heir); miss/failed -> invalid |
+| `point::InRect` | `0x00696f80` | 14 | member/1 | `engine/core/src/sim/world_host.cpp:7488` | yes | verified | inclusive on all four edges |
+| `Building::IsVeryBroken` | `0x00424f90` | 13 | member/0 | `engine/core/src/sim/world_host.cpp:7430` | yes | verified | no handle check; health < maxhealth / 20 (sar 3 confirmed), truncating |
+| `Unit::SetUser` | `0x005d7c80` | 13 | member/1 | `engine/core/src/sim/world_host.cpp:7416` | yes | verified | the int at [+0x164]; miss no-op |
+| `Obj::AsGate` | `0x00529980` | 12 | member/0 | `engine/core/src/sim/world_host.cpp:7529` | yes | verified | virtual cast to CVXGate (building heir); miss/failed -> invalid |
+| `Obj::class` | `0x005abda0` | 12 | member/0 | `engine/core/src/sim/world_host.cpp:7419` | yes | verified | class id string (+4 of [obj+0x3c]); miss "" |
+| `Building::IsBroken` | `0x004dd200` | 11 | member/0 | `engine/core/src/sim/world_host.cpp:7429` | yes | verified | damage tier [b+0x204] == 3; miss true |
+| `point::Len` | `0x00695360` | 11 | member/0 | `engine/core/src/sim/world_host.cpp:7496` | yes | verified | 32-bit squares and sum, floor root of the unsigned sum (fixed: was 64-bit) |
+| `Building::GlobalSpellStart` | `0x004dd440` | 9 | member/2 | `engine/core/src/sim/world_host.cpp:7420` | yes | partial | town hall and spell 0..5, then the spell manager record (0x0052d3e0), message 0x184 and UI; dropped here (no reader); 0x0052c5a0 not read |
+| `Building::GlobalSpellStart` | `0x004dd4f0` | 9 | member/2 | `engine/core/src/sim/world_host.cpp:7420` | yes | partial | the same with a data argument; dropped likewise |
+| `Obj::AsFlying` | `0x005aaa20` | 9 | member/0 | `engine/core/src/sim/world_host.cpp:7530` | yes | verified | virtual cast to CVXFlyingUnit (unit heir); miss/failed -> invalid |
+| `Unit::InShip` | `0x005d70f0` | 9 | member/0 | `engine/core/src/sim/world_host.cpp:7397` | yes | verified | no receiver check; holder [+0x154] resolves and its ship handle [holder+0x0e] resolves (0x005319a0) |
+| `Obj::AsItemHolder` | `0x005aa860` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:7533` | yes | verified | virtual cast to CVXItemHolder (script-object heir); miss/failed -> invalid |
+| `Unit::user` | `0x005d8bf0` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:7418` | yes | verified | the int at [+0x164]; miss 0 |
+| `point::ClampToMap` | `0x005bd3e0` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:7489` | yes | verified | no world -> unchanged; x to [0, w-2], y to [0, h-2] (high corner from [world+0xbc/0xc0] - 1) |
+| `Building::GetExitPoint` | `0x004dcfa0` | 7 | member/2 | `engine/core/src/sim/world_host.cpp:7400` | yes | partial | (Unit, point): miss -> the point; water from the unit class's water_unit (fixed, was ship class); one rand(0,10000) draw over 1/(d^4+1e-7) weights in double, fixed point here |
+| `Building::GetExitPoint` | `0x004dd080` | 7 | member/2 | `engine/core/src/sim/world_host.cpp:7400` | yes | partial | (point, bool): same worker 0x004db6c0; double-precision weights approximated in fixed point (core has no floats) |
+| `Flying::IsInAir` | `0x0051bd20` | 7 | member/0 | `engine/core/src/sim/world_host.cpp:7395` | yes | verified | bit 22 of [+0x194] |
+| `Unit::GetSacrifice` | `0x005d7bc0` | 7 | member/0 | `engine/core/src/sim/world_host.cpp:7431` | yes | partial | base answers invalid; only the druid override reads [+0x1cc]; no sacrifice machinery here (design) |
+| `Obj::IsValidCaptureTarget` | `0x005aaea0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7347` | yes | verified | argument then receiver (false each); Military receiver; target a Building heir with a live settlement, not Tower/Wall/Gate/Catapult |
+| `Teleport::Traverse` | `0x005cdcb0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7406` | yes | verified | ORs the traveller's record word +0x18 (share-view side, self included) into [tp+0x214] (fixed: was the one bit); 1..16 only |
+| `Teleport::exit_vector` | `0x005cdc40` | 6 | member/0 | `engine/core/src/sim/world_host.cpp:7404` | yes | partial | instance fields [tp+0x20c/0x210] copied from the class by the loader 0x005cd950; miss pushes (0xffff|garbage, 0), (-1,-1) here; agree on every shipped class |
+| `Unit::SetMinimapFlag` | `0x005d87d0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7456` | yes | verified | bit 0x4000000 of the unit flag word; miss no-op |
+| `Unit::SetNoselectFlag` | `0x005d8750` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7414` | yes | partial | fixed: the call before the write is the AI unregister 0x0041eee0 (not a deselect), and AddToSquad/the placement hook refuse the bit; the owner AI running tallies 0x004448a0 decrements are not kept here |
+| `Building::GetExitVector` | `0x004dd330` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7402` | yes | verified | class record pair [cls+0xacc/0xad0], absent marker answers (-1,-1); pair inheritance 0x0059c310; the original invalid-receiver arm pushes one byte where a point belongs and is not reproducible, (-1,-1) stands in |
+| `Building::IsStonehengeControlable` | `0x004ddd70` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7453` | yes | partial | fixed: the circle is the class sight [cls+0x2d0], not the instance radius SetSight moves; reference pinned to the local player so the walk order does not matter here, but the shared scan is in spawn order rather than grid order (design) |
+| `IsPointInWater` | `0x005c6d40` | 5 | free/1 | `engine/core/src/sim/world_host.cpp:7445` | yes | verified | terrain layer type 13 at ((x+32)>>6, (y+32)>>6), out of the inclusive world rect false; equal bounds on every shipped map size |
+| `Obj::AsTeleport` | `0x005cdb50` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7531` | yes | verified | kind test on CVXTeleport (leaf under CVXBuilding in the chain read from the image), handle or 0xffff |
+| `Obj::IsMilitary` | `0x005ad680` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7411` | yes | verified | heir test of [obj+0x3c] up [cls+0xe4], self included, against Military (0x00540130/0x0059a220); invalid receiver false |
+| `Obj::IsSentry` | `0x005ad500` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7412` | yes | verified | the same shape as IsMilitary with Sentry (0x005400c0) |
+| `Squad::GetFlags` | `0x004216d0` | 5 | member/1 | `engine/core/src/sim/world_host.cpp:7413` | yes | verified | body read: arity 0, answers [squad+0x30]; every shipped GetFlags site passes a mask (Unit::GetFlags/1), so this form has no caller and is left unbound |
+| `Unit::GetFlags` | `0x005d7e30` | 5 | member/1 | `engine/core/src/sim/world_host.cpp:7413` | yes | verified | [obj+0x194] & mask as bool, any resolving object, invalid false; only UNITFLAG_NOAI is passed by shipped sites, the three unmodelled bits are labelled |
+| `Gate::CloseNow` | `0x00529cd0` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:7464` | yes | partial | fixed: a call that repeats the current target writes nothing and leaves the move running (it used to restart it from a truncated position); building mode 3 is read as health <= 0, an inference (no building mode here) |
+| `Obj::AsSacrifice` | `0x005aa940` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:7532` | yes | verified | kind test on CVXSacrifice (leaf under CVXScriptObj in the image), handle or 0xffff |
+| `Obj::SetSight` | `0x005ab360` | 4 | member/1 | `engine/core/src/sim/world_host.cpp:7370` | yes | verified | refuses n<100 and n>2048 without storing; a widening explores the new circle for the owner unless held; stores [obj+0xd0] either way |
+| `Sacrifice::IsInvisibility` | `0x00594f10` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:7432` | yes | verified | case-insensitive compare of the class name ([obj+0x3c] string) with Hide; false for every shipped class |
+| `VisibleObjsInSight` | `0x00575ef0` | 4 | free/2 | `engine/core/src/sim/world_host.cpp:7295` | yes | partial | body read; the shared sight worker 0x004fee10 fixes the radius at the observer sight minus 100, a dead observer sees nothing, refresh is once a second; World::objects_in_sight (shared with ObjsInSight, the other batch) uses the whole current sight, sees when dead, and visibility is not applied |
+| `Building::GetUITarget` | `0x004ddc50` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7407` | yes | verified | [obj+0x1fc] handle with zero offset, invalid with no message on an unresolvable receiver |
+| `Building::IsCentralBuliding` | `0x004dd2d0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7348` | yes | verified | class slot [cls+0xa74] (atol of is_central_building) non-zero; invalid receiver answers true; shipped values are 0 and 1 |
+| `Building::RRepair` | `0x004dd250` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7371` | yes | verified | only at tier 3; auto_repair=yes classes only when the settlement central building [set+0x8c] is heir of BaseVillage (0x00440010); heals to (T2+H+1)% of [obj+0xc8] (0x004db520), the class figure for a building |
+| `CLAMP` | `0x00696070` | 3 | free/3 | `engine/core/src/sim/world_host.cpp:7442` | yes | verified | v < lo answers lo before hi is compared, then v > hi answers hi |
+| `CLAMP` | `0x00696bc0` | 3 | free/3 | `engine/core/src/sim/world_host.cpp:7442` | yes | verified | the double overload, same two branches; every shipped site passes integers, and the core has no floating point, so it is not bound |
+| `Catapult::AttackWait` | `0x004e32b0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7477` | yes | partial | 600000/(base+(crew-1)*add) less the attack animation, no crew or negative answers 0 (0x004e2030); the time left on a shot in progress (action state 4..7) is not added, there being no catapult action state here |
+| `Catapult::IsBuilt` | `0x004e2dc0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7469` | yes | verified | [obj+0x208] != 0, invalid receiver false |
+| `Catapult::RotateTo` | `0x004e2c50` | 3 | member/1 | `engine/core/src/sim/world_host.cpp:7479` | yes | partial | the point and the no-turn-in-progress gate are read; the original stores the point, sets action state 7 and suspends until the turn ends, this engine faces at once (no catapult turn rate) |
+| `Druid::SetSummoningDeath` | `0x005135a0` | 3 | member/1 | `engine/core/src/sim/world_host.cpp:7409` | yes | verified | stores the bool byte at [obj+0x1d4], silent on an unresolvable receiver |
+| `Gate::OpenNow` | `0x00529c50` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7463` | yes | partial | fixed: the same as CloseNow -- only a change of target writes it and clears the latch [gate+0x228]; mode 3 read as health <= 0 |
+| `GetCatapultAttackPoint` | `0x004e23d0` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7403` | yes | verified | CatapultVariationRadius from CONST.INI; no loop and offset (r, r) when isqrt(2r^2) <= r, else x then y drawn from [-r, r] until isqrt of the length <= r; clamped into the inclusive map rect |
+| `GetInnState` | `0x00533170` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7260` | yes | verified | (map, inn) string form: map list lookup, then the same clamped read; unknown map or inn answers 3; no shipped site passes strings, so it is not bound |
+| `GetInnState` | `0x00533ae0` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7260` | yes | verified | fixed: the read clamps to 1..3 (0x00533050), not only up to 1; not an Inn or unresolvable answers 2; keyed by object id where the original mints an index into [inn+0x208], which no script reads back |
+| `MIN` | `0x00694a60` | 3 | free/2 | `engine/core/src/sim/world_host.cpp:7443` | yes | verified | a < b ? a : b over ints |
+| `MIN` | `0x00695020` | 3 | free/2 | `engine/core/src/sim/world_host.cpp:7443` | yes | verified | the double overload of MIN; unreachable from the corpus, not bound |
+| `Ship::HasAiTransport` | `0x005c7190` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7447` | yes | verified | the transport order string [ship+0x210] is non-empty; invalid receiver false |
+| `Ship::UnitsMax` | `0x005c6e40` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7386` | yes | verified | holder [ship+0x1dc] capacity +0x10, seeded once from max_units_to_board; invalid receiver 0 |
+| `SpawnNamed` | `0x00573c70` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7272` | yes | verified | named-object lookup, the shared template spawn 0x00571d40 (clone, clear the template bit, refile in group and name tables); unknown or gone name prints and answers 0xffff, a non-template answers the null handle |
+| `Unit::Curse` | `0x005d90c0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7440` | yes | verified | fixed: 0x005d4880(0) sets bit 27 only when clear (curing a blessing first) and arms the object timer 0x19ec6e2 for CurseTimeout ms, whose handler is the cure 0x005d4800; the curse now lifts after CurseTimeout (ObjectState::curse_until, world version 35); the feedback object is presentation |
+| `Unit::IsCursed` | `0x005d8940` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7441` | yes | verified | fixed with Curse: bit 27 as it stands now (set and the cure not yet run); invalid receiver false |
+| `Building::GetSentryClassName` | `0x004ddce0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7355` | yes | verified | class string +0x2f8 (sentry_class_name), root default ""; no receiver test in the original (a null read), "" stands in |
+| `Building::PopTransportationUI` | `0x004dd3b0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7365` | yes | verified | refuses a non-heir of Inn with a complaint, otherwise opens the transport window (0x006ffd20) -- presentation, dropped after resolving the receiver |
+| `Building::itemtypes` | `0x004dda10` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7354` | yes | verified | fixed: the class string at +0x6a0 is a list -- the reader (0x005a1d58) appends each repeated itemtype after ", ", so BaseRuins offers all twelve items, not the last (ClassGraph and gamedata.py); undeclared answers **Invalid** (inferred from the record constructor); invalid receiver "" under the name Building::Starvation |
+| `Catapult::SetBuildFrame` | `0x004e2ed0` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:7366` | yes | verified | (frames-2)*(max-n-1)/(max-1)+1 into [obj+0x20c] and the sprite holds that frame; presentation, the object's maximum as maxhealth answers it |
+| `Druid::IsSummoningDeath` | `0x005135e0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7410` |  | verified | [obj+0x1d4] != 0, false and silent on an unresolvable receiver |
+| `Gate::AreEnemiesAround` | `0x00529af0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7461` |  | verified | [gate+0x210] != 0, as LookAround last left it; invalid false |
+| `InvalidateRegenConsts` | `0x005d30b0` | 2 | free/0 | `engine/core/src/sim/world_host.cpp:7362` | yes | verified | zeroes the regeneration-table scan cursor [0x009c0828]; there is no such cache here, a no-op is the same behaviour |
+| `IsProtected` | `0x00435250` | 2 | free/3 | `engine/core/src/sim/world_host.cpp:7279` | yes | verified | fixed: the sweep 0x00423ef0 counts objects of exactly the class (descriptor equality), with no life test and nothing held; player outside 1..16 or an unknown class answers true; point clamped to the map; radius twice [cls+0x2dc]; owner in the complement of the enemy word |
+| `MAX` | `0x00694a90` | 2 | free/2 | `engine/core/src/sim/world_host.cpp:7444` | yes | verified | b <= a ? a : b over ints |
+| `MAX` | `0x00695060` | 2 | free/2 | `engine/core/src/sim/world_host.cpp:7444` | yes | verified | the double overload of MAX; unreachable from the corpus, not bound |
+| `Obj::GetStaminaDecTime` | `0x005ab580` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7475` | yes | verified | the instance field [obj+0xec] (persisted as stamina_dec_time, seeded from the class; no map authors it), negative answers 0; no receiver test in the original |
+| `Obj::IsRanged` | `0x005ad620` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7350` | yes | verified | 0x0053f5b0: the class string [cls+0x960] non-empty and not **Invalid**; the projectile_class arm stores it (0x005a4254), settling the old inference |
+| `Obj::IsWaterUnit` | `0x005ac6b0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7349` | yes | verified | class slot [cls+0xb30] (water_unit) non-zero; invalid false |
+| `SetGlobalBloodlust` | `0x004c6610` | 2 | free/1 | `engine/core/src/sim/world_host.cpp:7361` | yes | partial | stores the byte in [0x00996ae4]; its only reader is the blow's special-stamina charge 0x0050ff30 (skips special 0x1000's cost), which this engine's combat does not model, so the flag is dropped |
+| `Ship::IsBuilding` | `0x005c6fc0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7396` | yes | verified | [ship+0x230] > 0, a construction counter, not a class test; invalid false |
+| `Unit::BestTrainingTarget` | `0x005d5bf0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7473` | yes | partial | fixed: the sweep visits units only (mask 0x400000 seeded at 0x005d3c50), so an armed enemy building no longer ends a lesson; the threat term and the +1 threat on the chosen unit (0x005d2850) are not modelled, and the sweep is in spawn order rather than grid order (design) |
+| `Unit::GetParryMode` | `0x005d9050` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7428` | yes | verified | fixed: without the Parry special (bit 0 of [obj+0x198]) the answer is -1, not 0, so ENTER_PARRY_MODE_VERIFY does not offer parry to units that cannot; else [obj+0x1a0]; an unresolvable receiver pushes nothing in the original, 0 stands in |
+| `Unit::GetStaminaDecTime` | `0x005d8080` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7475` | yes | verified | the unit's [unit+0x17c], the same value at the unit offset; negative answers 0 |
+| `Unit::Mutate` | `0x005df420` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:7417` | yes | partial | class lookup by id then altid, a message for an unknown name or receiver; mutates at once where the original defers to the vtbl+0x24 hook when the running script owns the object (unobservable: Mutate ends both shipped branches); the squad is left and, the AI manager flag being cleared during the rebuild, not re-filed; the AI tallies moved by 0x004448a0/0x00447200 are not kept here |
+| `Unit::SameHolderAs` | `0x005d8120` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:7334` | yes | verified | [unit+0x154] == [other+0x154] raw, so two units outside any holder answer true; an unresolvable handle reads through a null in the original, false stands in |
+| `abs` | `0x00694be0` | 2 | free/1 | `engine/core/src/sim/world_host.cpp:7438` | yes | verified | negate when negative; abs(INT32_MIN) is INT32_MIN |
+| `rect::height` | `0x00696c90` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7495` | yes | verified | bottom - top + 1 over the by-value rect |
+| `Building::GetNumSentrySlots` | `0x004ddca0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7358` | yes | verified | class int +0x2f4 (num_sentry_slots), root default 0; no receiver test in the original, 0 stands in |
+| `Building::GlobalSpellStop` | `0x004dd5b0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7421` | yes | verified | a CVXTownHall receiver has its record removed from the global spell manager (0x0052c4b0), anything else a complaint; nothing reads the record (GetGlobalSpell has no site), so it is dropped |
+| `Building::SetUITarget` | `0x004ddbf0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7408` | yes | verified | stores the argument handle at [obj+0x1fc], 0xffff when it does not resolve; silent on an unresolvable receiver |
+| `Building::StonehengeNumControllingMages` | `0x004dde80` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7452` | yes | partial | fixed with IsStonehengeControlable (class sight); the counter adopts the first qualifying owner, and the shared spatial query answers in spawn order where 0x004dc6f0 walks grid cells (design) |
+| `Building::levelperitem` | `0x004ddb50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7357` | yes | verified | class int +0x6c0 (levelperitem); undeclared keeps the -15000000 marker; invalid receiver 0 |
+| `Building::minlevel` | `0x004ddaf0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7356` | yes | verified | class int +0x6bc (minlevel); undeclared keeps the -15000000 marker; invalid receiver 0 |
+| `Catapult::CalcEscapeDirection` | `0x004e3380` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7280` | yes | verified | fixed: a threat at zero distance falls through to the random direction (two draws), and a random direction on the origin answers (1000, 0) (0x004e26c0); nearest enemy Tower/Outpost building in sight by squared distance, first met keeps a tie (spawn order here, grid order there, labelled); invalid receiver pushes 4 bytes in the original, (0,0) stands in |
+| `Catapult::ClearTowerTarget` | `0x004e37f0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7478` | yes | partial | writes 0xffff to [bld+0x1fc] on every CatapultTower heir of the catapult settlement [cat+0x148]; the original does so only while [cat+0x22c] is set, a slot not modelled, and the clear here is unconditional; an invalid receiver pushes a stray 0 there |
+| `Catapult::SetBuilt` | `0x004e2e20` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7476` | yes | verified | [cat+0x208] = 1 and the build frame to -1; the frozen-frame sprite bit 0x2000000 cleared and the idle animation restored (presentation) |
+| `Druid::GetJupiterAngerTarget` | `0x005134b0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7373` | yes | verified | the handle at [self+0x1d0] when it resolves to a unit (kSyncUnit), else 0xffff; no receiver test in the original |
+| `Druid::SetJupiterAngerTarget` | `0x00513540` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7372` | yes | verified | stores the argument handle at [self+0x1d0], silent on an unresolvable receiver; the argument is not validated |
+| `EnemyInRange` | `0x004dcb20` | 1 | free/3 | `engine/core/src/sim/world_host.cpp:7374` | yes | verified | fixed: the square only bounds the grid sweep; found is an enemy-owned, unhidden unit the asker can attack (vtbl+0xb4, unit_can_attack), of target_factor >= 0, whose distance from the point less its class radius (0x005a7900) is within range -- this answered any enemy-owned object in the square |
+| `Flying::FindNearBird` | `0x0051c0a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7458` | yes | partial | the first object of the same class pointer, not the receiver, within 2048 (r^2 0x400000) in the grid sweep 0x0051b840 with mask 0xffffffff, else 0xffff; first in cell order there, spawn order here (design: the spatial queries answer in id order) |
+| `Gate::AreFriendsAround` | `0x00529b50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7462` |  | verified | [gate+0x214] != 0, as LookAround last left it; invalid false |
+| `Gate::LookAround` | `0x00529bb0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7460` | yes | verified | fixed: zeroes both fields, walks kSyncUnit objects in the circle (0x005296d0) through the visitor 0x00529510, which never stops the walk; an Animal is skipped only when its damage [obj+0xdc] (persist name, 0x005b5df0) is zero, so a wolf counts -- every Animal used to be skipped |
+| `GetResearchHack` | `0x004db630` | 1 | free/0 | `engine/core/src/sim/world_host.cpp:7363` | yes | verified | [0x009969a8] != 0, whose only writer sets and clears it within one debug function: false |
+| `HasStarvingArmy` | `0x0055a7c0` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:7261` | yes | verified | the zero-argument form: whether the registry holds the "army starving" key; no shipped site calls it, not bound |
+| `HasStarvingArmy` | `0x00559c20` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:7261` | yes | partial | whether a record under "army starving" in the session notification registry is at least ms old; the registry is not kept here, the feeder's hungry_since over the local player's units stands in (labelled) |
+| `Obj::AddToStoreBin` | `0x005b5890` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7332` |  | verified | inserts the handle into the global store-bin set (0x005b5750), read only by a by-name search no entry point reaches; dropped |
+| `Obj::AsBarrack` | `0x005aa8d0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7534` | yes | verified | kind test on CVXBarrack (leaf under CVXBuilding in the image), handle or 0xffff |
+| `Obj::CoverOfMercyAction` | `0x005ca6a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7436` | yes | partial | fixed: only a CVXAreaEffect receiver acts, and an unowned unit (owner half zero) is not sheltered; lowers the bit on last time's list, raises it on the units within the class radius whose owner bit is in the complement of the owner's war mask; a hidden unit needs the side mask [player+0x18], not modelled |
+| `Obj::IsPeaceful` | `0x005ad740` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7377` | yes | verified | 0x005402f0: heir of Peaceful or of Animal (0x00540280); invalid false |
+| `Obj::IsPeasantAmbient` | `0x005ad7a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7369` |  | verified | heir of PeasantAmbient (0x005403f0); invalid false |
+| `Obj::IsRam` | `0x005ad5c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7359` |  | verified | heir of RamUnit (0x00540460); invalid false |
+| `Obj::MagicActionEnd` | `0x005c9f40` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7437` | yes | verified | the receiver handle to 0x005d5aa0, a whole-map grid sweep clearing [unit+0x14c] wherever it names the receiver; invalid does nothing |
+| `Obj::MistAction` | `0x005ca050` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7435` | yes | verified | fixed: the collection's filter 0x005c9f20 takes living units only, so a corpse in the mist is neither tagged nor counted; units in [obj+0xd4] whose tag is free or this mist are tagged, damaged through vtbl+0xa8 and the argument booked to both damage counters |
+| `Obj::RemoveFromStoreBin` | `0x005b0f10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7333` |  | verified | erases it from the same set (0x005b0e30); dropped |
+| `Obj::SetCmdEnable` | `0x005ac710` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7470` | yes | verified | a dead receiver complains and keeps its state; otherwise [obj+0x9c] = the bool (commands enabled) |
+| `Obj::SetDebug` | `0x005abcb0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7368` | yes | verified | vtbl+0xd4 with the bool, the debug overlay: presentation, dropped after resolving the receiver |
+| `Obj::SetName` | `0x005b6920` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7328` | yes | verified | fixed: an empty name removes the object's name (0x005b6120 deletes its record [obj+0x84]), which the one shipped site, 2_Great_loses_Spain seq12, relies on; otherwise rebind; the rename arm for an object already named differently (0x00572a30) is not reproduced and no shipped site reaches it |
+| `PlaceCatapult` | `0x004e3dc0` | 1 | free/4 | `engine/core/src/sim/world_host.cpp:7278` | yes | verified | fixed: the env write of 1 under /<map>/Player<n>/CatapultBuilt that ends 0x004e3be0, which BUILDINGSADVICE5.VS polls; race table 0x004e3b30, owner n-1, the site revealed to CatapultBuildSight (here through FogSystem), its own settlement, health 1, unbuilt |
+| `Sacrifice::AddDruid` | `0x00595af0` | 1 | member/2 | `engine/core/src/sim/world_host.cpp:7433` | yes | partial | one call into 0x00595a30 with the druid and now+time (a lease on the sacrifice's druid list, [druid+0x1cc] written); no sacrifice exists in this engine (the ritual machinery is not here), so the valid branch stores nothing (design) |
+| `Sacrifice::Consume` | `0x00596440` | 1 | member/3 | `engine/core/src/sim/world_host.cpp:7434` | yes | partial | suspending: a first call with the bool set sleeps period, then 0x00596050 spreads price over the listed druids' health; the wait is reproduced, the answer is an empty ritual's 0, there being no sacrifice machinery (design) |
+| `Sacrifice::MistAction` | `0x00595360` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7435` | yes | verified | the same body over a Sacrifice receiver, with a resolve test first; shared implementation |
+| `SetInnState` | `0x00533640` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7263` | yes | verified | (map, inn) string form of the setter, the same clamped write (0x005330e0) after the map and inn lookup; no caller, not bound |
+| `SetInnState` | `0x00533c00` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7263` | yes | verified | clamped 1..3 write under /Inns/<n>/state for an Inn, silent otherwise beyond the discarded complaint |
+| `Ship::ApplyAiTransport` | `0x005c8710` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7450` | yes | verified | snapshot the holder's passengers, unboard them all (0x005c84b0), each distinct squad once (0x00442880) ordered on through 0x0043ec00 with its own state, SF_ADVCHOOSER cleared, the stored verb and point; then the order cleared |
+| `Ship::ClearAiTransport` | `0x005c7e10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7448` | yes | verified | the order string to "" and the point to (-1,-1); silent on an unresolvable receiver |
+| `Ship::GetTransPt` | `0x005c6f20` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7449` |  | verified | the point at [ship+0x228/0x22c], (-1,-1) for no order; no receiver test in the original |
+| `Ship::ShowBuildAnimation` | `0x005c6a60` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7367` | yes | partial | not presentation: a suspending routine that unboards the new ship at the shipyard exit, raises the build counter [ship+0x230] (IsBuilding), slides it along the exit vector over ShipBuildAnimTime with a float cosine easing, then zeroes the counter and hands the ship to the AI (0x0041f310); dropped here, the ship stays held until ordered out (design: a suspending entry with state and a fixed-point easing) |
+| `StarvingArmyPos` | `0x00559d50` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:7262` | yes | partial | the same walk; on a hit it consumes the record (0x00559430) and answers the nearest of its objects to a point it holds; here the first hungry unit of the local player, the registry not being kept |
+| `Unit::Disappear` | `0x005d86d0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7329` | yes | verified | fixed: the command queue is not touched -- activity [obj+0x130] to 0, path dropped, animation reset, stood at (-1,-1) -- so the ambient villagers' queued errand behind disappear survives |
+| `Unit::Disease` | `0x005d9140` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7331` | yes | verified | sets bit 1 and spawns the disease feedback into [obj+0x1c4] when none; no timer |
+| `Unit::EnterHolder` | `0x005d7210` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7326` | yes | verified | a held receiver is refused; the holder is a building's settlement holder ([bld+0x148] -> [set+0x5e]), else the one the object carries (vtbl+0xe4, a ship here), else the one it is in; then the enter routine 0x005d3e10 |
+| `Unit::ExitHolder` | `0x005d71c0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7327` | yes | partial | runs the unboarding routine 0x005d3f20 when the receiver is held; the three clauses of it sim/boarding.hpp labels as not reproduced stay so |
+| `Unit::GetParty` | `0x005d7b10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7387` | yes | verified | SyncFlags bit 19 (party); invalid false |
+| `Unit::IsDiseased` | `0x005d89a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7330` | yes | verified | bit 1 of [obj+0x194]; invalid receiver false |
+| `Unit::RamBestTarget` | `0x005d91c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7281` | yes | verified | buildings in sight+512 (0x005d56b0), best seeded at 1,000,000 squared; the predicate 0x005d4980: owner row names the ram an enemy, not broken (tier 3), heir of Gate/Outpost/BaseShipyard, strictly nearer; a tie keeps the first met (spawn order here, labelled) |
+| `Unit::StartTraining` | `0x005d5de0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7471` | yes | verified | vtbl+0x44 sets SyncFlags bit 28 (training); invalid prints and returns |
+| `Unit::StopTraining` | `0x005d5e30` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7472` | yes | verified | vtbl+0x48 clears SyncFlags bit 28; invalid prints and returns |
+| `Unit::TrainAttack` | `0x005d5d10` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7474` | yes | partial | the three refusals (held receiver silently, unresolvable partner with a message, health <= 1) then action state 2 and suspend until it clears; the wait here is one attack-animation cycle, the length of state 2 with no animation not read |
+| `UnitsAroundSettlement` | `0x005744c0` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7312` |  | verified | settlement by name ([set+0xcc] string), class string checked when it has no comma, then the settlement-units query 0x004fe080 in mode 1: CollectUnits (0x005c58f0) ring pass only -- each building's own sight swept (0x005c5120), living, heir, not a template -- sorted and deduplicated; an unknown class answers the invalid query in the original, an empty one here, unreachable (the one site passes Unit) |
+| `UnitsAroundSettlement` | `0x00574d90` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7312` |  | verified | the same over a settlement object receiver argument; an unresolvable one prints and answers the invalid query |
+| `rect::bottom` | `0x00695200` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7493` | yes | verified | the rect's fourth int, bottom |
+| `rect::bottom` | `0x00695120` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7493` | yes | verified | the reference form of bottom (field +0xc, an lvalue); no shipped site assigns it, and a read is the same number |
+| `rect::left` | `0x00695140` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7490` | yes | verified | the rect's first int, left |
+| `rect::right` | `0x006951c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7492` | yes | verified | the rect's third int, right |
+| `rect::right` | `0x00695100` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7492` | yes | verified | the reference form of right (field +8, an lvalue); no shipped site assigns it, and a read is the same number |
+| `rect::top` | `0x00695180` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7491` | yes | verified | the rect's second int, top |
+| `rect::width` | `0x00696c50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7494` | yes | verified | right - left + 1 over the by-value rect |
 
-## command -- 0 of 56 verified, 14,299 call sites
-
-| entry point | body | sites | engine | implemented at | cited | status | note |
-|---|---|---:|---|---|---|---|---|
-| `Obj::SetCommand` | `0x005b0a50` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2359` |  | unread |  |
-| `Obj::SetCommand` | `0x005b0b30` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2359` |  | unread |  |
-| `Obj::SetCommand` | `0x005b0c30` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2359` |  | unread |  |
-| `ObjList::SetCommand` | `0x00561c10` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2359` |  | unread |  |
-| `ObjList::SetCommand` | `0x00562050` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2359` |  | unread |  |
-| `ObjList::SetCommand` | `0x00562a70` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2359` |  | unread |  |
-| `Query::SetCommand` | `0x00577db0` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2359` |  | unread |  |
-| `Query::SetCommand` | `0x005780d0` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2359` |  | unread |  |
-| `Query::SetCommand` | `0x00578870` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2359` |  | unread |  |
-| `Obj::AddCommand` | `0x005afe90` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2356` |  | unread |  |
-| `Obj::AddCommand` | `0x005aff70` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2356` |  | unread |  |
-| `Obj::AddCommand` | `0x005b0070` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2356` |  | unread |  |
-| `ObjList::AddCommand` | `0x00563020` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2356` |  | unread |  |
-| `ObjList::AddCommand` | `0x00561e30` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2356` |  | unread |  |
-| `ObjList::AddCommand` | `0x00562800` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2356` |  | unread |  |
-| `Query::AddCommand` | `0x00577c30` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2356` |  | unread |  |
-| `Query::AddCommand` | `0x00577f30` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2356` |  | unread |  |
-| `Query::AddCommand` | `0x00578690` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2356` |  | unread |  |
-| `Obj::command` | `0x005abe40` | 144 | member/0, member/1 | `engine/core/src/sim/command.cpp:2361` |  | unread |  |
-| `Obj::command` | `0x005ae620` | 144 | member/0, member/1 | `engine/core/src/sim/command.cpp:2361` |  | unread |  |
-| `Ship::Idle` | `0x005c6ea0` | 63 | member/0, member/1 | `engine/core/src/sim/command.cpp:2363` | yes | unread |  |
-| `Unit::Idle` | `0x005d6030` | 63 | member/0, member/1 | `engine/core/src/sim/command.cpp:2363` | yes | unread |  |
-| `Unit::GetCommanded` | `0x005d81e0` | 50 | member/0 | `engine/core/src/sim/command.cpp:2380` | yes | unread |  |
-| `Unit::GotoAttack` | `0x005d6a90` | 47 | member/3, member/4 | `engine/core/src/sim/command.cpp:2370` | yes | unread |  |
-| `Obj::KillCommand` | `0x005b0d30` | 44 | member/0 | `engine/core/src/sim/command.cpp:2372` |  | unread |  |
-| `ObjList::KillCommand` | `0x00562d20` | 44 | member/0 | `engine/core/src/sim/command.cpp:2372` |  | unread |  |
-| `Query::KillCommand` | `0x00578a80` | 44 | member/0 | `engine/core/src/sim/command.cpp:2372` |  | unread |  |
-| `GetCmdStaminaCost` | `0x00421e50` | 42 | free/1 | `engine/core/src/sim/command.cpp:2392` |  | unread |  |
-| `Hero::FormKeepMoving` | `0x0052eaf0` | 29 | member/1 | `engine/core/src/sim/command.cpp:2375` | yes | unread |  |
-| `Obj::CmdCount` | `0x005aa2c0` | 29 | member/0, member/1 | `engine/core/src/sim/command.cpp:2373` | yes | unread |  |
-| `Obj::CmdCount` | `0x005ae4d0` | 29 | member/0, member/1 | `engine/core/src/sim/command.cpp:2373` |  | unread |  |
-| `Unit::FormKeepMoving` | `0x005d7a40` | 29 | member/1 | `engine/core/src/sim/command.cpp:2375` | yes | unread |  |
-| `ObjList::SetCommandOffset` | `0x00562520` | 28 | member/2 | `engine/core/src/sim/command.cpp:2384` | yes | unread |  |
-| `Query::SetCommandOffset` | `0x00578460` | 28 | member/2 | `engine/core/src/sim/command.cpp:2384` | yes | unread |  |
-| `Hero::FormSetupAndMoveTo` | `0x0052e5e0` | 26 | member/4 | `engine/core/src/sim/command.cpp:2377` |  | unread |  |
-| `Hero::FormSetupAndMoveTo` | `0x0052e890` | 26 | member/4 | `engine/core/src/sim/command.cpp:2377` |  | unread |  |
-| `Obj::Progress` | `0x005ae890` | 23 | member/0, member/1 | `engine/core/src/sim/command.cpp:2382` | yes | unread |  |
-| `Obj::Progress` | `0x005ac530` | 23 | member/0, member/1 | `engine/core/src/sim/command.cpp:2382` | yes | unread |  |
-| `GetCmdCost` | `0x00425630` | 22 | free/3 | `engine/core/src/sim/command.cpp:2393` |  | unread |  |
-| `Obj::ExecCmd` | `0x005b5470` | 22 | member/4 | `engine/core/src/sim/command.cpp:2379` | yes | unread |  |
-| `ObjList::ExecCmd` | `0x0055e240` | 22 | member/4 | `engine/core/src/sim/command.cpp:2379` | yes | unread |  |
-| `Unit::GotoEnter` | `0x005d6620` | 22 | member/5 | `engine/core/src/sim/command.cpp:2378` | yes | unread |  |
-| `Obj::cmddelay` | `0x005ae9b0` | 8 | member/0 | `engine/core/src/sim/command.cpp:2381` |  | unread |  |
-| `Unit::Taunt` | `0x005d60f0` | 6 | member/1 | `engine/core/src/sim/command.cpp:2369` | yes | unread |  |
-| `Hero::FormPathLeft` | `0x0052ebc0` | 3 | member/0 | `engine/core/src/sim/command.cpp:2388` |  | unread |  |
-| `Obj::ClearCommands` | `0x005aa250` | 2 | member/0 | `engine/core/src/sim/command.cpp:2386` | yes | unread |  |
-| `Obj::CmdDisable` | `0x005ab770` | 2 | member/1 | `engine/core/src/sim/command.cpp:2390` | yes | unread |  |
-| `ObjList::AddCommandOffset` | `0x00562280` | 2 | member/3 | `engine/core/src/sim/command.cpp:2385` | yes | unread |  |
-| `ObjList::ClearCommands` | `0x00562ea0` | 2 | member/0 | `engine/core/src/sim/command.cpp:2386` |  | unread |  |
-| `Query::AddCommandOffset` | `0x00578280` | 2 | member/3 | `engine/core/src/sim/command.cpp:2385` | yes | unread |  |
-| `Query::ClearCommands` | `0x00578b60` | 2 | member/0 | `engine/core/src/sim/command.cpp:2386` |  | unread |  |
-| `Unit::SetCommanded` | `0x005d8180` | 2 | member/1 | `engine/core/src/sim/command.cpp:2387` | yes | unread |  |
-| `Obj::SneakCommand` | `0x005b0930` | 1 | member/1 | `engine/core/src/sim/command.cpp:2357` | yes | unread |  |
-| `ObjList::GetCanExecCmd` | `0x00560300` | 1 | member/1 | `engine/core/src/sim/command.cpp:2389` | yes | unread |  |
-| `Unit::ForceIdle` | `0x005d88b0` | 1 | member/0 | `engine/core/src/sim/command.cpp:2365` | yes | unread |  |
-| `Unit::FormAcceptMove` | `0x005d7880` | 1 | member/0 | `engine/core/src/sim/command.cpp:2376` | yes | unread |  |
-
-## objlist -- 0 of 30 verified, 10,557 call sites
+## command -- 30 of 56 verified, 14,299 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Count` | `0x00422300` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1084` |  | unread |  |
-| `GAIKA::Count` | `0x00430a30` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1084` |  | unread |  |
-| `GAIKA::Count` | `0x004330b0` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1084` | yes | unread |  |
-| `ItemHolder::count` | `0x0053c660` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1084` |  | unread |  |
-| `ObjList::count` | `0x0055e0c0` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1084` |  | unread |  |
-| `Query::count` | `0x00577b90` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1084` |  | unread |  |
-| `Squad::Count` | `0x00427980` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1084` | yes | unread |  |
-| `ObjList::ClearDead` | `0x0055f430` | 398 | member/0 | `engine/core/src/sim/objlist.cpp:1085` |  | unread |  |
-| `Query::GetObjList` | `0x0057a7c0` | 382 | member/0 | `engine/core/src/sim/objlist.cpp:1086` |  | unread |  |
-| `ObjList::Add` | `0x005601a0` | 156 | member/1 | `engine/core/src/sim/objlist.cpp:1088` |  | unread |  |
-| `SquadList::Add` | `0x004379b0` | 156 | member/1 | `engine/core/src/sim/objlist.cpp:1088` |  | unread |  |
-| `Hero::army` | `0x00530580` | 92 | member/0 | `engine/core/src/sim/objlist.cpp:1087` | yes | unread |  |
-| `Obj::Clear` | `0x005ab210` | 70 | member/0 | `engine/core/src/sim/objlist.cpp:1090` | yes | unread |  |
-| `ObjList::Clear` | `0x0055f590` | 70 | member/0 | `engine/core/src/sim/objlist.cpp:1090` |  | unread |  |
-| `ObjList::AddList` | `0x0055ff00` | 68 | member/1 | `engine/core/src/sim/objlist.cpp:1089` |  | unread |  |
-| `ObjList::Remove` | `0x0055f370` | 55 | member/1 | `engine/core/src/sim/objlist.cpp:1092` |  | unread |  |
-| `ObjList::RemoveList` | `0x0055f100` | 29 | member/1 | `engine/core/src/sim/objlist.cpp:1091` |  | unread |  |
-| `Ship::GetUnitsOnBoard` | `0x005c89f0` | 22 | member/0 | `engine/core/src/sim/objlist.cpp:1100` | yes | unread |  |
-| `NearestObj` / `Query::NearestObj` | `0x005794c0` | 19 | member/1 | `engine/core/src/sim/objlist.cpp:1099` | yes | unread |  |
-| `NearestObj` / `Query::NearestObj` | `0x00579620` | 19 | member/1 | `engine/core/src/sim/objlist.cpp:1099` | yes | unread |  |
-| `ObjList::Contains` | `0x0055e490` | 15 | member/1 | `engine/core/src/sim/objlist.cpp:1093` |  | unread |  |
-| `Query::Contains` | `0x00578d20` | 15 | member/1 | `engine/core/src/sim/objlist.cpp:1093` |  | unread |  |
-| `ObjList::FilterClosest` | `0x005616c0` | 6 | member/2 | `engine/core/src/sim/objlist.cpp:1094` |  | unread |  |
-| `IdxToSet` | `0x0042c780` | 5 | free/1 | `engine/core/src/sim/objlist.cpp:1109` |  | unread |  |
-| `Unit::GetUnitsInSameHolder` | `0x005df620` | 4 | member/0 | `engine/core/src/sim/objlist.cpp:1103` | yes | unread |  |
-| `MaxSetIdx` | `0x00422f50` | 3 | free/0 | `engine/core/src/sim/objlist.cpp:1110` |  | unread |  |
-| `ObjList::ObjClass` | `0x00560c10` | 2 | member/1 | `engine/core/src/sim/objlist.cpp:1097` | yes | unread |  |
-| `ObjList::ObjEnemy` | `0x005607b0` | 2 | member/1 | `engine/core/src/sim/objlist.cpp:1095` | yes | unread |  |
-| `ObjList::ObjAlly` | `0x005609e0` | 1 | member/1 | `engine/core/src/sim/objlist.cpp:1096` | yes | unread |  |
-| `ObjList::ObjInjured` | `0x00561090` | 1 | member/0 | `engine/core/src/sim/objlist.cpp:1098` | yes | unread |  |
+| `Obj::SetCommand` | `0x005b0a50` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2801` | yes | verified | Obj::SetCommand/void: tail cleared first (0x005b1120), lookup (miss: head kept), vtbl+0xbc then 0x005b07d0(0), which starts the new command inside the call through 0x005b4f20 (fixed: it started at the next command pass, and OUTPOST_BEHAVIOR.VS re-ordered a defender that had not left yet, for good; test set_command_starts_the_command_inside_the_call); own-script end not a cancel (0x0069fee0 stop flag). A verb with no compiled script is still left for the pass to retire |
+| `Obj::SetCommand` | `0x005b0b30` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2801` | yes | partial | Obj::SetCommand/point: as the void form, kind 1; same deferred-launch gap |
+| `Obj::SetCommand` | `0x005b0c30` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2801` | yes | partial | Obj::SetCommand/Obj: as the void form, kind 2; same deferred-launch gap |
+| `ObjList::SetCommand` | `0x00561c10` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2801` | yes | partial | ObjList::SetCommand/void: dead members skipped; a lookup miss ends the head too (0x00561d6a); same deferred-launch gap |
+| `ObjList::SetCommand` | `0x00562050` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2801` | yes | partial | ObjList::SetCommand/point: as the void list form, kind 1; same deferred-launch gap |
+| `ObjList::SetCommand` | `0x00562a70` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2801` | yes | partial | ObjList::SetCommand/Obj: invalid object argument does nothing; else as the void list form, kind 2; same deferred-launch gap |
+| `Query::SetCommand` | `0x00577db0` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2801` | yes | partial | Query::SetCommand/void: refreshed query, no dead test, a miss ends the head; same deferred-launch gap |
+| `Query::SetCommand` | `0x005780d0` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2801` | yes | partial | Query::SetCommand/point: as the void query form, kind 1; same deferred-launch gap |
+| `Query::SetCommand` | `0x00578870` | 918 | member/1, member/2 | `engine/core/src/sim/command.cpp:2801` | yes | partial | Query::SetCommand/Obj: invalid object argument does nothing; else as the void query form, kind 2; same deferred-launch gap |
+| `Obj::AddCommand` | `0x005afe90` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2798` | yes | verified | Obj::AddCommand/void: 0x005aef20 lookup by name and shape (miss queues nothing, draws no id), insert vtbl+0xbc (accept 0x005b1760, index 1 / back); no dead test |
+| `Obj::AddCommand` | `0x005aff70` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2798` | yes | verified | Obj::AddCommand/point: as the void form with kind 1 |
+| `Obj::AddCommand` | `0x005b0070` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2798` | yes | verified | Obj::AddCommand/Obj: as the void form with kind 2; the object handle is passed on unchecked |
+| `ObjList::AddCommand` | `0x00563020` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2798` | yes | verified | ObjList::AddCommand/void: list copy, dead members skipped, then Obj::AddCommand's rule per member |
+| `ObjList::AddCommand` | `0x00561e30` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2798` | yes | verified | ObjList::AddCommand/point: as the void list form, kind 1 |
+| `ObjList::AddCommand` | `0x00562800` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2798` | yes | verified | ObjList::AddCommand/Obj: an object argument that names nothing does nothing at all; else as the void list form, kind 2 |
+| `Query::AddCommand` | `0x00577c30` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2798` | yes | verified | Query::AddCommand/void: the query refreshed (vtbl+0x1c), every member, no dead test |
+| `Query::AddCommand` | `0x00577f30` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2798` | yes | verified | Query::AddCommand/point: as the void query form, kind 1 |
+| `Query::AddCommand` | `0x00578690` | 551 | member/2, member/3 | `engine/core/src/sim/command.cpp:2798` | yes | verified | Query::AddCommand/Obj: invalid object argument does nothing; else as the void query form, kind 2 |
+| `Obj::command` | `0x005abe40` | 144 | member/0, member/1 | `engine/core/src/sim/command.cpp:2803` |  | verified | Obj::command/0: the started command's name at [obj+0x110]; here the head's verb, and `idle` for a queue still empty before the first command pass (labelled reading) |
+| `Obj::command` | `0x005ae620` | 144 | member/0, member/1 | `engine/core/src/sim/command.cpp:2803` |  | verified | Obj::command/1: the verb ([cmd+0x34]) at the index, "" past the end; index 0 of an empty queue answers `idle` here (same reading) |
+| `Ship::Idle` | `0x005c6ea0` | 63 | member/0, member/1 | `engine/core/src/sim/command.cpp:2805` | yes | partial | Ship::Idle: duration should be the class idle animation's length (anim 12, record+0x4c), engine waits kDefaultIdleSlice; [ship+0x1cc] gate and the ship's activity dispatch not read; no held branch in the original |
+| `Unit::Idle` | `0x005d6030` | 63 | member/0, member/1 | `engine/core/src/sim/command.cpp:2805` | yes | partial | Unit::Idle: held wait and on-map target drop + ms budget read (0x005d2ca0); the idle activity's random draws (0x005a81b0 variant, rand(1,15) per 100 ms step) and animation not reproduced |
+| `Unit::GetCommanded` | `0x005d81e0` | 50 | member/0 | `engine/core/src/sim/command.cpp:2822` | yes | verified | Unit::GetCommanded: bit 0x80000 of [unit+0x194], a per-unit flag raised by the issue prologue (0x004ef475), not a command's; invalid receiver answers false |
+| `Unit::GotoAttack` | `0x005d6a90` | 47 | member/3, member/4 | `engine/core/src/sim/command.cpp:2812` | yes | partial | Unit::GotoAttack -> 0x005d40c0: combat target not set at entry, held/concealed targets not refused, invalid receiver/target answers, answer-after-wait (shared Goto design), 999/920 range caps |
+| `Obj::KillCommand` | `0x005b0d30` | 44 | member/0 | `engine/core/src/sim/command.cpp:2814` | yes | partial | Obj::KillCommand: dead object refused; 0x005b07d0(0) (release for a costed row, onfinish cancelled unless the caller is the runner). Gaps: deferred launch of the next command; 0x005b07d0's no-op without a live slot-0 script (0x0069f950) -- here an unstarted head is ended |
+| `ObjList::KillCommand` | `0x00562d20` | 44 | member/0 | `engine/core/src/sim/command.cpp:2814` | yes | partial | ObjList::KillCommand: dead members skipped; otherwise as Obj::KillCommand, same gaps |
+| `Query::KillCommand` | `0x00578a80` | 44 | member/0 | `engine/core/src/sim/command.cpp:2814` | yes | partial | Query::KillCommand: refreshed query, no dead test; otherwise as Obj::KillCommand, same gaps |
+| `GetCmdStaminaCost` | `0x00421e50` | 42 | free/1 | `engine/core/src/sim/command.cpp:2834` |  | verified | GetCmdStaminaCost: row by name, coststamina ([def+0x1f4]), 0 for a miss |
+| `Hero::FormKeepMoving` | `0x0052eaf0` | 29 | member/1 | `engine/core/src/sim/command.cpp:2817` | yes | partial | Hero::FormKeepMoving: suspension matches; formation object approximated (UpdateMove -> place_army), resume-time arrival drop (0x00417c10 -> 0x005d3830) left to movement |
+| `Obj::CmdCount` | `0x005aa2c0` | 29 | member/0, member/1 | `engine/core/src/sim/command.cpp:2815` | yes | verified | Obj::CmdCount/0: [obj+0x98], the queue's length; a dead receiver leaves the answer unwritten in the original (answered here) |
+| `Obj::CmdCount` | `0x005ae4d0` | 29 | member/0, member/1 | `engine/core/src/sim/command.cpp:2815` | yes | verified | Obj::CmdCount/1: counts queued commands whose row name ([def+0xc]) equals the argument byte for byte; row-less commands never counted |
+| `Unit::FormKeepMoving` | `0x005d7a40` | 29 | member/1 | `engine/core/src/sim/command.cpp:2817` | yes | partial | Unit::FormKeepMoving: target drop and suspension match; resume's arrival-test route drop not reproduced (formation-aimed route approximated) |
+| `ObjList::SetCommandOffset` | `0x00562520` | 28 | member/2 | `engine/core/src/sim/command.cpp:2826` | yes | verified | ObjList::SetCommandOffset: centre = mean position (0x004cd1b0), each live member's position + (pt - centre) clamped to the map rect, then SetCommand's point-form rule per member |
+| `Query::SetCommandOffset` | `0x00578460` | 28 | member/2 | `engine/core/src/sim/command.cpp:2826` | yes | verified | Query::SetCommandOffset: refreshed query, no dead test, otherwise ObjList::SetCommandOffset |
+| `Hero::FormSetupAndMoveTo` | `0x0052e5e0` | 26 | member/4 | `engine/core/src/sim/command.cpp:2819` |  | partial | Hero::FormSetupAndMoveTo(point): SetDest/hand-out read; a failed SetDest now ends members' form_move (0x005f2c10, fixed); range <=999 clamp absent; formation path approximated by the hero's route |
+| `Hero::FormSetupAndMoveTo` | `0x0052e890` | 26 | member/4 | `engine/core/src/sim/command.cpp:2819` | yes | partial | Hero::FormSetupAndMoveTo(Obj): a target naming nothing changes nothing (fixed); failed SetDest as the point form; non-unit targets route centre-to-centre with [formR+tR, formR+tR+range] ignoring min (0x0052e9a0..), engine measures edge gap; clamps absent; formation approximated |
+| `Obj::Progress` | `0x005ae890` | 23 | member/0, member/1 | `engine/core/src/sim/command.cpp:2824` | yes | verified | Obj::Progress/0: dead receiver returns without stamp or suspend; head row's execdelay, no suspend when 0; bar endpoints display only |
+| `Obj::Progress` | `0x005ac530` | 23 | member/0, member/1 | `engine/core/src/sim/command.cpp:2824` | yes | verified | Obj::Progress/1: stamps [obj+0x128]/[obj+0x12c] and suspends for the argument, zero included; no dead test; the resume clears the bar |
+| `GetCmdCost` | `0x00425630` | 22 | free/3 | `engine/core/src/sim/command.cpp:2835` | yes | verified | GetCmdCost: row by name; a miss answers false and writes neither out argument; a hit writes costgold ([def+0x1e8]) and costfood ([def+0x1ec]) |
+| `Obj::ExecCmd` | `0x005b5470` | 22 | member/4 | `engine/core/src/sim/command.cpp:2821` | yes | partial | Obj::ExecCmd: invalid/dead receiver refused, row by name, void; issue 0x004ef3d0 modelled (commanded prologue, groupdispatch with the row ambient 0x004ef5c1..0x004ef6f2, enabled test, method by shape obj->point->none, immediate, research arm, order insert 0x005b4e90 with replace&&!train). Gaps: first actor's group-move set-up (0x004e9100/0x004e8ae0/0x004ef1c0) and an offset row's per-actor spread (0x004e81f0) not reproduced |
+| `ObjList::ExecCmd` | `0x0055e240` | 22 | member/4 | `engine/core/src/sim/command.cpp:2821` | yes | partial | ObjList::ExecCmd: the list to the issue with player -1 and no dead test of its own; same issue gaps as Obj::ExecCmd |
+| `Unit::GotoEnter` | `0x005d6620` | 22 | member/5 | `engine/core/src/sim/command.cpp:2820` | yes | partial | Unit::GotoEnter: step-out, target drop (0x005d6810, fixed) and give-up match; gaps: answer-after-wait protocol (shared Goto design), destination clamp to the map rect, invalid-receiver answer true, taunt flag and animation remainder not reproduced |
+| `Obj::cmddelay` | `0x005ae9b0` | 8 | member/0 | `engine/core/src/sim/command.cpp:2823` |  | verified | Obj::cmddelay: the head command's row execdelay ([def+0x1f8]), 0 with no row |
+| `Unit::Taunt` | `0x005d60f0` | 6 | member/1 | `engine/core/src/sim/command.cpp:2811` | yes | partial | Unit::Taunt: Idle's body with activity 5; same gap (rand(1,3) per step and the taunt animation not reproduced) |
+| `Hero::FormPathLeft` | `0x0052ebc0` | 3 | member/0 | `engine/core/src/sim/command.cpp:2830` |  | partial | Hero::FormPathLeft: formation path approximated by the hero's route; +32000 for a flagged (incomplete) path (0x004185a0) not reproduced |
+| `Obj::ClearCommands` | `0x005aa250` | 2 | member/0 | `engine/core/src/sim/command.cpp:2828` | yes | verified | Obj::ClearCommands: dead object refused; vtbl+0xc0(0) = 0x005b1120, last index down to 1 through 0x005b07d0 (release first) |
+| `Obj::CmdDisable` | `0x005ab770` | 2 | member/1 | `engine/core/src/sim/command.cpp:2832` | yes | verified | Obj::CmdDisable: row index by name (negative: nothing), vtbl+0xdc = 0x005b5250: the 0xd8 predicate then the append; no dead test (building override of 0xd8 per the earlier reading of 0x004de580) |
+| `ObjList::AddCommandOffset` | `0x00562280` | 2 | member/3 | `engine/core/src/sim/command.cpp:2827` | yes | verified | ObjList::AddCommandOffset: as SetCommandOffset without the clear and without the clamp, AddCommand's point-form rule |
+| `ObjList::ClearCommands` | `0x00562ea0` | 2 | member/0 | `engine/core/src/sim/command.cpp:2828` | yes | verified | ObjList::ClearCommands: dead members skipped; as Obj::ClearCommands |
+| `Query::AddCommandOffset` | `0x00578280` | 2 | member/3 | `engine/core/src/sim/command.cpp:2827` | yes | verified | Query::AddCommandOffset: refreshed query, no dead test, no clamp, AddCommand's point-form rule |
+| `Query::ClearCommands` | `0x00578b60` | 2 | member/0 | `engine/core/src/sim/command.cpp:2828` | yes | verified | Query::ClearCommands: refreshed query, no dead test; as Obj::ClearCommands |
+| `Unit::SetCommanded` | `0x005d8180` | 2 | member/1 | `engine/core/src/sim/command.cpp:2829` | yes | verified | Unit::SetCommanded: writes that bit, queue or no queue; invalid receiver does nothing |
+| `Obj::SneakCommand` | `0x005b0930` | 1 | member/1 | `engine/core/src/sim/command.cpp:2799` | yes | partial | Obj::SneakCommand: empty queue untouched, bare-form lookup, clone (0x00599c40) + verb both front-inserted, head ended. Gap: the clone keeps the runner's id in the original (0x00599cdb); here it is issued a fresh one before the verb's |
+| `ObjList::GetCanExecCmd` | `0x00560300` | 1 | member/1 | `engine/core/src/sim/command.cpp:2831` | yes | verified | ObjList::GetCanExecCmd: a new list of the members whose vtbl+0xd8 (0x005ae380: [obj+0x9c] then the disabled list) accepts the row; no method test; unknown row gives an empty list |
+| `Unit::ForceIdle` | `0x005d88b0` | 1 | member/0 | `engine/core/src/sim/command.cpp:2807` | yes | partial | Unit::ForceIdle: [unit+0x1b8]=1; its only reader is the unmodelled idle animation activity (0x005d2ca0), so nothing is stored |
+| `Unit::FormAcceptMove` | `0x005d7880` | 1 | member/0 | `engine/core/src/sim/command.cpp:2818` | yes | partial | Unit::FormAcceptMove: no hero / no march returns 2 and ends the script (0x005d7a1c, fixed); step-out and target drop match; formation-aimed route approximated by place_army/march_member |
 
-## env -- 0 of 43 verified, 5,127 call sites
+## objlist -- 20 of 30 verified, 10,557 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `EnvReadInt` | `0x006acb60` | 474 | free/1, free/2 | `engine/core/src/sim/env.cpp:1405` |  | unread |  |
-| `EnvReadInt` | `0x006ad3e0` | 474 | free/1, free/2 | `engine/core/src/sim/env.cpp:1405` |  | unread |  |
-| `EnvReadInt` | `0x006acc60` | 474 | free/1, free/2 | `engine/core/src/sim/env.cpp:1405` |  | unread |  |
-| `EnvReadInt` | `0x006adb20` | 474 | free/1, free/2 | `engine/core/src/sim/env.cpp:1405` |  | unread |  |
-| `EnvWriteInt` | `0x006ac920` | 358 | free/2, free/3 | `engine/core/src/sim/env.cpp:1406` |  | unread |  |
-| `EnvWriteInt` | `0x006ad900` | 358 | free/2, free/3 | `engine/core/src/sim/env.cpp:1406` |  | unread |  |
-| `EnvWriteInt` | `0x006ad1a0` | 358 | free/2, free/3 | `engine/core/src/sim/env.cpp:1406` |  | unread |  |
-| `EnvWriteInt` | `0x006adeb0` | 358 | free/2, free/3 | `engine/core/src/sim/env.cpp:1406` |  | unread |  |
-| `IsResearched` | `0x00433790` | 183 | free/2 | `engine/core/src/sim/env.cpp:1416` |  | unread |  |
-| `IsResearched` | `0x00433b70` | 183 | free/2 | `engine/core/src/sim/env.cpp:1416` |  | unread |  |
-| `EnvReadString` | `0x006aca60` | 152 | free/1, free/2 | `engine/core/src/sim/env.cpp:1414` |  | unread |  |
-| `EnvReadString` | `0x006ad4d0` | 152 | free/1, free/2 | `engine/core/src/sim/env.cpp:1414` |  | unread |  |
-| `EnvReadString` | `0x006acd70` | 152 | free/1, free/2 | `engine/core/src/sim/env.cpp:1414` |  | unread |  |
-| `EnvReadString` | `0x006adbd0` | 152 | free/1, free/2 | `engine/core/src/sim/env.cpp:1414` |  | unread |  |
-| `GetConst` | `0x004c6270` | 152 | free/1 | `engine/core/src/sim/env.cpp:1417` |  | unread |  |
-| `Settlement::TSResearch` | `0x00426ab0` | 110 | member/1 | `engine/core/src/sim/env.cpp:1419` | yes | unread |  |
-| `EnvWriteString` | `0x006ac890` | 67 | free/2, free/3 | `engine/core/src/sim/env.cpp:1415` | yes | unread |  |
-| `EnvWriteString` | `0x006ad7e0` | 67 | free/2, free/3 | `engine/core/src/sim/env.cpp:1415` |  | unread |  |
-| `EnvWriteString` | `0x006ad070` | 67 | free/2, free/3 | `engine/core/src/sim/env.cpp:1415` |  | unread |  |
-| `EnvWriteString` | `0x006adde0` | 67 | free/2, free/3 | `engine/core/src/sim/env.cpp:1415` |  | unread |  |
-| `Settlement::CanResearch` | `0x00434870` | 53 | member/1 | `engine/core/src/sim/env.cpp:1421` | yes | unread |  |
-| `CheckUEnabled` | `0x004243d0` | 49 | free/5 | `engine/core/src/sim/env.cpp:1422` |  | unread |  |
-| `UTech` | `0x00420de0` | 30 | free/2 | `engine/core/src/sim/env.cpp:1423` |  | unread |  |
-| `UEnabled` | `0x00420ee0` | 27 | free/2 | `engine/core/src/sim/env.cpp:1424` |  | unread |  |
-| `IsResearching` | `0x00434000` | 23 | free/2 | `engine/core/src/sim/env.cpp:1425` |  | unread |  |
-| `IsResearching` | `0x004343e0` | 23 | free/2 | `engine/core/src/sim/env.cpp:1425` |  | unread |  |
-| `UType` | `0x00420d60` | 15 | free/2 | `engine/core/src/sim/env.cpp:1426` |  | unread |  |
-| `EnvReadObj` | `0x006acbd0` | 8 | free/2 | `engine/core/src/sim/env.cpp:1429` |  | unread |  |
-| `EnvReadObj` | `0x006ad6c0` | 8 | free/2 | `engine/core/src/sim/env.cpp:1429` |  | unread |  |
-| `EnvReadObj` | `0x006acf40` | 8 | free/2 | `engine/core/src/sim/env.cpp:1429` |  | unread |  |
-| `EnvReadObj` | `0x006add10` | 8 | free/2 | `engine/core/src/sim/env.cpp:1429` |  | unread |  |
-| `GetConstStr` | `0x004c62f0` | 8 | free/1 | `engine/core/src/sim/env.cpp:1428` |  | unread |  |
-| `EnvWriteObj` | `0x006ac9b0` | 6 | free/3 | `engine/core/src/sim/env.cpp:1430` |  | unread |  |
-| `EnvWriteObj` | `0x006ada00` | 6 | free/3 | `engine/core/src/sim/env.cpp:1430` |  | unread |  |
-| `EnvWriteObj` | `0x006ad2b0` | 6 | free/3 | `engine/core/src/sim/env.cpp:1430` |  | unread |  |
-| `EnvWriteObj` | `0x006adf70` | 6 | free/3 | `engine/core/src/sim/env.cpp:1430` |  | unread |  |
-| `UTrainCmd` | `0x00420e60` | 5 | free/2 | `engine/core/src/sim/env.cpp:1427` |  | unread |  |
-| `ArenaTrainCmd` | `0x00422a60` | 1 | free/1 | `engine/core/src/sim/env.cpp:1434` |  | unread |  |
-| `ArenaUTech` | `0x00420f10` | 1 | free/1 | `engine/core/src/sim/env.cpp:1432` |  | unread |  |
-| `ArenaUType` | `0x00422ad0` | 1 | free/1 | `engine/core/src/sim/env.cpp:1433` |  | unread |  |
-| `RUType` | `0x00420c90` | 1 | free/2 | `engine/core/src/sim/env.cpp:1431` |  | unread |  |
-| `TempleUTrain` | `0x00420ff0` | 1 | free/1 | `engine/core/src/sim/env.cpp:1436` |  | unread |  |
-| `TempleUType` | `0x00420f80` | 1 | free/1 | `engine/core/src/sim/env.cpp:1435` |  | unread |  |
+| `Count` | `0x00422300` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | partial | free Count(player, class): reads a per-player class-name counter map (0x004441e0/0x00444030) whose maintenance was not traced; engine counts live is-a objects |
+| `GAIKA::Count` | `0x00430a30` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` |  | partial | GAIKA::Count/6: walk matches census_of<true>; gaps named in squad.cpp: GAIKA node table approximated (design), 0x0044eb80 fog-memory rewrite absent, settlement sentry tail (0x00420c00) left out |
+| `GAIKA::Count` | `0x004330b0` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | partial | GAIKA::Count/3: walk matches count_class_in_node; same node-table and 0x0044eb80 gaps; sentry tail gated on ready count only, not BaseTownhall (0x0043ffc0) plus strength > 0 |
+| `ItemHolder::count` | `0x0053c660` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | partial | ItemHolder::count: vtbl+0x104 of the holder, not resolved; no shipped site reaches it, and m_count refuses an ItemHolder receiver |
+| `ObjList::count` | `0x0055e0c0` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | verified | ObjList::count: the deque's size word, members counted not resolved; prose at m_count |
+| `Query::count` | `0x00577b90` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | verified | Query::count: Refresh, accessor, size; invalid receiver prints and answers 0; evaluation itself is the query system's |
+| `Squad::Count` | `0x00427980` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | verified | Squad::Count: is-a by name over the squad's members; comma-list acceptance labelled (no shipped site) |
+| `ObjList::ClearDead` | `0x0055f430` | 398 | member/0 | `engine/core/src/sim/objlist.cpp:1314` | yes | verified | ClearDead: unresolvable or vtbl+0x50 (IsDead) members erased in place; same rule as m_is_dead |
+| `Query::GetObjList` | `0x0057a7c0` | 382 | member/0 | `engine/core/src/sim/objlist.cpp:1315` | yes | verified | GetObjList: Refresh then ordered copy (0x00438230); invalid receiver is a fresh empty list |
+| `ObjList::Add` | `0x005601a0` | 156 | member/1 | `engine/core/src/sim/objlist.cpp:1317` | yes | verified | ObjList::Add: FIXED -- dedup by handle (0x0050e2a0) and no validity test; test objlist_add_appends_once_and_takes_the_handle_as_it_stands |
+| `SquadList::Add` | `0x004379b0` | 156 | member/1 | `engine/core/src/sim/objlist.cpp:1317` | yes | verified | SquadList::Add: FIXED -- plain append, no dedup (0x00437870 -> 0x00435d90); test squadlist_add_goes_through_the_objlist_domain |
+| `Hero::army` | `0x00530580` | 92 | member/0 | `engine/core/src/sim/objlist.cpp:1316` | yes | partial | Hero::army: original pushes a live reference to [hero+0x1cc]; engine snapshots. Design: the pool's single AliasResolver serves settlement holders only |
+| `Obj::Clear` | `0x005ab210` | 70 | member/0 | `engine/core/src/sim/objlist.cpp:1319` | yes | verified | Obj::Clear: writes the invalid handle through a by-reference receiver; prose corrected from "writes into the object" |
+| `ObjList::Clear` | `0x0055f590` | 70 | member/0 | `engine/core/src/sim/objlist.cpp:1319` | yes | verified | ObjList::Clear: empties the deque (0x006a3cc0), handle kept |
+| `ObjList::AddList` | `0x0055ff00` | 68 | member/1 | `engine/core/src/sim/objlist.cpp:1318` | yes | verified | AddList: FIXED -- ordered union, push only when absent; test objlist_addlist_and_removelist_are_set_moves_not_copies |
+| `ObjList::Remove` | `0x0055f370` | 55 | member/1 | `engine/core/src/sim/objlist.cpp:1321` | yes | verified | Remove: FIXED -- first occurrence only (0x0041ee70), diagnostic when absent; test objlist_remove_and_removelist_take_one_occurrence_per_handle |
+| `ObjList::RemoveList` | `0x0055f100` | 29 | member/1 | `engine/core/src/sim/objlist.cpp:1320` | yes | partial | RemoveList: FIXED -- one first-occurrence erase per member of the argument; test objlist_remove_and_removelist_take_one_occurrence_per_handle. Gap: RemoveList(self) walks the list it erases in the original (no shipped site) |
+| `Ship::GetUnitsOnBoard` | `0x005c89f0` | 22 | member/0 | `engine/core/src/sim/objlist.cpp:1329` | yes | partial | GetUnitsOnBoard: copy of the ship holder's deque; engine answers id order since a ship holder keeps no roster here (differs after unload/reload) |
+| `NearestObj` / `Query::NearestObj` | `0x005794c0` | 19 | member/1 | `engine/core/src/sim/objlist.cpp:1328` | yes | verified | NearestObj (point): 10,000,000 start, strict less, edge distance 0x005a7900 |
+| `NearestObj` / `Query::NearestObj` | `0x00579620` | 19 | member/1 | `engine/core/src/sim/objlist.cpp:1328` | yes | verified | NearestObj (object): as point form less the argument's radius (0x005a77b0); invalid argument answers invalid |
+| `ObjList::Contains` | `0x0055e490` | 15 | member/1 | `engine/core/src/sim/objlist.cpp:1322` | yes | verified | ObjList::Contains: handle scan, argument not resolved |
+| `Query::Contains` | `0x00578d20` | 15 | member/1 | `engine/core/src/sim/objlist.cpp:1322` | yes | verified | Query::Contains: FIXED -- Refresh then handle scan (0x00571870); was refused, trapping the tutorial; test objlist_contains_on_a_query_asks_the_refreshed_result |
+| `ObjList::FilterClosest` | `0x005616c0` | 6 | member/2 | `engine/core/src/sim/objlist.cpp:1323` | yes | verified | FilterClosest: FIXED -- bounded heap (0x00561450, comparator 0x0055df20, sift 0x0055eb40); ties keep the earlier member; test objlist_filterclosest_is_a_bounded_heap_whose_ties_keep_the_earlier_member |
+| `IdxToSet` | `0x0042c780` | 5 | free/1 | `engine/core/src/sim/objlist.cpp:1338` | yes | partial | IdxToSet: slot table with holes reused first-free (0x005c3a80); engine never despawns a settlement so equal; load-time numbering not read |
+| `Unit::GetUnitsInSameHolder` | `0x005df620` | 4 | member/0 | `engine/core/src/sim/objlist.cpp:1332` | yes | partial | GetUnitsInSameHolder: FIXED -- a settlement holder's roster in garrison order (same deque as Settlement::Units); test objlist_get_units_in_same_holder_follows_the_holders_own_roster. Other holders fall back to id order |
+| `MaxSetIdx` | `0x00422f50` | 3 | free/0 | `engine/core/src/sim/objlist.cpp:1339` | yes | partial | MaxSetIdx: slot-table length, nulls included; see IdxToSet |
+| `ObjList::ObjClass` | `0x00560c10` | 2 | member/1 | `engine/core/src/sim/objlist.cpp:1326` | yes | verified | ObjClass: lookup 0x00409e40, is-a 0x0059a220; unknown name answers empty |
+| `ObjList::ObjEnemy` | `0x005607b0` | 2 | member/1 | `engine/core/src/sim/objlist.cpp:1324` | yes | verified | ObjEnemy: owner's relation bit 0 clear for the player record at player-1 |
+| `ObjList::ObjAlly` | `0x005609e0` | 1 | member/1 | `engine/core/src/sim/objlist.cpp:1325` | yes | verified | ObjAlly: complement of ObjEnemy's bit test |
+| `ObjList::ObjInjured` | `0x00561090` | 1 | member/0 | `engine/core/src/sim/objlist.cpp:1327` | yes | verified | ObjInjured: FIXED -- per-object maximum (+0xc8, object_max_health) not the class's; test objlist_obj_injured_measures_against_the_objects_own_maximum |
+
+## env -- 25 of 43 verified, 5,127 call sites
+
+| entry point | body | sites | engine | implemented at | cited | status | note |
+|---|---|---:|---|---|---|---|---|
+| `EnvReadInt` | `0x006acb60` | 474 | free/1, free/2 | `engine/core/src/sim/env.cpp:1750` |  | partial | EnvReadInt(str): MakePath context modelled for sequence threads only (0x005b9d40 sets '/'; fixed); object-attached and conversation contexts unmodelled, no root call reaches them |
+| `EnvReadInt` | `0x006ad3e0` | 474 | free/1, free/2 | `engine/core/src/sim/env.cpp:1750` | yes | verified | EnvReadInt(Settlement): invalid handle answers 0, no trap (fixed) |
+| `EnvReadInt` | `0x006acc60` | 474 | free/1, free/2 | `engine/core/src/sim/env.cpp:1750` | yes | verified | EnvReadInt(Building): keyed by object id, not Settlement/Bld (invisible to script); invalid or dead handle answers 0 (fixed) |
+| `EnvReadInt` | `0x006adb20` | 474 | free/1, free/2 | `engine/core/src/sim/env.cpp:1750` | yes | verified | EnvReadInt(int plr): Player%d with the integer verbatim; atol of the stored text (0x006ac740, CRT 0x00763919) |
+| `EnvWriteInt` | `0x006ac920` | 358 | free/2, free/3 | `engine/core/src/sim/env.cpp:1751` | yes | partial | EnvWriteInt(str): sequence context modelled (fixed); other launchers' contexts not |
+| `EnvWriteInt` | `0x006ad900` | 358 | free/2, free/3 | `engine/core/src/sim/env.cpp:1751` |  | verified | EnvWriteInt(Settlement): invalid handle stores nothing, no trap (fixed) |
+| `EnvWriteInt` | `0x006ad1a0` | 358 | free/2, free/3 | `engine/core/src/sim/env.cpp:1751` |  | verified | EnvWriteInt(Building): invalid or dead handle stores nothing (fixed) |
+| `EnvWriteInt` | `0x006adeb0` | 358 | free/2, free/3 | `engine/core/src/sim/env.cpp:1751` |  | verified | EnvWriteInt(int plr): ltoa(value,10) and map set (0x006ac4a0) |
+| `IsResearched` | `0x00433790` | 183 | free/2 | `engine/core/src/sim/env.cpp:1761` | yes | verified | IsResearched(Settlement): command row by name, first NamePlr/NameSet triple of its param (tokenizer 0x006ab970), owner+1 or settlement id; no row/no triple/invalid receiver -> false (fixed: was the research catalog, last triple, trap) |
+| `IsResearched` | `0x00433b70` | 183 | free/2 | `engine/core/src/sim/env.cpp:1761` | yes | verified | IsResearched(int): Player%d verbatim (0x00433be6 -> 0x00433e39); NameSet row -> false (fixed) |
+| `EnvReadString` | `0x006aca60` | 152 | free/1, free/2 | `engine/core/src/sim/env.cpp:1759` |  | partial | EnvReadString(str): sequence context modelled (fixed); other launchers' contexts not |
+| `EnvReadString` | `0x006ad4d0` | 152 | free/1, free/2 | `engine/core/src/sim/env.cpp:1759` |  | verified | EnvReadString(Settlement): invalid handle answers "" (fixed) |
+| `EnvReadString` | `0x006acd70` | 152 | free/1, free/2 | `engine/core/src/sim/env.cpp:1759` |  | verified | EnvReadString(Building): invalid or dead handle answers "" (fixed) |
+| `EnvReadString` | `0x006adbd0` | 152 | free/1, free/2 | `engine/core/src/sim/env.cpp:1759` |  | verified | EnvReadString(int plr): missing key is "" (0x007ab85a) |
+| `GetConst` | `0x004c6270` | 152 | free/1 | `engine/core/src/sim/env.cpp:1762` | yes | partial | GetConst: INI integer getter 0x0063f200 (sign, 0x hex or decimal, stops at first misfit; fixed: a half-numeric value was 0); a missing key pushes the un-zeroed local (a stack address) where this answers 0 -- only RecallDistance reaches it, dead value; INI loader's own comment handling (0x0063f120 store) not read |
+| `Settlement::TSResearch` | `0x00426ab0` | 110 | member/1 | `engine/core/src/sim/env.cpp:1764` | yes | partial | TSResearch: runs TSH_Research.vs on the owner's AI path; invalid receiver -> false (fixed); a helper that fails to run is a trap via the shared run_script_now where retail logs and answers false |
+| `EnvWriteString` | `0x006ac890` | 67 | free/2, free/3 | `engine/core/src/sim/env.cpp:1760` | yes | partial | EnvWriteString(str): sequence context modelled (fixed); other launchers' contexts not |
+| `EnvWriteString` | `0x006ad7e0` | 67 | free/2, free/3 | `engine/core/src/sim/env.cpp:1760` |  | verified | EnvWriteString(Settlement): invalid handle stores nothing (fixed) |
+| `EnvWriteString` | `0x006ad070` | 67 | free/2, free/3 | `engine/core/src/sim/env.cpp:1760` |  | verified | EnvWriteString(Building): invalid or dead handle stores nothing (fixed) |
+| `EnvWriteString` | `0x006adde0` | 67 | free/2, free/3 | `engine/core/src/sim/env.cpp:1760` |  | verified | EnvWriteString(int plr): value stored as is, empty included |
+| `Settlement::CanResearch` | `0x00434870` | 53 | member/1 | `engine/core/src/sim/env.cpp:1766` | yes | partial | CanResearch: row, idle lab, first ledger triple; no requirement check (fixed); lab finder 0x0042d010 (state string "idle", class command list) modelled by settlement_lab_for from row sources |
+| `CheckUEnabled` | `0x004243d0` | 49 | free/5 | `engine/core/src/sim/env.cpp:1767` | yes | partial | CheckUEnabled: 1-based player, type 0..5, max<0 set, max==0 clear, else set while Count(player, UType) < max (fixed: count was ignored); count shares Count's model (world_host) of the class-count map 0x004441e0 |
+| `UTech` | `0x00420de0` | 30 | free/2 | `engine/core/src/sim/env.cpp:1768` | yes | verified | UTech: as UType from 0x0081a448 |
+| `UEnabled` | `0x00420ee0` | 27 | free/2 | `engine/core/src/sim/env.cpp:1769` | yes | verified | UEnabled: bit & 31 (fixed: out-of-range bit was false) |
+| `IsResearching` | `0x00434000` | 23 | free/2 | `engine/core/src/sim/env.cpp:1770` | yes | verified | IsResearching(Settlement): as IsResearched with "researching" (fixed) |
+| `IsResearching` | `0x004343e0` | 23 | free/2 | `engine/core/src/sim/env.cpp:1770` | yes | verified | IsResearching(int): as IsResearched(int) with "researching" (fixed) |
+| `UType` | `0x00420d60` | 15 | free/2 | `engine/core/src/sim/env.cpp:1771` | yes | verified | UType: type 0..5 checked, race unchecked, table+race*6+type over the 184-pointer block (fixed: race>7 read next table); outside the block answers "" |
+| `EnvReadObj` | `0x006acbd0` | 8 | free/1, free/2 | `engine/core/src/sim/env.cpp:1774` |  | partial | EnvReadObj(str): root form now registered (fixed); context and id-space gaps as above |
+| `EnvReadObj` | `0x006ad6c0` | 8 | free/1, free/2 | `engine/core/src/sim/env.cpp:1774` |  | partial | EnvReadObj(Settlement): as the int form; invalid scope -> invalid handle (fixed) |
+| `EnvReadObj` | `0x006acf40` | 8 | free/1, free/2 | `engine/core/src/sim/env.cpp:1774` |  | partial | EnvReadObj(Building): as the int form; invalid scope -> invalid handle (fixed) |
+| `EnvReadObj` | `0x006add10` | 8 | free/1, free/2 | `engine/core/src/sim/env.cpp:1774` |  | partial | EnvReadObj(int plr): sscanf $$%d$$ rules and dead object -> invalid (fixed); original's 0..65535 index range not carried (32-bit never-reused ids, design) |
+| `GetConstStr` | `0x004c62f0` | 8 | free/1 | `engine/core/src/sim/env.cpp:1773` | yes | partial | GetConstStr: text or "" (fixed: numeric keys had no text); whether the INI store keeps inline comments not read (the two shipped keys have none) |
+| `EnvWriteObj` | `0x006ac9b0` | 6 | free/2, free/3 | `engine/core/src/sim/env.cpp:1775` | yes | partial | EnvWriteObj(str): root form now registered (fixed); context and $$65535$$ gaps as above |
+| `EnvWriteObj` | `0x006ada00` | 6 | free/2, free/3 | `engine/core/src/sim/env.cpp:1775` |  | partial | EnvWriteObj(Settlement): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above |
+| `EnvWriteObj` | `0x006ad2b0` | 6 | free/2, free/3 | `engine/core/src/sim/env.cpp:1775` |  | partial | EnvWriteObj(Building): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above |
+| `EnvWriteObj` | `0x006adf70` | 6 | free/2, free/3 | `engine/core/src/sim/env.cpp:1775` |  | partial | EnvWriteObj(int plr): invalid object stored as $$0$$ where the original writes $$65535$$ (both read back as nothing; id-space design) |
+| `UTrainCmd` | `0x00420e60` | 5 | free/2 | `engine/core/src/sim/env.cpp:1772` | yes | verified | UTrainCmd: as UType from 0x0081a508 |
+| `ArenaTrainCmd` | `0x00422a60` | 1 | free/1 | `engine/core/src/sim/env.cpp:1784` | yes | verified | ArenaTrainCmd: race 0..7 else "" |
+| `ArenaUTech` | `0x00420f10` | 1 | free/1 | `engine/core/src/sim/env.cpp:1782` | yes | verified | ArenaUTech: Egypt's slot is "Cult of Anubis" (fixed: was empty) |
+| `ArenaUType` | `0x00422ad0` | 1 | free/1 | `engine/core/src/sim/env.cpp:1783` | yes | verified | ArenaUType: race 0..7 else ""; table checked entry by entry |
+| `RUType` | `0x00420c90` | 1 | free/2 | `engine/core/src/sim/env.cpp:1781` | yes | verified | RUType: race 0..7 else -1, exact compare over the race's six types |
+| `TempleUTrain` | `0x00420ff0` | 1 | free/1 | `engine/core/src/sim/env.cpp:1786` | yes | partial | TempleUTrain: seven strings for eight races, Britain trainEPriest, Egypt trainTEnchantress (fixed); Germany's slot is a null pointer the original faults on, answered "" |
+| `TempleUType` | `0x00420f80` | 1 | free/1 | `engine/core/src/sim/env.cpp:1785` | yes | verified | TempleUType: race 0..7 else "" |
 
 ## economy -- 0 of 135 verified, 4,184 call sites
 
@@ -639,26 +639,26 @@ Batches are by the file that implements them, most-called file first.
 | `ShipNeeds` | `0x004226f0` | 1 | free/2 | `engine/core/src/sim/ai.cpp:4477` |  | unread |  |
 | `Unit::BestProtPos` | `0x0043a330` | 1 | member/4 | `engine/core/src/sim/ai.cpp:4474` | yes | unread |  |
 
-## scheduler -- 0 of 16 verified, 2,169 call sites
+## scheduler -- 10 of 16 verified, 2,169 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Sleep` | `0x006945e0` | 1,350 | free/1 | `engine/core/src/script/scheduler.cpp:605` | yes | unread |  |
-| `AIBreakScript` | `0x00421cd0` | 74 | free/1 | `engine/core/src/script/scheduler.cpp:615` |  | unread |  |
-| `AIBreakScript` | `0x00421d20` | 74 | free/1 | `engine/core/src/script/scheduler.cpp:615` |  | unread |  |
-| `AIRun` | `0x00422f90` | 72 | free/1, free/2, free/3, free/4, free/5, member/1, member/2, member/3, member/4, member/5 | `engine/core/src/script/scheduler.cpp:607` |  | unread |  |
-| `AIRun` | `0x00424a20` | 72 | free/1, free/2, free/3, free/4, free/5, member/1, member/2, member/3, member/4, member/5 | `engine/core/src/script/scheduler.cpp:607` |  | unread |  |
-| `AIRun` | `0x00424c30` | 72 | free/1, free/2, free/3, free/4, free/5, member/1, member/2, member/3, member/4, member/5 | `engine/core/src/script/scheduler.cpp:607` |  | unread |  |
-| `Conversation::Run` | `0x005098c0` | 55 | free/1, member/0 | `engine/core/src/script/scheduler.cpp:614` |  | unread |  |
-| `Run` | `0x004c6e30` | 55 | free/1, member/0 | `engine/core/src/script/scheduler.cpp:614` | yes | unread |  |
-| `Run` | `0x004c6f00` | 55 | free/1, member/0 | `engine/core/src/script/scheduler.cpp:614` |  | unread |  |
-| `Run` | `0x004c6fe0` | 55 | free/1, member/0 | `engine/core/src/script/scheduler.cpp:614` |  | unread |  |
-| `Run` | `0x004c70c0` | 55 | free/1, member/0 | `engine/core/src/script/scheduler.cpp:614` |  | unread |  |
-| `Run` | `0x004c71b0` | 55 | free/1, member/0 | `engine/core/src/script/scheduler.cpp:614` |  | unread |  |
-| `Run` | `0x004c72c0` | 55 | free/1, member/0 | `engine/core/src/script/scheduler.cpp:614` |  | unread |  |
-| `Settlement::Run` | `0x004c81e0` | 55 | free/1, member/0 | `engine/core/src/script/scheduler.cpp:614` |  | unread |  |
-| `KillScript` | `0x0061e730` | 13 | free/0 | `engine/core/src/script/scheduler.cpp:616` | yes | unread |  |
-| `StartPlayerScript` | `0x0056f970` | 2 | free/2 | `engine/core/src/script/scheduler.cpp:617` |  | unread |  |
+| `Sleep` | `0x006945e0` | 1,350 | free/1 | `engine/core/src/script/scheduler.cpp:771` | yes | verified | Sleep: two-phase suspend, wait stored for the runner, re-armed at clock + wait (0x00688220); scheduler order FIXED to the wheel's arming order (0x00688060/0x006879a0), test vs_scripts_due_together_run_in_the_order_they_were_armed. Interpreter's 15,000-instruction yield is a separate VM gap, noted |
+| `AIBreakScript` | `0x00421cd0` | 74 | free/1 | `engine/core/src/script/scheduler.cpp:786` | yes | partial | AIBreakScript: stops the caller-player's thread id 3..51 (0x0041cdc0/0x0069fee0); engine kills by global script id. Design: AIRun handles are per-AI-player recycled ids the scheduler does not keep |
+| `AIBreakScript` | `0x00421d20` | 74 | free/1 | `engine/core/src/script/scheduler.cpp:786` | yes | partial | AIBreakScript(player, handle): as 0x00421cd0 with the player explicit; not bound, no shipped site |
+| `AIRun` | `0x00422f90` | 72 | free/1, free/2, free/3, free/4, free/5, member/1, member/2, member/3, member/4, member/5 | `engine/core/src/script/scheduler.cpp:773` | yes | partial | AIRun(name): FIXED failure answers -1 (test vs_a_missing_script_is_survivable). Gap: per-player recycled handle 3..51 (design) and the caller's AI-player tag not checked |
+| `AIRun` | `0x00424a20` | 72 | free/1, free/2, free/3, free/4, free/5, member/1, member/2, member/3, member/4, member/5 | `engine/core/src/script/scheduler.cpp:773` | yes | partial | AIRun(name, set, ol, obj, n): as 0x00422f90; binds four parameters; same handle gap |
+| `AIRun` | `0x00424c30` | 72 | free/1, free/2, free/3, free/4, free/5, member/1, member/2, member/3, member/4, member/5 | `engine/core/src/script/scheduler.cpp:773` | yes | partial | AIRun(player, name, ...): read; not bound (engine binds free arity <= 5); no shipped site |
+| `Conversation::Run` | `0x005098c0` | 55 | free/1, free/2, free/3, free/4, free/5, free/6, member/0, member/1 | `engine/core/src/script/scheduler.cpp:783` | yes | partial | Conversation::Run: original polls with 1 ms suspends until finished, then deletes and clears the variable; engine plays inside the call (documented design in conversation.cpp) |
+| `Run` | `0x004c6e30` | 55 | free/1, free/2, free/3, free/4, free/5, free/6, member/0, member/1 | `engine/core/src/script/scheduler.cpp:783` | yes | verified | Run(name): FIXED -- compile and run synchronously (0x006a0360), was a spawned peer; test vs_run_calls_the_script_to_its_end_and_answers_nothing |
+| `Run` | `0x004c6f00` | 55 | free/1, free/2, free/3, free/4, free/5, free/6, member/0, member/1 | `engine/core/src/script/scheduler.cpp:783` | yes | verified | Run(name, i1): FIXED -- bound, synchronous, integers as parameters (same test shape) |
+| `Run` | `0x004c6fe0` | 55 | free/1, free/2, free/3, free/4, free/5, free/6, member/0, member/1 | `engine/core/src/script/scheduler.cpp:783` | yes | verified | Run(name, i1, i2): FIXED -- bound, synchronous; no shipped site |
+| `Run` | `0x004c70c0` | 55 | free/1, free/2, free/3, free/4, free/5, free/6, member/0, member/1 | `engine/core/src/script/scheduler.cpp:783` | yes | verified | Run(name, i1..i3): FIXED -- bound, synchronous; no shipped site |
+| `Run` | `0x004c71b0` | 55 | free/1, free/2, free/3, free/4, free/5, free/6, member/0, member/1 | `engine/core/src/script/scheduler.cpp:783` | yes | verified | Run(name, i1..i4): FIXED -- bound, synchronous; no shipped site |
+| `Run` | `0x004c72c0` | 55 | free/1, free/2, free/3, free/4, free/5, free/6, member/0, member/1 | `engine/core/src/script/scheduler.cpp:783` | yes | verified | Run(name, i1..i5): FIXED -- bound, synchronous; no shipped site |
+| `Settlement::Run` | `0x004c81e0` | 55 | free/1, free/2, free/3, free/4, free/5, free/6, member/0, member/1 | `engine/core/src/script/scheduler.cpp:783` | yes | verified | Settlement::Run(set, name): FIXED -- bound as member Run/1, synchronous with the settlement as parameter; no shipped site |
+| `KillScript` | `0x0061e730` | 13 | free/0 | `engine/core/src/script/scheduler.cpp:787` | yes | verified | KillScript: answers status 2, the interpreter stops the calling thread; Scheduler::kill on the caller |
+| `StartPlayerScript` | `0x0056f970` | 2 | free/2 | `engine/core/src/script/scheduler.cpp:788` | yes | verified | StartPlayerScript: FIXED -- eight name slots per player (0x0056f720), a second start of a name refused, slots saved; test vs_start_player_script_starts_a_name_once_per_player |
 
 ## text -- 0 of 16 verified, 1,601 call sites
 
@@ -681,172 +681,172 @@ Batches are by the file that implements them, most-called file first.
 | `ClearDebug` | `0x005a7fd0` | 1 | free/0 | `engine/core/src/sim/text.cpp:192` |  | unread |  |
 | `StrMid` | `0x00697740` | 1 | free/3 | `engine/core/src/sim/text.cpp:199` | yes | unread |  |
 
-## player_host -- 0 of 37 verified, 1,278 call sites
+## player_host -- 25 of 37 verified, 1,278 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `EnemyObjs` | `0x005756b0` | 312 | free/2 | `engine/core/src/sim/player_host.cpp:886` | yes | unread |  |
-| `Obj::IsEnemy` | `0x005aa480` | 172 | member/1 | `engine/core/src/sim/player_host.cpp:914` | yes | unread |  |
-| `Settlement::IsEnemy` | `0x00425250` | 172 | member/1 | `engine/core/src/sim/player_host.cpp:914` | yes | unread |  |
-| `DiplCeaseFire` | `0x00565500` | 116 | free/3 | `engine/core/src/sim/player_host.cpp:881` |  | unread |  |
-| `Obj::race` | `0x005ada20` | 112 | member/0 | `engine/core/src/sim/player_host.cpp:916` | yes | unread |  |
-| `SetPlayerStatus` | `0x004d4310` | 81 | free/3, free/4 | `engine/core/src/sim/player_host.cpp:895` |  | unread |  |
-| `SetPlayerStatus` | `0x004d43a0` | 81 | free/3, free/4 | `engine/core/src/sim/player_host.cpp:895` |  | unread |  |
-| `DiplShareView` | `0x00565640` | 55 | free/3 | `engine/core/src/sim/player_host.cpp:882` |  | unread |  |
-| `DiplShareSupport` | `0x005655a0` | 22 | free/3 | `engine/core/src/sim/player_host.cpp:883` |  | unread |  |
-| `DiplShareControl` | `0x00565700` | 18 | free/3 | `engine/core/src/sim/player_host.cpp:884` |  | unread |  |
-| `GetPlayerUnits` | `0x005debe0` | 17 | free/1, free/2 | `engine/core/src/sim/player_host.cpp:888` |  | unread |  |
-| `GetPlayerUnits` | `0x005dea90` | 17 | free/1, free/2 | `engine/core/src/sim/player_host.cpp:888` |  | unread |  |
-| `MilUnits` | `0x00421ee0` | 15 | free/1 | `engine/core/src/sim/player_host.cpp:893` | yes | unread |  |
-| `Settlement::IsOwn` | `0x004252c0` | 15 | member/1 | `engine/core/src/sim/player_host.cpp:928` | yes | unread |  |
-| `FriendlyObjs` | `0x00575ab0` | 10 | free/2 | `engine/core/src/sim/player_host.cpp:892` | yes | unread |  |
-| `Settlement::IsAlly` | `0x004251e0` | 8 | member/1 | `engine/core/src/sim/player_host.cpp:929` | yes | unread |  |
-| `GetRaceStr` | `0x005a7ce0` | 5 | free/1 | `engine/core/src/sim/player_host.cpp:918` | yes | unread |  |
-| `RevealHiddenEnemyUnits` | `0x004c8460` | 5 | free/3 | `engine/core/src/sim/player_host.cpp:887` | yes | unread |  |
-| `ClearDiplomacy` | `0x00565480` | 4 | free/0 | `engine/core/src/sim/player_host.cpp:885` |  | unread |  |
-| `ControllableObjs` | `0x005758b0` | 4 | free/2 | `engine/core/src/sim/player_host.cpp:897` | yes | unread |  |
-| `DiplAreAllied` | `0x00564c10` | 4 | free/2 | `engine/core/src/sim/player_host.cpp:903` | yes | unread |  |
-| `GetRaceStrPref` | `0x005a7d40` | 4 | free/1 | `engine/core/src/sim/player_host.cpp:919` | yes | unread |  |
-| `Outposts` | `0x0042d770` | 4 | free/1 | `engine/core/src/sim/player_host.cpp:894` | yes | unread |  |
-| `Party` | `0x004ca9c0` | 4 | free/0 | `engine/core/src/sim/player_host.cpp:890` | yes | unread |  |
-| `GetSettlements` | `0x00436f50` | 3 | free/2 | `engine/core/src/sim/player_host.cpp:901` | yes | unread |  |
-| `Obj::raceStrPref` | `0x005aab60` | 3 | member/0 | `engine/core/src/sim/player_host.cpp:926` | yes | unread |  |
-| `DiplGetCeaseFire` | `0x00564990` | 2 | free/2 | `engine/core/src/sim/player_host.cpp:904` | yes | unread |  |
-| `DiplGetShareSupport` | `0x00564a30` | 2 | free/2 | `engine/core/src/sim/player_host.cpp:907` | yes | unread |  |
-| `PartyQuery` | `0x005731e0` | 2 | free/0 | `engine/core/src/sim/player_host.cpp:891` | yes | unread |  |
-| `Strongholds` | `0x0042d2f0` | 2 | free/1 | `engine/core/src/sim/player_host.cpp:898` | yes | unread |  |
-| `DiplGetShareControl` | `0x00564b70` | 1 | free/2 | `engine/core/src/sim/player_host.cpp:906` | yes | unread |  |
-| `DiplGetShareView` | `0x00564ad0` | 1 | free/2 | `engine/core/src/sim/player_host.cpp:905` | yes | unread |  |
-| `GetClassRace` | `0x005b26a0` | 1 | free/1 | `engine/core/src/sim/player_host.cpp:917` | yes | unread |  |
-| `GetPlayerRace` | `0x005a80e0` | 1 | free/1 | `engine/core/src/sim/player_host.cpp:900` |  | unread |  |
-| `IsAIPlayer` | `0x00422900` | 1 | free/1 | `engine/core/src/sim/player_host.cpp:899` |  | unread |  |
-| `Obj::raceStr` | `0x005aaa90` | 1 | member/0 | `engine/core/src/sim/player_host.cpp:925` |  | unread |  |
-| `Obj::raceStrPrefLow` | `0x005aac90` | 1 | member/0 | `engine/core/src/sim/player_host.cpp:927` | yes | unread |  |
+| `EnemyObjs` | `0x005756b0` | 312 | free/2 | `engine/core/src/sim/player_host.cpp:995` | yes | partial | EnemyObjs: 1..16, one class by registry lookup, unknown class -> invalid handle (fixed); the factory 0x004fe990 interns (same player/type/class string returns the existing query) where this mints one per call (query-lifetime design); query evaluation is the query batch's |
+| `Obj::IsEnemy` | `0x005aa480` | 172 | member/1 | `engine/core/src/sim/player_host.cpp:1023` | yes | verified | Obj::IsEnemy: receiver owner's row, parameter owner's column, bit 0 clear; either invalid -> false |
+| `Settlement::IsEnemy` | `0x00425250` | 172 | member/1 | `engine/core/src/sim/player_host.cpp:1023` | yes | verified | Settlement::IsEnemy: row idPlayer-1, column owner, bit 0 clear; the original has no range check (out of range answers false here) |
+| `DiplCeaseFire` | `0x00565500` | 116 | free/3 | `engine/core/src/sim/player_host.cpp:990` |  | verified | DiplCeaseFire: both 1..16 checked first, one row read-modify-write of mask 0x01 through SetRelation 0x005652f0 (self skipped); its UI notification is presentation |
+| `Obj::race` | `0x005ada20` | 112 | member/0 | `engine/core/src/sim/player_host.cpp:1025` | yes | partial | Obj::race: class descriptor +0xb48; invalid receiver 0 (fixed); class-loader numbers None -1, Mutable 9, unknown 8 (fixed); a class with no race in its chain reads -1, the descriptor default unrecovered |
+| `SetPlayerStatus` | `0x004d4310` | 81 | free/3, free/4 | `engine/core/src/sim/player_host.cpp:1004` |  | verified | SetPlayerStatus(player, slot, text, important): writes only the HUD status table (0x005cd4f0 on 0x009bf87c); nothing in the simulation reads it, a no-op here |
+| `SetPlayerStatus` | `0x004d43a0` | 81 | free/3, free/4 | `engine/core/src/sim/player_host.cpp:1004` |  | verified | SetPlayerStatus(player, slot, important): as above (0x005cd570) |
+| `DiplShareView` | `0x00565640` | 55 | free/3 | `engine/core/src/sim/player_host.cpp:991` |  | partial | DiplShareView: mask 0x10 as DiplCeaseFire; the set path's exploration merge 0x00564fa0 is unread and not done |
+| `DiplShareSupport` | `0x005655a0` | 22 | free/3 | `engine/core/src/sim/player_host.cpp:992` |  | verified | DiplShareSupport: mask 0x04, as DiplCeaseFire |
+| `DiplShareControl` | `0x00565700` | 18 | free/3 | `engine/core/src/sim/player_host.cpp:993` |  | verified | DiplShareControl: mask 0x20, as DiplCeaseFire |
+| `GetPlayerUnits` | `0x005debe0` | 17 | free/1, free/2 | `engine/core/src/sim/player_host.cpp:997` |  | partial | GetPlayerUnits(player): every member of every squad on the player's AI record; this engine lists Unit-class objects (squad-roster design) |
+| `GetPlayerUnits` | `0x005dea90` | 17 | free/1, free/2 | `engine/core/src/sim/player_host.cpp:997` |  | partial | GetPlayerUnits(player, class): members of the squads on the player's AI record (0x005de750, count gate 0x004441e0, Hero/BaseMage arms); this engine lists world objects of the class (squad-roster design) |
+| `MilUnits` | `0x00421ee0` | 15 | free/1 | `engine/core/src/sim/player_host.cpp:1002` | yes | partial | MilUnits: members of squads with Squad::Eval != 0 and no 0x25 flag, neither Peaceful nor Animal (0x00443eb0); kept as a Military-class census because Squad::Eval is never written (squad design) |
+| `Settlement::IsOwn` | `0x004252c0` | 15 | member/1 | `engine/core/src/sim/player_host.cpp:1037` | yes | verified | Settlement::IsOwn: owner id == idPlayer-1 |
+| `FriendlyObjs` | `0x00575ab0` | 10 | free/2 | `engine/core/src/sim/player_host.cpp:1001` | yes | partial | FriendlyObjs: type 1, as EnemyObjs |
+| `Settlement::IsAlly` | `0x004251e0` | 8 | member/1 | `engine/core/src/sim/player_host.cpp:1038` | yes | verified | Settlement::IsAlly: row idPlayer-1, column owner, bit 0 set |
+| `GetRaceStr` | `0x005a7ce0` | 5 | free/1 | `engine/core/src/sim/player_host.cpp:1027` | yes | verified | GetRaceStr: the 0..7 name table 0x005a7b90, else "" |
+| `RevealHiddenEnemyUnits` | `0x004c8460` | 5 | free/3 | `engine/core/src/sim/player_host.cpp:996` | yes | partial | RevealHiddenEnemyUnits: radius squared, hidden + unit, owner not in the revealer's seeflags (+0x18, kept by SetRelation from the owner's share-view bit) (fixed: was is_enemy); own units spared (self bit unread); the stealth stamp [obj+0x1a4] is not stored |
+| `ClearDiplomacy` | `0x00565480` | 4 | free/0 | `engine/core/src/sim/player_host.cpp:994` |  | verified | ClearDiplomacy: SetRelation(i,j, i==j ? 0x35 : 0) over 16x16, diagonal skipped by SetRelation |
+| `ControllableObjs` | `0x005758b0` | 4 | free/2 | `engine/core/src/sim/player_host.cpp:1006` | yes | partial | ControllableObjs: type 3, as EnemyObjs |
+| `DiplAreAllied` | `0x00564c10` | 4 | free/2 | `engine/core/src/sim/player_host.cpp:1012` | yes | verified | DiplAreAllied: 1..16 else false; same player true; else both records' allied dword (+0x64, playerdata/@allied, PlayerSetup::allied_flag) and mutual bit 0 (fixed: allied flag was ignored) |
+| `GetRaceStrPref` | `0x005a7d40` | 4 | free/1 | `engine/core/src/sim/player_host.cpp:1028` | yes | verified | GetRaceStrPref: G R C I M B E T, else "" |
+| `Outposts` | `0x0042d770` | 4 | free/1 | `engine/core/src/sim/player_host.cpp:1003` | yes | verified | Outposts: as Strongholds with is_a Outpost (0x00440060); a negative decremented number counts every owner |
+| `Party` | `0x004ca9c0` | 4 | free/0 | `engine/core/src/sim/player_host.cpp:999` | yes | partial | Party: copies the roster deque at globals+0x1030; this engine lists in_party objects in ascending id (roster order approximated) |
+| `GetSettlements` | `0x00436f50` | 3 | free/2 | `engine/core/src/sim/player_host.cpp:1010` | yes | verified | GetSettlements: one class lookup, is_a on the central building (0x0059c020); a decremented player below 0 is the wildcard (fixed: only 0 was); pushes central-building handles |
+| `Obj::raceStrPref` | `0x005aab60` | 3 | member/0 | `engine/core/src/sim/player_host.cpp:1035` | yes | verified | Obj::raceStrPref: upper-case letter table; invalid receiver "" |
+| `DiplGetCeaseFire` | `0x00564990` | 2 | free/2 | `engine/core/src/sim/player_host.cpp:1013` | yes | verified | DiplGetCeaseFire: row p1, column p2, bit 0 (disassembly 0x005649be..0x005649e5); out of range false |
+| `DiplGetShareSupport` | `0x00564a30` | 2 | free/2 | `engine/core/src/sim/player_host.cpp:1016` | yes | verified | DiplGetShareSupport: bit 2, as DiplGetCeaseFire |
+| `PartyQuery` | `0x005731e0` | 2 | free/0 | `engine/core/src/sim/player_host.cpp:1000` | yes | partial | PartyQuery: the session's party query refreshed, invalid handle with no party; this engine answers an empty party query (no party object) |
+| `Strongholds` | `0x0042d2f0` | 2 | free/1 | `engine/core/src/sim/player_host.cpp:1007` | yes | verified | Strongholds: settlements of idPlayer-1 whose central building's class is_a BaseTownhall now (0x0043ffc0) (fixed: was the creation-time kind) |
+| `DiplGetShareControl` | `0x00564b70` | 1 | free/2 | `engine/core/src/sim/player_host.cpp:1015` | yes | verified | DiplGetShareControl: bit 5, as DiplGetCeaseFire |
+| `DiplGetShareView` | `0x00564ad0` | 1 | free/2 | `engine/core/src/sim/player_host.cpp:1014` | yes | verified | DiplGetShareView: bit 4, as DiplGetCeaseFire |
+| `GetClassRace` | `0x005b26a0` | 1 | free/1 | `engine/core/src/sim/player_host.cpp:1026` | yes | verified | GetClassRace: registry lookup, unknown class -1, else the descriptor's race (class_race_from_name, fixed) |
+| `GetPlayerRace` | `0x005a80e0` | 1 | free/1 | `engine/core/src/sim/player_host.cpp:1009` |  | partial | GetPlayerRace: reads the session setup table at 0x00a87c48 [(p-1)*0xc0+0xa4], -1 when the table is absent; its writer was not read; this answers the race match setup resolved into PlayerSetup::race |
+| `IsAIPlayer` | `0x00422900` | 1 | free/1 | `engine/core/src/sim/player_host.cpp:1008` | yes | verified | IsAIPlayer: record(idPlayer-1)+0x88 (the AI pointer AIStart builds and AIStop nulls) non-null, i.e. AiPlayer::active (fixed: was the slot's control) |
+| `Obj::raceStr` | `0x005aaa90` | 1 | member/0 | `engine/core/src/sim/player_host.cpp:1034` |  | verified | Obj::raceStr: class race through 0x005a7b90; invalid receiver "" |
+| `Obj::raceStrPrefLow` | `0x005aac90` | 1 | member/0 | `engine/core/src/sim/player_host.cpp:1036` | yes | verified | Obj::raceStrPrefLow: lower-case letter table; invalid receiver "" |
 
 ## combat -- 0 of 39 verified, 1,222 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Obj::range` | `0x005adde0` | 273 | member/0 | `engine/core/src/sim/combat.cpp:2812` |  | unread |  |
-| `Obj::attack` / `Obj::damage` | `0x005add80` | 116 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2807` | yes | unread |  |
-| `Obj::IsValidTarget` | `0x005aafd0` | 81 | member/1 | `engine/core/src/sim/combat.cpp:2756` | yes | unread |  |
-| `Unit::BestTargetInSquadSight` | `0x005dcbc0` | 69 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2763` |  | unread |  |
-| `Unit::BestTargetInSquadSight` | `0x005dce00` | 69 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2763` | yes | unread |  |
-| `Obj::Damage` | `0x005ab5d0` | 60 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2764` |  | unread |  |
-| `Query::Damage` | `0x00578ec0` | 60 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2764` |  | unread |  |
-| `Building::Attack` | `0x004df650` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2807` | yes | unread |  |
-| `Catapult::Attack` | `0x004e2d10` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2807` | yes | unread |  |
-| `Obj::SetStamina` | `0x005ab440` | 56 | member/1 | `engine/core/src/sim/combat.cpp:2816` | yes | unread |  |
-| `Unit::Attack` | `0x005ddb50` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2807` | yes | unread |  |
-| `Obj::Heal` | `0x005ab690` | 45 | member/1 | `engine/core/src/sim/combat.cpp:2813` |  | unread |  |
-| `Query::Heal` | `0x00578ff0` | 45 | member/1 | `engine/core/src/sim/combat.cpp:2813` |  | unread |  |
-| `Catapult::InRange` | `0x004e3230` | 28 | member/1 | `engine/core/src/sim/combat.cpp:2818` |  | unread |  |
-| `Unit::InRange` | `0x005d72e0` | 28 | member/1 | `engine/core/src/sim/combat.cpp:2818` |  | unread |  |
-| `Obj::maxstamina` | `0x005adba0` | 19 | member/0 | `engine/core/src/sim/combat.cpp:2808` |  | unread |  |
-| `Unit::maxstamina` | `0x005d8d10` | 19 | member/0 | `engine/core/src/sim/combat.cpp:2808` |  | unread |  |
-| `Obj::HealStamina` | `0x005ab700` | 11 | member/1 | `engine/core/src/sim/combat.cpp:2814` | yes | unread |  |
-| `Query::HealStamina` | `0x00579100` | 11 | member/1 | `engine/core/src/sim/combat.cpp:2814` | yes | unread |  |
-| `Unit::BestTargetForPos` | `0x005dd280` | 7 | member/0 | `engine/core/src/sim/combat.cpp:2784` | yes | unread |  |
-| `Obj::CanAttack` | `0x005ab060` | 6 | member/1 | `engine/core/src/sim/combat.cpp:2817` | yes | unread |  |
-| `Catapult::SetTarget` | `0x004e3600` | 5 | member/1 | `engine/core/src/sim/combat.cpp:2830` |  | unread |  |
-| `InvalidateDamageFormulaParams` | `0x004c6b10` | 5 | free/0 | `engine/core/src/sim/combat.cpp:2753` | yes | unread |  |
-| `Unit::BestTargetInRange` | `0x005dd2a0` | 5 | member/2 | `engine/core/src/sim/combat.cpp:2785` | yes | unread |  |
-| `Unit::BestTargetInSquadSightMisZeroDamage` | `0x005dcb00` | 5 | member/0 | `engine/core/src/sim/combat.cpp:2779` |  | unread |  |
-| `Catapult::ClearTarget` | `0x004e3710` | 4 | member/0 | `engine/core/src/sim/combat.cpp:2829` |  | unread |  |
-| `Building::BestTarget` | `0x004dcc60` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2821` |  | unread |  |
-| `Catapult::BestTarget` | `0x004e2f60` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2821` |  | unread |  |
-| `Catapult::GetPointOnTarget` | `0x004e3080` | 3 | member/1 | `engine/core/src/sim/combat.cpp:2820` | yes | unread |  |
-| `Unit::BestTargetInSquadSightExclusive` | `0x005dcf30` | 3 | member/1 | `engine/core/src/sim/combat.cpp:2782` | yes | unread |  |
-| `Unit::BestTargetInSquadSight_PreferUndiseased` | `0x005dcd40` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2781` |  | unread |  |
-| `Unit::TimeWithoutAttack` | `0x005d7f50` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2765` |  | unread |  |
-| `Catapult::GetCurrentTarget` | `0x004e3500` | 2 | member/0 | `engine/core/src/sim/combat.cpp:2828` |  | unread |  |
-| `Unit::EnemiesInSight` | `0x005d74d0` | 2 | member/0 | `engine/core/src/sim/combat.cpp:2819` | yes | unread |  |
-| `Obj::SetHealth` | `0x005ab4e0` | 1 | member/1 | `engine/core/src/sim/combat.cpp:2815` |  | unread |  |
-| `SetExperienceModifier` | `0x005d2fb0` | 1 | free/2 | `engine/core/src/sim/combat.cpp:2824` | yes | unread |  |
-| `Unit::AddBonus` | `0x005e0ce0` | 1 | member/5 | `engine/core/src/sim/combat.cpp:2827` | yes | unread |  |
-| `Unit::BestNoIndependentTargetInSquadSight` | `0x005dcc80` | 1 | member/0 | `engine/core/src/sim/combat.cpp:2780` |  | unread |  |
-| `Unit::RecalcBonuses` | `0x005e0380` | 1 | member/0 | `engine/core/src/sim/combat.cpp:2826` | yes | unread |  |
+| `Obj::range` | `0x005adde0` | 273 | member/0 | `engine/core/src/sim/combat.cpp:2813` |  | unread |  |
+| `Obj::attack` / `Obj::damage` | `0x005add80` | 116 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2808` | yes | unread |  |
+| `Obj::IsValidTarget` | `0x005aafd0` | 81 | member/1 | `engine/core/src/sim/combat.cpp:2757` | yes | unread |  |
+| `Unit::BestTargetInSquadSight` | `0x005dcbc0` | 69 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2764` |  | unread |  |
+| `Unit::BestTargetInSquadSight` | `0x005dce00` | 69 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2764` | yes | unread |  |
+| `Obj::Damage` | `0x005ab5d0` | 60 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2765` |  | unread |  |
+| `Query::Damage` | `0x00578ec0` | 60 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2765` |  | unread |  |
+| `Building::Attack` | `0x004df650` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2808` | yes | unread |  |
+| `Catapult::Attack` | `0x004e2d10` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2808` | yes | unread |  |
+| `Obj::SetStamina` | `0x005ab440` | 56 | member/1 | `engine/core/src/sim/combat.cpp:2817` | yes | unread |  |
+| `Unit::Attack` | `0x005ddb50` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2808` | yes | unread |  |
+| `Obj::Heal` | `0x005ab690` | 45 | member/1 | `engine/core/src/sim/combat.cpp:2814` |  | unread |  |
+| `Query::Heal` | `0x00578ff0` | 45 | member/1 | `engine/core/src/sim/combat.cpp:2814` |  | unread |  |
+| `Catapult::InRange` | `0x004e3230` | 28 | member/1 | `engine/core/src/sim/combat.cpp:2819` |  | unread |  |
+| `Unit::InRange` | `0x005d72e0` | 28 | member/1 | `engine/core/src/sim/combat.cpp:2819` |  | unread |  |
+| `Obj::maxstamina` | `0x005adba0` | 19 | member/0 | `engine/core/src/sim/combat.cpp:2809` |  | unread |  |
+| `Unit::maxstamina` | `0x005d8d10` | 19 | member/0 | `engine/core/src/sim/combat.cpp:2809` |  | unread |  |
+| `Obj::HealStamina` | `0x005ab700` | 11 | member/1 | `engine/core/src/sim/combat.cpp:2815` | yes | unread |  |
+| `Query::HealStamina` | `0x00579100` | 11 | member/1 | `engine/core/src/sim/combat.cpp:2815` | yes | unread |  |
+| `Unit::BestTargetForPos` | `0x005dd280` | 7 | member/0 | `engine/core/src/sim/combat.cpp:2785` | yes | unread |  |
+| `Obj::CanAttack` | `0x005ab060` | 6 | member/1 | `engine/core/src/sim/combat.cpp:2818` | yes | unread |  |
+| `Catapult::SetTarget` | `0x004e3600` | 5 | member/1 | `engine/core/src/sim/combat.cpp:2831` |  | unread |  |
+| `InvalidateDamageFormulaParams` | `0x004c6b10` | 5 | free/0 | `engine/core/src/sim/combat.cpp:2754` | yes | unread |  |
+| `Unit::BestTargetInRange` | `0x005dd2a0` | 5 | member/2 | `engine/core/src/sim/combat.cpp:2786` | yes | unread |  |
+| `Unit::BestTargetInSquadSightMisZeroDamage` | `0x005dcb00` | 5 | member/0 | `engine/core/src/sim/combat.cpp:2780` |  | unread |  |
+| `Catapult::ClearTarget` | `0x004e3710` | 4 | member/0 | `engine/core/src/sim/combat.cpp:2830` |  | unread |  |
+| `Building::BestTarget` | `0x004dcc60` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2822` |  | unread |  |
+| `Catapult::BestTarget` | `0x004e2f60` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2822` |  | unread |  |
+| `Catapult::GetPointOnTarget` | `0x004e3080` | 3 | member/1 | `engine/core/src/sim/combat.cpp:2821` | yes | unread |  |
+| `Unit::BestTargetInSquadSightExclusive` | `0x005dcf30` | 3 | member/1 | `engine/core/src/sim/combat.cpp:2783` | yes | unread |  |
+| `Unit::BestTargetInSquadSight_PreferUndiseased` | `0x005dcd40` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2782` |  | unread |  |
+| `Unit::TimeWithoutAttack` | `0x005d7f50` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2766` | yes | unread |  |
+| `Catapult::GetCurrentTarget` | `0x004e3500` | 2 | member/0 | `engine/core/src/sim/combat.cpp:2829` |  | unread |  |
+| `Unit::EnemiesInSight` | `0x005d74d0` | 2 | member/0 | `engine/core/src/sim/combat.cpp:2820` | yes | unread |  |
+| `Obj::SetHealth` | `0x005ab4e0` | 1 | member/1 | `engine/core/src/sim/combat.cpp:2816` |  | unread |  |
+| `SetExperienceModifier` | `0x005d2fb0` | 1 | free/2 | `engine/core/src/sim/combat.cpp:2825` | yes | unread |  |
+| `Unit::AddBonus` | `0x005e0ce0` | 1 | member/5 | `engine/core/src/sim/combat.cpp:2828` | yes | unread |  |
+| `Unit::BestNoIndependentTargetInSquadSight` | `0x005dcc80` | 1 | member/0 | `engine/core/src/sim/combat.cpp:2781` |  | unread |  |
+| `Unit::RecalcBonuses` | `0x005e0380` | 1 | member/0 | `engine/core/src/sim/combat.cpp:2827` | yes | unread |  |
 
 ## hero -- 0 of 64 verified, 1,181 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Unit::SetLevel` | `0x005d7690` | 207 | member/1 | `engine/core/src/sim/hero.cpp:2431` |  | unread |  |
-| `Unit::hero` | `0x005d7380` | 153 | member/0 | `engine/core/src/sim/hero.cpp:2428` |  | unread |  |
-| `Unit::inherentlevel` | `0x005d77a0` | 142 | member/0 | `engine/core/src/sim/hero.cpp:2430` | yes | unread |  |
-| `Unit::experience` | `0x005d75b0` | 102 | member/0 | `engine/core/src/sim/hero.cpp:2429` |  | unread |  |
-| `ItemHolder::AddItem` | `0x0053c5a0` | 69 | member/1 | `engine/core/src/sim/hero.cpp:2432` |  | unread |  |
-| `Obj::AddItem` | `0x005ac910` | 69 | member/1 | `engine/core/src/sim/hero.cpp:2432` |  | unread |  |
-| `Unit::level` | `0x005d7740` | 45 | member/0 | `engine/core/src/sim/hero.cpp:2436` |  | unread |  |
-| `Hero::SetAutocast` | `0x0052f790` | 33 | member/1 | `engine/core/src/sim/hero.cpp:2458` | yes | unread |  |
-| `ItemHolder::HasItem` | `0x0053c910` | 29 | member/1 | `engine/core/src/sim/hero.cpp:2435` |  | unread |  |
-| `Obj::HasItem` | `0x004263e0` | 29 | member/1 | `engine/core/src/sim/hero.cpp:2435` |  | unread |  |
-| `Unit::SetExperience` | `0x005d7610` | 27 | member/1 | `engine/core/src/sim/hero.cpp:2433` |  | unread |  |
-| `GetSquad` | `0x00421090` | 18 | free/2, member/0 | `engine/core/src/sim/hero.cpp:2437` | yes | unread |  |
-| `Unit::GetSquad` | `0x00424510` | 18 | free/2, member/0 | `engine/core/src/sim/hero.cpp:2437` |  | unread |  |
-| `Druid::FindUnitToLearn` | `0x00513ce0` | 15 | member/0 | `engine/core/src/sim/hero.cpp:2460` | yes | unread |  |
-| `Hero::GetSkill` | `0x0052f550` | 12 | member/1 | `engine/core/src/sim/hero.cpp:2438` |  | unread |  |
-| `ItemUsed` | `0x00534a30` | 12 | free/1 | `engine/core/src/sim/hero.cpp:2450` | yes | unread |  |
-| `Druid::FindUnitToHeal` | `0x00513990` | 11 | member/0 | `engine/core/src/sim/hero.cpp:2462` |  | unread |  |
-| `Obj::UseItem` | `0x00426480` | 11 | member/1 | `engine/core/src/sim/hero.cpp:2439` | yes | unread |  |
-| `GetUseCount` | `0x00534aa0` | 10 | free/0 | `engine/core/src/sim/hero.cpp:2451` | yes | unread |  |
-| `Squad::HasFreedom` | `0x00427aa0` | 10 | member/0 | `engine/core/src/sim/hero.cpp:2440` | yes | unread |  |
-| `Unit::HasFreedom` | `0x005d7d30` | 10 | member/0 | `engine/core/src/sim/hero.cpp:2440` | yes | unread |  |
-| `Druid::FindUnitBelowILevel` | `0x005132f0` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2466` |  | unread |  |
-| `Druid::FindUnitBelowILevel` | `0x00513390` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2466` |  | unread |  |
-| `Unit::DetachFrom` | `0x005db3b0` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2441` |  | unread |  |
-| `Druid::GetBestCrippleTarget` | `0x00513e10` | 8 | member/0 | `engine/core/src/sim/hero.cpp:2467` |  | unread |  |
-| `Unit::GetBestCurseTarget` | `0x005d9cb0` | 8 | member/0 | `engine/core/src/sim/hero.cpp:2465` |  | unread |  |
-| `Druid::FindUnitToRevitalize` | `0x00513aa0` | 7 | member/0 | `engine/core/src/sim/hero.cpp:2463` | yes | unread |  |
-| `Hero::DetachArmy` | `0x0052fd20` | 6 | member/0 | `engine/core/src/sim/hero.cpp:2443` |  | unread |  |
-| `Hero::SkillInEffect` | `0x0052f5c0` | 6 | member/1 | `engine/core/src/sim/hero.cpp:2442` |  | unread |  |
-| `Obj::FindItem` | `0x005acf10` | 6 | member/1 | `engine/core/src/sim/hero.cpp:2453` |  | unread |  |
-| `Obj::RemoveItemsOfType` | `0x005b0450` | 5 | member/1 | `engine/core/src/sim/hero.cpp:2444` |  | unread |  |
-| `Obj::item_count` | `0x005ad390` | 5 | member/0 | `engine/core/src/sim/hero.cpp:2445` |  | unread |  |
-| `Druid::FindUnitToHide` | `0x00513bb0` | 4 | member/0 | `engine/core/src/sim/hero.cpp:2464` | yes | unread |  |
-| `Hero::HasArmy` | `0x0052e4b0` | 4 | member/0 | `engine/core/src/sim/hero.cpp:2454` |  | unread |  |
-| `Hero::SetSkill` | `0x0052f4f0` | 4 | member/2 | `engine/core/src/sim/hero.cpp:2452` |  | unread |  |
-| `Obj::GiveItem` | `0x005aca10` | 4 | member/2 | `engine/core/src/sim/hero.cpp:2456` |  | unread |  |
-| `GetRandomHeroClass` | `0x00531440` | 3 | free/2 | `engine/core/src/sim/hero.cpp:2471` | yes | unread |  |
-| `Hero::AvailableSkillPoints` | `0x0052f680` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2486` |  | unread |  |
-| `Hero::GetFinalPartyOrientation` | `0x0052f7e0` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2475` | yes | unread |  |
-| `Hero::IsArmyOutside` | `0x0052ff00` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2455` | yes | unread |  |
-| `Hero::TimePastLastAttack` | `0x0052ee40` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2473` | yes | unread |  |
-| `Item::SetUseCount` | `0x00535100` | 3 | member/1 | `engine/core/src/sim/hero.cpp:2448` | yes | unread |  |
-| `Item::use_count` | `0x00535000` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2447` | yes | unread |  |
-| `Obj::max_items` | `0x005ad3f0` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2449` | yes | unread |  |
-| `SetUseCount` | `0x00534b10` | 3 | member/1 | `engine/core/src/sim/hero.cpp:2448` |  | unread |  |
-| `Hero::IsHeroArmyFull` | `0x0052e320` | 2 | member/0 | `engine/core/src/sim/hero.cpp:2469` | yes | unread |  |
-| `HeroSkillId` | `0x0052d9a0` | 2 | free/1 | `engine/core/src/sim/hero.cpp:2494` |  | unread |  |
-| `ItemHolder::RemoveItem` | `0x0053cb20` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2490` |  | unread |  |
-| `Obj::DropItem` | `0x005acdf0` | 2 | member/2 | `engine/core/src/sim/hero.cpp:2489` |  | unread |  |
-| `Obj::OpenItemHolder` | `0x005acba0` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2457` | yes | unread |  |
-| `Obj::PutItem` | `0x005acc90` | 2 | member/2 | `engine/core/src/sim/hero.cpp:2488` |  | unread |  |
-| `Obj::RemoveItem` | `0x005ad230` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2490` |  | unread |  |
-| `Obj::RemoveItem` | `0x005ad190` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2490` |  | unread |  |
-| `Unit::AttachTo` | `0x005de090` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2468` |  | unread |  |
-| `GetItem` | `0x006a5a00` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2446` |  | unread |  |
-| `Hero::HasFinalPartyOrientationRequest` | `0x0052f850` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2477` | yes | unread |  |
-| `Hero::SetFinalPartyOrientation` | `0x0052f6e0` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2476` | yes | unread |  |
-| `Hero::UseSkill` | `0x0052f620` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2487` |  | unread |  |
-| `Hero::autocast` | `0x0052f740` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2459` | yes | unread |  |
-| `Hero::maxarmy` | `0x0052e380` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2470` | yes | unread |  |
-| `HeroArmiesFullPerc` | `0x00421f30` | 1 | free/1 | `engine/core/src/sim/hero.cpp:2495` |  | unread |  |
-| `Obj::ExchangeItem` | `0x005ac800` | 1 | member/2 | `engine/core/src/sim/hero.cpp:2491` |  | unread |  |
-| `Obj::GetItem` | `0x005ad310` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2446` | yes | unread |  |
-| `Unit::IncKills` | `0x005d7810` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2434` | yes | unread |  |
+| `Unit::SetLevel` | `0x005d7690` | 207 | member/1 | `engine/core/src/sim/hero.cpp:2435` |  | unread |  |
+| `Unit::hero` | `0x005d7380` | 153 | member/0 | `engine/core/src/sim/hero.cpp:2432` |  | unread |  |
+| `Unit::inherentlevel` | `0x005d77a0` | 142 | member/0 | `engine/core/src/sim/hero.cpp:2434` | yes | unread |  |
+| `Unit::experience` | `0x005d75b0` | 102 | member/0 | `engine/core/src/sim/hero.cpp:2433` |  | unread |  |
+| `ItemHolder::AddItem` | `0x0053c5a0` | 69 | member/1 | `engine/core/src/sim/hero.cpp:2436` |  | unread |  |
+| `Obj::AddItem` | `0x005ac910` | 69 | member/1 | `engine/core/src/sim/hero.cpp:2436` |  | unread |  |
+| `Unit::level` | `0x005d7740` | 45 | member/0 | `engine/core/src/sim/hero.cpp:2440` |  | unread |  |
+| `Hero::SetAutocast` | `0x0052f790` | 33 | member/1 | `engine/core/src/sim/hero.cpp:2462` | yes | unread |  |
+| `ItemHolder::HasItem` | `0x0053c910` | 29 | member/1 | `engine/core/src/sim/hero.cpp:2439` |  | unread |  |
+| `Obj::HasItem` | `0x004263e0` | 29 | member/1 | `engine/core/src/sim/hero.cpp:2439` |  | unread |  |
+| `Unit::SetExperience` | `0x005d7610` | 27 | member/1 | `engine/core/src/sim/hero.cpp:2437` |  | unread |  |
+| `GetSquad` | `0x00421090` | 18 | free/2, member/0 | `engine/core/src/sim/hero.cpp:2441` | yes | unread |  |
+| `Unit::GetSquad` | `0x00424510` | 18 | free/2, member/0 | `engine/core/src/sim/hero.cpp:2441` |  | unread |  |
+| `Druid::FindUnitToLearn` | `0x00513ce0` | 15 | member/0 | `engine/core/src/sim/hero.cpp:2464` | yes | unread |  |
+| `Hero::GetSkill` | `0x0052f550` | 12 | member/1 | `engine/core/src/sim/hero.cpp:2442` |  | unread |  |
+| `ItemUsed` | `0x00534a30` | 12 | free/1 | `engine/core/src/sim/hero.cpp:2454` | yes | unread |  |
+| `Druid::FindUnitToHeal` | `0x00513990` | 11 | member/0 | `engine/core/src/sim/hero.cpp:2466` |  | unread |  |
+| `Obj::UseItem` | `0x00426480` | 11 | member/1 | `engine/core/src/sim/hero.cpp:2443` | yes | unread |  |
+| `GetUseCount` | `0x00534aa0` | 10 | free/0 | `engine/core/src/sim/hero.cpp:2455` | yes | unread |  |
+| `Squad::HasFreedom` | `0x00427aa0` | 10 | member/0 | `engine/core/src/sim/hero.cpp:2444` | yes | unread |  |
+| `Unit::HasFreedom` | `0x005d7d30` | 10 | member/0 | `engine/core/src/sim/hero.cpp:2444` | yes | unread |  |
+| `Druid::FindUnitBelowILevel` | `0x005132f0` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2470` |  | unread |  |
+| `Druid::FindUnitBelowILevel` | `0x00513390` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2470` |  | unread |  |
+| `Unit::DetachFrom` | `0x005db3b0` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2445` |  | unread |  |
+| `Druid::GetBestCrippleTarget` | `0x00513e10` | 8 | member/0 | `engine/core/src/sim/hero.cpp:2471` |  | unread |  |
+| `Unit::GetBestCurseTarget` | `0x005d9cb0` | 8 | member/0 | `engine/core/src/sim/hero.cpp:2469` |  | unread |  |
+| `Druid::FindUnitToRevitalize` | `0x00513aa0` | 7 | member/0 | `engine/core/src/sim/hero.cpp:2467` | yes | unread |  |
+| `Hero::DetachArmy` | `0x0052fd20` | 6 | member/0 | `engine/core/src/sim/hero.cpp:2447` |  | unread |  |
+| `Hero::SkillInEffect` | `0x0052f5c0` | 6 | member/1 | `engine/core/src/sim/hero.cpp:2446` |  | unread |  |
+| `Obj::FindItem` | `0x005acf10` | 6 | member/1 | `engine/core/src/sim/hero.cpp:2457` |  | unread |  |
+| `Obj::RemoveItemsOfType` | `0x005b0450` | 5 | member/1 | `engine/core/src/sim/hero.cpp:2448` |  | unread |  |
+| `Obj::item_count` | `0x005ad390` | 5 | member/0 | `engine/core/src/sim/hero.cpp:2449` |  | unread |  |
+| `Druid::FindUnitToHide` | `0x00513bb0` | 4 | member/0 | `engine/core/src/sim/hero.cpp:2468` | yes | unread |  |
+| `Hero::HasArmy` | `0x0052e4b0` | 4 | member/0 | `engine/core/src/sim/hero.cpp:2458` |  | unread |  |
+| `Hero::SetSkill` | `0x0052f4f0` | 4 | member/2 | `engine/core/src/sim/hero.cpp:2456` |  | unread |  |
+| `Obj::GiveItem` | `0x005aca10` | 4 | member/2 | `engine/core/src/sim/hero.cpp:2460` |  | unread |  |
+| `GetRandomHeroClass` | `0x00531440` | 3 | free/2 | `engine/core/src/sim/hero.cpp:2475` | yes | unread |  |
+| `Hero::AvailableSkillPoints` | `0x0052f680` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2490` |  | unread |  |
+| `Hero::GetFinalPartyOrientation` | `0x0052f7e0` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2479` | yes | unread |  |
+| `Hero::IsArmyOutside` | `0x0052ff00` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2459` | yes | unread |  |
+| `Hero::TimePastLastAttack` | `0x0052ee40` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2477` | yes | unread |  |
+| `Item::SetUseCount` | `0x00535100` | 3 | member/1 | `engine/core/src/sim/hero.cpp:2452` | yes | unread |  |
+| `Item::use_count` | `0x00535000` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2451` | yes | unread |  |
+| `Obj::max_items` | `0x005ad3f0` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2453` | yes | unread |  |
+| `SetUseCount` | `0x00534b10` | 3 | member/1 | `engine/core/src/sim/hero.cpp:2452` |  | unread |  |
+| `Hero::IsHeroArmyFull` | `0x0052e320` | 2 | member/0 | `engine/core/src/sim/hero.cpp:2473` | yes | unread |  |
+| `HeroSkillId` | `0x0052d9a0` | 2 | free/1 | `engine/core/src/sim/hero.cpp:2498` |  | unread |  |
+| `ItemHolder::RemoveItem` | `0x0053cb20` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2494` |  | unread |  |
+| `Obj::DropItem` | `0x005acdf0` | 2 | member/2 | `engine/core/src/sim/hero.cpp:2493` |  | unread |  |
+| `Obj::OpenItemHolder` | `0x005acba0` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2461` | yes | unread |  |
+| `Obj::PutItem` | `0x005acc90` | 2 | member/2 | `engine/core/src/sim/hero.cpp:2492` |  | unread |  |
+| `Obj::RemoveItem` | `0x005ad230` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2494` |  | unread |  |
+| `Obj::RemoveItem` | `0x005ad190` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2494` |  | unread |  |
+| `Unit::AttachTo` | `0x005de090` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2472` |  | unread |  |
+| `GetItem` | `0x006a5a00` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2450` |  | unread |  |
+| `Hero::HasFinalPartyOrientationRequest` | `0x0052f850` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2481` | yes | unread |  |
+| `Hero::SetFinalPartyOrientation` | `0x0052f6e0` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2480` | yes | unread |  |
+| `Hero::UseSkill` | `0x0052f620` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2491` |  | unread |  |
+| `Hero::autocast` | `0x0052f740` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2463` | yes | unread |  |
+| `Hero::maxarmy` | `0x0052e380` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2474` | yes | unread |  |
+| `HeroArmiesFullPerc` | `0x00421f30` | 1 | free/1 | `engine/core/src/sim/hero.cpp:2499` |  | unread |  |
+| `Obj::ExchangeItem` | `0x005ac800` | 1 | member/2 | `engine/core/src/sim/hero.cpp:2495` |  | unread |  |
+| `Obj::GetItem` | `0x005ad310` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2450` | yes | unread |  |
+| `Unit::IncKills` | `0x005d7810` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2438` | yes | unread |  |
 
-## area -- 0 of 7 verified, 1,049 call sites
+## area -- 7 of 7 verified, 1,049 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `AreaCenter` | `0x004d8bb0` | 279 | free/1 | `engine/core/src/sim/area.cpp:464` | yes | unread |  |
-| `ClassPlayerAreaObjs` | `0x00573e60` | 274 | free/3 | `engine/core/src/sim/area.cpp:465` |  | unread |  |
-| `AttackArea` | `0x0057a510` | 263 | free/2 | `engine/core/src/sim/area.cpp:466` |  | unread |  |
-| `AreaObjs` | `0x00577090` | 193 | free/2 | `engine/core/src/sim/area.cpp:467` |  | unread |  |
-| `GetRandomPointInArea` | `0x004d9100` | 31 | free/1 | `engine/core/src/sim/area.cpp:468` |  | unread |  |
-| `MoveToArea` | `0x0057a530` | 8 | free/2 | `engine/core/src/sim/area.cpp:469` |  | unread |  |
-| `AreaDistTo` | `0x004d8970` | 1 | free/2 | `engine/core/src/sim/area.cpp:470` |  | unread |  |
+| `AreaCenter` | `0x004d8bb0` | 279 | free/1 | `engine/core/src/sim/area.cpp:559` | yes | verified | AreaCenter: first member of the named group; circle centre or truncated rectangle midpoints; (-1,-1) on a miss |
+| `ClassPlayerAreaObjs` | `0x00573e60` | 274 | free/3 | `engine/core/src/sim/area.cpp:560` | yes | verified | ClassPlayerAreaObjs: FIXED -- player outside 1..16 and a name that is no class answer the invalid query, before the area; test an_area_query_with_no_such_class_or_player_is_an_invalid_handle. The query (0x004fe730) is the query system's |
+| `AttackArea` | `0x0057a510` | 263 | free/2 | `engine/core/src/sim/area.cpp:561` |  | verified | AttackArea ("advance" into 0x0057a2e0): FIXED -- dead members skipped before their draw, invalid query a message; tests attack_area_passes_over_a_dead_member_before_its_draw, attack_area_on_an_invalid_query_orders_nothing_and_does_not_trap |
+| `AreaObjs` | `0x00577090` | 193 | free/2 | `engine/core/src/sim/area.cpp:562` |  | verified | AreaObjs: FIXED -- a name that is no class answers the invalid query (0x00577218); test an_area_query_with_no_such_class_or_player_is_an_invalid_handle |
+| `GetRandomPointInArea` | `0x004d9100` | 31 | free/1 | `engine/core/src/sim/area.cpp:563` | yes | verified | GetRandomPointInArea: sampler 0x004d6d40, 20 attempts; FIXED -- box clamped to the map rectangle before drawing; test the_sampler_draws_only_over_the_part_of_an_area_on_the_map |
+| `MoveToArea` | `0x0057a530` | 8 | free/2 | `engine/core/src/sim/area.cpp:564` |  | verified | MoveToArea ("move" into 0x0057a2e0): same body and fixes as AttackArea |
+| `AreaDistTo` | `0x004d8970` | 1 | free/2 | `engine/core/src/sim/area.cpp:565` | yes | verified | AreaDistTo: circle edge distance or rectangle Chebyshev, clamped at 0; -1 on a miss |
 
 ## feedback -- 0 of 31 verified, 895 call sites
 
@@ -888,60 +888,60 @@ Batches are by the file that implements them, most-called file first.
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Squad::State` | `0x00421170` | 89 | member/0 | `engine/core/src/sim/squad.cpp:4289` | yes | unread |  |
-| `SquadList::Cur` | `0x0042bbd0` | 72 | member/0 | `engine/core/src/sim/squad.cpp:4317` |  | unread |  |
-| `Squad::GAIKAIn` | `0x004212c0` | 61 | member/0 | `engine/core/src/sim/squad.cpp:4290` |  | unread |  |
-| `Squad::Leader` | `0x00421310` | 37 | member/0 | `engine/core/src/sim/squad.cpp:4291` | yes | unread |  |
-| `Squad::AIDest` | `0x004215c0` | 36 | member/0 | `engine/core/src/sim/squad.cpp:4294` | yes | unread |  |
-| `Item::id` | `0x005351a0` | 33 | member/0 | `engine/core/src/sim/squad.cpp:4300` |  | unread |  |
-| `SquadList::Next` | `0x0042bb80` | 32 | member/0 | `engine/core/src/sim/squad.cpp:4318` | yes | unread |  |
-| `Squad::SetCmd` | `0x004272d0` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4301` |  | unread |  |
-| `Squad::SetCmd` | `0x00421460` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4301` |  | unread |  |
-| `Squad::SetCmd` | `0x00427470` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4301` |  | unread |  |
-| `SquadList::EOL` | `0x0042bae0` | 27 | member/0 | `engine/core/src/sim/squad.cpp:4319` | yes | unread |  |
-| `IntArray::size` | `0x00697f20` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4323` | yes | unread |  |
-| `Squad::Size` | `0x00422ca0` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4323` | yes | unread |  |
-| `SquadList::Size` | `0x0042bc40` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4323` | yes | unread |  |
-| `StrArray::size` | `0x00698070` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4323` | yes | unread |  |
-| `StrMap::size` | `0x00698300` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4323` |  | unread |  |
-| `Squad::Lock` | `0x004217e0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4320` | yes | unread |  |
-| `Squad::Unlock` | `0x00421820` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4321` | yes | unread |  |
-| `SquadList::Lock` | `0x0042bce0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4320` | yes | unread |  |
-| `SquadList::Unlock` | `0x0042bde0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4321` | yes | unread |  |
-| `Unit::IsEnemyInSquadSight` | `0x005d7400` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4303` | yes | unread |  |
-| `GAIKA::GetSquads` | `0x00437a20` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4326` | yes | unread |  |
-| `GAIKA::GetSquads` | `0x00439000` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4326` |  | unread |  |
-| `GAIKA::GetSquads` | `0x00439230` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4326` |  | unread |  |
-| `GAIKA::GetSquads` | `0x00439500` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4326` | yes | unread |  |
-| `Squad::TestFlags` | `0x00421720` | 18 | member/1 | `engine/core/src/sim/squad.cpp:4305` |  | unread |  |
-| `Squad::ClrCmd` | `0x004271d0` | 13 | member/3 | `engine/core/src/sim/squad.cpp:4304` | yes | unread |  |
-| `Squad::SendTo` | `0x00421520` | 13 | member/2 | `engine/core/src/sim/squad.cpp:4309` | yes | unread |  |
-| `SquadList::Rewind` | `0x0042bb30` | 12 | member/0 | `engine/core/src/sim/squad.cpp:4324` | yes | unread |  |
-| `GAIKA::GetAIControlledUnits` | `0x0043a920` | 4 | member/4 | `engine/core/src/sim/squad.cpp:4332` | yes | unread |  |
-| `MilEval` | `0x00421fb0` | 4 | free/1 | `engine/core/src/sim/squad.cpp:4310` |  | unread |  |
-| `Squad::GetLastAttacker` | `0x004218b0` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4293` | yes | unread |  |
-| `Squad::LastFightTime` | `0x00421860` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4292` | yes | unread |  |
-| `Squad::SrcGAIKA` | `0x00421220` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4297` | yes | unread |  |
-| `NumSquads` | `0x00422c40` | 3 | free/1 | `engine/core/src/sim/squad.cpp:4335` |  | unread |  |
-| `Squad::DelOrder` | `0x00421670` | 3 | member/0 | `engine/core/src/sim/squad.cpp:4313` | yes | unread |  |
-| `Squad::StateTime` | `0x00421400` | 3 | member/0 | `engine/core/src/sim/squad.cpp:4307` | yes | unread |  |
-| `AllyMilEval` | `0x004220c0` | 2 | free/1 | `engine/core/src/sim/squad.cpp:4311` |  | unread |  |
-| `GAIKA::AllEnemiesInHolder` | `0x00430dc0` | 2 | member/1 | `engine/core/src/sim/squad.cpp:4347` | yes | unread |  |
-| `Squad::CalcGoAround` | `0x0042e300` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4350` | yes | unread |  |
-| `Squad::DestGAIKA` | `0x00421270` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4298` | yes | unread |  |
-| `Squad::OrderDest` | `0x00421620` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4299` | yes | unread |  |
-| `Squad::TakeNearbyItems` | `0x00429530` | 2 | member/1 | `engine/core/src/sim/squad.cpp:4306` | yes | unread |  |
-| `Squadize` | `0x00425530` | 2 | free/3 | `engine/core/src/sim/squad.cpp:4355` | yes | unread |  |
-| `EnemyMilEval` | `0x00422240` | 1 | free/1 | `engine/core/src/sim/squad.cpp:4312` |  | unread |  |
-| `GAIKA::EvalNeighbors` | `0x00430800` | 1 | member/6 | `engine/core/src/sim/squad.cpp:4343` | yes | unread |  |
-| `NearestHospital` | `0x004316b0` | 1 | free/1 | `engine/core/src/sim/squad.cpp:4356` | yes | unread |  |
-| `Squad::EvalAttach` | `0x00424550` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4351` | yes | unread |  |
-| `Squad::FoodComing` | `0x0042a5b0` | 1 | member/0 | `engine/core/src/sim/squad.cpp:4352` | yes | unread |  |
-| `Squad::InvadeThroughGate` | `0x004299e0` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4348` | yes | unread |  |
-| `Squad::No` | `0x004210f0` | 1 | member/0 | `engine/core/src/sim/squad.cpp:4308` | yes | unread |  |
-| `Squad::SendFoodWagon` | `0x0042a750` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4353` | yes | unread |  |
-| `Squad::UseTeleport` | `0x004296b0` | 1 | member/4 | `engine/core/src/sim/squad.cpp:4349` |  | unread |  |
-| `SquadList::Train` | `0x004366c0` | 1 | member/5 | `engine/core/src/sim/squad.cpp:4330` | yes | unread |  |
+| `Squad::State` | `0x00421170` | 89 | member/0 | `engine/core/src/sim/squad.cpp:4310` | yes | unread |  |
+| `SquadList::Cur` | `0x0042bbd0` | 72 | member/0 | `engine/core/src/sim/squad.cpp:4338` |  | unread |  |
+| `Squad::GAIKAIn` | `0x004212c0` | 61 | member/0 | `engine/core/src/sim/squad.cpp:4311` |  | unread |  |
+| `Squad::Leader` | `0x00421310` | 37 | member/0 | `engine/core/src/sim/squad.cpp:4312` | yes | unread |  |
+| `Squad::AIDest` | `0x004215c0` | 36 | member/0 | `engine/core/src/sim/squad.cpp:4315` | yes | unread |  |
+| `Item::id` | `0x005351a0` | 33 | member/0 | `engine/core/src/sim/squad.cpp:4321` |  | unread |  |
+| `SquadList::Next` | `0x0042bb80` | 32 | member/0 | `engine/core/src/sim/squad.cpp:4339` | yes | unread |  |
+| `Squad::SetCmd` | `0x004272d0` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4322` |  | unread |  |
+| `Squad::SetCmd` | `0x00421460` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4322` |  | unread |  |
+| `Squad::SetCmd` | `0x00427470` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4322` |  | unread |  |
+| `SquadList::EOL` | `0x0042bae0` | 27 | member/0 | `engine/core/src/sim/squad.cpp:4340` | yes | unread |  |
+| `IntArray::size` | `0x00697f20` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` | yes | unread |  |
+| `Squad::Size` | `0x00422ca0` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` | yes | unread |  |
+| `SquadList::Size` | `0x0042bc40` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` | yes | unread |  |
+| `StrArray::size` | `0x00698070` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` | yes | unread |  |
+| `StrMap::size` | `0x00698300` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` |  | unread |  |
+| `Squad::Lock` | `0x004217e0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4341` | yes | unread |  |
+| `Squad::Unlock` | `0x00421820` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4342` | yes | unread |  |
+| `SquadList::Lock` | `0x0042bce0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4341` | yes | unread |  |
+| `SquadList::Unlock` | `0x0042bde0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4342` | yes | unread |  |
+| `Unit::IsEnemyInSquadSight` | `0x005d7400` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4324` | yes | unread |  |
+| `GAIKA::GetSquads` | `0x00437a20` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4347` | yes | unread |  |
+| `GAIKA::GetSquads` | `0x00439000` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4347` |  | unread |  |
+| `GAIKA::GetSquads` | `0x00439230` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4347` |  | unread |  |
+| `GAIKA::GetSquads` | `0x00439500` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4347` | yes | unread |  |
+| `Squad::TestFlags` | `0x00421720` | 18 | member/1 | `engine/core/src/sim/squad.cpp:4326` |  | unread |  |
+| `Squad::ClrCmd` | `0x004271d0` | 13 | member/3 | `engine/core/src/sim/squad.cpp:4325` | yes | unread |  |
+| `Squad::SendTo` | `0x00421520` | 13 | member/2 | `engine/core/src/sim/squad.cpp:4330` | yes | unread |  |
+| `SquadList::Rewind` | `0x0042bb30` | 12 | member/0 | `engine/core/src/sim/squad.cpp:4345` | yes | unread |  |
+| `GAIKA::GetAIControlledUnits` | `0x0043a920` | 4 | member/4 | `engine/core/src/sim/squad.cpp:4353` | yes | unread |  |
+| `MilEval` | `0x00421fb0` | 4 | free/1 | `engine/core/src/sim/squad.cpp:4331` |  | unread |  |
+| `Squad::GetLastAttacker` | `0x004218b0` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4314` | yes | unread |  |
+| `Squad::LastFightTime` | `0x00421860` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4313` | yes | unread |  |
+| `Squad::SrcGAIKA` | `0x00421220` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4318` | yes | unread |  |
+| `NumSquads` | `0x00422c40` | 3 | free/1 | `engine/core/src/sim/squad.cpp:4356` |  | unread |  |
+| `Squad::DelOrder` | `0x00421670` | 3 | member/0 | `engine/core/src/sim/squad.cpp:4334` | yes | unread |  |
+| `Squad::StateTime` | `0x00421400` | 3 | member/0 | `engine/core/src/sim/squad.cpp:4328` | yes | unread |  |
+| `AllyMilEval` | `0x004220c0` | 2 | free/1 | `engine/core/src/sim/squad.cpp:4332` |  | unread |  |
+| `GAIKA::AllEnemiesInHolder` | `0x00430dc0` | 2 | member/1 | `engine/core/src/sim/squad.cpp:4368` | yes | unread |  |
+| `Squad::CalcGoAround` | `0x0042e300` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4371` | yes | unread |  |
+| `Squad::DestGAIKA` | `0x00421270` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4319` | yes | unread |  |
+| `Squad::OrderDest` | `0x00421620` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4320` | yes | unread |  |
+| `Squad::TakeNearbyItems` | `0x00429530` | 2 | member/1 | `engine/core/src/sim/squad.cpp:4327` | yes | unread |  |
+| `Squadize` | `0x00425530` | 2 | free/3 | `engine/core/src/sim/squad.cpp:4376` | yes | unread |  |
+| `EnemyMilEval` | `0x00422240` | 1 | free/1 | `engine/core/src/sim/squad.cpp:4333` |  | unread |  |
+| `GAIKA::EvalNeighbors` | `0x00430800` | 1 | member/6 | `engine/core/src/sim/squad.cpp:4364` | yes | unread |  |
+| `NearestHospital` | `0x004316b0` | 1 | free/1 | `engine/core/src/sim/squad.cpp:4377` | yes | unread |  |
+| `Squad::EvalAttach` | `0x00424550` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4372` | yes | unread |  |
+| `Squad::FoodComing` | `0x0042a5b0` | 1 | member/0 | `engine/core/src/sim/squad.cpp:4373` | yes | unread |  |
+| `Squad::InvadeThroughGate` | `0x004299e0` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4369` | yes | unread |  |
+| `Squad::No` | `0x004210f0` | 1 | member/0 | `engine/core/src/sim/squad.cpp:4329` | yes | unread |  |
+| `Squad::SendFoodWagon` | `0x0042a750` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4374` | yes | unread |  |
+| `Squad::UseTeleport` | `0x004296b0` | 1 | member/4 | `engine/core/src/sim/squad.cpp:4370` |  | unread |  |
+| `SquadList::Train` | `0x004366c0` | 1 | member/5 | `engine/core/src/sim/squad.cpp:4351` | yes | unread |  |
 
 ## movement -- 0 of 28 verified, 633 call sites
 
@@ -1045,10 +1045,10 @@ Batches are by the file that implements them, most-called file first.
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `RunConv` | `0x0050cef0` | 74 | free/1 | `engine/core/src/sim/conversation.cpp:1003` |  | unread |  |
-| `Conversation::SetActor` | `0x0050a430` | 63 | member/2 | `engine/core/src/sim/conversation.cpp:1004` |  | unread |  |
-| `Conversation::Init` | `0x0050cde0` | 54 | member/1 | `engine/core/src/sim/conversation.cpp:1006` |  | unread |  |
-| `ConvResult` | `0x0050a4e0` | 5 | free/1 | `engine/core/src/sim/conversation.cpp:1007` |  | unread |  |
+| `RunConv` | `0x0050cef0` | 74 | free/1 | `engine/core/src/sim/conversation.cpp:1016` |  | unread |  |
+| `Conversation::SetActor` | `0x0050a430` | 63 | member/2 | `engine/core/src/sim/conversation.cpp:1017` |  | unread |  |
+| `Conversation::Init` | `0x0050cde0` | 54 | member/1 | `engine/core/src/sim/conversation.cpp:1019` |  | unread |  |
+| `ConvResult` | `0x0050a4e0` | 5 | free/1 | `engine/core/src/sim/conversation.cpp:1020` |  | unread |  |
 
 ## feeder -- 0 of 3 verified, 109 call sites
 
@@ -1062,20 +1062,20 @@ Batches are by the file that implements them, most-called file first.
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `ClearSelection` | `0x005a8120` | 18 | free/1 | `engine/core/src/sim/orders.cpp:1374` | yes | unread |  |
-| `Obj::Select` | `0x005abfc0` | 11 | member/1 | `engine/core/src/sim/orders.cpp:1388` | yes | unread |  |
-| `SquadList::Select` | `0x0042bee0` | 11 | member/1 | `engine/core/src/sim/orders.cpp:1388` | yes | unread |  |
-| `SwapSelectedObj` | `0x004c84e0` | 7 | free/2 | `engine/core/src/sim/orders.cpp:1375` | yes | unread |  |
-| `_GetSelection` | `0x005b5690` | 4 | free/0 | `engine/core/src/sim/orders.cpp:1376` | yes | unread |  |
-| `Obj::Deselect` | `0x005ac060` | 2 | member/0 | `engine/core/src/sim/orders.cpp:1389` | yes | unread |  |
-| `Obj::Deselect` | `0x005ac0e0` | 2 | member/0 | `engine/core/src/sim/orders.cpp:1389` | yes | unread |  |
-| `IsSelectionAssigned` | `0x004c6a30` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1378` | yes | unread |  |
-| `IsSelectionAssigned` | `0x004c6aa0` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1378` | yes | unread |  |
-| `Obj::ExecDefaultCmd` | `0x005b52b0` | 1 | member/4 | `engine/core/src/sim/orders.cpp:1391` | yes | unread |  |
-| `Obj::_LastSelectionTime` | `0x005abd60` | 1 | member/0 | `engine/core/src/sim/orders.cpp:1390` | yes | unread |  |
-| `ObjList::ExecDefaultCmd` | `0x0055e140` | 1 | member/4 | `engine/core/src/sim/orders.cpp:1391` | yes | unread |  |
-| `WasSelectionAssigned` | `0x004c69b0` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1387` |  | unread |  |
-| `WasSelectionAssigned` | `0x004c6a00` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1387` | yes | unread |  |
+| `ClearSelection` | `0x005a8120` | 18 | free/1 | `engine/core/src/sim/orders.cpp:1356` | yes | unread |  |
+| `Obj::Select` | `0x005abfc0` | 11 | member/1 | `engine/core/src/sim/orders.cpp:1370` | yes | unread |  |
+| `SquadList::Select` | `0x0042bee0` | 11 | member/1 | `engine/core/src/sim/orders.cpp:1370` | yes | unread |  |
+| `SwapSelectedObj` | `0x004c84e0` | 7 | free/2 | `engine/core/src/sim/orders.cpp:1357` | yes | unread |  |
+| `_GetSelection` | `0x005b5690` | 4 | free/0 | `engine/core/src/sim/orders.cpp:1358` | yes | unread |  |
+| `Obj::Deselect` | `0x005ac060` | 2 | member/0 | `engine/core/src/sim/orders.cpp:1371` | yes | unread |  |
+| `Obj::Deselect` | `0x005ac0e0` | 2 | member/0 | `engine/core/src/sim/orders.cpp:1371` | yes | unread |  |
+| `IsSelectionAssigned` | `0x004c6a30` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1360` | yes | unread |  |
+| `IsSelectionAssigned` | `0x004c6aa0` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1360` | yes | unread |  |
+| `Obj::ExecDefaultCmd` | `0x005b52b0` | 1 | member/4 | `engine/core/src/sim/orders.cpp:1373` | yes | unread |  |
+| `Obj::_LastSelectionTime` | `0x005abd60` | 1 | member/0 | `engine/core/src/sim/orders.cpp:1372` | yes | unread |  |
+| `ObjList::ExecDefaultCmd` | `0x0055e140` | 1 | member/4 | `engine/core/src/sim/orders.cpp:1373` | yes | unread |  |
+| `WasSelectionAssigned` | `0x004c69b0` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1369` |  | unread |  |
+| `WasSelectionAssigned` | `0x004c6a00` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1369` | yes | unread |  |
 
 ## heading -- 0 of 5 verified, 44 call sites
 
