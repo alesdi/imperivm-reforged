@@ -418,6 +418,37 @@ const UnitRow* UnitCatalog::row(std::int32_t race_index, std::int32_t type) cons
   return index < units->rows.size() ? &units->rows[index] : nullptr;
 }
 
+std::string_view UnitCatalog::block(std::int64_t index) const noexcept {
+  constexpr std::int64_t kRaceCount = 8;
+  constexpr std::int64_t kTypes = 6;
+  if (index < 0 || races_.size() != static_cast<std::size_t>(kRaceCount)) return {};
+  // Three six-wide tables, then five one-per-race tables.
+  for (int column = 0; column < 3; ++column) {
+    if (index < kRaceCount * kTypes) {
+      const std::vector<UnitRow>& rows = races_[static_cast<std::size_t>(index / kTypes)].rows;
+      if (rows.size() != static_cast<std::size_t>(kTypes)) return {};
+      const UnitRow& row = rows[static_cast<std::size_t>(index % kTypes)];
+      return column == 0 ? std::string_view{row.type}
+                         : column == 1 ? std::string_view{row.tech} : std::string_view{row.train_cmd};
+    }
+    index -= kRaceCount * kTypes;
+  }
+  for (int column = 0; column < 5; ++column) {
+    if (index < kRaceCount) {
+      const RaceUnits& units = races_[static_cast<std::size_t>(index)];
+      switch (column) {
+        case 0: return units.arena.type;
+        case 1: return units.arena.train_cmd;
+        case 2: return units.arena.tech;
+        case 3: return units.temple.type;
+        default: return units.temple.train_cmd;
+      }
+    }
+    index -= kRaceCount;
+  }
+  return {};
+}
+
 std::int32_t UnitCatalog::index_of(std::int32_t race_index,
                                    std::string_view type) const noexcept {
   const RaceUnits* units = race(race_index);
@@ -504,10 +535,12 @@ constexpr RawRace kRaces[] = {
       {"BJavelineer", "Britain Javelins", "trainBJavelineer"},
       {"BHighlander", "Britain Swords", "trainBHighlander"}},
      {"BVikingLord", "Britain Fights", "Hire Viking Lord"},
-     // `trainBDruid` is the command in `BTEMPLEOFTHOR.XML`, but it is the one
-     // string of this table that `gbr.exe` does not carry. Reproduced as the
-     // hole it is rather than filled in.
-     {"BDruid", "", ""}},
+     // The temple-train table (0x0081a648) has **seven** strings for eight
+     // races: `trainBDruid` -- the command `BTEMPLEOFTHOR.XML` offers -- is
+     // missing, so everything after Iberia's Imperial Rome entry slides up one
+     // slot. Britain's slot holds `trainEPriest`, Egypt's `trainTEnchantress`,
+     // and Germany's is a null pointer. Reproduced as the executable has it.
+     {"BDruid", "", "trainEPriest"}},
     {"Egypt",
      {{"ESwordsman", "", "trainESwordsman"},
       {"EArcher", "", "trainEArcher"},
@@ -515,11 +548,14 @@ constexpr RawRace kRaces[] = {
       {"EAnubisWarrior", "Cult of Anubis", "trainEAnubisWarrior"},
       {"EHorusWarrior", "Cult of Horus", "trainEHorusWarrior"},
       {"EGuardian", "", "trainEGuardian"}},
-     // `ETEMPLEOFOSIRIS.XML` gates `Chariot of Osiris` on `Cult of Osiris`, but
-     // that string is absent from `gbr.exe` while the other seven races' arena
-     // techs are present, so the engine's Egyptian slot reads as empty here.
-     {"EChariot", "", "Chariot of Osiris"},
-     {"EPriest", "", "trainEPriest"}},
+     // `ETEMPLEOFOSIRIS.XML` gates `Chariot of Osiris` on `Cult of Osiris`,
+     // which `gbr.exe` does not carry; its arena-tech table (0x0081a608) holds
+     // `Cult of Anubis` in the Egyptian slot (0x0081a620), the same string as
+     // Egypt's fourth barrack tech. So an Egyptian AI's arena recruit waits on
+     // the Anubis cult, as it does in the retail game.
+     {"EChariot", "Cult of Anubis", "Chariot of Osiris"},
+     // The slid temple-train slot; see Britain.
+     {"EPriest", "", "trainTEnchantress"}},
     {"Germany",
      {{"TSwordsman", "", "trainTSwordsman"},
       {"TArcher", "", "trainTArcher"},
@@ -528,7 +564,9 @@ constexpr RawRace kRaces[] = {
       {"TTeutonRider", "", "trainTTeutonRider"},
       {"TMaceman", "", "trainTMaceman"}},
      {"TValkyrie", "TFights", "Call Valkyries"},
-     {"TEnchantress", "", "trainTEnchantress"}},
+     // A null pointer in the original (0x0081a664), which `TempleUTrain`
+     // hands to `strlen` (0x00695e10) -- a fault, not an answer. Empty here.
+     {"TEnchantress", "", ""}},
 };
 
 [[nodiscard]] UnitRow to_row(const RawRow& raw) {
@@ -591,20 +629,53 @@ void EnvSystem::hash(std::uint64_t& accumulator) const {
   mix(ai_vars_.hash());
 }
 
+std::int32_t ini_number(std::string_view text) noexcept {
+  // 0x0063f200, the INI's integer getter. Leading spaces and tabs go (the
+  // trailing trim it also calls, 0x0063ec30, starts on the terminator and so
+  // trims nothing -- harmless, because the parse stops at the first misfit).
+  std::size_t i = 0;
+  while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+  std::int32_t sign = 1;
+  if (i < text.size() && (text[i] == '-' || text[i] == '+')) {
+    if (text[i] == '-') sign = -1;
+    ++i;
+  }
+  // 32-bit arithmetic as the original's; unsigned so a wrap is defined here.
+  std::uint32_t value = 0;
+  if (i + 1 < text.size() && text[i] == '0' && text[i + 1] == 'x') {
+    for (i += 2; i < text.size(); ++i) {
+      const char c = text[i];
+      std::uint32_t digit = 0;
+      if (c >= '0' && c <= '9') {
+        digit = static_cast<std::uint32_t>(c - '0');
+      } else if (c >= 'a' && c <= 'f') {
+        digit = static_cast<std::uint32_t>(c - 'a' + 10);
+      } else if (c >= 'A' && c <= 'F') {
+        digit = static_cast<std::uint32_t>(c - 'A' + 10);
+      } else {
+        break;
+      }
+      value = value * 16u + digit;
+    }
+  } else {
+    for (; i < text.size() && text[i] >= '0' && text[i] <= '9'; ++i) {
+      value = value * 10u + static_cast<std::uint32_t>(text[i] - '0');
+    }
+  }
+  return static_cast<std::int32_t>(sign < 0 ? 0u - value : value);
+}
+
 std::size_t EnvSystem::load_constants(const IniDocument& document) {
   const SectionIndex section = document.section("GamePlay");
   if (section == kNoSection) return 0;
   std::size_t taken = 0;
   for (const IniEntry& entry : document.entries_of(section)) {
     if (!entry.has_key || entry.key.empty()) continue;  // a bare line is not a constant
-    std::int32_t value = 0;
-    if (parse_int(entry.value, value)) {
-      // `parse_int` refuses a value it can only read half of, which is the
-      // guard `ProductionInterval` needed: `2000` must never become `20`.
-      set_constant(entry.key, value);
-    } else {
-      set_constant_string(entry.key, entry.value);
-    }
+    // Every key has both readings, as the original's one INI store does:
+    // `GetConstStr` the text, `GetConst` (and every engine reader) the number
+    // `ini_number` makes of it -- `"500, 1000"` is 500 to the latter.
+    set_constant_string(entry.key, entry.value);
+    set_constant(entry.key, ini_number(entry.value));
     ++taken;
   }
   return taken;
@@ -1460,67 +1531,99 @@ HostOutcome ts_research(CallContext& ctx) {
 
 // -- unit availability ----------------------------------------------------
 
-/// `UEnabled(int mask, int bit)` -- `bool, int mask, int bit` in `gbr.exe`.
+/// `UEnabled(int mask, int bit)` -- `bool, int mask, int bit`, 0x00420ee0.
+///
+/// `(mask & (1 << (bit & 31))) != 0`: the shift count is masked to five bits
+/// as the processor's `shl` does, so `UEnabled(m, 33)` tests bit 1. No world,
+/// no range check, nothing else.
 ///
 /// Not a research test and not unit-specific despite the name: `SQUADMONITOR.VS`
 /// uses it on a flee-reason bitfield (`UEnabled(nFlee, 0)` .. `(nFlee, 3)`) and
 /// every AI script uses it on `AIV_LogPlayer`, a player mask.
 HostOutcome u_enabled(CallContext& ctx) {
-  const std::int32_t mask = int_arg(ctx, 0);
-  const std::int32_t bit = int_arg(ctx, 1);
-  if (bit < 0 || bit >= 32) return boolean(false);
-  return boolean(((mask >> bit) & 1) != 0);
+  const std::uint32_t mask = static_cast<std::uint32_t>(int_arg(ctx, 0));
+  const std::uint32_t bit = static_cast<std::uint32_t>(int_arg(ctx, 1)) & 31u;
+  return boolean(((mask >> bit) & 1u) != 0);
 }
 
-/// `CheckUEnabled(OUT int mask, int idPlayer, int max, int nType, int nRace)`.
-///
-/// `ESH_ENABLEDUNITS.VS` is the only real caller and it is the whole
-/// specification: zero the mask, then run one call per unit type passing that
-/// type's `AIV_Max*` value as `max`, then store the mask as
-/// `<Race>UnitsEnabled`. `AI.INI` documents the value space of those variables
-/// as `0 - disable, -1: no limit`, so a zero clears the bit and anything else
-/// sets it. `ESH_BUILDARMY.VS`'s single call, `CheckUEnabled(nEnabled,
-/// AIPlayer, 0, 5, Carthage)`, uses exactly the clearing half.
-HostOutcome check_u_enabled(CallContext& ctx) {
-  if (ctx.count() < 5) return HostOutcome::failed("CheckUEnabled: expects five arguments");
-  const std::int32_t max = int_arg(ctx, 2);
-  const std::int32_t type = int_arg(ctx, 3);
-  if (type < 0 || type >= 32) return boolean(false);
-  const std::int32_t bit = static_cast<std::int32_t>(1u << static_cast<unsigned>(type));
-  std::int32_t mask = int_arg(ctx, 0);
-  const bool enabled = max != 0;
-  mask = enabled ? (mask | bit) : (mask & ~bit);
-  ctx.out(0) = Value::integer(mask);
-  return boolean(enabled);
-}
-
-[[nodiscard]] const UnitRow* row_arg(CallContext& ctx, EnvSystem& env) {
-  return env.units().row(int_arg(ctx, 1), int_arg(ctx, 0));
+/// `UType(int nType, int nRace)`, `UTech`, `UTrainCmd` -- 0x00420d60,
+/// 0x00420de0, 0x00420e60. Each checks `nType` against 0..5 and answers `""`
+/// outside it; `nRace` is **not** checked, and the string is
+/// `table[nRace * 6 + nType]` -- so a race past Germany reads on into the next
+/// table, which `UnitCatalog::block` answers.
+[[nodiscard]] std::string_view unit_column(CallContext& ctx, EnvSystem& env, std::int64_t table) {
+  const std::int64_t type = int_arg(ctx, 0);
+  const std::int64_t race = int_arg(ctx, 1);
+  if (type < 0 || type > 5) return {};
+  return env.units().block(table + race * 6 + type);
 }
 
 HostOutcome u_type(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
-  const UnitRow* row = row_arg(ctx, *env);
-  return text(row == nullptr ? std::string_view{} : std::string_view{row->type});
+  return text(unit_column(ctx, *env, 0));
 }
 
 HostOutcome u_tech(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
-  const UnitRow* row = row_arg(ctx, *env);
-  return text(row == nullptr ? std::string_view{} : std::string_view{row->tech});
+  return text(unit_column(ctx, *env, 48));
 }
 
 HostOutcome u_train_cmd(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
-  const UnitRow* row = row_arg(ctx, *env);
-  return text(row == nullptr ? std::string_view{} : std::string_view{row->train_cmd});
+  return text(unit_column(ctx, *env, 96));
 }
 
-/// `RUType(str strClass, int nRace) -> int`. The class comes first here, which
-/// is the reverse of the other three; `TSH_RecruitArmy.vs` is the only caller.
+/// `CheckUEnabled(OUT int mask, int idPlayer, int max, int nType, int nRace)`
+/// -- 0x004243d0, 49 sites, `ESH_ENABLEDUNITS.VS` once per unit type.
+///
+/// In its order:
+///
+///   1. `idPlayer` is **1-based**: the body takes `idPlayer - 1` and refuses
+///      16 and above; `nType` outside 0..5 is refused too. A refusal answers
+///      false and leaves the mask as it was. (Below 1 the original reads the
+///      record before the table; that is answered as a refusal here.)
+///   2. `max < 0` -- `AI.INI`'s "no limit" -- sets bit `nType` and answers true.
+///   3. `max == 0` -- "disabled" -- clears it and answers false.
+///   4. otherwise it asks the player's class-count map (0x004441e0 on the
+///      player record's `[+0x8c]`) how many of `UType(nType, nRace)` the player
+///      has -- `Count(idPlayer, that class)`'s number -- and sets the bit and
+///      answers true while that is **below** `max`, clears it and answers
+///      false once it is not.
+///
+/// So the mask is "types this player may still train", not "types the profile
+/// allows": an AI that has reached `AIV_MaxGArcher` archers stops being
+/// offered them. `UType` here is the unchecked-race read above.
+HostOutcome check_u_enabled(CallContext& ctx) {
+  if (ctx.count() < 5) return HostOutcome::failed("CheckUEnabled: expects five arguments");
+  const std::int32_t player = int_arg(ctx, 1);
+  const std::int32_t max = int_arg(ctx, 2);
+  const std::int32_t type = int_arg(ctx, 3);
+  if (type < 0 || type > 5 || player < 1 || player > 16) return boolean(false);
+  const std::uint32_t bit = 1u << static_cast<unsigned>(type);
+  std::uint32_t mask = static_cast<std::uint32_t>(int_arg(ctx, 0));
+  bool enabled = false;
+  if (max < 0) {
+    enabled = true;
+  } else if (max > 0) {
+    World* world = world_of(ctx);
+    EnvSystem* env = world == nullptr ? nullptr : env_of(*world);
+    if (env == nullptr) return no_env();
+    const std::string_view cls =
+        env->units().block(static_cast<std::int64_t>(int_arg(ctx, 4)) * 6 + type);
+    enabled = player_class_count(*world, player_from_script(player), cls) < max;
+  }
+  mask = enabled ? (mask | bit) : (mask & ~bit);
+  ctx.out(0) = Value::integer(static_cast<std::int32_t>(mask));
+  return boolean(enabled);
+}
+
+/// `RUType(str strClass, int nRace) -> int` -- 0x00420c90. The class comes
+/// first here, the reverse of the other three; `TSH_RecruitArmy.vs` is the
+/// only caller. `nRace` **is** checked here (0..7, else -1), and the class is
+/// compared byte for byte against that race's six types; no match is -1.
 HostOutcome r_u_type(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
@@ -1533,6 +1636,12 @@ HostOutcome r_u_type(CallContext& ctx) {
 [[nodiscard]] const RaceUnits* race_arg(CallContext& ctx, EnvSystem& env) {
   return env.units().race(int_arg(ctx, 0));
 }
+
+// The five one-per-race tables -- `ArenaUType` 0x00422ad0, `ArenaTrainCmd`
+// 0x00422a60, `ArenaUTech` 0x00420f10, `TempleUType` 0x00420f80,
+// `TempleUTrain` 0x00420ff0 -- each check the race against 0..7 and answer
+// `""` outside it. `TempleUTrain(Germany)` is the null pointer described at
+// `kRaces`; the original faults on it and this answers `""`.
 
 HostOutcome arena_u_type(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
@@ -1571,25 +1680,26 @@ HostOutcome temple_u_train(CallContext& ctx) {
 
 // -- balance constants ----------------------------------------------------
 
-/// `GetConst(str) -> int` over `DATA\CONST.INI`'s `[GamePlay]` section.
+/// `GetConst(str) -> int` -- 0x004c6270, over `DATA\CONST.INI`'s `[GamePlay]`.
+///
+/// The body asks the INI's integer getter (0x0063f200) for `GamePlay`/key
+/// into a local and pushes the local. The getter finds the text (0x0063f120),
+/// skips leading spaces and tabs, takes one `-` or `+`, and then reads `0x`
+/// hexadecimal (lower-case `x`; both digit cases) or decimal, **stopping at
+/// the first character that does not fit and keeping what it has** -- so
+/// `"1,5 5,20"` is 1 and `"12.5"` is 12. `load_constants` stores that number
+/// for every key (`ini_number`).
 ///
 /// The economy's slice is asked first, so `EconomySystem::set_rules` stays
-/// authoritative for the ~40 keys it holds as fields; everything else comes
-/// from the generated table.
+/// authoritative for the ~40 keys it holds as fields.
 ///
-/// An unknown key reads **zero**, not an error. `DATA\SUBAI\HERO_DETACH_
-/// BEHAVIOR.VS` -- a shipped, live behaviour -- opens with
-/// `GetConst("RecallDistance")`, and `RecallDistance` is in no section of
-/// `CONST.INI`: of the 74 distinct literals the corpus passes to `GetConst`,
-/// 73 are `[GamePlay]` keys and that one is in no section of the file. Trapping there would kill a script the retail engine runs happily.
-/// (The value is dead -- that local is never read again -- so the *magnitude*
-/// of the fallback is unconstrained by the corpus, and zero is simply what an
-/// INI reader with no default returns.)
-///
-/// Zero is therefore also what every key reads as before `load_constants` has
-/// run, apart from the economy's slice. That is deliberate: this domain does
-/// not carry a second copy of `CONST.INI`, so a build with no game data has no
-/// balance numbers rather than plausible invented ones.
+/// **A key the section does not have.** The getter then leaves the local as
+/// it was, and `GetConst` never initialised it: it holds the VM stack pointer
+/// it was loaded from. That is an address, not a number anybody can
+/// reproduce; this answers zero. The one shipped key that reaches it --
+/// `RecallDistance`, opening `DATA\SUBAI\HERO_DETACH_BEHAVIOR.VS` -- is
+/// assigned to a local that is never read again, so no shipped behaviour
+/// depends on the value.
 HostOutcome get_const(CallContext& ctx) {
   if (ctx.count() < 1 || !ctx.arg(0).is_string()) {
     return HostOutcome::failed("GetConst: expects a constant name");
@@ -1608,9 +1718,11 @@ HostOutcome get_const(CallContext& ctx) {
   return integer(value);
 }
 
-/// `GetConstStr(str) -> str`. Two keys in the whole corpus, both of them
-/// comma-separated lists the scripts walk with `ParseStr`: `TributeTimes` and
-/// `TributeGold`.
+/// `GetConstStr(str) -> str` -- 0x004c62f0: the INI's text for
+/// `GamePlay`/key (0x0063f120), or `""` (0x007ab85a) for a key it does not
+/// have. Every key has its text, numeric ones included. Two keys in the whole
+/// corpus, both comma-separated lists the scripts walk with `ParseStr`:
+/// `TributeTimes` and `TributeGold`.
 HostOutcome get_const_str(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();

@@ -196,6 +196,11 @@ struct EnvEntry {
 /// Decimal, with a leading `-`. The inverse of `env_parse_int` on its range.
 [[nodiscard]] std::string env_format_int(std::int32_t value);
 
+/// `CONST.INI`'s integer reading (0x0063f200): leading spaces and tabs, one
+/// sign, then `0x` hexadecimal or decimal, stopping at the first character
+/// that does not fit and keeping the digits read so far. No digits is 0.
+[[nodiscard]] std::int32_t ini_number(std::string_view text) noexcept;
+
 /// The `$$<id>$$` encoding `gbr.exe` uses for an object inside the registry:
 /// `EnvWriteObj` formats the object's index with `$$%d$$` (0x006ac9b0) and
 /// `EnvReadObj` reads it back with `sscanf` of the same format (0x006ac790).
@@ -486,20 +491,29 @@ struct RaceUnits {
 
 /// The whole table, indexed by the race constant.
 ///
-/// **The race index is inferred.** The eight races appear in `gbr.exe`'s string
-/// pool in the order Gaul, RepublicanRome, Carthage, Iberia, ImperialRome,
-/// Britain, Egypt, Germany — five parallel runs agree on it (the unit classes,
-/// the train commands, the arena techs, the arena types and the temple building
-/// classes), and `ESH_NEEDTECH.VS` names the arena techs against races in its
-/// comments, which matches. What is *not* proven is that the race globals
-/// `Gaul`, `RepublicanRome`, … are literally 0..7 in that order; nothing in the
-/// shipped data states their numeric values. See "what is still unknown".
+/// The race index is the race constant: Gaul 0, RepublicanRome 1, Carthage 2,
+/// Iberia 3, ImperialRome 4, Britain 5, Egypt 6, Germany 7 -- the values the
+/// constants are registered with (0x005b70b2) and the values the class loader
+/// stores for those names (0x0059f540).
 class UnitCatalog {
  public:
   [[nodiscard]] const RaceUnits* race(std::int32_t race) const noexcept;
   [[nodiscard]] const UnitRow* row(std::int32_t race, std::int32_t type) const noexcept;
   /// The index of `type` within `race`'s rows, or -1.
   [[nodiscard]] std::int32_t index_of(std::int32_t race, std::string_view type) const noexcept;
+
+  /// The executable's eight tables read as the one block they are in memory.
+  ///
+  /// `gbr.exe` lays them out back to back: the unit types (0x0081a388, 48
+  /// entries), techs (0x0081a448, 48), train commands (0x0081a508, 48), arena
+  /// types (0x0081a5c8, 8), arena train commands (0x0081a5e8, 8), arena techs
+  /// (0x0081a608, 8), temple types (0x0081a628, 8) and temple train commands
+  /// (0x0081a648, 8) -- 184 pointers. `UType`, `UTech` and `UTrainCmd` index
+  /// `table + race*6 + type` with only `type` checked, so a race past 7 reads
+  /// on into the next table; this answers that read for any index inside the
+  /// block. Outside it -- the memory before the first table or after the
+  /// last -- and for a catalog that is not the eight-race shape, it is empty.
+  [[nodiscard]] std::string_view block(std::int64_t index) const noexcept;
 
   void set_races(std::vector<RaceUnits> races) { races_ = std::move(races); }
   [[nodiscard]] std::span<const RaceUnits> races() const noexcept { return races_; }
@@ -509,7 +523,8 @@ class UnitCatalog {
   std::vector<RaceUnits> races_;
 };
 
-/// The table as `gbr.exe` carries it.
+/// The table as `gbr.exe` carries it, checked entry by entry against the eight
+/// pointer tables `UnitCatalog::block` names.
 ///
 /// Every string below is in the retail binary, and every column is corroborated
 /// by a second shipped source:
@@ -741,22 +756,6 @@ std::size_t register_env_host(script::HostRegistry& registry);
 //
 // * **`int` → `str` coercion** is settled: `EnvWriteInt` stores `ltoa(value,
 //   10)` (0x006ac920) and `EnvReadInt` `atol`s whatever is there (0x006ac740).
-//
-// * **Whether `CheckUEnabled` consults anything but its `max` argument.** Its
-//   signature is `bool, int *mask, int idPlayer, int max, int nType, int nRace`
-//   and we set the bit iff `max != 0` — which is what `AI.INI`'s own comment
-//   (`0 - disable, -1: no limit`) says the value means, and what
-//   `ESH_BUILDARMY.VS`'s `CheckUEnabled(nEnabled, AIPlayer, 0, 5, Carthage)`
-//   uses it for. `idPlayer` and `nRace` are then unused, which is suspicious.
-//   What it is *not* is a research test: `ESH_BUILDARMY.VS` line 327 asks
-//   `UEnabled(nEnabled, i) && !IsResearched(set, UTech(i, nRace))`, which no
-//   unit could satisfy if the mask already required the tech.
-//
-// * **The numeric values of the race constants.** The unit table is ordered
-//   Gaul, RepublicanRome, Carthage, Iberia, ImperialRome, Britain, Egypt,
-//   Germany, corroborated five ways, but the constants themselves are host
-//   globals whose values no shipped file states. If they are not 0..7 in that
-//   order, `UnitCatalog` needs a remap and nothing else changes.
 //
 // * **Germany's unit techs, and the temple/arena prerequisites.** `UTech(i,
 //   Germany)` is empty for every `i` in the shipped table — the four German

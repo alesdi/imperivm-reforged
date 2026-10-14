@@ -299,6 +299,13 @@ std::size_t start_behaviors(script::Scheduler& scheduler, ScriptLibrary& library
 std::size_t stop_behaviors(script::Scheduler& scheduler, ScriptLibrary& library,
                            const World& world, ObjectId id, ClassIndex class_index);
 
+/// How many objects of a class `player` owns: `Count(idPlayer, class)`'s
+/// answer, shared with `CheckUEnabled`, which asks the original's same
+/// per-player class-count map (0x004441e0 on `[record+0x8c]`) for the same
+/// number. `player` is a `PlayerId`; `kNoPlayer` counts nothing.
+[[nodiscard]] std::int32_t player_class_count(World& world, PlayerId player,
+                                              std::string_view class_name);
+
 std::size_t register_world_host(script::HostRegistry& registry);
 
 /// Install the scheduler hook that drains `World::deferred_erase`.

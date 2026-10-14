@@ -690,13 +690,31 @@ TEST(the_shipped_unit_catalog_is_the_table_the_binary_carries) {
   CHECK(catalog.races()[0].arena.train_cmd == "Hire Trident warrior");
   CHECK(catalog.races()[4].arena.train_cmd == "Hire Liberati");
   CHECK(catalog.races()[7].arena.train_cmd == "Call Valkyries");
-  // Egypt's arena tech is the one string of the table `gbr.exe` does not
-  // carry; reproduced as the hole it is.
-  CHECK(catalog.races()[6].arena.tech.empty());
+  // Egypt's arena tech slot (0x0081a620) holds `Cult of Anubis`.
+  CHECK(catalog.races()[6].arena.tech == "Cult of Anubis");
 
   CHECK(catalog.races()[0].temple.type == "GDruid");
   CHECK(catalog.races()[4].temple.type == "RPriest");  // shares Rome's temple
-  CHECK(catalog.races()[5].temple.train_cmd.empty());  // Britain's is absent too
+  // The temple-train table has seven strings for eight races: Britain's
+  // `trainBDruid` is missing and the last three slots slide up one.
+  CHECK(catalog.races()[4].temple.train_cmd == "trainRPriest");
+  CHECK(catalog.races()[5].temple.train_cmd == "trainEPriest");
+  CHECK(catalog.races()[6].temple.train_cmd == "trainTEnchantress");
+  CHECK(catalog.races()[7].temple.train_cmd.empty());  // a null pointer there
+
+  // The eight tables are one block of 184 pointers, in this order.
+  CHECK(catalog.block(0) == "GSwordsman");
+  CHECK(catalog.block(47) == "TMaceman");
+  CHECK(catalog.block(48 + 2) == "Gaul Iron Axes");
+  CHECK(catalog.block(96) == "trainGSwordsman");
+  CHECK(catalog.block(144) == "GTridentWarrior");
+  CHECK(catalog.block(152) == "Hire Trident warrior");
+  CHECK(catalog.block(160) == "Fights");
+  CHECK(catalog.block(168) == "GDruid");
+  CHECK(catalog.block(176) == "trainGDruid");
+  CHECK(catalog.block(183).empty());
+  CHECK(catalog.block(184).empty());
+  CHECK(catalog.block(-1).empty());
 }
 
 TEST(u_enabled_is_a_bit_test_and_check_u_enabled_writes_the_mask) {
@@ -719,6 +737,10 @@ TEST(u_enabled_is_a_bit_test_and_check_u_enabled_writes_the_mask) {
   CHECK(enabled(0b1010, 0) == 0);
   CHECK(enabled(0b1010, 3) == 1);
   CHECK(enabled(0b1010, 40) == 0);
+  // The shift count is masked to five bits (0x00420ee0), as `shl` does.
+  CHECK(enabled(0b1010, 33) == 1);
+  CHECK(enabled(0b1010, 35) == 1);
+  CHECK(enabled(0b1010, -29) == 1);  // -29 & 31 == 3
 
   // `ESH_ENABLEDUNITS.VS`: zero the mask, one call per unit type carrying that
   // type's `AIV_Max*` value. `AI.INI` documents that value space as
@@ -743,6 +765,43 @@ TEST(u_enabled_is_a_bit_test_and_check_u_enabled_writes_the_mask) {
       &out);
   CHECK(cleared.value.as_integer() == 0);
   CHECK(out[0].as_integer() == 0b001000);
+
+  // A positive `max` is a ceiling on what the player already has: the bit is
+  // set while `Count(idPlayer, UType(nType, nRace))` is below it (0x004243d0
+  // through 0x004441e0). `idPlayer` is 1-based.
+  ClassGraph graph;
+  REQUIRE(graph.add(bytes_of(R"(<class id="GArcher" cpp_class="CVXUnit"/>)"), "garcher.sc.xml")
+              .ok());
+  graph.link();
+  world.set_class_graph(&graph);
+  env.units() = shipped_unit_catalog();
+  const ClassIndex archer = graph.find("GArcher");
+  REQUIRE(archer != kNoClass);
+  for (int i = 0; i < 2; ++i) {
+    const ObjectId id = world.spawn(NativeClass::unit, nullptr, archer);
+    world.set_owner(id, 1);  // script player 2
+  }
+  const auto check = [&](std::int32_t player, std::int32_t max, std::int32_t type) {
+    std::vector<script::Value> window;
+    const script::HostOutcome got = call_host(
+        registry, &world, script::CallKind::free_function, "CheckUEnabled", 5,
+        {script::Value::integer(0b100), script::Value::integer(player), script::Value::integer(max),
+         script::Value::integer(type), script::Value::integer(0)},
+        &window);
+    // The answer and the mask in one number: 1000 for true, plus the mask.
+    if (got.status != script::HostStatus::ok) return -1;
+    return (got.value.as_integer() != 0 ? 1000 : 0) + window[0].as_integer();
+  };
+  // Two archers, a ceiling of three: still enabled. GArcher is Gaul's type 1.
+  CHECK(check(2, 3, 1) == 1000 + 0b110);
+  // A ceiling of two: reached, so the bit is cleared.
+  CHECK(check(2, 2, 1) == 0b100);
+  // Player 3 has none.
+  CHECK(check(3, 1, 1) == 1000 + 0b110);
+  // A type outside 0..5 or a player outside 1..16 is refused and the mask is
+  // left as it was.
+  CHECK(check(2, -1, 6) == 0b100);
+  CHECK(check(17, -1, 1) == 0b100);
 }
 
 TEST(the_unit_table_entry_points_answer_from_the_catalog) {
@@ -779,6 +838,15 @@ TEST(the_unit_table_entry_points_answer_from_the_catalog) {
   CHECK(str("UTech", 2, {script::Value::integer(0), script::Value::integer(0)}).empty());
   CHECK(str("UType", 2, {script::Value::integer(99), script::Value::integer(0)}).empty());
   CHECK(str("UType", 2, {script::Value::integer(0), script::Value::integer(99)}).empty());
+  // The race is not checked: race 8 is the next table along, `UTech`'s first
+  // row, and race 16 the train commands'.
+  CHECK(str("UType", 2, {script::Value::integer(2), script::Value::integer(8)}) ==
+        "Gaul Iron Axes");
+  CHECK(str("UType", 2, {script::Value::integer(0), script::Value::integer(16)}) ==
+        "trainGSwordsman");
+  CHECK(str("UTech", 2, {script::Value::integer(0), script::Value::integer(16)}) ==
+        "GTridentWarrior");
+  CHECK(str("UType", 2, {script::Value::integer(0), script::Value::integer(-1)}).empty());
 
   // `TSH_ArenaRecruit.vs` and `TSH_TempleRecruit.vs`.
   CHECK(str("ArenaUType", 1, {script::Value::integer(3)}) == "IMountaineer");
@@ -786,6 +854,9 @@ TEST(the_unit_table_entry_points_answer_from_the_catalog) {
   CHECK(str("ArenaTrainCmd", 1, {script::Value::integer(3)}) == "Call Mountaineer");
   CHECK(str("TempleUType", 1, {script::Value::integer(2)}) == "CShaman");
   CHECK(str("TempleUTrain", 1, {script::Value::integer(2)}) == "trainCShaman");
+  CHECK(str("TempleUTrain", 1, {script::Value::integer(5)}) == "trainEPriest");
+  CHECK(str("ArenaUTech", 1, {script::Value::integer(6)}) == "Cult of Anubis");
+  CHECK(str("ArenaUTech", 1, {script::Value::integer(8)}).empty());
 
   // With no catalog at all every one of them is empty rather than wrong.
   World bare_world;
@@ -834,8 +905,8 @@ TEST(constants_are_read_from_the_ini_rather_than_transcribed) {
   CHECK(!env.constant("id1", value));           // a different section
   CHECK(!env.constant("RecallDistance", value));  // in no section at all
 
-  // A value that is not entirely an integer is a string constant, which is
-  // what `GetConstStr`'s only two corpus keys are.
+  // Every key has its text, and its number as 0x0063f200 reads it: a prefix
+  // of digits, whatever follows.
   std::string_view text;
   REQUIRE(env.constant_string("TributeTimes", text));
   CHECK(text == "0,   10,   20,   30");
@@ -843,8 +914,19 @@ TEST(constants_are_read_from_the_ini_rather_than_transcribed) {
   CHECK(text == "500, 1000, 1500, 2000");
   REQUIRE(env.constant_string("DeathBlowFeedback", text));
   CHECK(text == "DeathBlow");
-  CHECK(!env.constant_string("MinPopulation", text));
-  CHECK(!env.constant("TributeTimes", value));
+  REQUIRE(env.constant_string("MinPopulation", text));
+  CHECK(text == "10");
+  REQUIRE(env.constant("TributeGold", value));
+  CHECK(value == 500);
+  REQUIRE(env.constant("DeathBlowFeedback", value));
+  CHECK(value == 0);
+
+  CHECK(ini_number("12.5") == 12);
+  CHECK(ini_number(" \t-0x1F") == -31);
+  CHECK(ini_number("0xg") == 0);
+  CHECK(ini_number("0X10") == 0);  // only a lower-case x opens hexadecimal
+  CHECK(ini_number("+7 ; comment") == 7);
+  CHECK(ini_number("") == 0);
 }
 
 TEST(get_const_asks_the_economy_first_and_reads_zero_for_a_key_nobody_defines) {

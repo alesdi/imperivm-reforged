@@ -30,3 +30,16 @@
 0x004343e0	verified	IsResearching(int): as IsResearched(int) with "researching" (fixed)
 0x00434870	partial	CanResearch: row, idle lab, first ledger triple; no requirement check (fixed); lab finder 0x0042d010 (state string "idle", class command list) modelled by settlement_lab_for from row sources
 0x00426ab0	partial	TSResearch: runs TSH_Research.vs on the owner's AI path; invalid receiver -> false (fixed); a helper that fails to run is a trap via the shared run_script_now where retail logs and answers false
+0x004c6270	partial	GetConst: INI integer getter 0x0063f200 (sign, 0x hex or decimal, stops at first misfit; fixed: a half-numeric value was 0); a missing key pushes the un-zeroed local (a stack address) where this answers 0 -- only RecallDistance reaches it, dead value; INI loader's own comment handling (0x0063f120 store) not read
+0x004c62f0	partial	GetConstStr: text or "" (fixed: numeric keys had no text); whether the INI store keeps inline comments not read (the two shipped keys have none)
+0x004243d0	partial	CheckUEnabled: 1-based player, type 0..5, max<0 set, max==0 clear, else set while Count(player, UType) < max (fixed: count was ignored); count shares Count's model (world_host) of the class-count map 0x004441e0
+0x00420d60	verified	UType: type 0..5 checked, race unchecked, table+race*6+type over the 184-pointer block (fixed: race>7 read next table); outside the block answers ""
+0x00420de0	verified	UTech: as UType from 0x0081a448
+0x00420e60	verified	UTrainCmd: as UType from 0x0081a508
+0x00420ee0	verified	UEnabled: bit & 31 (fixed: out-of-range bit was false)
+0x00420c90	verified	RUType: race 0..7 else -1, exact compare over the race's six types
+0x00422ad0	verified	ArenaUType: race 0..7 else ""; table checked entry by entry
+0x00420f10	verified	ArenaUTech: Egypt's slot is "Cult of Anubis" (fixed: was empty)
+0x00422a60	verified	ArenaTrainCmd: race 0..7 else ""
+0x00420f80	verified	TempleUType: race 0..7 else ""
+0x00420ff0	partial	TempleUTrain: seven strings for eight races, Britain trainEPriest, Egypt trainTEnchantress (fixed); Germany's slot is a null pointer the original faults on, answered ""
