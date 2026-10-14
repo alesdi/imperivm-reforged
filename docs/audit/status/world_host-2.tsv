@@ -51,7 +51,7 @@
 0x004e2ed0	verified	(frames-2)*(max-n-1)/(max-1)+1 into [obj+0x20c] and the sprite holds that frame; presentation, the object's maximum as maxhealth answers it
 0x00529af0	verified	[gate+0x210] != 0, as LookAround last left it; invalid false
 0x00529b50	verified	[gate+0x214] != 0, as LookAround last left it; invalid false
-0x00529bb0	partial	zeroes both fields, walks kSyncUnit objects in the circle (0x005296d0) through the visitor 0x00529510, which never stops the walk; an Animal is skipped only when [obj+0xdc] is zero, a field not identified, and every Animal is skipped here
+0x00529bb0	verified	fixed: zeroes both fields, walks kSyncUnit objects in the circle (0x005296d0) through the visitor 0x00529510, which never stops the walk; an Animal is skipped only when its damage [obj+0xdc] (persist name, 0x005b5df0) is zero, so a wolf counts -- every Animal used to be skipped
 0x004c6610	partial	stores the byte in [0x00996ae4]; its only reader is the blow's special-stamina charge 0x0050ff30 (skips special 0x1000's cost), which this engine's combat does not model, so the flag is dropped
 0x005d30b0	verified	zeroes the regeneration-table scan cursor [0x009c0828]; there is no such cache here, a no-op is the same behaviour
 0x004db630	verified	[0x009969a8] != 0, whose only writer sets and clears it within one debug function: false
@@ -59,3 +59,5 @@
 0x005ac6b0	verified	class slot [cls+0xb30] (water_unit) non-zero; invalid false
 0x005c6fc0	verified	[ship+0x230] > 0, a construction counter, not a class test; invalid false
 0x00435250	verified	fixed: the sweep 0x00423ef0 counts objects of exactly the class (descriptor equality), with no life test and nothing held; player outside 1..16 or an unknown class answers true; point clamped to the map; radius twice [cls+0x2dc]; owner in the complement of the enemy word
+0x005ab580	verified	the instance field [obj+0xec] (persisted as stamina_dec_time, seeded from the class; no map authors it), negative answers 0; no receiver test in the original
+0x005d8080	verified	the unit's [unit+0x17c], the same value at the unit offset; negative answers 0

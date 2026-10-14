@@ -4340,6 +4340,7 @@ struct GateClasses {
   ClassIndex animal = kNoClass;
   ClassIndex ambient = kNoClass;
   ClassIndex ghostly = kNoClass;
+  ClassIndex wolf = kNoClass;
 
   GateClasses() {
     const std::string docs[] = {
@@ -4351,16 +4352,22 @@ struct GateClasses {
         // Not named by the visitor: skipped for its property instead.
         R"(<class id="Ghostly" parent="Unit" cpp_class="CVXUnit"><properties
              ignore_passability="1"/></class>)",
+        // An animal that does damage: the visitor skips an `Animal` only when
+        // `[obj+0xdc]`, its damage, is zero.
+        R"(<class id="Wolf" parent="Animal" cpp_class="CVXUnit"><properties
+             damage="12"/></class>)",
     };
     const char* names[] = {"unit.sc.xml",   "gate.sc.xml",    "plain.sc.xml",
-                           "animal.sc.xml", "ambient.sc.xml", "ghostly.sc.xml"};
-    for (int i = 0; i < 6; ++i) graph.add(bytes_of(docs[i]), names[i]);
+                           "animal.sc.xml", "ambient.sc.xml", "ghostly.sc.xml",
+                           "wolf.sc.xml"};
+    for (int i = 0; i < 7; ++i) graph.add(bytes_of(docs[i]), names[i]);
     graph.link();
     gate = graph.find("Gate");
     plain = graph.find("Plain");
     animal = graph.find("Animal");
     ambient = graph.find("PeasantAmbient");
     ghostly = graph.find("Ghostly");
+    wolf = graph.find("Wolf");
   }
 };
 
@@ -4482,6 +4489,15 @@ TEST(sim_look_around_is_what_makes_the_two_gate_predicates_mean_anything) {
     fresh.look(g, 350);
     CHECK(!fresh.saw(g, "AreEnemiesAround"));
     CHECK(!fresh.saw(g, "AreFriendsAround"));
+  }
+  // ...but an animal that does damage is counted like anything else.
+  {
+    GateBench fresh;
+    const ObjectId g = fresh.gate(Point{0, 0}, 0);
+    (void)fresh.unit(fresh.classes.wolf, Point{100, 0}, 1);
+    fresh.world.players().set(0, 1, Relation::allied, false);
+    fresh.look(g, 350);
+    CHECK(fresh.saw(g, "AreEnemiesAround"));
   }
 
   // An unresolvable receiver leaves both fields alone -- it does not even zero

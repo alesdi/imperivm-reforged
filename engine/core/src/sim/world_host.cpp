@@ -5258,7 +5258,10 @@ HostOutcome m_apply_ai_transport(CallContext& ctx) {
 /// `0x00529510` is the visitor, and each of its clauses is here:
 ///
 ///   * skip the dead (`vtbl[0x50]`);
-///   * skip an heir of `PeasantAmbient`, and of `Animal` -- see below;
+///   * skip an heir of `PeasantAmbient`, and an heir of `Animal` **that does
+///     no damage** -- `[obj+0xdc]`, the instance field the object's persist
+///     table (0x005b5df0) names `damage` and `Obj::damage` reads: a deer is
+///     passed over, a wolf at the gate is somebody;
 ///   * skip a class whose `ignore_passability` property is set;
 ///   * **friend** when bit 0 of the gate's own diplomacy row for that owner is
 ///     set, which is `PlayerTable::is_enemy` negated and is not the transpose;
@@ -5268,12 +5271,18 @@ HostOutcome m_apply_ai_transport(CallContext& ctx) {
 /// Both fields are set to the literal 1 rather than incremented, so they are
 /// booleans in the original too and `!= 0` loses nothing.
 ///
-/// **One clause is widened, deliberately.** The original skips an `Animal` only
-/// when the dword at `[obj+0xdc]` is zero -- an animal with a non-zero one *is*
-/// counted -- and that field has two comparison sites in the whole executable
-/// and no identified meaning. Rather than invent a condition, every `Animal` is
-/// skipped here, which is the reading that agrees with the original wherever
-/// `[obj+0xdc]` is zero and is named where it might not be.
+/// `[obj+0xdc]`, the object's own damage: the combatant's, when the combat
+/// system holds the object, which is what `Obj::damage` answers; otherwise the
+/// class's `damage`, which is what the object was built with.
+[[nodiscard]] std::int32_t object_damage(World& world, const WorldObject& slot) {
+  if (const CombatSystem* combat = combat_system_of(world); combat != nullptr) {
+    if (const Combatant* unit = combat->find(slot.id); unit != nullptr) {
+      return combat->attack_of(*unit);
+    }
+  }
+  return class_int(world, slot, "damage");
+}
+
 void gate_look_around(World& world, const WorldObject& gate, std::int32_t radius) {
   ObjectState* state = world.mutable_state(gate.id);
   if (state == nullptr) return;
@@ -5292,7 +5301,7 @@ void gate_look_around(World& world, const WorldObject& gate, std::int32_t radius
     if (graph != nullptr && other->class_index != kNoClass) {
       const std::string_view ignores = graph->property(other->class_index, "ignore_passability");
       if (!ignores.empty() && ignores != "0") continue;
-      if (class_is(world, *other, "Animal")) continue;
+      if (class_is(world, *other, "Animal") && object_damage(world, *other) == 0) continue;
       if (class_is(world, *other, "PeasantAmbient")) continue;
     }
     if (!world.players().is_enemy(state->owner, other->state.owner)) {
