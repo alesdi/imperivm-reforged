@@ -1645,6 +1645,20 @@ HostOutcome m_pos_rh(CallContext& ctx) {
   return HostOutcome::ok_with(pack_point(slot->state.position));
 }
 
+/// `health/0` -- `Obj::health` (0x005ada80) is the handle check and
+/// `[obj+0xc0]`, 0 on a miss. `Squad::health` (0x00427740) splits the handle
+/// into player and index, looks the squad up without a bounds check
+/// (0x00443e30), and sums `[+0xc0]` over the members whose table slot is live;
+/// an empty squad is 0, and nothing is printed.
+///
+/// `Settlement::health` (0x005c1e40) and `Settlement::stamina` (0x005c1f00)
+/// read the settlement's **garrison holder** -- the 16-bit handle at
+/// `[settlement+0x5e]`, the holder `UnitsCount` and `max_units` read -- at
+/// `+0x1c` and `+0x24`, 0 on a miss. The holder constructor (0x00531de0)
+/// zeroes `+0x14..+0x24` and no writer of those two fields was found, so they
+/// are probably always 0; here a settlement receiver answers the settlement
+/// object's own health and stamina, which are 0 too. No shipped site asks a
+/// settlement either.
 HostOutcome m_health(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("health: no world");
@@ -1674,7 +1688,8 @@ HostOutcome m_health(CallContext& ctx) {
 /// `.maxhealth` -- 109 sites, and the class property on every object that is
 /// not a registered combatant.
 ///
-/// The original reads `[obj+0xc8]`, which the object constructor fills from
+/// `Obj::maxhealth` (0x005adb40) reads `[obj+0xc8]` (0 on a miss), which the
+/// object constructor fills from
 /// the class and `Unit::RecalcBonuses`'s virtual rebuilds -- from the class
 /// again, plus whatever `Unit::AddBonus` has put on that object. Buildings,
 /// wagons and item holders carry the field too and nothing ever adds to
@@ -1699,6 +1714,13 @@ HostOutcome m_max_health(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(max_health_of_object(*world, *slot)));
 }
 
+/// `stamina/0` -- `Obj::stamina` (0x005adae0) and `Unit::stamina`
+/// (0x005d8b90) both read `[obj+0xc4]` after the handle check, 0 on a miss.
+/// The object constructor (0x005b4ca0) seeds it from the class `maxstamina`
+/// (class `+0x298`). This engine seeds it for combatants only; no shipped
+/// class outside the unit family declares a non-zero `maxstamina`, so the
+/// difference cannot be seen. `Settlement::stamina` (0x005c1f00) reads its
+/// garrison holder's `+0x24` instead (see `m_health`).
 HostOutcome m_stamina(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("stamina: no world");
@@ -1706,6 +1728,9 @@ HostOutcome m_stamina(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(slot != nullptr ? slot->state.stamina : 0));
 }
 
+/// `Obj::sight` (0x005adcc0): the handle check, then `[obj+0xd0]`, 0 on a miss.
+/// The constructor seeds it from class `+0x2d0` and `SetSight` moves it; that
+/// is `WorldObject::sight`.
 HostOutcome m_sight(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("sight: no world");
@@ -2079,14 +2104,17 @@ HostOutcome m_store_bin(CallContext& ctx) {
 HostOutcome m_settlement(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("settlement: no world");
-  // **Two registrations, one key.** `gbr.exe` declares `settlement/0` on `Obj`
-  // (0x005ae7c0, 432 sites) and on `GAIKA` (0x004219a0), and this registry
-  // keys on `(kind, name, arity)` -- so one body answers both and tells them
-  // apart by what it is handed, exactly as `Size/0` does for its four
-  // receivers. A GAIKA is a bare integer (`sim/gaika.hpp`), which is what makes
-  // the discrimination possible at all.
+  // **Two registrations, one key.** `gbr.exe` declares `settlement/0` on
+  // `Building` (0x004dcdd0, 671 sites) and on `GAIKA` (0x004219a0), and this
+  // registry keys on `(kind, name, arity)` -- so one body answers both and
+  // tells them apart by what it is handed, exactly as `Size/0` does for its
+  // four receivers. A GAIKA is a bare integer (`sim/gaika.hpp`), which is
+  // what makes the discrimination possible at all.
   //
-  // The GAIKA arm is the inverse of `Settlement::GetGaika`: a settlement node
+  // `GAIKA::settlement`: when the node table (0x008c8e54) exists, the node at
+  // `index * 0x24` (no bounds check, 0x0044e8e0), and its settlement pointer
+  // at `+0x14` as a handle, or the invalid handle when it is null. Nothing is
+  // printed. It is the inverse of `Settlement::GetGaika`: a settlement node
   // answers its settlement and a region node answers nothing.
   // `GetGAIKAStrat.vs` opens with `Set = gaika.settlement;` and then branches
   // on `Set.IsValid`, so "nothing" is a case it is written for.
@@ -2097,14 +2125,22 @@ HostOutcome m_settlement(CallContext& ctx) {
     }
     return HostOutcome::ok_with(Value::object(ObjectRef{kTypeSettlement, node->settlement}));
   }
+  // `Building::settlement`: the handle check -- a miss prints and answers the
+  // invalid handle -- then the 16-bit settlement slot at `[bld+0x148]` as a
+  // handle. The constructor leaves that slot 0xffff and the body does not test
+  // for it, so a building outside every settlement reads an empty table slot
+  // and faults; the invalid handle is the only answer to model that with. A
+  // unit receiver is accepted here and cannot be reached from compiled code.
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr || slot->settlement == kNoObject) return HostOutcome::ok_with(invalid_object());
   return HostOutcome::ok_with(Value::object(ObjectRef{kTypeSettlement, slot->settlement}));
 }
 
 /// A class `radius` for a distance, floored at zero: a radius below zero -- how
-/// the original's class constructor can leave a number no class declared --
-/// must not make a distance grow.
+/// the original's class constructor can leave a number no class declared (the
+/// placeholder at 0x0059c310) -- must not make a distance grow. Every one of
+/// the 845 shipped classes resolves a radius of zero or more, so the floor is
+/// never reached on retail data.
 [[nodiscard]] std::int32_t reach_radius(const World& world, const WorldObject& slot) {
   const std::int32_t radius = class_int(world, slot, "radius");
   return radius > 0 ? radius : 0;
@@ -2112,56 +2148,76 @@ HostOutcome m_settlement(CallContext& ctx) {
 
 /// `a.DistTo(b)` -- the gap between two edges, not two centres.
 ///
-/// `gbr.exe` registers the name twice. The point form (0x005aa350) is
-/// `isqrt(dx² + dy²)` **less the receiver's class `radius`** (`[class+0x2dc]`);
-/// the object form (0x005aa3e0) calls 0x005a77b0, the same distance **less
-/// both radii** -- the measure the conversation reach test and a hero's skill
-/// reach are written in here already. Either can be negative, for a point
-/// inside the receiver or two objects that overlap, and the original hands the
-/// negative back.
+/// `gbr.exe` registers the name twice, and both measure from the **stored**
+/// position, `[obj+0x24]`/`[obj+0x28]` -- the `(-1, -1)` marker for a held
+/// object, not where its holder stands:
 ///
-/// It was centre to centre here, and that is what made a unit's `Goto` to an
-/// object and its own `DistTo` disagree once `Goto` measured edges:
+///   * the point form (0x005aa350) pops the point, then the receiver; a miss
+///     prints and answers **-1**. Otherwise the floor square root (0x0067c3d0)
+///     of `dx² + dy²`, **less the receiver's class `radius`** (`[class+0x2dc]`);
+///   * the object form (0x005aa3e0) checks the argument first ("Parameter #1",
+///     -1), then the receiver (-1), and calls 0x005a77b0: the same distance
+///     between the two stored positions **less both radii** -- the measure the
+///     conversation reach test and a hero's skill reach are written in here.
+///
+/// Either can be negative, for a point inside the receiver or two objects that
+/// overlap, and the original hands the negative back. The sums are 32-bit
+/// there and 64-bit here, which agree for any two points on a map.
+///
+/// It was centre to centre here once, and that is what made a unit's `Goto`
+/// to an object and its own `DistTo` disagree once `Goto` measured edges:
 /// `SHAMAN_IDLE.VS` reads `if (.DistTo(.hero) > 250) { .Goto(.hero, 250, ...);
 /// continue; }`, and a `Goto` that has arrived where `DistTo` says it has not
-/// is a loop that never yields. The two measure the same gap in the original.
+/// is a loop that never yields. It also measured from the holder and answered
+/// 0 for a miss, until the host audit read both bodies.
 HostOutcome m_dist_to(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("DistTo: no world");
-  const WorldObject* self = object_of(*world, ctx.arg(0));
-  if (self == nullptr) return HostOutcome::ok_with(Value::integer(0));
+  const auto miss = [] { return HostOutcome::ok_with(Value::integer(-1)); };
 
   Point target{};
-  std::int64_t reach = reach_radius(*world, *self);
+  const WorldObject* other = nullptr;
   if (is_point(ctx.arg(1))) {
     target = unpack_point(ctx.arg(1));
   } else {
-    const WorldObject* other = object_of(*world, ctx.arg(1));
-    if (other == nullptr) return HostOutcome::ok_with(Value::integer(0));
-    target = world->resolve_position(other->id);
-    reach += reach_radius(*world, *other);
+    other = object_of(*world, ctx.arg(1));
+    if (other == nullptr) return miss();
+    target = other->state.position;
   }
-  const Point here = world->resolve_position(self->id);
+  const WorldObject* self = object_of(*world, ctx.arg(0));
+  if (self == nullptr) return miss();
+  std::int64_t reach = reach_radius(*world, *self);
+  if (other != nullptr) reach += reach_radius(*world, *other);
+  const Point here = self->state.position;
   const std::int64_t dx = static_cast<std::int64_t>(here.x) - target.x;
   const std::int64_t dy = static_cast<std::int64_t>(here.y) - target.y;
   return HostOutcome::ok_with(
       Value::integer(static_cast<std::int32_t>(isqrt(dx * dx + dy * dy) - reach)));
 }
 
-/// `o.IsHeirOf("Class")` -- a test against the class *tree*, which is what the
-/// dumps' queries filter on: they mix concrete classes with abstract ones.
+/// `o.IsHeirOf("Class")` (0x005ad450) -- a test against the class *tree*.
+///
+/// The handle check (a miss prints and answers false), then the **whole
+/// string as one key** in the class map at 0x009bdb00 (0x00409e40 and
+/// 0x00431f10), compared exactly and case-sensitively (0x00409350): no comma
+/// list, no trimming. No match answers false; otherwise it walks the parent
+/// links (`[class+0xe4]`) up from the object's class (`[obj+0x3c]`) and answers
+/// whether it reaches the found one. `ClassGraph::lookup` also falls back to
+/// an `altid`; whether the original's map is keyed by those too was not
+/// traced. This parsed a comma list until the host audit, so
+/// `IsHeirOf("Fort,Unit")` was true of a soldier; no shipped literal has a
+/// comma or a space, and the sites that pass a variable pass one name.
 HostOutcome m_is_heir_of(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsHeirOf: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  if (slot == nullptr || !ctx.arg(1).is_string()) {
+  const ClassGraph* graph = world->class_graph();
+  if (slot == nullptr || graph == nullptr || !ctx.arg(1).is_string()) {
     return HostOutcome::ok_with(Value::boolean(false));
   }
-  const ClassFilter filter = ClassFilter::parse(ctx.arg(1).as_string(), world->class_graph());
-  // An unresolvable name must not read as true: `match_all` with no class graph
-  // would make every `IsHeirOf` succeed and every guard in the corpus vanish.
-  if (filter.match_all) return HostOutcome::ok_with(Value::boolean(false));
-  return HostOutcome::ok_with(Value::boolean(world->matches_filter(*slot, filter)));
+  const ClassIndex base = graph->lookup(ctx.arg(1).as_string());
+  if (base == kNoClass) return HostOutcome::ok_with(Value::boolean(false));
+  return HostOutcome::ok_with(Value::boolean(world->class_is_a(slot->id, base)));
 }
 
 // --------------------------------------------------------------------------
@@ -2911,10 +2967,33 @@ HostOutcome m_is_valid_capture_target(CallContext& ctx) {
 // members: downcasts
 // --------------------------------------------------------------------------
 
-/// Every `AsXxx` returns the handle unchanged when the object is of that native
-/// class or derives from it, and an invalid handle otherwise. There is one
-/// runtime representation for all handle types, so a downcast is a test, not a
-/// conversion.
+/// Every `AsXxx` answers a handle to the same object when it is of that native
+/// class or derives from it, and the invalid handle otherwise -- for a failed
+/// cast and for a receiver that does not resolve alike, and silently. There is
+/// one runtime representation for all handle types, so a downcast is a test,
+/// not a conversion. In `gbr.exe` the test is one of two kinds:
+///
+///   * **a sync-flag bit** at `[obj+0x2c]` for three of them: `AsUnit`
+///     (0x005aa580) tests 0x400000, which the `CVXUnit` constructor (0x005d3170)
+///     sets; `AsBuilding`/`AsTower` (0x005aa5e0) test 0x800000, set by the
+///     `CVXBuilding` constructor (0x004e00d0); `AsHero` (0x005aa640) tests
+///     0x1000000. Every subclass runs its base constructor, so each bit covers
+///     exactly that C++ family;
+///   * **the object's virtual cast** with a C++ class-name pointer for the
+///     rest -- `AsShip` 0x005aa9b0, `AsDruid` 0x005aa6a0, `AsCatapult`
+///     0x005aa780, `AsWagon` 0x005aa7f0, `AsGate` 0x00529980, `AsFlying`
+///     0x005aaa20, `AsItemHolder` 0x005aa860. Each class's cast compares the
+///     pointer with its own name and otherwise defers to its parent's: ship,
+///     druid, wagon, flying unit, ghost and hero to the unit's (0x005d27d0);
+///     catapult, gate, town hall, outpost, barrack, tavern and teleport to the
+///     building's (0x004db2a0); item holder straight to the script object's.
+///
+/// So a druid is not a hero, catapults and gates are buildings, and nothing
+/// derives from ship, gate, flying unit or item holder -- which is the tree
+/// `NativeObject::is_a` walks, for all ten. A hit pushes the object's own
+/// 16-bit handle `[obj+8]` with offset 0. (One edge outside these ten
+/// differs: the outpost's cast goes straight to the building's, where this
+/// engine's native tree puts the outpost under the town hall.)
 template <NativeClass kClass>
 HostOutcome m_as(CallContext& ctx) {
   World* world = world_of(ctx);

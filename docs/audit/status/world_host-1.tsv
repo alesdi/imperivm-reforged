@@ -27,3 +27,27 @@
 0x005abda0	verified	class id string (+4 of [obj+0x3c]); miss ""
 0x005ab8d0	verified	bit 26 set/clear via vtbl+0x44/0x48, no life test; miss no-op
 0x00579c70	verified	every member that resolves and is not dead (vtbl+0x50); empty query does nothing
+0x005aa580	verified	sync bit 0x400000 (CVXUnit ctor 0x005d3170); miss or failed cast -> invalid handle; matches NativeObject::is_a
+0x005aa640	verified	sync bit 0x1000000; miss/failed -> invalid
+0x005aa5e0	verified	sync bit 0x800000 (CVXBuilding ctor 0x004e00d0), AsTower the same body; miss/failed -> invalid
+0x005aa9b0	verified	virtual cast to CVXShip (chain via unit 0x005d27d0); miss/failed -> invalid
+0x005aa6a0	verified	virtual cast to CVXDruid (a druid is not a hero); miss/failed -> invalid
+0x005aa780	verified	virtual cast to CVXCatapult (a building heir); miss/failed -> invalid
+0x005aa7f0	verified	virtual cast to CVXWagon (unit heir); miss/failed -> invalid
+0x00529980	verified	virtual cast to CVXGate (building heir); miss/failed -> invalid
+0x005aaa20	verified	virtual cast to CVXFlyingUnit (unit heir); miss/failed -> invalid
+0x005aa860	verified	virtual cast to CVXItemHolder (script-object heir); miss/failed -> invalid
+0x004dcdd0	verified	16-bit settlement slot [bld+0x148] as a handle; miss -> invalid; no 0xffff guard (faults) -> invalid here
+0x004219a0	verified	node at index*0x24 of 0x008c8e54, settlement pointer +0x14 or invalid; no print
+0x005ada80	verified	[obj+0xc0]; miss 0
+0x005c1e40	partial	garrison holder [settlement+0x5e] +0x1c; no writer found (ctor 0x00531de0 zeroes it); engine answers the settlement's own health, 0; 0 sites
+0x00427740	verified	sum of [+0xc0] over members with a live slot; no bounds check; empty 0
+0x005adae0	verified	[obj+0xc4]; miss 0; ctor seeds from class maxstamina, engine for combatants only (no other class declares one)
+0x005c1f00	partial	garrison holder +0x24; same as Settlement::health
+0x005d8b90	verified	[obj+0xc4], same field as Obj::stamina
+0x005adcc0	verified	[obj+0xd0] (WorldObject::sight); miss 0
+0x005adb40	verified	[obj+0xc8], class max plus bonuses (CombatSystem) or class maxhealth; miss 0
+0x00427800	verified	sum of [+0xc8] over live members
+0x005ad450	partial	whole string as one exact case-sensitive key (0x00409e40/0x00409350), then walk [class+0xe4]; fixed (was a comma list); altid keying of the map 0x009bdb00 not traced
+0x005aa350	verified	floor isqrt of the stored-position distance to the point, less own radius; miss -1 (was 0, and measured from the holder)
+0x005aa3e0	verified	argument then receiver checked (-1 each); 0x005a77b0: stored positions, less both radii

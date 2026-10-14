@@ -277,3 +277,53 @@ TEST(audit_pos_and_pos_rh_answer_the_origin_for_an_invalid_receiver) {
     CHECK(unpack_point(out.value) == (Point{0, 0}));
   }
 }
+
+// --------------------------------------------------------------------------
+// distance and ancestry: DistTo, IsHeirOf
+// --------------------------------------------------------------------------
+
+TEST(audit_dist_to_measures_stored_positions_and_answers_minus_one_on_a_miss) {
+  // `Obj::DistTo` (0x005aa350 point, 0x005aa3e0 object -> 0x005a77b0) reads
+  // `[obj+0x24/0x28]` -- the (-1, -1) marker for a held unit -- and pushes -1
+  // for an invalid receiver or argument. No class graph, so every radius is 0.
+  Host h;
+  const World::ShipIds ship = h.world.spawn_ship(nullptr);
+  REQUIRE(h.world.set_position(ship.ship, Point{1200, 1500}));
+  const ObjectId passenger = h.unit(1, Point{0, 0});
+  REQUIRE(h.world.put_in_holder(passenger, ship.holder));
+  const ObjectId other = h.unit(1, Point{11, 11});
+  const ObjectId free = h.unit(1, Point{700, 900});
+
+  CHECK(h.integer("DistTo", {obj(passenger), pack_point(Point{2, 3})}) == 5);
+  CHECK(h.integer("DistTo", {obj(passenger), obj(other)}) == 16);  // floor(sqrt(288))
+  CHECK(h.integer("DistTo", {obj(free), pack_point(Point{703, 904})}) == 5);
+  CHECK(h.integer("DistTo", {obj(9999), pack_point(Point{1, 1})}) == -1);
+  CHECK(h.integer("DistTo", {obj(free), obj(9999)}) == -1);
+}
+
+TEST(audit_is_heir_of_takes_the_whole_string_as_one_class_name) {
+  // `Obj::IsHeirOf` (0x005ad450) looks the string up whole, exactly
+  // (0x00409e40, 0x00409350): no comma list, no trimming.
+  imperivm::core::ClassGraph graph;
+  const std::string docs[] = {
+      R"(<class id="Object" cpp_class="CVXDecor"><properties/></class>)",
+      R"(<class id="Unit" parent="Object" cpp_class="CVXUnit"><properties/></class>)",
+      R"(<class id="Soldier" parent="Unit" cpp_class="CVXUnit"><properties/></class>)",
+      R"(<class id="Fort" parent="Object" cpp_class="CVXBuilding"><properties/></class>)",
+  };
+  const char* names[] = {"object.sc.xml", "unit.sc.xml", "soldier.sc.xml", "fort.sc.xml"};
+  for (int i = 0; i < 4; ++i) {
+    graph.add({reinterpret_cast<const std::byte*>(docs[i].data()), docs[i].size()}, names[i]);
+  }
+  graph.link();
+  Host h;
+  h.world.set_class_graph(&graph);
+  const ObjectId soldier = h.world.spawn(NativeClass::unit, nullptr, graph.find("Soldier"));
+
+  CHECK(h.truthy("IsHeirOf", {obj(soldier), str("Unit")}));
+  CHECK(h.truthy("IsHeirOf", {obj(soldier), str("Soldier")}));
+  CHECK(!h.truthy("IsHeirOf", {obj(soldier), str("Fort")}));
+  CHECK(!h.truthy("IsHeirOf", {obj(soldier), str("Fort,Unit")}));
+  CHECK(!h.truthy("IsHeirOf", {obj(soldier), str(" Unit")}));
+  CHECK(!h.truthy("IsHeirOf", {obj(9999), str("Unit")}));
+}
