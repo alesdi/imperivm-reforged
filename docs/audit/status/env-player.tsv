@@ -24,3 +24,9 @@
 0x006ada00	partial	EnvWriteObj(Settlement): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
 0x006ad2b0	partial	EnvWriteObj(Building): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
 0x006ac9b0	partial	EnvWriteObj(str): root form now registered (fixed); context and $$65535$$ gaps as above
+0x00433790	verified	IsResearched(Settlement): command row by name, first NamePlr/NameSet triple of its param (tokenizer 0x006ab970), owner+1 or settlement id; no row/no triple/invalid receiver -> false (fixed: was the research catalog, last triple, trap)
+0x00433b70	verified	IsResearched(int): Player%d verbatim (0x00433be6 -> 0x00433e39); NameSet row -> false (fixed)
+0x00434000	verified	IsResearching(Settlement): as IsResearched with "researching" (fixed)
+0x004343e0	verified	IsResearching(int): as IsResearched(int) with "researching" (fixed)
+0x00434870	partial	CanResearch: row, idle lab, first ledger triple; no requirement check (fixed); lab finder 0x0042d010 (state string "idle", class command list) modelled by settlement_lab_for from row sources
+0x00426ab0	partial	TSResearch: runs TSH_Research.vs on the owner's AI path; invalid receiver -> false (fixed); a helper that fails to run is a trap via the shared run_script_now where retail logs and answers false

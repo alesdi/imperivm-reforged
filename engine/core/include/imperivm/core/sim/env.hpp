@@ -766,24 +766,14 @@ std::size_t register_env_host(script::HostRegistry& registry);
 //   of calling `UTech`. That is consistent, but it means the table has a hole
 //   we are reproducing rather than filling.
 //
-// * **`Settlement::TSResearch`.** The retail engine implements it by running
-//   `data/ai/TSH_Research.vs` (`gbr.exe`: `TSResearch: Error running script!` /
-//   `TSH_Research.vs`). That script is six lines and we transcribe it, but it
-//   calls `set.Research(tech)`, which queues a command on a research lab. We
-//   mark the ledger `researching` directly and charge nothing, because
-//   `Settlement::Research/1` is declared and implemented by nobody. When it
-//   lands, `TSResearch` should become a script dispatch and this native path
-//   should be deleted.
-//
 // * **Who answers `script::Host::global` for `AIV_*`.** `AIVar`'s second
 //   argument is an integer variable id, and `ai_var_id` is the only place the
 //   name-to-id mapping exists -- but nothing implements `global` yet, so no
 //   script can currently reach an `AIV_*` constant at all. Until it does, the
 //   757 `AIVar`/`SetAIVar` call sites are reachable only from C++.
 //
-// * **`CanResearch` and the command queue.** `ESH_NEEDTECH.VS` comments its
-//   failure as "researched, researching or impossible to research **or the
-//   Queue is not empty**". We cannot test the queue, so `can_research` is
-//   optimistic by exactly that one condition.
+// * **`CanResearch` and the command queue** is settled: the entry point wants
+//   an idle building of the settlement that offers the row (0x0042d010), and
+//   `can_research` here is only the verifier script's ledger half.
 
 }  // namespace imperivm::core::sim

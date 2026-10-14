@@ -1078,10 +1078,6 @@ struct EnvTarget {
   return economy->settlements().for_object(ref.id);
 }
 
-[[nodiscard]] HostOutcome no_settlement() {
-  return HostOutcome::failed("receiver does not resolve to a settlement");
-}
-
 // -- the environment store ------------------------------------------------
 //
 // The twenty-four bodies are six names times four overloads (root, Settlement,
@@ -1234,72 +1230,162 @@ HostOutcome set_ai_var(CallContext& ctx) {
 }
 
 // -- research -------------------------------------------------------------
+//
+// `IsResearched`, `IsResearching` and `Settlement::CanResearch` do not consult
+// a research catalog: each looks the name up in the **command table**, any
+// row of any building (the vtable call at `[0x009969dc]+0x14`, which is what
+// `CommandTable::find` models), answers false with "No such upgrade %s" when
+// there is none, and then reads the row's `param` string itself, three tokens
+// at a time, until the **first** `NamePlr` or `NameSet` triple. That triple
+// names the ledger key and its scope; the other verbs (`ReqSet`, `SetsPlr`,
+// ...) are skipped without being read. A row with neither verb has no ledger.
+//
+// The settlement forms read a `NamePlr` key at the owner's script number (the
+// owner's index plus one: 0x00433a15, 0x00434a4f) and a `NameSet` key at the
+// settlement's id. The `int idPlayer` forms read `NamePlr` at the integer
+// **verbatim**, with no adjustment, and answer false for a `NameSet` row ("%s
+// is not player upgrade"). The disassembly settles the verbatim: the integer
+// is saved at 0x00433be6 and pushed unchanged at 0x00433e39.
+//
+// A world with no command system -- the tests' and the conformance fixtures'
+// -- falls back to `EnvSystem`'s catalog, which is the reading the shipped
+// verifier scripts make (`ParseStr` over the same attribute) and the only one
+// available without the table.
 
-HostOutcome is_researched(CallContext& ctx) {
+/// One token of a command row's `param`, as 0x006ab970 cuts it: skip leading
+/// **spaces** (not tabs), take everything up to the next comma, drop trailing
+/// spaces. `pos` becomes the index after the comma, or `npos` once the string
+/// is exhausted -- after which every further token is empty.
+[[nodiscard]] std::string_view param_token(std::string_view text, std::size_t& pos) noexcept {
+  if (pos == std::string_view::npos) return {};
+  const std::size_t start = text.find_first_not_of(' ', pos);
+  if (start == std::string_view::npos) {
+    pos = std::string_view::npos;
+    return {};
+  }
+  const std::size_t comma = text.find(',', start);
+  std::size_t end = text.size();
+  if (comma == std::string_view::npos) {
+    pos = std::string_view::npos;
+  } else {
+    end = comma;
+    pos = comma + 1;
+  }
+  while (end > start && text[end - 1] == ' ') --end;
+  return text.substr(start, end - start);
+}
+
+/// The ledger a command row names: the first `NamePlr`/`NameSet` triple.
+struct RowLedger {
+  ResearchScope scope = ResearchScope::none;
+  std::string_view key;
+};
+
+[[nodiscard]] RowLedger row_ledger(std::string_view param) noexcept {
+  std::size_t pos = 0;
+  do {
+    const std::string_view verb = param_token(param, pos);
+    const std::string_view subject = param_token(param, pos);
+    (void)param_token(param, pos);
+    // `std::string::compare(0, size, "NamePlr", 7)`: exact and case-sensitive.
+    if (verb == "NamePlr") return {ResearchScope::player, subject};
+    if (verb == "NameSet") return {ResearchScope::settlement, subject};
+  } while (pos != std::string_view::npos);
+  return {};
+}
+
+/// The command table, when the world has one.
+[[nodiscard]] const CommandTable* command_table(CallContext& ctx) noexcept {
+  World* world = world_of(ctx);
+  const CommandSystem* commands = world == nullptr ? nullptr : command_system(*world);
+  return commands == nullptr ? nullptr : &commands->table();
+}
+
+/// `IsResearched` and `IsResearching` -- 0x00433790 / 0x00433b70 and
+/// 0x00434000 / 0x004343e0, one body per receiver type, the two names
+/// differing only in the literal they compare the ledger value with
+/// (`"researched"`, `"researching"`; exact). An invalid settlement is false
+/// ("Parameter #1 ... is uninitialized or invalid object"), never a trap.
+/// Nothing is written, nothing suspends.
+HostOutcome ledger_state(CallContext& ctx, std::string_view state) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
   std::string_view name;
   if (!key_arg(ctx, 1, name)) return bad_key();
-  // `gbr.exe` declares both overloads at arity 2:
-  //   bool, Settlement set, str research
-  //   bool, int idPlayer,   str research
-  if (ctx.count() > 0 && ctx.arg(0).is_integer()) {
-    return boolean(env->is_researched_for_player(ctx.arg(0).as_integer(), name));
+  const bool by_player = ctx.count() > 0 && ctx.arg(0).is_integer();
+  const CommandTable* table = command_table(ctx);
+  if (table == nullptr) {
+    if (by_player) {
+      const std::int32_t player = ctx.arg(0).as_integer();
+      return boolean(state == kResearched ? env->is_researched_for_player(player, name)
+                                          : env->is_researching_for_player(player, name));
+    }
+    const Settlement* s = settlement_receiver(ctx);
+    if (s == nullptr) return boolean(false);
+    return boolean(state == kResearched ? env->is_researched(*s, name)
+                                        : env->is_researching(*s, name));
+  }
+  const CommandDef* row = table->find(name);
+  if (row == nullptr) return boolean(false);  // "No such upgrade %s"
+  const RowLedger ledger = row_ledger(row->param);
+  if (by_player) {
+    if (ledger.scope != ResearchScope::player) return boolean(false);
+    return boolean(env->env().read_string(EnvScope::for_player(ctx.arg(0).as_integer()),
+                                          ledger.key) == state);
   }
   const Settlement* s = settlement_receiver(ctx);
-  if (s == nullptr) return no_settlement();
-  return boolean(env->is_researched(*s, name));
+  if (s == nullptr) return boolean(false);
+  if (ledger.scope == ResearchScope::none) return boolean(false);
+  const EnvScope scope = ledger.scope == ResearchScope::player
+                             ? owner_scope(*s)
+                             : EnvScope::for_settlement(s->id);
+  return boolean(env->env().read_string(scope, ledger.key) == state);
 }
 
-HostOutcome is_researching(CallContext& ctx) {
-  EnvSystem* env = host_env(ctx);
-  if (env == nullptr) return no_env();
-  std::string_view name;
-  if (!key_arg(ctx, 1, name)) return bad_key();
-  if (ctx.count() > 0 && ctx.arg(0).is_integer()) {
-    return boolean(env->is_researching_for_player(ctx.arg(0).as_integer(), name));
-  }
-  const Settlement* s = settlement_receiver(ctx);
-  if (s == nullptr) return no_settlement();
-  return boolean(env->is_researching(*s, name));
-}
+HostOutcome is_researched(CallContext& ctx) { return ledger_state(ctx, kResearched); }
+HostOutcome is_researching(CallContext& ctx) { return ledger_state(ctx, kResearching); }
 
 /// `set.CanResearch(name)` -- 53 sites. 0x00434870, in its order:
 ///
-///   1. the `<cmd>` row by name, any building's, research or not; none is
+///   1. the receiver; an invalid one is false (no trap);
+///   2. the `<cmd>` row by name, any building's, research or not; none is
 ///      *"No such upgrade %s"* and false. `hireheroE` and `BuySlaves` are
-///      asked about as often as `Fights`, and neither is a research row.
-///   2. **an idle building of the settlement that offers the row**
-///      (0x0042d010 with the idle flag set); none is false. This is the test
-///      that makes the answer a settlement's rather than a ledger's, and it
-///      is why a stronghold with no temple cannot hire a hero.
-///   3. the ledger, only for a row that names `NamePlr` or `NameSet`: not
-///      `researched`, not `researching`. A row with neither -- a hire, a
-///      purchase -- skips this and is researchable whenever its lab is idle.
+///      asked about as often as `Fights`, and neither is a research row;
+///   3. **an idle building of the settlement that offers the row** (0x0042d010
+///      with its idle flag set: a member whose state string is exactly
+///      `"idle"` and whose class's command list holds the row); none is
+///      false. `settlement_lab_for` models it from the row's sources;
+///   4. the row's ledger (`row_ledger`), if it names one: true unless the value
+///      there is `"researched"` or `"researching"`. A row with no
+///      `NamePlr`/`NameSet` -- a hire, a purchase -- is true here.
 ///
-/// `EnvSystem::can_research` is the ledger half with the catalog's
-/// requirements on top, and answers the whole question for a world with no
-/// command system -- the tests' and the conformance fixtures' -- which is
-/// where the older reading lived: a name outside the research catalog was
-/// "no such upgrade" there, so every `CanResearch("hirehero…")` in the
-/// installation answered no and no computer player ever hired a hero.
+/// **No requirement is checked.** `ReqSet`, `ReqPlr` and `NReqSet` are never
+/// read by this body; they are `VERIFY_RESEARCH.VS`'s, which the command bar
+/// runs, and `EnvSystem::can_research` -- which does check them -- is that
+/// script's model, not this entry point's. A world with no command system
+/// falls back to it.
 HostOutcome can_research(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
   std::string_view name;
   if (!key_arg(ctx, 1, name)) return bad_key();
   const Settlement* s = settlement_receiver(ctx);
-  if (s == nullptr) return no_settlement();
+  if (s == nullptr) return boolean(false);
   World* world = world_of(ctx);
-  const CommandSystem* commands = world == nullptr ? nullptr : command_system(*world);
-  if (commands == nullptr) return boolean(env->can_research(*s, name));
-  const CommandDef* row = commands->table().find(name);
+  const CommandTable* table = command_table(ctx);
+  if (table == nullptr) return boolean(env->can_research(*s, name));
+  const CommandDef* row = table->find(name);
   if (row == nullptr) return boolean(false);
   if (settlement_lab_for(*world, *s, *row, /*must_be_idle=*/true) == kNoObject) {
     return boolean(false);
   }
-  if (env->research().find(name) == nullptr) return boolean(true);
-  return boolean(env->can_research(*s, name));
+  const RowLedger ledger = row_ledger(row->param);
+  if (ledger.scope == ResearchScope::none) return boolean(true);
+  const EnvScope scope = ledger.scope == ResearchScope::player
+                             ? owner_scope(*s)
+                             : EnvScope::for_settlement(s->id);
+  const std::string_view value = env->env().read_string(scope, ledger.key);
+  return boolean(value != kResearched && value != kResearching);
 }
 
 /// `Settlement::TSResearch(str)` -- 110 sites, the tactic scripts' poll loop:
@@ -1327,13 +1413,24 @@ HostOutcome can_research(CallContext& ctx) {
 /// tests'. The fallback is what this whole entry point was for a long time,
 /// and it is why a tactic script's `TSResearch("BuySlaves")` -- a market
 /// purchase, not a research row -- answered false on every map forever.
+///
+/// The body itself (0x00426ab0): an invalid receiver prints "The function
+/// 'TSResearch' called for an uninitialized or invalid object." and answers
+/// false; otherwise it registers a scratch out-value (0x0067b480), runs the
+/// helper synchronously through the AI's script launcher for the owner's
+/// player index (0x0043d030, then 0x006a0360) with the out-value, the
+/// settlement and the name, and answers whether the out-value came back
+/// non-zero. A helper that fails to run prints "TSResearch: Error running
+/// script!" and the out-value is still false; here that failure is
+/// `run_script_now`'s, which is shared with every `TS*` helper and reports it
+/// as the caller's trap (`sim/ai.cpp`).
 HostOutcome ts_research(CallContext& ctx) {
   EnvSystem* env = host_env(ctx);
   if (env == nullptr) return no_env();
   std::string_view name;
   if (!key_arg(ctx, 1, name)) return bad_key();
   const Settlement* s = settlement_receiver(ctx);
-  if (s == nullptr) return no_settlement();
+  if (s == nullptr) return boolean(false);
 
   World* world = world_of(ctx);
   if (world != nullptr && ctx.scheduler != nullptr && command_system(*world) != nullptr) {
