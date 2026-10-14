@@ -3255,6 +3255,19 @@ HostOutcome m_set_build_frame(CallContext& ctx) {
 ///     0x006ffd20, which opens the transport window. A window.
 ///   * `Ship::ShowBuildAnimation/1` -- 1 site, `SHIPYARD_BUILD_SHIP.VS`, which
 ///     passes the shipyard's exit vector so the hull slides out along it.
+///     **Not only presentation, and a labelled gap.** 0x005c6a60 is a
+///     suspending entry point (it answers "again in 50 ms" until done): on
+///     its first pass it takes the new ship out of the shipyard's holder
+///     (0x005d3f20) at the holder's exit point (0x004db6c0), raises the build
+///     counter `[ship+0x230]` that `Ship::IsBuilding` reads, then slides the
+///     ship along the vector over `ShipBuildAnimTime` ms with a
+///     floating-point cosine easing, holding `[ship+0x230]` at the build
+///     frame; once the animation's last state has run it drops the counter
+///     to 0, restores the idle animation and hands the ship to the AI
+///     (0x0041f310). Here the ship stays in the holder `CreateShip` put it in
+///     until its first order takes it out, and `IsBuilding` is never true.
+///     Reproducing it needs a suspending entry with its own state and a
+///     fixed-point stand-in for the easing; recorded for a round of its own.
 ///   * `Obj::SetDebug/1` -- 1 site, and it is `DEBUG_SELECTION.VS` walking the
 ///     current selection to turn a debug overlay on. 0x005abcb0 normalises the
 ///     argument to 0 or 1 and calls the object's `vtbl+0xd4`.

@@ -92,3 +92,10 @@
 0x005b5890	verified	inserts the handle into the global store-bin set (0x005b5750), read only by a by-name search no entry point reaches; dropped
 0x005b0f10	verified	erases it from the same set (0x005b0e30); dropped
 0x005d86d0	verified	fixed: the command queue is not touched -- activity [obj+0x130] to 0, path dropped, animation reset, stood at (-1,-1) -- so the ambient villagers' queued errand behind disappear survives
+0x005d7210	verified	a held receiver is refused; the holder is a building's settlement holder ([bld+0x148] -> [set+0x5e]), else the one the object carries (vtbl+0xe4, a ship here), else the one it is in; then the enter routine 0x005d3e10
+0x005d71c0	partial	runs the unboarding routine 0x005d3f20 when the receiver is held; the three clauses of it sim/boarding.hpp labels as not reproduced stay so
+0x005d7b10	verified	SyncFlags bit 19 (party); invalid false
+0x005c6a60	partial	not presentation: a suspending routine that unboards the new ship at the shipyard exit, raises the build counter [ship+0x230] (IsBuilding), slides it along the exit vector over ShipBuildAnimTime with a float cosine easing, then zeroes the counter and hands the ship to the AI (0x0041f310); dropped here, the ship stays held until ordered out (design: a suspending entry with state and a fixed-point easing)
+0x005c8710	verified	snapshot the holder's passengers, unboard them all (0x005c84b0), each distinct squad once (0x00442880) ordered on through 0x0043ec00 with its own state, SF_ADVCHOOSER cleared, the stored verb and point; then the order cleared
+0x005c7e10	verified	the order string to "" and the point to (-1,-1); silent on an unresolvable receiver
+0x005c6f20	verified	the point at [ship+0x228/0x22c], (-1,-1) for no order; no receiver test in the original
