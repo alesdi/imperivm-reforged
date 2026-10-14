@@ -15,6 +15,7 @@
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/globals.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/objlist.hpp"
@@ -366,6 +367,40 @@ TEST(audit_has_special_answers_freedom_for_every_hero) {
   CHECK(h.truthy("HasSpecial", {obj(hero), num(30)}));
   CHECK(!h.truthy("HasSpecial", {obj(soldier), num(30)}));
   CHECK(!h.truthy("HasSpecial", {obj(hero), num(31)}));
+}
+
+TEST(audit_set_no_ai_flag_regroups_the_unit_so_its_squad_carries_the_flag) {
+  // Both `SetNoAIFlag` bodies (0x00435470 free, 0x005de600 member) write
+  // `[unit+0x194] & 0x40000` and then hand the unit(s) to the Squadize worker
+  // 0x00447330 with state 0, which gives each a fresh squad whose `SF_NOAI`
+  // is the unit's own bit -- the bit the AI reads.
+  Host h;
+  HeroSystem heroes;
+  REQUIRE(h.world.add_system(&heroes));
+  const ObjectId a = h.unit(1, Point{100, 100});
+  const ObjectId b = h.unit(1, Point{120, 100});
+  SquadTable& squads = heroes.squads();
+  const SquadKey shared = squads.create(1);
+  REQUIRE(squads.join(shared, a));
+  REQUIRE(squads.join(shared, b));
+  REQUIRE((squads.find(shared)->flags & kSquadFlagNoAi) == 0);
+
+  CHECK(h.member("SetNoAIFlag", {obj(a), num(1)}).status == script::HostStatus::ok);
+  CHECK(h.world.find(a)->state.flags.no_ai);
+  const Squad* own = squads.find(squads.squad_of(a));
+  REQUIRE(own != nullptr);
+  CHECK(squads.squad_of(a) != squads.squad_of(b));
+  CHECK((own->flags & kSquadFlagNoAi) != 0);
+  CHECK(own->state == 0);
+  CHECK((squads.find(squads.squad_of(b))->flags & kSquadFlagNoAi) == 0);
+
+  ObjListPool& pool = objlist_pool_of(h.world);
+  const ObjListId list = pool.acquire(1, 0);
+  pool.mutable_items(list)->assign({a});
+  CHECK(h.free("SetNoAIFlag", {make_objlist_value(list), num(0)}).status ==
+        script::HostStatus::ok);
+  CHECK(!h.world.find(a)->state.flags.no_ai);
+  CHECK((squads.find(squads.squad_of(a))->flags & kSquadFlagNoAi) == 0);
 }
 
 TEST(audit_traverse_records_the_travellers_whole_view_sharing_side) {

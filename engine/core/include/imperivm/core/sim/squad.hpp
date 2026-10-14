@@ -938,6 +938,14 @@ ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId af
 void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const ObjectId> units,
                                std::int32_t state, GameTime now);
 
+/// The Squadize worker, 0x00447330, whole: for each owned body in order, a
+/// fresh squad (placeholder state), `add_to_squad`, and the squad listed in
+/// `out` when it has exactly one member; then `state` and the current time on
+/// every listed squad. `out` is cleared first. `squadize_impl` documents the
+/// rule; `Squadize` and both `SetNoAIFlag` bodies (sim/world_host.cpp) call it.
+void squadize_bodies(World& world, HeroSystem& heroes, std::span<const ObjectId> bodies,
+                     std::int32_t state, std::vector<SquadKey>& out);
+
 std::size_t register_squad_host(script::HostRegistry& registry);
 
 /// How many entry points `register_squad_host` defines.

@@ -73,3 +73,5 @@
 0x005cdcb0	verified	ORs the traveller's record word +0x18 (share-view side, self included) into [tp+0x214] (fixed: was the one bit); 1..16 only
 0x005cdc40	partial	instance fields [tp+0x20c/0x210] copied from the class by the loader 0x005cd950; miss pushes (0xffff|garbage, 0), (-1,-1) here; agree on every shipped class
 0x005d87d0	verified	bit 0x4000000 of the unit flag word; miss no-op
+0x00435470	partial	bit 0x40000 of [+0x194] on live units only, then the whole list to the Squadize worker 0x00447330 at state 0 (fixed: the regroup was missing); non-units left out of the regroup (labelled; 0 shipped)
+0x005de600	verified	handle check, bit 0x40000 with no unit/death test, then a one-element list to 0x00447330 at state 0 (fixed)

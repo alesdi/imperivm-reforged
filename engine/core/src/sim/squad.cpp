@@ -3617,28 +3617,35 @@ HostOutcome squadize_impl(CallContext& ctx) {
   const SquadListId list = squadlist_of(ctx.arg(1));
   std::vector<SquadKey>* out = squadlist_pool_of(*world).mutable_items(list);
   if (out == nullptr) return HostOutcome::failed("Squadize: receiver is not a live SquadList");
-  out->clear();
   squadlist_pool_of(*world).set_cursor(list, 0);
 
   const std::int32_t wanted =
       ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
-  const GameTime now = world->time();
 
   // A copy: the walk creates and destroys squads, and one shipped site hands in
   // a list it goes on to read afterwards.
   const std::span<const ObjectId> items = objlist_pool_of(*world).items(objlist_of(ctx.arg(0)));
   const std::vector<ObjectId> bodies(items.begin(), items.end());
+  squadize_bodies(*world, *heroes, bodies, wanted, *out);
+  return HostOutcome::ok_void();
+}
 
-  SquadTable& table = heroes->squads();
+}  // namespace
+
+void squadize_bodies(World& world, HeroSystem& heroes, std::span<const ObjectId> bodies,
+                     std::int32_t state, std::vector<SquadKey>& out) {
+  out.clear();
+  const GameTime now = world.time();
+  SquadTable& table = heroes.squads();
   for (const ObjectId id : bodies) {
-    const WorldObject* slot = world->find(id);
+    const WorldObject* slot = world.find(id);
     if (slot == nullptr) continue;
     // `[obj+0x70]`, the owner record: an object nobody owns is skipped before
     // anything else, because the squad it would get would belong to nobody.
     if (slot->state.owner == kNoPlayer) continue;
 
     const ObjectId one[1] = {id};
-    regroup_into_fresh_squads(*world, *heroes, std::span<const ObjectId>(one, 1),
+    regroup_into_fresh_squads(world, heroes, std::span<const ObjectId>(one, 1),
                               kSquadizePlaceholder, now);
 
     // The destination the regrouper is asked for is the one step 1 just settled
@@ -3646,23 +3653,24 @@ HostOutcome squadize_impl(CallContext& ctx) {
     const Squad* fresh = table.find(table.squad_of(id));
     const GaikaId dest = fresh != nullptr ? fresh->dest_gaika : kNoGaika;
 
-    const SquadKey landed = add_to_squad(*world, *heroes, id, dest, 0);
+    const SquadKey landed = add_to_squad(world, heroes, id, dest, 0);
     const Squad* settled = table.find(landed);
     // Exactly one member, which is the original's whole test (0x00447572) and
     // needs no guard against listing a squad twice: a squad two bodies both
     // landed in has two members by the time the second one asks.
     if (settled == nullptr || settled->members.size() != 1) continue;
-    out->push_back(landed);
+    out.push_back(landed);
   }
 
-  for (const SquadKey key : *out) {
+  for (const SquadKey key : out) {
     if (Squad* squad = table.find(key); squad != nullptr) {
-      squad->state = wanted;
+      squad->state = state;
       squad->state_time = now;
     }
   }
-  return HostOutcome::ok_void();
 }
+
+namespace {
 
 /// The number of `define` calls `register_squad_host` makes. Kept next to the
 /// list so the two cannot drift.

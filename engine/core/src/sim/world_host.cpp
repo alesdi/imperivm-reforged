@@ -1232,35 +1232,38 @@ HostOutcome fn_place_ex(CallContext& ctx) {
 }
 
 /// `SetNoAIFlag(ObjList, bool)` -- 121 sites -- and `Unit::SetNoAIFlag(bool)`
-/// -- 109. Together the sixth most-used unimplemented name in the install.
+/// -- 109.
 ///
 /// The flag says "this unit belongs to a script; the AI is to leave it alone",
-/// and both bodies do the same one thing to it: `[unit+0x194]` cleared of
+/// and both bodies write it the same way: `[unit+0x194]` cleared of
 /// `0x00040000` and then or-ed back in when the argument is true. That is bit
 /// 18 of a **second** flag word, not of the `+0x2c` `SyncFlags` every other
 /// object flag here comes from -- see `ObjectFlags::no_ai`.
 ///
-/// **The two forms are not the same function with a different receiver.** The
-/// free form (0x00435470) walks the list and applies three filters the member
-/// form (0x005de600) does not have:
+/// **The two forms differ in what they write the bit on.** The free form
+/// (0x00435470) walks the list and writes it only on a member that resolves,
+/// carries the unit bit (`[obj+0x2c] & 0x00400000`) and is not dead
+/// (`vtbl + 0x50`, `object_is_dead`). The member form (0x005de600) checks the
+/// handle -- *"The function 'Unit::SetNoAIFlag' called for an uninitialized or
+/// invalid object"* (0x007d31a0), then a return, not a refusal -- and writes it
+/// with no unit test and no death test.
 ///
-///   1. a handle that resolves to nothing is skipped;
-///   2. `[obj+0x2c] & 0x00400000` -- bit 22, which `docs/formats/map.md`
-///      records as *the object is a mobile unit*, all 16,171 of them -- must
-///      be set, so a building in the list is passed over rather than flagged;
-///   3. the virtual at `vtbl + 0x50` must return zero. That slot is
-///      `IsDead`: `Obj::IsAlive` (0x005aae00) is nothing but its negation,
-///      and it has 229 call sites across the image. So **the dead are
-///      skipped**.
+/// **Then both regroup.** The free form hands the *whole, unfiltered* list,
+/// and the member form a one-element list of the unit it built (vtable
+/// 0x007ac828, append 0x0041f290), to 0x00447330 with state 0 -- the
+/// `Squadize` worker (`squadize_bodies` in sim/squad.cpp): each owned body
+/// gets a fresh squad whose `SF_NOAI` bit is copied from the unit's own flag,
+/// goes through `AddToSquad`, and the single-member squads it seeds take state
+/// 0. That is what makes the flag bite: the AI reads the *squad's* bit, so a
+/// tactic script's `SetNoAIFlag(ol, false)` is what hands its army back to the
+/// AI, and `true` is what takes a unit out of an AI squad. This engine wrote
+/// the unit's bit and stopped there until the host audit read the bodies, on
+/// a reading of the call as a post to the AI that nothing received.
 ///
-/// The member form validates the handle and writes the bit, with no unit test
-/// and no death test -- its receiver is typed `Unit` by the registrar, which
-/// this engine's `(kind, name, arity)` registry does not reproduce. Both
-/// asymmetries are the original's and are kept.
-///
-/// The member form also posts something through 0x00447330 afterwards that the
-/// free form does not; it constructs a temporary with the vtable at 0x007ac828
-/// and hands it to the AI. Not reproduced, because nothing here receives it.
+/// **One labelled gap:** the original also feeds a building or a corpse in the
+/// list to the worker. A non-unit is left out here -- no shipped list holds
+/// one, and a squad of buildings is nothing this engine's AI can carry --
+/// while a dying unit goes through as in the original.
 template <bool kFiltered>
 HostOutcome set_no_ai_flag(CallContext& ctx, std::size_t value_index) {
   World* world = world_of(ctx);
@@ -1274,20 +1277,23 @@ HostOutcome set_no_ai_flag(CallContext& ctx, std::size_t value_index) {
     ids.assign(items.begin(), items.end());
   } else {
     const WorldObject* slot = object_of(*world, ctx.arg(0));
-    // `The function 'Unit::SetNoAIFlag' called for an uninitialized or invalid
-    // object` (0x007d31a0), and then a return. Not a refusal.
     if (slot == nullptr) return HostOutcome::ok_void();
     ids.push_back(slot->id);
   }
 
+  std::vector<ObjectId> bodies;
   for (const ObjectId id : ids) {
-    ObjectState* state = world->mutable_state(id);
-    if (state == nullptr) continue;
-    if (kFiltered) {
-      if (!state->flags.is_unit) continue;
-      if (state->health <= 0) continue;  // `vtbl + 0x50`, which is `IsDead`
+    const WorldObject* slot = world->find(id);
+    if (slot == nullptr) continue;
+    if (!kFiltered || (slot->state.flags.is_unit && !object_is_dead(*slot))) {
+      if (ObjectState* state = world->mutable_state(id); state != nullptr) state->flags.no_ai = wanted;
     }
-    state->flags.no_ai = wanted;
+    if (slot->state.flags.is_unit) bodies.push_back(id);
+  }
+
+  if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr && !bodies.empty()) {
+    std::vector<SquadKey> seeds;
+    squadize_bodies(*world, *heroes, bodies, 0, seeds);
   }
   return HostOutcome::ok_void();
 }
