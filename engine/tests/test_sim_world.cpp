@@ -5317,10 +5317,13 @@ TEST(the_class_property_readers_answer_the_class_and_walk_up_the_tree) {
   CHECK(number("minlevel", obj(ruin)) == 4);
   CHECK(number("levelperitem", obj(ruin)) == 3);
   CHECK(text("itemtypes", obj(ruin)) == "Ring of Power,Sword of Kings");
-  // A building that declares none of them reads the type's zero, not a refusal.
-  CHECK(number("minlevel", obj(plain)) == 0);
-  CHECK(number("levelperitem", obj(plain)) == 0);
-  CHECK(text("itemtypes", obj(plain)).empty());
+  // A building that declares none of them reads what the class record was
+  // built with and inheritance never overwrote (0x0059c310's root branch
+  // resets only the sentry pair): the absent marker and `**Invalid**`.
+  CHECK(number("minlevel", obj(plain)) == -15000000);
+  CHECK(number("levelperitem", obj(plain)) == -15000000);
+  CHECK(text("itemtypes", obj(plain)) == "**Invalid**");
+  CHECK(number("GetNumSentrySlots", obj(plain)) == 0);
 
   CHECK(number("GetNumSentrySlots", obj(wall)) == 4);
   CHECK(text("GetSentryClassName", obj(wall)) == "RSentry");

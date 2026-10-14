@@ -2108,6 +2108,33 @@ HostOutcome m_is_central_building(CallContext& ctx) {
       Value::boolean(class_flag(*world, *slot, "is_central_building")));
 }
 
+/// Whether any class from `index` up the chain declares `key` -- the
+/// question `ClassGraph::property` folds into an empty answer.
+[[nodiscard]] bool class_declares(const ClassGraph& graph, ClassIndex index,
+                                  std::string_view key) noexcept {
+  for (ClassIndex at = index; at != kNoClass; at = graph.at(at).parent_index) {
+    for (const ClassProperty& property : graph.at(at).properties) {
+      if (property.key == key) return true;
+    }
+    if (graph.at(at).parent_index == at) break;
+  }
+  return false;
+}
+
+/// The class record's "absent" marker for an int slot (`0xff1b1e40`).
+constexpr std::int32_t kClassIntAbsent = -15000000;
+
+/// One class int that keeps the absent marker when nothing declares it.
+[[nodiscard]] std::int32_t class_int_or_marker(const World& world, const WorldObject& slot,
+                                               std::string_view key) noexcept {
+  const ClassGraph* graph = world.class_graph();
+  if (graph == nullptr || slot.class_index == kNoClass ||
+      !class_declares(*graph, slot.class_index, key)) {
+    return kClassIntAbsent;
+  }
+  return class_int(world, slot, key);
+}
+
 /// Five reads off the class descriptor, and two ancestry tests that carry
 /// their own name.
 ///
@@ -2115,31 +2142,46 @@ HostOutcome m_is_central_building(CallContext& ctx) {
 /// resolves the receiver, takes `obj + 0x3c`, and reads one slot the class
 /// reader filled from one XML attribute. None of them consults the object.
 ///
-///   * `Building::minlevel/0` -- descriptor `+0x6bc`, the `minlevel` attribute.
-///   * `Building::levelperitem/0` -- `+0x6c0`, `levelperitem`.
-///   * `Building::itemtypes/0` -- the `std::string` at `+0x6a0`, `itemtype`.
-///     The entry point is plural and the attribute is singular, because the
-///     value is a comma-separated *list*: `RUIN_BEHAVIOR.VS` calls it twice and
-///     runs `ParseStr` down it both times, once to count the entries and once
-///     to walk to a random one.
-///   * `Building::GetNumSentrySlots/0` -- `+0x2f4`, `num_sentry_slots`.
-///   * `Building::GetSentryClassName/0` -- the `std::string` at `+0x2f8`,
-///     `sentry_class_name`. The walls and gates declare it (`RSentry`,
-///     `GSentry1`, ...); everything else inherits nothing and answers empty.
+///   * `Building::minlevel/0` (0x004ddaf0) -- descriptor `+0x6bc`, the
+///     `minlevel` attribute.
+///   * `Building::levelperitem/0` (0x004ddb50) -- `+0x6c0`, `levelperitem`.
+///   * `Building::itemtypes/0` (0x004dda10) -- the `std::string` at `+0x6a0`,
+///     `itemtype`. The entry point is plural and the attribute is singular,
+///     because the value is a *list*: the class reader appends each repeated
+///     `itemtype` after `", "` (see `ClassGraph`), and `RUIN_BEHAVIOR.VS` calls
+///     this twice and runs `ParseStr` down it both times, once to count the
+///     entries and once to walk to a random one.
+///   * `Building::GetNumSentrySlots/0` (0x004ddca0) -- `+0x2f4`,
+///     `num_sentry_slots`.
+///   * `Building::GetSentryClassName/0` (0x004ddce0) -- the `std::string` at
+///     `+0x2f8`, `sentry_class_name`. The walls and gates declare it
+///     (`RSentry`, `GSentry1`, ...).
+///
+/// **A class that declares none of them up its whole chain** answers what the
+/// class record was built with, since inheritance (0x0059c310) copies only
+/// over the "absent" marker: the root branch there resets `num_sentry_slots`
+/// to 0 and `sentry_class_name` to `""`, but leaves `minlevel` and
+/// `levelperitem` at the marker `-15000000` (the record constructor 0x005a6820
+/// writes it) and `itemtype` at `"**Invalid**"` -- the last INFERRED from the
+/// constructor's run of `"**Invalid**"` strings, whose targets Ghidra does not
+/// keep. Every shipped call asks a ruin, a wall or a gate, which declare them.
 ///   * `Obj::IsRam/0` and `Obj::IsPeasantAmbient/0` are 0x00540460 and
 ///     0x005403f0, which are both one `IsHeirOf` against a class the function
 ///     looks up once and caches in a file-static: `"RamUnit"` and
 ///     `"PeasantAmbient"`. Ancestry, not name equality, so a subclass matches.
 ///
 /// **The invalid-receiver answers are the type's zero here, not `IsCentralBuliding`'s
-/// surprising `true`.** Each thunk reports through 0x00686eb0 -- a bare `ret` in
-/// retail -- and pushes 0, `false` or the empty string.
+/// surprising `true`.** `minlevel`, `levelperitem` and `itemtypes` report
+/// through 0x00686eb0 -- a bare `ret` in retail, and all three under the name
+/// `Building::Starvation` -- and push 0 or the empty string. **The two sentry
+/// readers do not test the receiver at all**: they read `+0x3c` of a null
+/// object and fault. 0 and the empty string stand in for that here.
 HostOutcome m_building_minlevel(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("minlevel: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   return HostOutcome::ok_with(
-      Value::integer(slot == nullptr ? 0 : class_int(*world, *slot, "minlevel")));
+      Value::integer(slot == nullptr ? 0 : class_int_or_marker(*world, *slot, "minlevel")));
 }
 
 HostOutcome m_building_level_per_item(CallContext& ctx) {
@@ -2147,7 +2189,7 @@ HostOutcome m_building_level_per_item(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed("levelperitem: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   return HostOutcome::ok_with(
-      Value::integer(slot == nullptr ? 0 : class_int(*world, *slot, "levelperitem")));
+      Value::integer(slot == nullptr ? 0 : class_int_or_marker(*world, *slot, "levelperitem")));
 }
 
 HostOutcome m_building_num_sentry_slots(CallContext& ctx) {
@@ -2158,9 +2200,11 @@ HostOutcome m_building_num_sentry_slots(CallContext& ctx) {
       Value::integer(slot == nullptr ? 0 : class_int(*world, *slot, "num_sentry_slots")));
 }
 
-/// One class property as a string, walking up the class tree, empty for
-/// anything the graph cannot answer.
-[[nodiscard]] HostOutcome class_text(CallContext& ctx, std::string_view key) {
+/// One class property as a string, walking up the class tree; `absent` when
+/// no class up the chain declares it, empty for a receiver that resolves to
+/// nothing.
+[[nodiscard]] HostOutcome class_text(CallContext& ctx, std::string_view key,
+                                     std::string_view absent) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::ok_with(Value::string(std::string()));
   const WorldObject* slot = object_of(*world, ctx.arg(0));
@@ -2168,14 +2212,19 @@ HostOutcome m_building_num_sentry_slots(CallContext& ctx) {
   if (slot == nullptr || graph == nullptr || slot->class_index == kNoClass) {
     return HostOutcome::ok_with(Value::string(std::string()));
   }
+  if (!class_declares(*graph, slot->class_index, key)) {
+    return HostOutcome::ok_with(Value::string(std::string(absent)));
+  }
   return HostOutcome::ok_with(
       Value::string(std::string(graph->property(slot->class_index, key))));
 }
 
-HostOutcome m_building_item_types(CallContext& ctx) { return class_text(ctx, "itemtype"); }
+HostOutcome m_building_item_types(CallContext& ctx) {
+  return class_text(ctx, "itemtype", "**Invalid**");
+}
 
 HostOutcome m_building_sentry_class_name(CallContext& ctx) {
-  return class_text(ctx, "sentry_class_name");
+  return class_text(ctx, "sentry_class_name", "");
 }
 
 HostOutcome m_is_ram(CallContext& ctx) {

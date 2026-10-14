@@ -42,3 +42,9 @@
 0x005d8940	verified	fixed with Curse: bit 27 as it stands now (set and the cure not yet run); invalid receiver false
 0x005d9140	verified	sets bit 1 and spawns the disease feedback into [obj+0x1c4] when none; no timer
 0x005d89a0	verified	bit 1 of [obj+0x194]; invalid receiver false
+0x004dda10	verified	fixed: the class string at +0x6a0 is a list -- the reader (0x005a1d58) appends each repeated itemtype after ", ", so BaseRuins offers all twelve items, not the last (ClassGraph and gamedata.py); undeclared answers **Invalid** (inferred from the record constructor); invalid receiver "" under the name Building::Starvation
+0x004ddce0	verified	class string +0x2f8 (sentry_class_name), root default ""; no receiver test in the original (a null read), "" stands in
+0x004ddca0	verified	class int +0x2f4 (num_sentry_slots), root default 0; no receiver test in the original, 0 stands in
+0x004ddb50	verified	class int +0x6c0 (levelperitem); undeclared keeps the -15000000 marker; invalid receiver 0
+0x004ddaf0	verified	class int +0x6bc (minlevel); undeclared keeps the -15000000 marker; invalid receiver 0
+0x004dd3b0	verified	refuses a non-heir of Inn with a complaint, otherwise opens the transport window (0x006ffd20) -- presentation, dropped after resolving the receiver

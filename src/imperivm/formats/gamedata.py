@@ -52,6 +52,10 @@ NO_ANIM = 65536
 UNINITIALISED = -842150451
 
 
+#: Properties a class accumulates rather than overwrites when it repeats them:
+#: gbr.exe appends each later value after ", " (0x005a1d58).
+LIST_PROPERTIES = frozenset({"itemtype"})
+
 class GameDataError(Exception):
     """Raised when the class graph is structurally impossible to load."""
 
@@ -201,9 +205,16 @@ class GameClass:
             entities={k: v for k, v in entities.items() if v},
         )
 
-        # <properties> and <sounds> repeat and merge attribute-wise, last wins.
+        # <properties> and <sounds> repeat and merge attribute-wise, last wins --
+        # except `itemtype`, which gbr.exe's class reader (0x005a1d58) keeps as a
+        # list: a second value is appended after ", " rather than replacing the
+        # first. BASERUINS.SC.XML is the one class that repeats it.
         for element in root.findall("properties"):
-            obj.properties.update(element.attrib)
+            for key, value in element.attrib.items():
+                if key in LIST_PROPERTIES and key in obj.properties:
+                    obj.properties[key] = obj.properties[key] + ", " + value
+                else:
+                    obj.properties[key] = value
         for element in root.findall("sounds"):
             obj.sounds.update(element.attrib)
 
