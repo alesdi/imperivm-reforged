@@ -657,6 +657,7 @@ TEST(objlist_contains_on_a_query_asks_the_refreshed_result) {
   Fixture f;
   const ObjectId inside = f.world.spawn(NativeClass::unit, nullptr);
   const ObjectId outside = f.world.spawn(NativeClass::unit, nullptr);
+  for (const ObjectId id : {inside, outside}) f.world.set_health(id, 10);  // see object_is_dead
   f.world.set_position(inside, pt(10, 10));
   f.world.set_position(outside, pt(5000, 5000));
   const ObjectId query = f.world.create_query(objs_in_circle(pt(10, 10), 500, ClassFilter{}));
