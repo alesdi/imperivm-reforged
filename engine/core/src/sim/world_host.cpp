@@ -435,9 +435,10 @@ HostOutcome fn_group(CallContext& ctx) {
 /// `/Inns/<n>/state`: 0x00532780 formats `/Inns/%d` from the inn's index at
 /// `[inn+0x208]`, minting a fresh one into the same registry when the slot is
 /// `-1` (0x005327d0), and 0x00533050 / 0x005330e0 join `/state` (0x007b1428)
-/// and go through the registry's own int get and set. The read answers **1**
-/// for anything stored below 1 -- an inn nobody has touched is open -- and
-/// the write clamps to 1..3. What the scripts make of the numbers: 1 is open
+/// and go through the registry's own int get and set. **Both clamp to 1..3**:
+/// the read answers 1 for anything stored below 1 -- an inn nobody has touched
+/// is open -- and 3 for anything above, and the write stores the clamped
+/// value. What the scripts make of the numbers: 1 is open
 /// for transport (`UNIT_TRANSPORT_VERIFY.VS`, `INN_TRANSPORT_REQUEST.VS`), 3
 /// is what `INN_BEHAVIOR.VS` waits on before it announces the inn and sets 1.
 ///
@@ -445,7 +446,10 @@ HostOutcome fn_group(CallContext& ctx) {
 /// `[inn+0x208]`, and the path is spelt by nobody but these two -- no script
 /// reads it back through `EnvReadInt` -- so the observable is only that each
 /// inn's state is its own, which the id gives. The `(str, str)` forms
-/// `gbr.exe` registers beside these have no call site and stay unbound.
+/// `gbr.exe` registers beside these (0x00533170, 0x00533640: a map name and an
+/// inn name, looked up through the campaign's map list; an unknown map or inn
+/// prints and the read answers 3) have no call site -- all four shipped sites
+/// pass the inn object -- and stay unbound.
 [[nodiscard]] std::string inn_state_key(ObjectId inn) {
   return "/Inns/" + std::to_string(inn) + "/state";
 }
@@ -460,7 +464,7 @@ HostOutcome fn_get_inn_state(CallContext& ctx) {
   const EnvSystem* env = env_of(*world);
   const std::int32_t stored =
       env == nullptr ? 0 : env->env().read_int(EnvScope::root(), inn_state_key(slot->id));
-  return HostOutcome::ok_with(Value::integer(stored < 1 ? 1 : stored));
+  return HostOutcome::ok_with(Value::integer(stored < 1 ? 1 : (stored > 3 ? 3 : stored)));
 }
 
 HostOutcome fn_set_inn_state(CallContext& ctx) {

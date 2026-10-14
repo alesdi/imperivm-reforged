@@ -5962,12 +5962,17 @@ TEST(inn_state_is_one_env_int_per_inn_open_by_default_and_clamped) {
   CHECK(get(PredicateBench::obj(inn)) == 1);
   CHECK(set(PredicateBench::obj(roman), -4));
   CHECK(get(PredicateBench::obj(roman)) == 1);
-  // The write clamps on the way in, not the read on the way out: the store
-  // holds 1, which only the store can show.
+  // The write clamps on the way in: the store holds 1, which only the store
+  // can show.
   CHECK(env.env().read_int(EnvScope::root(), "/Inns/" + std::to_string(roman) + "/state") == 1);
   // The key is the registry's own, under the root, so the store shows it.
   CHECK(set(PredicateBench::obj(roman), 3));
   CHECK(env.env().read_int(EnvScope::root(), "/Inns/" + std::to_string(roman) + "/state") == 3);
+  // And the read clamps too (0x00533050), both ways: a value no setter could
+  // have stored, written to the registry under the inn's key, still reads 3.
+  env.env().write_int(EnvScope::root(), "/Inns/" + std::to_string(roman) + "/state", 9);
+  CHECK(get(PredicateBench::obj(roman)) == 3);
+  env.env().write_int(EnvScope::root(), "/Inns/" + std::to_string(roman) + "/state", 3);
   // Not an inn, or not anything: 2 from the read, nothing from the write.
   CHECK(get(PredicateBench::obj(fort)) == 2);
   CHECK(set(PredicateBench::obj(fort), 3));
