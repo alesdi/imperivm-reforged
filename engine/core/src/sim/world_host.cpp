@@ -3118,11 +3118,14 @@ HostOutcome m_global_spell(CallContext& ctx) {
 ///   * `SetGlobalBloodlust(bool)` -- 2 sites, both in
 ///     `STONEHENGE_BLOODLUST.VS`, and the sole blocker of it. 0x004c6610
 ///     writes the byte argument into the global at `0x00996ae4`. That global
-///     has exactly two readers and both are in 0x00510b80..0x00510e24, the
-///     block that prices a stonehenge spell against the caster: with the flag
-///     set, one subtraction of `[0x00996e10]` is skipped. This engine has no
-///     spell pricing to skip, so the flag would be state nothing could read --
-///     which is the test `ObjectState::user` passes and this fails.
+///     has exactly two readers and both are in 0x0050ff30, which the blow
+///     resolution 0x00511550 calls to decide which of the attacker's specials
+///     a blow uses and to charge each one's stamina cost: with the flag set,
+///     the special behind mask `0x1000` (effect code `0xe`) is never charged
+///     its `[0x00996e10]`. This engine's blows charge no special any stamina,
+///     so the flag would be state nothing could read -- which is the test
+///     `ObjectState::user` passes and this fails. **A known gap, by design**:
+///     it lands with the specials' stamina costs, not before.
 ///   * `GetResearchHack()` -- 1 site, and it is **false**. 0x004db630 answers
 ///     `[0x009969a8] != 0`, and the only writer of that global anywhere in the
 ///     image is 0x004dfdf0, a debug path that sets it and clears it again
