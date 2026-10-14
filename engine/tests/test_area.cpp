@@ -234,7 +234,9 @@ TEST(the_sampler_and_the_query_disagree_about_a_circles_rim_on_purpose) {
 
   World world;
   const ObjectId on_rim = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(on_rim, 100);  // alive: see object_is_dead
   const ObjectId in_shell = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(in_shell, 100);  // alive: see object_is_dead
   world.set_position(on_rim, Point{60, 80});
   world.set_position(in_shell, Point{61, 80});
 
@@ -262,6 +264,7 @@ TEST(the_rect_query_sweep_and_the_area_shape_agree_on_every_point) {
   for (std::int32_t x = 96; x <= 404; x += 4) {
     for (std::int32_t y = 196; y <= 504; y += 4) {
       const ObjectId id = world.spawn(NativeClass::unit, nullptr);
+      (void)world.set_health(id, 100);  // alive: see object_is_dead
       world.set_position(id, Point{x, y});
       ids.push_back(id);
       places.push_back(Point{x, y});
@@ -668,6 +671,9 @@ TEST(the_two_area_queries_answer_a_circle_and_a_rectangle_exactly) {
                                                 fixture.graph.lookup("Unit"));
   fixture.world.set_position(within, Point{4100, 5100});
   fixture.world.set_position(cornered, Point{4200, 4960});
+  // Alive: every area sweep passes over an object `vtbl + 0x50` calls dead.
+  (void)fixture.world.set_health(within, 100);
+  (void)fixture.world.set_health(cornered, 100);
 
   HostCall rect(fixture.world, {str("Yard"), str("Unit")});
   const HostOutcome boxed = invoke(registry, "AreaObjs", 2, rect);

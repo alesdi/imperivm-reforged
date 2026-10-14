@@ -124,7 +124,9 @@ class RecordingSystem : public System {
 TEST(sim_ids_are_monotonic_and_never_reused) {
   World world;
   const ObjectId a = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId b = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(b, 100);  // alive: see object_is_dead
   const ObjectId c = world.spawn(NativeClass::building, nullptr);
   CHECK(a == 1 && b == 2 && c == 3);
 
@@ -135,6 +137,7 @@ TEST(sim_ids_are_monotonic_and_never_reused) {
   // 0.93 at tick 2, 0.052 after 8,569 ticks -- so gaps accumulate and are never
   // refilled. A stale reference must read as dead, not as somebody else.
   const ObjectId d = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(d, 100);  // alive: see object_is_dead
   CHECK(d == 4);
   CHECK(world.size() == 3);
 }
@@ -160,6 +163,7 @@ TEST(sim_objects_stay_in_ascending_id_order_after_despawn) {
 TEST(sim_internal_objects_share_the_handle_space) {
   World world;
   const ObjectId unit = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(unit, 100);  // alive: see object_is_dead
   const ObjectId settlement = world.spawn_internal(InternalKind::settlement);
   const ObjectId next = world.spawn(NativeClass::building, nullptr);
 
@@ -183,6 +187,7 @@ TEST(sim_a_held_object_has_no_position_of_its_own) {
   const ObjectId building = world.spawn(NativeClass::building, nullptr);
   const ObjectId holder = world.spawn_internal(InternalKind::holder);
   const ObjectId soldier = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(soldier, 100);  // alive: see object_is_dead
 
   CHECK(world.set_position(building, pt(1000, 2000)));
   CHECK(world.set_position(soldier, pt(1500, 2500)));
@@ -206,6 +211,7 @@ TEST(sim_setting_a_position_on_a_held_object_is_refused) {
   World world;
   const ObjectId box = world.spawn_internal(InternalKind::holder);
   const ObjectId item = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(item, 100);  // alive: see object_is_dead
   world.set_position(box, pt(500, 500));
   CHECK(world.put_in_holder(item, box));
 
@@ -303,8 +309,10 @@ TEST(sim_sync_flags_round_trip) {
 TEST(sim_spawning_caches_the_category_bits) {
   World world;
   const ObjectId hero = world.spawn(NativeClass::hero, nullptr);
+  (void)world.set_health(hero, 100);  // alive: see object_is_dead
   const ObjectId gate = world.spawn(NativeClass::gate, nullptr);
   const ObjectId decor = world.spawn(NativeClass::decor, nullptr);
+  (void)world.set_health(decor, 100);  // alive: see object_is_dead
   CHECK(world.state(hero)->flags.is_unit && world.state(hero)->flags.is_hero);
   CHECK(world.state(gate)->flags.is_building);
   CHECK(!world.state(decor)->flags.is_unit && !world.state(decor)->flags.is_building);
@@ -363,8 +371,10 @@ TEST(sim_singletons_take_three_consecutive_ids) {
 TEST(sim_a_query_is_an_object_with_a_handle) {
   World world;
   const ObjectId unit = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(unit, 100);  // alive: see object_is_dead
   const ObjectId q = world.create_query(objs_in_circle(pt(0, 0), 100, ClassFilter{}));
   const ObjectId after = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(after, 100);  // alive: see object_is_dead
 
   // This is the finding that makes a stateless find() wrong: a query takes a
   // handle out of the same monotonic counter as a unit, so its allocation
@@ -390,6 +400,7 @@ TEST(sim_a_query_lives_and_dies_like_any_object) {
   CHECK(world.spawn(NativeClass::unit, nullptr) != q);
   // A non-query object is not a query, whatever its handle.
   const ObjectId unit = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(unit, 100);  // alive: see object_is_dead
   CHECK(world.query_spec(unit) == nullptr);
 }
 
@@ -397,6 +408,8 @@ TEST(sim_queries_re_evaluate_rather_than_snapshot) {
   World world;
   const ObjectId a = world.spawn(NativeClass::unit, nullptr);
   world.set_position(a, pt(10, 10));
+  // Alive: every area sweep passes over an object `vtbl + 0x50` calls dead.
+  world.set_health(a, 10);
   const ObjectId q = world.create_query(objs_in_circle(pt(0, 0), 100, ClassFilter{}));
 
   std::vector<ObjectId> found;
@@ -404,6 +417,7 @@ TEST(sim_queries_re_evaluate_rather_than_snapshot) {
 
   const ObjectId b = world.spawn(NativeClass::unit, nullptr);
   world.set_position(b, pt(20, 20));
+  world.set_health(b, 10);
   // WaitNonEmptyQuery(q, ms) in the host API only makes sense against something
   // that re-reads the world, which is what a persistent query object is for.
   CHECK(world.evaluate_query(q, found) == 2);
@@ -416,30 +430,34 @@ TEST(sim_queries_re_evaluate_rather_than_snapshot) {
 TEST(sim_set_op_queries_compose_two_query_handles) {
   World world;
   const ObjectId near = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(near, 100);  // alive: see object_is_dead
   const ObjectId far = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(far, 100);  // alive: see object_is_dead
   const ObjectId both = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(both, 100);  // alive: see object_is_dead
   world.set_position(near, pt(10, 0));
   world.set_position(far, pt(900, 0));
   world.set_position(both, pt(100, 0));
   world.set_owner(near, 1);
   world.set_owner(far, 1);
   world.set_owner(both, 1);
+  for (const ObjectId id : {near, far, both}) world.set_health(id, 10);
 
   const ObjectId circle = world.create_query(objs_in_circle(pt(0, 0), 200, ClassFilter{}));
   const ObjectId ring = world.create_query(objs_in_circle(pt(950, 0), 200, ClassFilter{}));
 
   std::vector<ObjectId> found;
   const ObjectId u = world.create_query(set_op(SetOp::set_union, circle, ring));
-  CHECK(world.evaluate_query(u, found) == 3);
-  // A set operation's result is still in ascending id order: both operands are,
-  // and the algebra is a merge.
+  REQUIRE(world.evaluate_query(u, found) == 3);
+  // A union is in ascending id order: 0x004ffbe0 sorts both operands by handle
+  // and merges them.
   CHECK(found[0] == near && found[1] == far && found[2] == both);
 
   const ObjectId i = world.create_query(set_op(SetOp::intersect, circle, ring));
   CHECK(world.evaluate_query(i, found) == 0);
 
   const ObjectId d = world.create_query(set_op(SetOp::subtract, u, ring));
-  CHECK(world.evaluate_query(d, found) == 2);
+  REQUIRE(world.evaluate_query(d, found) == 2);
   CHECK(found[0] == near && found[1] == both);
 
   // Set ops nest: their operands are query handles, not results.
@@ -465,7 +483,9 @@ TEST(sim_class_filters_match_the_class_tree) {
   world.set_class_graph(&tiny.graph);
 
   const ObjectId soldier = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
+  (void)world.set_health(soldier, 100);  // alive: see object_is_dead
   const ObjectId plain = world.spawn(NativeClass::unit, nullptr, tiny.unit);
+  (void)world.set_health(plain, 100);  // alive: see object_is_dead
   const ObjectId fort = world.spawn(NativeClass::building, nullptr, tiny.building);
   for (ObjectId id : {soldier, plain, fort}) world.set_position(id, pt(0, 0));
 
@@ -507,6 +527,7 @@ TEST(sim_radius_queries_are_inclusive_and_ordered) {
   std::vector<ObjectId> ids;
   for (int i = 0; i < 5; ++i) {
     const ObjectId id = world.spawn(NativeClass::unit, nullptr);
+    (void)world.set_health(id, 100);  // alive: see object_is_dead
     world.set_position(id, pt(i * 100, 0));
     ids.push_back(id);
   }
@@ -527,6 +548,7 @@ TEST(sim_rect_queries_include_their_corners_and_stay_ordered) {
                           pt(99, 300),  pt(300, 501)};
   for (const Point& place : places) {
     const ObjectId id = world.spawn(NativeClass::unit, nullptr);
+    (void)world.set_health(id, 100);  // alive: see object_is_dead
     world.set_position(id, place);
     ids.push_back(id);
   }
@@ -580,6 +602,7 @@ TEST(sim_a_rect_query_normalises_the_corners_the_map_gave_it) {
 
   World world;
   const ObjectId inside = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(inside, 100);  // alive: see object_is_dead
   world.set_position(inside, pt(300, 300));
   std::vector<ObjectId> found;
   // `REQUIRE`: without normalisation this selects nothing, and indexing an
@@ -598,8 +621,11 @@ TEST(sim_a_rect_query_evaluates_as_a_rectangle_and_not_as_a_circle) {
   // still passes any case where everything happens to be the right answer.
   World world;
   const ObjectId inside = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(inside, 100);  // alive: see object_is_dead
   const ObjectId outside = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(outside, 100);  // alive: see object_is_dead
   const ObjectId far_off = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(far_off, 100);  // alive: see object_is_dead
   world.set_position(inside, pt(300, 300));
   world.set_position(outside, pt(900, 300));
   world.set_position(far_off, pt(300, 900));
@@ -626,6 +652,7 @@ TEST(sim_no_area_query_finds_a_garrison) {
   const World::SettlementIds town = world.spawn_settlement(0);
   const ObjectId fort = world.spawn(NativeClass::building, nullptr);
   const ObjectId guard = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(guard, 100);  // alive: see object_is_dead
   world.set_position(fort, pt(5000, 5000));
   world.set_position(guard, pt(5010, 5000));
   REQUIRE(world.resolve_position(town.holder) == pt(0, 0));
@@ -650,7 +677,9 @@ TEST(sim_no_area_query_finds_a_garrison) {
   CHECK(world.contents_of(town.holder, found) == 1 && found[0] == guard);
 }
 
-TEST(sim_sight_queries_use_the_observers_sight_property) {
+TEST(sim_sight_sweep_takes_its_radius_and_leaves_the_observer_out) {
+  // The radius is the query's, frozen at construction (sight less 100, see
+  // `fn_objs_in_sight`); the sweep itself is inclusive and skips the observer.
   TinyGraph tiny;
   World world;
   world.set_class_graph(&tiny.graph);
@@ -658,16 +687,22 @@ TEST(sim_sight_queries_use_the_observers_sight_property) {
   const ObjectId watcher = world.spawn(NativeClass::unit, nullptr, tiny.unit);   // sight 100
   const ObjectId sharp = world.spawn(NativeClass::unit, nullptr, tiny.soldier);  // sight 200
   const ObjectId close = world.spawn(NativeClass::unit, nullptr, tiny.unit);
+  (void)world.set_health(close, 100);  // alive: see object_is_dead
   const ObjectId distant = world.spawn(NativeClass::unit, nullptr, tiny.unit);
+  (void)world.set_health(distant, 100);  // alive: see object_is_dead
   world.set_position(watcher, pt(0, 0));
   world.set_position(sharp, pt(0, 0));
   world.set_position(close, pt(50, 0));
   world.set_position(distant, pt(150, 0));
 
   std::vector<ObjectId> found;
-  CHECK(world.objects_in_sight(watcher, ClassFilter{}, found) == 2);  // sharp, close
-  CHECK(world.objects_in_sight(sharp, ClassFilter{}, found) == 3);
+  CHECK(world.objects_in_sight(watcher, 100, ClassFilter{}, found) == 2);  // sharp, close
+  CHECK(world.objects_in_sight(sharp, 200, ClassFilter{}, found) == 3);
+  CHECK(world.objects_in_sight(sharp, 50, ClassFilter{}, found) == 2);   // inclusive at 50
+  CHECK(world.objects_in_sight(sharp, 0, ClassFilter{}, found) == 1);    // its own spot
+  CHECK(world.objects_in_sight(sharp, -1, ClassFilter{}, found) == 0);
   // Nobody sees themselves.
+  CHECK(world.objects_in_sight(sharp, 200, ClassFilter{}, found) == 3);
   for (ObjectId id : found) CHECK(id != sharp);
 }
 
@@ -677,7 +712,9 @@ TEST(sim_class_player_area_selects_on_owner_and_class) {
   world.set_class_graph(&tiny.graph);
 
   const ObjectId mine = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
+  (void)world.set_health(mine, 100);  // alive: see object_is_dead
   const ObjectId theirs = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
+  (void)world.set_health(theirs, 100);  // alive: see object_is_dead
   const ObjectId my_fort = world.spawn(NativeClass::building, nullptr, tiny.building);
   world.set_owner(mine, 1);
   world.set_owner(theirs, 2);
@@ -855,7 +892,9 @@ TEST(sim_settlement_queries_split_units_from_buildings) {
   const World::SettlementIds town = world.spawn_settlement(1);
   const ObjectId hall = world.spawn(NativeClass::town_hall, nullptr);
   const ObjectId guard = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(guard, 100);  // alive: see object_is_dead
   const ObjectId stray = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(stray, 100);  // alive: see object_is_dead
   world.find(hall)->settlement = town.settlement;
   world.find(guard)->settlement = town.settlement;
 
@@ -1069,7 +1108,9 @@ TEST(sim_group_queries_read_the_worlds_group_table) {
   // `QuerySpec::group` is a `GroupTable` index and nothing else.
   World world;
   const ObjectId first = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(first, 100);  // alive: see object_is_dead
   const ObjectId second = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(second, 100);  // alive: see object_is_dead
   world.spawn(NativeClass::unit, nullptr);  // in no group
 
   const std::int32_t attackers = world.group_index("Attackers");
@@ -1187,6 +1228,7 @@ namespace {
 /// under test rather than an artefact of construction.
 void build(World& world) {
   const ObjectId a = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId b = world.spawn(NativeClass::building, nullptr);
   world.set_position(a, pt(100, 200));
   world.set_position(b, pt(300, 400));
@@ -1381,17 +1423,35 @@ TEST(sim_rand_is_exclusive_of_its_bound) {
   CHECK(heads > 4000 && heads < 6000);
 }
 
-TEST(sim_rand_draws_even_when_the_bound_is_degenerate) {
-  // Whether a call advances the stream is itself synchronised state, so a bound
-  // of 1 or 0 must still move it -- otherwise the peers' stream positions
-  // depend on a value one of them computed differently.
-  Rng a(42);
-  Rng b(42);
-  CHECK(a.below(1) == 0);
-  CHECK(a.below(0) == 0);
-  b.next();
-  b.next();
-  CHECK(a.state() == b.state());
+TEST(sim_rand_is_gbr_exe_range_on_its_lcg) {
+  // `rand(n)` (0x004c63a0) is the game generator's Range(0, n - 1)
+  // (0x0063ff00): equal ends answer without drawing, a reversed range is
+  // swapped and draws, and a draw is the high dword of (span + 1) times the
+  // raw NR LCG state -- no output scramble. Whether a call advances the
+  // stream is synchronised state, so the no-draw case is part of the rule.
+  Rng a(12345);
+  const std::int32_t expected[] = {2, 1, 54, 63, 91};
+  for (const std::int32_t value : expected) CHECK(a.below(100) == value);
+  CHECK(a.state() == 0xe8f7b1b8u);
+
+  Rng one(12345);
+  CHECK(one.below(1) == 0);
+  CHECK(one.state() == 12345u);  // Range(0, 0): no draw
+  CHECK(one.between(7, 7) == 7);
+  CHECK(one.state() == 12345u);
+
+  Rng zero(12345);
+  CHECK(zero.below(0) == -1);  // Range(0, -1): swapped to [-1, 0], one draw
+  CHECK(zero.state() == 87628868u);
+
+  Rng swapped(12345);
+  Rng straight(12345);
+  CHECK(swapped.between(5, -5) == straight.between(-5, 5));
+  CHECK(swapped.state() == straight.state());
+
+  Rng first(0);
+  CHECK(first.below(360) == 84);
+  CHECK(first.state() == 1013904223u);
 }
 
 TEST(sim_rng_between_is_inclusive_at_both_ends) {
@@ -1570,8 +1630,11 @@ TEST(sim_a_player_flags_query_selects_by_relation_not_by_owner) {
   // hashing, and passing every test that checked only its shape.
   World world;
   const ObjectId mine = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(mine, 100);  // alive: see object_is_dead
   const ObjectId theirs = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(theirs, 100);  // alive: see object_is_dead
   const ObjectId neutral = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(neutral, 100);  // alive: see object_is_dead
   world.set_owner(mine, 0);
   world.set_owner(theirs, 1);
   world.set_owner(neutral, 2);
@@ -2011,6 +2074,7 @@ TEST(pos_is_the_stored_field_and_pos_rh_differs_only_for_a_held_unit) {
   };
 
   const ObjectId free_standing = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(free_standing, 100);  // alive: see object_is_dead
   REQUIRE(world.set_position(free_standing, Point{700, 900}));
   answers(obj(free_standing), Point{700, 900}, Point{700, 900});
 
@@ -2018,6 +2082,7 @@ TEST(pos_is_the_stored_field_and_pos_rh_differs_only_for_a_held_unit) {
   const World::ShipIds ship = world.spawn_ship(nullptr);
   REQUIRE(world.set_position(ship.ship, Point{1200, 1500}));
   const ObjectId passenger = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(passenger, 100);  // alive: see object_is_dead
   REQUIRE(world.find(passenger)->state.flags.is_unit);
   REQUIRE(world.put_in_holder(passenger, ship.holder));
   REQUIRE(world.resolve_position(passenger) == (Point{0, 0}));
@@ -2026,15 +2091,17 @@ TEST(pos_is_the_stored_field_and_pos_rh_differs_only_for_a_held_unit) {
 
   // A held object that is not a unit has no override: both are the marker.
   const ObjectId crate = world.spawn(NativeClass::decor, nullptr);
+  (void)world.set_health(crate, 100);  // alive: see object_is_dead
   REQUIRE(world.put_in_holder(crate, ship.holder));
   answers(obj(crate), kHeldPosition, kHeldPosition);
 
   // The invalid receiver, which is the one place the two bodies differ in
   // `gbr.exe` -- `pos` prints a diagnostic first and `posRH` does not -- and
-  // the one place they still have to return the same thing.
-  answers(obj(kNoObject), kHeldPosition, kHeldPosition);
-  answers(obj(static_cast<ObjectId>(9999)), kHeldPosition, kHeldPosition);
-  answers(script::Value::integer(3), kHeldPosition, kHeldPosition);
+  // the one place they still have to return the same thing: (0, 0), written at
+  // 0x005add4d and 0x005ad8c6 -- not the held marker.
+  answers(obj(kNoObject), pt(0, 0), pt(0, 0));
+  answers(obj(static_cast<ObjectId>(9999)), pt(0, 0), pt(0, 0));
+  answers(script::Value::integer(3), pt(0, 0), pt(0, 0));
 }
 
 TEST(the_building_predicates_answer_what_gbr_exe_answers) {
@@ -2711,8 +2778,11 @@ TEST(world_host_reads_a_player_argument_as_the_script_writes_it_one_based) {
   // not occur once. Read 0-based, 0 would be the commonest value.
   World world;
   const ObjectId first = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(first, 100);  // alive: see object_is_dead
   const ObjectId second = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(second, 100);  // alive: see object_is_dead
   const ObjectId third = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(third, 100);  // alive: see object_is_dead
   world.set_owner(first, 0);
   world.set_owner(second, 1);
   world.set_owner(third, 1);
@@ -2770,6 +2840,7 @@ TEST(world_host_reads_a_player_argument_as_the_script_writes_it_one_based) {
 
   // 16 is the last valid script number and must not be rejected; 17 must be.
   const ObjectId last = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(last, 100);  // alive: see object_is_dead
   world.set_owner(last, 15);
   const script::HostOutcome sixteen =
       call("Count", {script::Value::integer(16), script::Value::string("")});
@@ -2842,6 +2913,7 @@ struct EraseBench {
 
   ObjectId unit() {
     const ObjectId id = world.spawn(NativeClass::unit, nullptr, classes.unit);
+    (void)world.set_health(id, 100);  // alive: see object_is_dead
     if (ObjectState* state = world.mutable_state(id)) state->flags.is_unit = true;
     return id;
   }
@@ -3334,7 +3406,9 @@ TEST(sim_parry_mode_needs_the_parry_special) {
   PredicateBench b;
   b.world.set_class_graph(&graph);
   const ObjectId shield = b.world.spawn(NativeClass::unit, nullptr, graph.find("Shieldman"));
+  (void)b.world.set_health(shield, 100);  // alive: see object_is_dead
   const ObjectId archer = b.world.spawn(NativeClass::unit, nullptr, graph.find("Archer"));
+  (void)b.world.set_health(archer, 100);  // alive: see object_is_dead
 
   const auto set = [&](ObjectId id, bool on) {
     const script::HostOutcome out =
@@ -3394,6 +3468,7 @@ TEST(sim_the_sacrifice_pair_answers_what_the_shipped_data_can_produce) {
   PredicateBench b;
   b.world.set_class_graph(&graph);
   const ObjectId unit = b.world.spawn(NativeClass::unit, nullptr, graph.find("Object"));
+  (void)b.world.set_health(unit, 100);  // alive: see object_is_dead
   const ObjectId spell = b.world.spawn(NativeClass::sacrifice, nullptr, graph.find("Invisibility"));
   const ObjectId hide = b.world.spawn(NativeClass::sacrifice, nullptr, graph.find("hIDe"));
 
@@ -3450,6 +3525,7 @@ TEST(sim_the_global_spell_pair_answers_and_changes_nothing) {
   PredicateBench b;
   const ObjectId hall = b.world.spawn(NativeClass::town_hall, nullptr, b.classes.building);
   const ObjectId soldier = b.world.spawn(NativeClass::unit, nullptr, b.classes.soldier);
+  (void)b.world.set_health(soldier, 100);  // alive: see object_is_dead
   const std::uint64_t before = b.world.hashes().hash_of_hashes;
 
   const auto start = [&](script::Value receiver, std::int32_t spell, std::int32_t player) {
@@ -3499,7 +3575,9 @@ TEST(sim_class_answers_the_class_id_and_the_empty_string_for_a_miss) {
   PredicateBench b;
   b.world.set_class_graph(&graph);
   const ObjectId lord = b.world.spawn(NativeClass::hero, nullptr, graph.find("BVikingLord"));
+  (void)b.world.set_health(lord, 100);  // alive: see object_is_dead
   const ObjectId nameless = b.world.spawn(NativeClass::unit, nullptr);
+  (void)b.world.set_health(nameless, 100);  // alive: see object_is_dead
 
   const auto class_of = [&](ObjectId id) {
     const script::HostOutcome out =
@@ -3524,6 +3602,7 @@ TEST(sim_class_answers_the_class_id_and_the_empty_string_for_a_miss) {
 TEST(sim_set_entering_writes_one_bit_of_the_second_flag_word) {
   PredicateBench b;
   const ObjectId u = b.world.spawn(NativeClass::unit, nullptr, b.classes.soldier);
+  (void)b.world.set_health(u, 100);  // alive: see object_is_dead
   REQUIRE(b.world.find(u) != nullptr);
   CHECK(!b.world.find(u)->state.flags.entering);
 
@@ -3560,6 +3639,7 @@ TEST(sim_as_tower_is_as_building_under_another_name) {
   PredicateBench b;
   const ObjectId fort = b.world.spawn(NativeClass::building, nullptr, b.classes.building);
   const ObjectId soldier = b.world.spawn(NativeClass::unit, nullptr, b.classes.soldier);
+  (void)b.world.set_health(soldier, 100);  // alive: see object_is_dead
 
   const auto cast = [&](const char* name, ObjectId id) {
     const script::HostOutcome out =
@@ -3584,6 +3664,7 @@ TEST(sim_as_tower_is_as_building_under_another_name) {
 TEST(sim_is_in_air_and_is_building_are_one_bit_each) {
   PredicateBench b;
   const ObjectId crow = b.world.spawn(NativeClass::flying_unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(crow, 100);  // alive: see object_is_dead
   const ObjectId ship = b.world.spawn_ship(nullptr, b.classes.unit).ship;
 
   // Both start false, which is what a map-placed crow and a map-placed ship
@@ -3626,6 +3707,7 @@ TEST(sim_a_curse_holds_for_curse_timeout_and_then_lifts) {
   REQUIRE(b.world.add_system(&env));
   CHECK(env.load_constants(parsed.value()) == 1);
   const ObjectId target = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(target, 100);  // alive: see object_is_dead
   CHECK(!b.predicate("IsCursed", PredicateBench::obj(target)));
 
   b.world.advance(1000);
@@ -3652,6 +3734,7 @@ TEST(sim_a_curse_holds_for_curse_timeout_and_then_lifts) {
 
   // Another object is untouched: the bit is per-object, not global.
   const ObjectId bystander = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(bystander, 100);  // alive: see object_is_dead
   CHECK(!b.predicate("IsCursed", PredicateBench::obj(bystander)));
 
   // An unresolvable receiver answers false rather than trapping, which is the
@@ -3667,6 +3750,7 @@ TEST(sim_a_curse_holds_for_curse_timeout_and_then_lifts) {
 TEST(sim_set_last_attack_time_resolves_its_receiver_and_stores_nothing) {
   PredicateBench b;
   const ObjectId unit = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(unit, 100);  // alive: see object_is_dead
   const std::uint64_t before = b.world.state_hash();
   const script::HostOutcome out =
       b.call(script::CallKind::member, "SetLastAttackTime", 0, {PredicateBench::obj(unit)});
@@ -3696,8 +3780,11 @@ TEST(sim_in_ship_asks_what_kind_of_holder_the_unit_is_in) {
   const World::SettlementIds town = b.world.spawn_settlement(1);
 
   const ObjectId sailor = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(sailor, 100);  // alive: see object_is_dead
   const ObjectId guard = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(guard, 100);  // alive: see object_is_dead
   const ObjectId walker = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(walker, 100);  // alive: see object_is_dead
   REQUIRE(b.world.put_in_holder(sailor, ship.holder));
   REQUIRE(b.world.put_in_holder(guard, town.holder));
 
@@ -3727,10 +3814,15 @@ TEST(sim_same_holder_as_compares_the_field_and_not_the_holders_existence) {
   const World::ShipIds ship = b.world.spawn_ship(nullptr, b.classes.unit);
   const World::SettlementIds town = b.world.spawn_settlement(1);
   const ObjectId a = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId c = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(c, 100);  // alive: see object_is_dead
   const ObjectId d = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(d, 100);  // alive: see object_is_dead
   const ObjectId loose1 = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(loose1, 100);  // alive: see object_is_dead
   const ObjectId loose2 = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(loose2, 100);  // alive: see object_is_dead
   REQUIRE(b.world.put_in_holder(a, ship.holder));
   REQUIRE(b.world.put_in_holder(c, ship.holder));
   REQUIRE(b.world.put_in_holder(d, town.holder));
@@ -3767,6 +3859,7 @@ TEST(sim_same_holder_as_compares_the_field_and_not_the_holders_existence) {
 TEST(sim_set_noselect_flag_writes_the_bit_and_leaves_the_selection_alone) {
   PredicateBench b;
   const ObjectId hen = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(hen, 100);  // alive: see object_is_dead
   b.world.mutable_state(hen)->flags.is_unit = true;
   REQUIRE(b.selections.select(1, hen));
   REQUIRE(b.selections.player(1).contains(hen));
@@ -3804,12 +3897,18 @@ TEST(sim_enter_holder_joins_a_ship_a_settlement_or_a_units_own_holder) {
   const World::ShipIds ship = b.world.spawn_ship(nullptr, b.classes.unit);
   const World::SettlementIds town = b.world.spawn_settlement(1);
   const ObjectId sailor = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(sailor, 100);  // alive: see object_is_dead
   const ObjectId guard = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(guard, 100);  // alive: see object_is_dead
   const ObjectId fort = b.world.spawn(NativeClass::building, nullptr, b.classes.graph.find("Fort"));
   const ObjectId a = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId c = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(c, 100);  // alive: see object_is_dead
   const ObjectId d = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(d, 100);  // alive: see object_is_dead
   const ObjectId e = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(e, 100);  // alive: see object_is_dead
   REQUIRE(b.world.put_in_holder(guard, town.holder));
 
   // A ship: its own holder.
@@ -3853,7 +3952,9 @@ TEST(sim_enter_holder_joins_a_ship_a_settlement_or_a_units_own_holder) {
 TEST(sim_set_name_binds_and_moves_a_taken_name) {
   PredicateBench b;
   const ObjectId x = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(x, 100);  // alive: see object_is_dead
   const ObjectId y = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(y, 100);  // alive: see object_is_dead
   b.call(script::CallKind::member, "SetName", 1,
          {PredicateBench::obj(x), script::Value::string("NO_Scipio")});
   CHECK(b.world.named_objects().object("NO_Scipio") == x);
@@ -3875,12 +3976,47 @@ TEST(sim_set_name_binds_and_moves_a_taken_name) {
   CHECK(b.world.named_objects().object("NO_Scipio") == x);
 }
 
+/// The named-object table's three states together, as `gbr.exe` keeps them:
+/// `GetNamedObj` of an unknown name **mints** an entry (0x00553230) -- valid,
+/// dead, naming nothing -- that a later `SetName` fills in place; `SetName("")`
+/// deletes the object's named query (0x005b6120), so a handle taken before is
+/// no longer valid, and `GetNamedObj` of the freed name mints a fresh entry.
+TEST(sim_get_named_obj_and_set_name_share_one_named_entry) {
+  PredicateBench b;
+  const ObjectId hero = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(hero, 100);  // alive: see object_is_dead
+  const auto get = [&] {
+    return b.call(script::CallKind::free_function, "GetNamedObj", 1, {script::Value::string("RomeHero1")})
+        .value;
+  };
+
+  const script::Value early = get();
+  REQUIRE(early.is_object());
+  CHECK(b.predicate("IsValid", early));
+  CHECK(b.predicate("IsDead", early));
+  CHECK(get().as_object().id == early.as_object().id);  // found, not minted twice
+
+  b.call(script::CallKind::member, "SetName", 1,
+         {PredicateBench::obj(hero), script::Value::string("RomeHero1")});
+  CHECK(b.world.named_objects().object(static_cast<std::int32_t>(early.as_object().id)) == hero);
+  CHECK(!b.predicate("IsDead", early));  // the handle taken first sees the hero
+
+  b.call(script::CallKind::member, "SetName", 1,
+         {PredicateBench::obj(hero), script::Value::string("")});
+  CHECK(!b.predicate("IsValid", early));
+  const script::Value fresh = get();
+  CHECK(fresh.as_object().id != early.as_object().id);
+  CHECK(b.predicate("IsValid", fresh));
+  CHECK(b.predicate("IsDead", fresh));
+}
+
 /// `Disappear` takes the unit off the map; `Disease` and `IsDiseased` are one
 /// bit; the store bin is accepted and dropped.
 TEST(sim_disappear_disease_and_the_store_bin) {
   PredicateBench b;
   const script::CallKind member = script::CallKind::member;
   const ObjectId u = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(u, 100);  // alive: see object_is_dead
   b.world.set_position(u, Point{300, 300});
   b.world.mutable_state(u)->flags.has_active_path = true;
   CHECK(b.call(member, "Disappear", 0, {PredicateBench::obj(u)}).status == script::HostStatus::ok);
@@ -3947,6 +4083,7 @@ TEST(sim_in_holder_with_a_name_counts_rather_than_answering_yes) {
   std::vector<ObjectId> army;
   for (int i = 0; i < 4; ++i) {
     const ObjectId unit = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+    (void)b.world.set_health(unit, 100);  // alive: see object_is_dead
     b.world.mutable_state(unit)->flags.is_unit = true;
     army.push_back(unit);
   }
@@ -5212,8 +5349,11 @@ TEST(sim_a_world_with_no_stonehenge_class_has_no_stonehenges) {
 TEST(sim_set_messenger_status_writes_every_member_of_its_receiver) {
   PredicateBench b;
   const ObjectId one = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(one, 100);  // alive: see object_is_dead
   const ObjectId two = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(two, 100);  // alive: see object_is_dead
   const ObjectId three = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(three, 100);  // alive: see object_is_dead
 
   // The object form.
   CHECK(b.call(script::CallKind::member, "SetMessengerStatus", 1,
@@ -5338,9 +5478,11 @@ TEST(the_class_property_readers_answer_the_class_and_walk_up_the_tree) {
   const ObjectId gate = world.spawn(NativeClass::building, nullptr, graph.find("Gate"));
   const ObjectId plain = world.spawn(NativeClass::building, nullptr, graph.find("Building"));
   const ObjectId ram = world.spawn(NativeClass::unit, nullptr, graph.find("RRam"));
+  (void)world.set_health(ram, 100);  // alive: see object_is_dead
   const ObjectId peasant =
       world.spawn(NativeClass::unit, nullptr, graph.find("GPeasantAmbient"));
   const ObjectId soldier = world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  (void)world.set_health(soldier, 100);  // alive: see object_is_dead
 
   // Inherited from `BaseRuins`, which is the whole point of the subclass.
   CHECK(number("minlevel", obj(ruin)) == 4);
@@ -5399,7 +5541,9 @@ TEST(the_presentation_requests_run_and_change_no_state) {
 
   const ObjectId inn = world.spawn(NativeClass::building, nullptr);
   const ObjectId ship = world.spawn(NativeClass::ship, nullptr);
+  (void)world.set_health(ship, 100);  // alive: see object_is_dead
   const ObjectId anyone = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(anyone, 100);  // alive: see object_is_dead
   const std::uint64_t before = world.state_hash();
 
   const auto call = [&](const char* name, std::vector<script::Value> args) {
@@ -5577,7 +5721,9 @@ TEST(the_jupiter_anger_target_is_stored_raw_and_checked_on_the_way_out) {
   context.object_type = kTypeObj;
 
   const ObjectId priest = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(priest, 100);  // alive: see object_is_dead
   const ObjectId victim = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(victim, 100);  // alive: see object_is_dead
   world.find(victim)->state.flags.is_unit = true;
   const ObjectId keep = world.spawn(NativeClass::building, nullptr);
   world.find(keep)->state.flags.is_building = true;
@@ -5635,6 +5781,7 @@ TEST(the_jupiter_anger_target_is_stored_raw_and_checked_on_the_way_out) {
 
   // It is state: it moves the hash and survives a save.
   const ObjectId other = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(other, 100);  // alive: see object_is_dead
   world.find(other)->state.flags.is_unit = true;
   const std::uint64_t before = world.state_hash();
   world.find(priest)->state.jupiter_target = other;
@@ -5844,6 +5991,7 @@ TEST(attack_wait_is_the_shot_interval_for_the_crew_less_the_attack_animation) {
   std::vector<ObjectId> crew;
   for (int i = 0; i < 10; ++i) {
     const ObjectId u = b.world.spawn(NativeClass::unit, nullptr, graph.find("RCatapult"));
+    (void)b.world.set_health(u, 100);  // alive: see object_is_dead
     crew.push_back(u);
   }
   REQUIRE(economy.garrison_add(id, crew[0]));
@@ -5930,6 +6078,7 @@ TEST(clear_tower_target_clears_the_settlements_catapult_towers) {
   b.world.set_health(other_cat, 400);
   const SettlementId theirs = settle(other_cat);
   const ObjectId prey = b.world.spawn(NativeClass::unit, nullptr, graph.find("Fort"));
+  (void)b.world.set_health(prey, 100);  // alive: see object_is_dead
 
   const ObjectId tower = building(mine, graph.find("CatapultTower"), prey);
   const ObjectId roman = building(mine, graph.find("RCatapultTower"), prey);
@@ -5962,6 +6111,7 @@ TEST(clear_tower_target_clears_the_settlements_catapult_towers) {
 TEST(start_and_stop_training_are_the_sync_words_training_bit) {
   PredicateBench b;
   const ObjectId unit = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(unit, 100);  // alive: see object_is_dead
   const auto call = [&](const char* name, script::Value receiver) {
     return b.call(script::CallKind::member, name, 0, {receiver}).status == script::HostStatus::ok;
   };
@@ -6055,8 +6205,11 @@ TEST(inn_state_is_one_env_int_per_inn_open_by_default_and_clamped) {
 TEST(party_query_is_the_party_as_a_live_query) {
   PredicateBench b;
   const ObjectId first = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(first, 100);  // alive: see object_is_dead
   const ObjectId second = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(second, 100);  // alive: see object_is_dead
   const ObjectId third = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
+  (void)b.world.set_health(third, 100);  // alive: see object_is_dead
   b.world.mutable_state(third)->flags.in_party = true;
   b.world.mutable_state(first)->flags.in_party = true;
 
@@ -6207,6 +6360,7 @@ TEST(cover_of_mercy_action_shelters_the_friendly_units_under_it) {
   b.world.players().set(1, 2, Relation::ceasefire, true);
   const auto unit_at = [&](Point at, PlayerId owner) -> ObjectId {
     const ObjectId id = b.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+    (void)b.world.set_health(id, 100);  // alive: see object_is_dead
     b.world.set_position(id, at);
     b.world.set_owner(id, owner);
     return id;
@@ -6471,6 +6625,7 @@ TEST(get_stamina_dec_time_and_magic_action_end_read_and_release) {
   const ObjectId mist = b.world.spawn(NativeClass::script_obj, nullptr, graph.find("Mist"));
   const ObjectId sour = b.world.spawn(NativeClass::script_obj, nullptr, graph.find("Sour"));
   const ObjectId plain = b.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  (void)b.world.set_health(plain, 100);  // alive: see object_is_dead
   const auto dec = [&](script::Value who) -> std::int32_t {
     const script::HostOutcome out =
         b.call(script::CallKind::member, "GetStaminaDecTime", 0, {who});
@@ -6484,8 +6639,11 @@ TEST(get_stamina_dec_time_and_magic_action_end_read_and_release) {
 
   const ObjectId other = b.world.spawn(NativeClass::script_obj, nullptr, graph.find("Mist"));
   const ObjectId a = b.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  (void)b.world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId c = b.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  (void)b.world.set_health(c, 100);  // alive: see object_is_dead
   const ObjectId d = b.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  (void)b.world.set_health(d, 100);  // alive: see object_is_dead
   b.world.mutable_state(a)->mist = mist;
   b.world.mutable_state(c)->mist = mist;
   b.world.mutable_state(d)->mist = other;
@@ -6878,6 +7036,7 @@ TEST(sim_max_health_reads_the_bonus_a_script_put_on_the_object) {
   };
 
   const ObjectId soldier = world.spawn(NativeClass::unit, nullptr, classes.soldier);
+  (void)world.set_health(soldier, 100);  // alive: see object_is_dead
   const ObjectId fort = world.spawn(NativeClass::building, nullptr, classes.building);
   Combatant c;
   c.id = soldier;

@@ -135,18 +135,19 @@ std::vector<ObjectId> scan_located(const World& w, std::int32_t l, std::int32_t 
   return out;
 }
 
-std::vector<ObjectId> scan_sight(const World& w, ObjectId observer, const ClassFilter& filter) {
+std::vector<ObjectId> scan_sight(const World& w, ObjectId observer, std::int32_t radius,
+                                 const ClassFilter& filter) {
   std::vector<ObjectId> out;
   const WorldObject* watcher = w.find(observer);
-  if (watcher == nullptr) return out;
+  if (watcher == nullptr || radius < 0) return out;
   const Point eye = watcher->state.position;  // `(-1, -1)` for a held observer
-  const std::int64_t limit = std::int64_t{watcher->sight} * watcher->sight;
+  const std::int64_t limit = std::int64_t{radius} * radius;
   for (const WorldObject& slot : w.objects()) {
     if (slot.internal != InternalKind::none) continue;
     if (slot.id == observer) continue;
     const Point at = located(w, slot);
     if (at == kHeldPosition) continue;
-    if (watcher->sight > 0 && d2(at, eye) > limit) continue;
+    if (d2(at, eye) > limit) continue;
     take(w, slot, filter, out);
   }
   return out;
@@ -256,8 +257,8 @@ void ask_everything(Lcg& rng, const World& w, const Graph& g, Tally& tally) {
     tally.compare(got, scan_located(w, l, t, rr, b));
 
     const ObjectId eye = pick(rng, w);
-    w.objects_in_sight(eye, f, got);
-    tally.compare(got, scan_sight(w, eye, f));
+    w.objects_in_sight(eye, r, f, got);
+    tally.compare(got, scan_sight(w, eye, r, f));
 
     const PlayerId player = rng.chance(20) ? kNoPlayer : static_cast<PlayerId>(rng.in(0, 3));
     w.objects_of_class_for_player(f, player, c, r, got);

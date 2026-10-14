@@ -86,10 +86,12 @@ ClassFilter ClassFilter::parse(std::string_view names, const ClassGraph* graph) 
 // constructors
 // --------------------------------------------------------------------------
 
-QuerySpec objs_in_sight(ObjectId observer, ClassFilter filter, bool visible_only) noexcept {
+QuerySpec objs_in_sight(ObjectId observer, std::int32_t radius, ClassFilter filter,
+                        bool visible_only) noexcept {
   QuerySpec spec;
   spec.kind = QueryKind::objs_in_sight;
   spec.subject = observer;
+  spec.radius = radius;
   spec.filter = filter;
   spec.visible_only = visible_only;
   return spec;
@@ -140,7 +142,7 @@ QuerySpec objs_in_rect(std::int32_t left, std::int32_t top, std::int32_t right,
 
 QuerySpec objs_in_range(ObjectId anchor, std::int32_t radius, ClassFilter filter) noexcept {
   QuerySpec spec;
-  spec.kind = QueryKind::map_area_circle;
+  spec.kind = QueryKind::objs_in_sight;
   spec.subject = anchor;
   spec.radius = radius;
   spec.filter = filter;

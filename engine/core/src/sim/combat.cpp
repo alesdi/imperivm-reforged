@@ -2547,7 +2547,8 @@ HostOutcome host_best_target_in_range(CallContext& ctx) {
 /// `SetLastAttackTime`'s 40 sites expect a stamp to do to the next attack. The
 /// reader does not depend on that. It reads `Combatant::last_attack_time`, the
 /// dumps' `last attack time`, which `attack` already stamps with `now` on every
-/// blow. `SetLastAttackTime` stays declared and unimplemented.
+/// blow, and which `SetLastAttackTime` (0x005d7fc0, `m_set_last_attack_time`
+/// in sim/world_host.cpp) stamps on a script's say-so.
 HostOutcome host_time_without_attack(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));

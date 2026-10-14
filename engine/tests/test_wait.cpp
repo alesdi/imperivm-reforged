@@ -150,6 +150,7 @@ struct QueryWorld {
   explicit QueryWorld(std::size_t count) {
     for (std::size_t i = 0; i < count; ++i) {
       const ObjectId id = world.spawn(NativeClass::unit, nullptr);
+      (void)world.set_health(id, 100);  // alive: see object_is_dead
       world.set_position(id, Point{0, 0});
     }
     query = world.create_query(objs_in_circle(Point{0, 0}, 1000, ClassFilter{}));
@@ -258,6 +259,7 @@ TEST(obj_in_query_and_common_objects_ask_about_membership) {
   QueryWorld fixture(3);
   const ObjectId inside = fixture.world.objects().front().id;
   const ObjectId outside = fixture.world.spawn(NativeClass::unit, nullptr);
+  (void)fixture.world.set_health(outside, 100);  // alive: see object_is_dead
   fixture.world.set_position(outside, Point{100000, 100000});
 
   const Value obj_in = Value::object(script::ObjectRef{kTypeObj, inside});
@@ -345,6 +347,7 @@ struct IdleWorld {
   explicit IdleWorld(std::size_t count) {
     for (std::size_t i = 0; i < count; ++i) {
       const ObjectId id = world.spawn(NativeClass::unit, nullptr);
+      (void)world.set_health(id, 100);  // alive: see object_is_dead
       world.set_position(id, Point{0, 0});
       units.push_back(id);
     }
@@ -593,6 +596,7 @@ struct AreaWorld {
     areas.areas().bind(marker, AreaShape::of_circle(Point{0, 0}, 100));
     for (std::size_t i = 0; i < count; ++i) {
       const ObjectId id = world.spawn(NativeClass::unit, nullptr);
+      (void)world.set_health(id, 100);  // alive: see object_is_dead
       world.set_position(id, Point{0, 0});
       units.push_back(id);
     }
@@ -673,6 +677,7 @@ TEST(a_named_object_is_a_query_of_one_and_empties_when_the_object_dies) {
   const HostRegistry registry = wait_registry();
   World world;
   const ObjectId caesar = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(caesar, 100);  // alive: see object_is_dead
   world.set_position(caesar, Point{0, 0});
   REQUIRE(world.named_objects().bind("Caesar", caesar));
   const auto index = static_cast<std::uint32_t>(world.named_objects().find("Caesar"));
@@ -732,6 +737,7 @@ struct ConvWorld {
 
   ObjectId spawn(ClassIndex which, Point at) {
     const ObjectId id = world.spawn(NativeClass::unit, nullptr, which);
+    (void)world.set_health(id, 100);  // alive: see object_is_dead
     world.set_position(id, at);
     return id;
   }

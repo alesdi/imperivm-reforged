@@ -748,12 +748,11 @@ HostOutcome m_race_str_pref(CallContext& ctx) {
 /// **The stealth clock is the one thing left out, and it is left out
 /// elsewhere.** Between the side test and the reveal, the original stamps
 /// `[obj+0x1a4]` with the current game time for objects carrying bit 26 of
-/// `[obj+0x198]`. That field is `Unit::SetLastAttackTime`'s, and `m_set_last_
-/// attack_time` in `world_host.cpp` records why this engine does not store it:
-/// no registered entry point reads it back, so it would be hashed, serialised
-/// state that no script could observe. That comment ends "the day one exists,
-/// this is where it writes" -- and this is now the second writer waiting on the
-/// same day.
+/// `[obj+0x198]`. That field is `Unit::SetLastAttackTime`'s -- the combatant's
+/// `last_attack_time`, which `Unit::TimeWithoutAttack` reads back, so the
+/// premise this was left out on ("no entry point reads it") was wrong, and
+/// `m_set_last_attack_time` in `world_host.cpp` now stores it. This writer is
+/// still left out: a known gap, for whoever audits this entry point.
 HostOutcome fn_reveal_hidden_enemy_units(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RevealHiddenEnemyUnits: no world");

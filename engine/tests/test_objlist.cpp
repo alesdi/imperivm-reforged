@@ -329,7 +329,9 @@ TEST(objlist_every_member_asserts_on_its_receiver) {
 TEST(objlist_count_answers_for_a_list_and_for_a_query) {
   Fixture f;
   const ObjectId a = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId b = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(b, 100);  // alive: see object_is_dead
   f.world.set_position(a, pt(10, 10));
   f.world.set_position(b, pt(20, 20));
 
@@ -376,7 +378,9 @@ TEST(objlist_count_answers_for_a_list_and_for_a_query) {
 TEST(objlist_add_appends_in_order_and_ignores_a_dead_handle) {
   Fixture f;
   const ObjectId a = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId b = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(b, 100);  // alive: see object_is_dead
   const script::Value list = fresh_list(f.world);
 
   f.call(script::CallKind::member, "Add", {list, f.obj(b)});
@@ -400,6 +404,7 @@ TEST(objlist_add_appends_in_order_and_ignores_a_dead_handle) {
 TEST(objlist_a_declaration_binds_its_entry_at_the_declaration_site) {
   Fixture f;
   const ObjectId a = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(a, 100);  // alive: see object_is_dead
   WorldHost host(f.world);
 
   // Exactly what `ObjList OL_UnattachedVillages;` in BUILDINGSADVICE4.VS is:
@@ -505,6 +510,7 @@ TEST(objlist_remove_takes_an_object_or_a_list) {
 TEST(objlist_clear_empties_the_list_and_keeps_the_handle) {
   Fixture f;
   const ObjectId a = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(a, 100);  // alive: see object_is_dead
   const script::Value list = fresh_list(f.world);
   f.call(script::CallKind::member, "Add", {list, f.obj(a)});
 
@@ -572,6 +578,7 @@ TEST(objlist_cleardead_drops_missing_and_zero_health_objects) {
 TEST(objlist_getobjlist_is_a_snapshot_and_a_query_is_not) {
   Fixture f;
   const ObjectId a = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(a, 100);  // alive: see object_is_dead
   f.world.set_position(a, pt(10, 10));
   const ObjectId query = f.world.create_query(objs_in_circle(pt(10, 10), 500, ClassFilter{}));
   const script::Value query_value = script::Value::object(script::ObjectRef{kTypeQuery, query});
@@ -586,6 +593,7 @@ TEST(objlist_getobjlist_is_a_snapshot_and_a_query_is_not) {
   // list does not. This is why GUARD.VS re-reads `ol = qryDef.GetObjList();` at
   // the top of every pass of its loop.
   const ObjectId b = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(b, 100);  // alive: see object_is_dead
   f.world.set_position(b, pt(11, 11));
   CHECK(f.call(script::CallKind::member, "count", {query_value}).value.as_integer() == 2);
   CHECK(f.call(script::CallKind::member, "count", {list}).value.as_integer() == 1);
@@ -602,8 +610,11 @@ TEST(objlist_getobjlist_is_a_snapshot_and_a_query_is_not) {
 TEST(objlist_filterclosest_ranks_by_distance_then_by_id) {
   Fixture f;
   const ObjectId near = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(near, 100);  // alive: see object_is_dead
   const ObjectId far = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(far, 100);  // alive: see object_is_dead
   const ObjectId tie = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(tie, 100);  // alive: see object_is_dead
   f.world.set_position(near, pt(10, 0));
   f.world.set_position(far, pt(500, 0));
   f.world.set_position(tie, pt(10, 0));
@@ -691,7 +702,9 @@ TEST(objlist_index_get_yields_an_object_and_refuses_nothing_else) {
   World world;
   WorldHost host(world);
   const ObjectId a = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId b = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(b, 100);  // alive: see object_is_dead
   const script::Value list = fresh_list(world);
   std::vector<ObjectId>* items = objlist_pool_of(world).mutable_items(objlist_of(list));
   items->push_back(a);
@@ -720,7 +733,9 @@ TEST(objlist_index_set_writes_in_range_and_refuses_past_the_end) {
   World world;
   WorldHost host(world);
   const ObjectId a = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId b = world.spawn(NativeClass::unit, nullptr);
+  (void)world.set_health(b, 100);  // alive: see object_is_dead
   script::Value list = fresh_list(world);
   objlist_pool_of(world).mutable_items(objlist_of(list))->push_back(a);
 
@@ -1031,6 +1046,8 @@ TEST(objlist_a_named_object_counts_as_the_one_member_query_it_upcasts_to) {
   // query of exactly one object. `sim/wait.cpp` already relies on that edge.
   Fixture f;
   const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr);
+  // Alive: a named unit at no health is purged from its name (0x005530a0).
+  f.world.set_health(hero, 10);
   CHECK(f.world.named_objects().bind("NO_Scipio", hero));
   const std::int32_t index = f.world.named_objects().find("NO_Scipio");
   REQUIRE(index >= 0);
@@ -1062,6 +1079,7 @@ TEST(objlist_a_dead_named_object_counts_zero_rather_than_refusing) {
   // three functions up.
   Fixture f;
   const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr);
+  (void)f.world.set_health(hero, 100);  // alive: see object_is_dead
   CHECK(f.world.named_objects().bind("NO_Scipio", hero));
   const std::int32_t index = f.world.named_objects().find("NO_Scipio");
   REQUIRE(index >= 0);
@@ -1110,7 +1128,9 @@ TEST(objlist_nearestobj_scores_to_the_edge_and_not_to_the_centre) {
   const imperivm::core::ClassIndex fat = graph.find("Fat");
 
   const ObjectId near_small = f.world.spawn(NativeClass::unit, nullptr, small);
+  (void)f.world.set_health(near_small, 100);  // alive: see object_is_dead
   const ObjectId far_fat = f.world.spawn(NativeClass::unit, nullptr, fat);
+  (void)f.world.set_health(far_fat, 100);  // alive: see object_is_dead
   f.world.set_position(near_small, pt(100, 0));   // centre 100 away, edge  90
   f.world.set_position(far_fat, pt(300, 0));      // centre 300 away, edge -100
 
@@ -1150,7 +1170,9 @@ TEST(objlist_nearestobj_takes_an_object_argument_and_subtracts_the_askers_radius
   // inside. So that is what this measures, and it is the only test that can
   // tell `0x005a77b0` (both radii) from `0x005a7900` (one).
   const ObjectId asker = f.world.spawn(NativeClass::unit, nullptr, wide);
+  (void)f.world.set_health(asker, 100);  // alive: see object_is_dead
   const ObjectId only = f.world.spawn(NativeClass::unit, nullptr, plain);
+  (void)f.world.set_health(only, 100);  // alive: see object_is_dead
   f.world.set_position(asker, pt(0, 0));
   f.world.set_position(only, pt(10'000'500, 0));
 
@@ -1176,6 +1198,7 @@ TEST(objlist_nearestobj_takes_an_object_argument_and_subtracts_the_askers_radius
 TEST(objlist_nearestobj_has_a_ten_million_cap_and_answers_invalid_past_it) {
   Fixture f;
   const ObjectId lonely = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(lonely, 100);  // alive: see object_is_dead
   f.world.set_position(lonely, pt(20'000'000, 0));
 
   const ObjectId query =
@@ -1208,6 +1231,7 @@ TEST(objlist_nearestobj_has_a_ten_million_cap_and_answers_invalid_past_it) {
 TEST(objlist_nearestobj_answers_invalid_for_a_receiver_that_is_not_a_query) {
   Fixture f;
   const ObjectId a = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(a, 100);  // alive: see object_is_dead
   f.world.set_position(a, pt(10, 10));
 
   // An `ObjList` receiver. The original's two bodies begin by calling the
@@ -1241,6 +1265,9 @@ TEST(objlist_nearestobj_skips_a_member_whose_handle_has_gone) {
   const ObjectId here = f.world.spawn(NativeClass::unit, nullptr);
   f.world.set_position(gone, pt(10, 0));
   f.world.set_position(here, pt(900, 0));
+  // Alive: a named unit at no health is purged from its name (0x005530a0).
+  f.world.set_health(gone, 10);
+  f.world.set_health(here, 10);
 
   const script::Value list = fresh_list(f.world);
   f.call(script::CallKind::member, "Add", {list, f.obj(gone)});
@@ -1277,7 +1304,9 @@ TEST(objlist_nearestobj_skips_a_member_whose_handle_has_gone) {
 TEST(objlist_nearestobj_ties_keep_the_first_member) {
   Fixture f;
   const ObjectId first = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(first, 100);  // alive: see object_is_dead
   const ObjectId second = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(second, 100);  // alive: see object_is_dead
   CHECK(first < second);
   f.world.set_position(first, pt(-300, 0));
   f.world.set_position(second, pt(300, 0));
@@ -1299,8 +1328,11 @@ TEST(objlist_nearestobj_measures_from_a_held_askers_holder) {
   Fixture f;
   const ObjectId barracks = f.world.spawn(NativeClass::building, nullptr);
   const ObjectId asker = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(asker, 100);  // alive: see object_is_dead
   const ObjectId near_barracks = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(near_barracks, 100);  // alive: see object_is_dead
   const ObjectId near_origin = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(near_origin, 100);  // alive: see object_is_dead
   // The barracks itself sits outside the query's band, so it cannot win.
   f.world.set_position(barracks, pt(10'000, 500));
   f.world.set_position(near_barracks, pt(10'100, 0));
@@ -1339,9 +1371,13 @@ TEST(objlist_get_units_on_board_snapshots_the_ships_holder) {
   // not the same thing as "held at all".
   const World::ShipIds other = f.world.spawn_ship(nullptr);
   const ObjectId a = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId b = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(b, 100);  // alive: see object_is_dead
   const ObjectId ashore = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(ashore, 100);  // alive: see object_is_dead
   const ObjectId elsewhere = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(elsewhere, 100);  // alive: see object_is_dead
   REQUIRE(f.world.put_in_holder(a, ship.holder));
   REQUIRE(f.world.put_in_holder(b, ship.holder));
   REQUIRE(f.world.put_in_holder(elsewhere, other.holder));
@@ -1387,10 +1423,15 @@ TEST(objlist_get_units_in_same_holder_is_the_whole_holder_including_the_asker) {
   const ObjectId barracks = f.world.spawn(NativeClass::building, nullptr);
   const ObjectId elsewhere = f.world.spawn(NativeClass::building, nullptr);
   const ObjectId me = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(me, 100);  // alive: see object_is_dead
   const ObjectId mate = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(mate, 100);  // alive: see object_is_dead
   const ObjectId foe = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(foe, 100);  // alive: see object_is_dead
   const ObjectId outside = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(outside, 100);  // alive: see object_is_dead
   const ObjectId other_holder = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(other_holder, 100);  // alive: see object_is_dead
   f.world.set_owner(me, 1);
   f.world.set_owner(mate, 1);
   f.world.set_owner(foe, 2);
@@ -1429,8 +1470,10 @@ TEST(objlist_get_units_in_same_holder_is_the_whole_holder_including_the_asker) {
 TEST(objlist_get_units_on_board_answers_empty_for_anything_that_is_not_a_ship) {
   Fixture f;
   const ObjectId plain = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(plain, 100);  // alive: see object_is_dead
   const ObjectId barracks = f.world.spawn(NativeClass::building, nullptr);
   const ObjectId rider = f.world.spawn(NativeClass::unit, nullptr);
+  (void)f.world.set_health(rider, 100);  // alive: see object_is_dead
   // `plain + 1` exists, is *not* a holder, and **is holding something** --
   // which is the case that separates "the neighbour is the holder" from "the
   // neighbour is whatever came next". Without the second half a body that
@@ -1478,8 +1521,11 @@ TEST(objlist_filters_mint_a_new_list_of_the_members_that_pass) {
   f.world.players().set_relation_word(0, 1, 1);
   f.world.players().set_relation_word(1, 2, 1);
   const ObjectId a = f.world.spawn(NativeClass::unit, nullptr, graph.find("Horse"));
+  (void)f.world.set_health(a, 100);  // alive: see object_is_dead
   const ObjectId b = f.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  (void)f.world.set_health(b, 100);  // alive: see object_is_dead
   const ObjectId c = f.world.spawn(NativeClass::unit, nullptr, graph.find("Horse"));
+  (void)f.world.set_health(c, 100);  // alive: see object_is_dead
   for (const ObjectId id : {a, b, c}) f.world.set_health(id, 100);
   CHECK(f.world.set_owner(a, 0));
   CHECK(f.world.set_owner(b, 1));

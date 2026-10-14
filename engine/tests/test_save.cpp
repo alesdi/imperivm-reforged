@@ -250,6 +250,8 @@ void populate(World& world, std::uint32_t seed) {
   world.named_objects().bind("Retired", units[1]);
   (void)world.named_objects().unbind_object(units[1]);
   world.named_objects().bind("Retired", units[3]);
+  // A name `GetNamedObj` minted before anything carried it.
+  (void)world.named_objects().intern("Awaited");
 
   ClassFilter filter;
   filter.match_all = false;

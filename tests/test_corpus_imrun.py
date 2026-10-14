@@ -528,6 +528,15 @@ def test_a_skirmish_on_crossroads_goes_to_war_and_its_walled_town_holds(imrun, g
 P0_OUTSIDE = (3950, 2700)
 P0_TOWNHALL = (2758, 2466)
 
+#: The seed whose Crossroads these coordinates describe. The seed draws each
+#: seat's race and each town's layout through the world's generator, and when
+#: that became `gbr.exe`'s own (sim/rng.hpp) the default seed's game changed:
+#: p1 was no longer the race that trains `ESwordsman`. Seed 1020 is a seed
+#: under the recovered generator whose p0 town hall, p1 gates and first p1
+#: swordsman outside the walls are where the default seed's were before
+#: (found by sweeping seeds 1..1200 for exactly those three facts).
+LAYOUT_SEED = 1020
+
 
 def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     """The walls fight, by placement rather than by waiting for the AI to
@@ -544,7 +553,8 @@ def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     if not crossroads.is_file():
         pytest.skip("Crossroads.BFHP is not in this installation")
     first = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "800"],
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "800",
+         "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_OBJECTS": "ESwordsman"},
     )
@@ -556,7 +566,8 @@ def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     unit = enemies[0]
 
     second = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "800"],
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "800",
+         "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_DEATHS": "1",
              "IMRUN_PLACE": f"{P0_OUTSIDE[0]},{P0_OUTSIDE[1]}",
@@ -825,7 +836,8 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
     # Which swordsman: the first of p1's standing outside its walls, well away
     # from every gate.
     first = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "100"],
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "100",
+         "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_OBJECTS": "ESwordsman", "IMRUN_GATES": "1"},
     )
@@ -848,7 +860,8 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
     assert any(target == "closed" and "near" not in rest for *_, target, rest in gates), gates
 
     second = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "100"],
+        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "100",
+         "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_GATES": "1", "IMRUN_WATCH": str(unit),
              "IMRUN_GOTO": f"{ORDER_TURN}:{unit}:{P1_INSIDE[0]},{P1_INSIDE[1]}"},

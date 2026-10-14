@@ -1150,18 +1150,31 @@ TEST(spawn_group_in_holder_dispatches_on_its_second_arguments_type) {
   // one passes an object.
   SpawnFixture f;
 
-  // The object form: the copies go inside the holder, which means they have no
-  // position of their own.
-  const ObjectId holder = TemplateMap::spawned(0);
+  // The object form asks the object for **its holder** (`vtbl + 0xe4`,
+  // 0x00576e00): an object that has none -- a plain unit -- spawns nothing and
+  // answers an empty list.
+  const ObjectId plain = TemplateMap::spawned(0);
+  const std::size_t objects = f.map.world.objects().size();
+  const script::HostOutcome refused = f.call(
+      "SpawnGroupInHolder",
+      {script::Value::string("Garrison"),
+       script::Value::object(script::ObjectRef{kTypeObj, plain})});
+  REQUIRE(refused.status == script::HostStatus::ok);
+  CHECK(f.list_of(refused.value).empty());
+  CHECK(f.map.world.objects().size() == objects);
+
+  // A ship's holder is the record at ship + 1, which is where its passengers
+  // are -- not the ship object itself.
+  const World::ShipIds ship = f.map.world.spawn_ship(nullptr);
   const script::HostOutcome held = f.call(
       "SpawnGroupInHolder",
       {script::Value::string("Garrison"),
-       script::Value::object(script::ObjectRef{kTypeObj, holder})});
+       script::Value::object(script::ObjectRef{kTypeObj, ship.ship})});
   REQUIRE(held.status == script::HostStatus::ok);
   const std::span<const ObjectId> inside = f.list_of(held.value);
   REQUIRE(inside.size() == 2);
-  CHECK(f.map.world.state(inside[0])->holder == holder);
-  CHECK(f.map.world.resolve_position(inside[0]) == f.map.world.resolve_position(holder));
+  CHECK(f.map.world.state(inside[0])->holder == ship.holder);
+  CHECK(f.map.world.state(inside[1])->holder == ship.holder);
 
   // The string form with a name no settlement carries: a diagnostic and an
   // empty list, the same shape as an unknown group.

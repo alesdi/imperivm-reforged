@@ -1084,7 +1084,11 @@ TEST(ai_get_skill_to_develop_draws_the_exact_value_over_twenty_five_equal_weight
 
   bool saw_first = false;
   bool saw_last = false;
-  for (std::uint32_t seed = 1; seed <= 60; ++seed) {
+  // Spread seeds: the generator is the original's bare LCG, whose first draw
+  // from consecutive small seeds barely moves, so 1..60 would never reach
+  // either end of 1..25.
+  for (std::uint32_t i = 1; i <= 60; ++i) {
+    const std::uint32_t seed = i * 0x9E3779B9u;
     f.world.rng().seed(seed);
     Rng model = f.world.rng();
     const std::int32_t draw = model.between(1, 25);
