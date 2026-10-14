@@ -315,6 +315,33 @@ TEST(ai_stop_host_kills_the_players_ai_and_refuses_a_bad_number_quietly) {
   CHECK(stop(script::Value::integer(3), false).status != script::HostStatus::ok);
 }
 
+/// `IsAIPlayer` (0x00422900) reads the player record's AI pointer, which
+/// `AIStart` builds and `AIStop` deletes and nulls: a running AI, not a slot
+/// whose control says Computer.
+TEST(ai_start_and_stop_are_what_is_ai_player_reads) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);
+  f.world.players().setup(2).control = PlayerControl::computer;
+  const auto is_ai = [&](std::int32_t who) {
+    const std::uint32_t index = f.registry.find(script::CallKind::free_function, "IsAIPlayer", 1);
+    if (index == script::kUnresolvedHost) return -1;
+    std::vector<script::Value> args{script::Value::integer(who)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &f.context;
+    ctx.name = "IsAIPlayer";
+    ctx.kind = script::CallKind::free_function;
+    const script::HostOutcome out = f.registry.entry(index).fn(ctx);
+    return out.status == script::HostStatus::ok && out.value.as_integer() != 0 ? 1 : 0;
+  };
+  CHECK(is_ai(3) == 0);  // a Computer slot whose AI nobody started
+  REQUIRE(f.ai.start(2, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(is_ai(3) == 1);
+  CHECK(is_ai(2) == 0);
+  CHECK(f.ai.stop(2, f.scheduler));
+  CHECK(is_ai(3) == 0);
+}
+
 TEST(ai_start_refuses_a_profile_it_was_never_given) {
   Fixture f;
   REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);

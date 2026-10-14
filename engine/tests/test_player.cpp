@@ -588,9 +588,14 @@ struct RaceBench {
         // An `altid`, because a script names a class the way the data does and
         // `ClassGraph::lookup` resolves `id` first and `altid` after.
         R"(<class id="GSwordsman" altid="GaulSword" parent="Object" cpp_class="CVXDecor"><properties race="Gaul"/></class>)",
+        // The class loader's two other outcomes: `Mutable` and a race string
+        // it does not know.
+        R"(<class id="MutableStronghold" parent="Object" cpp_class="CVXDecor"><properties race="Mutable"/></class>)",
+        R"(<class id="Atlantean" parent="Object" cpp_class="CVXDecor"><properties race="Atlantis"/></class>)",
     };
-    const char* names[] = {"o.sc.xml", "e.sc.xml", "m.sc.xml", "r.sc.xml", "g.sc.xml"};
-    for (int i = 0; i < 5; ++i) graph.add(bytes_of(docs[i]), names[i]);
+    const char* names[] = {"o.sc.xml", "e.sc.xml", "m.sc.xml", "r.sc.xml",
+                           "g.sc.xml", "ms.sc.xml", "at.sc.xml"};
+    for (int i = 0; i < 7; ++i) graph.add(bytes_of(docs[i]), names[i]);
     graph.link();
     world.set_class_graph(&graph);
     context.world = &world;
@@ -758,8 +763,23 @@ TEST(dipl_getters_read_the_matrix_one_way_round) {
   // The other direction is `0x11`, which does not share support.
   CHECK(!bench.truthy(kFree, "DiplGetShareSupport",
                       {script::Value::integer(2), script::Value::integer(1)}));
+  // A mutual bit 0 is not yet an alliance: 0x00564c10 also wants both player
+  // records' `allied` dword (`playerdata/@allied`, the shared-victory flag).
+  CHECK(!bench.truthy(kFree, "DiplAreAllied",
+                      {script::Value::integer(1), script::Value::integer(2)}));
+  players.setup(0).allied_flag = true;
+  CHECK(!bench.truthy(kFree, "DiplAreAllied",
+                      {script::Value::integer(1), script::Value::integer(2)}));
+  players.setup(1).allied_flag = true;
   CHECK(bench.truthy(kFree, "DiplAreAllied",
                      {script::Value::integer(1), script::Value::integer(2)}));
+  // The flags without the mutual bit are not an alliance either.
+  players.setup(2).allied_flag = true;
+  CHECK(!bench.truthy(kFree, "DiplAreAllied",
+                      {script::Value::integer(1), script::Value::integer(3)}));
+  // And a player is its own ally whatever its flag says.
+  CHECK(bench.truthy(kFree, "DiplAreAllied",
+                     {script::Value::integer(4), script::Value::integer(4)}));
 
   // 0 and 17 are outside 1..16: false, not a trap, because a script that walks
   // the table off the end relies on that.
@@ -835,12 +855,15 @@ TEST(is_own_and_is_ally_read_the_argument_as_the_asker) {
 TEST(reveal_hidden_enemy_units_clears_the_bit_on_enemy_units_in_the_circle) {
   Bench bench;
   PlayerTable& players = bench.world.players();
-  // Player 0 is at war with player 1 and at peace with player 2. The rows are
-  // written one way only: `is_enemy` reads the viewer's own row and the mask in
-  // `gbr.exe` belongs to the revealing player, so the transpose must not matter.
-  players.set_relation_word(0, 1, 0);
-  players.set_relation_word(0, 2, kRelationFriendly);
-  players.set_relation_word(1, 0, kRelationFriendly);
+  // The mask is the revealing player's `seeflags`: who shares their view with
+  // it, which `SetRelation` maintains from the **owner's** word. Player 1
+  // grants player 0 a bare ceasefire (0x01, no shared view) and player 0 is at
+  // peace with it -- revealed all the same. Player 2 shares its view with
+  // player 0 (0x11) while player 0 is at war with it -- spared.
+  players.set_relation_word(1, 0, kRelationCeasefireOnly);
+  players.set_relation_word(0, 1, kRelationFriendly);
+  players.set_relation_word(2, 0, kRelationFriendly);
+  players.set_relation_word(0, 2, 0);
 
   const auto hidden_unit = [&](PlayerId owner, Point at) {
     const ObjectId id = bench.world.spawn(NativeClass::unit, nullptr);
@@ -857,6 +880,8 @@ TEST(reveal_hidden_enemy_units_clears_the_bit_on_enemy_units_in_the_circle) {
   // that doubles the radius would go unnoticed.
   const ObjectId far_enemy = hidden_unit(1, Point{1000, 1700});
   const ObjectId near_friend = hidden_unit(2, Point{1010, 1000});
+  // The revealing player's own hidden unit stays hidden.
+  const ObjectId near_own = hidden_unit(0, Point{1005, 1000});
   // An enemy unit in the circle that was never hiding. Clearing a bit that is
   // already clear changes nothing, so the `hidden` test in the sweep cannot be
   // caught by any assertion here -- see the fault sweep's annotated survivor.
@@ -880,6 +905,7 @@ TEST(reveal_hidden_enemy_units_clears_the_bit_on_enemy_units_in_the_circle) {
   CHECK(is_hidden(far_enemy));
   CHECK(!is_hidden(visible_enemy));
   CHECK(is_hidden(near_friend));
+  CHECK(is_hidden(near_own));
   CHECK(is_hidden(near_building));
 }
 
@@ -1036,7 +1062,10 @@ TEST(per_player_facts_come_from_the_setup) {
   players.setup(1).race = "Random";
   players.setup(2).control = PlayerControl::disabled;
 
-  CHECK(bench.truthy(kFree, "IsAIPlayer", {script::Value::integer(1)}));
+  // `IsAIPlayer` is whether the player's AI is running (`[record+0x88]`), not
+  // the slot's control: nobody has started one here, so a Computer slot is
+  // false too. `ai_start_and_stop_are_what_is_ai_player_reads` has the rest.
+  CHECK(!bench.truthy(kFree, "IsAIPlayer", {script::Value::integer(1)}));
   CHECK(!bench.truthy(kFree, "IsAIPlayer", {script::Value::integer(2)}));
   CHECK(!bench.truthy(kFree, "IsAIPlayer", {script::Value::integer(3)}));
   CHECK(!bench.truthy(kFree, "IsAIPlayer", {script::Value::integer(0)}));
@@ -1122,6 +1151,9 @@ TEST(dipl_ceasefire_writes_one_row_and_not_the_transpose) {
                {script::Value::integer(2), script::Value::integer(1),
                 script::Value::boolean(true)})
             .status == script::HostStatus::ok);
+  // Mutual now, and allied once both declare the shared-victory flag.
+  b.world.players().setup(0).allied_flag = true;
+  b.world.players().setup(1).allied_flag = true;
   CHECK(b.truthy(kFree, "DiplAreAllied", {script::Value::integer(1), script::Value::integer(2)}));
 }
 
@@ -1314,6 +1346,12 @@ TEST(clear_diplomacy_then_declare_teams_is_the_zama_opening) {
   ally(1, 3);
   ally(2, 3);
   ally(4, 5);
+  // The skirmish victory scripts ask `DiplAreAllied`, which also wants each
+  // side's `allied` flag; a team declared with flags set is the alliance.
+  CHECK(!b.truthy(kFree, "DiplAreAllied", {script::Value::integer(1), script::Value::integer(3)}));
+  for (const PlayerId id : {PlayerId{0}, PlayerId{1}, PlayerId{2}, PlayerId{3}, PlayerId{4}}) {
+    b.world.players().setup(id).allied_flag = true;
+  }
 
   CHECK(b.truthy(kFree, "DiplAreAllied", {script::Value::integer(1), script::Value::integer(3)}));
   CHECK(b.truthy(kFree, "DiplAreAllied", {script::Value::integer(2), script::Value::integer(3)}));
@@ -1374,6 +1412,74 @@ TEST(get_class_race_answers_the_named_class_and_minus_one_for_anything_else) {
   ctx.name = "race";
   ctx.kind = kMember;
   CHECK(b.registry.entry(member).fn(ctx).value.as_integer() == race("ETownhall"));
+}
+
+/// The class loader (0x0059f540) stores 9 for `race="Mutable"` and 8 for a
+/// race string it does not know; `Obj::race` (0x005ada20) pushes 0 for an
+/// invalid receiver. `GetClassRace`, `.race` and the string members all read
+/// that one number.
+TEST(class_races_are_the_loaders_numbers_and_an_invalid_object_is_race_zero) {
+  RaceBench b;
+  const auto number = [&](script::CallKind kind, const char* name, script::Value arg) {
+    const std::uint32_t index = b.registry.find(kind, name, kind == kMember ? 0 : 1);
+    if (index == script::kUnresolvedHost) return -999;
+    std::vector<script::Value> args{arg};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &b.context;
+    ctx.name = name;
+    ctx.kind = kind;
+    const script::HostOutcome out = b.registry.entry(index).fn(ctx);
+    if (out.status != script::HostStatus::ok || !out.value.is_integer()) return -999;
+    return out.value.as_integer();
+  };
+  CHECK(number(kFree, "GetClassRace", script::Value::string("MutableStronghold")) == 9);
+  CHECK(number(kFree, "GetClassRace", script::Value::string("Atlantean")) == 8);
+  CHECK(number(kFree, "GetClassRace", script::Value::string("Rock")) == kNoRace);
+  const ObjectId shifty = b.make("MutableStronghold");
+  CHECK(number(kMember, "race", b.obj(shifty)) == 9);
+  // Race 9 has no name and no prefix.
+  CHECK(b.text(kMember, "raceStr", {b.obj(shifty)}).empty());
+  CHECK(b.text(kMember, "raceStrPref", {b.obj(shifty)}).empty());
+  // An object that is not there is Gaul to `Obj::race`, and "" to the strings.
+  CHECK(number(kMember, "race", b.obj(999999)) == 0);
+  CHECK(b.text(kMember, "raceStr", {b.obj(999999)}).empty());
+
+  CHECK(class_race_from_name("Gaul") == 0);
+  CHECK(class_race_from_name("british") == 5);
+  CHECK(class_race_from_name("none") == kNoRace);
+  CHECK(class_race_from_name("mutable") == 9);
+  CHECK(class_race_from_name("Random") == 8);
+  CHECK(class_race_from_name("") == kNoRace);
+}
+
+/// `EnemyObjs`, `FriendlyObjs` and `ControllableObjs` resolve **one** class
+/// name in the registry and push the invalid handle when it is unknown
+/// ("Could not find class named '%s' in function 'EnemyObjs'"), rather than
+/// an empty query.
+TEST(player_flag_queries_answer_the_invalid_handle_for_an_unknown_class) {
+  RaceBench b;
+  const auto handle = [&](const char* name, const char* cls) -> script::ObjectRef {
+    const std::uint32_t index = b.registry.find(kFree, name, 2);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::ObjectRef{};
+    std::vector<script::Value> args{script::Value::integer(3),
+                                    script::Value::string(std::string(cls))};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &b.context;
+    ctx.name = name;
+    ctx.kind = kFree;
+    const script::HostOutcome out = b.registry.entry(index).fn(ctx);
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_object() ? out.value.as_object() : script::ObjectRef{};
+  };
+  for (const char* name : {"EnemyObjs", "FriendlyObjs", "ControllableObjs"}) {
+    CHECK(handle(name, "Object").valid());
+    CHECK(handle(name, "GaulSword").valid());  // by altid too
+    CHECK(!handle(name, "NoSuchClass").valid());
+    CHECK(!handle(name, "Object,Rock").valid());  // one name, not a list
+  }
 }
 
 /// Three globals that are accepted and dropped, on `GlobalSpellStart`'s

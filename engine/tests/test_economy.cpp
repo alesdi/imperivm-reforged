@@ -5165,6 +5165,24 @@ TEST(get_settlements_filters_by_class_and_treats_player_zero_as_a_wildcard) {
   // a class the graph cannot resolve does not silently widen to everything.
   CHECK(list_of("Tavern", 1).empty());
   CHECK(list_of("NoSuchClassAnywhere", 0).empty());
+  // The collector (0x00436ec0) takes every owner whenever the decremented
+  // number is negative, so every argument below 1 is the wildcard.
+  CHECK(list_of("Barracks", -1).size() == 1);
+  CHECK(list_of("Barracks", -7).size() == 1);
+  // One class name (0x0059c020 looks the string up whole): a list is no class.
+  CHECK(list_of("Barracks,Building", 0).empty());
+
+  // `Strongholds` asks the central building's class whether it is a
+  // `BaseTownhall` (0x0043ffc0), not the kind the settlement was made with:
+  // this one was created a stronghold around a barracks, and is not counted.
+  REQUIRE(town->kind == SettlementKind::stronghold);
+  const auto count = [&](const char* name, std::int64_t player) {
+    return call_host(registry, b.world, script::CallKind::free_function, name, 1,
+                     {script::Value::integer(player)})
+        .value.as_integer();
+  };
+  CHECK(count("Strongholds", 1) == 0);
+  CHECK(count("Outposts", 0) == 0);
 }
 
 /// `set.IsCity()` is two class names, and `set.PopulationDied()` is a zero.
