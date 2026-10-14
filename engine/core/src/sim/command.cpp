@@ -474,9 +474,13 @@ bool CommandSystem::launch(World& world, ObjectId id, Command& command, GameTime
   command.started = true;
   command.started_at = now;
   if (scheduler_ == nullptr) return true;  // queued, running, never retires
+  return launch_chunk(world, id, command, chunk_of(world, id, command.verb, /*count_miss=*/true));
+}
 
-  const std::string_view path = script_for(world, id, command.verb);
-  if (path.empty()) return false;
+std::uint32_t CommandSystem::chunk_of(World& world, ObjectId id, std::string_view verb,
+                                      bool count_miss) {
+  const std::string_view path = script_for(world, id, verb);
+  if (path.empty()) return script::kNoChunk;
 
   // **The file has to be compiled before it can be spawned, and nothing else
   // compiles it.** `Scheduler::spawn_by_name` is a lookup in the already-loaded
@@ -488,16 +492,20 @@ bool CommandSystem::launch(World& world, ObjectId id, Command& command, GameTime
   // failed to spawn, and was retired by `service` without a word.
   const std::uint32_t chunk = library_ != nullptr ? library_->chunk_for(path)
                                                   : scheduler_->find_chunk(path);
-  if (chunk == script::kNoChunk) {
+  if (chunk == script::kNoChunk && count_miss) {
     // Counted rather than dropped: a verb whose file will not compile is a
     // broken installation or a missing behaviour, and it used to be invisible.
-    if (const auto at = launch_failures_.find(command.verb); at != launch_failures_.end()) {
+    if (const auto at = launch_failures_.find(std::string(verb)); at != launch_failures_.end()) {
       ++at->second;
     } else {
-      launch_failures_.emplace(std::string(command.verb), std::size_t{1});
+      launch_failures_.emplace(std::string(verb), std::size_t{1});
     }
-    return false;
   }
+  return chunk;
+}
+
+bool CommandSystem::launch_chunk(World& world, ObjectId id, Command& command, std::uint32_t chunk) {
+  if (chunk == script::kNoChunk) return false;
 
   // The receiver first, the command's argument second: exactly what the
   // shipped scripts declare. `UNIT_MOVE.VS` opens `// void, Obj This, point pt`
@@ -869,6 +877,35 @@ std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_
   q = find(id);
   if (had_head && q->entries.size() > 1 && q->entries.front().id == head) {
     (void)remove_at(world, id, 0);
+  }
+  // **And the new command starts now, inside the call.** Ending the head
+  // (0x005b07d0) starts the next command through 0x005b4f20 there and then,
+  // and the command's script is a thread armed at the wheel's clock
+  // (0x00688240), so it runs in this same pass as soon as the script that
+  // gave the order yields. Leaving the start to the next command pass, as
+  // this did, opened a window the shipped scripts walk into:
+  // `OUTPOST_BEHAVIOR.VS` orders a garrisoned defender out with
+  // `guardadvance`, `Sleep(200)`s and looks again for one still inside --
+  // and with the order not yet started the same defender was still there,
+  // was ordered again (which cancels the order that never ran), and never
+  // left. Every outpost on the map spun in that loop for good once
+  // `ObjList::Add` stopped taking a duplicate, and the war around them went
+  // quiet.
+  // A verb the class binds no compiled script for is left for the pass, which
+  // retires it as it always has.
+  if (scheduler_ != nullptr) {
+    if (CommandQueue* now_q = find(id); now_q != nullptr && !now_q->entries.empty() &&
+                                        now_q->entries.front().id == issued &&
+                                        !now_q->entries.front().started) {
+      Command& fresh = now_q->entries.front();
+      // A miss is left for the pass, which counts and retires it once.
+      const std::uint32_t chunk = chunk_of(world, id, fresh.verb, /*count_miss=*/false);
+      if (chunk != script::kNoChunk) {
+        fresh.started = true;
+        fresh.started_at = world.time();
+        (void)launch_chunk(world, id, fresh, chunk);
+      }
+    }
   }
   return issued;
 }

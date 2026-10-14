@@ -19,7 +19,7 @@
 0x00577c30	verified	Query::AddCommand/void: the query refreshed (vtbl+0x1c), every member, no dead test
 0x00577f30	verified	Query::AddCommand/point: as the void query form, kind 1
 0x00578690	verified	Query::AddCommand/Obj: invalid object argument does nothing; else as the void query form, kind 2
-0x005b0a50	partial	Obj::SetCommand/void: tail cleared first (0x005b1120), lookup (miss: head kept), vtbl+0xbc then 0x005b07d0(0); own-script end not a cancel (0x0069fee0 stop flag). Gap (design): the next command starts at the next command pass, not inside the call (0x005b5160 -> 0x005b4f20)
+0x005b0a50	verified	Obj::SetCommand/void: tail cleared first (0x005b1120), lookup (miss: head kept), vtbl+0xbc then 0x005b07d0(0), which starts the new command inside the call through 0x005b4f20 (fixed: it started at the next command pass, and OUTPOST_BEHAVIOR.VS re-ordered a defender that had not left yet, for good; test set_command_starts_the_command_inside_the_call); own-script end not a cancel (0x0069fee0 stop flag). A verb with no compiled script is still left for the pass to retire
 0x005b0b30	partial	Obj::SetCommand/point: as the void form, kind 1; same deferred-launch gap
 0x005b0c30	partial	Obj::SetCommand/Obj: as the void form, kind 2; same deferred-launch gap
 0x00561c10	partial	ObjList::SetCommand/void: dead members skipped; a lookup miss ends the head too (0x00561d6a); same deferred-launch gap
