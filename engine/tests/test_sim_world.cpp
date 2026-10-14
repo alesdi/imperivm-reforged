@@ -23,6 +23,7 @@
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/formats/ini.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/feeder.hpp"
 #include "imperivm/core/sim/gate.hpp"
@@ -3606,25 +3607,44 @@ TEST(sim_is_in_air_and_is_building_are_one_bit_each) {
   }
 }
 
-/// `Curse` and `IsCursed` are a matched pair on one bit, and `SHAMAN_IDLE.VS`
-/// is the whole corpus for both -- it reads its own write to decide whether to
-/// curse a target again.
-///
-/// See `ObjectFlags::cursed` for what is *not* established: the original's
-/// `Curse` hands off to the spell machinery and no write to bit 27 of
-/// `[obj+0x194]` was found anywhere in `.text`.
-TEST(sim_curse_and_is_cursed_round_trip_one_bit) {
+/// `Curse` and `IsCursed` are a matched pair on bit 27, and a curse **lifts
+/// after `CurseTimeout` ms**: 0x005d4880 arms the object's timer `0x19ec6e2`
+/// when it sets the bit, and the timer's handler (0x005d4970) is the cure.
+/// The three `SHAMAN_*.VS` scripts read the bit to decide whether to curse a
+/// target again, so a curse that never lifted was a target cursed once.
+TEST(sim_a_curse_holds_for_curse_timeout_and_then_lifts) {
+  constexpr std::string_view kIni =
+      "[GamePlay]\n"
+      "CurseTimeout = 15000\n";
+  const auto parsed = imperivm::core::IniDocument::parse(bytes_of(kIni));
+  REQUIRE(parsed.ok());
   PredicateBench b;
+  EnvSystem env;
+  REQUIRE(b.world.add_system(&env));
+  CHECK(env.load_constants(parsed.value()) == 1);
   const ObjectId target = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
   CHECK(!b.predicate("IsCursed", PredicateBench::obj(target)));
 
+  b.world.advance(1000);
   b.call(script::CallKind::member, "Curse", 0, {PredicateBench::obj(target)});
   CHECK(b.predicate("IsCursed", PredicateBench::obj(target)));
   CHECK(b.world.find(target)->state.flags.cursed);
 
-  // Cursing twice is not a toggle -- the shipped guard reads the bit precisely
-  // so that a shaman does not repeat itself, and a toggle would defeat it.
+  // Cursing again while cursed does nothing -- not a toggle, and **not a
+  // re-arm**: 0x005d4880 returns at once when bit 27 is set, so the curse
+  // still lifts fifteen seconds after the first one.
+  b.world.advance(10000);
   b.call(script::CallKind::member, "Curse", 0, {PredicateBench::obj(target)});
+  CHECK(b.predicate("IsCursed", PredicateBench::obj(target)));
+  b.world.advance(4999);
+  CHECK(b.predicate("IsCursed", PredicateBench::obj(target)));
+  b.world.advance(1);
+  CHECK(!b.predicate("IsCursed", PredicateBench::obj(target)));
+
+  // Lifted, it can be laid again, for another fifteen seconds from now.
+  b.call(script::CallKind::member, "Curse", 0, {PredicateBench::obj(target)});
+  CHECK(b.predicate("IsCursed", PredicateBench::obj(target)));
+  b.world.advance(14999);
   CHECK(b.predicate("IsCursed", PredicateBench::obj(target)));
 
   // Another object is untouched: the bit is per-object, not global.

@@ -35,3 +35,10 @@
 0x00533ae0	verified	fixed: the read clamps to 1..3 (0x00533050), not only up to 1; not an Inn or unresolvable answers 2; keyed by object id where the original mints an index into [inn+0x208], which no script reads back
 0x00533640	verified	(map, inn) string form of the setter, the same clamped write (0x005330e0) after the map and inn lookup; no caller, not bound
 0x00533c00	verified	clamped 1..3 write under /Inns/<n>/state for an Inn, silent otherwise beyond the discarded complaint
+0x005c7190	verified	the transport order string [ship+0x210] is non-empty; invalid receiver false
+0x005c6e40	verified	holder [ship+0x1dc] capacity +0x10, seeded once from max_units_to_board; invalid receiver 0
+0x00573c70	verified	named-object lookup, the shared template spawn 0x00571d40 (clone, clear the template bit, refile in group and name tables); unknown or gone name prints and answers 0xffff, a non-template answers the null handle
+0x005d90c0	verified	fixed: 0x005d4880(0) sets bit 27 only when clear (curing a blessing first) and arms the object timer 0x19ec6e2 for CurseTimeout ms, whose handler is the cure 0x005d4800; the curse now lifts after CurseTimeout (ObjectState::curse_until, world version 35); the feedback object is presentation
+0x005d8940	verified	fixed with Curse: bit 27 as it stands now (set and the cure not yet run); invalid receiver false
+0x005d9140	verified	sets bit 1 and spawns the disease feedback into [obj+0x1c4] when none; no timer
+0x005d89a0	verified	bit 1 of [obj+0x194]; invalid receiver false

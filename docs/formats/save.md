@@ -276,6 +276,12 @@ envelope.
                            move the unit themselves and then call it on **both**
                            ends of the pair. What reads the mask is not settled;
                            `FindTeleport` is the likely consumer.
+      i64   curse_until    When `Unit::Curse`'s curse lifts, in game time; 0 if
+                           none was laid. Version 35. The original arms a
+                           per-object timer for `CurseTimeout` ms (0x005d4880)
+                           whose handler clears bit 27; here the bit is read as
+                           live while `time < curse_until`. Hashed: a shaman's
+                           `IsCursed` guard decides whether it curses again.
       u8    animating
       u8    repeat         AnimRepeat
       -- only when native_class != 0xFF --

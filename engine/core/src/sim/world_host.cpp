@@ -4299,14 +4299,15 @@ HostOutcome m_get_exit_point(CallContext& ctx) {
 /// mask, on `squad.Leader` or a unit, so they are `Unit::GetFlags/1`; the
 /// zero-argument form has no caller and is not bound, as `UnitsGuardingSettlement`
 /// is not.
-[[nodiscard]] std::uint32_t pack_unit_flags(const ObjectFlags& flags) noexcept {
+[[nodiscard]] std::uint32_t pack_unit_flags(const ObjectState& state, GameTime now) noexcept {
+  const ObjectFlags& flags = state.flags;
   return (flags.autocast ? 0x00000004u : 0u) |    // bit 2  Hero::SetAutocast
          (flags.no_ai ? 0x00040000u : 0u) |       // bit 18 UNITFLAG_NOAI
          (flags.entering ? 0x00100000u : 0u) |    // bit 20 Unit::SetEntering
          (flags.in_air ? 0x00400000u : 0u) |      // bit 22 Flying::IsInAir
          (flags.noselect ? 0x00800000u : 0u) |    // bit 23 Unit::SetNoselectFlag
          (flags.on_minimap ? 0x04000000u : 0u) |  // bit 26 Unit::SetMinimapFlag
-         (flags.cursed ? 0x08000000u : 0u);       // bit 27 Unit::IsCursed
+         (state.cursed_at(now) ? 0x08000000u : 0u);  // bit 27 Unit::IsCursed
 }
 
 HostOutcome m_get_flags(CallContext& ctx) {
@@ -4319,7 +4320,7 @@ HostOutcome m_get_flags(CallContext& ctx) {
           ? static_cast<std::uint32_t>(static_cast<std::uint64_t>(ctx.arg(1).as_integer()))
           : 0u;
   return HostOutcome::ok_with(
-      Value::boolean((pack_unit_flags(found->state.flags) & mask) != 0));
+      Value::boolean((pack_unit_flags(found->state, world->time()) & mask) != 0));
 }
 
 /// `Unit::SetNoselectFlag(bool)` -- 6 sites, every one of them passing `true`,
@@ -4453,26 +4454,52 @@ HostOutcome fn_abs(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(out));
 }
 
-/// `Unit::Curse()` and `Unit::IsCursed()` -- 3 sites each, one script between
-/// them.
+/// `Unit::Curse()` and `Unit::IsCursed()` -- 3 sites each, all in the three
+/// `SHAMAN_*.VS` scripts, which round-trip them: `if (tgt.IsCursed) break;`
+/// guards the loop that later runs `tgt.Curse();`.
 ///
-/// `SHAMAN_IDLE.VS` is the entire corpus for both, and it round-trips them:
-/// `if (tgt.IsCursed) break;` guards the loop that eleven lines later runs
-/// `tgt.Curse();`. That is the behaviour reproduced here, and
-/// `ObjectFlags::cursed` says at length what is *not* established -- the
-/// original's `Curse` hands off to the spell machinery at 0x005d4880 and no
-/// write to the bit was found anywhere in `.text`.
+/// `Curse` (0x005d90c0) resolves the receiver -- an unresolvable one prints
+/// *"called for an uninitialized or invalid object"* and returns -- and calls
+/// 0x005d4880 with 0, the worker it shares with `Unit::Bless` (0x005d9100,
+/// which passes 1 and works bit 0). For a curse that worker, **only when bit
+/// 27 of `[obj+0x194]` is clear**:
 ///
-/// `IsCursed` on an unresolvable receiver answers **false** after a complaint,
-/// which is 0x005d896f writing a zero byte; the shaman's guard reads that as
-/// "not cursed, go ahead", which is the branch it wants for a target that has
-/// stopped existing.
+///   1. cures a blessing first: when bit 0 is set it runs the cure 0x005d4800,
+///      which clears it and drops the effect object at `[obj+0x1c6]`;
+///   2. sets bit 27 (a masked set, which is why a sweep for an `or` on the word
+///      found no writer);
+///   3. spawns the curse's feedback (class index 0x18) and keeps its handle at
+///      `[obj+0x1c6]` -- presentation, not reproduced;
+///   4. arms the object's timer `0x19ec6e2` for `CurseTimeout` ms (`[GamePlay]`
+///      in `CONST.INI`, 15,000, read once and cached), re-arming it if one is
+///      pending; its handler (0x00512090 -> 0x005d4970) is the cure, which
+///      clears bit 27 again.
+///
+/// So **a curse lasts fifteen seconds**, and a shaman whose target's curse
+/// has lifted curses it again. Here the timer is `ObjectState::curse_until`
+/// and the bit is live while the clock is short of it (`cursed_at`).
+/// `Bless` has no shipped site and is not bound, so step 1 never has a
+/// blessing to cure.
+///
+/// `IsCursed` (0x005d8940) answers bit 27, and **false** after a complaint on
+/// an unresolvable receiver; the shaman's guard reads that as "not cursed, go
+/// ahead", which is the branch it wants for a target that has stopped
+/// existing.
 HostOutcome m_curse(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Curse: no world");
-  for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
-    if (ObjectState* state = world->mutable_state(id); state != nullptr) state->flags.cursed = true;
+  const WorldObject* slot = object_of(*world, ctx.arg(0));
+  if (slot == nullptr) return HostOutcome::ok_void();
+  ObjectState* state = world->mutable_state(slot->id);
+  if (state == nullptr) return HostOutcome::ok_void();
+  const GameTime now = world->time();
+  if (state->cursed_at(now)) return HostOutcome::ok_void();
+  std::int32_t timeout = 0;
+  if (const EnvSystem* env = env_of(*world); env != nullptr) {
+    (void)env->constant("CurseTimeout", timeout);
   }
+  state->flags.cursed = true;
+  state->curse_until = now + timeout;
   return HostOutcome::ok_void();
 }
 
@@ -4480,7 +4507,8 @@ HostOutcome m_is_cursed(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsCursed: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  return HostOutcome::ok_with(Value::boolean(slot != nullptr && slot->state.flags.cursed));
+  return HostOutcome::ok_with(
+      Value::boolean(slot != nullptr && slot->state.cursed_at(world->time())));
 }
 
 /// `Unit::SetLastAttackTime()` -- 40 sites, and it stores nothing here.

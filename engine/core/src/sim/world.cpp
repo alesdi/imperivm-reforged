@@ -1948,6 +1948,8 @@ std::uint64_t World::state_hash() const noexcept {
     // somewhere else. See `ObjectState::teleport_destination`.
     hash_u64(state, slot.state.teleport_destination);
     hash_u64(state, slot.state.traversed_by);
+    // When the unit's curse lifts: `IsCursed` reads it. See `ObjectState`.
+    hash_u64(state, static_cast<std::uint64_t>(slot.state.curse_until));
     // A gate's portcullis motion: where it stands decides whether units pass.
     if (slot.object != nullptr && slot.object->is_a(NativeClass::gate)) {
       hash_u64(state, static_cast<std::uint64_t>(slot.gate.start));
@@ -2065,7 +2067,7 @@ WorldHashes World::hashes() const noexcept {
 namespace {
 
 constexpr std::uint32_t kWorldMagic = 0x444C5749u;  // "IWLD"
-constexpr std::uint32_t kWorldVersion = 34;  // 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
+constexpr std::uint32_t kWorldVersion = 35;  // 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
 
 /// `0xFF` for a slot with no native object -- every internal kind.
 /// `NativeClass` is a `std::uint8_t` enum with 26 values, so the sentinel
@@ -2288,6 +2290,8 @@ void World::serialize(std::vector<std::byte>& out) const {
     bytes::put_u32(out, slot.state.sheltered_by);
     bytes::put_u32(out, slot.state.teleport_destination);
     bytes::put_u32(out, slot.state.traversed_by);
+    // World version 35: when the unit's curse lifts.
+    bytes::put_i64(out, slot.state.curse_until);
 
     // The animation cursor. `AnimTimeline` is not written: it is re-resolved
     // from the entity on load, and a timeline in a file would be a copy of game
@@ -2494,7 +2498,8 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
         !reader.u32(slot.state.ui_target) || !reader.u32(slot.state.mist) ||
         !reader.u32(slot.state.sheltered_by) ||
         !reader.u32(slot.state.teleport_destination) ||
-        !reader.u32(slot.state.traversed_by) || !reader.u8(animating) ||
+        !reader.u32(slot.state.traversed_by) ||
+        !bytes::get_i64(reader, slot.state.curse_until) || !reader.u8(animating) ||
         !reader.u8(repeat) || !bytes::get_string(reader, slot.display_name)) {
       return FormatError::truncated;
     }

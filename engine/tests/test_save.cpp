@@ -197,6 +197,8 @@ void populate(World& world, std::uint32_t seed) {
     slot->state.z_from = 40 + i;
     slot->state.z_to = 900 - i;
     slot->state.damage_taken = 7 * i;
+    // When the curse lifts (version 35): a 64-bit time, so a value past 2^32.
+    slot->state.curse_until = 5'000'000'000LL + 1000 * i;
     // The two effect tags, for the same reason: handles nothing here resolves,
     // which is what a build that dropped either would have to get wrong.
     slot->state.mist = 500 + static_cast<ObjectId>(i);
@@ -478,6 +480,7 @@ TEST(save_world_restores_every_field_it_claims) {
     CHECK(x.state.flags.messenger == y.state.flags.messenger);
     CHECK(x.state.flags.landing == y.state.flags.landing);
     CHECK(x.state.flags.cursed == y.state.flags.cursed);
+    CHECK(x.state.curse_until == y.state.curse_until);
     CHECK(x.state.flags.diseased == y.state.flags.diseased);
     CHECK(x.state.flags.ondie_fired == y.state.flags.ondie_fired);
     CHECK(x.state.flags.commands_disabled == y.state.flags.commands_disabled);

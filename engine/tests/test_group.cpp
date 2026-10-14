@@ -2044,8 +2044,12 @@ TEST(get_flags_tests_a_mask_against_the_second_flag_word) {
   state->flags.on_minimap = true;
   CHECK(only(0x04000000) == 1);
   CHECK(only(0x00800000) == 0);  // and the minimap bit is not that one
+  // Bit 27 is the curse as it stands now: set, and its timer not yet run.
   state->flags.cursed = true;
+  state->curse_until = world.time() + 1;
   CHECK(only(0x08000000) == 1);
+  state->curse_until = world.time();
+  CHECK(only(0x08000000) == 0);
 
   // An unresolvable receiver answers false rather than refusing. It is not a
   // liveness test: `SQUADMONITOR.VS` asks this of a squad leader that may have
