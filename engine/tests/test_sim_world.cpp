@@ -3733,16 +3733,15 @@ TEST(sim_same_holder_as_compares_the_field_and_not_the_holders_existence) {
              .value.truthy_scalar());
 }
 
-/// `SetNoselectFlag(true)` writes a bit **and** drops the object out of every
-/// selection -- but only on the transition.
+/// `SetNoselectFlag(bool)` writes bit 23 of `[obj+0x194]` and **leaves every
+/// selection as it was**.
 ///
-/// `0x005d8750` tests the bit before it writes and calls the deselect path only
-/// when it was clear, so setting a flag that is already set changes nothing.
-/// All six shipped sites pass `true`, on ambient props -- hens, fish, the
-/// settlement's wandering villagers -- always beside `SetMinimapFlag(true)`.
-/// The `false` path is never exercised by shipped content and is transcribed
-/// anyway: it clears the bit and deselects nothing.
-TEST(sim_set_noselect_flag_deselects_only_on_the_transition) {
+/// `0x005d8750`'s one call besides the write, 0x0041eee0, is the AI unregister
+/// the death virtual ends with (test_squad.cpp holds that half), not a
+/// deselection; this engine read it as one for a while. All six shipped sites
+/// pass `true`, on ambient props -- hens, fish, the settlement's wandering
+/// villagers -- always beside `SetMinimapFlag(true)`.
+TEST(sim_set_noselect_flag_writes_the_bit_and_leaves_the_selection_alone) {
   PredicateBench b;
   const ObjectId hen = b.world.spawn(NativeClass::unit, nullptr, b.classes.unit);
   b.world.mutable_state(hen)->flags.is_unit = true;
@@ -3756,15 +3755,8 @@ TEST(sim_set_noselect_flag_deselects_only_on_the_transition) {
 
   CHECK(set(true).status == script::HostStatus::ok);
   CHECK(b.world.state(hen)->flags.noselect);
-  CHECK(!b.selections.player(1).contains(hen));
-
-  // Selected again, then flagged again: the bit is already set, so the deselect
-  // path is not reached and the selection survives.
-  REQUIRE(b.selections.select(1, hen));
-  CHECK(set(true).status == script::HostStatus::ok);
   CHECK(b.selections.player(1).contains(hen));
 
-  // Clearing writes the bit and deselects nothing.
   CHECK(set(false).status == script::HostStatus::ok);
   CHECK(!b.world.state(hen)->flags.noselect);
   CHECK(b.selections.player(1).contains(hen));

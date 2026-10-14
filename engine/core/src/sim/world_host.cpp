@@ -4249,38 +4249,53 @@ HostOutcome m_get_flags(CallContext& ctx) {
       Value::boolean((pack_unit_flags(found->state.flags) & mask) != 0));
 }
 
-/// `Unit::SetNoselectFlag(bool)` -- 6 sites, every one of them passing `true`.
+/// `Unit::SetNoselectFlag(bool)` -- 6 sites, every one of them passing `true`,
+/// and every one an ambient walker: `FISH_IDLE.VS` on its fish and
+/// `SETTLEMENT_BEHAVIOR_AMBIENT.VS` on the hens, villagers and messengers it
+/// places.
 ///
-/// `0x005d8750` writes bit 23 of `[obj+0x194]`, and **the mask is the same
-/// `0x00800000` the Building bit uses on the other word**, which is the sort of
-/// coincidence worth writing down once rather than rediscovering.
+/// `0x005d8750` pops a one-byte bool and the receiver handle, and resolves the
+/// handle through the object table; an unresolvable one prints *"called for an
+/// uninitialized or invalid object"* into the discard sink and returns. No
+/// class test, no `IsDead` probe. Otherwise it writes bit 23 of `[obj+0x194]`
+/// (`0x00800000`, the same mask the Building bit uses on the other word),
+/// set or cleared by the bool.
 ///
-/// It follows the *member* shape of `SetNoAIFlag` (0x005de600) and not the free
-/// one: the only gate is whether the receiver resolves. No class test, no
-/// `IsDead` probe.
+/// **What the bit means is "not the AI's".** Before it writes, and only when
+/// the bool is true and the bit is still clear, it calls 0x0041eee0 -- the
+/// same AI unregister the unit death virtual (0x005db270) and the erase
+/// (0x005db230) end with, and *not* a deselection. 0x0041eee0 does nothing
+/// unless the AI manager exists (`[0x8c8e58]`), the object is not a spawn
+/// template (`[obj+0x2c] & 0x8000000`), the bit is clear, it has an owner
+/// (`[obj+0x70]`) and a squad handle (`[obj+0x174]`); then 0x004448a0 clears
+/// the handle and takes the unit out of its squad (0x00444750), and takes its
+/// worth off the owner AI's running tallies. The bit then keeps it out: the
+/// placement hook (0x0041e820) and `AddToSquad` itself (0x00446a70, its first
+/// test) refuse an object carrying it, so a noselect walker never joins a
+/// squad again. That is `HeroSystem::ai_unregister` here, and the two
+/// refusals are in sim/squad.cpp.
 ///
-/// **One side effect is transcribed and one is not.** On a false-to-true
-/// transition the original calls `0x0041eee0`, which drops the object out of
-/// the current selection -- so flipping the bit on a selected unit deselects
-/// it, and an implementation that only wrote the bit would leave it selected.
-/// That is done here through `SelectionTable`. What is *not* done is the rest
-/// of `0x0041eee0`, which also touches the minimap and the interface; those are
-/// not this layer's.
+/// The selection is not touched: a selected unit stays selected. What keeps a
+/// flagged unit from being *picked* is the select paths' own test of the bit
+/// (sim/orders.cpp).
+///
+/// **One gap, labelled.** The owner AI's tallies 0x004448a0 decrements -- a
+/// count and a summed power per kind at `[[owner+0x8c]+0x24..0x30]`, and a
+/// count per class name -- are not running counters in this engine; nothing
+/// here keeps them for the unregister to correct.
 HostOutcome m_set_noselect_flag(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetNoselectFlag: no world");
   const WorldObject* found = object_of(*world, ctx.arg(0));
-  // An unresolvable receiver writes nothing and says nothing.
   if (found == nullptr) return HostOutcome::ok_void();
-  const bool set = ctx.count() > 1 && ctx.arg(1).is_integer() && ctx.arg(1).as_integer() != 0;
+  const bool set = ctx.count() > 1 && ctx.arg(1).truthy_scalar();
   ObjectState* state = world->mutable_state(found->id);
   if (state == nullptr) return HostOutcome::ok_void();
-  // The transition, not the value: `0x005d8750` tests the bit before it writes,
-  // so setting a flag that is already set deselects nothing.
-  if (set && !state->flags.noselect) {
-    if (HostContext* context = host_context_of(ctx);
-        context != nullptr && context->selections != nullptr) {
-      (void)context->selections->forget(found->id);
+  if (set && !state->flags.noselect && !state->flags.unspawned && state->owner != kNoPlayer) {
+    const AiSystem* ai = ai_system_of(*world);
+    HeroSystem* heroes = hero_system_of(*world);
+    if (ai != nullptr && ai->manager_started() && heroes != nullptr) {
+      heroes->ai_unregister(*world, found->id);
     }
   }
   state->flags.noselect = set;

@@ -431,6 +431,10 @@ void HeroSystem::detach_for_death(World& world, ObjectId id) {
     (void)detach(world, id);
   }
   // The AI unregister: the squad handle cleared and the unit out of its squad.
+  ai_unregister(world, id);
+}
+
+void HeroSystem::ai_unregister(World& world, ObjectId id) {
   // Re-found, because `detach` may already have cleared it.
   if (UnitRecord* record = unit(id); record != nullptr) {
     if (record->squad.valid()) (void)squads_.leave(world, record->squad, id);

@@ -1,0 +1,1 @@
+0x005d8750	partial	fixed: the call before the write is the AI unregister 0x0041eee0 (not a deselect), and AddToSquad/the placement hook refuse the bit; the owner AI running tallies 0x004448a0 decrements are not kept here
