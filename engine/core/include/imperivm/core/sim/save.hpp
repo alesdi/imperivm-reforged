@@ -300,7 +300,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// and each marching member (`MoveState::march_rate`, 0x00419e52). Not hashed
 /// -- path media -- and a version-31 file would load a marching army walking
 /// at its own speeds, the hero out ahead of it, until his next placement.
-inline constexpr std::uint32_t kStateVectorVersion = 32;
+/// 33: a settlement's loyalty is `gbr.exe`'s pair -- the loyalty in tenths
+/// and the change pending for the next cap tick -- where the same two words
+/// held the loyalty in points and what the window had lost, and every
+/// settlement keeps one more timer (`LoyaltyInterval`'s gain tick). Hashed,
+/// and a version-32 file would load a garrisoned town at hundreds of
+/// tenths' worth of points over the 100 the original allows.
+inline constexpr std::uint32_t kStateVectorVersion = 33;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

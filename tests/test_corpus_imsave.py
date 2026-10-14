@@ -119,7 +119,7 @@ def test_a_save_taken_mid_war_loads_back_into_the_same_game(imsave, game_dir):
     Town halls are not razed any more -- a building at no health stands
     broken, as it does in `gbr.exe` -- so the war this save has to carry is
     the one `imsave` counts: central buildings standing broken (tier 3,
-    `IsBroken`) and settlements in other hands than the map's (0 and 3 at
+    `IsBroken`) and settlements in other hands than the map's (0 and 1 at
     this turn). At least one of those, or a fallen node, is asserted, so the
     test says when it has stopped saving a game at war: a change to the AI
     that leaves every town whole and unowned past this turn would otherwise

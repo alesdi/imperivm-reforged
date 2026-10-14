@@ -264,8 +264,8 @@ void put_settlement(std::vector<std::byte>& out, const Settlement& s) {
   bytes::put_i64(out, s.last_capture_query_time);
   bytes::put_i32(out, s.exit_interval);
   bytes::put_i32(out, s.loan);
-  bytes::put_i32(out, s.loyalty);
-  bytes::put_i32(out, s.loyalty_decreased);
+  bytes::put_i32(out, s.loyalty_tenths);
+  bytes::put_i32(out, s.loyalty_pending);
   bytes::put_i32(out, s.efficiency);
   bytes::put_i32(out, s.food_per_pop);
   bytes::put_i32(out, s.capture_health_percent);
@@ -307,7 +307,7 @@ void put_settlement(std::vector<std::byte>& out, const Settlement& s) {
       !bytes::get_i64(reader, s.last_unit_exit_time) ||
       !bytes::get_i64(reader, s.last_capture_query_time) ||
       !bytes::get_i32(reader, s.exit_interval) || !bytes::get_i32(reader, s.loan) ||
-      !bytes::get_i32(reader, s.loyalty) || !bytes::get_i32(reader, s.loyalty_decreased) ||
+      !bytes::get_i32(reader, s.loyalty_tenths) || !bytes::get_i32(reader, s.loyalty_pending) ||
       !bytes::get_i32(reader, s.efficiency) || !bytes::get_i32(reader, s.food_per_pop) ||
       !bytes::get_i32(reader, s.capture_health_percent) ||
       !bytes::get_i32(reader, s.anchor_max_health) || !bytes::get_i32(reader, s.sentries) ||

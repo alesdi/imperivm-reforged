@@ -124,13 +124,20 @@ struct EconomyRules {
 
   // -- loyalty and capture ----------------------------------------------
   /// `LoyaltyCapInterval = 2000`, `LoyaltyChangeCap = 10`,
-  /// `LoyaltyIncreasePerUnit = 10`, `LoyaltySettlementsInitial = 10`.
-  /// The cap's own comment says what it caps: "No more than 'LoyaltyDecreaseCap'
-  /// loyalty percents **decreased** in 'LoyaltyCapInterval'".
+  /// `LoyaltyIncreasePerUnit = 10`, `LoyaltySettlementsInitial = 10`,
+  /// `LoyaltyInterval = 2000`, `LoyaltyRadius = 1000`,
+  /// `LoyaltyRadiusTownhall = 1500`. `gbr.exe` caches the first five at
+  /// 0x005c0da3..0x005c0e85 and the two radii on first use at 0x005c56cf and
+  /// 0x005c5713. The cap bounds the net change of a window both ways (see the
+  /// loyalty note on `EconomySystem`), although the constant's comment speaks
+  /// only of decrease. `LoyaltyIncreasePerUnit` is in tenths of a point.
   std::int32_t loyalty_cap_interval = 2000;
   std::int32_t loyalty_change_cap = 10;
   std::int32_t loyalty_increase_per_unit = 10;
   std::int32_t loyalty_settlements_initial = 10;
+  std::int32_t loyalty_interval = 2000;
+  std::int32_t loyalty_radius = 1000;
+  std::int32_t loyalty_radius_townhall = 1500;
   /// Not a constant: `UNIT_CAPTURE.VS` writes `SetLoyalty(11)` literally, the
   /// instant a settlement changes hands.
   std::int32_t loyalty_after_capture = 11;
@@ -362,25 +369,64 @@ class EconomySystem final : public System {
   /// support this reading, and no script states it.
   [[nodiscard]] bool is_valid_capture_target(const World& world, SettlementId id) const;
 
-  /// `DecreaseLoyalty(n)`. The capturing unit's script calls this once per
-  /// two-second taunt; loyalty stops at zero, and no more than
-  /// `LoyaltyChangeCap` is lost inside one `LoyaltyCapInterval` window.
-  /// Returns what was actually taken off.
-  std::int32_t decrease_loyalty(SettlementId id, std::int32_t amount);
+  /// ## Loyalty, as `gbr.exe` keeps it
+  ///
+  /// A percentage held in tenths (`Settlement::loyalty_tenths`, `[+0x54]`)
+  /// beside a pending change (`loyalty_pending`, `[+0x58]`). Five places write
+  /// the two fields, and nothing else in the settlement code does: the two
+  /// constructors (0x005c3fac, 0x005c4c4f: `10 * LoyaltySettlementsInitial`
+  /// and nothing pending), `SetLoyalty`, `DecreaseLoyalty`, and two timers
+  /// every settlement starts with the rest (0x005c0ea0):
+  ///
+  ///   * **the gain tick**, every `LoyaltyInterval` (0x005c5690): it counts
+  ///     the soldiers -- live heirs of `Military`, not hidden, not unspawned,
+  ///     not a `Sentry` or a `RamUnit` -- of every player the owner is not at
+  ///     war with, standing within `LoyaltyRadius` of the central building, or
+  ///     `LoyaltyRadiusTownhall` when that is a `BaseTownhall` (the sweep
+  ///     0x005eb9d0, whose only other caller is the wagon's); then every live
+  ///     `Military` unit in the settlement's own holder (`[+0x5e]`, the deque
+  ///     `UnitsCount` reads). The pending change grows by
+  ///     `LoyaltyIncreasePerUnit` per soldier counted, and 3.
+  ///   * **the cap tick**, every `LoyaltyCapInterval` (0x005c0f00): the pending
+  ///     change, clamped to `10 * LoyaltyChangeCap` either way, is added to the
+  ///     loyalty, which is then held between 0 and 1,000 tenths, and the
+  ///     pending change is cleared.
+  ///
+  /// So a town is captured by out-taunting the soldiers who stand by it: each
+  /// taunt (`UNIT_CAPTURE.VS`'s `DecreaseLoyalty(1)` every two seconds) is a
+  /// point against, each friendly soldier near the hall or inside it a point
+  /// for, and the net moves at most ten points a window.
+  ///
+  /// Garrisoning a unit writes no loyalty (it counts in the gain tick instead),
+  /// and loyalty never passes 100, so `TOWNHALL_BEHAVIOR_GUARD.VS`'s
+  /// `loyalty < GetConst("LoyaltyUnitsOutTreshold")` -- 151 -- always holds and
+  /// a town hall with enemies in sight always sends its garrison out.
+  ///
+  /// Labelled, not settled: which of the two timers fires first when both
+  /// come due at one instant (here the gain, so it lands in the same window);
+  /// and the sweep's cell walk, which accepts a cell wholly inside the circle
+  /// without testing each object and tests the rest by `d^2 <= r^2` -- taken
+  /// here as `d^2 <= r^2` for every object, which is the same set.
+  ///
+  /// `DecreaseLoyalty(n)`: `10 * n` off the pending change; a negative `n` is
+  /// refused (the original prints and writes nothing). Returns whether it was
+  /// taken.
+  bool decrease_loyalty(SettlementId id, std::int32_t amount);
+  /// `SetLoyalty(v)`: `v * 10`, for `v` from 0 to 100; anything else is
+  /// refused and writes nothing, as 0x005c280d refuses it. The pending change
+  /// is left alone.
   bool set_loyalty(SettlementId id, std::int32_t value);
 
   /// Garrison a unit: `AddUnit` (refused when the holder is full) and
   /// `ForceAddUnit` (admitted past the cap, which is what outposts and tents
-  /// do). Both raise loyalty by `LoyaltyIncreasePerUnit`, and leaving lowers it
-  /// again — INFERRED, but it is what makes `LoyaltyUnitsOutTreshold = 151`
-  /// mean something: a settlement holding fifteen units sits above it and keeps
-  /// them in, and one holding fewer sends them out to fight.
+  /// do). Neither writes loyalty -- see the loyalty note above.
   bool garrison_add(SettlementId id, ObjectId unit);
   bool garrison_force_add(SettlementId id, ObjectId unit);
   bool garrison_remove(SettlementId id, ObjectId unit);
 
   /// `SetPlayer` from `UNIT_CAPTURE.VS`: refused unless loyalty has reached
-  /// zero, then the settlement changes hands and loyalty is set to 11.
+  /// zero, then the settlement changes hands and loyalty is set to 11 (110
+  /// tenths); the pending change is left, as `SetLoyalty` leaves it.
   bool capture(SettlementId id, PlayerId new_owner);
   /// An unconditional transfer — an allied unit walking in, or a scenario
   /// script. `UNIT_CAPTURE.VS` takes this path for a non-enemy owner.
@@ -472,6 +518,7 @@ class EconomySystem final : public System {
   void burn(Settlement& s);
   void repair(World& world, Settlement& s);
   void tick_loyalty(Settlement& s);
+  void tick_loyalty_gain(World& world, Settlement& s);
   void tick_outpost_trade(World& world, Settlement& s);
   void tick_loan(Settlement& s);
 

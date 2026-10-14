@@ -153,7 +153,8 @@ enum class SettlementTimer : std::uint8_t {
   decrease,        ///< `PopulationDecreaseInterval`
   burn,            ///< `BurnTime`
   repair,          ///< `RepairInterval`
-  loyalty,         ///< `LoyaltyCapInterval`: rolls the decrease-cap window over
+  loyalty_gain,    ///< `LoyaltyInterval`: friendly soldiers near and inside add loyalty
+  loyalty,         ///< `LoyaltyCapInterval`: applies the pending change, capped
   outpost_trade,   ///< `OutpostRefresh`
   loan,            ///< `TimeProductionForLoan`
   count,
@@ -326,15 +327,20 @@ struct Settlement {
   std::int32_t loan = 0;
 
   // -- not printed, but read by the scripts ------------------------------
-  /// `LoyaltySettlementsInitial` at creation, plus `LoyaltyIncreasePerUnit` for
-  /// every unit garrisoned; `DecreaseLoyalty(1)` per capture beat; reset to 11
-  /// the moment a settlement changes hands.
-  std::int32_t loyalty = 0;
-  /// How much loyalty has already been lost inside the current
-  /// `LoyaltyCapInterval` window. `LoyaltyChangeCap` is a cap on *decrease* —
-  /// "No more than … loyalty percents decreased in LoyaltyCapInterval" — so it
-  /// is tracked per window and reset when the window rolls over.
-  std::int32_t loyalty_decreased = 0;
+  /// Loyalty in **tenths of a point**, `[settlement+0x54]`: `Settlement::loyalty`
+  /// (0x005c2c10) answers it divided by ten, `SetLoyalty(v)` (0x005c27d0)
+  /// stores `v * 10` for a `v` from 0 to 100, and the cap tick (0x005c0f00)
+  /// holds it between 0 and 1,000. So a settlement's loyalty is a percentage,
+  /// `LoyaltySettlementsInitial` (10) at creation. See `EconomySystem`'s
+  /// loyalty note for the two ticks that move it.
+  std::int32_t loyalty_tenths = 0;
+  /// The change waiting for the next cap tick, in tenths, `[settlement+0x58]`:
+  /// `DecreaseLoyalty(n)` (0x005c2830) subtracts `10 * n`, the gain tick
+  /// (0x005c5690) adds `10` per friendly soldier and `3`, and the cap tick
+  /// applies at most `10 * LoyaltyChangeCap` of it either way and clears it.
+  std::int32_t loyalty_pending = 0;
+  /// The loyalty the scripts read: the tenths, truncated.
+  [[nodiscard]] std::int32_t loyalty_points() const noexcept { return loyalty_tenths / 10; }
   std::int32_t efficiency = 0;
   std::int32_t food_per_pop = 0;
   std::int32_t capture_health_percent = 100;

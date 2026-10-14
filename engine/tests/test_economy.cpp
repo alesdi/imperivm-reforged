@@ -557,53 +557,82 @@ TEST(economy_hash_covers_the_unit_a_wagon_follows) {
 // capture and loyalty
 // --------------------------------------------------------------------------
 
-/// `LoyaltySettlementsInitial = 10` at creation; `DecreaseLoyalty(1)` per
-/// capture beat; `SetPlayer` then `SetLoyalty(11)` at zero, which is
-/// `UNIT_CAPTURE.VS` line for line.
+/// `LoyaltySettlementsInitial = 10` at creation, kept in tenths; each
+/// `DecreaseLoyalty(1)` is ten tenths off the pending change, which the cap
+/// tick applies; `SetPlayer` then `SetLoyalty(11)` at zero, which is
+/// `UNIT_CAPTURE.VS` line for line. No class graph here, so the gain tick
+/// counts no soldier and adds its bare 3 tenths a window.
 TEST(economy_capture_needs_loyalty_at_zero) {
   World world;
   EconomySystem economy;
   const SettlementId id = economy.create(town_hall());
   economy.start(world);
-  CHECK(economy.find(id)->loyalty == 10);
+  CHECK(economy.find(id)->loyalty_tenths == 100);
+  CHECK(economy.find(id)->loyalty_points() == 10);
 
   CHECK(!economy.capture(id, 3));  // loyalty is not zero yet
 
-  for (int i = 0; i < 10; ++i) {
-    economy.decrease_loyalty(id, 1);
-    // The cap window has to roll over, or the eleventh point cannot be taken.
-    run(economy, world, 400, 2000);
-  }
-  CHECK(economy.find(id)->loyalty == 0);
+  // Ten taunts in one window: -100 tenths, +3 from the gain tick, applied at
+  // the window's end. 3 tenths is 0 points.
+  for (int i = 0; i < 10; ++i) CHECK(economy.decrease_loyalty(id, 1));
+  CHECK(economy.find(id)->loyalty_tenths == 100);  // nothing moves before the tick
+  run(economy, world, 400, 2000);
+  CHECK(economy.find(id)->loyalty_tenths == 3);
+  CHECK(economy.find(id)->loyalty_pending == 0);
+  CHECK(economy.find(id)->loyalty_points() == 0);
 
   CHECK(economy.capture(id, 3));
   CHECK(economy.find(id)->owner == 3);
-  CHECK(economy.find(id)->loyalty == 11);
+  CHECK(economy.find(id)->loyalty_points() == 11);
 }
 
-/// `LoyaltyChangeCap = 10` per `LoyaltyCapInterval = 2000` -- the constant's own
-/// comment says "No more than … decreased in LoyaltyCapInterval".
-TEST(economy_loyalty_decrease_is_capped_per_window) {
+/// `LoyaltyChangeCap = 10` points per `LoyaltyCapInterval = 2000`, applied to
+/// the net change of the window (0x005c0f00); loyalty lives between 0 and 100
+/// points; `SetLoyalty` refuses anything outside them and `DecreaseLoyalty` a
+/// negative amount, writing nothing (0x005c280d, 0x005c286b).
+TEST(economy_loyalty_change_is_capped_per_window) {
   World world;
   EconomySystem economy;
   SettlementInit init = town_hall();
   const SettlementId id = economy.create(init);
-  economy.set_loyalty(id, 100);
+  CHECK(economy.set_loyalty(id, 100));
   economy.start(world);
+  CHECK(economy.find(id)->loyalty_tenths == 1000);
 
-  CHECK(economy.decrease_loyalty(id, 40) == 10);
-  CHECK(economy.decrease_loyalty(id, 40) == 0);
-  CHECK(economy.find(id)->loyalty == 90);
+  CHECK(!economy.set_loyalty(id, 101));
+  CHECK(!economy.set_loyalty(id, -1));
+  CHECK(!economy.decrease_loyalty(id, -1));
+  CHECK(economy.find(id)->loyalty_tenths == 1000);
+  CHECK(economy.find(id)->loyalty_pending == 0);
 
-  run(economy, world, 400, 2000);  // window rolls over
-  CHECK(economy.decrease_loyalty(id, 40) == 10);
-  CHECK(economy.find(id)->loyalty == 80);
+  CHECK(economy.decrease_loyalty(id, 40));
+  CHECK(economy.decrease_loyalty(id, 40));
+  CHECK(economy.find(id)->loyalty_pending == -800);
+  run(economy, world, 400, 2000);  // -797 pending, capped at -100
+  CHECK(economy.find(id)->loyalty_points() == 90);
+  CHECK(economy.find(id)->loyalty_pending == 0);
+
+  // A window with nobody taunting gains its 3 tenths, and loyalty stops at
+  // 100 points however long it gains.
+  run(economy, world, 400, 2000);
+  CHECK(economy.find(id)->loyalty_tenths == 903);
+  run(economy, world, 400, 2000 * 40);
+  CHECK(economy.find(id)->loyalty_tenths == 1000);
+
+  // And at 0 however hard it is taunted.
+  CHECK(economy.set_loyalty(id, 5));
+  CHECK(economy.decrease_loyalty(id, 10));
+  run(economy, world, 400, 2000);
+  CHECK(economy.find(id)->loyalty_tenths == 0);
 }
 
-/// `LoyaltyIncreasePerUnit = 10` per garrisoned unit, which is what makes
-/// `LoyaltyUnitsOutTreshold = 151` a number rather than a mystery: a settlement
-/// holding fifteen units sits above it.
-TEST(economy_garrison_raises_loyalty) {
+/// Garrisoning writes no loyalty: the original's five loyalty writers are the
+/// two constructors, `SetLoyalty`, `DecreaseLoyalty` and the two ticks, and
+/// the holder entry is none of them. So no town passes 100 points, and
+/// `TOWNHALL_BEHAVIOR_GUARD.VS`'s `loyalty < LoyaltyUnitsOutTreshold` (151)
+/// always holds: a town with enemies in sight sends its garrison out however
+/// many it holds.
+TEST(economy_garrison_writes_no_loyalty) {
   World world;
   EconomySystem economy;
   const SettlementId id = economy.create(town_hall());
@@ -611,11 +640,11 @@ TEST(economy_garrison_raises_loyalty) {
 
   for (ObjectId u = 1; u <= 15; ++u) CHECK(economy.garrison_add(id, u));
   CHECK(economy.find(id)->holder.count() == 15);
-  CHECK(economy.find(id)->loyalty == 10 + 15 * 10);
-  CHECK(economy.find(id)->loyalty > economy.rules().loyalty_units_out_threshold);
-
+  CHECK(economy.find(id)->loyalty_tenths == 100);
   CHECK(economy.garrison_remove(id, 7));
-  CHECK(economy.find(id)->loyalty == 150);
+  CHECK(economy.find(id)->loyalty_tenths == 100);
+  CHECK(economy.find(id)->loyalty_pending == 0);
+  CHECK(economy.find(id)->loyalty_points() < economy.rules().loyalty_units_out_threshold);
 }
 
 /// `max_units` on the holder: `AddUnit` refuses past it, `ForceAddUnit` does
@@ -1689,7 +1718,7 @@ struct CaptureBench {
     s->buildings.push_back(SettlementBuilding{anchor, 5000});
     s->buildings.push_back(SettlementBuilding{barracks, 800});
     s->buildings.push_back(SettlementBuilding{tower, 400});
-    s->loyalty = 40;
+    s->loyalty_tenths = 400;
     (void)economy.garrison_force_add(town, garrison_a);
     (void)economy.garrison_force_add(town, garrison_b);
     // The back-link the object model resolves a settlement through, and the
@@ -1747,7 +1776,7 @@ TEST(economy_capture_leaves_loyalty_stock_and_population_alone) {
   CHECK(b.set_player(b.settlement_handle(), 2).status == script::HostStatus::ok);
 
   const Settlement* after = b.economy.find(b.town);
-  CHECK(after->loyalty == before.loyalty);
+  CHECK(after->loyalty_tenths == before.loyalty_tenths);
   CHECK(after->gold() == before.gold());
   CHECK(after->food() == before.food());
   CHECK(after->population == before.population);
@@ -6024,4 +6053,87 @@ TEST(create_ship_spawns_the_class_into_the_settlements_holder) {
                 {script::Value::object(kTypeSettlement, 999999), script::Value::string("Trireme")});
   CHECK(bad.status == script::HostStatus::ok);
   CHECK(bad.value.is_object() && bad.value.as_object().type == script::kNoType);
+}
+
+/// **A temple is found by the race its class names.** The shipped classes
+/// spell a race out -- `<properties race="Iberia"/>` on `ITownhall` and
+/// `ITemple` -- and `BestTemple` (0x00435750) indexes the per-race temple
+/// table with the central building's decoded race, `TSGetAllTemples`
+/// (0x004376f0) with each candidate's own. The lookup once read a single
+/// digit, which no shipped class carries, so neither ever found a temple and
+/// every tactic script waiting on `TSTempleRecruit` waited forever.
+TEST(best_temple_and_ts_get_all_temples_find_a_temple_by_its_named_race) {
+  ClassGraph graph;
+  const std::string docs[] = {
+      R"(<class id="Building" cpp_class="CVXBuilding"><properties maxhealth="3000"/></class>)",
+      R"(<class id="BaseBarracks" parent="Building" cpp_class="CVXBarrack"/>)",
+      R"(<class id="ITownhall" parent="Building" cpp_class="CVXBuilding">
+           <properties race="Iberia"/></class>)",
+      R"(<class id="ITemple" parent="BaseBarracks" cpp_class="CVXBarrack">
+           <properties race="Iberia"/></class>)",
+      // Another race's temple standing in the same town, as on a captured one.
+      R"(<class id="RTemple" parent="BaseBarracks" cpp_class="CVXBarrack">
+           <properties race="RepublicanRome"/></class>)",
+  };
+  const char* names[] = {"building.sc.xml", "basebarracks.sc.xml", "itownhall.sc.xml",
+                         "itemple.sc.xml", "rtemple.sc.xml"};
+  for (int i = 0; i < 5; ++i) graph.add(bytes_of(docs[i]), names[i]);
+  graph.link();
+
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  register_world_host(registry);
+  register_command_host(registry);
+  register_env_host(registry);
+  register_economy_hosts(registry);
+  World world;
+  world.set_class_graph(&graph);
+  CommandSystem commands;
+  EnvSystem env;
+  EconomySystem economy;
+  REQUIRE(world.add_system(&commands));
+  REQUIRE(world.add_system(&env));
+  REQUIRE(world.add_system(&economy));
+  economy.start(world);
+  env.start(world);
+
+  const ObjectId hall = world.spawn(NativeClass::building, nullptr, graph.find("ITownhall"));
+  world.set_position(hall, Point{1000, 1000});
+  SettlementInit init;
+  init.kind = SettlementKind::stronghold;
+  init.anchor = hall;
+  init.owner = 2;
+  init.max_units = 10000;
+  economy.create(world, init);
+  const Settlement* s = economy.settlements().for_object(hall);
+  REQUIRE(s != nullptr);
+  const SettlementId town = s->id;
+  const script::Value set = script::Value::object(kTypeSettlement, s->object);
+  const auto add = [&](ClassIndex which) {
+    const ObjectId id = world.spawn(NativeClass::barrack, nullptr, which);
+    world.set_position(id, Point{1100, 1000});
+    world.set_health(id, 3000);
+    CHECK(economy.add_building(world, town, id, 3000));
+    return id;
+  };
+  const ObjectId roman = add(graph.find("RTemple"));
+  const ObjectId iberian = add(graph.find("ITemple"));
+
+  const script::HostOutcome best =
+      call_host(registry, world, script::CallKind::member, "BestTemple", 0, {set});
+  CHECK(best.status == script::HostStatus::ok);
+  REQUIRE(best.value.is_object());
+  // The town's own race's temple, not the first temple in the roll.
+  CHECK(best.value.as_object().id == iberian);
+
+  const script::HostOutcome all =
+      call_host(registry, world, script::CallKind::member, "TSGetAllTemples", 0, {set});
+  CHECK(all.status == script::HostStatus::ok);
+  REQUIRE(is_objlist(all.value));
+  const std::span<const ObjectId> items = objlist_pool_of(world).items(objlist_of(all.value));
+  std::vector<ObjectId> ids(items.begin(), items.end());
+  // Both: each candidate is tested against the temple of its own race.
+  CHECK(ids.size() == 2);
+  CHECK(std::find(ids.begin(), ids.end(), roman) != ids.end());
+  CHECK(std::find(ids.begin(), ids.end(), iberian) != ids.end());
 }

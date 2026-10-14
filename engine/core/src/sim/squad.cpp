@@ -3810,12 +3810,18 @@ constexpr std::string_view kTrainingVerbs[] = {"train", "waitarmytrain", "unittr
 }
 
 /// 0x00425d60, in the original's order.
+///
+/// `maxtrainlevel` is read from the owner's ledger by its **script number**,
+/// the owner's index plus one (the `inc` at 0x00425d85), which is where
+/// `ONFINISH_RESEARCH.VS`'s `EnvWriteString(.player, …)` puts it. The raw
+/// index read the cap of the player one slot below.
 [[nodiscard]] bool can_train(TrainScan& scan, const WorldObject& slot) {
   if (!scan.cap_known) {
     const EnvSystem* env = env_of(scan.world);
     const std::int32_t declared =
         env == nullptr ? 0
-                       : env->env().read_int(EnvScope::for_player(slot.state.owner), "maxtrainlevel");
+                       : env->env().read_int(EnvScope::for_player(player_to_script(slot.state.owner)),
+                                             "maxtrainlevel");
     scan.cap = declared - 1;
     scan.cap_known = true;
   }

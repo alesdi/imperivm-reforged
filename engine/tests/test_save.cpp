@@ -1129,11 +1129,10 @@ TEST(save_economy_section_round_trips) {
   init.warehouse_object = 22;
   init.kind = SettlementKind::village;
   const SettlementId village = economy.create(init);
-  // Garrisoning first: `garrison_force_add` raises loyalty by
-  // `loyalty_increase_per_unit`, so setting it afterwards is what pins the
-  // value this test asserts on.
+  // Loyalty and the change pending for the next cap tick, both saved.
   (void)economy.garrison_force_add(town, 99);
   (void)economy.set_loyalty(town, 77);
+  (void)economy.decrease_loyalty(town, 2);
   (void)economy.set_supplied(village, town);
   const std::uint32_t mule = economy.create_mule(village, town, Resource::food, 60);
   CHECK(mule != 0);
@@ -1148,7 +1147,8 @@ TEST(save_economy_section_round_trips) {
 
   const Settlement* restored = fresh.find(town);
   REQUIRE(restored != nullptr);
-  CHECK(restored->loyalty == 77);
+  CHECK(restored->loyalty_points() == 77);
+  CHECK(restored->loyalty_pending == -20);
   CHECK(restored->warehouse.gold == 400);
   CHECK(restored->holder.units.size() == 1);
   REQUIRE(fresh.wagons().size() == 2);

@@ -6,6 +6,7 @@
 #include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/player_host.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 
@@ -658,6 +659,27 @@ std::string_view EnvSystem::ai_var_name(std::int32_t id) const noexcept {
 
 // -- research --------------------------------------------------------------
 
+namespace {
+
+/// The ledger of a settlement's owner, **by the owner's script number**.
+///
+/// A player's ledger is the one `RESEARCH.VS` and `ONFINISH_RESEARCH.VS`
+/// write with `EnvWriteString(.player, name, …)`, and `.player` is the owner's
+/// index plus one (0x005ab290); `VERIFY_RESEARCH.VS` reads it back the same
+/// way. gbr.exe's own readers agree: `IsResearched(Settlement, str)` builds
+/// the path from the settlement's player id plus one (the `inc` at
+/// 0x00433a15), and the training cap 0x00425d60 does the same for
+/// `maxtrainlevel` (0x00425d85). This read the raw owner for a long time, so
+/// every settlement-side question about a `NamePlr` research -- `IsResearched`,
+/// `CanResearch`'s requirements, `TSResearch` -- answered from the ledger of
+/// the player one slot below, and a computer player whose tactic waits on
+/// "Rome Training 1" or "Fights" waited forever, its army held out of the AI.
+[[nodiscard]] EnvScope owner_scope(const Settlement& s) noexcept {
+  return EnvScope::for_player(player_to_script(s.owner));
+}
+
+}  // namespace
+
 EnvSystem::ResearchSlot EnvSystem::slot_for(const Settlement& s, std::string_view name) const {
   ResearchSlot slot;
   const ResearchCommand* command = research_.find(name);
@@ -670,7 +692,7 @@ EnvSystem::ResearchSlot EnvSystem::slot_for(const Settlement& s, std::string_vie
   slot.known = true;
   slot.key = command->records;
   slot.scope = command->scope == ResearchScope::player
-                   ? EnvScope::for_player(static_cast<std::int32_t>(s.owner))
+                   ? owner_scope(s)
                    : EnvScope::for_settlement(s.id);
   return slot;
 }
@@ -693,7 +715,7 @@ bool EnvSystem::is_researched(const Settlement& s, std::string_view name) const 
   // `VERIFY_ISRESEARCHED.VS`'s own fallback, and it is what makes
   // `ESH_NEEDTECH.VS` work with a single call for both kinds of research.
   if (ledger_is(env_, EnvScope::for_settlement(s.id), name, kResearched)) return true;
-  return ledger_is(env_, EnvScope::for_player(static_cast<std::int32_t>(s.owner)), name,
+  return ledger_is(env_, owner_scope(s), name,
                    kResearched);
 }
 
@@ -701,7 +723,7 @@ bool EnvSystem::is_researching(const Settlement& s, std::string_view name) const
   const ResearchSlot slot = slot_for(s, name);
   if (slot.known) return ledger_is(env_, slot.scope, slot.key, kResearching);
   if (ledger_is(env_, EnvScope::for_settlement(s.id), name, kResearching)) return true;
-  return ledger_is(env_, EnvScope::for_player(static_cast<std::int32_t>(s.owner)), name,
+  return ledger_is(env_, owner_scope(s), name,
                    kResearching);
 }
 
@@ -730,7 +752,7 @@ bool EnvSystem::can_research(const Settlement& s, std::string_view name) const {
     return research_.size() == 0;
   }
   const EnvScope settlement_scope = EnvScope::for_settlement(s.id);
-  const EnvScope player_scope = EnvScope::for_player(static_cast<std::int32_t>(s.owner));
+  const EnvScope player_scope = owner_scope(s);
   for (const ResearchRequirement& requirement : command->requires_) {
     const EnvScope& scope =
         requirement.scope == ResearchScope::player ? player_scope : settlement_scope;
@@ -752,7 +774,7 @@ bool EnvSystem::finish_research(const Settlement& s, std::string_view name) {
   const ResearchCommand* command = research_.find(name);
   if (command == nullptr) return true;
   const EnvScope settlement_scope = EnvScope::for_settlement(s.id);
-  const EnvScope player_scope = EnvScope::for_player(static_cast<std::int32_t>(s.owner));
+  const EnvScope player_scope = owner_scope(s);
   for (const ResearchAssignment& assignment : command->assigns) {
     const EnvScope& scope =
         assignment.scope == ResearchScope::player ? player_scope : settlement_scope;
