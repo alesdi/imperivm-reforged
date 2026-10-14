@@ -2372,7 +2372,8 @@ TEST(hero_can_see_is_a_stealth_test_and_the_argument_is_the_one_looked_at) {
   CHECK(sees(watcher, far));
 
   CHECK(!sees(watcher, 9999));
-  CHECK(!sees(9999, far));
+  // A visible target is seen without the receiver being looked at.
+  CHECK(sees(9999, far));
 }
 
 /// `FindUnitToRevitalize` minimises **reach**, floors every real candidate at

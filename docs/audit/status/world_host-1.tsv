@@ -1,2 +1,29 @@
 # world_host-1: the first 115 rows of world_host in host-ledger.md (Obj::player .. Unit::SetMinimapFlag)
 0x004c63a0	verified	Range(0, n-1) on the game LCG (0x0063ff00): no draw when low == high, swapped arm draws, high dword of (span+1)*state, no scramble; sim/rng.hpp
+0x005ab290	verified	handle check, owner record index [[obj+0x70]+8] + 1; miss -1; NamedObj conversion now hides a dead named unit
+0x005c2340	verified	settlement owner record at +0x90, index + 1; miss -1
+0x004210c0	verified	handle low nibble + 1, no lookup
+0x005530a0	verified	purges dead (vtbl+0x50) then front object; empty -> invalid; also the NamedObj->Obj conversion (object_of)
+0x005add20	verified	raw [obj+0x24/0x28]; miss (0,0), not the held marker
+0x00422cf0	verified	front member's posRH, (-1,-1) for none; a handle naming no squad faults in the original, (-1,-1) here
+0x00577af0	partial	handle check then vtbl+0x2c "registered": named map (name exists), group map, sight queries 1; other query subclasses not enumerated, deregistration not read
+0x005ab1d0	verified	handle check only (table slot + offset non-null), no print; a corpse is valid
+0x00421a70	partial	index within the squad-list pool (0x0043ed70); engine asks for a live entry, which differs only for a released one (0 sites)
+0x00579320	partial	miss -> true (was a trap); refresh+count==0 evaluated on the spot -- the original's 1-2 s query cache is the query-model design gap
+0x00594eb0	partial	miss -> true; stop flag [+0x15c] never set here (no sacrifice machinery), so a sacrifice answers false
+0x005ad8a0	verified	vtbl+0xc8 (unit: unit_pos_rh, else raw); miss (0,0) silently
+0x00553000	verified	invalid -> dead; else purge then deque empty; a named building at no health is not dead
+0x005aae50	verified	invalid or vtbl+0x50 (health==0, never for the 7 non-catapult building vtables): object_is_dead
+0x005aae00	verified	valid and not vtbl+0x50 dead: object_is_dead
+0x00553230	verified	miss mints an empty named query under the name (0x005722a0): valid, dead, .obj invalid, filled by a later SetName
+0x005ab970	verified	not bit 21 of [obj+0x2c]; miss false
+0x005ab920	verified	bit 21 via vtbl+0x44/0x48; effect and refresh are presentation; miss is a no-op (was a trap)
+0x0055ea60	partial	every hero member's army, then every live member (0x005a7600); list arm tested, hero-army arm implemented but not tested; 0 sites
+0x005ab9d0	partial	argument first; visible -> true without the receiver; hidden -> target owner grants observer share_view (record+0x18, 0x005652f0); own bit inferred (initialiser not found)
+0x005ab250	partial	handle check then vtbl+0x94 destroy; miss no-op; holder-eviction gap already labelled at perform_erase
+0x00578c40	partial	walks the query's list skipping bit 23 (buildings), reads before refresh; query cache is the query-model gap
+0x006981d0	inferred	StrMap key erase; no StrMap type in the engine and 0 shipped sites -- the 47 are Obj/Query::Erase counted by folded name
+0x005aa520	verified	class +0x2dc from `radius`, inherited; miss 0
+0x005abda0	verified	class id string (+4 of [obj+0x3c]); miss ""
+0x005ab8d0	verified	bit 26 set/clear via vtbl+0x44/0x48, no life test; miss no-op
+0x00579c70	verified	every member that resolves and is not dead (vtbl+0x50); empty query does nothing

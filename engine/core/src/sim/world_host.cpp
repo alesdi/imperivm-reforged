@@ -29,6 +29,7 @@
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/player_host.hpp"
 #include "imperivm/core/sim/squad.hpp"
+#include "imperivm/core/sim/objlist.hpp"
 
 #include <algorithm>
 #include <vector>
@@ -51,11 +52,24 @@ constexpr script::CallKind kMember = script::CallKind::member;
 
 /// The object a value refers to, or null.
 ///
+/// **The handle check every `Obj`-family body opens with.** A handle is eight
+/// bytes: a table slot in the low 16 bits of the first word and an offset in
+/// the second. The object is the pointer in the table at 0x00a2a610 for that
+/// slot plus the offset, and the handle is invalid when the slot is empty or
+/// the sum is null -- `Obj::IsValid` (0x005ab1d0) is exactly that test and
+/// nothing else, so a corpse still lying in the world is valid. A body whose
+/// check fails formats *"... called for an uninitialized or invalid object"*
+/// into 0x00686eb0, a bare `ret` in retail, and pushes a default: it never
+/// traps. Each member's doc says which default.
+///
 /// `kTypeNamedObj` resolves through the name table rather than being rejected,
 /// and that is not a widening: `gbr.exe` registers a **type conversion**
-/// `NamedObj -> Obj` at `0x0055343e` -- `0x00699800(from=0x22, to=0x14,
-/// fn=0x005330a0, cost=10)`, through the same function that implements
-/// `NamedObj::obj`. The registrar's three other uses are the language's
+/// `NamedObj -> Obj` -- `0x00699800(from=0x22, to=0x14, fn=0x005530a0,
+/// cost=10)`, pushed at 0x0055343e..0x00553447 -- whose function is the body
+/// of `NamedObj::obj` itself. So the conversion answers what `.obj` answers:
+/// **nothing for a named object that has died** (see `m_named_obj_obj`), and a
+/// member reached through it -- `NO_X.pos`, `.player`, `.Erase` -- sees an
+/// invalid receiver. The registrar's three other uses are the language's
 /// primitive conversions (`bool -> int` cost 15, `int -> str` cost 50), so this
 /// is the ordinary mechanism and not a special case. It is what lets
 /// `Maps/10/Sequences/seq0.vs` write `NO_Hero1.SetCommand("stand_position")`
@@ -72,7 +86,9 @@ void feed_from_now(World& world, ObjectId id);
   if (ref.type == kTypeNamedObj) {
     const auto index = static_cast<std::int32_t>(ref.id);
     if (!world.named_objects().valid(index)) return nullptr;
-    return world.find(world.named_objects().object(index));
+    const WorldObject* bound = world.find(world.named_objects().object(index));
+    if (bound == nullptr || object_is_dead(*bound)) return nullptr;
+    return bound;
   }
   if (ref.type != kTypeObj && ref.type != kTypeQuery && ref.type != kTypeSettlement) return nullptr;
   return world.find(ref.id);
@@ -1344,63 +1360,107 @@ HostOutcome fn_count(CallContext& ctx) {
   return world.named_objects().valid(index) ? index : NamedObjectTable::kNoName;
 }
 
-/// `GetNamedObj("...")` -- 66 of the 67 literal call sites in the shipped map
-/// scripts, and the other one is a group name the editor should have caught.
+/// `GetNamedObj("...")` (0x00553230) -- 66 of the 67 literal call sites in the
+/// shipped map scripts, and the other one is a group name the editor should
+/// have caught.
 ///
-/// An unknown name answers with an invalid handle rather than trapping.
-/// `gbr.exe` prints `Could not find named object named '%s'` and carries on,
-/// and `.IsValid` is what the scripts then test; trapping would stop a script
-/// that the original merely warns at.
+/// Looks the name up in the named map at `[0x009bdacc]` (0x004c93c0) and, **on
+/// a miss, mints one**: an empty `CVXNamedObjQuery` (0x005722a0) registered
+/// (0x00571650) and inserted under the name (0x004cf1c0). It then takes a
+/// reference and answers the handle; the invalid handle is pushed only if the
+/// allocation failed. So an unknown name is a *valid, empty* named object --
+/// `IsValid` true, `IsDead` true, `.obj` invalid -- and a later `SetName` of
+/// that name (here `NamedObjectTable::rebind`) fills the same entry, so a
+/// handle taken before the object existed resolves once it does. This
+/// answered the invalid handle for a miss until the host audit read the body.
 HostOutcome fn_get_named_obj(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetNamedObj: no world");
   if (!ctx.arg(0).is_string()) return HostOutcome::failed("GetNamedObj: expected a name");
   return HostOutcome::ok_with(
-      named_object_value(world->named_objects().find(ctx.arg(0).as_string())));
+      named_object_value(world->named_objects().intern(ctx.arg(0).as_string())));
 }
 
-/// `NamedObj::obj`.
+/// The object a named entry currently answers with: its bound object if that
+/// is still in the world and not dead, else nothing.
 ///
-/// The bound object *as bound*, dead or alive: this is the read that has to
-/// keep working after the object dies, or `IsDead` could never be true. An
-/// unbound entry gives an invalid handle, which is what every other failed
-/// lookup in this file answers with.
+/// `CVXNamedObjQuery`'s refresh (vtbl+0x1c, 0x00572c10 through 0x005719d0)
+/// purges from its deque, in place and for good, every slot whose table entry
+/// is gone or whose `vtbl + 0x50` says dead (`object_is_dead`); the list
+/// (vtbl+0x20, 0x005716f0) and the emptiness test (vtbl+0x28, 0x00571710)
+/// read what is left. The purge cannot be observed separately -- death is
+/// final -- so it is modelled by asking at each read.
+[[nodiscard]] const WorldObject* named_live_object(World& world, std::int32_t index) {
+  const WorldObject* bound = world.find(world.named_objects().object(index));
+  if (bound == nullptr || object_is_dead(*bound)) return nullptr;
+  return bound;
+}
+
+/// `NamedObj::obj` (0x005530a0), which is also the registered `NamedObj -> Obj`
+/// conversion (see `object_of`).
+///
+/// An invalid handle prints `named::obj` and answers the invalid handle.
+/// Otherwise it purges the dead from the entry's deque (`named_live_object`);
+/// an entry left empty prints *"Named unit %s is dead or not initialized!"*
+/// and answers the invalid handle, and a live one answers its front object as
+/// an `Obj` handle. **A named unit that has died is not reachable through its
+/// name**, corpse or not; a named building at no health still is, because a
+/// building does not die (`object_is_dead`). This answered the bound object
+/// dead or alive for a while, on the reading that `IsDead` needed it -- it
+/// does not: `IsDead` asks the entry, not the object.
 HostOutcome m_named_obj_obj(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("obj: no world");
   const std::int32_t index = named_index_of(*world, ctx.arg(0));
   if (index == NamedObjectTable::kNoName) return HostOutcome::ok_with(invalid_object());
-  return HostOutcome::ok_with(object_value(world->named_objects().object(index)));
+  const WorldObject* live = named_live_object(*world, index);
+  return HostOutcome::ok_with(live == nullptr ? invalid_object() : object_value(live->id));
 }
 
 // --------------------------------------------------------------------------
 // members: identity and state
 // --------------------------------------------------------------------------
 
+/// `IsValid/0` -- one name over four bodies, and they ask different things.
+///
+///   * `Item`/`Obj`/`Settlement::IsValid` (0x005ab1d0): the handle check and
+///     nothing else (`object_of`'s doc) -- no message, false on a miss. A
+///     corpse still in the table is valid.
+///   * `NamedObj`/`Query::IsValid` (0x00577af0): the handle check, then the
+///     query's `vtbl + 0x2c`, "am I registered". For a named object that is
+///     membership of the named map (0x00571ac0 via 0x00571a40), which every
+///     handle `GetNamedObj` gives holds, so it asks whether the *name* exists,
+///     not whether its object lives -- `IsDead` is that question. A group
+///     query asks the group map (0x00571c10); the sight queries answer 1
+///     (0x00444560). Here a named handle is valid while its table entry is,
+///     and a query while its object resolves.
+///   * `SquadList::IsValid` (0x00421a70): the receiver is an index into the
+///     squad-list pool (0x008c8dc4/0x008c8dc8, 16-byte entries, 0x0043ed70),
+///     valid while it lies inside the pool. `SquadListPool::contains` is the
+///     nearest question this pool answers (a live entry); no shipped site asks.
 HostOutcome m_is_valid(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsValid: no world");
-  // `NamedObj::IsValid` asks whether the *name* is bound, not whether what it
-  // is bound to is alive -- `IsDead` is the separate member for that, and two
-  // members that answered the same question would make one of them pointless.
   if (ctx.arg(0).is_object() && ctx.arg(0).as_object().type == kTypeNamedObj) {
     return HostOutcome::ok_with(
         Value::boolean(named_index_of(*world, ctx.arg(0)) != NamedObjectTable::kNoName));
   }
+  if (is_squadlist(ctx.arg(0))) {
+    return HostOutcome::ok_with(
+        Value::boolean(world->squadlists().contains(squadlist_of(ctx.arg(0)))));
+  }
   return HostOutcome::ok_with(Value::boolean(object_of(*world, ctx.arg(0)) != nullptr));
 }
 
-/// `Obj::IsVisible` -- 56 call sites, and the top trap on every shipped map
-/// once the target sweep stops failing before it.
+/// `Obj::IsVisible` (0x005ab970) -- 56 call sites, and the top trap on every
+/// shipped map once the target sweep stops failing before it.
 ///
-/// `gbr.exe` (0x005ab970) returns `!((SyncFlags >> 21) & 1)`, registered at
-/// 0x005b7721 as `bool, Obj`. **The stored bit means hidden**, so this is its
-/// negation; the same bit gates a candidate out of the target sweep at
-/// 0x005dba19, which is why an invisible unit cannot be attacked.
-///
-/// An object that does not resolve reads as not visible rather than trapping:
-/// `UNIT_IDLE.VS` asks this of a target it has just acquired, and a target that
-/// died in between is exactly the case the guard exists for.
+/// The handle check, then **not** bit 21 of the sync flags at `[obj+0x2c]`;
+/// registered at 0x005b7721 as `bool, Obj`. **The stored bit means hidden**,
+/// so this is its negation; the same bit gates a candidate out of the target
+/// sweep at 0x005dba19, which is why an invisible unit cannot be attacked. A
+/// miss prints and answers false: `UNIT_IDLE.VS` asks this of a target it has
+/// just acquired, and a target that died in between is exactly that case.
 HostOutcome m_is_visible(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsVisible: no world");
@@ -1408,43 +1468,73 @@ HostOutcome m_is_visible(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(slot != nullptr && !slot->state.flags.hidden));
 }
 
+/// `SetVisible(bool)` -- two bodies, one registration here.
+///
+///   * `Obj::SetVisible` (0x005ab920): the handle check -- a miss prints and
+///     returns, **it does not trap**, so `Instructor.obj.SetVisible(false)` in
+///     the tutorial and `NO_SecondDruid.obj.AsUnit().SetVisible(true)` in Great
+///     Losses Spain go on when the object has gone -- then 0x005a7600: a visual
+///     effect when the bit changes (presentation), the bit itself set or
+///     cleared through `vtbl + 0x44`/`+0x48` (0x0040a500/0x0040a520, mirrored
+///     into the record at `[[obj+0x30]+0x10]`), and a sprite and selection
+///     refresh (presentation). The argument is visibility; the bit is
+///     hiddenness.
+///   * `ObjList::SetVisible` (0x0055ea60): first, for every member that
+///     resolves and carries the hero bit, the same 0x005a7600 on every live
+///     member of the hero's army (the list at hero+0x1cc); then on every live
+///     member of the list. No shipped site has an `ObjList` receiver.
 HostOutcome m_set_visible(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetVisible: no world");
-  const WorldObject* found = object_of(*world, ctx.arg(0));
-  WorldObject* slot = found == nullptr ? nullptr : world->find(found->id);
-  if (slot == nullptr) return HostOutcome::failed("SetVisible: receiver does not resolve");
-  // The argument is visibility; the stored bit is hiddenness.
   const bool visible = ctx.count() > 1 && ctx.arg(1).truthy_scalar();
-  slot->state.flags.hidden = !visible;
+  const auto apply = [&](ObjectId id) {
+    if (ObjectState* state = world->mutable_state(id); state != nullptr) state->flags.hidden = !visible;
+  };
+  if (is_objlist(ctx.arg(0))) {
+    const std::span<const ObjectId> items = objlist_pool_of(*world).items(objlist_of(ctx.arg(0)));
+    const std::vector<ObjectId> members(items.begin(), items.end());
+    if (const HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
+      for (const ObjectId id : members) {
+        const HeroRecord* hero = world->find(id) == nullptr ? nullptr : heroes->hero(id);
+        if (hero == nullptr) continue;
+        for (const ObjectId soldier : hero->army) apply(soldier);
+      }
+    }
+    for (const ObjectId id : members) apply(id);
+    return HostOutcome::ok_void();
+  }
+  if (const WorldObject* slot = object_of(*world, ctx.arg(0)); slot != nullptr) apply(slot->id);
   return HostOutcome::ok_void();
 }
 
+/// `Obj::IsAlive` (0x005aae00): the handle check, then `vtbl + 0x50` negated
+/// -- valid and not dead (`object_is_dead`). A miss answers false, silently.
+/// So a building at no health is alive: it is broken, and stays its owner's.
 HostOutcome m_is_alive(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsAlive: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  // `action = 8` with an empty method is the dying state in the dumps, and all
-  // 15 such objects have health 0 to 3. Health is the only part of that this
-  // layer owns, so alive is health above zero and nothing more.
-  return HostOutcome::ok_with(Value::boolean(slot != nullptr && slot->state.health > 0));
+  return HostOutcome::ok_with(Value::boolean(slot != nullptr && !object_is_dead(*slot)));
 }
 
+/// `IsDead/0` -- two bodies.
+///
+///   * `Obj::IsDead` (0x005aae50): invalid, or `vtbl + 0x50` says dead
+///     (`object_is_dead`). No message.
+///   * `NamedObj::IsDead` (0x00553000): an invalid handle is dead; otherwise
+///     the entry's purge (`named_live_object`) and then "is the deque empty".
+///     So an entry whose object died, and one `GetNamedObj` minted that
+///     nothing carries yet, are both dead; a named building at no health is
+///     not.
 HostOutcome m_is_dead(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsDead: no world");
-  // `NamedObj::IsDead` asks about the object the name is bound to, which the
-  // receiver is not: it is the table entry. `gbr.exe`'s message for it --
-  // `Named unit %s is dead or not initialized!` -- names both halves, and an
-  // unbound name reads as dead for the same reason an unresolvable handle does
-  // below.
   const std::int32_t named = named_index_of(*world, ctx.arg(0));
   if (named != NamedObjectTable::kNoName) {
-    const WorldObject* bound = world->find(world->named_objects().object(named));
-    return HostOutcome::ok_with(Value::boolean(bound == nullptr || bound->state.health <= 0));
+    return HostOutcome::ok_with(Value::boolean(named_live_object(*world, named) == nullptr));
   }
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  return HostOutcome::ok_with(Value::boolean(slot == nullptr || slot->state.health <= 0));
+  return HostOutcome::ok_with(Value::boolean(slot == nullptr || object_is_dead(*slot)));
 }
 
 /// `player`, `pos`, `health`, `maxhealth` and `InHolder` are **registered on
@@ -1456,8 +1546,12 @@ HostOutcome m_is_dead(CallContext& ctx) {
 ///
 ///   * `Squad::Player` (0x004210c0): the handle's low nibble plus one, with no
 ///     lookup at all -- a handle naming no live squad still has an owner;
-///   * `Squad::pos` (0x00422cf0): the **front member's** position, and
-///     `(-1, -1)` for a squad with none;
+///   * `Squad::pos` (0x00422cf0): the squad from the handle (0x00443e30, the
+///     low nibble and the index above it), its front member (0x00443df0,
+///     null when the count at `+0x50` is 0 or the slot is gone), and that
+///     member's `vtbl + 0xc8` -- `posRH`; `(-1, -1)` for a squad with no front.
+///     A handle naming no squad faults in the original (no null check after
+///     the lookup), and answers `(-1, -1)` here;
 ///   * `Squad::health` / `maxhealth` (0x00427740, 0x00427800): the **sum** over
 ///     the members of what each would answer on its own;
 ///   * `Squad::InHolder` (0x00427670): **every** member held, and an empty
@@ -1469,6 +1563,10 @@ HostOutcome m_player(CallContext& ctx) {
     return HostOutcome::ok_with(Value::integer(player_to_script(unpack_squad(ctx.arg(0)).player)));
   }
   const WorldObject* slot = object_of(*world, ctx.arg(0));
+  // `Obj::player` (0x005ab290): the handle check, then the owner record's
+  // index (`[[obj+0x70]+8]`) plus one; a miss prints and answers -1.
+  // `Settlement::player` (0x005c2340) is the same through the settlement's
+  // record at `+0x90`.
   if (slot == nullptr) return HostOutcome::ok_with(Value::integer(-1));
   // **Script player numbers are 1..16, not 0..15**, and this returned the raw
   // index for a while. `Obj::player` in `gbr.exe` (0x005ab290) returns `ID + 1`;
@@ -1495,8 +1593,9 @@ HostOutcome m_pos(CallContext& ctx) {
     return HostOutcome::ok_with(
         pack_point(unit_pos_rh(*world, squad->members.front())));
   }
+  if (is_squad(ctx.arg(0))) return HostOutcome::ok_with(pack_point(kHeldPosition));
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  if (slot == nullptr) return HostOutcome::ok_with(pack_point(kHeldPosition));
+  if (slot == nullptr) return HostOutcome::ok_with(pack_point(Point{0, 0}));
   // **Raw**: 0x005add20 copies `[obj+0x24]`/`[obj+0x28]` and asks nothing
   // else, so a held object answers the `(-1, -1)` its holder entry wrote
   // (0x005d3e10 sets it through `vtbl+0x38` at 0x005d3ef9) -- which is what
@@ -1531,14 +1630,15 @@ HostOutcome m_pos(CallContext& ctx) {
 ///
 /// What also differs is the miss. `pos` prints `The function 'Obj::pos' called
 /// for an uninitialized or invalid object` before pushing its result; `posRH`
-/// pushes silently. Both push the same thing, so the difference is invisible
+/// pushes silently. Both push **(0, 0)** -- not the `(-1, -1)` held marker --
+/// at 0x005add4d and 0x005ad8c6, so the difference is invisible
 /// to a script and this engine keeps the two bodies apart anyway -- a
 /// diagnostic that exists is worth having a place to go.
 HostOutcome m_pos_rh(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("posRH: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  if (slot == nullptr) return HostOutcome::ok_with(pack_point(kHeldPosition));
+  if (slot == nullptr) return HostOutcome::ok_with(pack_point(Point{0, 0}));
   if (slot->state.flags.is_unit) {
     return HostOutcome::ok_with(pack_point(unit_pos_rh(*world, slot->id)));
   }
@@ -1819,6 +1919,13 @@ HostOutcome fn_enemy_in_range(CallContext& ctx) {
   return no;
 }
 
+/// `Obj::radius` (0x005aa520): the handle check -- a miss prints and answers 0
+/// -- then the class descriptor's `+0x2dc`, which the class reader fills from
+/// the `radius` property through 0x00660f00 (0x005a1a8c), inherited from the
+/// parent when a class does not declare it. `class_int` reads the same
+/// property up the same tree; it answers 0 for a value with trailing junk where
+/// the reader's integer parse would keep the leading digits, and no shipped
+/// class has one.
 HostOutcome m_radius(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("radius: no world");
@@ -4654,54 +4761,76 @@ HostOutcome fn_is_point_in_water(CallContext& ctx) {
 /// `Obj::CanSee(Obj)` -- 57 sites over 24 files, and **it is a stealth test and
 /// nothing else**.
 ///
-/// `0x005ab9d0` is five instructions of substance: if the *observed* object does
-/// not carry bit 21 of `[obj+0x2c]`, return true; otherwise AND the observer's
-/// team-vision mask with the observed object's per-player visibility bits. No
-/// line of sight, no radius, no distance, no terrain, no exploration state. A
-/// unit that is not hiding is visible from anywhere on the map.
+/// 0x005ab9d0, in its order:
 ///
-/// That is the finding, and it is a good one: the name promises fog and the
-/// body does not need any. This engine models neither the sixteen visibility
-/// bits nor the team-vision mask -- `ExploreArea` is unimplemented for the same
-/// reason -- so a hidden object reads as invisible to everybody, which is the
-/// conservative half of the original's answer and the one that cannot make a
-/// druid heal something it should not be able to see.
+///   1. **The argument is checked first**, and it is the *observed* object: a
+///      miss prints *"Parameter #1 in function 'Obj::CanSee' is uninitialized
+///      or invalid object."* and answers false.
+///   2. An observed object without the hidden bit (bit 21 of `[obj+0x2c]`) is
+///      seen: **true, without looking at the receiver at all**. No line of
+///      sight, no radius, no terrain, no exploration state -- a unit that is
+///      not hiding is visible from anywhere on the map, to anybody.
+///   3. A hidden one is seen when the observer's player record word `+0x18`
+///      shares a bit with the observed object's owner bits (the low 16 of its
+///      sync flags). That word is filled by `SetRelation` (0x005652f0): when
+///      player P's word toward Q carries bit 0x10 -- `Relation::share_view` --
+///      P's one-hot bit is ORed into Q's `+0x18`. So a hidden object is seen
+///      by an observer whose owner it **shares view with**:
+///      `has(observed.owner, observer.owner, share_view)`.
+///   4. The receiver is never checked: with a hidden argument the original
+///      reads the receiver's record through a null object and faults. That is
+///      a fault, not a behaviour, and answers false here.
 ///
-/// **The argument is the observed object and the receiver is the observer.**
-/// `0x005ab9d0` pops the argument first and complains about it by name --
-/// *"Parameter #1 in function 'Obj::CanSee' is uninitialized or invalid
-/// object."* -- and never checks the receiver at all: with a stealthed argument
-/// it dereferences the receiver's owner unconditionally and faults. That is a
-/// fault, not a behaviour, so an unresolvable observer answers false here.
+/// **A player's own bit** is inferred to be in its own word: SetRelation
+/// skips the diagonal (0x005653ae), and the record's initialiser was not
+/// found. The other reader of the same word settles it in practice --
+/// `RevealHiddenEnemyUnits` (sim/player_host.cpp) reveals the hidden objects
+/// whose owner bit is *not* in it, which without the self bit would unmask a
+/// player's own stealthed units -- so the same owner sees its own.
 ///
 /// Every caster script calls it twice per target -- once as a validity gate
 /// before approaching and again after `Sleep(.TimeToActionMoment())`,
-/// immediately before the effect lands -- which is why it leads the site census
-/// among unimplemented members.
+/// immediately before the effect lands. This answered false for every hidden
+/// object, and for a dead observer even when the target was not hiding, until
+/// the host audit read the body.
 HostOutcome m_can_see(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("CanSee: no world");
-  const WorldObject* observer = object_of(*world, ctx.arg(0));
   const WorldObject* seen = object_of(*world, ctx.arg(1));
-  if (observer == nullptr || seen == nullptr) {
-    return HostOutcome::ok_with(Value::boolean(false));
-  }
-  return HostOutcome::ok_with(Value::boolean(!seen->state.flags.hidden));
+  if (seen == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  if (!seen->state.flags.hidden) return HostOutcome::ok_with(Value::boolean(true));
+  const WorldObject* observer = object_of(*world, ctx.arg(0));
+  if (observer == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  const PlayerId owner = seen->state.owner;
+  const PlayerId viewer = observer->state.owner;
+  if (owner == kNoPlayer || viewer == kNoPlayer) return HostOutcome::ok_with(Value::boolean(false));
+  const bool shared =
+      owner == viewer || world->players().has(owner, viewer, Relation::share_view);
+  return HostOutcome::ok_with(Value::boolean(shared));
 }
 
 /// `SetMessengerStatus(bool)` -- 26 sites, registered on `Obj` and on `Query`.
 ///
 /// Bit 26 of `[obj+0x2c]`, and see `ObjectFlags::messenger` for what reads it.
-/// One body for both receivers, because this registry keys on
-/// (kind, name, arity) and `receiver_objects` resolves all three handle shapes;
-/// the original's `Query` form (`0x00579c70`) is the same write applied to each
-/// member, with one extra complaint for an empty query that the retail sink
-/// discards like every other.
+///
+///   * `Obj::SetMessengerStatus` (0x005ab8d0): the handle check (a miss
+///     prints and returns), then true sets the bit through `vtbl + 0x44` and
+///     false clears it through `vtbl + 0x48` (0x0040a500/0x0040a520). No life
+///     test: a corpse's bit is written too.
+///   * `Query::SetMessengerStatus` (0x00579c70): the handle check, then an
+///     empty result prints and does nothing; otherwise every member that
+///     resolves, is a script object and **is not dead** (`vtbl + 0x50`,
+///     `object_is_dead`) gets the same write.
+///
+/// One body for both, because this registry keys on (kind, name, arity).
 HostOutcome m_set_messenger_status(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetMessengerStatus: no world");
   const bool on = ctx.count() > 1 && ctx.arg(1).is_integer() && ctx.arg(1).as_integer() != 0;
+  const bool query = ctx.arg(0).is_object() && ctx.arg(0).as_object().type == kTypeQuery;
   for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+    const WorldObject* slot = world->find(id);
+    if (slot == nullptr || (query && object_is_dead(*slot))) continue;
     if (ObjectState* state = world->mutable_state(id); state != nullptr) {
       state->flags.messenger = on;
     }
@@ -5316,8 +5445,11 @@ void erase_one(CallContext& ctx, World& world, ObjectId id) {
 HostOutcome m_erase(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Erase: no world");
-  // A receiver that resolves to nothing is a no-op, not a refusal: both bodies
-  // format a complaint into `0x00686eb0`, which is a bare `ret` in retail.
+  // `Obj::Erase` (0x005ab250) is the handle check and then the object's
+  // `vtbl + 0x94`, its destroy. A receiver that resolves to nothing is a
+  // no-op, not a refusal: both bodies format a complaint into `0x00686eb0`,
+  // which is a bare `ret` in retail. A named object that has died resolves to
+  // nothing (`object_of`), so `NO_X.Erase()` on one erases no corpse.
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_void();
 
@@ -5359,13 +5491,30 @@ HostOutcome m_erase(CallContext& ctx) {
 // silently replacing the other. `register_objlist_host` must therefore run
 // after this function -- sim/host_setup.hpp's manifest is where that is fixed.
 
+/// `IsEmpty/0` -- two bodies, and neither traps.
+///
+///   * `Query::IsEmpty` (0x00579320): the handle check -- a miss prints and
+///     answers **true** -- then the query's refresh (`vtbl + 0x1c`, which for
+///     a group or named query purges the dead) and its emptiness test
+///     (`vtbl + 0x28`, count == 0; a sight query refreshes first if stale).
+///     Here the query is evaluated on the spot; how stale the original's
+///     cached answer may be is the query model's (see `fn_set_op`).
+///   * `Sacrifice::IsEmpty` (0x00594eb0): the handle check -- a miss answers
+///     true -- then the stop flag at `[sacrifice+0x15c]`, the one `Consume`'s
+///     core (0x00596050) reads. Nothing in this engine sets it (there is no
+///     sacrifice machinery; see `m_get_sacrifice`), so a resolved sacrifice
+///     answers false. The two share this registration because the registry
+///     keys on (kind, name, arity); an `Obj` receiver that is not a query is
+///     the sacrifice form.
+///
+/// Both used to trap, which stopped a script on a handle whose object had
+/// gone where the original answers "empty" and goes on.
 HostOutcome m_query_is_empty(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsEmpty: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
-  if (slot == nullptr || slot->internal != InternalKind::query) {
-    return HostOutcome::failed("IsEmpty: receiver is not a Query");
-  }
+  if (slot == nullptr) return HostOutcome::ok_with(Value::boolean(true));
+  if (slot->internal != InternalKind::query) return HostOutcome::ok_with(Value::boolean(false));
   std::vector<ObjectId> found;
   return HostOutcome::ok_with(Value::boolean(world->evaluate_query(slot->id, found) == 0));
 }

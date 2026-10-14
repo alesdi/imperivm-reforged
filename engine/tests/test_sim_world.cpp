@@ -2048,10 +2048,11 @@ TEST(pos_is_the_stored_field_and_pos_rh_differs_only_for_a_held_unit) {
 
   // The invalid receiver, which is the one place the two bodies differ in
   // `gbr.exe` -- `pos` prints a diagnostic first and `posRH` does not -- and
-  // the one place they still have to return the same thing.
-  answers(obj(kNoObject), kHeldPosition, kHeldPosition);
-  answers(obj(static_cast<ObjectId>(9999)), kHeldPosition, kHeldPosition);
-  answers(script::Value::integer(3), kHeldPosition, kHeldPosition);
+  // the one place they still have to return the same thing: (0, 0), written at
+  // 0x005add4d and 0x005ad8c6 -- not the held marker.
+  answers(obj(kNoObject), pt(0, 0), pt(0, 0));
+  answers(obj(static_cast<ObjectId>(9999)), pt(0, 0), pt(0, 0));
+  answers(script::Value::integer(3), pt(0, 0), pt(0, 0));
 }
 
 TEST(the_building_predicates_answer_what_gbr_exe_answers) {

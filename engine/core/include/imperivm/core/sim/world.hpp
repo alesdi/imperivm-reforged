@@ -764,9 +764,17 @@ class NamedObjectTable {
   /// No such name. Distinct from every valid index, which are 0..size()-1.
   static constexpr std::int32_t kNoName = -1;
 
-  /// The index of `name`, or `kNoName`. Never creates: every consumer in the
-  /// executable refuses an unknown name rather than minting one.
+  /// The index of `name`, or `kNoName`. Never creates.
   [[nodiscard]] std::int32_t find(std::string_view name) const noexcept;
+
+  /// The index of `name`, appending an **unbound** entry for it on a miss.
+  ///
+  /// `GetNamedObj` (0x00553230) is the one consumer that mints: on a miss in
+  /// the named map at `[0x009bdacc]` it constructs an empty
+  /// `CVXNamedObjQuery` (0x005722a0), registers it and inserts it under the
+  /// name, so an unknown name is a valid, empty handle that a later
+  /// `SetName` -- here `rebind` -- fills in place.
+  std::int32_t intern(std::string_view name);
 
   /// Bind `name` to `id`. False when the name is already bound, which is how
   /// the four maps that repeat a type-0 name resolve: **first in document order

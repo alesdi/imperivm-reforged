@@ -1031,6 +1031,8 @@ TEST(objlist_a_named_object_counts_as_the_one_member_query_it_upcasts_to) {
   // query of exactly one object. `sim/wait.cpp` already relies on that edge.
   Fixture f;
   const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr);
+  // Alive: a named unit at no health is purged from its name (0x005530a0).
+  f.world.set_health(hero, 10);
   CHECK(f.world.named_objects().bind("NO_Scipio", hero));
   const std::int32_t index = f.world.named_objects().find("NO_Scipio");
   REQUIRE(index >= 0);
@@ -1241,6 +1243,9 @@ TEST(objlist_nearestobj_skips_a_member_whose_handle_has_gone) {
   const ObjectId here = f.world.spawn(NativeClass::unit, nullptr);
   f.world.set_position(gone, pt(10, 0));
   f.world.set_position(here, pt(900, 0));
+  // Alive: a named unit at no health is purged from its name (0x005530a0).
+  f.world.set_health(gone, 10);
+  f.world.set_health(here, 10);
 
   const script::Value list = fresh_list(f.world);
   f.call(script::CallKind::member, "Add", {list, f.obj(gone)});

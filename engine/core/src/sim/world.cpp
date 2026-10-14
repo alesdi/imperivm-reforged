@@ -366,6 +366,13 @@ std::int32_t NamedObjectTable::find(std::string_view name) const noexcept {
   return kNoName;
 }
 
+std::int32_t NamedObjectTable::intern(std::string_view name) {
+  const std::int32_t at = find(name);
+  if (at != kNoName) return at;
+  names_.push_back(Entry{std::string(name), kNoObject});
+  return static_cast<std::int32_t>(names_.size() - 1);
+}
+
 bool NamedObjectTable::bind(std::string_view name, ObjectId id) {
   if (id == kNoObject) return false;
   // First binding wins. See the header for why the tie-break is inference and
@@ -2638,8 +2645,11 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
     if (!bytes::get_string(reader, name) || !reader.u32(id)) return FormatError::truncated;
     // First-wins on a repeat is the live table's rule, so a save carrying a
     // repeat would lose the second binding and come back smaller than it went
-    // out. Refused instead.
-    if (!names.bind(name, id)) return FormatError::malformed;
+    // out. Refused instead. An unbound entry (`kNoObject`) is legitimate: it
+    // is what `GetNamedObj` mints for a name nothing carries yet.
+    if (names.find(name) != NamedObjectTable::kNoName) return FormatError::malformed;
+    (void)names.intern(name);
+    if (id != kNoObject) (void)names.rebind(name, static_cast<ObjectId>(id));
   }
 
   std::uint32_t boarding_rows = 0;

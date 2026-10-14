@@ -546,6 +546,10 @@ TEST(feedback_a_control_group_outlives_the_script_that_set_it) {
   Stage stage;
   const ObjectId one = stage.world.spawn(NativeClass::decor, nullptr);
   const ObjectId two = stage.world.spawn(NativeClass::decor, nullptr);
+  // Standing: an object at no health that is not a building is dead to
+  // `vtbl + 0x50`, and `NamedObj::obj` (0x005530a0) purges it from its name.
+  stage.world.mutable_state(one)->health = 1;
+  stage.world.mutable_state(two)->health = 1;
   CHECK(stage.world.named_objects().bind("NO_One", one));
   CHECK(stage.world.named_objects().bind("NO_Two", two));
 
