@@ -54,11 +54,13 @@ RUN_TIMEOUT_SECONDS = 900
 #: Saves taken mid-war: (container, turns before the save, turns compared).
 #: The sweep above saves every map at turn 40, before anything has marched or
 #: fallen, and so could not see the node table a load rebuilt with a gone
-#: town hall's node in the map's corner. Crossroads at 5,500 turns has three
-#: settlements in other hands than the map's and armies on the road. It was
+#: town hall's node in the map's corner. Crossroads at 5,500 turns has a
+#: settlement in other hands than the map's and armies on the road. It was
 #: 1,600 until a swordsman could no longer hurt a building (playtest #24),
 #: then 2,700; with #22's march pacing as well, `imsave` counts nothing broken
-#: or taken at 3,200, 3,800 or 4,500, and 3 taken at 5,500. `imsave` prints
+#: or taken at 3,200, 3,800 or 4,500, and 3 taken at 5,500 -- 1 since a
+#: town's loyalty is gbr.exe's and a tactic script hands its army back to the
+#: AI (the seventh round). `imsave` prints
 #: how many nodes outlive their centre, how many centres stand broken and how
 #: many towns changed hands, and a run where all three are zero is reported
 #: as a failure of coverage, not a pass. Only `verify.py --slow` runs it.

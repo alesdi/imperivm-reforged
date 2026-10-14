@@ -489,19 +489,16 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
         pytest.skip(f"{CROSSROADS} is not in this installation")
     # The seed's war, as far as the ceiling or the match's end. Which turn the AI
     # takes a town is the seed's and has moved from under every cap this test
-    # held: seed 1 is undecided at 12,000 turns, and seed 4, which had one
-    # computer take a village from another at 2,698, has it at 3,306 since a
-    # swordsman cannot hit a building (playtest #24) and a hero's army marches
-    # at its pace (#22). Over seeds 1 to 12 at 6,000 turns a settlement changes
-    # hands between players on four, the first on seed 5 at turn 3,078, so the
-    # peers are held to a war in which that happens; which seed shows it is
-    # the AI's, and the capture is asserted on the solo run rather than assumed.
-    # Seed 2 since a tactic script hands its army back to the AI (a temple is
-    # found by its class's named race, and a player's research is read from
-    # its script-numbered ledger): seed 5's Germanic tactic, which had waited
-    # on a research forever, now finishes, and no settlement changes hands
-    # between players there in 6,000 turns, while on seed 2 p3 takes p1's
-    # village #12 at turn 1,775 -- the earliest such capture over seeds 1-12.
+    # held: seed 4 had one computer take a village from another at 2,698, then
+    # at 3,306 once a swordsman could not hit a building (playtest #24) and a
+    # hero's army marched at its pace (#22); seed 5's came at 3,078 until a
+    # tactic script handed its army back to the AI and a town's loyalty became
+    # gbr.exe's, after which seed 5 is a war p1 wins at 5,398. On that tree,
+    # over seeds 1 to 12 at 6,000 turns, a settlement changes hands between
+    # players on eight seeds, the first on seed 2, where p1 takes village #12
+    # from p3 at turn 1,785. The peers are held to a war in which that
+    # happens; which seed shows it is the AI's, and the capture is asserted on
+    # the solo run rather than assumed.
     solo = subprocess.run(
         [str(imrun), str(game_dir), str(path), str(CAPTURE_TURNS), str(LENGTH),
          "--seed", str(CAPTURE_SEED)],
