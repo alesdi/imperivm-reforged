@@ -2775,7 +2775,7 @@ struct BarrackGraph {
   BarrackGraph() {
     const std::string docs[] = {
         R"(<class id="Building" cpp_class="CVXBuilding"><properties maxhealth="3000"/></class>)",
-        R"(<class id="BaseBarracks" parent="Building" cpp_class="CVXBarrack"/>)",
+        R"(<class id="BaseBarracks" parent="Building" cpp_class="CVXBarrack"><method sig="train" vs="train.vs"/></class>)",
         R"(<class id="RBarracks" parent="BaseBarracks" cpp_class="CVXBarrack"/>)",
         // The Gaul barracks answers to `Barrack`, which is the name the
         // executable's list actually carries.
@@ -3411,6 +3411,8 @@ TEST(a_building_refuses_to_queue_what_its_settlement_cannot_pay_for) {
   train.train_command = true;
   train.cost_gold = 100;
   train.cost_pop = 1;
+  // A row the issue can find: the enabled test (`vtbl+0xd8`) asks the table.
+  b.commands.mutable_table().set(train);
 
   // Two are paid for; the third finds 50 gold and is turned away whole.
   const std::uint32_t first = issue_order(b.world, barracks, train, OrderTarget{}, OrderMode::replace);

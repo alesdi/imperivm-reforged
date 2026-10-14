@@ -225,38 +225,16 @@ struct CommandBar::Impl {
   /// list lives exactly as long as the call and is released after it.
   bool dispatch(const CommandDef& def, std::span<const ObjectId> selection,
                 const OrderTarget& target, bool replace, bool modifier, PlayerId player) {
-    HostContext& context = session->host_context();
-    script::Scheduler& scheduler = session->scheduler();
-    if (context.library == nullptr) return false;
-    const std::uint32_t chunk_index = context.library->chunk_for(def.group_dispatch);
-    if (chunk_index == script::kNoChunk || chunk_index >= scheduler.chunk_count()) return false;
+    // The issue (`CommandSystem::issue`): the commanded flag on every unit,
+    // then the dispatch arm with the row's `cmdparam` and `cmdcost_*` ambient
+    // for the call (`CommandSystem::dispatch`) -- `ACTIVATE_HERO_SKILL.VS`
+    // reads both, and used to trap on the first.
     World& world = session->world();
-    ObjListPool& pool = objlist_pool_of(world);
-    // The selection as a list the call is handed. 0x004ef3d0 puts in only the
-    // actors whose `vtbl+0xd8` accepts the row; `offered` already left the
-    // row off the bar unless every one of them does, so that is all of them.
-    const ObjListId list = pool.acquire_temporary(script::kNoScript);
-    if (std::vector<ObjectId>* items = pool.mutable_items(list)) {
-      items->assign(selection.begin(), selection.end());
-    }
-    const std::array<script::Value, 6> args{
-        make_objlist_value(list),
-        pack_point(target.point),
-        target.is_object() ? script::Value::object(context.object_type, target.object)
-                           : script::Value::object(script::ObjectRef{script::kNoType, 0}),
-        script::Value::boolean(replace),
-        script::Value::boolean(modifier),
-        script::Value::integer(static_cast<std::int32_t>(player) + 1),
-    };
-    const script::CallReport ran = scheduler.call(chunk_index, args);
-    // The call's own temporaries went with it; the list it was handed is
-    // `kNoScript`'s, as a verifier's is, and goes now.
-    pool.release_script(script::kNoScript);
-    if (ran.status == script::ExecStatus::failed) {
-      scheduler.report_trap(
-          script::FailedScript{ran.id, scheduler.chunk(chunk_index).source_name, ran.trap});
-    }
-    return ran.id != script::kNoScript;
+    CommandSystem* commands = command_system(world);
+    if (commands == nullptr) return false;
+    return commands->issue(world, selection, def, target.point,
+                           target.is_object() ? target.object : kNoObject, replace, modifier,
+                           static_cast<std::int32_t>(player) + 1, /*user=*/true) != 0;
   }
 };
 

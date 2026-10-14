@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 33;  // 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 34;  // 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -1334,6 +1334,9 @@ void CommandSystem::serialize(std::vector<std::byte>& out) const {
   // inside one still answers. See `CommandSystem::finish_command`.
   bytes::put_u32(out, static_cast<std::uint32_t>(finishing_.size()));
   for (const Command& c : finishing_) put_command(out, c);
+  // Section version 34: the units whose commanded flag is up, ascending.
+  bytes::put_u32(out, static_cast<std::uint32_t>(commanded_.size()));
+  for (const ObjectId id : commanded_) bytes::put_u32(out, id);
 }
 
 Status CommandSystem::deserialize(std::span<const std::byte> data) {
@@ -1393,12 +1396,22 @@ Status CommandSystem::deserialize(std::span<const std::byte> data) {
     if (!get_command(reader, command)) return FormatError::truncated;
     finishing.push_back(std::move(command));
   }
+  std::uint32_t commanded_count = 0;
+  if (!reader.u32(commanded_count)) return FormatError::truncated;
+  std::vector<ObjectId> commanded;
+  for (std::uint32_t i = 0; i < commanded_count; ++i) {
+    ObjectId id = kNoObject;
+    if (!reader.u32(id)) return FormatError::truncated;
+    if (!commanded.empty() && id <= commanded.back()) return FormatError::malformed;
+    commanded.push_back(id);
+  }
   if (const Status status = finish(reader); !status.ok()) return status;
 
   default_verb_ = std::move(default_verb);
   queues_ = std::move(queues);
   disabled_ = std::move(disabled);
   finishing_ = std::move(finishing);
+  commanded_ = std::move(commanded);
   // `method_cache_` is a memo of the class graph and is left to refill itself.
   // It is `mutable` precisely because it is not state.
   method_cache_.clear();

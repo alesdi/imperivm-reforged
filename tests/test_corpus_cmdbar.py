@@ -134,12 +134,15 @@ def test_a_train_press_the_town_cannot_pay_for_queues_nothing(imconform, game_di
     assert ctrl == ("issued", ["idle"])
 
 
-def test_a_research_press_replaces_what_the_barracks_trains(imconform, game_dir):
-    # The flag is the row's, and a research row does not carry it: without
-    # Shift it replaces the queue as a unit's move would.
+def test_a_research_press_jumps_ahead_of_what_the_barracks_trains(imconform, game_dir):
+    # A research row never reaches the order insert's replace: the per-object
+    # issue's research arm (0x004efa05..0x004efad5) puts it in front of a
+    # running command that came in through a non-research row -- the training
+    # is stopped, told it was cancelled, and waits behind to start again -- and
+    # the rest of the queue keeps its place.
     *_, research = presses(imconform, game_dir, "BaseBarracks",
                            ["trainMHastatus", "trainMHastatus", "Barrack Level 1"], BALCANS)
-    assert research == ("issued", ["Barrack Level 1"])
+    assert research == ("issued", ["Barrack Level 1", "trainMHastatus", "trainMHastatus"])
 
 
 def test_shift_appends_a_move_and_ctrl_does_not(imconform, game_dir):

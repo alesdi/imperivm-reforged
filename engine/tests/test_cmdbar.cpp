@@ -48,11 +48,11 @@ ClassGraph graph_of() {
   ClassGraph graph;
   const char* docs[] = {
       R"(<class id="Object" cpp_class="CVXDecor"><properties sight="0"/></class>)",
-      R"(<class id="Unit" parent="Object" cpp_class="CVXUnit"><properties maxhealth="100"/><method sig="idle" vs="idle.vs"/><method sig="move" vs="move.vs"/></class>)",
+      R"(<class id="Unit" parent="Object" cpp_class="CVXUnit"><properties maxhealth="100"/><method sig="idle" vs="idle.vs"/><method sig="move" vs="move.vs"/><method sig="stand_position" vs="stand.vs"/></class>)",
       R"(<class id="Sentry" parent="Unit" cpp_class="CVXUnit"/>)",
       R"(<class id="RHastatus" parent="Unit" cpp_class="CVXUnit"/>)",
       R"(<class id="RSentry" parent="Sentry" cpp_class="CVXUnit"/>)",
-      R"(<class id="Building" parent="Object" cpp_class="CVXBuilding"><method sig="idle" vs="idle.vs"/><method sig="train" vs="train.vs"/></class>)",
+      R"(<class id="Building" parent="Object" cpp_class="CVXBuilding"><method sig="idle" vs="idle.vs"/><method sig="train" vs="train.vs"/><method sig="stand_position" vs="stand.vs"/></class>)",
       // Standing, with health: a turn does not prune it from a selection, and
       // the lockstep sink will command it.
       R"(<class id="RBarracks" parent="Building" cpp_class="CVXBuilding"><properties maxhealth="3000"/></class>)",

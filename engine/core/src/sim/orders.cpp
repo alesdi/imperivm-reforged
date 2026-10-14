@@ -617,38 +617,20 @@ std::uint32_t issue_order(World& world, ObjectId actor, const CommandDef& def,
                           const OrderTarget& target, OrderMode mode, bool user) {
   CommandSystem* system = command_system(world);
   if (system == nullptr) return 0;
-
-  Command prototype;
-  // The object wins over the point when both are present, for the reason
-  // `exec_cmd_impl` gives: a targeted verb is aimed at the object and the
-  // shipped sites pass a dummy point beside it.
-  if (target.is_object() && world.find(target.object) != nullptr) {
-    prototype.arg_kind = CommandArgKind::object;
-    prototype.object = target.object;
-  } else {
-    prototype.arg_kind = CommandArgKind::point;
-    prototype.point = target.point;
-  }
-  prototype.param = def.param;
-  prototype.name = def.name;
-  prototype.cost_gold = def.cost_gold;
-  prototype.cost_food = def.cost_food;
-  prototype.cost_pop = def.cost_pop;
-  prototype.cost_stamina = def.cost_stamina;
-  prototype.delay = def.exec_delay;
-  // `Unit.GetCommanded`: set when the command came from a player action rather
-  // than from a script's own decision. A click is the player action; the
-  // script form is issued as nobody and says so.
-  prototype.user = user;
-
-  const std::string_view verb = def.method.empty() ? def.name : def.method;
-  // A `traincommand="yes"` row is never inserted replacing: the per-object
-  // issue hands the object's insert (`vtbl+0xb8`) `replace && !traincommand`
-  // (0x004efbbb, the flag at `[def+0x1b4]`), whoever asked for a replace.
-  if (mode == OrderMode::replace && !def.train_command) {
-    return system->set_command(world, actor, verb, prototype);
-  }
-  return system->append_order(world, actor, verb, prototype);
+  // The per-object issue every order reaches (0x004ef3d0, from the right
+  // click 0x004f4ff0, the row's execution 0x004f1610 and both `ExecCmd`s):
+  // the commanded flag, the enabled test, the method by shape, the immediate
+  // and research arms, the order insert -- `CommandSystem::issue`. An object
+  // the world no longer holds is no object, and the point is used.
+  const ObjectId object =
+      target.is_object() && world.find(target.object) != nullptr ? target.object : kNoObject;
+  const ObjectId actors[1] = {actor};
+  const std::uint32_t before = world.command_id_seed();
+  const std::size_t issued = system->issue(world, actors, def, target.point, object,
+                                           mode == OrderMode::replace, /*modifier=*/false,
+                                           /*player_arg=*/0, user);
+  if (issued == 0 || world.command_id_seed() == before) return 0;
+  return world.command_id_seed() - 1;
 }
 
 /// The group-order spread, and it is four rules rather than one.
