@@ -39,3 +39,18 @@
 0x00562280	verified	ObjList::AddCommandOffset: as SetCommandOffset without the clear and without the clamp, AddCommand's point-form rule
 0x00578460	verified	Query::SetCommandOffset: refreshed query, no dead test, otherwise ObjList::SetCommandOffset
 0x00578280	verified	Query::AddCommandOffset: refreshed query, no dead test, no clamp, AddCommand's point-form rule
+0x005b5470	partial	Obj::ExecCmd: invalid/dead receiver refused, row by name, void; issue 0x004ef3d0 modelled (commanded prologue, groupdispatch with the row ambient 0x004ef5c1..0x004ef6f2, enabled test, method by shape obj->point->none, immediate, research arm, order insert 0x005b4e90 with replace&&!train). Gaps: first actor's group-move set-up (0x004e9100/0x004e8ae0/0x004ef1c0) and an offset row's per-actor spread (0x004e81f0) not reproduced
+0x0055e240	partial	ObjList::ExecCmd: the list to the issue with player -1 and no dead test of its own; same issue gaps as Obj::ExecCmd
+0x005aa2c0	verified	Obj::CmdCount/0: [obj+0x98], the queue's length; a dead receiver leaves the answer unwritten in the original (answered here)
+0x005ae4d0	verified	Obj::CmdCount/1: counts queued commands whose row name ([def+0xc]) equals the argument byte for byte; row-less commands never counted
+0x005abe40	verified	Obj::command/0: the started command's name at [obj+0x110]; here the head's verb, and `idle` for a queue still empty before the first command pass (labelled reading)
+0x005ae620	verified	Obj::command/1: the verb ([cmd+0x34]) at the index, "" past the end; index 0 of an empty queue answers `idle` here (same reading)
+0x005ae9b0	verified	Obj::cmddelay: the head command's row execdelay ([def+0x1f8]), 0 with no row
+0x005ae890	verified	Obj::Progress/0: dead receiver returns without stamp or suspend; head row's execdelay, no suspend when 0; bar endpoints display only
+0x005ac530	verified	Obj::Progress/1: stamps [obj+0x128]/[obj+0x12c] and suspends for the argument, zero included; no dead test; the resume clears the bar
+0x005d81e0	verified	Unit::GetCommanded: bit 0x80000 of [unit+0x194], a per-unit flag raised by the issue prologue (0x004ef475), not a command's; invalid receiver answers false
+0x005d8180	verified	Unit::SetCommanded: writes that bit, queue or no queue; invalid receiver does nothing
+0x00560300	verified	ObjList::GetCanExecCmd: a new list of the members whose vtbl+0xd8 (0x005ae380: [obj+0x9c] then the disabled list) accepts the row; no method test; unknown row gives an empty list
+0x005ab770	verified	Obj::CmdDisable: row index by name (negative: nothing), vtbl+0xdc = 0x005b5250: the 0xd8 predicate then the append; no dead test (building override of 0xd8 per the earlier reading of 0x004de580)
+0x00425630	verified	GetCmdCost: row by name; a miss answers false and writes neither out argument; a hit writes costgold ([def+0x1e8]) and costfood ([def+0x1ec])
+0x00421e50	verified	GetCmdStaminaCost: row by name, coststamina ([def+0x1f4]), 0 for a miss

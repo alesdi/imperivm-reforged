@@ -1650,12 +1650,21 @@ HostOutcome command_impl(CallContext& ctx) {
       std::string(self.commands->command_name(self.id, static_cast<std::size_t>(index)))));
 }
 
-/// `CmdCount()` / `CmdCount(verb)`.
+/// `CmdCount()` / `CmdCount(name)`.
+///
+/// `Obj::CmdCount/0` (0x005aa2c0) answers the queue's length, `[obj+0x98]`,
+/// the running command included. `Obj::CmdCount/1` (0x005ae4d0) walks the
+/// queue and counts the commands whose `<cmd>` row is called `name`, byte for
+/// byte (`CommandSystem::command_count_named`) -- **by row, not by verb**: the
+/// AI writes `barrack.CmdCount(cmd)` beside `barrack.ExecCmd(cmd, ...)` with the
+/// one row name, and a train row's verb is `train`. A dead receiver of the bare
+/// form prints and leaves the answer slot unwritten in the original; the count
+/// is answered here.
 HostOutcome cmd_count_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   const std::size_t n = ctx.count() > 1 && ctx.arg(1).is_string()
-                            ? self.commands->command_count(self.id, ctx.arg(1).as_string())
+                            ? self.commands->command_count_named(self.id, ctx.arg(1).as_string())
                             : self.commands->command_count(self.id);
   return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(n)));
 }
@@ -1715,6 +1724,12 @@ template <bool kExplicitDuration>
 HostOutcome progress_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
+  // `Progress()` (0x005ae890) refuses a dead receiver -- prints and returns 0,
+  // no bar and no suspend. `Progress(ms)` (0x005ac530) asks nothing about
+  // health.
+  if constexpr (!kExplicitDuration) {
+    if (dead(*self.world, self.id)) return HostOutcome::ok_void();
+  }
 
   std::int64_t duration = 0;
   if constexpr (kExplicitDuration) {
@@ -1744,7 +1759,9 @@ HostOutcome progress_impl(CallContext& ctx) {
   return HostOutcome::sleep_for(duration);
 }
 
-/// `GetCommanded()`: whether the running command came from the player.
+/// `GetCommanded()`: whether the unit has been given an order since a script
+/// last cleared the flag -- the unit's own bit, raised by the per-object issue
+/// on every unit an order reaches (`CommandSystem::commanded`).
 ///
 /// The corpus annotates the setter for us -- `u.SetCommanded(false); /// clear
 /// user commanded flag` in `TOWNHALL_AUTOTRAIN.VS` -- and reads it to decide
@@ -1767,9 +1784,8 @@ HostOutcome get_commanded_impl(CallContext& ctx) {
     if (self.error == kNoReceiver) return HostOutcome::ok_with(Value::boolean(false));
     return HostOutcome::failed(self.error);
   }
-  const CommandQueue* q = self.commands->find(self.id);
-  const Command* running = q == nullptr ? nullptr : q->running();
-  return HostOutcome::ok_with(Value::boolean(running != nullptr && running->user));
+  // Bit 0x80000 of `[unit+0x194]` (0x005d81e0): the unit's, not a command's.
+  return HostOutcome::ok_with(Value::boolean(self.commands->commanded(self.id)));
 }
 
 HostOutcome set_commanded_impl(CallContext& ctx) {
@@ -1778,94 +1794,89 @@ HostOutcome set_commanded_impl(CallContext& ctx) {
     if (self.error == kNoReceiver) return HostOutcome::ok_void();
     return HostOutcome::failed(self.error);
   }
-  CommandQueue* q = self.commands->find(self.id);
-  if (q == nullptr || q->entries.empty()) return HostOutcome::ok_void();
-  q->entries.front().user = ctx.count() > 1 && ctx.arg(1).truthy_scalar();
+  // 0x005d8180 writes the bit, queue or no queue.
+  self.commands->set_commanded(self.id, ctx.count() > 1 && ctx.arg(1).truthy_scalar());
   return HostOutcome::ok_void();
 }
 
 // -- the player-facing command table ---------------------------------------
 
-/// `ExecCmd(name, pt, obj, replace)`: run a `DATA\COMMANDS` row.
+/// `ExecCmd(name, pt, obj, replace)`: issue a `DATA\COMMANDS` row as the
+/// player's interface issues it. 22 sites: the AI's training, its market and
+/// village orders, a hero's skill autocast, a siege's `advance`.
 ///
-/// The fourth argument is `replace`, which `GROUP_UNITSOUT.VS` names for us: it
-/// forwards its own parameters as `l.ExecDefaultCmd(pt, obj, bReplace,
-/// bModifier)`, the same position in the sibling entry point. Every one of the
-/// 22 `ExecCmd` sites passes `false`, and they are right to: a barracks queues
-/// `n` training commands with `for (i = 0; i < n; i += 1) b.ExecCmd(cmd, ...)`
-/// and then counts them with `CmdCount(cmd)`, which only works if each call
-/// appends. It appends as an order, though (`CommandSystem::append_order`): a
-/// barracks resting on `idle` stops resting, where a script's `AddCommand`
-/// would have queued behind an `idle` that never returns.
+/// `Obj::ExecCmd` (0x005b5470) refuses a receiver that names nothing and a
+/// dead one ("called for a dead object"), looks the row up by name (a miss
+/// prints "Invalid command" and returns), and hands the per-object issue
+/// (0x004ef3d0, `CommandSystem::issue`) a one-member list, the row, the point,
+/// the object, `bReplace`, no modifier and the receiver's player.
+/// `ObjList::ExecCmd` (0x0055e240) hands it the list itself and no player
+/// (-1). Both are registered **void**: no script can read an answer.
 ///
-/// Returns whether the row exists, so that a caller can tell a misspelt command
-/// from one it simply cannot afford. **The cost is not charged here**: the
-/// shipped AI charges it itself (`set.SpentGoldOnArmy(gold + food / 2)` right
-/// before the call), and double-charging would be a silent economy bug.
+/// What the issue does with a row is all of its own -- a `groupdispatch` run
+/// with the row ambient, an `immediate` method run at once, a research that
+/// jumps the queue, an ordinary order through the order insert, a train row
+/// never replacing -- and so is the commanded flag it raises on every unit.
+/// The cost is charged there, by the accept test, as for a player's press:
+/// the shipped AI's `SpentGoldOnArmy` beside the call is a counter of its
+/// own, not a payment.
+///
+/// **The fourth argument is `replace`**, which `GROUP_UNITSOUT.VS` names for us:
+/// it forwards its own parameters as `l.ExecDefaultCmd(pt, obj, bReplace,
+/// bModifier)`. Every shipped site passes `false`.
 HostOutcome exec_cmd_impl(CallContext& ctx) {
   Receivers targets = receivers_of(ctx, /*accept_query=*/false);
   if (!targets.ok()) return HostOutcome::failed(targets.error);
   const CallerScope caller(*targets.commands, ctx.script);
   if (ctx.count() < 2 || !ctx.arg(1).is_string()) return HostOutcome::failed(kNoVerb);
+  World& world = *targets.world;
+  const ReceiverForm form = receiver_form(ctx.arg(0));
+  std::int32_t player_arg = 0;  // `ObjList::ExecCmd` passes -1, plus one
+  if (form == ReceiverForm::object) {
+    if (targets.ids.empty() || dead(world, targets.ids.front())) return HostOutcome::ok_void();
+    const ObjectState* state = world.state(targets.ids.front());
+    player_arg = state == nullptr || state->owner == kNoPlayer
+                     ? 0
+                     : static_cast<std::int32_t>(state->owner) + 1;
+  }
   const CommandDef* def = targets.commands->table().find(ctx.arg(1).as_string());
-  if (def == nullptr) return HostOutcome::ok_with(Value::boolean(false));
-
-  // `Obj::ExecCmd` (0x005b5470) and `ObjList::ExecCmd` (0x0055e240) both reach
-  // the per-object issue 0x004ef3d0, which masks the flag off for a
-  // `traincommand="yes"` row (0x004efbbb): a train row appends even when told
-  // to replace. No shipped site asks, and `issue_order` does the same.
-  const bool replace = ctx.count() > 4 && ctx.arg(4).truthy_scalar() && !def->train_command;
-  Command prototype;
-  // The object argument wins over the point when both are given: a command with
-  // a target ("enter", "capture") is aimed at the object, and the shipped sites
-  // pass a dummy point beside it.
-  if (ctx.count() > 3 && object_of(ctx.arg(3)) != kNoObject) {
-    prototype.arg_kind = CommandArgKind::object;
-    prototype.object = object_of(ctx.arg(3));
-  } else if (ctx.count() > 2 && is_point(ctx.arg(2))) {
-    prototype.arg_kind = CommandArgKind::point;
-    prototype.point = unpack_point(ctx.arg(2));
-  }
-  prototype.param = def->param;
-  prototype.name = def->name;
-  prototype.cost_gold = def->cost_gold;
-  prototype.cost_food = def->cost_food;
-  prototype.cost_pop = def->cost_pop;
-  prototype.cost_stamina = def->cost_stamina;
-  prototype.delay = def->exec_delay;
-
-  for (const ObjectId id : targets.ids) {
-    if (replace) {
-      targets.commands->set_command(*targets.world, id, def->method, prototype);
-    } else {
-      targets.commands->append_order(*targets.world, id, def->method, prototype);
-    }
-  }
-  return HostOutcome::ok_with(Value::boolean(true));
+  if (def == nullptr) return HostOutcome::ok_void();
+  const Point point = ctx.count() > 2 && is_point(ctx.arg(2)) ? unpack_point(ctx.arg(2)) : Point{};
+  const ObjectId object = ctx.count() > 3 ? object_of(ctx.arg(3)) : kNoObject;
+  const bool replace = ctx.count() > 4 && ctx.arg(4).truthy_scalar();
+  (void)targets.commands->issue(world, targets.ids, *def, point, object, replace,
+                                /*modifier=*/false, player_arg, /*user=*/false);
+  return HostOutcome::ok_void();
 }
 
-/// `GetCanExecCmd(name)`: the row exists, this object's class binds its method,
-/// and nothing has taken the command away. One site, on a unit, for
-/// "build_catapult".
+/// `ObjList::GetCanExecCmd(name)` -> `ObjList`: the members the row is
+/// enabled for. One site, `BUILD_CATAPULT_VERIFY.VS`'s
+/// `builders = _GetSelection().GetCanExecCmd("build_catapult");`.
 ///
-/// **The third clause is the original's own.** 0x00560461, inside
-/// `ObjList::GetCanExecCmd` (0x00560300), calls the object's `vtbl+0xd8` -- the
-/// predicate that reads `[obj+0x9c]` and then walks the disabled list at
-/// `[obj+0x78]`. `CommandSystem::command_enabled` is that predicate, and this
-/// is one of its two shipped readers; the other is the interface's own button
-/// availability (0x005e787b), which `CommandBar` now asks it of every selected
-/// object.
+/// 0x00560300 makes a new list, looks the row's index up by name (a negative
+/// one leaves the list empty), and appends every member whose `vtbl+0xd8`
+/// accepts that index (0x00560461) -- `CommandSystem::command_enabled`, the
+/// whole-object flag then the disabled set. **It does not ask whether the
+/// class binds the row's method**; that is the issue's question, not this
+/// one's. The list is the calling script's temporary. This used to answer a
+/// bool for a single object, which is neither the receiver nor the answer the
+/// one shipped site is written for.
 HostOutcome get_can_exec_cmd_impl(CallContext& ctx) {
-  const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  Receivers targets = receivers_of(ctx);
+  if (!targets.ok()) return HostOutcome::failed(targets.error);
   if (ctx.count() < 2 || !ctx.arg(1).is_string()) return HostOutcome::failed(kNoVerb);
-  const CommandDef* def = self.commands->table().find(ctx.arg(1).as_string());
-  if (def == nullptr) return HostOutcome::ok_with(Value::boolean(false));
-  if (!self.commands->command_enabled(*self.world, self.id, def->name)) {
-    return HostOutcome::ok_with(Value::boolean(false));
+  World& world = *targets.world;
+  ObjListPool& pool = objlist_pool_of(world);
+  const ObjListId list = pool.acquire_temporary(ctx.script);
+  const CommandDef* def = targets.commands->table().find(ctx.arg(1).as_string());
+  if (def != nullptr) {
+    if (std::vector<ObjectId>* items = pool.mutable_items(list)) {
+      for (const ObjectId id : targets.ids) {
+        if (targets.commands->command_enabled(world, id, def->name)) items->push_back(id);
+      }
+    }
   }
-  return HostOutcome::ok_with(
-      Value::boolean(!self.commands->script_for(*self.world, self.id, def->method).empty()));
+  return HostOutcome::ok_with(make_objlist_value(list));
 }
 
 /// `Obj::CmdDisable(name)` -- 2 sites, and with `Unit::AddBonus` it finishes
@@ -1903,10 +1914,14 @@ HostOutcome get_cmd_cost_impl(CallContext& ctx) {
   CommandSystem* commands = command_system(*world);
   if (commands == nullptr) return HostOutcome::failed(kNoSystem);
   if (ctx.count() < 3 || !ctx.arg(0).is_string()) return HostOutcome::failed(kNoVerb);
+  // 0x00425630: the row by name (the registry's `+0x14`); a miss answers false
+  // and **writes neither argument**, which keep what the caller had in them.
+  // A hit writes `costfood` (`[def+0x1ec]`) and `costgold` (`[def+0x1e8]`).
   const CommandDef* def = commands->table().find(ctx.arg(0).as_string());
-  ctx.out(1) = Value::integer(def == nullptr ? 0 : def->cost_gold);
-  ctx.out(2) = Value::integer(def == nullptr ? 0 : def->cost_food);
-  return HostOutcome::ok_with(Value::boolean(def != nullptr));
+  if (def == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  ctx.out(1) = Value::integer(def->cost_gold);
+  ctx.out(2) = Value::integer(def->cost_food);
+  return HostOutcome::ok_with(Value::boolean(true));
 }
 
 /// `GetCmdStaminaCost(name)` -> `<cmd coststamina>`. 42 sites, all druid and

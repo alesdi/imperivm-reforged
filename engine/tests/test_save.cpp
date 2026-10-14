@@ -1288,16 +1288,16 @@ TEST(save_command_section_refuses_a_malformed_disabled_set) {
   writer.queue(7).entries.push_back(Command{});
   std::vector<std::byte> base;
   writer.serialize(base);
-  // The section ends with the disabled-set count and then the finishing
-  // list's count, and this system has neither.
-  REQUIRE(base.size() > 8);
-  base.resize(base.size() - 8);
+  // The section ends with the disabled-set count, the finishing list's count
+  // and the commanded set's count, and this system has none of them.
+  REQUIRE(base.size() > 12);
+  base.resize(base.size() - 12);
 
   const auto with_tail = [&base](const std::vector<std::byte>& tail) {
     std::vector<std::byte> out = base;
     out.insert(out.end(), tail.begin(), tail.end());
-    // No command is finishing.
-    for (int i = 0; i < 4; ++i) out.push_back(std::byte{0});
+    // No command is finishing, and no unit is commanded.
+    for (int i = 0; i < 8; ++i) out.push_back(std::byte{0});
     return out;
   };
   const auto u32 = [](std::vector<std::byte>& out, std::uint32_t value) {
