@@ -141,9 +141,14 @@ struct Bench {
   /// the nodes; the others run with no ground at all, as they always have.
   OwnedGrid terrain;
   OwnedGrid pass;
+  /// With `with_relief`: a plateau at 115, and the templates' own ground --
+  /// a patch of roads under each template's town -- so that a template laid
+  /// levels and slopes the map.
+  OwnedGrid height;
+  OwnedGrid pack;
   std::unique_ptr<GameSession> session;
 
-  explicit Bench(std::string_view map = kMap, bool with_ground = false) {
+  explicit Bench(std::string_view map = kMap, bool with_ground = false, bool with_relief = false) {
     const char* names[] = {"a.sc.xml", "b.sc.xml", "c.sc.xml", "d.sc.xml", "e.sc.xml",
                            "f.sc.xml", "g.sc.xml", "h.sc.xml", "i.sc.xml", "j.sc.xml",
                            "k.sc.xml", "l.sc.xml", "m.sc.xml", "n.sc.xml", "o.sc.xml"};
@@ -167,6 +172,26 @@ struct Bench {
       pass = std::move(clear.value());
       inputs.terrain = terrain.bytes();
       inputs.passability = pass.bytes();
+    }
+    if (with_relief) {
+      auto plateau = OwnedGrid::create(32, 8, 8192, 8192);
+      REQUIRE(plateau.ok());
+      (void)plateau->grid().fill(115);
+      height = std::move(plateau.value());
+      auto ground = OwnedGrid::create(64, 8, 16384, 16384);
+      REQUIRE(ground.ok());
+      (void)ground->grid().fill(15);  // unpainted: the map shows through
+      // Roads under the Carthaginian town (5000, 5000), a 5 x 5 patch of
+      // 64-unit cells, and under the Gaul one (9000, 9000), 9 x 9: a template
+      // lands centred on the placeholder, so only the footprints differ.
+      for (const auto [at, r] : {std::pair{78u, 2u}, std::pair{140u, 4u}}) {
+        for (std::uint32_t y = at - r; y <= at + r; ++y) {
+          for (std::uint32_t x = at - r; x <= at + r; ++x) (void)ground->grid().set_cell(x, y, 7);
+        }
+      }
+      pack = std::move(ground.value());
+      inputs.height = height.bytes();
+      inputs.settlement_template_terrain = pack.bytes();
     }
     auto made = GameSession::create(registry, inputs, /*seed=*/1);
     REQUIRE(made.ok());
@@ -650,6 +675,44 @@ TEST(a_razed_town_hall_leaves_its_node_where_it_stood_across_a_save) {
   const auto resaved = again.session->save();
   REQUIRE(resaved.ok());
   CHECK(resaved.value() == saved.value());
+}
+
+/// A load lays the save's templates over the map's own ground, not over a
+/// started match's. The app and `imsave` start a match and then load, and
+/// laying a second time over ground the limiter already sloped left cells a
+/// step off -- nine on Island War, one under a gate, so a script asking for
+/// that gate's point after a load was sent five units from where the game
+/// that saved would have sent it.
+TEST(a_load_into_a_started_match_lays_the_saves_ground_once) {
+  Bench b(kMap, /*with_ground=*/true, /*with_relief=*/true);
+  b.start(static_cast<std::int32_t>(Race::carthage));
+  const auto saved = b.session->save();
+  REQUIRE(saved.ok());
+
+  // The session loaded into started its own match as Gaul, so its own
+  // templates' ground -- levelled and sloped under a Gaul town -- is down
+  // before the load, which must take it all away.
+  Bench again(kMap, /*with_ground=*/true, /*with_relief=*/true);
+  again.start(static_cast<std::int32_t>(Race::gaul));
+  {
+    const Grid& want = b.world().height();
+    const Grid& got = again.world().height();
+    std::size_t off = 0;
+    for (std::uint32_t y = 0; y < want.height(); ++y) {
+      for (std::uint32_t x = 0; x < want.width(); ++x) off += want.cell(x, y) != got.cell(x, y);
+    }
+    REQUIRE(off > 0);  // the two matches laid different ground
+  }
+  REQUIRE(again.session->load(saved.value()).ok());
+  const Grid& want = b.world().height();
+  const Grid& got = again.world().height();
+  REQUIRE(want.width() == got.width());
+  REQUIRE(want.height() == got.height());
+  std::size_t off = 0;
+  for (std::uint32_t y = 0; y < want.height(); ++y) {
+    for (std::uint32_t x = 0; x < want.width(); ++x) off += want.cell(x, y) != got.cell(x, y);
+  }
+  CHECK(off == 0);
 }
 
 /// The nodes a save carries are checked before they are adopted: an area the

@@ -130,6 +130,14 @@ struct GameSession::Impl : ScriptLibrary, ClassHookRunner {
   /// The decoration layer over `decor`, writable, for the templates'
   /// bulldozer; empty when the map has none.
   Grid decor_grid;
+  /// The three layers as the map ships them, before any template laid its
+  /// ground: what `load` puts back before it lays the save's stamps.
+  std::vector<std::byte> shipped_terrain;
+  std::vector<std::byte> shipped_height;
+  std::vector<std::byte> shipped_decor;
+  /// `terrain`, `height` and `decor` back to the shipped bytes, in place --
+  /// the world's grids and `decor_grid` view those buffers.
+  void restore_shipped_layers();
   std::vector<std::byte> terrain_table;
   std::vector<std::byte> decor_table;
   PassMaskResolver* masks = nullptr;
@@ -468,6 +476,9 @@ Result<std::unique_ptr<GameSession>> GameSession::create(const script::HostRegis
   impl.settlement_templates.assign(inputs.settlement_templates.begin(),
                                    inputs.settlement_templates.end());
   impl.decor.assign(inputs.decor.begin(), inputs.decor.end());
+  impl.shipped_terrain = impl.terrain;
+  impl.shipped_height = impl.height;
+  impl.shipped_decor = impl.decor;
   if (!impl.decor.empty()) {
     if (const Result<Grid> parsed = Grid::parse_mutable(impl.decor); parsed.ok()) impl.decor_grid = parsed.value();
   }
@@ -889,6 +900,13 @@ bool GameSession::Impl::rebuild_passability(const edit::WorldRect& rect, Passabi
   report.rebuilt = true;
   report.cells_changed += changed;
   return true;
+}
+
+void GameSession::Impl::restore_shipped_layers() {
+  // Same sizes by construction: nothing resizes a layer after `create`.
+  std::copy(shipped_terrain.begin(), shipped_terrain.end(), terrain.begin());
+  std::copy(shipped_height.begin(), shipped_height.end(), height.begin());
+  std::copy(shipped_decor.begin(), shipped_decor.end(), decor.begin());
 }
 
 void GameSession::Impl::lay_template_ground(std::span<const TemplateStamp> stamps) {
@@ -1600,6 +1618,14 @@ Status GameSession::load(std::span<const std::byte> bytes, std::string_view map,
       if (out != nullptr) *out = std::move(summary);
       return Status(FormatError::malformed);
     }
+    // Over the map's own layers, not over what this session already laid: a
+    // session that started a match before loading -- the app's and
+    // `imsave`'s order -- has its own templates' ground down, and laying the
+    // save's on top is laying twice. The copy is idempotent but the slope
+    // limiter is not: run over ground it already sloped, it leaves a few
+    // cells a step off (Island War: nine height cells, one of them under a
+    // town's gate, so `GetEnterExit` answered 5 units off after a load).
+    impl.restore_shipped_layers();
     impl.ground = GroundReport{};
     impl.lay_template_ground(stamps);
     impl.materialised.stamps = std::move(stamps);
