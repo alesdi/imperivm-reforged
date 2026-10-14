@@ -1,4 +1,5 @@
-// `Unit::CanAttack`: which units may strike which things at all.
+// `Unit::CanAttack`: which units may strike which things at all -- and, last,
+// `InRange`, whether one is near enough to, measured where the two stand now.
 // sim/combat.hpp's `CombatSystem::unit_can_attack` has the rule and its
 // addresses; playtest #24 (docs/plan.html) was a swordsman hitting a fort.
 //
@@ -292,4 +293,31 @@ TEST(unit_can_attack_follows_the_originals_table) {
 
   // A building attacker is not this rule's: the engine may still be aimed.
   CHECK(b.combat.order_attack(engine, sword));
+}
+
+/// **`InRange` measures where the two stand now**, as `GotoAttack` does. A
+/// combatant's `position` is copied from the world once a turn, and a script
+/// runs after movement has stepped the units; measuring the copy, a priest on
+/// Balcans was told by `GotoAttack` that it had arrived and by `InRange` that
+/// it was out of range, and `EPRIEST_IDLE.VS` looped between the two until its
+/// instruction budget ran out (the seventh round's war pass).
+TEST(in_range_measures_where_the_two_stand_now) {
+  Bench b(false);
+  const ObjectId archer = b.unit("Archer", Point{1000, 1000});
+  const ObjectId foe = b.unit("Swordsman", Point{1300, 1000}, kThem);
+  b.world.start();
+  b.run(1);
+  REQUIRE(b.combat.find(foe) != nullptr);
+  CHECK(b.call("InRange", archer, foe).value.as_integer() == 1);
+
+  // Out of reach (500 + 15 + 15) since the turn began; combat's copy is not.
+  b.world.set_position(foe, Point{2000, 1000});
+  REQUIRE(b.combat.find(foe)->position.x == 1300);
+  CHECK(b.call("InRange", archer, foe).value.as_integer() == 0);
+
+  // And back within it, the copy still where the turn left it.
+  b.run(1);
+  b.world.set_position(foe, Point{1300, 1000});
+  REQUIRE(b.combat.find(foe)->position.x == 2000);
+  CHECK(b.call("InRange", archer, foe).value.as_integer() == 1);
 }

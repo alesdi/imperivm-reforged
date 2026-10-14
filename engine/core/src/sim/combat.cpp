@@ -2281,13 +2281,28 @@ HostOutcome host_is_enemy(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(ok));
 }
 
+/// `InRange(target)`, measured where the two stand now. A combatant's
+/// `position` is the copy taken from the world at the start of the turn, and a
+/// script runs after movement has stepped its units, so a target that walked
+/// during the turn was measured where it had been. `GotoAttack` measures the
+/// same band from the world's live positions (`run_goto`), so the two could
+/// disagree inside one script run: on Balcans an `EPRIEST_IDLE.VS` priest was
+/// told it had arrived by `GotoAttack` and that it was out of range by
+/// `InRange`, and looped between them until its instruction budget ran out.
+/// The original keeps one position per object, which both read.
 HostOutcome host_in_range(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const Combatant* a = combat->find(id_of(ctx.arg(0)));
   const Combatant* d = combat->find(id_of(ctx.arg(1)));
-  const bool ok = a != nullptr && d != nullptr && combat->in_attack_range(*a, *d);
-  return HostOutcome::ok_with(Value::boolean(ok));
+  if (a == nullptr || d == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  Combatant attacker = *a;
+  Combatant defender = *d;
+  if (World* world = world_of(ctx); world != nullptr && combat->world_bound()) {
+    if (world->state(attacker.id) != nullptr) attacker.position = world->resolve_position(attacker.id);
+    if (world->state(defender.id) != nullptr) defender.position = world->resolve_position(defender.id);
+  }
+  return HostOutcome::ok_with(Value::boolean(combat->in_attack_range(attacker, defender)));
 }
 
 /// `SetExperienceModifier(player, percent)` -- 1 site, and one third of what
