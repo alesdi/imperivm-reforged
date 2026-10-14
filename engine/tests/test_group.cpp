@@ -2704,6 +2704,10 @@ TEST(place_catapult_reveals_the_site_to_the_build_sight) {
   REQUIRE(out.status == script::HostStatus::ok);
   REQUIRE(PlaceFixture::id_of(out.value) != kNoObject);
   CHECK(fog.map().explored(Point{4000, 4000}, mine));
+  // And the placing player's env scope says so (0x004e3d7a): the flag the
+  // tutorial's `EnvReadInt(playerid, "CatapultBuilt")` waits on.
+  CHECK(env.env().read_int(EnvScope::for_player(3), "CatapultBuilt") == 1);
+  CHECK(env.env().read_int(EnvScope::for_player(4), "CatapultBuilt") == 0);
   CHECK(fog.map().explored(Point{4000, 6500}, mine));    // within 3000
   CHECK(!fog.map().explored(Point{4000, 7800}, mine));   // past it
   CHECK(!fog.map().explored(Point{4000, 4000}, theirs));

@@ -928,8 +928,12 @@ HostOutcome fn_place(CallContext& ctx) {
 /// `vtbl + 0x98`: an engine under construction, at one point of health, for
 /// the builders to raise. **No bounds test** on the point, unlike `Place`; and
 /// the `CVXCatapult` constructor leaves it unbuilt, which is what
-/// `ObjectFlags::built` defaults to. The handle is read from `word [obj+8]`
-/// and 0xffff answers a creation that failed.
+/// `ObjectFlags::built` defaults to. Between the two it builds the engine's
+/// own settlement (0x00541980; see `place_catapult`), and last it writes `1`
+/// to the env registry under `/<map>/Player<n>/CatapultBuilt`, `n` the
+/// script's player number -- the flag `BUILDINGSADVICE5.VS` polls with
+/// `EnvReadInt(playerid, "CatapultBuilt")`. The handle is read from `word
+/// [obj+8]` and 0xffff answers a creation that failed.
 ///
 /// The reveal is the one step reproduced by a different mechanism: this
 /// engine's `SetPos` does not explore, its fog is stamped by `FogSystem`, so
@@ -6044,6 +6048,12 @@ ObjectId place_catapult(World& world, ClassIndex class_index, Point at, std::int
       const SettlementId town = economy->create(world, init);
       if (town != kNoSettlement) (void)economy->add_building(world, town, id, init.anchor_max_health);
     }
+  }
+  // The last thing 0x004e3be0 does: `1` into the player's env scope under
+  // `CatapultBuilt` (0x004e3d7a..0x004e3da1, `/%s/Player%d/%s` with the
+  // script's 1-based number). `BUILDINGSADVICE5.VS` waits on exactly that.
+  if (EnvSystem* env = env_of(world); env != nullptr) {
+    env->env().write_int(EnvScope::for_player(player), "CatapultBuilt", 1);
   }
   return id;
 }
