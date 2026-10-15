@@ -2475,6 +2475,10 @@ HostOutcome count_class_impl(CallContext& ctx) {
 ///     it and still has to be indoors for the answer to be yes; a squad merely
 ///     *coming* is not here yet and is not asked about. `Count/3` masks with 4
 ///     and `BestTargetInGAIKA` with 6, so the family really does use both.
+///   * between the presence and the mask the asker's sight of an enemy is
+///     applied (0x0044eb80 at 0x00430f9c, `seen_enemy_presence`), and it
+///     **cannot cross the mask**: it turns leaving into staying (both in 6)
+///     or coming into nothing (neither in 6), so it is not called here;
 ///   * `SF_PEACEFUL` **is** skipped here: 0x00430f73 passes 0 as the classifier's
 ///     third argument where `Count/3` passes 1. Wildlife in the open does not
 ///     stop a siege.
@@ -2546,7 +2550,7 @@ HostOutcome all_enemies_in_holder_impl(CallContext& ctx) {
   for (const Squad& squad : heroes->squads().squads()) {
     if (squad.eval == 0) continue;
     if ((squad_relation(players, player, squad) & kAiEnemy) == 0) continue;
-    if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
+    // A peaceful squad is refused by `squad_presence` (0x0044e1f0 with 0).
     if ((squad_presence(node, squad) & kHereAtAll) == 0) continue;
     if (squad.members.empty()) continue;
     const WorldObject* first = world->find(squad.members.front());
@@ -3589,9 +3593,11 @@ HostOutcome nearest_hospital_impl(CallContext& ctx) {
 /// meet on shipped data, where `min` is well under 50.
 ///
 /// The second is the **hero's effective level** (`vtbl+0x114`, the slot
-/// `effective_level_of` reads for `AttackSetForTraining`): `level / 10 + 1`,
-/// truncating toward zero as the `imul`-by-0x66666667 sequence does. The two
-/// multiply.
+/// `effective_level_of` reads for `AttackSetForTraining`): **`level / 5 + 1`**,
+/// truncating toward zero -- 0x00424633 multiplies by 0x66666667 and shifts
+/// the high half right by **one**, which is a fifth; this read it as a tenth,
+/// which takes a second shift. The two multiply. The level is read even on a
+/// refusal (0x0042462b), whose score is 0 whatever it is.
 HostOutcome eval_attach_impl(CallContext& ctx) {
   const auto zero = HostOutcome::ok_with(Value::integer(0));
   Self self = resolve(ctx);
@@ -3614,7 +3620,7 @@ HostOutcome eval_attach_impl(CallContext& ctx) {
 
   const std::int32_t standing = n >= min ? n - min + 1 : n - min + 100;
   const std::int32_t level = effective_level_of(world, hero->id);
-  return HostOutcome::ok_with(Value::integer((level / 10 + 1) * standing));
+  return HostOutcome::ok_with(Value::integer((level / 5 + 1) * standing));
 }
 
 /// `int sq.FoodComing` and `bool sq.SendFoodWagon(amount, range)` -- one site

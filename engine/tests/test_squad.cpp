@@ -1322,18 +1322,19 @@ TEST(eval_attach_scores_a_heros_squad_by_its_standing_against_min_and_its_level)
     return out.value.is_integer() ? out.value.as_integer() : -1;
   };
 
-  // Five bodies against a floor of 5: standing 1; level 23 is a factor of 3.
-  CHECK(eval(hero, 5) == 3);
+  // Five bodies against a floor of 5: standing 1; level 23 is a factor of
+  // 23 / 5 + 1 = 5 (0x00424633: `imul 0x66666667`, `sar 1` -- a fifth).
+  CHECK(eval(hero, 5) == 5);
   // Against a floor of 2: three over, standing 4.
-  CHECK(eval(hero, 2) == 12);
+  CHECK(eval(hero, 2) == 20);
   // Short of a floor of 8 by three: 100 less the shortfall, 97.
-  CHECK(eval(hero, 8) == 97 * 3);
-  // The level factor truncates: 29 is still 3, 30 is 4, 9 is 1.
-  CHECK(f.heroes.set_level(hero, 29));
-  CHECK(eval(hero, 5) == 3);
-  CHECK(f.heroes.set_level(hero, 30));
-  CHECK(eval(hero, 5) == 4);
-  CHECK(f.heroes.set_level(hero, 9));
+  CHECK(eval(hero, 8) == 97 * 5);
+  // The level factor truncates: 24 is still 5, 25 is 6, 4 is 1.
+  CHECK(f.heroes.set_level(hero, 24));
+  CHECK(eval(hero, 5) == 5);
+  CHECK(f.heroes.set_level(hero, 25));
+  CHECK(eval(hero, 5) == 6);
+  CHECK(f.heroes.set_level(hero, 4));
   CHECK(eval(hero, 5) == 1);
 
   // **Bound elsewhere is 0**, and `AIDest` falls back to `DestGAIKA` on
