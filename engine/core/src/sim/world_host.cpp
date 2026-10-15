@@ -6520,6 +6520,8 @@ constexpr Cardinal kCardinals[] = {
 
 }  // namespace
 
+void erase_object(CallContext& ctx, World& world, ObjectId id) { erase_one(ctx, world, id); }
+
 std::int32_t object_max_health(World& world, const WorldObject& slot) {
   return max_health_of_object(world, slot);
 }

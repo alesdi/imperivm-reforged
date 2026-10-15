@@ -2068,48 +2068,144 @@ void sync_to_world(CallContext& ctx, const CombatSystem& combat, ObjectId id) {
   }
 }
 
+/// A world object the combat system does not hold, or null.
+///
+/// `gbr.exe` gives every object the same health and stamina fields and the
+/// same generic virtuals: `+0x98` and `+0x9c` store health and stamina raw
+/// (0x005a7a00, 0x005a7a30), `+0xa8` is the damage routine (0x005a7720),
+/// `+0xb0` the base death (0x005b16f0). So `Mist` and `CoverOfMercy`
+/// (`CVXScriptObj`, `CVXAreaEffect`) take `SetStamina`, `Heal` and `Damage`
+/// like a soldier does: `DRUID_MIST.VS` gives its mist `SetStamina(10)`,
+/// `MIST_IDLE.VS` runs while that stamina lasts, and `SUMMONING_BEHAVIOR.VS`
+/// counts it down and ends the object with `Damage(health)`. This engine
+/// registers neither class as a combatant (`is_combat_object`), so the
+/// mutators below fall back to the world object's own `ObjectState` for it.
+[[nodiscard]] WorldObject* script_object(CallContext& ctx, const CombatSystem& combat,
+                                         ObjectId id) {
+  if (combat.find(id) != nullptr) return nullptr;
+  World* world = world_of(ctx);
+  if (world == nullptr) return nullptr;
+  WorldObject* slot = world->find(id);
+  if (slot == nullptr || slot->internal != InternalKind::none) return nullptr;
+  return slot;
+}
+
+/// The unit health store, `vtbl+0x98` on a unit (0x005d3a80): when the value
+/// changes and reaches the unit's maximum, the disease bit (`[unit+0x194] &
+/// 2`) is cleared and its effect handle dropped. `Heal` and `SetHealth`
+/// reach it; the bit is `ObjectFlags::diseased`.
+void cure_at_full_health(CallContext& ctx, const CombatSystem& combat, ObjectId id,
+                         std::int32_t before) {
+  const Combatant* unit = combat.find(id);
+  World* world = world_of(ctx);
+  if (unit == nullptr || world == nullptr || unit->health == before) return;
+  if (unit->health < combat.max_health_of(*unit)) return;
+  if (ObjectState* state = world->mutable_state(id); state != nullptr) {
+    state->flags.diseased = false;
+  }
+}
+
+/// `Damage(n)` -- 60 sites. `Obj::Damage` (0x005ab5d0) answers a bool.
+///
+/// An invalid receiver logs and answers **true**. A negative `n` logs
+/// ("Negative damage in function 'Obj::Damage'") and answers false, changing
+/// nothing -- a log line, not a script error. A building runs its fire points
+/// first (0x004e0fd0, visual). Then the damage routine (0x005a7720): an
+/// object already dead answers true and is left alone; otherwise `n` is
+/// clamped to the health left, the new health stored, and an object now dead
+/// goes through its death virtual; the answer is whether it is dead now. No
+/// attacker is credited. The ambient-civilian immunity (`[obj+0x2c] &
+/// 0x4000000`, answer 0) is not modelled: the engine carries no such bit and
+/// no shipped script damages a villager.
 HostOutcome host_damage(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const std::int32_t amount = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  // The original refuses this: "Negative damage in function 'Obj::Damage'".
-  if (amount < 0) return HostOutcome::failed("Negative damage in function 'Obj::Damage'");
   const ObjectId victim = id_of(ctx.arg(0));
-  // `system_of` found the system *through* the world, so a non-null system
-  // means a non-null world. No second guard, for the reason `hit`'s `onkill`
-  // fire gives: a branch nothing can reach is a claim this engine is not
-  // making.
-  combat->apply_damage(*world_of(ctx), victim, amount);
+  World& world = *world_of(ctx);
+  if (world.find(victim) == nullptr && combat->find(victim) == nullptr) {
+    return HostOutcome::ok_with(Value::boolean(true));
+  }
+  if (amount < 0) return HostOutcome::ok_with(Value::boolean(false));
+  if (WorldObject* slot = script_object(ctx, *combat, victim); slot != nullptr) {
+    if (object_is_dead(*slot)) return HostOutcome::ok_with(Value::boolean(true));
+    const std::int32_t left = slot->state.health > amount ? slot->state.health - amount : 0;
+    (void)world.set_health(victim, left);
+    if (left > 0) return HostOutcome::ok_with(Value::boolean(false));
+    // The base death, 0x005b16f0: health 0, `ondie`, off the map, deleted.
+    erase_object(ctx, world, victim);
+    return HostOutcome::ok_with(Value::boolean(true));
+  }
+  combat->apply_damage(world, victim, amount);
   sync_to_world(ctx, *combat, victim);
-  return HostOutcome::ok_void();
+  const Combatant* after = combat->find(victim);
+  const bool dead = after == nullptr || !combat->is_alive(victim) ||
+                    after->action == Action::dying || after->health <= 0;
+  return HostOutcome::ok_with(Value::boolean(dead));
 }
 
+/// `Heal(n)` -- 45 sites. `Obj::Heal` (0x005ab690): an invalid receiver logs;
+/// a negative `n` logs and changes nothing; otherwise health becomes
+/// `min(health + n, maxhealth)` through the health store. The original has no
+/// dead check -- it writes a corpse's health too; this engine keeps
+/// `CombatSystem::heal`'s refusal of a dying unit, whose health is the dying
+/// state's own business here.
 HostOutcome host_heal(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const std::int32_t amount = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
+  if (amount < 0) return HostOutcome::ok_void();
   const ObjectId patient = id_of(ctx.arg(0));
+  if (WorldObject* slot = script_object(ctx, *combat, patient); slot != nullptr) {
+    World& world = *world_of(ctx);
+    const std::int64_t raised = static_cast<std::int64_t>(slot->state.health) + amount;
+    const std::int32_t cap = object_max_health(world, *slot);
+    (void)world.set_health(patient, static_cast<std::int32_t>(raised > cap ? cap : raised));
+    return HostOutcome::ok_void();
+  }
+  const std::int32_t before = combat->health(patient);
   combat->heal(patient, amount);
+  cure_at_full_health(ctx, *combat, patient, before);
   sync_to_world(ctx, *combat, patient);
   return HostOutcome::ok_void();
 }
 
+/// `SetHealth(n)` -- `Obj::SetHealth` (0x005ab4e0) stores `n` raw through the
+/// health store: no clamp, and no death even at 0.
 HostOutcome host_set_health(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
+  const ObjectId id = id_of(ctx.arg(0));
+  if (!ctx.arg(1).is_integer()) return HostOutcome::ok_void();
+  if (WorldObject* slot = script_object(ctx, *combat, id); slot != nullptr) {
+    (void)world_of(ctx)->set_health(id, ctx.arg(1).as_integer());
+    return HostOutcome::ok_void();
+  }
+  Combatant* unit = combat->find(id);
   if (unit == nullptr) return HostOutcome::ok_void();
-  unit->health = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : unit->health;
-  sync_to_world(ctx, *combat, unit->id);
+  const std::int32_t before = unit->health;
+  unit->health = ctx.arg(1).as_integer();
+  cure_at_full_health(ctx, *combat, id, before);
+  sync_to_world(ctx, *combat, id);
   return HostOutcome::ok_void();
 }
 
+/// `SetStamina(n)` -- `Obj::SetStamina` (0x005ab440) stores `n` raw through
+/// `vtbl+0x9c`: no clamp, no dead check.
 HostOutcome host_set_stamina(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
+  const ObjectId id = id_of(ctx.arg(0));
+  if (!ctx.arg(1).is_integer()) return HostOutcome::ok_void();
+  if (WorldObject* slot = script_object(ctx, *combat, id); slot != nullptr) {
+    if (ObjectState* state = world_of(ctx)->mutable_state(id); state != nullptr) {
+      state->stamina = ctx.arg(1).as_integer();
+    }
+    return HostOutcome::ok_void();
+  }
+  Combatant* unit = combat->find(id);
   if (unit == nullptr) return HostOutcome::ok_void();
-  unit->stamina = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : unit->stamina;
+  unit->stamina = ctx.arg(1).as_integer();
   sync_to_world(ctx, *combat, unit->id);
   return HostOutcome::ok_void();
 }
@@ -2145,13 +2241,27 @@ HostOutcome host_heal_stamina(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const std::int32_t amount = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  // Before the receiver is even resolved, as in the original: the sign test at
-  // 0x005ab72c comes after the receiver check but nothing between them has an
-  // effect, and refusing early makes the no-op unmistakable.
-  if (amount < 0) return HostOutcome::ok_void();
+  // The single form refuses a negative amount (0x005ab72c); the group form,
+  // `Query::HealStamina` (0x00579100), has no sign test but skips its dead
+  // members, and refreshes the query first.
+  const HostContext* context = host_context_of(ctx);
+  const bool single = ctx.arg(0).is_object() && context != nullptr &&
+                      ctx.arg(0).as_object().type == context->object_type;
+  if (single && amount < 0) return HostOutcome::ok_void();
   for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+    if (single) {
+      if (WorldObject* slot = script_object(ctx, *combat, id); slot != nullptr) {
+        const std::int32_t cap = class_int(*world, *slot, "maxstamina");
+        const std::int64_t raised = static_cast<std::int64_t>(slot->state.stamina) + amount;
+        slot->state.stamina = static_cast<std::int32_t>(raised > cap ? cap : raised);
+        continue;
+      }
+    }
     Combatant* unit = combat->find(id);
     if (unit == nullptr) continue;
+    if (!single && (!combat->is_alive(id) || unit->action == Action::dying || unit->health <= 0)) {
+      continue;
+    }
     const std::int32_t max = combat->max_stamina_of(*unit);
     const std::int64_t raised = static_cast<std::int64_t>(unit->stamina) + amount;
     unit->stamina = static_cast<std::int32_t>(raised > max ? max : raised);

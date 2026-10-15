@@ -1729,11 +1729,17 @@ TEST(the_combat_host_slice_is_defined_and_reaches_the_system) {
   CHECK(call("InRange", 1, {me, them}).value.as_integer() == 1);
   CHECK(call("BestTargetInSquadSight", 0, {me}).value.as_object().id == 2);
 
-  call("Damage", 1, {them, Value::integer(50)});
+  // `Damage` answers whether the object is dead now (0x005ab5d0).
+  CHECK(call("Damage", 1, {them, Value::integer(50)}).value.as_integer() == 0);
   CHECK(combat.health(2) == 150);
-  // The original refuses negative damage by name; so does this.
+  // The original refuses negative damage by name -- a log line and `false`,
+  // not a script error -- and changes nothing.
   const auto refused = call("Damage", 1, {them, Value::integer(-1)});
-  CHECK(refused.status == imperivm::core::script::HostStatus::error);
+  CHECK(refused.status == imperivm::core::script::HostStatus::ok);
+  CHECK(refused.value.as_integer() == 0);
+  CHECK(combat.health(2) == 150);
+  // An invalid receiver answers true.
+  CHECK(call("Damage", 1, {Value::object(1, 777), Value::integer(5)}).value.as_integer() == 1);
 
   call("Heal", 1, {them, Value::integer(10)});
   CHECK(combat.health(2) == 160);
@@ -3059,6 +3065,7 @@ struct SightBench {
   ClassIndex soldier_class = kNoClass;
   ClassIndex villager_class = kNoClass;
   ClassIndex wall_class = kNoClass;
+  ClassIndex fog_class = kNoClass;
 
   SightBench() {
     // A real graph, because `EnemiesInSight` reads `WorldObject::sight` -- the
@@ -3072,10 +3079,14 @@ struct SightBench {
              <properties sight="120" maxhealth="40"/></class>)",
         R"(<class id="Wall" parent="Object" cpp_class="CVXBuilding">
              <properties sight="300" maxhealth="4000"/></class>)",
+        R"(<class id="Fog" parent="Object" cpp_class="CVXScriptObj">
+             <properties maxhealth="100" maxstamina="0"/></class>)",
     };
-    const char* names[] = {"object.sc.xml", "soldier.sc.xml", "villager.sc.xml", "wall.sc.xml"};
-    for (int i = 0; i < 4; ++i) graph.add(bytes_of(docs[i]), names[i]);
+    const char* names[] = {"object.sc.xml", "soldier.sc.xml", "villager.sc.xml", "wall.sc.xml",
+                           "fog.sc.xml"};
+    for (int i = 0; i < 5; ++i) graph.add(bytes_of(docs[i]), names[i]);
     graph.link();
+    fog_class = graph.find("Fog");
     soldier_class = graph.find("Soldier");
     villager_class = graph.find("Villager");
     wall_class = graph.find("Wall");
@@ -3300,6 +3311,43 @@ TEST(combat_target_accessors_check_what_the_binary_checks) {
       b.call("GetPointOnTarget", 1, {Value::object(1, 999999), Value::object(1, deer)});
   REQUIRE(is_point(orphan.value));
   CHECK((unpack_point(orphan.value) == Point{0, 0}));
+}
+
+/// A script object the combat system does not hold -- a `Mist`, a
+/// `CoverOfMercy` -- takes the generic mutators like any object (0x005a7a00,
+/// 0x005a7a30, 0x005a7720, 0x005b16f0): `SetStamina` stores, `Damage` takes
+/// it to zero and removes it. And a unit's health store (0x005d3a80) cures
+/// its disease when it reaches full health.
+TEST(combat_mutators_reach_script_objects_and_cure_at_full_health) {
+  using imperivm::core::script::Value;
+  SightBench b;
+  const ObjectId fog = b.world.spawn(NativeClass::script_obj, nullptr, b.fog_class);
+  REQUIRE(b.world.set_health(fog, 100));
+  REQUIRE(b.combat.find(fog) == nullptr);
+
+  (void)b.call("SetStamina", 1, {Value::object(1, fog), Value::integer(10)});
+  CHECK(b.world.state(fog)->stamina == 10);
+
+  const auto hurt = b.call("Damage", 1, {Value::object(1, fog), Value::integer(30)});
+  CHECK(hurt.value.as_integer() == 0);
+  CHECK(b.world.state(fog)->health == 70);
+  (void)b.call("Heal", 1, {Value::object(1, fog), Value::integer(500)});
+  CHECK(b.world.state(fog)->health == 100);  // capped at the class maximum
+  const auto ended = b.call("Damage", 1, {Value::object(1, fog), Value::integer(100)});
+  CHECK(ended.value.as_integer() == 1);
+  CHECK(b.world.find(fog) == nullptr);
+
+  const ObjectId sick = b.soldier(0, Point{0, 0});
+  b.world.mutable_state(sick)->flags.diseased = true;
+  (void)b.call("SetHealth", 1, {Value::object(1, sick), Value::integer(150)});
+  CHECK(b.world.state(sick)->flags.diseased);  // not yet full
+  (void)b.call("Heal", 1, {Value::object(1, sick), Value::integer(100)});
+  CHECK(!b.world.state(sick)->flags.diseased);
+
+  // A negative heal changes nothing, not even the clamp.
+  b.combat.find(sick)->health = 999;
+  (void)b.call("Heal", 1, {Value::object(1, sick), Value::integer(-1)});
+  CHECK(b.combat.health(sick) == 999);
 }
 
 /// A hidden enemy is not an enemy in sight.
