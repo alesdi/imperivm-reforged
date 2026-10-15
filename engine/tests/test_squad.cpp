@@ -1706,6 +1706,16 @@ TEST(squadlist_walks_with_a_cursor_the_list_carries) {
   CHECK(squadlist_pool_of(f.world).cursor(list) == 1);
   HostCall size(f.world, {make_squadlist_value(list)});
   CHECK(invoke(registry, CallKind::member, "Size", 0, size).value.as_integer() == 2);
+
+  // **But 0 once the cursor is at the end**: 0x0042bc40 asks `EOL`'s test
+  // (0x00420170) first and answers the count only when it is not at the end.
+  CHECK(!next());
+  HostCall size_at_end(f.world, {make_squadlist_value(list)});
+  CHECK(invoke(registry, CallKind::member, "Size", 0, size_at_end).value.as_integer() == 0);
+  HostCall again(f.world, {make_squadlist_value(list)});
+  CHECK(invoke(registry, CallKind::member, "Rewind", 0, again).value.as_integer() != 0);
+  HostCall size_rewound(f.world, {make_squadlist_value(list)});
+  CHECK(invoke(registry, CallKind::member, "Size", 0, size_rewound).value.as_integer() == 2);
 }
 
 /// An empty list is at its end from the start, and a handle that names nothing

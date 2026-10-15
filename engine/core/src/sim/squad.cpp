@@ -1531,8 +1531,18 @@ HostOutcome size_impl(CallContext& ctx) {
         Value::integer(static_cast<std::int32_t>(world->arrays().size(array_of(self)))));
   }
   if (is_squadlist(self)) {
-    return HostOutcome::ok_with(Value::integer(
-        static_cast<std::int32_t>(squadlist_pool_of(*world).items(squadlist_of(self)).size())));
+    // **0 while the cursor stands at the end.** 0x0042bc40 asks the list's
+    // end test (0x00420170, `EOL`'s) first and answers the deque's count
+    // (`[deque+0x10]`) only when it says *not at the end*; at the end -- an
+    // empty list, a slot not in use, or a list walked through -- it answers
+    // 0. The one shipped site, `GSH_SYNCHAPPROACH.VS`'s `if (SL.Size == 1)`,
+    // reads it straight after `GetSquads` rewinds and an `EOL` guard, where
+    // the two answers agree.
+    const SquadListPool& pool = squadlist_pool_of(*world);
+    const SquadListId id = squadlist_of(self);
+    const std::size_t count = pool.items(id).size();
+    return HostOutcome::ok_with(
+        Value::integer(pool.cursor(id) >= count ? 0 : static_cast<std::int32_t>(count)));
   }
   if (is_squad(self)) {
     HeroSystem* heroes = hero_system_of(*world);
