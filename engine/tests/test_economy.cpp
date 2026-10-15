@@ -1113,7 +1113,7 @@ TEST(a_settlement_is_found_by_its_map_name_exactly_or_not_at_all) {
   const SettlementId utica = economy.create(world, named);
 
   // A second settlement with no name at all. 496 of the installation's 684
-  // ship this way, and the empty key must not match them together.
+  // ship this way.
   SettlementInit unnamed = town_hall();
   unnamed.anchor = world.spawn(NativeClass::town_hall, nullptr);
   economy.create(world, unnamed);
@@ -1141,7 +1141,13 @@ TEST(a_settlement_is_found_by_its_map_name_exactly_or_not_at_all) {
   CHECK(misses("s_utica"));
   CHECK(misses("S_Utic"));
   CHECK(misses("S_Utica "));
-  CHECK(misses(""));  // and the empty name reaches the unnamed settlement no more
+  // **The empty name is a name.** 0x00409350 compares the stored length with
+  // the argument's `strlen` and the bytes between, so `""` equals the first
+  // settlement whose name is empty -- here the second one, a real settlement.
+  const script::HostOutcome empty = get("");
+  REQUIRE(empty.value.is_object());
+  CHECK(empty.value.as_object().type == kTypeSettlement);
+  CHECK(empty.value.as_object().id != economy.find(utica)->object);
 
   // **A miss is not a refusal.** 0x005c3bad diagnoses and pushes the 0xffff
   // sentinel, and `SIEGE.VS` opens `set = GetSettlement(Target); if
@@ -1788,19 +1794,30 @@ TEST(economy_capture_leaves_loyalty_stock_and_population_alone) {
   CHECK(after->owner == 1);
 }
 
-TEST(economy_capture_wipes_the_loan_and_setting_the_current_owner_does_not) {
-  // The loan wipe is the only observable the "already owns it" early-out at
-  // 0x005c4ec1 has. Without a loan on the books, re-capturing by the current
-  // owner is indistinguishable from doing the work again.
+TEST(economy_capture_empties_the_wall_and_setting_the_current_owner_does_not) {
+  // 0x005c4eb0 zeroes the roster `[+0xfc]`, the bank `[+0x100]` and the
+  // in-wall count `[+0xf4]`, and sends the warehouse's shipping target to
+  // 0xffff -- and it leaves the loan, `[+0xec]`, alone. The "already owns it"
+  // early-out at 0x005c4ec1 skips all of it.
   CaptureBench b;
-  b.economy.find(b.town)->loan = 750;
+  Settlement* town = b.economy.find(b.town);
+  town->loan = 750;
+  town->sentries = 6;
+  town->sentries_ready = 4;
+  town->sentries_put_back = 1;
+  town->supplied = b.town;
   CHECK(b.set_player(b.settlement_handle(), 1).status == script::HostStatus::ok);
-  CHECK(b.economy.find(b.town)->loan == 750);   // player 1 -> index 0, already the owner
-  CHECK(b.economy.find(b.town)->owner == 0);
+  CHECK(town->sentries == 6);   // player 1 -> index 0, already the owner
+  CHECK(town->supplied == b.town);
+  CHECK(town->owner == 0);
 
   CHECK(b.set_player(b.settlement_handle(), 4).status == script::HostStatus::ok);
-  CHECK(b.economy.find(b.town)->loan == 0);
-  CHECK(b.economy.find(b.town)->owner == 3);
+  CHECK(town->owner == 3);
+  CHECK(town->sentries == 0);
+  CHECK(town->sentries_ready == 0);
+  CHECK(town->sentries_put_back == 0);
+  CHECK(town->supplied == kNoSettlement);
+  CHECK(town->loan == 750);
 }
 
 TEST(economy_a_building_receiver_captures_its_whole_settlement) {
@@ -2567,11 +2584,19 @@ TEST(economy_objects_around_filters_on_the_class_tree) {
   CHECK(std::find(everything.begin(), everything.end(), soldier) != everything.end());
   CHECK(std::find(everything.begin(), everything.end(), villager) != everything.end());
 
-  // A name nothing resolves to. `ClassFilter::parse` yields a filter that names
-  // classes and resolved none, which matches nothing -- a divergence from the
-  // original, which refuses the whole query, and one no shipped site can see.
+  // A name nothing resolves to: 0x00409e40 answers null and the collector's
+  // heir test matches nothing against it.
   CHECK(b.members("ObjectsAround",
                   {b.settlement_value(), script::Value::string(std::string("Dragon"))})
+            .empty());
+  // **One name, whole.** 0x005c5b90 looks the string up as a single registry
+  // key, so a comma list is a name no class carries and the empty string is
+  // too -- neither is the "everything" a parsed filter would make of it.
+  CHECK(b.members("ObjectsAround",
+                  {b.settlement_value(), script::Value::string(std::string("Military,Peasant"))})
+            .empty());
+  CHECK(b.members("ObjectsAround",
+                  {b.settlement_value(), script::Value::string(std::string())})
             .empty());
 }
 
@@ -5723,13 +5748,23 @@ TEST(get_sentry_takes_one_out_of_the_wall_and_put_sentry_puts_one_back) {
   CHECK(town->sentries_ready == 100);
   CHECK(town->max_sentries < 100);
 
-  // `DelSentry` runs and changes nothing a script can read.
-  const std::int32_t before_roster = town->sentries;
+  // `DelSentry` (0x005c2a60) spends the bank `PutSentry` filled first -- two
+  // puts above, so two deaths cost the roster nothing -- and then the roster,
+  // one a death, floored at zero. The wall count is not touched.
+  CHECK(town->sentries_put_back == 2);
   const std::int32_t before_wall = town->sentries_ready;
+  CHECK(call("DelSentry").status == script::HostStatus::ok);
+  CHECK(call("DelSentry").status == script::HostStatus::ok);
+  CHECK(town->sentries_put_back == 0);
+  CHECK(town->sentries == 3);
+  CHECK(roster() == 3);
+  CHECK(call("DelSentry").status == script::HostStatus::ok);
+  CHECK(town->sentries == 2);
+  CHECK(roster() == 2);
   for (int i = 0; i < 5; ++i) {
     CHECK(call("DelSentry").status == script::HostStatus::ok);
   }
-  CHECK(town->sentries == before_roster);
+  CHECK(town->sentries == 0);
   CHECK(town->sentries_ready == before_wall);
 
   // The wall pool is state: it decides whether a gate can post a guard.
@@ -6232,4 +6267,187 @@ TEST(best_temple_and_ts_get_all_temples_find_a_temple_by_its_named_race) {
   CHECK(ids.size() == 2);
   CHECK(std::find(ids.begin(), ids.end(), roman) != ids.end());
   CHECK(std::find(ids.begin(), ids.end(), iberian) != ids.end());
+}
+
+// ==========================================================================
+// the economy-1 audit: rules read off the bodies
+// ==========================================================================
+
+/// `Settlement::Research` subtracts the **whole** reserve (the flag 1 at
+/// 0x0042d26b) -- including when the reserve is held for this very research,
+/// which `CanAfford(cmd)` exempts. So the two disagree, and that is the
+/// original's arrangement.
+TEST(economy_research_holds_back_the_whole_reserve) {
+  LabBench b;
+  EnvSystem env;
+  REQUIRE(b.world.add_system(&env));
+  env.start(b.world);
+  const ObjectId arena = b.add_building(b.classes.arena1);
+  const EnvScope scope = EnvScope::for_settlement(b.town);
+  // An unowned settlement keys its reserve with the owner's index, 255 here.
+  env.env().write_int(scope, "Reserve255", 100);
+  env.env().write_int(scope, "ReservedAt255", 0);
+  env.env().write_int(scope, "GoldSpentOnArmy255", 1000);
+  env.env().write_string(scope, "ReserveFor255", "Fights");
+  b.set_store(/*gold=*/2500, /*food=*/0, /*population=*/50);
+
+  // Fights costs 2000; 2500 - 1000 held back is 1500.
+  const script::HostOutcome afford =
+      b.call("CanAfford", 1, {b.settlement_value(), script::Value::string("Fights")});
+  REQUIRE(afford.value.is_integer());
+  CHECK(afford.value.as_integer() != 0);  // exempt: the reserve is for it
+  b.call("Research", 1, {b.settlement_value(), script::Value::string("Fights")});
+  const CommandQueue* queue = b.commands.find(arena);
+  CHECK(queue == nullptr || queue->entries.empty());
+
+  b.set_store(/*gold=*/3000, /*food=*/0, /*population=*/50);
+  b.call("Research", 1, {b.settlement_value(), script::Value::string("Fights")});
+  queue = b.commands.find(arena);
+  REQUIRE(queue != nullptr);
+  CHECK(queue->entries.size() == 1);
+}
+
+/// `IsTeutonTent` (0x00420650) compares the central building's class `id`
+/// and `altid` with `"TTent"`; `IsTTent` asks ancestry. The winter tent,
+/// `TTentWinter` with `parent="TTent"`, is where they part.
+TEST(economy_is_teuton_tent_compares_the_class_name_and_is_ttent_its_ancestry) {
+  ClassGraph graph;
+  const char* docs[] = {
+      R"(<class id="Building" cpp_class="CVXBuilding"/>)",
+      R"(<class id="TTent" parent="Building" cpp_class="CVXTownHall"/>)",
+      R"(<class id="TTentWinter" parent="TTent" cpp_class="CVXTownHall"/>)",
+  };
+  const char* names[] = {"building.sc.xml", "ttent.sc.xml", "ttentwinter.sc.xml"};
+  for (int i = 0; i < 3; ++i) graph.add(bytes_of(docs[i]), names[i]);
+  graph.link();
+
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  register_world_host(registry);
+  register_economy_hosts(registry);
+  World world;
+  world.set_class_graph(&graph);
+  EconomySystem economy;
+  REQUIRE(world.add_system(&economy));
+  economy.start(world);
+
+  const auto town = [&](const char* cls) {
+    SettlementInit init;
+    init.anchor = world.spawn(NativeClass::town_hall, nullptr, graph.find(cls));
+    fill_settlement_class_defaults(graph, graph.find(cls), init);
+    const SettlementId id = economy.create(world, init);
+    return script::Value::object(kTypeSettlement, economy.find(id)->object);
+  };
+  const auto ask = [&](const char* name, const script::Value& s) {
+    const script::HostOutcome out =
+        call_host(registry, world, script::CallKind::member, name, 0, {s});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_integer() && out.value.as_integer() != 0;
+  };
+  const script::Value summer = town("TTent");
+  const script::Value winter = town("TTentWinter");
+  CHECK(ask("IsTeutonTent", summer));
+  CHECK(ask("IsTTent", summer));
+  CHECK(!ask("IsTeutonTent", winter));
+  CHECK(ask("IsTTent", winter));
+}
+
+/// The setters clamp above and not below: `SetGold`/`SetFood` against the
+/// warehouse cap (0x005c21a0 / 0x005c2140), `SetPopulation` against
+/// `max_population` (0x005c2200).
+TEST(economy_settlement_setters_clamp_only_from_above) {
+  BarrackBench b;
+  b.set_store(500, 500, 50);
+  Settlement* s = b.economy.settlements().find(b.town);
+  s->max_population = 80;
+  const auto set = [&](const char* name, std::int32_t v) {
+    CHECK(b.call(name, 1, {b.settlement_value(), script::Value::integer(v)}).status ==
+          script::HostStatus::ok);
+  };
+  set("SetGold", -50);
+  CHECK(s->warehouse.gold == -50);
+  set("SetGold", 5000000);
+  CHECK(s->warehouse.gold == s->warehouse.max_gold);
+  set("SetFood", -7);
+  CHECK(s->warehouse.food == -7);
+  set("SetPopulation", -3);
+  CHECK(s->population == -3);
+  set("SetPopulation", 500);
+  CHECK(s->population == 80);
+}
+
+/// `AddUnit` (0x005c1b20) answers **true** when the unit or the settlement
+/// does not resolve -- each miss prints and pushes 1.
+TEST(economy_add_unit_answers_true_for_a_handle_that_does_not_resolve) {
+  BarrackBench b;
+  const ObjectId soldier = b.world.spawn(NativeClass::unit, nullptr);
+  const auto add = [&](const script::Value& s, const script::Value& u) {
+    const script::HostOutcome out = b.call("AddUnit", 1, {s, u});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_integer() && out.value.as_integer() != 0;
+  };
+  CHECK(add(b.settlement_value(), script::Value::object(kTypeObj, 999999)));
+  CHECK(add(script::Value::object(kTypeSettlement, 999999),
+            script::Value::object(kTypeObj, soldier)));
+  CHECK(!b.economy.find(b.town)->holder.contains(soldier));
+  // And a real pair is the holder's answer.
+  CHECK(add(b.settlement_value(), script::Value::object(kTypeObj, soldier)));
+  CHECK(b.economy.find(b.town)->holder.contains(soldier));
+}
+
+/// The handle-returning members answer an invalid **handle** for an invalid
+/// receiver -- 0xffff, which `.IsValid` reads -- never the integer 0:
+/// `supplied` (0x005ef530), `CreateMuleGold`/`CreateMuleFood` (0x005ef140 /
+/// 0x005ef040).
+TEST(economy_handle_members_answer_an_invalid_handle_for_a_dead_settlement) {
+  BarrackBench b;
+  const script::Value nowhere = script::Value::object(kTypeSettlement, 999999);
+  const script::HostOutcome supplied = b.call("supplied", 0, {nowhere});
+  REQUIRE(supplied.status == script::HostStatus::ok);
+  REQUIRE(supplied.value.is_object());
+  CHECK(!supplied.value.as_object().valid());
+  for (const char* name : {"CreateMuleGold", "CreateMuleFood"}) {
+    const script::HostOutcome out = b.call(name, 1, {nowhere, script::Value::integer(100)});
+    REQUIRE(out.status == script::HostStatus::ok);
+    REQUIRE(out.value.is_object());
+    CHECK(!out.value.as_object().valid());
+  }
+}
+
+/// A unit is never a `Settlement` receiver. The names shared with `Unit` and
+/// `Wagon` are separate bodies in the original, picked by the variable's
+/// type; a unit the map filed under a settlement carries its back-link here,
+/// and through it `u.food` / `u.SetGold` reached the town's warehouse.
+TEST(economy_a_unit_with_a_settlement_link_is_not_its_settlement) {
+  BarrackBench b;
+  b.set_store(700, 900, 50);
+  const ObjectId soldier = b.world.spawn(NativeClass::unit, nullptr);
+  b.world.find(soldier)->settlement = b.settlement_object;
+  const script::Value u = script::Value::object(kTypeObj, soldier);
+
+  const script::HostOutcome food = b.call("food", 0, {u});
+  REQUIRE(food.status == script::HostStatus::ok);
+  CHECK(food.value.as_integer() != 900);
+  (void)b.call("SetGold", 1, {u, script::Value::integer(5)});
+  (void)b.call("SetFood", 1, {u, script::Value::integer(5)});
+  CHECK(b.economy.find(b.town)->warehouse.gold == 700);
+  CHECK(b.economy.find(b.town)->warehouse.food == 900);
+  // A building still reaches its settlement through the same link.
+  if (WorldObject* anchor = b.world.find(b.anchor)) anchor->settlement = b.settlement_object;
+  const script::HostOutcome gold = b.call("gold", 0, {script::Value::object(kTypeObj, b.anchor)});
+  CHECK(gold.value.as_integer() == 700);
+}
+
+/// `Wagon::SetFood` / `SetGold` (0x005ebe70 / 0x005ebec0): the kind word
+/// `[+0x1d4]` and then the cargo `[+0x1cc]`, unclamped.
+TEST(economy_wagon_set_food_and_set_gold_write_kind_and_cargo) {
+  BarrackBench b;
+  const ObjectId mule = b.world.spawn(NativeClass::wagon, nullptr);
+  const script::Value w = script::Value::object(kTypeObj, mule);
+  CHECK(b.call("SetFood", 1, {w, script::Value::integer(1500)}).status == script::HostStatus::ok);
+  CHECK(b.world.find(mule)->state.cargo == 1500);
+  CHECK(b.world.find(mule)->state.cargo_resource == 1);
+  CHECK(b.call("SetGold", 1, {w, script::Value::integer(30)}).status == script::HostStatus::ok);
+  CHECK(b.world.find(mule)->state.cargo == 30);
+  CHECK(b.world.find(mule)->state.cargo_resource == 0);
 }

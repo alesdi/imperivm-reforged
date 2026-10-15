@@ -34,6 +34,7 @@
 #include "imperivm/core/script/compiler.hpp"
 #include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
@@ -3136,6 +3137,47 @@ TEST(get_item_indexes_the_inventory_from_one) {
       call("GetItem", {stranger, script::Value::integer(1)});
   CHECK(missed.status == script::HostStatus::ok);
   CHECK(!missed.value.as_object().valid());
+}
+
+/// `item.name` -- `Item::name` (0x00535260) -- is the item definition's `id`:
+/// the string the item reader fills from `<item id=…>`, not the display
+/// `name=`. `UNIT_ON_ENTER.VS` asks `item.name == "Gold"` to pay the
+/// *Mercenary pact*; through the named-object lookup it answered `""`.
+TEST(item_name_answers_the_definitions_id) {
+  Fixture f;
+  ItemCatalog catalog;
+  REQUIRE(catalog.load(bytes(kItemsXml)).ok());
+  f.heroes.items().set_catalog(&catalog);
+  const ObjectId hero = f.spawn_hero();
+
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  (void)register_economy_hosts(registry);
+  HostContext context;
+  context.world = &f.world;
+  const auto call = [&](const char* name, std::vector<script::Value> args) {
+    const std::uint32_t index = registry.find(script::CallKind::member, name,
+                                              static_cast<std::uint16_t>(args.size() - 1));
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    return registry.entry(index).fn(ctx);
+  };
+  // `King's Belt` is the item whose `id` and `name` differ in case.
+  const ObjectId belt = f.heroes.items().add(f.world, hero, "King's Belt");
+  REQUIRE(belt != sim::kNoObject);
+  const script::HostOutcome named = call("name", {script::Value::object(kTypeObj, belt)});
+  REQUIRE(named.status == script::HostStatus::ok);
+  CHECK(named.value.as_string() == "King's Belt");
+  // An item that does not resolve answers the empty string.
+  const script::HostOutcome none = call("name", {script::Value::object(kTypeObj, 9999)});
+  REQUIRE(none.status == script::HostStatus::ok);
+  CHECK(none.value.as_string().empty());
 }
 
 // ==========================================================================
