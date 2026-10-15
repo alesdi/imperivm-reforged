@@ -219,6 +219,8 @@ TEST(one_registry_serves_a_hero_call_and_a_movement_call_in_the_same_run) {
   world.set_owner(hero, 1);
   world.set_health(hero, 1000);
   world.set_position(hero, Point{100, 100});
+  // `AttachTo` reaches only what the hero sees (0x005a7870).
+  world.find(hero)->sight = 400;
   heroes.register_hero(world, hero);
 
   const auto spawn_warrior = [&](Point at) {

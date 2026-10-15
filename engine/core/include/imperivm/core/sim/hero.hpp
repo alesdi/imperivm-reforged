@@ -520,19 +520,23 @@ class HeroSystem final : public System {
 
   // -- attachment ------------------------------------------------------
 
-  /// `Unit.AttachTo(hero)` -- the unit-side operation `CVXUnit :: AttachHero`
-  /// names.
+  /// The join of `CVXUnit :: AttachHero` (0x005ddf50), the unit-side
+  /// operation `Unit.AttachTo(hero)` ends in.
   ///
-  /// Refuses, in the order `DATA\SUBAI\UNIT_ATTACH_VERIFY.VS` checks:
-  /// `unit == hero`, either side unknown, a dead hero, a unit with
-  /// `HasFreedom`, an enemy (different owner), or a full army. Re-attaching to
-  /// the hero a unit is already with succeeds and changes nothing, which is
-  /// what the verify script's `if (.hero == hero) return false` implies.
+  /// Refuses `unit == hero`, a side that is neither unit nor hero, and an
+  /// army whose size **equals** its cap (`[hero+0x1e4] == [hero+0x1f8]`, a
+  /// `je`: an army already over a lowered cap still takes one more). Then a
+  /// unit already in this hero's army is a success that changes nothing;
+  /// otherwise it leaves its present hero (`DetachHero`, 0x005db190), takes
+  /// this one's handle, joins the back of the army deque and the hero's
+  /// squad. True.
   ///
-  /// Note what is *not* refused: a hero attaching to another hero. Both the
-  /// attach script and its verifier have that check present and **commented
-  /// out** (`//if (this.AsHero.IsValid()) return;`), so the shipped build
-  /// allowed it.
+  /// **What it does not refuse** is everything `UNIT_ATTACH.VS` and
+  /// `UNIT_ATTACH_VERIFY.VS` test before calling it -- an enemy, a unit with
+  /// `HasFreedom`, a dead hero -- which this used to repeat; nor a hero
+  /// joining another hero, whose check both scripts carry commented out. The
+  /// entry point's own refusals and the sight reach the original tests here
+  /// are `fn_attach_to`'s, since they need the world's positions.
   bool attach(World& world, ObjectId unit, ObjectId hero);
 
   /// `Unit.DetachFrom(hero)`. Also the path `HERO_DETACH_BEHAVIOR.VS` takes

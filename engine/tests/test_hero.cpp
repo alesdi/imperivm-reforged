@@ -427,23 +427,93 @@ TEST(administration_lets_more_warriors_in_than_the_bare_cap) {
   CHECK(!f.heroes.attach(f.world, f.spawn_warrior(), hero));
 }
 
-TEST(attachment_refuses_what_the_verify_script_refuses) {
+TEST(the_attach_join_leaves_the_scripts_refusals_to_the_scripts) {
+  // 0x005ddf50 refuses only the hero itself and a full army; the enemy and
+  // `HasFreedom` tests are `UNIT_ATTACH.VS`'s, made before it calls.
   Fixture f;
   const ObjectId hero = f.spawn_hero(1);
   const ObjectId mine = f.spawn_warrior(1);
   const ObjectId theirs = f.spawn_warrior(2);
 
-  CHECK(!f.heroes.attach(f.world, hero, hero));           // `if (me == h) return`
-  CHECK(!f.heroes.attach(f.world, mine, sim::kNoObject));      // `!hero.IsValid()`
-  CHECK(!f.heroes.attach(f.world, theirs, hero));         // `.IsEnemy(hero)`
-
+  CHECK(!f.heroes.attach(f.world, hero, hero));
+  CHECK(!f.heroes.attach(f.world, mine, sim::kNoObject));
+  CHECK(f.heroes.attach(f.world, theirs, hero));
   f.heroes.unit(mine)->has_freedom = true;
-  CHECK(!f.heroes.attach(f.world, mine, hero));           // `if (.HasFreedom) return`
-  f.heroes.unit(mine)->has_freedom = false;
   CHECK(f.heroes.attach(f.world, mine, hero));
-  // `if (.hero == hero) return false` -- already there, nothing to do.
+  // Already there: a success that changes nothing.
   CHECK(f.heroes.attach(f.world, mine, hero));
-  CHECK(f.heroes.army_size(hero) == 1);
+  CHECK(f.heroes.army_size(hero) == 2);
+
+  // The cap test is `==` (0x005ddfab): filled to 52 under Administration 1,
+  // then the point withdrawn (cap 50), the army is past its cap and still
+  // takes one more.
+  f.grant(hero, 5);
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::administration, 1));
+  while (f.heroes.army_size(hero) < 52) REQUIRE(f.heroes.attach(f.world, f.spawn_warrior(1), hero));
+  CHECK(!f.heroes.attach(f.world, f.spawn_warrior(1), hero));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::administration, 0));
+  CHECK(f.heroes.attach(f.world, f.spawn_warrior(1), hero));
+  CHECK(f.heroes.army_size(hero) == 53);
+}
+
+TEST(attach_to_refuses_the_dead_and_a_unit_the_hero_cannot_see) {
+  // 0x005de090: invalid or dead receiver, invalid or dead hero -> false.
+  // 0x005a7870 inside 0x005ddf50: a hero of no sight sees nothing, and the
+  // edge distance (centre distance less both radii) must not pass its sight.
+  Fixture f;
+  const ObjectId hero = f.spawn_hero(1);
+  const ObjectId near = f.spawn_warrior(1);
+  const ObjectId far = f.spawn_warrior(1);
+  const ObjectId dead = f.spawn_warrior(1);
+  f.world.set_position(hero, Point{1000, 1000});
+  f.world.set_position(near, Point{1600, 1000});
+  f.world.set_position(far, Point{1601, 1000});
+  f.world.set_position(dead, Point{1000, 1000});
+  f.world.set_health(dead, 0);
+  WorldObject* seer = f.world.find(hero);
+  REQUIRE(seer != nullptr);
+
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  sim::HostContext context;
+  context.world = &f.world;
+  const auto call = [&](std::string_view name, ObjectId self,
+                        ObjectId other) -> script::HostOutcome {
+    const std::uint32_t index = registry.find(script::CallKind::member, name, 1);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    std::vector<script::Value> args{script::Value::object(7, self), script::Value::object(7, other)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    return registry.entry(index).fn(ctx);
+  };
+  const auto attach = [&](ObjectId self, ObjectId other) {
+    return call("AttachTo", self, other).value.as_integer() == 1;
+  };
+
+  seer->sight = 0;
+  CHECK(!attach(near, hero));  // no sight, no reach
+  seer->sight = 600;
+  CHECK(!attach(far, hero));   // 601 away
+  CHECK(attach(near, hero));   // 600 away
+  CHECK(!attach(dead, hero));
+  CHECK(!attach(hero, hero));
+  f.world.set_health(hero, 0);
+  CHECK(!attach(far, hero));
+  f.world.set_health(hero, 1000);
+
+  // `DetachFrom` (0x005db3b0) is void, and refuses the wrong hero.
+  const ObjectId other = f.spawn_hero(1);
+  const script::HostOutcome wrong = call("DetachFrom", near, other);
+  CHECK(wrong.status == script::HostStatus::ok);
+  CHECK(wrong.value.is_nil());
+  CHECK(f.heroes.hero_of(near) == hero);
+  (void)call("DetachFrom", near, hero);
+  CHECK(f.heroes.hero_of(near) == sim::kNoObject);
 }
 
 /// `Unit::HasFreedom` (0x005d7d30) is the specials word's `freedom` bit --
@@ -469,8 +539,8 @@ TEST(a_unit_whose_class_lists_freedom_or_descends_from_ramunit_is_free) {
   CHECK(!sim::unit_has_freedom(f.world, keen));
   CHECK(!sim::unit_has_freedom(f.world, plain));
   CHECK(!sim::unit_has_freedom(f.world, sim::kNoObject));
-  CHECK(!f.heroes.attach(f.world, sentry, hero));
-  CHECK(!f.heroes.attach(f.world, catapult, hero));
+  // The freedom test is `UNIT_ATTACH.VS`'s `if (.HasFreedom) return`, made
+  // before `AttachTo` is called; the join itself takes anyone.
   CHECK(f.heroes.attach(f.world, keen, hero));
   CHECK(f.heroes.attach(f.world, plain, hero));
   CHECK(f.heroes.army_size(hero) == 2);
@@ -2326,6 +2396,8 @@ TEST(a_host_call_reaches_the_system_through_the_call_context) {
   const script::Value hero_ref = script::Value::object(kUnit, hero);
   const script::Value warrior_ref = script::Value::object(kUnit, warrior);
 
+  // Both at the origin; the hero needs a sight to reach the warrior.
+  f.world.find(hero)->sight = 400;
   CHECK(call(script::CallKind::member, "AttachTo", {warrior_ref, hero_ref})
             .value.as_integer() == 1);
   CHECK(call(script::CallKind::member, "hero", {warrior_ref}).value.as_object().id == hero);
@@ -2355,8 +2427,7 @@ TEST(a_host_call_reaches_the_system_through_the_call_context) {
             .value.as_integer() == 1);
   CHECK(call(script::CallKind::member, "item_count", {warrior_ref}).value.as_integer() == 1);
 
-  CHECK(call(script::CallKind::member, "DetachFrom", {warrior_ref, hero_ref})
-            .value.as_integer() == 1);
+  (void)call(script::CallKind::member, "DetachFrom", {warrior_ref, hero_ref});
   CHECK(f.heroes.hero_of(warrior) == sim::kNoObject);
 }
 

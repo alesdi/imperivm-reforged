@@ -342,7 +342,6 @@ SquadKey HeroSystem::squad_of(ObjectId id) const {
 }
 
 bool HeroSystem::attach(World& world, ObjectId unit_id, ObjectId hero_id) {
-  // The order of these refusals is `DATA\SUBAI\UNIT_ATTACH_VERIFY.VS`'s.
   if (unit_id == hero_id) return false;
   // Registered on demand. `start()` adopts what the map placed, and nothing
   // adopts what a script places afterwards -- so a warrior from `Place` or
@@ -364,19 +363,12 @@ bool HeroSystem::attach(World& world, ObjectId unit_id, ObjectId hero_id) {
   UnitRecord* record = unit(unit_id);
   HeroRecord* leader = hero(hero_id);
   if (record == nullptr || leader == nullptr) return false;
-  if (record->hero == hero_id) return true;  // `if (.hero == hero) return false`
-  if (record->has_freedom || unit_has_freedom(world, unit_id)) return false;
-
-  const ObjectState* hero_state = world.state(hero_id);
-  const ObjectState* unit_state = world.state(unit_id);
-  if (hero_state == nullptr || unit_state == nullptr) return false;
-  // `if (!hero.IsAlive()) return;`
-  if (hero_state->health <= 0 && max_health_of(world, hero_id) > 0) return false;
-  // `if (this.IsEnemy(hero)) return;` -- a different owner is an enemy, and the
-  // squad player field is derived from the owner, so a mixed squad could not be
-  // represented anyway.
-  if (unit_state->owner != hero_state->owner) return false;
-  if (army_full(hero_id)) return false;
+  // The cap test is an equality (0x005ddfab), ahead of the membership one.
+  if (static_cast<std::int32_t>(leader->army.size()) == max_army(hero_id)) return false;
+  // Already in this army: the deque search finds it, and nothing changes.
+  if (std::find(leader->army.begin(), leader->army.end(), unit_id) != leader->army.end()) {
+    return true;
+  }
 
   if (record->hero != kNoObject) detach(world, unit_id);
 
@@ -1151,6 +1143,20 @@ script::TypeId receiver_type(CallContext& ctx) {
 /// Resolve the world and the system or refuse. `host` stays the name the entry
 /// points below use, so the migration off `HeroHostState` changed the lookup
 /// and nothing else.
+/// `isqrt(dx² + dy²) − their radius − my radius`, which is what `0x005a77b0`
+/// computes and what the heal score's distance term is measured in.
+[[nodiscard]] std::int64_t edge_distance(const World& world, const WorldObject& a,
+                                         const WorldObject& b) {
+  const Point pa = world.resolve_position(a.id);
+  const Point pb = world.resolve_position(b.id);
+  const std::int64_t dx = pa.x - pb.x;
+  const std::int64_t dy = pa.y - pb.y;
+  const std::int64_t straight = isqrt(dx * dx + dy * dy);
+  const std::int64_t radii = class_int_property(world, a.id, "radius", 0) +
+                             class_int_property(world, b.id, "radius", 0);
+  return straight - radii;
+}
+
 #define HERO_STATE(ctx)                                                        \
   const HeroSelf self = resolve(ctx);                                          \
   const HeroSelf* const host = &self;                                          \
@@ -1158,22 +1164,58 @@ script::TypeId receiver_type(CallContext& ctx) {
 
 // -- attachment ------------------------------------------------------------
 
-HostOutcome fn_attach_to(CallContext& ctx) {
-  HERO_STATE(ctx);
-  return HostOutcome::ok_with(
-      Value::boolean(host->heroes->attach(*host->world, receiver(ctx), object_arg(ctx, 1))));
+/// Whether a receiver and its object argument are both there and alive -- the
+/// four refusals `Unit::AttachTo` and `Unit::DetachFrom` open with, each a
+/// printed message: an unresolvable receiver, a dead one (`vtbl+0x50`), an
+/// unresolvable argument, a dead one.
+[[nodiscard]] bool both_alive(const World& world, ObjectId receiver_id, ObjectId argument) {
+  const WorldObject* self = world.find(receiver_id);
+  const WorldObject* other = world.find(argument);
+  return self != nullptr && self->state.health > 0 && other != nullptr &&
+         other->state.health > 0;
 }
 
+/// `Unit::AttachTo(hero)` (0x005de090): the four refusals of `both_alive`,
+/// each answering false, then `CVXUnit :: AttachHero` (0x005ddf50), which
+/// refuses a unit that is the hero, a full army (`HeroSystem::attach`) and --
+/// between the two -- **a unit the hero cannot see**: 0x005a7870 on the hero
+/// is false for a hero of no sight and for a unit whose edge distance
+/// (0x005a77b0: the floored root of the squared centre distance, less both
+/// class radii) exceeds the hero's sight. `UNIT_ATTACH.VS` calls this from up
+/// to 1500 away and walks on toward the hero when it refuses.
+HostOutcome fn_attach_to(CallContext& ctx) {
+  HERO_STATE(ctx);
+  World& world = *host->world;
+  const ObjectId unit = receiver(ctx);
+  const ObjectId leader = object_arg(ctx, 1);
+  if (!both_alive(world, unit, leader)) return HostOutcome::ok_with(Value::boolean(false));
+  if (unit == leader) return HostOutcome::ok_with(Value::boolean(false));
+  const HeroRecord* record = host->heroes->hero(leader);
+  if (record != nullptr &&
+      static_cast<std::int32_t>(record->army.size()) == host->heroes->max_army(leader)) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
+  const WorldObject* seer = world.find(leader);
+  const WorldObject* seen = world.find(unit);
+  if (seer->sight == 0 || edge_distance(world, *seer, *seen) > seer->sight) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
+  return HostOutcome::ok_with(Value::boolean(host->heroes->attach(world, unit, leader)));
+}
+
+/// `Unit::DetachFrom(hero)` (0x005db3b0) -- registered **void**. The four
+/// refusals of `both_alive`, then a fifth: the hero's handle must be the
+/// unit's hero handle (`[unit+0x170]`), or it prints *"Trying to detach unit
+/// from wrong hero!"*; then `DetachHero` (0x005db190). Every refusal writes
+/// nothing. This answered a bool and detached a unit named with no hero.
 HostOutcome fn_detach_from(CallContext& ctx) {
   HERO_STATE(ctx);
   const ObjectId unit = receiver(ctx);
-  // `DetachFrom(hero)` names the hero it is leaving; a unit is in one army, so
-  // the argument is a check rather than a selector.
   const ObjectId named = object_arg(ctx, 1);
-  if (named != kNoObject && host->heroes->hero_of(unit) != named) {
-    return HostOutcome::ok_with(Value::boolean(false));
-  }
-  return HostOutcome::ok_with(Value::boolean(host->heroes->detach(*host->world, unit)));
+  if (!both_alive(*host->world, unit, named)) return HostOutcome::ok_void();
+  if (host->heroes->hero_of(unit) != named) return HostOutcome::ok_void();
+  (void)host->heroes->detach(*host->world, unit);
+  return HostOutcome::ok_void();
 }
 
 HostOutcome fn_detach_army(CallContext& ctx) {
@@ -1620,20 +1662,6 @@ struct Candidate {
 [[nodiscard]] std::int32_t caster_sight(const World& world, ObjectId id) {
   const WorldObject* slot = world.find(id);
   return slot == nullptr ? 0 : slot->sight;
-}
-
-/// `isqrt(dx² + dy²) − their radius − my radius`, which is what `0x005a77b0`
-/// computes and what the heal score's distance term is measured in.
-[[nodiscard]] std::int64_t edge_distance(const World& world, const WorldObject& a,
-                                         const WorldObject& b) {
-  const Point pa = world.resolve_position(a.id);
-  const Point pb = world.resolve_position(b.id);
-  const std::int64_t dx = pa.x - pb.x;
-  const std::int64_t dy = pa.y - pb.y;
-  const std::int64_t straight = isqrt(dx * dx + dy * dy);
-  const std::int64_t radii = class_int_property(world, a.id, "radius", 0) +
-                             class_int_property(world, b.id, "radius", 0);
-  return straight - radii;
 }
 
 /// `Druid::FindUnitToHeal` -- 136 hits, and the score is the finding.
