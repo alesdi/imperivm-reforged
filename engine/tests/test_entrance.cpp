@@ -1126,6 +1126,26 @@ TEST(find_near_enter_exit_keeps_the_nearest_gate_of_any_building) {
   CHECK(near(Point{512, 0}) == all[1]);
   CHECK(near(Point{1000, 512}) == all[2]);
 
+  // **The comparison is on the integer root** (0x0067c3d0): from a point
+  // where the first gate is a fraction farther than the second but both
+  // truncate to the same whole distance, the first is kept. Exact squared
+  // distances would hand it to the second.
+  bool found = false;
+  for (std::int32_t x = 0; x <= 1024 && !found; ++x) {
+    for (std::int32_t y = 0; y <= 1024 && !found; ++y) {
+      const auto d2 = [&](const Point& g) {
+        const std::int64_t dx = g.x - x;
+        const std::int64_t dy = g.y - y;
+        return dx * dx + dy * dy;
+      };
+      if (d2(all[1]) >= d2(all[0]) || isqrt(d2(all[1])) != isqrt(d2(all[0]))) continue;
+      if (isqrt(d2(all[2])) <= isqrt(d2(all[0]))) continue;
+      found = true;
+      CHECK(near(Point{x, y}) == all[0]);
+    }
+  }
+  CHECK(found);
+
   // A settlement with no gate anywhere is the sentinel.
   const ObjectId alone = b.dock(blind.value(), "Hut");
   const SettlementId hamlet = b.town(alone, {alone});

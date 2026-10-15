@@ -1,0 +1,68 @@
+# economy-2: rows 69-135 of economy in host-ledger.md at b0ee3ef (Settlement::StopSupply .. SettlementCount/0)
+0x005ef430	verified	link object [set+0x5c]+0x38 := 0xffff, kind +0x3c kept, panel refresh (0x005e7710, presentation); invalid receiver prints, nothing
+0x00426010	partial	no receiver check; central heir of BaseShipyard else 0; cached water LSA [central+0x1f6] computed on demand from the first exit-water door; the original's 128-step spiral for a door off any water area is not reproduced (order not recovered; no shipped map reaches it)
+0x005c2250	verified	one add to [set+0x50], no clamp (fixed: clamped at 0; test economy_the_three_population_writers_disagree_about_the_ceiling)
+0x00425190	verified	invalid receiver false; central class heir of BaseShipyard (0x004400b0, cached); SettlementKind::shipyard is the same ancestry test and no shipped class mixes bases
+0x005ef380	verified	argument then receiver resolved; invalid target prints and keeps the link; no self/owner test; link := target, kind := 1 food; void (fixed: invalid target cleared the link, self cleared it; test economy_settlement_members_answer_as_their_bodies)
+0x005c1de0	verified	holder [set+0x5e] max at +0x10; invalid prints, 0
+0x005c2290	verified	one add to [set+0x4c], no clamp (fixed: clamped at 0; same test as AddToPopulation)
+0x005c2830	verified	negative n prints and returns; pending [set+0x58] -= 10*n; no clamp; void
+0x005c49b0	verified	no receiver check; wall pool [set+0xf4] > 0 -> setter 0x005c4930(n-1) and 1, else 0
+0x005c1d20	verified	occupancy [holder+0x14] == max [holder+0x10], equality not >=; invalid receiver prints and answers TRUE (0x005c1d4f) (fixed both; test economy_settlement_members_answer_as_their_bodies)
+0x00425380	verified	no receiver check; 0x004401c0: IsOutpost, owner 14/15, central class defender_cls_1/2 non-empty
+0x005ec160	partial	Wagon::DecreaseLoyalty: wagon loyalty [+0x1d8]/pending [+0x1dc]/capture flag [+0x1d0] and timers 9/10 (WagonLoyalty* keys, 0x005eaef0) are not modelled; on a wagon the shared registration resolves no settlement and does nothing. Design: per-wagon loyalty state + timers, shared with Wagon::loyalty/SetLoyalty
+0x005ebdb0	verified	[obj+0x1cc] cargo; invalid prints, 0
+0x005c2b30	verified	one add to [set+0x104], no clamp, no print on invalid (fixed: clamped at 0; test economy_settlement_members_answer_as_their_bodies)
+0x005c4ac0	verified	roster [set+0xfc] += n and pool via 0x005c4930(+n), no clamp -- Numantia's AddSentries(-12) goes into debt (fixed: clamped at 0; same test)
+0x005ef0c0	partial	0x005eed90(n, food, ShipS): max_load then store clamp, store drawn, zero -> invalid, ShipS owned by the settlement's player into its holder; negative request (store grows, boat carries a negative load) and the AI ship filing 0x0041f310 not reproduced
+0x005ef1c0	partial	as CreateBoatFood with gold; same two gaps
+0x00425140	verified	invalid false; 0x00440100: TTent cached, holder-is-a-ship test unrepresentable here, IsHeirOf TTent
+0x005c2410	verified	[set+0xec] := n + n*LoanInterestPercent/100, no clamp, panel refresh (fixed: stored n clamped at 0; and the inferred periodic interest is gone, production repays the debt first per 0x005c1010; tests economy_settlement_members_answer_as_their_bodies, economy_production_pays_the_loan_and_nothing_accrues)
+0x005c23a0	verified	[set+0xec]*100/(LoanInterestPercent+100); invalid prints, 0 (fixed: answered the stored debt; same tests)
+0x004ddbb0	verified	Building::ClearDamageTaken: [obj+0x1f8] := 0, no receiver check
+0x00564400	verified	gate 0x00440060 on [bld+0x148]'s central; slot 1 +0x208, slot 2 +0x224, else ""; non-central building of an outpost reads unconstructed memory in the original, own class here
+0x00563d60	verified	gate as GetDefenderCls; slot 1 +0x258 (defenders_out_1), slot 2 +0x25c, else 0; loader 0x0059f540 order max,start,end,out
+0x00563e80	verified	slot 1 +0x250 (end_level_1), slot 2 +0x254, else 0
+0x00563df0	verified	slot 1 +0x248 (start_level_1), slot 2 +0x24c, else 0
+0x0042cba0	verified	last settlement passing: unsigned isqrt < dist, central heir BaseRuins, Bld minlevel <= level, items, same LSA, rand(0,1)==1 (one draw per candidate reaching it) (fixed: signed distance compare; test find_ruins_walks_the_settlements_and_flips_a_coin_per_candidate)
+0x004284e0	partial	gates of the deque, isqrt + health/5 strictly least from 0x7fffffff; invalid receiver/point invalid handle. Walk is ascending id (World::buildings_in_settlement), the deque is join order: they differ only for a building re-filed into a settlement after creation (ids are monotonic)
+0x0042ca20	verified	0x0042c800 (shared with SupplyCount, described at supply_target): GAIKA node LSA nonzero, same owner record, BaseTownhall heir (0x0043ffc0), same LSA, least centre distance strictly; invalid receiver prints and pushes nothing in the original (stack fault), invalid handle here
+0x00424ff0	verified	[set+0x3c], overridden to false for an outpost of zero-based player 14 (0x00425030, 14 only); no receiver check (fixed: the override was missing; test economy_settlement_members_answer_as_their_bodies)
+0x005c1c40	partial	CanBeCaptured(obj): invalid argument or receiver true, else 0x005c19d0 (IsValidCaptureTarget's helper). Not bound: no shipped site passes an argument
+0x005c3a00	verified	every deque building's [+0x1f8] := 0; no receiver check
+0x005c2ab0	verified	roster [set+0xfc]; invalid 0, no print
+0x00428640	verified	every CVXGate in the deque whose current command string is not exactly "idle" (0x00409350) gets vtbl+0xc0(1); no receiver check
+0x00428360	verified	count of deque members casting to CVXGate; order irrelevant
+0x00425cb0	verified	Env /root/Settlement<id>/GoldSpentOnTech<owner0> += n; invalid prints
+0x00437430	verified	fresh list of deque members with the building bit and the eight-name barrack descent (0x004403a0); no downcast, no ruin test; invalid receiver prints and answers an empty list
+0x00437030	partial	gates (min 1, 5, 10 minutes), level 1 outright / 2-3 busiest strictly above the unsigned seed, race-spelt level 3, issue via 0x004efc00 (0,0) all match; the row verifier 0x00440f80 is modelled from VERIFY_RESEARCH.VS's text, not run (0x004eaa40)
+0x005ebf10	partial	held arm: holder -> settlement -> central cast to CVXTownHall (an outpost is not one: its type query 0x00563aa0 falls to CVXBuilding) + share-support bit 2 (0x005eb070); empty-or-same-kind, clamp to max_load, kind written, store drawn (fixed: any settlement loaded; test a_mule_loads_only_from_a_town_hall_whose_owner_it_supports). Not reproduced: the not-held arm (sweep of the mule's sight for a supported CVXTownHall, 0x005eb4b0, cell order) and 0x005eb0a0 killing a mule whose cargo comes out 0 (shared with Wagon::SetGold/SetFood)
+0x005ebfd0	partial	as LoadFood with gold; same fix, same two gaps
+0x005ebe10	verified	[obj+0x1d4] restype; invalid prints, 0
+0x004397d0	partial	roll last-to-first, owner 14, unsigned isqrt <= radius, four ranked classes with level bars, rank/nearest-to-unit ties, two defenders from holder then range sweep, approach (vtbl+0xb8,1) + engage/exclusive (fixed: signed radius compare; test attack_set_for_training_picks_the_best_defended_outpost_and_engages). Gap: the range sweep is ascending id, the original's 0x004233b0 is cell order, which can change the exclusive engage's named defender
+0x00429310	verified	invalid gate false; members via 0x00443e30; 0x005295d0 per member with this = gate: held -> false, route to [gate+0x148]'s central with flag 0x100, inside when no gate crossed (inside_walls); stale "deliberately absent" note removed
+0x0042eef0	partial	invalid settlement prints, W untouched; the AI's ten seen-army rows ([ai+0x30], 0x0041c420) are not kept, only the census fallback 0x0041c400 is modelled
+0x004229f0	verified	command row by name (vtbl+0x14), costgold +0x1e8, else 0
+0x004355f0	verified	deque buildings with the building bit, tier != 3, heir of BaseArena; queue length one less when the running command is exactly "idle"; unsigned least from UINT_MAX; invalid receiver prints, invalid handle
+0x00435750	verified	as BestArena with the temple of the central building's race (+0xb48 into 0x0081a668)
+0x00428ef0	verified	cost credit when Reserve != 0 and ReserveFor equals the argument exactly (0x00426df0, byte compare); tech <= total*percent/100 (fixed: switch was reserved>0 and compare was row identity; test check_tech_budget_is_a_share_of_army_store_and_technology)
+0x005ef240	partial	invalid receiver invalid handle; class created, owner via vtbl+0xa0, first enter-water door nearest (-1,-1), into the holder (0x005d3e10); a class that is not a ship answers invalid here where the original creates it
+0x005c4a60	verified	roster > 0 ? 0x005c4830 * roster : 0; 0x005c4830 = race-prefixed Sentry class, (damage+armor_slash)*(SentriesLevel+13)*(maxhealth*5/4)/1000+1
+0x005c3730	verified	every type-12 point of every deque building (off-map skipped), signed isqrt strictly less from 10,000,000, else (-1,-1) (fixed: compared exact squared distances; test find_near_enter_exit_keeps_the_nearest_gate_of_any_building)
+0x005c2af0	verified	ceiling [set+0x104]; invalid 0, no print
+0x005c29f0	verified	owner's score block +0x38 += n, no sign check; invalid prints
+0x005c2890	verified	central class name exactly GTownhall or RTownhall (10-byte repe cmpsb)
+0x00428a10	verified	unknown row prints, 0; 0x00425a10 with the row's gold/food/pop and the reserve exempted when ReserveFor equals the argument exactly (fixed: compared row identity with the row's spelling; shared helper reserved_gold_for; test max_afford_count_and_can_afford_hold_the_reserve_back_from_gold)
+0x005c38d0	partial	strictly most [+0x1f8] from 0 among deque buildings whose entity has bit 12 (type-12 point); invalid receiver prints, invalid handle. Walk is ascending id, the deque join order (as BestGate)
+0x00428710	verified	gates whose target state [+0x208] != 1 get vtbl+0xc0(1) and opengate via 0x004efc00 with replace, as the settlement's owner; missing opengate row prints and stops; prose corrected (no mid-swing divergence)
+0x005c2930	verified	reads [set+0xf0], which nothing writes: always 0
+0x005c4a10	verified	no receiver check; pool +1 via 0x005c4930 and [set+0x100] += 1, no ceiling
+0x0042dec0	verified	deque buildings at tier 3 whose class command list has a row named exactly "repair", 0x00425a10 count with the reserve, issue via 0x004efc00 (1,0) as owner
+0x0042cd60	verified	running reserve: different tech (0x00429c60 differs) false, same tech same percent true no write, same tech new percent rewrites Reserve/ReserveFor and keeps ReservedAt; none running writes all three (fixed: first arm inverted and ReservedAt always restarted; test reserve_for_writes_three_slots_and_refuses_another_research_while_one_runs)
+0x005c25b0	verified	[set+0x48] food rate := n; invalid prints
+0x0042c910	verified	receiver must be a BaseTownhall heir; count same-record settlements whose central is heir of the class and whose 0x0042c800 is the receiver
+0x00437580	verified	fresh list: deque members with the building bit, heir of BaseArena, no ruin test; invalid prints, empty list
+0x004376f0	verified	as TSGetAllArenae with each building's own race temple class (+0xb48, 0..7 else none)
+0x004246a0	verified	sum over the holder's members of 0x004439d0 & 0xffff (object_power); invalid prints, 0
+0x0042ca90	verified	store order, non-null settlements, unsigned isqrt(central) < dist, central heir of the class (fixed: signed compare; test economy_settlement_count_is_strictly_within_and_by_descent)
+0x006a7550	partial	SettlementCount/0: debug-log dump of the settlement vector's sizes; no game effect. Not bound: no shipped site
