@@ -911,12 +911,26 @@ std::uint32_t ai_script_chunk(CallContext& ctx, PlayerId player, std::string_vie
 
 namespace {
 
-/// `AIGetPlayer` -- the 1-based player whose AI owns the running script, or -1.
+/// `AIGetPlayer` (0x00421cb0) -- the 1-based player whose AI owns the running
+/// script, and **0** for a script no AI owns.
+///
+/// The body is one call and an increment: 0x0043caa0 reads the running
+/// script's owner tag (the text field at +0x44 of the current script record),
+/// answers -1 when the field is null and its `atol` otherwise, and the entry
+/// point pushes that **plus one**. The tag is written by the AI's own spawn
+/// (0x0041cd00 formats `[ai+0x24]`, the 0-based seat, with `%d` and stores it
+/// through 0x0069d040), so an AI-owned script reads its seat + 1 and anything
+/// else reads -1 + 1 = 0. No argument, no receiver, no failure arm.
+/// `AiSystem::script_player` keeps -1 for "no owner" because its other callers
+/// (the script-slot and helper families) test for it; only this entry point
+/// adds the original's increment to that case. All nine shipped sites run
+/// inside an AI, so the retail scripts never see the 0.
 HostOutcome f_ai_get_player(CallContext& ctx) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed("AIGetPlayer: no world");
   if (ctx.scheduler == nullptr) return HostOutcome::failed("AIGetPlayer: no scheduler");
-  return HostOutcome::ok_with(Value::integer(ai->script_player(ctx.script, *ctx.scheduler)));
+  const std::int32_t owner = ai->script_player(ctx.script, *ctx.scheduler);
+  return HostOutcome::ok_with(Value::integer(owner < 0 ? 0 : owner));
 }
 
 /// `AIStart(player, profile, difficulty)` -- 20 sites, every one of them inside
@@ -938,9 +952,19 @@ HostOutcome f_ai_get_player(CallContext& ctx) {
 ///   * the player is validated **1..16** and passed down 0-based, which is
 ///     `player_arg`'s rule everywhere else. `Function "AIStart": Player number
 ///     should be between 1 and 16` is the original's own message.
-///   * the profile name is **uppercased** (0x00435030-0x0043505c, an inline
-///     `a`..`z` fold) before the lookup, and an unknown one refuses with
-///     `AIStart: invalid AI profile` and starts nothing.
+///   * the profile name must match a listed profile **exactly, case and
+///     all**. The wrapper does copy the argument into a stack buffer and fold
+///     `a`..`z` there (0x00435030-0x0043505c), but the key it then pushes to
+///     the lookup (0x0043506d: the address of the slot holding the *original*
+///     string) is not that buffer, so the fold is dead. The lookup, 0x00426ea0,
+///     walks the profile list comparing length and bytes with no folding, and
+///     the list holds uppercased directory names (0x00443190). So
+///     `"DEFENSIVE"` would match and `"Defensive"` is refused with `AIStart:
+///     invalid AI profile`, starting nothing. The core (0x00434ca0) uppercases
+///     the stored copy afterwards, a no-op on a name that matched. Here that is
+///     a refusal of any argument with a lower-case letter in it, ahead of
+///     `AiSystem::start`'s folded lookup. The two-argument form (0x00434e60)
+///     has the same dead fold and the same exact lookup.
 ///   * the difficulty argument is 0, 1 or 2 -- the core increments before
 ///     validating against 1..3 -- and anything else refuses with
 ///     `AIStart: invalid diffivulty`, the typo included. `ai_start_difficulty`
@@ -987,10 +1011,12 @@ HostOutcome f_ai_start(CallContext& ctx) {
   const PlayerId player = player_from_script(ctx.arg(0).as_integer());
   if (player == kNoPlayer) return HostOutcome::ok_void();
   if (ctx.arg(1).as_string().empty()) return HostOutcome::ok_void();  // `invalid AI profile`
+  // An exact match against uppercased names: a lower-case letter matches none.
+  if (upper(ctx.arg(1).as_string()) != ctx.arg(1).as_string()) return HostOutcome::ok_void();
   const AiDifficulty difficulty = ai_start_difficulty(ctx.arg(2).as_integer());
   if (difficulty == AiDifficulty::none) return HostOutcome::ok_void();
   // `AiSystem::add_profile` uppercases on the way in and `start` looks up by
-  // the uppercased name, so the fold happens once, there.
+  // the uppercased name; the check above has made that fold the identity.
   (void)ai_start(*world, player, ctx.arg(1).as_string(), difficulty, *ctx.scheduler);
   return HostOutcome::ok_void();
 }
@@ -4437,7 +4463,13 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
   registry.define(kFree, "AIStop", 1, &f_ai_stop);     //  1, in a container, and a trap message
   // The one- and two-argument forms (0x00434e20, 0x00434e60) are **not**
   // bound: no script in the installation writes either, and the surface
-  // has no entry for them to fill. `ShowNotes`'s precedent.
+  // has no entry for them to fill. `ShowNotes`'s precedent. Read, for the day
+  // one is: the one-argument form checks 1..16 and calls the core with no
+  // name and difficulty 0, so the new AI keeps what its constructor
+  // (0x0041e100) seeds -- the seat's own playerdata profile string and its
+  // difficulty, anything outside 1..3 made 3. The two-argument form is the
+  // three-argument one's exact, case-sensitive profile check with difficulty
+  // 0, the same "keep the seat's".
 
   // The AI-helper runner. `RunAIHelper` is registered **eight times** in
   // `gbr.exe` (0x004d4160, arities 2..9, every argument a string), and only

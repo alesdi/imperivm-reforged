@@ -1,0 +1,7 @@
+# ai batch: engine/core/src/sim/ai.cpp (and squad.cpp for the member Eval forms)
+# body	status	note
+0x00421cb0	verified	AIGetPlayer: atol of the running script's owner tag (0x0043caa0, -1 when untagged) plus one; a script no AI owns answers 0, not -1 (fixed; test ai_get_player_answers_zero_outside_any_ai)
+0x00434f90	verified	AIStart(player, profile, difficulty): 1..16, exact case-sensitive profile match (the 0x00435030 fold writes a buffer the 0x00426ea0 lookup never reads; fixed, test ai_start_host_entry_matches_the_profile_name_case_sensitively), difficulty+1 in 1..3, then the core 0x00434ca0 (old AI destroyed first); refusals print and return
+0x00434e60	partial	AIStart(player, profile): read; the 3-argument rules with difficulty 0 (constructor's seat default kept); not bound, no shipped site and no surface entry
+0x00434e20	partial	AIStart(player): read; 1..16 then core with no name and difficulty 0, so the constructor 0x0041e100 seeds the seat's playerdata profile and difficulty (outside 1..3 -> 3); not bound, no shipped site and no surface entry
+0x00422720	verified	AIStop: 1..16 message, then [p*800+0x1034] with p 1-based (= the core's 0-based slot), virtual destroy and null; no AI is a no-op; out-of-range carries on off the table in the original, refused here (labelled)

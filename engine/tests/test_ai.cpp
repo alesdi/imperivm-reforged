@@ -468,7 +468,9 @@ TEST(ai_get_player_survives_a_prune) {
   CHECK(f.ai.script_player(monitor, f.scheduler) == 1);
 }
 
-TEST(ai_get_player_answers_minus_one_outside_any_ai) {
+/// 0x0043caa0 answers -1 for a script with no owner tag and 0x00421cb0 adds
+/// one to whatever it answers, so the entry point says **0**, not -1.
+TEST(ai_get_player_answers_zero_outside_any_ai) {
   Fixture f;
   const std::uint32_t chunk =
       build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/SUBAI/IDLE.VS");
@@ -478,9 +480,9 @@ TEST(ai_get_player_answers_minus_one_outside_any_ai) {
   const script::HostOutcome out =
       f.call(script::CallKind::free_function, "AIGetPlayer", {}, loose);
   CHECK(out.status == script::HostStatus::ok);
-  CHECK(out.value.as_integer() == -1);
-  // And with no running script at all, which is the case 0x0043caa0 answers -1
-  // for by name.
+  CHECK(out.value.as_integer() == 0);
+  // The internal resolver keeps -1 for "no owner"; the increment belongs to
+  // the entry point.
   CHECK(f.ai.script_player(script::kNoScript, f.scheduler) == -1);
 }
 
@@ -2706,8 +2708,7 @@ TEST(ai_start_host_entry_starts_the_named_player) {
   CHECK(f.ai.player_ai(5) == nullptr || !f.ai.player_ai(5)->active);
   CHECK(f.ai.player_ai(0) == nullptr || !f.ai.player_ai(0)->active);
 
-  // The name is folded on the way in, so any casing of a registered profile
-  // reaches it -- and an unregistered one starts nothing and does not trap.
+  // An unregistered name starts nothing and does not trap.
   const script::HostOutcome miss =
       f.call(script::CallKind::free_function, "AIStart",
              {script::Value::integer(6), script::Value::string("CHAOTIC"),
@@ -2715,6 +2716,30 @@ TEST(ai_start_host_entry_starts_the_named_player) {
              script::kNoScript);
   CHECK(miss.status == script::HostStatus::ok);
   CHECK(f.ai.active_count() == 1);
+}
+
+/// **The profile match is exact.** The wrapper's upper-casing loop
+/// (0x00435030) writes a buffer the lookup never reads: the key pushed at
+/// 0x0043506d is the caller's own string, and 0x00426ea0 compares bytes. A
+/// lower-case spelling of a listed profile is `AIStart: invalid AI profile`.
+TEST(ai_start_host_entry_matches_the_profile_name_case_sensitively) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);
+  f.ai.add_profile("DEFENSIVE", &f.profile);
+  const auto start = [&](std::int32_t player, const char* profile) {
+    return f.call(script::CallKind::free_function, "AIStart",
+                  {script::Value::integer(player), script::Value::string(profile),
+                   script::Value::integer(1)},
+                  script::kNoScript);
+  };
+  CHECK(start(2, "defensive").status == script::HostStatus::ok);
+  CHECK(start(3, "Defensive").status == script::HostStatus::ok);
+  CHECK(f.ai.active_count() == 0);
+  // The exact spelling starts, so the two above are refusals.
+  CHECK(start(4, "DEFENSIVE").status == script::HostStatus::ok);
+  CHECK(f.ai.active_count() == 1);
+  REQUIRE(f.ai.player_ai(3) != nullptr);
+  CHECK(f.ai.player_ai(3)->active);
 }
 
 /// Every refusal the original makes is a **return**, not a trap: a mission that
@@ -2793,16 +2818,18 @@ TEST(ai_start_host_entry_restarts_a_seats_ai_and_a_refusal_keeps_it) {
   REQUIRE(first != script::kNoScript);
   CHECK(ai->difficulty == AiDifficulty::easy);
 
-  // Refused three ways: the first AI is untouched, root and all.
+  // Refused four ways: the first AI is untouched, root and all. A lower-case
+  // spelling is one of them: the lookup is exact (0x00426ea0).
   CHECK(start("CHAOTIC", 2).status == script::HostStatus::ok);
   CHECK(start("", 2).status == script::HostStatus::ok);
   CHECK(start("DEFAULT", 3).status == script::HostStatus::ok);
+  CHECK(start("default", 2).status == script::HostStatus::ok);
   CHECK(f.ai.player_ai(3)->root == first);
   CHECK(f.ai.player_ai(3)->difficulty == AiDifficulty::easy);
   CHECK(f.scheduler.alive(first));
 
   // Accepted: a new root, the old one gone, one AI still.
-  CHECK(start("default", 2).status == script::HostStatus::ok);
+  CHECK(start("DEFAULT", 2).status == script::HostStatus::ok);
   const AiPlayer* again = f.ai.player_ai(3);
   REQUIRE(again != nullptr);
   CHECK(again->active);
