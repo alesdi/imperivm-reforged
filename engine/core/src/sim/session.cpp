@@ -805,7 +805,9 @@ Result<std::unique_ptr<GameSession>> GameSession::create(const script::HostRegis
 ///     `Level="9"` legionary is level 10. Here that is the same write, through
 ///     `HeroSystem::set_experience` with the world, so the Nobility rule the
 ///     virtual applies applies here too.
-///   * `hs<Skill>="n"` -- `load_skill`; the balance derives from the level.
+///   * `hs<Skill>="n"` -- `load_skill`, the skill writer 0x0052def0 with the
+///     value as a signed byte: -1 withdraws the skill, and Scout moves the
+///     hero's sight; the balance derives from the level.
 ///   * `slot<n>="<item id>"` -- 0x005af5d0 takes every attribute whose name
 ///     starts `slot`, in document order, mints the item by id (0x00535640
 ///     tries the catalogue by one key and then the other) and hands it to
@@ -831,7 +833,7 @@ void GameSession::Impl::apply_authored_attributes(const MapObjectList& map,
         const std::int32_t which = hero_skill_id(name);
         std::int32_t points = 0;
         if (which >= 0 && parse_authored_int(value, points)) {
-          (void)hero.load_skill(id, static_cast<HeroSkill>(which), points);
+          (void)hero.load_skill(world, id, static_cast<HeroSkill>(which), points);
         }
       } else if (name.size() > 4 && name.compare(0, 4, "slot") == 0 && !value.empty()) {
         (void)hero.items().add(world, id, value);

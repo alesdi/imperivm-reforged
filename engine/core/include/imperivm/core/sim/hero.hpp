@@ -260,10 +260,10 @@ struct HeroConstants {
   std::int32_t stamina_per_charge_level = 1;
   std::int32_t stamina_per_rush_level = 1;
 
-  /// The highest a skill goes. **Inferred**: every AI tactic script sets its
-  /// goal levels to 10 (`aSkillLevels[j] = 10`), and `HEROSKILL DEFAULT.VS`
-  /// caps its own recommendation with `MIN(skill_points + 5, 10)`. Nothing
-  /// states a hard limit.
+  /// The highest a skill goes: 10, written into the skill writer's clamp
+  /// (0x0052def0) and the balance's ten per offered skill (0x0052da80) as a
+  /// literal, not read from `CONST.INI`. The AI tactic scripts' goal levels
+  /// (`aSkillLevels[j] = 10`) agree.
   std::int32_t max_skill_points = 10;
 };
 
@@ -630,36 +630,53 @@ class HeroSystem final : public System {
 
   // -- skills ----------------------------------------------------------
 
-  /// `Hero.GetSkill(id)`. `-1` for an unknown hero or an out-of-range id --
-  /// `HERO_SKILL_BEHAVIOUR.VS` tests `skillpoints < 0` explicitly.
+  /// `Hero.GetSkill(id)` (0x0052f550): the signed byte at `[hero+0x1fc+id]`,
+  /// which is **-1 for a skill the hero is not offered** -- the scripts read
+  /// it so: `HERO_SKILL_BEHAVIOUR.VS` floors `GetSkill(hsHealing)` at 0,
+  /// `VERIFY_HERO_SKILL.VS` refuses on `level < 0`. -1 too for an id of 25 or
+  /// more (compared unsigned, so a negative id as well) and for an unknown
+  /// hero.
   [[nodiscard]] std::int32_t skill(ObjectId hero, HeroSkill which) const;
   [[nodiscard]] std::int32_t skill(ObjectId hero, std::int32_t id) const;
 
-  /// `Hero.SetSkill(id, points)`. Clamps to `[0, max_skill_points]` and
-  /// refuses what the balance does not cover.
+  /// `Hero.SetSkill(id, points)` -- 0x0052f4f0: an id of 25 or more, or
+  /// points outside `[-1, 10]`, does nothing at all (false); anything else
+  /// goes to the skill writer 0x0052def0 (`write_skill`) **with no look at
+  /// the balance** -- the scripts compute `skillpoints + available`
+  /// themselves, and an overspend leaves `AvailableSkillPoints` negative.
+  /// -1 withdraws the skill (not offered), 0..10 offers it at that many.
+  /// The world-free form leaves out Scout's sight.
   bool set_skill(ObjectId hero, HeroSkill which, std::int32_t points);
-  /// The map's `hs<Skill>="n"`: written straight into the record, spending
-  /// nothing, which is what the hero loader does -- 0x00530810 matches each
+  bool set_skill(World& world, ObjectId hero, HeroSkill which, std::int32_t points);
+  /// The map's `hs<Skill>="n"`: the hero loader (0x00530810) matches each
   /// attribute against the `hs*` table (0x00824b68, the enum's order) and
-  /// calls `Hero::SetSkill` (0x0052def0), which clamps to `[-1, 10]` and
-  /// writes the byte at `[hero+0x1fc+skill]` with no look at the balance.
-  /// Clamped to `[0, max_skill_points]` here; -1 is the exe's "not offered"
-  /// marker and the `offered` table carries that.
+  /// hands the value, as a signed byte, straight to the skill writer
+  /// 0x0052def0 -- so `write_skill`, clamping rather than refusing.
   bool load_skill(ObjectId hero, HeroSkill which, std::int32_t points);
-  /// Whether the hero's class offers the skill at all.
-  ///
-  /// **Not enforced by `set_skill`.** The `HeroSkills` list is what the skill
-  /// panel offers and what the AI tactic scripts choose from; nothing in the
-  /// corpus shows the engine refusing a `SetSkill` outside it, and silently
-  /// dropping an AI's request would be a wrong answer rather than a refusal.
-  /// So this is a question the UI and the AI ask, not a gate.
+  bool load_skill(World& world, ObjectId hero, HeroSkill which, std::int32_t points);
+  /// 0x0052def0, the skill writer: points clamped to `[-1, 10]` and stored
+  /// (`offered` false and 0 points for -1); then, with the old and new
+  /// values each floored at 0, Scout (19) moves the hero's own sight by
+  /// `SightPerScoutLevel` per point of difference, clamped to `[100, 2048]`,
+  /// exploring the new circle round the hero for its owner when that widens
+  /// it and the hero is not held -- `m_set_sight`'s reveal -- and storing it
+  /// either way. Administration, the team skills, Discipline, Quick March and
+  /// the Epic skills only refresh what this engine computes when asked
+  /// (`max_army`, `modifiers_for`, `hero_modifiers`).
+  bool write_skill(World* world, ObjectId hero, HeroSkill which, std::int32_t points);
+  /// Whether the hero is offered the skill: its byte is not -1. The class's
+  /// `HeroSkills` list seeds it at registration; `SetSkill` and the map's
+  /// `hs*` can change it.
   [[nodiscard]] bool offers_skill(ObjectId hero, HeroSkill which) const;
 
-  /// `AvailableSkillPoints` (0x0052da80): the balance as the original
-  /// derives it rather than keeps it -- `min(10 per offered skill, level)
-  /// - spent`, where `level` is `level_for_experience` (0x005d28c0) of the
-  /// raw counter, **one point per level**. Nothing is stored: a level-up is
-  /// a point, and a skill sold back is a point again.
+  /// `AvailableSkillPoints` (0x0052f680 -> 0x0052da80): the balance as the
+  /// original derives it rather than keeps it -- `min(level, 10 per offered
+  /// skill) - spent`, where `level` is `level_for_experience` (0x005d28c0) of
+  /// the running total, **one point per level**, and spent sums the offered
+  /// skills. **Not floored at 0**: a hero whose skills were set past its level
+  /// owes points. Nothing is stored: a level-up is a point, and a skill sold
+  /// back is a point again. 0 for an unknown hero here; the entry point
+  /// answers -1 for an unresolvable receiver.
   [[nodiscard]] std::int32_t available_skill_points(ObjectId hero) const;
 
   /// `Hero.UseSkill(id)` -- fire an active skill.

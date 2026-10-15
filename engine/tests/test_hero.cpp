@@ -669,36 +669,100 @@ TEST(the_chance_skills_report_percentages_and_never_roll_here) {
   CHECK(f.world.rng().state() == before);
 }
 
-TEST(a_skill_cannot_be_bought_without_points_and_stops_at_ten) {
+TEST(set_skill_writes_without_looking_at_the_balance_and_stops_at_ten) {
+  // `Hero::SetSkill` (0x0052f4f0) refuses only an id past 24 and points
+  // outside [-1, 10]; the skill writer (0x0052def0) stores the rest with no
+  // look at the balance, and `AvailableSkillPoints` (0x0052da80) is
+  // `min(level, 10 per offered skill) - spent`, which nothing floors.
   Fixture f;
   const ObjectId hero = f.spawn_hero();
-  // One point per level (0x0052da80): a fresh hero is level 1 and has one.
+  // One point per level: a fresh hero is level 1 and has one.
   CHECK(f.heroes.available_skill_points(hero) == 1);
-  CHECK(!f.heroes.set_skill(hero, HeroSkill::team_attack, 2));
-  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 0);
+  CHECK(f.heroes.set_skill(hero, HeroSkill::team_attack, 2));
+  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 2);
+  CHECK(f.heroes.available_skill_points(hero) == -1);
   // A level-up is a point without anyone granting it.
   const std::int32_t next = f.heroes.experience_for_level(2) - f.heroes.experience(hero);
   REQUIRE(next > 0);
   (void)f.heroes.add_experience(hero, next);
   CHECK(f.heroes.inherent_level(hero) == 2);
-  CHECK(f.heroes.available_skill_points(hero) == 2);
+  CHECK(f.heroes.available_skill_points(hero) == 0);
 
   f.grant(hero, 4);
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 4));
   CHECK(f.heroes.available_skill_points(hero) == 0);
-  // Selling back returns the points, which is what makes `SetSkill` safe for
-  // the AI's `SetSkill(id, skillpoints + available)` idiom.
+  // Selling back returns the points.
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 1));
   CHECK(f.heroes.available_skill_points(hero) == 3);
 
+  // Past 10, or below -1, the entry point does nothing at all.
   f.grant(hero, 100);
-  REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 99));
+  CHECK(!f.heroes.set_skill(hero, HeroSkill::team_attack, 11));
+  CHECK(!f.heroes.set_skill(hero, HeroSkill::team_attack, -2));
+  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 1);
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 10));
   CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 10);
+
+  // -1 withdraws the skill: `GetSkill` reads -1, and it leaves the balance's
+  // ten-per-skill cap and its spending both.
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, -1));
+  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == -1);
+  CHECK(!f.heroes.offers_skill(hero, HeroSkill::team_attack));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 0));
+  CHECK(f.heroes.offers_skill(hero, HeroSkill::team_attack));
+  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 0);
 
   // `HERO_SKILL_BEHAVIOUR.VS` tests `skillpoints < 0` explicitly.
   CHECK(f.heroes.skill(sim::kNoObject, HeroSkill::team_attack) == -1);
   CHECK(f.heroes.skill(hero, -1) == -1);
   CHECK(f.heroes.skill(hero, 25) == -1);
+}
+
+TEST(scout_moves_the_heros_own_sight_by_the_difference_and_clamps_it) {
+  // 0x0052def0, case 19: sight += SightPerScoutLevel * (new - old), with old
+  // and new floored at 0, clamped to [100, 2048], stored either way.
+  Fixture f;
+  const ObjectId hero = f.spawn_hero();
+  WorldObject* slot = f.world.find(hero);
+  REQUIRE(slot != nullptr);
+  slot->sight = 400;
+  f.grant(hero, 30);
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, 2));
+  CHECK(slot->sight == 500);
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, 0));
+  CHECK(slot->sight == 400);
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, -1));  // floored at 0: no change
+  CHECK(slot->sight == 400);
+  slot->sight = 2000;
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, 10));
+  CHECK(slot->sight == 2048);
+  slot->sight = 120;
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, 9));
+  CHECK(slot->sight == 100);
+}
+
+TEST(a_skill_the_hero_is_not_offered_reads_minus_one) {
+  // The class's `HeroSkills` list is the offer; a skill outside it is the
+  // byte -1 (0x0052f550 answers it as is) and counts for nothing in the
+  // balance (0x0052da80 skips it).
+  ClassGraph graph;
+  graph.add(bytes(R"(<class id="Hero" cpp_class="CVXHero" parent="">
+      <properties maxhealth="1000" HeroSkills="Administration, Team attack"/>
+    </class>)"),
+            "hero.sc.xml");
+  graph.link();
+  World world;
+  world.set_class_graph(&graph);
+  HeroSystem heroes;
+  world.add_system(&heroes);
+  const ObjectId hero = world.spawn(NativeClass::hero, nullptr, graph.find("Hero"));
+  world.set_owner(hero, 1);
+  world.set_health(hero, 1000);
+  heroes.register_hero(world, hero);
+  CHECK(heroes.skill(hero, HeroSkill::administration) == 0);
+  CHECK(heroes.skill(hero, HeroSkill::healing) == -1);
+  CHECK(heroes.set_level(hero, 30));
+  CHECK(heroes.available_skill_points(hero) == 20);  // min(30, 2 * 10) - 0
 }
 
 TEST(a_hero_class_offers_the_five_skills_its_heroskills_property_names) {
@@ -1095,6 +1159,8 @@ TEST(the_progression_entry_points_refuse_the_dead_and_answer_one_on_a_miss) {
   CHECK(f.heroes.experience(dead) == 0);
 
   const script::Value nobody = ref(static_cast<ObjectId>(9999));
+  CHECK(call("AvailableSkillPoints", {nobody}).value.as_integer() == -1);
+  CHECK(call("GetSkill", {nobody, script::Value::integer(0)}).value.as_integer() == -1);
   CHECK(call("level", {nobody}).value.as_integer() == 1);
   CHECK(call("inherentlevel", {nobody}).value.as_integer() == 1);
   CHECK(call("experience", {nobody}).value.as_integer() == 0);

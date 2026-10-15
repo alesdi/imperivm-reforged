@@ -10,6 +10,7 @@
 #include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/env.hpp"
+#include "imperivm/core/sim/fog.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
@@ -470,6 +471,7 @@ void HeroSystem::on_erase(World& world, ObjectId id) {
 std::int32_t HeroSystem::skill(ObjectId hero_id, HeroSkill which) const {
   const HeroRecord* record = hero(hero_id);
   if (record == nullptr || idx(which) >= kHeroSkillCount) return -1;
+  if (!record->offered[idx(which)]) return -1;
   return record->skills[idx(which)];
 }
 
@@ -478,31 +480,50 @@ std::int32_t HeroSystem::skill(ObjectId hero_id, std::int32_t id) const {
   return skill(hero_id, static_cast<HeroSkill>(id));
 }
 
-bool HeroSystem::set_skill(ObjectId hero_id, HeroSkill which, std::int32_t points) {
+bool HeroSystem::write_skill(World* world, ObjectId hero_id, HeroSkill which,
+                             std::int32_t points) {
   HeroRecord* record = hero(hero_id);
   if (record == nullptr || idx(which) >= kHeroSkillCount) return false;
-  if (points < 0) points = 0;
-  if (points > constants_.max_skill_points) points = constants_.max_skill_points;
+  const std::int32_t cap = constants_.max_skill_points;
+  points = std::clamp(points, -1, cap);
+  const std::int32_t before = record->offered[idx(which)] ? record->skills[idx(which)] : 0;
+  record->offered[idx(which)] = points >= 0;
+  record->skills[idx(which)] = points >= 0 ? points : 0;
+  const std::int32_t after = points >= 0 ? points : 0;
 
-  const std::int32_t before = record->skills[idx(which)];
-  const std::int32_t delta = points - before;
-  // Spending more than is available is refused rather than clamped: the shipped
-  // AI computes `skillpoints + available` itself and would silently under-spend
-  // if we quietly truncated.
-  if (delta > available_skill_points(hero_id)) return false;
-  record->skills[idx(which)] = points;
+  if (which == HeroSkill::scout && world != nullptr) {
+    if (WorldObject* slot = world->find(hero_id); slot != nullptr) {
+      const std::int32_t sight =
+          std::clamp(slot->sight + constants_.sight_per_scout_level * (after - before), 100, 2048);
+      if (sight > slot->sight && slot->state.position != kHeldPosition) {
+        if (FogSystem* fog = fog_system_of(*world); fog != nullptr) {
+          fog->map().explore_circle(slot->state.position, sight,
+                                    fog_slot_from_script(slot->state.owner + 1));
+        }
+      }
+      slot->sight = sight;
+    }
+  }
   return true;
+}
+
+bool HeroSystem::set_skill(ObjectId hero_id, HeroSkill which, std::int32_t points) {
+  if (points < -1 || points > constants_.max_skill_points) return false;
+  return write_skill(nullptr, hero_id, which, points);
+}
+
+bool HeroSystem::set_skill(World& world, ObjectId hero_id, HeroSkill which, std::int32_t points) {
+  if (points < -1 || points > constants_.max_skill_points) return false;
+  return write_skill(&world, hero_id, which, points);
 }
 
 bool HeroSystem::load_skill(ObjectId hero_id, HeroSkill which, std::int32_t points) {
-  HeroRecord* record = hero(hero_id);
-  if (record == nullptr || idx(which) >= kHeroSkillCount) return false;
-  if (points < 0) points = 0;
-  if (points > constants_.max_skill_points) points = constants_.max_skill_points;
-  record->skills[idx(which)] = points;
-  return true;
+  return write_skill(nullptr, hero_id, which, points);
 }
 
+bool HeroSystem::load_skill(World& world, ObjectId hero_id, HeroSkill which, std::int32_t points) {
+  return write_skill(&world, hero_id, which, points);
+}
 
 bool HeroSystem::offers_skill(ObjectId hero_id, HeroSkill which) const {
   const HeroRecord* record = hero(hero_id);
@@ -513,19 +534,17 @@ bool HeroSystem::offers_skill(ObjectId hero_id, HeroSkill which) const {
 std::int32_t HeroSystem::available_skill_points(ObjectId hero_id) const {
   const HeroRecord* record = hero(hero_id);
   if (record == nullptr) return 0;
-  // Derived, as 0x0052da80 derives it: `min(10 per offered skill, level)
-  // - spent`, the level being `level_for_experience` of the raw counter --
-  // one point per level, and a level-up is a point without anyone granting
-  // it. Nothing is stored, so nothing can drift from the skills and the
-  // level that are.
+  // Derived, as 0x0052da80 derives it: `min(level, 10 per offered skill)
+  // - spent` over the offered skills, the level being `level_for_experience`
+  // of the running total -- one point per level -- and nothing floors it.
   std::int32_t spent = 0;
   std::int32_t capacity = 0;
   for (std::size_t i = 0; i < kHeroSkillCount; ++i) {
+    if (!record->offered[i]) continue;
     spent += record->skills[i];
-    if (record->offered[i]) capacity += constants_.max_skill_points;
+    capacity += constants_.max_skill_points;
   }
-  const std::int32_t allowance = std::min(capacity, inherent_level(hero_id));
-  return allowance > spent ? allowance - spent : 0;
+  return std::min(capacity, inherent_level(hero_id)) - spent;
 }
 
 std::int32_t HeroSystem::skill_duration(ObjectId hero_id, HeroSkill which) const {
@@ -2028,24 +2047,34 @@ HostOutcome fn_hero_skill_id(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(hero_skill_id(string_arg(ctx, 0))));
 }
 
+/// `Hero::GetSkill(id)` (0x0052f550): an unresolvable receiver prints and
+/// answers -1; otherwise `HeroSystem::skill`.
 HostOutcome fn_get_skill(CallContext& ctx) {
   HERO_STATE(ctx);
   return HostOutcome::ok_with(
       Value::integer(host->heroes->skill(receiver(ctx), int_arg(ctx, 1))));
 }
 
+/// `Hero::SetSkill(id, points)` (0x0052f4f0): an unresolvable receiver
+/// prints; an id of 25 or more (unsigned) or points outside `[-1, 10]` do
+/// nothing; otherwise `HeroSystem::set_skill`, balance unchecked.
 HostOutcome fn_set_skill(CallContext& ctx) {
   HERO_STATE(ctx);
   const std::int32_t id = int_arg(ctx, 1);
   if (id < 0 || static_cast<std::size_t>(id) >= kHeroSkillCount) return HostOutcome::ok_void();
-  host->heroes->set_skill(receiver(ctx), static_cast<HeroSkill>(id), int_arg(ctx, 2));
+  (void)host->heroes->set_skill(*host->world, receiver(ctx), static_cast<HeroSkill>(id),
+                                int_arg(ctx, 2));
   return HostOutcome::ok_void();
 }
 
+/// `Hero::AvailableSkillPoints` (0x0052f680): an unresolvable receiver prints
+/// and answers **-1**; otherwise 0x0052da80, `HeroSystem::available_skill_points`,
+/// which may be negative.
 HostOutcome fn_available_skill_points(CallContext& ctx) {
   HERO_STATE(ctx);
-  return HostOutcome::ok_with(
-      Value::integer(host->heroes->available_skill_points(receiver(ctx))));
+  const ObjectId id = receiver(ctx);
+  if (host->world->find(id) == nullptr) return HostOutcome::ok_with(Value::integer(-1));
+  return HostOutcome::ok_with(Value::integer(host->heroes->available_skill_points(id)));
 }
 
 HostOutcome fn_use_skill(CallContext& ctx) {
@@ -2162,6 +2191,29 @@ HostOutcome fn_set_level(CallContext& ctx) {
 
 // -- items -----------------------------------------------------------------
 
+/// `AddItem(name)` -- two registrations, one body here.
+///
+/// `Obj::AddItem` (0x005ac910), which every shipped site reaches (heroes,
+/// units, `RUIN_BEHAVIOR.VS`'s building): an unresolvable receiver prints and
+/// answers false. Otherwise the item is minted by name (0x00535640: the
+/// first catalogue, then the second, an exact `strcmp`) and offered to the
+/// receiver's add virtual (`vtbl+0xec` -> `+0xe8`, 0x005b60a0), which takes
+/// it only while the holder has fewer items than its class's
+/// `inventory_size` (`vtbl+0x108`, the descriptor's `+0x29c`). Taken: true,
+/// the receiver's bonuses are rebuilt (`RecalcBonuses`; `HeroSystem::level`
+/// and the modifiers are computed when asked here) and a `GetItem` effect
+/// object is spawned on it (0x00518650 entry 27). Refused or unknown: the
+/// minted item is destroyed and the answer is false. `ItemStore::add`.
+///
+/// **Known gaps.** The `GetItem` effect object is not spawned -- the
+/// effect-object factory `SetParryMode` names is not modelled (see
+/// `m_set_parry_mode`). And `ItemHolder::AddItem` (0x0053c5a0), the
+/// registration for an `ItemHolder`-typed receiver, answers **whether the name
+/// minted**, true even when the full holder refused the item; this body
+/// answers whether it was added. No shipped script calls `AddItem` on an
+/// `ItemHolder`-typed variable (the five that declare one only ask
+/// `IsValid`/`IsAlive`), and the registry here resolves by name, not by the
+/// receiver's static type, so the two cannot be told apart at the call.
 HostOutcome fn_add_item(CallContext& ctx) {
   HERO_STATE(ctx);
   const ObjectId item =
@@ -2169,6 +2221,14 @@ HostOutcome fn_add_item(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(item != kNoObject));
 }
 
+/// `HasItem(name)` -- `Obj::HasItem` (0x004263e0) is the receiver's
+/// find-by-name virtual (`vtbl+0xfc`, 0x005afd60 for a unit: a front-to-back
+/// walk over the held items, an exact, length-checked comparison of each
+/// item's name) answering whether it found an index; `ItemHolder::HasItem`
+/// (0x0053c910) is the same walk written out in the entry point. Both answer
+/// false for an unresolvable receiver. Here: the catalogue's exact lookup and
+/// a match on the type, which is the same answer while every shipped item's
+/// `name` is its `id`.
 HostOutcome fn_has_item(CallContext& ctx) {
   HERO_STATE(ctx);
   return HostOutcome::ok_with(

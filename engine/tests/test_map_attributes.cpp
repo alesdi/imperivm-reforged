@@ -213,7 +213,8 @@ TEST(the_maps_level_skills_and_items_land_on_the_hero) {
   CHECK(heroes.experience(aeneas) == 41);  // the running total: Exp[12]
   CHECK(heroes.skill(aeneas, HeroSkill::team_attack) == 3);
   CHECK(heroes.skill(aeneas, HeroSkill::administration) == 2);
-  CHECK(heroes.skill(aeneas, HeroSkill::healing) == 0);
+  // Not in the class's `HeroSkills`: the byte -1 `GetSkill` answers.
+  CHECK(heroes.skill(aeneas, HeroSkill::healing) == -1);
   // One point per level (0x0052da80), capped by ten per offered skill:
   // min(20, 12) - 5 spent.
   CHECK(heroes.available_skill_points(aeneas) == 7);
