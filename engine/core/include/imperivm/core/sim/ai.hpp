@@ -418,11 +418,11 @@ class AiSystem final : public System {
 
   /// `Settlement::EconomyScript` / `Settlement::TacticScript`.
   ///
-  /// Reports 0 (`ES_NONE` / `TS_NONE`) once the recorded coroutine is gone.
-  /// The original clears the slot from a script-completion hook; deriving it
-  /// from liveness instead is the same observable with one less thing to keep
-  /// in step, and it means a script that trapped does not wedge its settlement
-  /// forever.
+  /// Reports 0 (`ES_NONE` / `TS_NONE`) once the recorded coroutine is gone,
+  /// which is the original's own rule: 0x0041d2a0 asks the AI's thread manager
+  /// whether the settlement's fixed thread id still runs and zeroes the stored
+  /// id when it does not. This is the raw slot; the entry points add the
+  /// owner's-AI reading (`owner_slot` in `ai.cpp`).
   [[nodiscard]] std::int32_t economy_script(SettlementId settlement,
                                             const script::Scheduler& scheduler) const;
   [[nodiscard]] std::int32_t tactic_script(SettlementId settlement,

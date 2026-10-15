@@ -663,7 +663,11 @@ TEST(run_economy_script_spawns_the_file_the_profile_names) {
   CHECK(cleared.value.as_integer() == 0);
 }
 
-TEST(run_economy_script_refuses_an_id_the_profile_does_not_declare) {
+/// An id that names no script starts nothing **and does not trap**: 0x0043f1b0
+/// names `""` past its table and 0x0041cd00 answers -1 for a file the library
+/// does not hold, silently. The id is still written (0x0041d310 writes before
+/// it spawns), and reads back 0 because no thread runs at the slot's id.
+TEST(run_economy_script_of_an_id_that_names_nothing_starts_nothing_quietly) {
   Fixture f;
   REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
           script::kNoChunk);
@@ -671,18 +675,154 @@ TEST(run_economy_script_refuses_an_id_the_profile_does_not_declare) {
   const script::ScriptId root = f.ai.player_ai(1)->root;
   const script::Value handle = f.settlement_value(f.make_settlement(1));
 
-  // 99 names nothing. Refusing beats spawning something plausible.
   const script::HostOutcome out = f.call(script::CallKind::member, "RunEconomyScript",
                                          {handle, script::Value::integer(99)}, root);
-  CHECK(out.status == script::HostStatus::error);
+  CHECK(out.status == script::HostStatus::ok);
   CHECK(f.scheduler.live_count() == 1);
+  CHECK(f.call(script::CallKind::member, "EconomyScript", {handle}, root).value.as_integer() ==
+        0);
 
-  // The sentinel is a no-op rather than an error: `ES_NONE` means "nothing to
-  // run", and the corpus passes whatever came back.
-  const script::HostOutcome none = f.call(script::CallKind::member, "RunEconomyScript",
-                                          {handle, script::Value::integer(0)}, root);
-  CHECK(none.status == script::HostStatus::ok);
+  // A declared id whose file the library lacks is the same quiet nothing.
+  const std::int32_t es_village = f.profile.constant(AiEnum::economy_script, "ES_Village");
+  const script::HostOutcome missing = f.call(script::CallKind::member, "RunEconomyScript",
+                                             {handle, script::Value::integer(es_village)}, root);
+  CHECK(missing.status == script::HostStatus::ok);
   CHECK(f.scheduler.live_count() == 1);
+}
+
+/// **A second run replaces the first, and 0 stops it.** 0x0041d310 stops the
+/// thread at the settlement's fixed id when the slot is non-zero (0x0069fee0),
+/// then writes the new id unconditionally and spawns only for a non-zero one.
+TEST(run_economy_script_replaces_the_running_script_and_zero_stops_it) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void, Settlement set\nSleep(100000);\n",
+                "DATA/AI/ES_VILLAGE.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void, Settlement set\nSleep(100000);\n",
+                "DATA/AI/ES_STRONGHOLD.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(1)->root;
+  const script::Value handle = f.settlement_value(f.make_settlement(1));
+  const std::int32_t es_village = f.profile.constant(AiEnum::economy_script, "ES_Village");
+  const std::int32_t es_stronghold = f.profile.constant(AiEnum::economy_script, "ES_Stronghold");
+  const auto run = [&](std::int32_t id) {
+    return f.call(script::CallKind::member, "RunEconomyScript",
+                  {handle, script::Value::integer(id)}, root);
+  };
+  const auto slot = [&] {
+    return f.call(script::CallKind::member, "EconomyScript", {handle}, root).value.as_integer();
+  };
+
+  CHECK(run(es_village).status == script::HostStatus::ok);
+  const script::ScriptId first = f.scheduler.scripts().back().id;
+  CHECK(f.scheduler.live_count() == 2);
+  CHECK(slot() == es_village);
+
+  CHECK(run(es_stronghold).status == script::HostStatus::ok);
+  CHECK(!f.scheduler.alive(first));
+  CHECK(f.scheduler.live_count() == 2);  // the root and the replacement only
+  CHECK(slot() == es_stronghold);
+  const script::ScriptId second = f.scheduler.scripts().back().id;
+  CHECK(second != first);
+
+  CHECK(run(0).status == script::HostStatus::ok);
+  CHECK(!f.scheduler.alive(second));
+  CHECK(f.scheduler.live_count() == 1);
+  CHECK(slot() == 0);
+}
+
+/// **The slot is the settlement owner's AI's**, not the settlement's: the
+/// readers ask `[[set+0x90]+0x88]` and read that AI's own array (0x00426190 ->
+/// 0x0041d2a0), and `RunEconomyScript` runs on that AI (0x0042616b).
+TEST(economy_script_slots_belong_to_the_settlements_current_owner) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void, Settlement set\nSleep(100000);\n",
+                "DATA/AI/ES_VILLAGE.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(f.ai.start(2, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root1 = f.ai.player_ai(1)->root;
+  const script::ScriptId root2 = f.ai.player_ai(2)->root;
+  const SettlementId set = f.make_settlement(1);
+  const script::Value handle = f.settlement_value(set);
+  const std::int32_t es_village = f.profile.constant(AiEnum::economy_script, "ES_Village");
+  const auto slot = [&](script::ScriptId caller) {
+    return f.call(script::CallKind::member, "EconomyScript", {handle}, caller).value.as_integer();
+  };
+
+  // Player 2's script starts it, but it runs on the owner's AI: tagged seat 1.
+  CHECK(f.call(script::CallKind::member, "RunEconomyScript",
+               {handle, script::Value::integer(es_village)}, root2)
+            .status == script::HostStatus::ok);
+  const script::ScriptId first = f.scheduler.scripts().back().id;
+  CHECK(f.ai.script_player(first, f.scheduler) == 2);
+  CHECK(slot(root1) == es_village);
+  CHECK(slot(root2) == es_village);  // whoever asks: the owner's array is read
+
+  // The settlement changes hands. Its old economy script has not ended, but it
+  // is in seat 1's array, and seat 2's says nothing runs there.
+  f.economy.settlements().find(set)->owner = 2;
+  CHECK(f.scheduler.alive(first));
+  CHECK(slot(root1) == 0);
+  // So seat 2 starts its own, and does not stop seat 1's thread.
+  CHECK(f.call(script::CallKind::member, "RunEconomyScript",
+               {handle, script::Value::integer(es_village)}, root2)
+            .status == script::HostStatus::ok);
+  CHECK(f.scheduler.alive(first));
+  const script::ScriptId second = f.scheduler.scripts().back().id;
+  CHECK(f.ai.script_player(second, f.scheduler) == 3);
+  CHECK(slot(root1) == es_village);
+
+  // A settlement whose owner has no AI has no slot, whatever runs on it.
+  f.economy.settlements().find(set)->owner = 4;
+  CHECK(f.scheduler.alive(second));
+  CHECK(slot(root1) == 0);
+  // And running on it starts nothing (a null AI in the original).
+  CHECK(f.call(script::CallKind::member, "RunEconomyScript",
+               {handle, script::Value::integer(es_village)}, root1)
+            .status == script::HostStatus::ok);
+  CHECK(f.scheduler.live_count() == 4);
+}
+
+/// `GetEconomyScript(idPlayer)` searches **`idPlayer - 1`'s** directory
+/// (0x004260f0 -> 0x0043d740 -> 0x0043d030), not the caller's, and answers a
+/// non-negative return masked to 16 bits and 0 for a negative one.
+TEST(get_economy_script_searches_the_arguments_seat_and_masks_the_answer) {
+  Fixture f;
+  AiProfile defensive;
+  const auto parsed = AiProfile::parse(bytes_of(kProfileIni));
+  REQUIRE(parsed.ok());
+  defensive = parsed.value();
+  f.ai.add_profile("DEFENSIVE", &defensive, "DATA\\AI\\DEFENSIVE\\");
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n",
+                "DATA/AI/DEFENSIVE/MAIN.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// int, Settlement set, int idPlayer\nreturn 5;\n",
+                "DATA/AI/GETECONOMYSCRIPT.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// int, Settlement set, int idPlayer\nreturn 65543;\n",
+                "DATA/AI/DEFENSIVE/GETECONOMYSCRIPT.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// int, Settlement set, int idPlayer\nreturn -3;\n",
+                "DATA/AI/GETTACTICSCRIPT.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(f.ai.start(3, "DEFENSIVE", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root1 = f.ai.player_ai(1)->root;
+  const script::Value handle = f.settlement_value(f.make_settlement(1));
+  const auto get = [&](const char* name, std::int32_t seat) {
+    return f.call(script::CallKind::member, name, {handle, script::Value::integer(seat)}, root1);
+  };
+
+  // Seat 1's script asks about seat 3 (1-based 4): the DEFENSIVE copy runs,
+  // and its 65543 is 7 in 16 bits.
+  CHECK(get("GetEconomyScript", 4).value.as_integer() == 7);
+  // About itself: the root copy.
+  CHECK(get("GetEconomyScript", 2).value.as_integer() == 5);
+  // A negative return is 0.
+  const script::HostOutcome negative = get("GetTacticScript", 2);
+  CHECK(negative.status == script::HostStatus::ok);
+  CHECK(negative.value.as_integer() == 0);
 }
 
 TEST(get_economy_script_runs_the_script_and_returns_its_value) {

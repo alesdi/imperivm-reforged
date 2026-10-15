@@ -831,6 +831,16 @@ int g_sync_depth = 0;
 /// `TSRecruitHero` needs it and it is a pointer rather than a second overload
 /// so that the one caller that does is the only one that pays for the copy.
 ///
+/// **A callee that fails traps the caller here, and that is a known gap.** The
+/// original's synchronous launcher (0x006a0360) reports a failed run as a
+/// non-zero status, and every trampoline read in the tenth round's audit
+/// (0x0043d740, 0x0043d820, the recruiters, `TSH_HeroSkills`) answers its
+/// default -- 0, false, an empty list -- and carries on. This runner returns
+/// the failure instead, so the trap sweep sees a callee that broke: with the
+/// shipped scripts a failing callee is this engine's bug, not the game's, and
+/// a silent default would hide it. A missing script file is not a failure of
+/// that kind, and each caller answers its own default for it.
+///
 /// **Exported, not local.** `sim/squad.cpp` runs `CheckMAIKA.vs` from
 /// `Squad::CalcGoAround` through the same trampoline shape (0x0043d670 beside
 /// 0x0043d740), and one runner is one set of refusals.
@@ -1157,14 +1167,62 @@ HostOutcome m_ai(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean((flags & kSquadFlagNoAi) == 0));
 }
 
-/// `set.EconomyScript` / `set.TacticScript`.
+/// The economy or tactic slot of `set` **as its current owner's AI sees it**:
+/// what `set.EconomyScript` (0x00426190) and `set.TacticScript` (0x00426290)
+/// answer, and what `RunEconomyScript` tests before it stops anything.
+///
+/// The two entry points resolve the handle and take the settlement's owner
+/// record (`[set+0x90]`) and that player's AI (`[player+0x88]`); **no AI
+/// answers 0** -- a human's settlement has no economy script whatever ran on
+/// it before. With an AI they call 0x0041d2a0 / 0x0041d410 on it, which read
+/// the AI's own per-settlement array (`[ai+0x70]` for economy, `[ai+0x80]` for
+/// tactic, a 16-bit id at the settlement's index `[set+0x1c]`), first asking
+/// the AI's thread manager whether the settlement's fixed thread id (economy
+/// `base + 0x34 + 2*index`, tactic one more; `base` is the helper-table count)
+/// still runs (0x0069f950) and zeroing the stored id when it does not. The
+/// answer is the stored id masked to 16 bits.
+///
+/// **Both the array and the threads are the AI's**, so the slot is per
+/// (AI, settlement). This engine keeps one slot per settlement
+/// (`AiSettlementScripts`) and recovers the per-AI reading by asking who owns
+/// the recorded script: a live script another seat started -- the settlement
+/// has changed hands and the old owner's economy script has not yet noticed --
+/// is not in the new owner's array, so it reads 0 here as it does there. What
+/// that does not reproduce is a seat recapturing a settlement while its *own*
+/// old script still runs and a third seat's has overwritten the slot (the
+/// original still sees the first); labelled, and a per-AI slot table is the
+/// fix. The receiver failing to resolve is a null dereference in the original;
+/// here it traps.
+[[nodiscard]] std::int32_t owner_slot(AiSystem& ai, const Settlement& set, AiEnum family,
+                                      const script::Scheduler& scheduler,
+                                      script::ScriptId* running = nullptr) {
+  const AiPlayer* seat = ai.player_ai(set.owner);
+  if (seat == nullptr || !seat->active) return 0;
+  const std::int32_t id = family == AiEnum::economy_script
+                              ? ai.economy_script(set.id, scheduler)
+                              : ai.tactic_script(set.id, scheduler);
+  if (id == 0) return 0;
+  script::ScriptId script = script::kNoScript;
+  for (const AiSettlementScripts& slot : ai.settlement_scripts()) {
+    if (slot.settlement != set.id) continue;
+    script = family == AiEnum::economy_script ? slot.economy_script : slot.tactic_script;
+    break;
+  }
+  if (ai.script_player(script, scheduler) != static_cast<std::int32_t>(set.owner) + 1) return 0;
+  if (running != nullptr) *running = script;
+  return id & 0xffff;
+}
+
+/// `set.EconomyScript` / `set.TacticScript` -- `owner_slot`, which describes
+/// both bodies.
 HostOutcome m_economy_script(CallContext& ctx) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed("EconomyScript: no world");
   if (ctx.scheduler == nullptr) return HostOutcome::failed("EconomyScript: no scheduler");
   const Settlement* set = receiver_settlement(ctx);
   if (set == nullptr) return HostOutcome::failed("EconomyScript: receiver is not a settlement");
-  return HostOutcome::ok_with(Value::integer(ai->economy_script(set->id, *ctx.scheduler)));
+  return HostOutcome::ok_with(
+      Value::integer(owner_slot(*ai, *set, AiEnum::economy_script, *ctx.scheduler)));
 }
 
 HostOutcome m_tactic_script(CallContext& ctx) {
@@ -1173,28 +1231,43 @@ HostOutcome m_tactic_script(CallContext& ctx) {
   if (ctx.scheduler == nullptr) return HostOutcome::failed("TacticScript: no scheduler");
   const Settlement* set = receiver_settlement(ctx);
   if (set == nullptr) return HostOutcome::failed("TacticScript: receiver is not a settlement");
-  return HostOutcome::ok_with(Value::integer(ai->tactic_script(set->id, *ctx.scheduler)));
+  return HostOutcome::ok_with(
+      Value::integer(owner_slot(*ai, *set, AiEnum::tactic_script, *ctx.scheduler)));
 }
 
-/// `set.GetEconomyScript(idPlayer)` / `set.GetTacticScript(idPlayer)`.
+/// `set.GetEconomyScript(idPlayer)` / `set.GetTacticScript(idPlayer)`
+/// (0x004260f0 / 0x004261f0).
 ///
-/// Both are `Settlement::GetXxxScript` in `gbr.exe` and both are one call into
-/// the identically named `.vs` file, whose declared signature is
-/// `int, Settlement set, int idPlayer` -- exactly this call's arguments, in
-/// this order. So the arguments pass straight through.
+/// Each pops the player and the settlement and calls 0x0043d740 / 0x0043d820
+/// with **`idPlayer - 1`**: the seat whose script directory is searched is the
+/// argument's, not the running script's. That resolves the file through
+/// 0x0043d030 -- `<the seat's AI profile name>/<file>` when the seat (0..15)
+/// has an AI with a non-empty profile name and that file exists, the plain
+/// name otherwise, which is `ai_script_chunk` -- and runs it synchronously
+/// (0x006a0360) with the declared `int, Settlement set, int idPlayer`: the
+/// settlement's id and `idPlayer` again, so the arguments pass straight
+/// through. The answer is the script's return value when the run succeeded
+/// **and the value is not negative**, masked to 16 bits; a negative value, a
+/// script that returns nothing, a missing file or a failed run all answer 0.
+/// No receiver check: an invalid handle is dereferenced. Here a missing file
+/// answers 0 as there, and a callee that traps traps the caller (the shared
+/// `run_script_now`, labelled there) where retail answers 0.
 HostOutcome get_script_common(CallContext& ctx, const char* file, const char* what) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed(what);
   if (ctx.scheduler == nullptr) return HostOutcome::failed(what);
   if (ctx.count() != 2) return HostOutcome::failed(what);
-  const std::int32_t player = ai->script_player(ctx.script, *ctx.scheduler);
-  const PlayerId owner = player > 0 ? static_cast<PlayerId>(player - 1) : kNoPlayer;
-  const std::uint32_t chunk = owner == kNoPlayer ? ctx.scheduler->find_chunk(file)
-                                                 : ai->find_script(*ctx.scheduler, owner, file);
+  const std::int64_t seat = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
+  const PlayerId owner = seat >= 1 && seat <= 16 ? static_cast<PlayerId>(seat - 1) : kNoPlayer;
+  const std::uint32_t chunk = ai_script_chunk(ctx, owner, file);
+  if (chunk == script::kNoChunk) return HostOutcome::ok_with(Value::integer(0));
   Value result;
   const HostOutcome ran = run_script_now(ctx, chunk, ctx.arguments, what, result);
   if (ran.status != script::HostStatus::ok) return ran;
-  return HostOutcome::ok_with(result.is_integer() ? result : Value::integer(0));
+  if (!result.is_integer() || result.as_integer() < 0) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
+  return HostOutcome::ok_with(Value::integer(result.as_integer() & 0xffff));
 }
 
 HostOutcome m_get_economy_script(CallContext& ctx) {
@@ -1205,18 +1278,35 @@ HostOutcome m_get_tactic_script(CallContext& ctx) {
   return get_script_common(ctx, "GetTacticScript.vs", "GetTacticScript failed");
 }
 
-/// `set.RunEconomyScript(id)` / `set.RunTacticScript(id)`.
+/// `set.RunEconomyScript(id)` / `set.RunTacticScript(id)` (0x00426140 /
+/// 0x00426240).
 ///
-/// `CVXAI::RunEconomyScript` (0x0041d310) writes the id into the settlement's
-/// slot and spawns the script the id names. The name comes from the profile's
-/// own enum table -- the same table `GS_STR`/`SS_STR` print through -- and the
-/// file is that name plus `.vs`, which every `ES_*`, `GS_*` and `TS_*` entry in
-/// `[EconomyScripts]`, `[GAIKAStrat]` and `[TacticScripts]` has a matching
-/// `[Scripts]` line for.
+/// Each pops the id and the settlement and calls 0x0041d310 / 0x0041d480 **on
+/// the settlement owner's AI** (`this` is `[[set+0x90]+0x88]`, loaded at
+/// 0x0042616b; no null test, so a settlement whose owner has no AI is a crash
+/// in the original and nothing at all here). That routine, in order:
 ///
-/// The spawned script takes the settlement as its one parameter
-/// (`ES_Village.vs = void, Settlement set`), and its parent is the caller, so
-/// `AIGetPlayer` inside it resolves.
+///   1. reads the owner's slot (`owner_slot`'s rule) and, when it is
+///      non-zero, **stops the thread running in the settlement's fixed id**
+///      (0x0069fee0) -- a second `RunEconomyScript` replaces the first script
+///      rather than running beside it;
+///   2. **writes the id, unconditionally** -- 0 included, which is how a
+///      caller stops the slot's script and clears it;
+///   3. for a non-zero id, takes its name from the constant table (0x0043f1b0;
+///      an id past the table's end names `""`), appends `.vs`, and starts it in
+///      the owner's thread manager at the settlement's fixed id through
+///      0x0041cd00, with the signature `void, Settlement set` and the
+///      settlement as its argument, tagged with the owner's seat so
+///      `AIGetPlayer` inside it answers the owner. A name with no script file
+///      makes 0x0041cd00 answer -1 and start nothing: no message, and the id
+///      stays written, which the next read turns back into 0 because no
+///      thread runs at that id.
+///
+/// The constant names here come from the profile family by family
+/// (`AiProfile::constant_name`), which is this engine's numbering of the same
+/// names (`sim/ai_profile.hpp` says why it differs from retail's single
+/// table). The spawned script's parent is the caller, which only matters for
+/// the ownership walk; it is adopted for the owner explicitly.
 HostOutcome run_script_common(CallContext& ctx, AiEnum family, const char* what) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed(what);
@@ -1224,32 +1314,38 @@ HostOutcome run_script_common(CallContext& ctx, AiEnum family, const char* what)
   if (ctx.count() != 2 || !ctx.arg(1).is_integer()) return HostOutcome::failed(what);
   const Settlement* set = receiver_settlement(ctx);
   if (set == nullptr) return HostOutcome::failed(what);
+  const PlayerId owner = set->owner;
+  const AiPlayer* seat = ai->player_ai(owner);
+  if (seat == nullptr || !seat->active) return HostOutcome::ok_void();
 
-  const std::int32_t id = ctx.arg(1).as_integer();
-  // The sentinel is 0 and means "no script"; running it is a no-op, not an
-  // error. `EconomyMonitor.vs` already guards against it, but `AIRun`-shaped
-  // entry points in this corpus are habitually called with whatever came back.
+  // Step 1: the owner's own running script goes first.
+  script::ScriptId running = script::kNoScript;
+  if (owner_slot(*ai, *set, family, *ctx.scheduler, &running) != 0) {
+    ctx.scheduler->kill(running);
+  }
+  // Step 2: the 16-bit id is written whatever it is.
+  const std::int32_t id = static_cast<std::int32_t>(ctx.arg(1).as_integer() & 0xffff);
+  const auto write = [&](ScriptId script) {
+    if (family == AiEnum::economy_script) {
+      ai->set_economy_script(set->id, id, script);
+    } else {
+      ai->set_tactic_script(set->id, id, script);
+    }
+  };
+  write(script::kNoScript);
   if (id == 0) return HostOutcome::ok_void();
 
-  const std::int32_t player = ai->script_player(ctx.script, *ctx.scheduler);
-  if (player <= 0) return HostOutcome::failed(what);
-  const PlayerId owner = static_cast<PlayerId>(player - 1);
-
+  // Step 3.
   const std::string file = ai->script_file_for(owner, family, id);
-  if (file.empty()) return HostOutcome::failed(what);
+  if (file.empty()) return HostOutcome::ok_void();
   const std::uint32_t chunk = ai->find_script(*ctx.scheduler, owner, file);
-  if (chunk == script::kNoChunk) return HostOutcome::failed(what);
-
+  if (chunk == script::kNoChunk) return HostOutcome::ok_void();
   const Value argument = ctx.arg(0);
   const ScriptId spawned = ctx.scheduler->spawn(chunk, std::span<const Value>(&argument, 1),
                                                 script::ObjectRef{}, ctx.script);
-  if (spawned == script::kNoScript) return HostOutcome::failed(what);
+  if (spawned == script::kNoScript) return HostOutcome::ok_void();
   ai->adopt(spawned, owner);
-  if (family == AiEnum::economy_script) {
-    ai->set_economy_script(set->id, id, spawned);
-  } else {
-    ai->set_tactic_script(set->id, id, spawned);
-  }
+  write(spawned);
   return HostOutcome::ok_void();
 }
 
