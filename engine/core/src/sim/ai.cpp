@@ -3877,14 +3877,17 @@ HostOutcome f_prepare_ai_transport_ship(CallContext& ctx) {
 ///   * have the node as their **AI destination** -- 0x00444140's computed half
 ///     with `DestGAIKA` as the fallback, which is `Squad::AIDest` (0x004215c0)
 ///     to the instruction, so `squad_ai_dest` is the one reading for both;
-///   * have a leader that resolves;
-///   * whose leader stands **strictly within** `dist` of the centre --
-///     `isqrt(dx² + dy²) < dist`.
+///   * have a **front member** (0x00443df0, the first of `members`) that
+///     resolves -- not a leader: the AI's own squads have none, and reading
+///     the leader here skipped every one of them, so the strength a
+///     computer player had marching on a node read 0 to `GETGAIKASTRAT.VS`;
+///   * whose front member's **stored** position (`vtbl+0x3c`, so a member
+///     inside a holder reads `(-1, -1)` rather than its holder's) is
+///     **strictly within** `dist` of the centre -- `isqrt(dx² + dy²) < dist`.
 ///
-/// `Squad::eval` is stored and nothing on this engine writes it yet, which
-/// `sim/squad.hpp` records; the walk is complete regardless, on the precedent
-/// of `EnemyPlayersEval`. A player outside the table answers 0, as does a
-/// GAIKA that names no node.
+/// A squad with no strength is walked and adds nothing. The player is tested
+/// only against 16 there, and a 0 reads the record before the table; here a
+/// player outside `1..16` answers 0, as does a GAIKA that names no node.
 /// `g.ControlledNeighbors(player)` -- 1 site, and the sole blocker of
 /// `DATA\AI\DEFENSIVE\MAIN.VS`.
 ///
@@ -3953,9 +3956,10 @@ HostOutcome m_gaika_approaching_squads(CallContext& ctx) {
   for (const Squad& squad : heroes->squads().squads()) {
     if (squad.key.player != player || squad.gaika_in == here) continue;
     if (squad_ai_dest(squad) != here) continue;
-    const WorldObject* leader = world->find(squad.leader);
-    if (leader == nullptr) continue;
-    const Point at = world->resolve_position(leader->id);
+    if (squad.members.empty()) continue;
+    const WorldObject* front = world->find(squad.members.front());
+    if (front == nullptr) continue;
+    const Point at = front->state.position;
     const std::int64_t dx = static_cast<std::int64_t>(at.x) - node->center.x;
     const std::int64_t dy = static_cast<std::int64_t>(at.y) - node->center.y;
     if (isqrt(dx * dx + dy * dy) < within) coming += squad.eval;
@@ -3972,17 +3976,24 @@ HostOutcome m_gaika_approaching_squads(CallContext& ctx) {
 // self rule folded in, so the three categories are `self`, `!is_enemy` and
 // `is_enemy` here.
 
-/// `Eval(player, pt, range, *own, *ally, *enemy)` -- 2 sites. 0x00426580
-/// sweeps the object grid within `range` of `pt` (distance squared against
-/// range squared, so the edge counts) for **units** -- bit 22, alive or not,
-/// but not held, because a garrisoned unit is off the grid -- and adds each
-/// one's census valuation (`object_power`, 16 bits of it) to the bucket its
-/// owner's category against `player` names. The three are out-parameters and
-/// start at zero.
-/// The three sums, shared with `Unit::BestMDPos` -- which builds the very same
-/// `{point, range}` / `{range squared, player, own, ally, enemy}` pair on its
-/// stack and hands it to the same sweep, so a second copy of this walk is how
-/// the two would come to disagree about what a crowd is worth.
+/// The three sums of 0x00423850's sweep, shared by `Eval` and
+/// `Unit::BestMDPos` -- which builds the very same `{point, range, range
+/// squared}` / `{flag mask -1, player, own, ally, enemy}` pair on its stack and
+/// hands it to the same sweep, so a second copy of this walk is how the two
+/// would come to disagree about what a crowd is worth.
+///
+/// The sweep clamps the square `pt +- range` to the map and visits the 256-unit
+/// grid cells it covers; a cell wholly inside the circle (0x00416810 answers
+/// 2) is taken whole, a cell the circle cuts (1) object by object against the
+/// squared range, inclusive. So the set is "on the grid, within `range` of
+/// `pt`", and a **negative range inverts the square and visits nothing**. Every
+/// object whose flag word meets the mask -- all of them, at -1 -- goes to the
+/// visitor 0x004231f0, which keeps only **units** (bit 22 of `+0x2c`), alive or
+/// not, and a held unit is not on the grid at all. Each kept unit adds its
+/// census valuation (0x004439d0, `object_power`, masked to 16 bits) to the
+/// bucket 0x0044e250(player, its owner) names: 1 own, 2 ally (bit 0 of the
+/// viewer's relation word for the owner, so a one-sided truce is an ally), 4
+/// enemy, and 0 -- counted nowhere -- for an owner past the sixteenth.
 struct EvalSums {
   std::int64_t own = 0;
   std::int64_t ally = 0;
@@ -3992,6 +4003,7 @@ struct EvalSums {
 [[nodiscard]] EvalSums eval_around(const World& world, const CombatSystem* combat, PlayerId player,
                                    Point at, std::int64_t range) {
   EvalSums sums;
+  if (range < 0) return sums;
   for (const WorldObject& slot : world.objects()) {
     if (slot.internal != InternalKind::none || !slot.state.flags.is_unit) continue;
     if (slot.state.is_held()) continue;
@@ -4011,6 +4023,14 @@ struct EvalSums {
   return sums;
 }
 
+/// `Eval(player, pt, range, *own, *ally, *enemy)` -- 2 sites. 0x00426580 pops
+/// the three out-parameters, the range, the point and the player, zeroes the
+/// three sums and runs `eval_around`'s sweep with `player - 1` as the viewer,
+/// then writes own, ally and enemy back -- always, zero when nothing counted.
+/// The player is not range-checked: past 16 the viewer is outside the table
+/// and 0x0044e250 answers 0 for everything (all three stay 0, as here); 0 or
+/// less makes it index a record before the table, which is not a player, and
+/// here answers zeros (labelled; no shipped site passes it).
 HostOutcome f_eval(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Eval: no world");

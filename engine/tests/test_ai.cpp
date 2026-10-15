@@ -4335,6 +4335,16 @@ TEST(ai_eval_buckets_the_units_in_range_by_relation) {
   CHECK(out[5].as_integer() == 2);   // foe, and edge at exactly 200
   (void)mine; (void)friendly; (void)foe; (void)edge;
 
+  // A negative range inverts 0x00423850's square: nothing is visited, though
+  // the same circle of 200 is full.
+  out = call_with_outs(f, "Eval",
+                       {script::Value::integer(1), pack_point(Point{100, 100}),
+                        script::Value::integer(-200), script::Value::integer(7),
+                        script::Value::integer(7), script::Value::integer(7)});
+  CHECK(out[3].as_integer() == 0);
+  CHECK(out[4].as_integer() == 0);
+  CHECK(out[5].as_integer() == 0);
+
   // A player outside the table leaves every bucket at zero.
   out = call_with_outs(f, "Eval",
                        {script::Value::integer(40), pack_point(Point{100, 100}),

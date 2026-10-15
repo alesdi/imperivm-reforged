@@ -2849,6 +2849,26 @@ TEST(approaching_squads_sums_the_strength_on_its_way_to_the_node) {
       b.call(script::CallKind::member, "AIDest", {pack_squad(fallback)});
   CHECK(dest.status == script::HostStatus::ok);
   CHECK(gaika_of(dest.value) == here);
+
+  // **An AI squad has no leader**, and 0x0042c060 measures its front member
+  // (0x00443df0), so it counts like any other.
+  const SquadKey troop = b.heroes.squads().create(0);
+  const ObjectId first = leader(0, Point{centre.x + 200, centre.y});
+  CHECK(b.heroes.squads().join(troop, first));
+  CHECK(b.heroes.squads().join(troop, leader(0, Point{centre.x + 5000, centre.y})));
+  Squad* sq = b.heroes.squads().find(troop);
+  REQUIRE(sq != nullptr);
+  sq->leader = kNoObject;
+  sq->gaika_in = there;
+  sq->ai_dest = here;
+  sq->eval = 1000;
+  CHECK(coming(1, 300) == 1000);
+  // Measured from the stored position, `vtbl+0x3c`: a front member inside a
+  // holder stands at `(-1, -1)`, not where its holder does.
+  const World::SettlementIds keep = b.world.spawn_settlement(0);
+  REQUIRE(b.world.set_position(keep.holder, Point{centre.x + 10, centre.y}));
+  REQUIRE(b.world.put_in_holder(first, keep.holder));
+  CHECK(coming(1, 300) == 0);
 }
 
 /// A partition alone, for the slot-grid cases that need no systems.
