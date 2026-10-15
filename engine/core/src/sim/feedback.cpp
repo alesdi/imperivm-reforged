@@ -282,11 +282,18 @@ HostOutcome fn_user_notification(CallContext& ctx) {
 /// `5_Great_Battles_Britain:seq13.vs` calls it immediately before
 /// `ShowAnnouncement`.
 ///
-/// A core with no HUD has nothing to clear, and unlike `BlockUserInput` beside
-/// it there is no flag a script can read back -- `gbr.exe` registers no getter
-/// and no shipped script asks. So this stores nothing, for the same reason.
+/// That widget group is the one `pr` writes to: both bodies take the object at
+/// `[0x00996ff4]+0x44cc`, `pr` appending a line through 0x00619060 and `cls`
+/// blanking every line and zeroing the line count through 0x00618a10. So
+/// `cls` empties the `DebugSink`, the same seam `pr` writes to -- which is
+/// what `DEBUG_SELECTION.VS`'s `ClearDebug(); ...; cls();` relies on, and not
+/// `ClearDebug`'s job (see `sim/text.cpp`). It answers nothing and there is no
+/// flag a script can read back.
 HostOutcome fn_cls(CallContext& ctx) {
-  (void)ctx;
+  if (HostContext* context = host_context_of(ctx);
+      context != nullptr && context->debug != nullptr) {
+    context->debug->clear();
+  }
   return HostOutcome::ok_void();
 }
 

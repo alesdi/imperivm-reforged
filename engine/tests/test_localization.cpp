@@ -14,6 +14,7 @@
 #include "imperivm/core/game/localization.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/host_context.hpp"
+#include "imperivm/core/sim/feedback.hpp"
 #include "imperivm/core/sim/text.hpp"
 #include "test.hpp"
 
@@ -440,6 +441,23 @@ TEST(text_host_sends_pr_to_the_sink_and_survives_without_one) {
   clear.state.debug = &sink;
   CHECK(invoke(registry, "ClearDebug", 0, clear).status == script::HostStatus::ok);
   CHECK(sink.lines.size() == 2);
+}
+
+/// `cls` (0x006a3fe0 -> 0x00618a10) blanks the console `pr` writes to.
+TEST(cls_clears_the_console_pr_writes_to) {
+  script::HostRegistry registry = text_registry();
+  (void)sim::register_feedback_host(registry);
+  RecordingSink sink;
+
+  HostCall line{script::Value::string("kept until cls")};
+  line.state.debug = &sink;
+  (void)invoke(registry, "pr", 1, line);
+  REQUIRE(sink.lines.size() == 1);
+
+  HostCall clear{};
+  clear.state.debug = &sink;
+  CHECK(invoke(registry, "cls", 0, clear).status == script::HostStatus::ok);
+  CHECK(sink.lines.empty());
 }
 
 TEST(text_host_refuses_every_entry_point_with_no_context) {
