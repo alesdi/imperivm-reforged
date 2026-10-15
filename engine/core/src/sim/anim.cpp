@@ -46,10 +46,25 @@ using script::Value;
 }
 
 /// The animation an object is playing, or null.
+///
+/// What the original calls playing is its slot `[obj+0x50]`, which
+/// `StartAnimation` (0x0053e6c0) sets and three things clear to -1: the
+/// animation's own end (0x0053f6a0), `StopAnimation` (0x0053d730), and
+/// entering a state (`CObj::SetState`, 0x0053e860). So **a state's own loop is
+/// not playing**: it is the pose the object rests in, drawn by the sprite with
+/// no animation behind it. This engine runs that loop through the same cursor
+/// as a started animation (`World::enter_state`), and tells the two apart
+/// here: a looping cursor on the slot its state names is the pose. A strip
+/// that has finished is not playing either.
 [[nodiscard]] const EntityAnim* playing(const WorldObject& slot) noexcept {
   if (slot.object == nullptr || slot.object->entity == nullptr) return nullptr;
-  if (slot.object->anim.anim_slot == kNoAnim) return nullptr;
-  return slot.object->entity->anim(slot.object->anim.anim_slot);
+  const AnimCursor& cursor = slot.object->anim;
+  if (cursor.anim_slot == kNoAnim || !slot.animating) return nullptr;
+  if (slot.repeat == AnimRepeat::loop) {
+    const EntityState* state = slot.object->entity->state(cursor.state_idx);
+    if (state != nullptr && state->anim_idx == cursor.anim_slot) return nullptr;
+  }
+  return slot.object->entity->anim(cursor.anim_slot);
 }
 
 /// How long the animation at `anim_slot` lasts as far as a script can tell:
@@ -308,13 +323,13 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
 /// clamp survives every test in the suite. It is written the way the original
 /// writes it, because the guarantee belongs to the timeline and not to here.
 ///
-/// The end is the start plus the declared `duration` (`length_of`). **Two
-/// approximations, neither reached by a shipped site** (every one calls this
-/// right after its own `StartAnim`): the original answers 0 for an object
-/// resting in a state, whose loop is not a playing animation (`CObj::SetState`
-/// sets the slot to -1), where this counts down the loop's cursor; and an
-/// animation whose strip runs out before its declared length answers 0 from
-/// then on here, where the original keeps counting to the declared end.
+/// The end is the start plus the declared `duration` (`length_of`), and
+/// nothing playing (`playing`) answers 0. **Approximated:** an animation
+/// whose strip runs out before its declared length stops playing here at the
+/// strip's end and answers 0 from then on, where the original keeps counting
+/// to the declared end. No shipped site reaches it -- every one calls this
+/// right after its own `StartAnim`, and none of their animations declares a
+/// length past its strip.
 HostOutcome m_time_to_anim_finish(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
@@ -324,10 +339,6 @@ HostOutcome m_time_to_anim_finish(CallContext& ctx) {
   if (anim == nullptr) return integer(0);
   const std::int32_t total = anim->duration;
   const std::int32_t elapsed = slot->object->anim.elapsed_ms;
-  // A strip that ran out before the declared length leaves a cursor that has
-  // stopped counting, so how far past it the clock now stands is not kept.
-  // Zero, by the asymmetry above.
-  if (!slot->animating && total > elapsed) return integer(0);
   // At the script's millisecond, which the world's clock may be ahead of.
   const std::int32_t left =
       total - elapsed + static_cast<std::int32_t>(script_lag(ctx, *world));
@@ -360,16 +371,16 @@ HostOutcome m_time_to_action_moment(CallContext& ctx) {
 /// `GetAnim()` -- the slot playing now, or **0** for nothing.
 ///
 /// `0x005a9fd0` is `push (slot < 0) ? 0 : slot + 1`, so zero is the sentinel
-/// and every real answer is a document number. Zero shipped call sites; bound
+/// and every real answer is a document number. A state's loop and a finished
+/// animation are slot -1 there (`playing`), so 0 here. Zero shipped call sites; bound
 /// because it costs one field read and because the corpus comments show the
 /// guard the family expects to write against it.
 HostOutcome m_get_anim(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("GetAnim: no world");
-  if (slot == nullptr || slot->object == nullptr) return integer(0);
-  const std::int32_t playing_slot = slot->object->anim.anim_slot;
-  return integer(playing_slot == kNoAnim ? 0 : playing_slot);
+  if (slot == nullptr || playing(*slot) == nullptr) return integer(0);
+  return integer(slot->object->anim.anim_slot);
 }
 
 /// `GetAnimTime(int slot)` -- how long that animation lasts, whether or not it
@@ -408,13 +419,16 @@ HostOutcome m_get_anim_duration(CallContext& ctx) {
 /// receivers and this registry keys on (kind, name, arity), so the handle type
 /// picks the half.
 ///
-/// **The object half hard-resets the cursor.** `CObj::SetState` (0x0053e860)
-/// returns immediately when the state is already current, and otherwise sets
-/// the playing slot to `-1` and recomputes -- so entering a state stops
-/// whatever was playing. It is called with `useTransition = 0` from the host,
-/// so the transition animation the engine-side caller would play is skipped;
+/// **The object half hard-resets the cursor.** 0x005aa040 checks the handle
+/// (a dead one reports and pushes an int, see the header) and calls
+/// `CObj::SetState` (0x0053e860) with the script's number less one -- the
+/// state array is the document's `idx - 1`, as the animation array is -- and
+/// no transition. That returns at once when the object already rests in the
+/// state (`[obj+0x44]` is the state plus 0x1c, which it is only while no
+/// animation plays), and otherwise sets the playing slot to -1 and the state
+/// word -- so entering a state stops whatever was playing.
 /// `World::enter_state` matches, and loops the state's own `anim_idx` when it
-/// names one.
+/// names one; resting already, the loop's cursor is left where it is.
 ///
 /// **The squad half writes the time too.** `Squad::StateTime` is persisted as
 /// `StateSetTime` and its three corpus sites all compare it against `GetTime()`,
@@ -457,6 +471,10 @@ HostOutcome m_set_state(CallContext& ctx) {
   World* ignored = nullptr;
   const WorldObject* slot = receiver_object(ctx, ignored);
   if (slot == nullptr) return HostOutcome::ok_void();
+  if (slot->object != nullptr && slot->object->anim.state_idx == state &&
+      playing(*slot) == nullptr) {
+    return HostOutcome::ok_void();
+  }
   (void)world->enter_state(slot->id, state);
   return HostOutcome::ok_void();
 }

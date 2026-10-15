@@ -481,6 +481,14 @@ TEST(anim_set_state_dispatches_on_the_handle_type) {
   CHECK(b.world.find(id)->object->anim.state_idx == 1);
   CHECK(b.world.find(id)->object->anim.anim_slot == 13);
 
+  // Resting in it already, `CObj::SetState` returns before it writes
+  // anything (0x0053e860): the pose's loop runs on.
+  b.world.advance_turns(1);
+  const std::int32_t looped = b.world.find(id)->object->anim.elapsed_ms;
+  REQUIRE(looped != 0);
+  b.call("SetState", 1, {AnimBench::obj(id), script::Value::integer(1)});
+  CHECK(b.world.find(id)->object->anim.elapsed_ms == looped);
+
   // The squad half, on a squad handle rather than an object one.
   const ObjectId leader = b.spawn();
   const SquadKey key = b.heroes.squads().create(1, leader);
@@ -533,6 +541,31 @@ TEST(anim_squad_set_state_stamps_the_scripts_millisecond) {
   REQUIRE(squad != nullptr);
   CHECK(squad->state == 7);
   CHECK(squad->state_time == 730);
+}
+
+/// A state's own loop is the pose the object rests in, not a playing animation,
+/// and neither is one that has run to its end.
+///
+/// The original's playing slot `[obj+0x50]` is set by `StartAnimation`
+/// (0x0053e6c0) and cleared to -1 by entering a state (0x0053e860) and by the
+/// animation's end (0x0053f6a0); `GetAnim` (0x005a9fd0) answers 0 for -1, and
+/// `TimeToAnimFinish` (0x005a9f20) and `TimeToActionMoment` answer 0.
+TEST(anim_a_states_loop_and_a_finished_animation_are_not_playing) {
+  AnimBench b;
+  const ObjectId id = b.spawn();
+  REQUIRE(b.world.enter_state(id, 1));
+  REQUIRE(b.world.find(id)->object->anim.anim_slot == 13);
+  REQUIRE(b.world.find(id)->animating);
+  b.world.advance_turns(1);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 0);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 0);
+
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(13),
+                          AnimBench::point(100, 100)});
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 13);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 264);
+  b.world.advance_turns(3);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 0);
 }
 
 /// `StartDelayedAnim(slot, point, delay)` -- one site, and its delay is `-1`.
