@@ -4950,7 +4950,10 @@ TEST(gaika_dest_point_aims_a_squad_at_the_ground_outside_the_nearest_gate) {
   }
 
   // **An offset that leaves the map is refused, not clamped**: the original
-  // tests all four edges and falls back to the central building. The northern
+  // tests all four edges and keeps what it already had, which is **the gate**
+  // -- the gate loop wrote it into the running answer before the step was
+  // tried (0x00427b80), so the refusal does not go back to the central
+  // building. The northern
   // gate's offset goes *negative*, so the low edges are what refuse it -- a
   // test of the far edges alone would let it through.
   {
@@ -4963,7 +4966,8 @@ TEST(gaika_dest_point_aims_a_squad_at_the_ground_outside_the_nearest_gate) {
     MatchRules tight;
     tight.map_size = 100000;  // wide enough that only the low edge can refuse
     match->configure(tight, 0, false);
-    CHECK(ask(node, scout) == centre);
+    CHECK(ask(node, scout) == north_at);
+    CHECK(ask(node, scout) != centre);
     // ...and a rectangle the offset fits inside lets it through again. It has
     // to be the southern gate: 450 north of the northern one is off the top of
     // any map, the town standing three cells from the edge.

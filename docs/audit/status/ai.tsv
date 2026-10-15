@@ -51,7 +51,7 @@
 0x0040d1d0	partial	SPFInitConnectData: sets the connect pass's range on the builder; engine no-op, same design
 0x004161d0	partial	SPFIncreaseConnect: 0x00415e30 then [builder+0x2c]=0; engine no-op, same design
 0x0040f8c0	partial	SPFDone: destroys the live structure, installs the built one, frees the builder; engine no-op, same design
-0x004225d0	partial	GAIKA::LSA: 0x0043cb00, node 0 -> 0, else the node record's 16-bit area (+0x10) by bare index; an id past the table answers 0 here; the node areas are this engine's partition (sim/lsa.hpp, design)
+0x004225d0	verified	GAIKA::LSA: 0x0043cb00, node 0 -> 0, else the node record's 16-bit area (+0x10) by bare index; an id past the table answers 0 here (the areas are this engine's partition, sim/lsa.hpp)
 0x00422600	partial	LSA(x, y): 0x0043cb30, the area of the node at the point (0x0044e3f0); bound (fixed: was unregistered), no shipped site; point-to-node is GaikaTable::at, the slot-grid approximation (design)
 0x00422630	partial	LSA(pt): as LSA(x, y); bound (fixed), no shipped site; same slot-grid approximation
 0x00425fd0	partial	Obj::LSA: 0x0043cb70, node at the object's raw position (vtbl+0x3c; a held unit is no node, area 0), no handle test; served by the member LSA/0 by receiver type (fixed), no shipped site; same approximation
@@ -77,3 +77,13 @@
 0x00421a00	partial	GAIKA::CalcPriority: CalcGAIKAPriority.vs on seat idPlayer-1, (idPlayer, g), negative or failed -> 0, full 32 bits; out-of-range seat runs the plain file (fixed; test calc_priority_marshals_the_player_first); callee-trap gap
 0x00421ae0	verified	GAIKA::StratRunning: the player's AI [p*800+0x1034] (none -> 0), then 0x0041d150: g==0 -> 0, slot = map[g] (0 past the map), the record's strat (+4) zeroed when thread 0x34+g no longer runs; per-record script here
 0x00421b30	verified	GAIKA::RunStrat: 0x0041d1d0 on the player's AI (no null test in retail, nothing here): stop thread 0x34+g when strat != 0, write strat unconditionally, spawn <name>.vs (void, GAIKA gaika) tagged with the seat for non-zero; missing file starts nothing
+0x00422dc0	verified	GAIKA::Empty: true without a node vector or node; else [node+0x18] (the squad container) empty -- modelled as no squad whose GAIKAIn is the node
+0x00422d70	verified	GAIKACount: the node vector's size including reserved node 0 (count+1 here), 0 without a vector
+0x00422950	verified	GAIKA::ControlledNeighbors: count of the node's neighbours (+0x1e/+0x20) whose settlement (+0x14) owner [[set+0x90]+8] equals player-1; region neighbours skipped (neighbour list from this engine's partition)
+0x0042afc0	partial	GAIKA::CanExplore: false without the node; a neighbour explored for player-1, else a teleport in the world settlement vector whose position is in this node and whose far end's node is explored; Explored's session overrides (0x0041cb80) not modelled, and a teleport is always its own node here (partition)
+0x00427b80	partial	GAIKA::GetDestPoint: (0,0) for no node, centre for a region node, else the settlement's position; BaseTownhall: nearest gate to the unit (initial best 200000), then 450 beyond it from the centre, bounds-tested inclusively, a refusal answering the gate (fixed: was the centre; test gaika_dest_point_aims_a_squad_at_the_ground_outside_the_nearest_gate); Outpost arm (0x00440060: 1300-unit offset tried at +-90 degrees against 0x004092b0) not reproduced, answers the settlement position
+0x0041f870	verified	SS_STR: state <1 -> "SS_IDLE", else the constant table name (0x0043f1b0; "" past its end); names from the root profile's per-family table (sim/ai_profile.hpp numbering)
+0x00421b70	partial	SetMAIKA: all three ids non-zero and distinct, then 0x0044fc60 records (src, dst, way-point) in a 512-capped list at the node manager +0x38 (also fed natively by 0x0041e6c0); the list is not kept here (no reader found but its own search), so the call is accepted and dropped
+0x00432790	verified	AreaAINoRecruit: area by name (0x004d9050; miss prints and does nothing), every node record whose centre is inside (rect inclusive, circle d2 <= r2), 0x0042b8d0 with {player-1, bits bool?8:0, mask bool?0:8}: sets or clears NoRecruit; node 0 skipped; the walk's early exit never fires (writer low half 0)
+0x00432c30	verified	AreaAIMaxPriority: as NoRecruit with {player-1, bool?100:-1} into 0x0042b960: SetPriority 100, or 50 for a value below 1, through the re-sort (0x0041cf00)
+0x00432e70	verified	AreaAISetAttackOptimism: as NoRecruit with {player-1, value} into 0x0042ba60 -> 0x0041d130: record +0x14 = value (Laika::optimism)

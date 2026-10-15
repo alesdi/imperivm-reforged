@@ -2339,9 +2339,10 @@ HostOutcome m_gaika_military_presence(CallContext& ctx) {
 ///     the nearest **gate** among the settlement's buildings to the *unit*,
 ///     then a point **450 world units beyond it, along the line from the town
 ///     centre through that gate**. No gate leaves the answer at the central
-///     building, and so does an offset point that falls outside the map
-///     rectangle -- the original tests all four edges and *refuses*, it does
-///     not clamp;
+///     building. An offset point that falls outside the map rectangle is
+///     refused -- the original tests all four edges inclusively and does not
+///     clamp -- and the answer is then **the gate itself**, because the gate
+///     loop wrote it into the running answer before the step was tried;
 ///   * when it is a heir of **`Outpost`** (0x00440060) there is a second
 ///     branch, and it is the one thing here not read to the end. Its guards
 ///     are: the settlement's owner is not **player 15**, the neutral-passive
@@ -2428,7 +2429,10 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
   const std::int32_t extent = match == nullptr ? 0 : match->rules().map_size;
   if (extent <= 0) return answer(out);
   const std::int32_t edge = extent - 1;
-  if (out.x < 0 || out.x > edge || out.y < 0 || out.y > edge) return answer(centre);
+  // Refused, the running answer is the **gate**: the gate loop has already
+  // moved it there (0x00427d9c onward) and the step only replaces it when it
+  // passes all four edges.
+  if (out.x < 0 || out.x > edge || out.y < 0 || out.y > edge) return answer(best);
   return answer(out);
 }
 
