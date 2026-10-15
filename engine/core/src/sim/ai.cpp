@@ -834,8 +834,10 @@ int g_sync_depth = 0;
 /// **A callee that fails traps the caller here, and that is a known gap.** The
 /// original's synchronous launcher (0x006a0360) reports a failed run as a
 /// non-zero status, and every trampoline read in the tenth round's audit
-/// (0x0043d740, 0x0043d820, the recruiters, `TSH_HeroSkills`) answers its
-/// default -- 0, false, an empty list -- and carries on. This runner returns
+/// (0x0043d740, 0x0043d820, the four recruiters, 0x00426c00) carries on with
+/// what it had -- 0, the list it minted, whatever the by-reference slot holds
+/// -- after at most a message through the retail no-op sink; 0x00426680 counts
+/// the skill as weight 0, which `m_ai_get_skill_to_develop` does too. This runner returns
 /// the failure instead, so the trap sweep sees a callee that broke: with the
 /// shipped scripts a failing callee is this engine's bug, not the game's, and
 /// a silent default would hide it. A missing script file is not a failure of
@@ -1404,10 +1406,14 @@ HostOutcome m_ts_adv_hero_skills(CallContext& ctx) {
   // pass-through below, which hands `ctx.arguments` to a callee whose
   // parameter list is fixed at three.
   if (ctx.count() != 3) return HostOutcome::failed(kWhat);
-  // The original's own guard: any of the three arguments naming nothing prints
-  // and returns without running the helper. A receiver that is not an object
-  // handle at all is the same case, and the helper's `if (!hero.IsValid)`
-  // would answer it identically if it ran.
+  // The original's own guard (0x00426c00): only the **hero** is tested -- the
+  // two arrays are resolved and passed on as they are -- and a hero naming
+  // nothing prints and returns without running the helper. A receiver that is
+  // not an object handle at all is the same case, and the helper's `if
+  // (!hero.IsValid)` would answer it identically if it ran. The search path
+  // is the hero's player (`[[hero+0x70]+8]` into 0x0043d030). A failed run
+  // prints `TSHeroSkills: Error running script!` and returns; here it traps
+  // (`run_script_now`'s labelled gap).
   if (!ctx.arg(0).is_object()) return HostOutcome::ok_void();
 
   const WorldObject* slot = world->find(ctx.arg(0).as_object().id);
