@@ -156,10 +156,15 @@ class ItemCatalog {
   /// Register one definition directly, for tests and for synthetic worlds.
   ItemTypeIndex add(ItemDefinition definition);
 
-  /// Case-insensitive lookup by `id`. Shipped ids mix case (`God's Gift`,
-  /// `Boar teeth`) and scripts spell them back exactly, but `AddItem("Boar
-  /// tooth")` in `BONUSSCRIPTS\103` names an item that does not exist at all,
-  /// so a tolerant lookup costs nothing and a strict one loses nothing either.
+  /// Lookup by `id`, **exactly**: the original's catalogue search (0x00534f50,
+  /// reached through the item minter 0x00535640 that `AddItem`, the map's
+  /// `slot<n>` and every by-name item entry point use) compares with a plain
+  /// byte-for-byte `strcmp` (0x00649bd0), so `AddItem("boar teeth")` mints
+  /// nothing where `AddItem("Boar teeth")` mints the item. Shipped scripts
+  /// spell every literal back exactly; this used to be case-insensitive.
+  ///
+  /// The minter asks a second catalogue (`0x9a7218`) when the first
+  /// (`0x9a7214`) misses; this engine has the one.
   [[nodiscard]] ItemTypeIndex find(std::string_view id) const;
 
   [[nodiscard]] const ItemDefinition* at(ItemTypeIndex index) const;

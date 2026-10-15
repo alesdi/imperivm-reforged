@@ -1197,7 +1197,11 @@ TEST(the_item_catalogue_reads_items_xml) {
   CHECK(catalog.find("Not an item") == kNoItemType);
   // `BONUSSCRIPTS\103 BOAR TOOTH.VS` asks for "Boar tooth", which no item is.
   CHECK(catalog.find("Boar tooth") == kNoItemType);
-  CHECK(catalog.find("bear teeth AMULET") != kNoItemType);  // tolerant lookup
+  // **Exact, not tolerant**: the catalogue search (0x00534f50) compares with a
+  // byte-for-byte strcmp (0x00649bd0), so a different case names no item.
+  CHECK(catalog.find("bear teeth AMULET") == kNoItemType);
+  CHECK(catalog.find("king's belt") == kNoItemType);
+  CHECK(catalog.find("King's Belt") == belt);
 }
 
 TEST(an_item_is_held_by_its_owner_and_has_no_position_of_its_own) {
