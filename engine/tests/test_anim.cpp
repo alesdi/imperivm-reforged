@@ -31,7 +31,7 @@ using namespace imperivm::core::sim;
 namespace {
 
 /// Three animations: slot 13 (264 units), slot 19 (300, action moment 100) and
-/// slot 1, whose sheet is `pingpong`. Slot 5 is deliberately absent, because a
+/// slot 1, whose sheet is `pingpong` and which declares 150 over a 200 strip. Slot 5 is deliberately absent, because a
 /// missing slot is an ordinary case and not an error.
 constexpr std::string_view kEntityXml = R"(<?xml version="1.0"?>
 <entity name="fixture" type="vx/unit" variations="8">
@@ -68,7 +68,7 @@ constexpr std::string_view kEntityXml = R"(<?xml version="1.0"?>
       <frame idx="4" duration="100"/>
       <frame idx="5" duration="0"/>
     </anim>
-    <anim idx="1" name="fire" startstate="1" endstate="1" frames="6" duration="0"
+    <anim idx="1" name="fire" startstate="1" endstate="1" frames="6" duration="150"
           default_duration="0" action_time="0" step="0">
       <replace layer="1" image="3"/>
       <frame idx="1" duration="0"/>
@@ -257,12 +257,12 @@ TEST(anim_the_flying_play_anim_numbers_its_slots_one_lower) {
   AnimBench b;
   const ObjectId id = b.spawn();
 
-  // 0 here is slot 1, which the fixture declares: four frames of 50.
+  // 0 here is slot 1, which the fixture declares: `duration="150"`.
   const script::HostOutcome out =
       b.call("PlayAnim", 3, {AnimBench::obj(id), script::Value::integer(0),
                              AnimBench::point(100, 100), script::Value::integer(-1)});
   CHECK(out.status == script::HostStatus::suspend);
-  CHECK(out.suspend_for == 200);
+  CHECK(out.suspend_for == 150);
   CHECK(b.world.find(id)->object->anim.anim_slot == 1);
 
   // 18 here is slot 19, which it also declares.
@@ -410,13 +410,46 @@ TEST(anim_get_anim_and_the_two_duration_readers) {
   // `GetAnimDuration` takes one less for the same animation.
   CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(12)}) == 264);
   CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(18)}) == 300);
-  CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(0)}) == 200);
+  CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(0)}) == 150);
   // Which is to say the two disagree about every number.
   CHECK(b.number("GetAnimTime", 1, {AnimBench::obj(id), script::Value::integer(12)}) == 0);
 
   // The original dereferences null here rather than checking; this answers 0.
   CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(9999), script::Value::integer(0)}) == 0);
   CHECK(b.number("GetAnim", 0, {AnimBench::obj(9999)}) == 0);
+}
+
+/// Every length a script sees is the entity's declared `duration`, not the
+/// frame strip's sum.
+///
+/// The loader stores `<anim duration>` at `[anim+0x4c]` and the whole family
+/// reads that one field: `GetAnimTime` (0x005a9c50), `GetAnimDuration`
+/// (0x0051c180), `Flying::PlayAnim`'s suspension (0x0051bcba), and the end
+/// `TimeToAnimFinish` counts down to, which `StartAnimation` (0x0053e6c0)
+/// sets at the start plus it. The two disagree in 127 shipped animations --
+/// the barrack horses' idle is 1000 over a 1200 strip. Slot 1 here declares
+/// 150 over four frames of 50.
+TEST(anim_scripts_see_the_declared_duration_not_the_frame_strip) {
+  AnimBench b;
+  const ObjectId id = b.spawn();
+  CHECK(b.number("GetAnimTime", 1, {AnimBench::obj(id), script::Value::integer(1)}) == 150);
+  CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(0)}) == 150);
+
+  const script::HostOutcome play =
+      b.call("PlayAnim", 2, {AnimBench::obj(id), script::Value::integer(1),
+                             AnimBench::point(100, 100)});
+  CHECK(play.status == script::HostStatus::suspend);
+  CHECK(play.suspend_for == 150);
+
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(1),
+                          AnimBench::point(100, 100)});
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 150);
+  b.world.advance_turns(1);
+  // The strip is still running (100 of its 200), the declared length nearly over.
+  CHECK(b.world.find(id)->animating);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 50);
+  b.world.advance_turns(1);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 0);
 }
 
 /// `SetState` is two entry points wearing one name, and the squad half is the

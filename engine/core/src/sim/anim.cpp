@@ -52,21 +52,26 @@ using script::Value;
   return slot.object->entity->anim(slot.object->anim.anim_slot);
 }
 
-/// How long one full cycle of `slot`'s animation lasts, or 0.
+/// How long the animation at `anim_slot` lasts as far as a script can tell:
+/// the entity document's `duration` attribute, or 0.
 ///
-/// **The timeline's number, not the document's `duration` attribute.** The
-/// original reads a single nominal field; this engine has two -- the `duration`
-/// attribute and the sum of the frame holds -- and they disagree in 127 of the
-/// 1,168 shipped animations, with no evidence for which the original honours
-/// (`docs/formats/ent-xml.md`). The timeline's is the one `TimeToAnimFinish`
-/// counts down against, so answering with the other would be two numbers for
-/// one question, which is the shape of defect this tree keeps finding.
-[[nodiscard]] std::int32_t cycle_of(const WorldObject& slot, std::int32_t anim_slot) {
+/// **The declared `duration`, not the frame strip's sum.** The loader
+/// (0x006004d0) stores the `<anim duration>` attribute at `[anim+0x4c]`, and
+/// that one field is every script-visible length in this family:
+/// `StartAnimation` (0x0053e6c0) takes it as the playback length `[obj+0x64]`
+/// unless a caller overrides it, the end time `TimeToAnimFinish` counts down to
+/// is the start plus it (0x0053cef0, filled by 0x0053cf30), the animation's own
+/// timer ends it there (0x0053f6a0), and `GetAnimTime` (0x005a9c50),
+/// `Unit::GetAnimDuration` (0x0051c180) and `Flying::PlayAnim`'s suspension
+/// (0x0051bcba, written into the VM's wait cell) read it verbatim. The two
+/// disagree in 127 of the 1,168 shipped animations -- the barrack horses' idle
+/// declares 1000 over a 1200 strip, the hero grave's crumble 6486 over 12100.
+/// The strip still drives which sprite row is drawn (`AnimTimeline`); this is
+/// the clock the scripts see.
+[[nodiscard]] std::int32_t length_of(const WorldObject& slot, std::int32_t anim_slot) {
   if (slot.object == nullptr || slot.object->entity == nullptr) return 0;
   const EntityAnim* anim = slot.object->entity->anim(anim_slot);
-  if (anim == nullptr) return 0;
-  const AnimTimeline timeline = slot.object->entity->timeline(*anim);
-  return timeline.valid() ? timeline.cycle() : 0;
+  return anim == nullptr ? 0 : anim->duration;
 }
 
 /// Turn to face `point`, unless it is the object's own position.
@@ -178,8 +183,9 @@ HostOutcome m_start_delayed_anim(CallContext& ctx) {
 
 /// `PlayAnim(int slot, point face)` -- **suspending**. 13 sites.
 ///
-/// Start it, then hold the script for the animation's length. See the header
-/// for the mechanism the original uses and why this engine cannot use it.
+/// Start it, then hold the script for the animation's declared length. See the
+/// header for the mechanism the original uses and why this engine cannot use
+/// it.
 ///
 /// A slot the entity does not declare plays nothing and suspends for zero,
 /// which still yields: the scheduler runs a zero-length suspension again at
@@ -198,7 +204,7 @@ HostOutcome m_play_anim(CallContext& ctx) {
 
   HostOutcome out;
   out.status = script::HostStatus::suspend;
-  out.suspend_for = playing_now ? cycle_of(*slot, anim_slot) : 0;
+  out.suspend_for = playing_now ? length_of(*slot, anim_slot) : 0;
   if (out.suspend_for < 0) out.suspend_for = 0;
   return out;
 }
@@ -280,7 +286,7 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
 
   HostOutcome out;
   out.status = script::HostStatus::suspend;
-  out.suspend_for = playing_now ? cycle_of(*slot, anim_slot) : 0;
+  out.suspend_for = playing_now ? length_of(*slot, anim_slot) : 0;
   if (out.suspend_for < 0) out.suspend_for = 0;
   return out;
 }
@@ -301,6 +307,14 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
 /// cycle, so `total - elapsed` cannot go negative and a fault injected into the
 /// clamp survives every test in the suite. It is written the way the original
 /// writes it, because the guarantee belongs to the timeline and not to here.
+///
+/// The end is the start plus the declared `duration` (`length_of`). **Two
+/// approximations, neither reached by a shipped site** (every one calls this
+/// right after its own `StartAnim`): the original answers 0 for an object
+/// resting in a state, whose loop is not a playing animation (`CObj::SetState`
+/// sets the slot to -1), where this counts down the loop's cursor; and an
+/// animation whose strip runs out before its declared length answers 0 from
+/// then on here, where the original keeps counting to the declared end.
 HostOutcome m_time_to_anim_finish(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
@@ -308,10 +322,15 @@ HostOutcome m_time_to_anim_finish(CallContext& ctx) {
   if (slot == nullptr) return integer(0);
   const EntityAnim* anim = playing(*slot);
   if (anim == nullptr) return integer(0);
-  const std::int32_t total = cycle_of(*slot, slot->object->anim.anim_slot);
+  const std::int32_t total = anim->duration;
+  const std::int32_t elapsed = slot->object->anim.elapsed_ms;
+  // A strip that ran out before the declared length leaves a cursor that has
+  // stopped counting, so how far past it the clock now stands is not kept.
+  // Zero, by the asymmetry above.
+  if (!slot->animating && total > elapsed) return integer(0);
   // At the script's millisecond, which the world's clock may be ahead of.
-  const std::int32_t left = total - slot->object->anim.elapsed_ms +
-                            static_cast<std::int32_t>(script_lag(ctx, *world));
+  const std::int32_t left =
+      total - elapsed + static_cast<std::int32_t>(script_lag(ctx, *world));
   return integer(left > 0 ? left : 0);
 }
 
@@ -360,7 +379,7 @@ HostOutcome m_get_anim_time(CallContext& ctx) {
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("GetAnimTime: no world");
   if (slot == nullptr) return integer(0);
-  return integer(cycle_of(*slot, int_arg(ctx, 1)));
+  return integer(length_of(*slot, int_arg(ctx, 1)));
 }
 
 /// `Unit::GetAnimDuration(int slot)` -- the same number, **one slot lower**.
@@ -378,7 +397,7 @@ HostOutcome m_get_anim_duration(CallContext& ctx) {
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("GetAnimDuration: no world");
   if (slot == nullptr) return integer(0);
-  return integer(cycle_of(*slot, int_arg(ctx, 1) + 1));
+  return integer(length_of(*slot, int_arg(ctx, 1) + 1));
 }
 
 /// `SetState(int)` -- **two entry points wearing one name**.

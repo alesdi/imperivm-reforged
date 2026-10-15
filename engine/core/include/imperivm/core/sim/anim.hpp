@@ -46,8 +46,14 @@
 /// suspends for exactly the animation's duration. This engine has no per-object
 /// order queue for a script to wait on, so **both are implemented as
 /// `Flying::PlayAnim`'s shape**: start now, suspend for what is left. The
-/// difference is a tick of latency at the front, and it is recorded here rather
-/// than left to be discovered.
+/// difference is a tick of latency at the front -- and, when the object is
+/// already playing an animation, the whole of what is left of it: the
+/// original's armed animation timer keeps 0x005a9ba0 from arming its own, so
+/// the continuation runs only when the current one ends (0x0053f6a0 calls the
+/// action handler 0x005b0f70, whose mode 6 is 0x005a76c0). Here the new one
+/// interrupts it. Every shipped `Obj::PlayAnim` loop calls it again only after
+/// its last one ended; the druids' summoning lines call it once on a druid that
+/// has just been ordered to cast.
 ///
 /// ## The index is the entity's `<anim idx>`, and two names are off by one
 ///
@@ -84,7 +90,7 @@
 ///
 /// ## What is left out, and named
 ///
-/// **The state model is thinner here than in the original, in five places.**
+/// **The state model is thinner here than in the original, in four places.**
 /// `gbr.exe` keeps, per object: a combined action/state word (`Anim`, where
 /// values below `0x1c` are "playing animation n" and above are "resting in
 /// state n - 0x1c"), a facing vector, the playing index, a *transition*
@@ -100,15 +106,14 @@
 ///     play somewhere other than where the object stands. Every shipped site
 ///     passes the object's own position or a facing target, so the field is
 ///     never used for its own purpose in the corpus.
-///   * **No duration override**, which is what `StartDelayedAnim`'s and
-///     `Flying::PlayAnim`'s fifth parameter would carry. Nothing passes one.
+///   * **No duration override**, `StartAnimation`'s (0x0053e6c0) last
+///     parameter; every entry point here passes 0, so the declared `duration`
+///     is the length.
 ///   * **Elapsed, not absolute.** A reimplementation aiming at the original's
 ///     *own* hash would have to store the start time; this engine hashes its
 ///     own cursor and the two are equivalent under it.
-///   * **`Flying::PlayAnim`'s Z is read, range-checked and discarded.** There is
-///     no flight here: `docs/engine/state-vector.md` has no height field and
-///     `ObjectFlags::in_air` has no writer. What is *not* discarded is the
-///     animation, which is the half that makes a crow flap.
+///   * **`Flying::PlayAnim`'s Z** is no longer discarded: `sim/flying.hpp`
+///     carries the flight state it writes, and `sim/anim.cpp` the order.
 ///
 /// **A retail stack bug is deliberately not reproduced.** `Obj::SetState` is
 /// registered `void` and its error path pushes an int anyway, leaving four
