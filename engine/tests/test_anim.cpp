@@ -318,6 +318,22 @@ TEST(anim_flying_play_anim_refuses_a_bad_slot_before_it_moves_and_clamps_its_poi
   CHECK((b.world.resolve_position(id) == Point{0, 300}));
 }
 
+/// An object off the map -- inside a holder, or taken away -- plays nothing.
+///
+/// `StartAnimation` (0x0053e6c0) returns before it starts anything when the
+/// object's own position is the invalid point.
+TEST(anim_an_object_off_the_map_plays_nothing) {
+  AnimBench b;
+  const ObjectId id = b.spawn();
+  (void)b.world.set_position(id, kHeldPosition);
+  CHECK(b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(19),
+                                AnimBench::point(500, 500)})
+            .status == script::HostStatus::ok);
+  CHECK(b.world.find(id)->object->anim.anim_slot != 19);
+  CHECK(!b.world.find(id)->animating);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 0);
+}
+
 /// `TimeToAnimFinish` counts down, and answers **0** in every degenerate case.
 ///
 /// `Sleep(.TimeToAnimFinish())` is 20 of its 29 shipped sites verbatim. The

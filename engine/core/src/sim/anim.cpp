@@ -138,10 +138,21 @@ void face_unless_self(CallContext& ctx, World& world, const WorldObject& slot, s
 /// script that waits out its animation wakes while the cursor is still short
 /// of the end -- a bird's next leg began before the last one was drawn to its
 /// end, a jump of the rest of the leg.
+///
+/// **An object off the map plays nothing.** `StartAnimation` (0x0053e6c0)
+/// opens by testing the object's own position against the invalid point and,
+/// when it is one -- a unit inside a building or a ship, or one `Disappear`
+/// took away -- cancels its animation timer and returns without starting
+/// anything. That test comes after the facing, which the entry points set
+/// first.
 bool start(CallContext& ctx, World& world, const WorldObject& slot, std::int32_t anim_slot,
            std::size_t at) {
   face_unless_self(ctx, world, slot, at);
   const ObjectId id = slot.id;
+  if (const ObjectState* state = world.state(id);
+      state != nullptr && state->position == kHeldPosition) {
+    return false;
+  }
   if (!world.play_anim(id, anim_slot, AnimRepeat::hold)) return false;
   const GameTime lag = script_lag(ctx, world);
   WorldObject* object = world.find(id);
