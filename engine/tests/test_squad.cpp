@@ -649,7 +649,7 @@ TEST(squad_count_is_a_subset_of_the_membership_by_class_tree) {
   CHECK(gone.value.as_integer() == 0);
 }
 
-/// `sq.Eval` reads a field nothing writes, and says so.
+/// `sq.Eval` reads the stored strength (0x00421120, `[squad+0x1c]`).
 TEST(squad_eval_reads_stored_strength_and_is_zero_until_something_writes_it) {
   Fixture f;
   HostRegistry registry;
@@ -672,6 +672,41 @@ TEST(squad_eval_reads_stored_strength_and_is_zero_until_something_writes_it) {
   CHECK(invoke(registry, CallKind::member, "Eval", 0, set).value.as_integer() == 240);
 
   HostCall stale(f.world, {pack_squad(SquadKey{77, 4})});
+  CHECK(invoke(registry, CallKind::member, "Eval", 0, stale).value.as_integer() == 0);
+}
+
+/// `SL.Eval` (0x0042bc90) is the list's size times the strength of the squad
+/// under the cursor -- 0x0042a450 counts from the first entry to the last but
+/// reads the cursor's entry every time -- and 0 at the end of the list.
+TEST(squad_list_eval_is_the_size_times_the_cursor_squads_strength) {
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  const SquadKey a = f.squad_of(1, 1);
+  const SquadKey b = f.squad_of(1, 2);
+  const SquadKey c = f.squad_of(1, 1);
+  f.heroes.squads().find(a)->eval = 10;
+  f.heroes.squads().find(b)->eval = 200;
+  f.heroes.squads().find(c)->eval = 3000;
+  SquadListPool& pool = squadlist_pool_of(f.world);
+  const SquadListId list = pool.acquire(1, 0);
+  std::vector<SquadKey>* items = pool.mutable_items(list);
+  REQUIRE(items != nullptr);
+  *items = {a, b, c};
+  const auto eval = [&]() {
+    HostCall call(f.world, {make_squadlist_value(list)});
+    const HostOutcome out = invoke(registry, CallKind::member, "Eval", 0, call);
+    CHECK(out.status == HostStatus::ok);
+    return out.value.as_integer();
+  };
+  pool.set_cursor(list, 0);
+  CHECK(eval() == 3 * 10);
+  pool.set_cursor(list, 1);
+  CHECK(eval() == 3 * 200);  // not 10 + 200 + 3000
+  pool.set_cursor(list, 3);
+  CHECK(eval() == 0);         // EOL
+  HostCall stale(f.world, {make_squadlist_value(9999)});
   CHECK(invoke(registry, CallKind::member, "Eval", 0, stale).value.as_integer() == 0);
 }
 
@@ -1737,7 +1772,9 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   HostRegistry registry;
   register_squad_host(registry);
 
-  // Player 0 is asking. 1 is its ally, 2 its enemy, 3 neither.
+  // Player 0 is asking. 1 is its ally, 2 its enemy, and 3 one it has granted a
+  // truce that 3 has not returned -- which `Eval` counts as an ally (0x0044e250
+  // reads the asking player's row alone) and `Count` still counts as nobody.
   PlayerTable& players = f.world.players();
   players.set(0, 1, Relation::allied, true);
   players.set(1, 0, Relation::allied, true);
@@ -1761,7 +1798,7 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   place(1, 2, 40, kHere, kHere);           // ally, staying (destination is here)
   place(2, 5, 250, kHere, kElsewhere);     // enemy, leaving
   place(2, 1, 7, kElsewhere, kHere);       // enemy, coming
-  place(3, 9, 999, kHere, kNoGaika);       // neither side: counted by nobody
+  place(3, 9, 999, kHere, kNoGaika);       // a one-sided truce: an ally to Eval
 
   const auto census = [&](const char* name, std::uint16_t arity, std::int32_t presence) {
     HostCall call(f.world,
@@ -1781,7 +1818,7 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   {
     const auto totals = census("Eval", 6, 4 /*AI_STAYING*/);
     CHECK(totals[0] == 100);
-    CHECK(totals[1] == 40);
+    CHECK(totals[1] == 40 + 999);
     CHECK(totals[2] == 0);
     CHECK(totals[3] == 0);
   }
@@ -1820,8 +1857,8 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   };
   CHECK(total(3, 4, 4 /*AI_ENEMY*/) == 0);
   CHECK(total(3, 2, 4) == 250);
-  CHECK(total(3, 4, 1 + 2 /*AI_FRIENDLY*/) == 140);
-  CHECK(total(3, 4, 0xFFFF) == 140);
+  CHECK(total(3, 4, 1 + 2 /*AI_FRIENDLY*/) == 100 + 40 + 999);
+  CHECK(total(3, 4, 0xFFFF) == 100 + 40 + 999);
   CHECK(total(2, 4, 0) == 100);   // defaults to AI_OWN
   CHECK(total(2, 2, 0) == 0);
 
@@ -1865,7 +1902,19 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
            call.arguments[5].as_integer();
   };
   CHECK(asking(1) != 0);
-  for (const std::int32_t who : {0, -1, 17, 257, 1000}) CHECK(asking(who) == 0);
+  for (const std::int32_t who : {17, 257, 1000}) CHECK(asking(who) == 0);
+  // **And 0 or less is not nobody to `Eval`**: the decremented viewer is
+  // negative, and every body then takes category 1 for every squad without
+  // asking the table -- so everything in the node is "own".
+  for (const std::int32_t who : {0, -1}) {
+    HostCall call(f.world, {gaika_value(kHere), Value::integer(0xFFFF), Value::integer(who),
+                            Value::integer(-1), Value::integer(-1), Value::integer(-1),
+                            Value::integer(-1)});
+    CHECK(invoke(registry, CallKind::member, "Eval", 6, call).status == HostStatus::ok);
+    CHECK(call.arguments[3].as_integer() == asking(1));
+    CHECK(call.arguments[4].as_integer() == 0);
+    CHECK(call.arguments[5].as_integer() == 0);
+  }
 
   // **A squad in no node is not in node zero.** `kNoGaika` is 0 and every squad
   // on every real map carries it, so a presence rule that answered "staying"

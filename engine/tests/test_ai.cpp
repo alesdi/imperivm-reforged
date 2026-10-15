@@ -15,6 +15,7 @@
 // the way `gbr.exe` refuses it, and this domain's registration overwrites
 // nothing another domain already implemented.
 
+#include <array>
 #include <cstdio>
 #include <span>
 #include <string>
@@ -4316,6 +4317,172 @@ TEST(ai_eval_buckets_the_units_in_range_by_relation) {
   CHECK(out[3].as_integer() == 0);
   CHECK(out[4].as_integer() == 0);
   CHECK(out[5].as_integer() == 0);
+}
+
+/// **`GAIKA::Eval`, read whole** (0x0042f3d0, 0x0042f670, 0x0042fc40): the four
+/// rules the shared census walk did not have.
+///
+///   * the node's settlement offers its sentry strength (0x00420c00,
+///     `[settlement+0xf8]`) as `AI_STAYING`, under its owner's relation;
+///   * the six-argument form passes over a squad of messengers and fills
+///     `enemy_hidden` from an enemy squad whose front member is hidden
+///     (0x00427e90), while the short forms add every squad straight;
+///   * an enemy squad's presence is the asking AI's view of it (0x0044eb80):
+///     one marching on the node is seen only within the difficulty's range of
+///     its centre, and one whose order elsewhere is still pending has not left.
+TEST(gaika_eval_adds_the_settlement_skips_messengers_and_sees_as_the_ai_sees) {
+  Fixture f;
+  imperivm::core::ClassGraph graph;
+  const auto add = [&](std::string_view xml, const char* source) {
+    CHECK(graph.add(bytes_of(xml), source).ok());
+  };
+  add(R"(<class id="Building" cpp_class="CVXBuilding" parent=""/>)", "b.sc.xml");
+  add(R"(<class id="RTownhall" cpp_class="CVXTownHall" parent="Building">
+      <properties race="RepublicanRome"/>
+    </class>)",
+      "rth.sc.xml");
+  // perSentry = (20 + 10) * 13 * (100 * 5 / 4) / 1000 + 1 = 49.
+  add(R"(<class id="RSentry" cpp_class="CVXUnit" parent="">
+      <properties maxhealth="100" damage="20" armor_slash="10"/>
+    </class>)",
+      "rs.sc.xml");
+  graph.link();
+  f.world.set_class_graph(&graph);
+  // Player 0 asks; 2 is its enemy (a fresh table is a free-for-all).
+  const ObjectId hall =
+      f.world.spawn(imperivm::core::NativeClass::town_hall, nullptr, graph.find("RTownhall"));
+  f.world.set_owner(hall, 2);
+  f.world.set_position(hall, Point{1000, 1000});
+  SettlementInit init;
+  init.settlement_object = hall;
+  init.anchor = hall;
+  init.owner = 2;
+  init.kind = SettlementKind::stronghold;
+  const SettlementId town = f.economy.settlements().create(init);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  constexpr GaikaId kHere = 1;
+  constexpr GaikaId kElsewhere = 7;
+  const GaikaNode* node = f.world.gaika().find(kHere);
+  REQUIRE(node != nullptr);
+  REQUIRE(node->settlement == hall);
+  const Point centre = node->center;
+
+  const auto squad = [&](PlayerId owner, std::int32_t eval, GaikaId in, GaikaId dest,
+                         std::size_t members, Point at) {
+    const SquadKey key = f.heroes.squads().create(owner);
+    for (std::size_t i = 0; i < members; ++i) {
+      const ObjectId id = f.world.spawn(imperivm::core::NativeClass::unit, nullptr);
+      f.world.set_owner(id, owner);
+      f.world.set_health(id, 100);
+      f.world.set_position(id, at);
+      (void)f.heroes.squads().join(key, id);
+    }
+    Squad* sq = f.heroes.squads().find(key);
+    CHECK(sq != nullptr);
+    if (sq != nullptr) {
+      sq->eval = eval;
+      sq->gaika_in = in;
+      sq->dest_gaika = dest;
+    }
+    return key;
+  };
+  const auto front = [&](SquadKey key) -> WorldObject& {
+    return *f.world.find(f.heroes.squads().find(key)->members.front());
+  };
+  const auto eval6 = [&](std::int32_t presence) {
+    std::vector<script::Value> args{gaika_value(kHere), script::Value::integer(presence),
+                                    script::Value::integer(1), script::Value::integer(-1),
+                                    script::Value::integer(-1), script::Value::integer(-1),
+                                    script::Value::integer(-1)};
+    const std::uint32_t index = f.registry.find(script::CallKind::member, "Eval", 6);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return std::array<std::int32_t, 4>{};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &f.context;
+    CHECK(f.registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+    return std::array<std::int32_t, 4>{args[3].as_integer(), args[4].as_integer(),
+                                       args[5].as_integer(), args[6].as_integer()};
+  };
+  const auto eval3 = [&](std::int32_t presence, std::int32_t sides) {
+    return f.call(script::CallKind::member, "Eval",
+                  {gaika_value(kHere), script::Value::integer(presence),
+                   script::Value::integer(1), script::Value::integer(sides)},
+                  1)
+        .value.as_integer();
+  };
+
+  squad(0, 100, kHere, kHere, 2, centre);                  // own, staying
+  const SquadKey errand = squad(0, 30, kHere, kHere, 1, centre);
+  front(errand).state.flags.messenger = true;              // a lone messenger
+  const SquadKey lurking = squad(2, 50, kHere, kHere, 2, centre);
+  front(lurking).state.flags.hidden = true;                // an enemy unseen
+
+  // No sentries in the wall: no settlement strength.
+  {
+    const auto t = eval6(4 /*AI_STAYING*/);
+    CHECK(t[0] == 100);   // the lone messenger is nobody's army...
+    CHECK(t[2] == 50);
+    CHECK(t[3] == 50);    // ...and the hidden enemy is counted twice over
+  }
+  CHECK(eval3(4, 1 /*AI_OWN*/) == 130);  // the short forms add the messenger
+  // A messenger squad with one ordinary member counts after all.
+  {
+    Squad* sq = f.heroes.squads().find(errand);
+    const ObjectId porter = f.world.spawn(imperivm::core::NativeClass::unit, nullptr);
+    f.world.set_owner(porter, 0);
+    f.world.set_health(porter, 100);
+    (void)f.heroes.squads().join(errand, porter);
+    sq = f.heroes.squads().find(errand);
+    REQUIRE(sq != nullptr);
+    sq->eval = 30;
+    CHECK(eval6(4)[0] == 130);
+    f.world.find(porter)->state.flags.messenger = true;
+    CHECK(eval6(4)[0] == 100);
+  }
+  // The wall: three sentries standing, 49 apiece.
+  {
+    f.economy.settlements().find(town)->sentries_ready = 3;
+    const auto t = eval6(4);
+    CHECK(t[2] == 50 + 3 * 49);  // the settlement's wall, under its owner
+    CHECK(t[3] == 50);
+    CHECK(eval6(1 /*AI_COMING*/)[2] == 0);  // the wall only ever stays
+    CHECK(eval3(4, 4 /*AI_ENEMY*/) == 50 + 3 * 49);
+    CHECK(eval3(4, 1) == 130);
+  }
+
+  // A front member inside a holder is not hidden from anybody (`[obj+0x154]`).
+  {
+    const ObjectId lurker = f.heroes.squads().find(lurking)->members.front();
+    const World::SettlementIds keep = f.world.spawn_settlement(2);
+    REQUIRE(f.world.put_in_holder(lurker, keep.holder));
+    CHECK(eval6(4)[3] == 0);
+    CHECK(eval6(4)[2] == 50 + 3 * 49);
+  }
+
+  // The AI's sight. One enemy squad marching on the node from 7000 away, one
+  // from 5000 away, and one standing in it whose order elsewhere has not been
+  // drained (the squad's heading reads `DestGAIKA` then, which is here).
+  squad(2, 7, kElsewhere, kHere, 1, Point{centre.x + 7000, centre.y});
+  squad(2, 11, kElsewhere, kHere, 1, Point{centre.x + 5000, centre.y});
+  const SquadKey lingering = squad(2, 13, kHere, kHere, 1, centre);
+  f.heroes.squads().find(lingering)->ai_dest = kElsewhere;
+  // Without an AI record the presence is the plain one.
+  CHECK(eval6(1 /*AI_COMING*/)[2] == 18);
+  CHECK(eval6(2 /*AI_LEAVING*/)[2] == 13);
+  // An Easy AI sees 6000: the far column is not coming, the lingering squad is
+  // staying.
+  const std::uint32_t main_chunk =
+      build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS");
+  REQUIRE(main_chunk != script::kNoChunk);
+  REQUIRE(f.ai.start(0, "", AiDifficulty::easy, f.scheduler) == AiStartStatus::ok);
+  CHECK(eval6(1)[2] == 11);
+  CHECK(eval6(2)[2] == 0);
+  CHECK(eval6(4)[2] == 50 + 3 * 49 + 13);
+  CHECK(eval3(1, 4) == 11);
+  // A Normal one sees 32000.
+  REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(eval6(1)[2] == 18);
 }
 
 /// `EnemyPlayersEval`: per enemy, the sum of its squads' `eval` less the
