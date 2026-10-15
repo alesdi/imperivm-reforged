@@ -1462,6 +1462,16 @@ TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
   CHECK(f.heroes.squads().join(others, leader));
   CHECK(coming(others) == 450);
 
+  // **A held leader is measured from its stored `(-1, -1)`** (`vtbl+0x3c`,
+  // 0x0042a7fc), not from what holds it: the far store, 50 from the keep the
+  // leader stands in, is out of a range of 200.
+  const ObjectId keep = f.world.spawn(NativeClass::building, nullptr);
+  f.world.set_position(keep, Point{1100, 150});
+  const ObjectId front = f.heroes.squads().find(others)->members.front();
+  REQUIRE(f.world.put_in_holder(front, keep));
+  REQUIRE(f.world.resolve_position(front) == (Point{1100, 150}));
+  CHECK(!send(others, 50, 200));
+
   // An empty squad and a handle naming none answer false and 0.
   const SquadKey hollow = f.heroes.squads().create(1);
   CHECK(!send(hollow, 300, 5000));
@@ -3435,6 +3445,15 @@ TEST(take_nearby_items_asks_the_front_member_and_dest_gaika_against_the_order) {
   REQUIRE(f.commands.command_name(hero, 0) == "GETITEMS");
   HostCall call(f.world, {pack_squad(key), Value::integer(400)});
   CHECK(invoke(registry, CallKind::member, "TakeNearbyItems", 1, call).value.truthy_scalar());
+
+  // The sweep is centred on the hero's stored position (`vtbl+0x3c`,
+  // 0x00429627), `(-1, -1)` while he is held: the chest 100 from the tower he
+  // stands in is not swept.
+  const ObjectId tower = f.world.spawn(NativeClass::building, nullptr);
+  f.world.set_position(tower, Point{1000, 1000});
+  REQUIRE(f.world.put_in_holder(hero, tower));
+  REQUIRE(f.world.resolve_position(hero) == (Point{1000, 1000}));
+  CHECK(!take());
 }
 
 TEST(register_squad_host_defines_exactly_what_it_says_it_does) {

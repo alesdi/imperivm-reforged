@@ -905,9 +905,16 @@ HostOutcome take_nearby_items_impl(CallContext& ctx) {
   if (items.count_for(leader) >= items.capacity_of(world, leader)) {
     return HostOutcome::ok_with(Value::boolean(false));
   }
-  const Point at = world.resolve_position(leader);
+  // The sweep is centred on the member's **stored** position (`vtbl+0x3c`,
+  // 0x00429627: `(-1, -1)` while it is held), and the predicate ranks by the
+  // floored root (0x0067c3d0) between the two `posRH`s (0x00422820's two
+  // `vtbl+0xc8` calls). This centred on `resolve_position` and ranked by the
+  // squared distance, which orders the same except where two roots floor
+  // alike, and there the first offered is kept.
+  const Point centre = slot->state.position;
+  const Point at = unit_pos_rh(world, leader);
   std::vector<ObjectId> around;
-  world.objects_in_radius(at, range, ClassFilter{}, around);
+  world.objects_in_radius(centre, range, ClassFilter{}, around);
   ObjectId best = kNoObject;
   std::int64_t best_distance = 0;
   for (const ObjectId id : around) {
@@ -920,7 +927,7 @@ HostOutcome take_nearby_items_impl(CallContext& ctx) {
     const Point there = world.resolve_position(id);
     const std::int64_t dx = there.x - at.x;
     const std::int64_t dy = there.y - at.y;
-    const std::int64_t distance = dx * dx + dy * dy;
+    const std::int64_t distance = isqrt(dx * dx + dy * dy);
     if (best == kNoObject || distance < best_distance) {
       best = id;
       best_distance = distance;
@@ -3727,7 +3734,10 @@ HostOutcome send_food_wagon_impl(CallContext& ctx) {
   if (economy == nullptr) return no;
   const std::int32_t amount = ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
   const std::int32_t range = ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
-  const Point at = world.resolve_position(leader);
+  // The leader's **stored** position, `vtbl+0x3c` (0x0042a7fc; 0x0063d900
+  // reads `[obj+0x24/0x28]`): `(-1, -1)` for a garrisoned leader, which then
+  // finds no store in range. `resolve_position` measured from its holder.
+  const Point at = world.find(leader)->state.position;
   constexpr std::int32_t kLoadableFood = 100;
 
   // Phase 2: the nearest own settlement with food to spare within range.
