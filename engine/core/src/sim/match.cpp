@@ -51,16 +51,22 @@ constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 /// `EndGame(int player, bool lose)`.
 ///
-/// `gbr.exe` 0x004c9610 pops the bool, pops the player, subtracts one, and
-/// forwards the pair. It does not inspect the world, and neither does this.
+/// `gbr.exe` 0x004c9610 pops the bool, pops the player, subtracts one,
+/// assigns the empty string to the game's end-message string (0x0082e7ec --
+/// the one the three-argument form fills), and forwards the pair through the
+/// game object's slot 0x48 (0x00524090), which `MatchSystem::end_game`
+/// describes. A player number outside 1..16 faults there; here it changes
+/// nothing but the cleared message.
 HostOutcome fn_end_game(CallContext& ctx) {
   MatchSystem* match = host_match(ctx);
   if (match == nullptr) return HostOutcome::failed("EndGame: no match");
+  // 0x004c9610 empties the end message (0x0082e7ec) first, for any player.
+  match->clear_end_message();
   const PlayerId player = player_arg(ctx.arg(0));
   if (player == kNoPlayer) return HostOutcome::ok_void();
   // Any non-zero integer is `true`; the language has no separate bool value.
   const bool lost = ctx.arg(1).is_integer() && ctx.arg(1).as_integer() != 0;
-  match->end_game(player, lost);
+  match->end_game(*world_of(ctx), player, lost);
   return HostOutcome::ok_void();
 }
 
@@ -90,9 +96,9 @@ HostOutcome fn_end_game_message(CallContext& ctx) {
   // it dangles the moment the statement ends. `-Wdangling-gsl` caught it; the
   // message it produced was plausible garbage rather than a crash.
   if (ctx.arg(2).is_string()) {
-    match->end_game(player, lost, ctx.arg(2).as_string());
+    match->end_game(*world_of(ctx), player, lost, ctx.arg(2).as_string());
   } else {
-    match->end_game(player, lost, std::string_view{});
+    match->end_game(*world_of(ctx), player, lost, std::string_view{});
   }
   return HostOutcome::ok_void();
 }
@@ -199,7 +205,12 @@ HostOutcome fn_set_speed(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `MapName()`.
+/// `MapName()` -- 1 site, `SUBAI/INN_BEHAVIOR.VS`, inside a `Translatef` note.
+/// 0x004c8370 copies the game object's string at `+0x198` (the same string
+/// the debug dump prints as "Current map: %s", 0x0074bb70) into a fresh script
+/// string and pushes it. **What fills that string was not traced**: this
+/// answers `map.xml`'s `name`, which may be the file's name rather than the
+/// title. Display text either way.
 HostOutcome fn_map_name(CallContext& ctx) {
   MatchSystem* match = host_match(ctx);
   if (match == nullptr) return HostOutcome::failed("MapName: no match");
@@ -382,23 +393,77 @@ std::size_t MatchSystem::participant_count() const noexcept {
   return count;
 }
 
-void MatchSystem::end_game(PlayerId player, bool lost) {
-  if (!PlayerTable::is_valid(player)) return;
-  MatchPlayer& slot = players_[player];
-  if (!slot.participates) return;
-  if (slot.outcome != MatchOutcome::undecided) return;
-  slot.outcome = lost ? MatchOutcome::lost : MatchOutcome::won;
+namespace {
+
+/// Still playing: `[record+0x290] == 1`.
+[[nodiscard]] bool still_playing(const MatchPlayer& slot) noexcept {
+  return slot.participates && slot.outcome == MatchOutcome::undecided;
 }
 
-void MatchSystem::end_game(PlayerId player, bool lost, std::string_view message) {
+}  // namespace
+
+void MatchSystem::declare_team_won(const World& world, PlayerId player) {
+  // 0x00523260: the team's members still playing win, and their bits make the
+  // mask the losers are the complement of.
+  std::array<bool, kPlayerCount> winners{};
+  for (const PlayerId member : match_team_of(world, player)) {
+    if (!still_playing(players_[member])) continue;
+    players_[member].outcome = MatchOutcome::won;
+    winners[member] = true;
+  }
+  // Then every slot of the first eight still playing outside that mask loses
+  // (0x00522f90, index below eight -- all of these are).
+  for (PlayerId other = 0; other < kTeamScanSlots; ++other) {
+    if (winners[other] || !still_playing(players_[other])) continue;
+    players_[other].outcome = MatchOutcome::lost;
+  }
+}
+
+void MatchSystem::end_game(const World& world, PlayerId player, bool lost) {
+  if (!PlayerTable::is_valid(player)) return;
+  if (!still_playing(players_[player])) return;
+  if (!lost) {
+    declare_team_won(world, player);
+    return;
+  }
+  // 0x00522f90 marks a loser only below slot eight.
+  if (player < kTeamScanSlots) players_[player].outcome = MatchOutcome::lost;
+
+  // 0x00522ec0 and 0x005651e0: are the first eight's survivors one side?
+  std::vector<PlayerId> remaining;
+  for (PlayerId other = 0; other < kTeamScanSlots; ++other) {
+    if (still_playing(players_[other])) remaining.push_back(other);
+  }
+  const PlayerTable& table = world.players();
+  if (remaining.size() > 1) {
+    for (const PlayerId a : remaining) {
+      if (a != kNeutralWildlife && !table.setup(a).allied_flag) return;
+    }
+    for (const PlayerId a : remaining) {
+      for (const PlayerId b : remaining) {
+        if (a != b && table.is_enemy(a, b)) return;
+      }
+    }
+  }
+  if (remaining.empty()) {
+    // 0x00524262: nobody is left, and the local player is marked lost.
+    if (!multiplayer_ && PlayerTable::is_valid(human_)) {
+      players_[human_].outcome = MatchOutcome::lost;
+    }
+    return;
+  }
+  declare_team_won(world, remaining.front());
+}
+
+void MatchSystem::end_game(const World& world, PlayerId player, bool lost,
+                           std::string_view message) {
   // The message is taken before the outcome, and taken whether or not the
   // outcome sticks. 0x004c9660 assigns the string on the index comparison
-  // alone; it has not looked at the outcome table at that point and does not
-  // look afterwards. A second `EndGame` from the human's script therefore
-  // replaces the sentence while leaving the outcome at whatever the first one
-  // said -- which is the retail behaviour, however odd it reads.
+  // alone. A second `EndGame` from the human's script therefore replaces the
+  // sentence while leaving the outcome at whatever the first one said -- which
+  // is the retail behaviour, however odd it reads.
   if (player != kNoPlayer && player == human_) end_message_ = message;
-  end_game(player, lost);
+  end_game(world, player, lost);
 }
 
 MatchOutcome MatchSystem::outcome(PlayerId id) const noexcept { return player(id).outcome; }
@@ -615,15 +680,20 @@ HostOutcome fn_team_overall_score(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(match->team_overall_score(*world, player)));
 }
 
-/// `EvalGroup(name)` -- 1 site. 0x004350e0 looks the group up by name in the
-/// group table, and answers 0 for a name it does not hold; otherwise it walks
-/// the group's members and sums `object_power` -- the census valuation, 16
-/// bits of it -- over those that are units. A member that is not a unit
-/// contributes nothing, and a member the world no longer holds is skipped.
+/// `EvalGroup(name)` -- 1 site (`AI/GETARMYNEED.VS`). 0x004350e0 looks the
+/// name up in the group map (0x004c93c0, which answers "NOTFOUND" for a name
+/// it does not hold, and then the call answers 0); otherwise it refreshes the
+/// group's query (vtbl+0x20), walks the live members it answers -- the spawn
+/// templates sit in the group's other deque and are not among them -- and
+/// sums `object_power` (0x004439d0, its low 16 bits) over each member whose
+/// handle resolves and whose sync word carries the unit bit 0x400000. The sum
+/// is an unsigned 32-bit total pushed as an int.
 ///
 /// `World::group_index` interns rather than finds, because `Group("X")` on an
 /// undeclared name has to keep answering; here a name nobody declared is
-/// looked up with `find` and answers 0 without minting a row.
+/// looked up with `find` and answers 0 without minting a row. The live members
+/// are `World::objects_in_group`'s, which passes over templates and the
+/// internal objects exactly as the group query does.
 HostOutcome fn_eval_group(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("EvalGroup: no world");
@@ -631,8 +701,10 @@ HostOutcome fn_eval_group(CallContext& ctx) {
   const std::int32_t group = world->groups().find(ctx.arg(0).as_string());
   if (group < 0) return HostOutcome::ok_with(Value::integer(0));
   const CombatSystem* combat = combat_system_of(*world);
-  std::int64_t total = 0;
-  for (const ObjectId id : world->groups().members(group)) {
+  std::vector<ObjectId> members;
+  (void)world->objects_in_group(group, ClassFilter{}, members);
+  std::uint32_t total = 0;
+  for (const ObjectId id : members) {
     const WorldObject* slot = world->find(id);
     if (slot == nullptr || (world->sync_flags(id) & kSyncUnit) == 0) continue;
     total += object_power(*world, combat, *slot);
@@ -889,45 +961,51 @@ std::int32_t MatchSystem::power_score(World& world, PlayerId player) const {
   return static_cast<std::int32_t>(total);
 }
 
+std::vector<PlayerId> match_team_of(const World& world, PlayerId player) {
+  std::vector<PlayerId> team;
+  if (!PlayerTable::is_valid(player)) return team;
+  team.push_back(player);
+  const PlayerTable& players = world.players();
+  if (!players.setup(player).allied_flag) return team;
+  for (PlayerId other = 0; other < kTeamScanSlots; ++other) {
+    if (other == player) continue;
+    if (!players.setup(other).allied_flag) continue;
+    if (!players.are_allied(player, other)) continue;
+    team.push_back(other);
+  }
+  return team;
+}
+
 std::int32_t MatchSystem::team_overall_score(World& world, PlayerId player) const {
   if (!PlayerTable::is_valid(player)) return 0;
-  // The same team the military score averages over, member for member -- see
-  // its own note on why the bound is eight and why the asking player is on the
-  // list from any slot.
+  // The same team the military score averages over (`match_team_of`). The
+  // per-member term is 0x0056c900's: `gold_used / 500` -- the `0x10624dd3`
+  // multiply and a shift of five at 0x0056c999..0x0056c9a5, unsigned -- plus
+  // `power * rating / 100`, a signed product and a signed division
+  // (0x0056c9e0..0x0056c9f2). The sum and the final division by the member
+  // count are unsigned (0x0056ca0f).
   const auto term = [&](PlayerId id) {
     const PlayerScoreCounters& counters = players_[id].score;
     const auto rating = static_cast<std::uint32_t>(military_rating(counters));
     const auto power = static_cast<std::uint32_t>(power_score(world, id));
-    return static_cast<std::uint32_t>(counters.gold) / 1000u + power * rating / 100u;
+    const auto product = static_cast<std::int32_t>(power * rating);
+    return static_cast<std::uint32_t>(counters.gold) / 500u +
+           static_cast<std::uint32_t>(product / 100);
   };
-
-  std::uint32_t total = term(player);
-  std::uint32_t members = 1;
-  for (PlayerId other = 0; other < kTeamScanSlots; ++other) {
-    if (other == player) continue;
-    if (!players_[other].participates) continue;
-    if (!world.players().are_allied(player, other)) continue;
-    total += term(other);
-    ++members;
-  }
-  return static_cast<std::int32_t>(total / members);
+  std::uint32_t total = 0;
+  const std::vector<PlayerId> team = match_team_of(world, player);
+  for (const PlayerId member : team) total += term(member);
+  return static_cast<std::int32_t>(total / static_cast<std::uint32_t>(team.size()));
 }
 
 std::int32_t MatchSystem::team_military_score(const World& world, PlayerId player) const {
   if (!PlayerTable::is_valid(player)) return 0;
-  // The player itself is on the list before any test but the range one, and it
-  // is on the list from any slot; only the *others* are drawn from the first
-  // eight. See the header on why the bound is eight.
-  std::uint32_t total = static_cast<std::uint32_t>(military_rating(players_[player].score));
-  std::uint32_t members = 1;
-  for (PlayerId other = 0; other < kTeamScanSlots; ++other) {
-    if (other == player) continue;
-    if (!players_[other].participates) continue;
-    if (!world.players().are_allied(player, other)) continue;
-    total += static_cast<std::uint32_t>(military_rating(players_[other].score));
-    ++members;
+  std::uint32_t total = 0;
+  const std::vector<PlayerId> team = match_team_of(world, player);
+  for (const PlayerId member : team) {
+    total += static_cast<std::uint32_t>(military_rating(players_[member].score));
   }
-  return static_cast<std::int32_t>(total / members);
+  return static_cast<std::int32_t>(total / static_cast<std::uint32_t>(team.size()));
 }
 
 // --------------------------------------------------------------------------
