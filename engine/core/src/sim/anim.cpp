@@ -227,16 +227,18 @@ HostOutcome m_play_anim(CallContext& ctx) {
 /// `Flying::PlayAnim(int slot, point at, int z)` -- **suspending**. 13 sites,
 /// all crows and eagles.
 ///
-/// Three differences from the `Obj` form, and two of them are transcribed:
+/// Four differences from the `Obj` form:
 ///
 ///   * **the slot is one less**, because this body passes its argument raw into
 ///     the array `Obj::PlayAnim` decrements into. See the header.
 ///   * **the Z is range-checked**: `-1 .. 1024`, and out of range is a refusal
 ///     that starts nothing (0x0051bb6f). `-1` means *use the terrain height and
 ///     land*.
+///   * the slot is checked before anything is written, and a bad one returns
+///     without suspending;
 ///   * the point is the animation's *origin* as well as the facing target, and
-///     is clamped into the map rather than ignored. This engine has no
-///     animation origin, so it is only a facing target here.
+///     is clamped into the map. This engine has no animation origin, so it is
+///     the facing target and the place the bird arrives (below).
 ///
 /// **The Z is the whole flight model**, and used to be read and discarded here.
 /// `sim/flying.hpp` owns what it means; this call site owns the order. The
@@ -257,19 +259,34 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
   // that is a bare `ret`, and then nothing happens.
   if (z < -1 || z > 1024) return HostOutcome::ok_void();
 
+  // Then the slot, before anything is written (0x0051bb7d..0x0051bbb5): a
+  // negative argument, one past the entity's last, or one naming no animation
+  // prints *"Invalid animation specified"* and returns without suspending --
+  // no flight state, no move, no wait.
+  const std::int32_t raw_slot = int_arg(ctx, 1);
+  const std::int32_t anim_slot = raw_slot + 1;
+  if (raw_slot < 0 || slot->object == nullptr || slot->object->entity == nullptr ||
+      slot->object->entity->anim(anim_slot) == nullptr) {
+    return HostOutcome::ok_void();
+  }
+
   // The point is the animation's *origin* in the original and its facing target
   // here; either way it is where the descent's terrain height is read from, so
   // an absent or malformed one falls back to the object's own position rather
-  // than to the origin of the map.
-  const Point destination = ctx.count() > 2 && is_point(ctx.arg(2))
-                                ? unpack_point(ctx.arg(2))
-                                : world->resolve_position(slot->id);
+  // than to the origin of the map. **Clamped into the map rectangle** first
+  // (0x004092b0, then 0x00422b70 against `[map+0xb4..0xc0]`), in place, so
+  // the bird lands on the edge rather than off it.
+  Point destination = ctx.count() > 2 && is_point(ctx.arg(2))
+                          ? unpack_point(ctx.arg(2))
+                          : world->resolve_position(slot->id);
+  if (const MovementSystem* movement = movement_system(*world); movement != nullptr) {
+    destination = movement->grid().clamp_to_map(destination);
+  }
   const ObjectId id = slot->id;
   begin_flight_anim(*world, id, destination, z);
   slot = world->find(id);
   if (slot == nullptr) return HostOutcome::ok_void();
 
-  const std::int32_t anim_slot = int_arg(ctx, 1) + 1;
   const bool playing_now = start(ctx, *world, *slot, anim_slot, 2);
 
   // **And the object arrives.** 0x0053e6c0 starts the animation with `at` as

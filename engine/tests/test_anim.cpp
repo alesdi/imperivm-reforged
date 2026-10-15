@@ -290,6 +290,34 @@ TEST(anim_the_flying_play_anim_numbers_its_slots_one_lower) {
   }
 }
 
+/// `Flying::PlayAnim` checks its slot before it writes anything, and clamps its
+/// point into the map.
+///
+/// 0x0051bb10 range-checks Z, then the slot (negative, past the entity's last,
+/// or naming nothing prints and returns without suspending), and only then
+/// clamps the point into the map rectangle (0x00422b70) and writes the flight
+/// state. A bad slot used to fly the bird to the point and suspend.
+TEST(anim_flying_play_anim_refuses_a_bad_slot_before_it_moves_and_clamps_its_point) {
+  AnimBench b;
+  b.movement.set_grid(ObstructionGrid(64, 64));
+  const ObjectId id = b.spawn();
+  const Point before = b.world.resolve_position(id);
+
+  for (const std::int32_t bad : {-1, 4, 200}) {
+    const script::HostOutcome out =
+        b.call("PlayAnim", 3, {AnimBench::obj(id), script::Value::integer(bad),
+                               AnimBench::point(900, 900), script::Value::integer(-1)});
+    CHECK(out.status == script::HostStatus::ok);
+    CHECK(b.world.resolve_position(id) == before);
+  }
+
+  const script::HostOutcome edge =
+      b.call("PlayAnim", 3, {AnimBench::obj(id), script::Value::integer(0),
+                             AnimBench::point(-500, 300), script::Value::integer(-1)});
+  CHECK(edge.status == script::HostStatus::suspend);
+  CHECK((b.world.resolve_position(id) == Point{0, 300}));
+}
+
 /// `TimeToAnimFinish` counts down, and answers **0** in every degenerate case.
 ///
 /// `Sleep(.TimeToAnimFinish())` is 20 of its 29 shipped sites verbatim. The
