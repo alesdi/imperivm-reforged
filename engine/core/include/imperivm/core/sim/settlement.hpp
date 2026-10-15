@@ -365,6 +365,12 @@ struct Settlement {
   /// the roster (0x005c4930 keeps a player-wide total beside it), which is not
   /// modelled: this engine has no per-player sentry upkeep to charge.
   std::int32_t sentries_ready = 0;
+  /// **The sentries that walked back into the wall**, `[settlement+0x100]`:
+  /// `PutSentry` (0x005c4a10) raises it beside `sentries_ready`, and
+  /// `DelSentry` (0x005c2a60) spends it before it touches the roster -- a
+  /// sentry that dies while one of these is banked costs the roster nothing.
+  /// A change of owner zeroes it with the other two (0x005c4eb0).
+  std::int32_t sentries_put_back = 0;
   /// The settlement this one ships its surplus to, or `kNoSettlement`.
   SettlementId supplied = kNoSettlement;
   OutpostTrade outpost_trade = OutpostTrade::none;

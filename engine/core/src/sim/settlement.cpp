@@ -276,6 +276,7 @@ std::uint64_t SettlementStore::hash() const noexcept {
     mix(h, static_cast<std::uint32_t>(s.sentries));
     mix(h, static_cast<std::uint32_t>(s.max_sentries));
     mix(h, static_cast<std::uint32_t>(s.sentries_ready));
+    mix(h, static_cast<std::uint32_t>(s.sentries_put_back));
     mix(h, s.supplied);
     mix(h, static_cast<std::uint64_t>(s.outpost_trade));
     mix(h, static_cast<std::uint64_t>(s.burning ? 1 : 0));

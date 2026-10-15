@@ -19,6 +19,7 @@
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/feeder.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
@@ -620,19 +621,45 @@ TEST(feeder_host_reads_and_writes_a_units_food) {
             .status == script::HostStatus::ok);
   CHECK(feeder.food(soldier) == 20);
 
-  // Clamped to `max_food`: `TTENT_BEHAVIOR.VS` writes `u.SetFood(u.maxfood)`
-  // and nothing may exceed it, which is why the dumps' `food` domain is 0..20.
+  // **Not clamped.** `Unit::SetFood` (0x005d7cd0) stores `[unit+0x16c]` as
+  // given: `OUTPOST_BEHAVIOR.VS`'s `u1.SetFood(20)` and the Danube sequences'
+  // `SetFood(40)` leave a unit over its `maxfood`.
   CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
-                  {handle, script::Value::integer(9999)})
+                  {handle, script::Value::integer(40)})
             .status == script::HostStatus::ok);
-  CHECK(feeder.food(soldier) == 20);
+  CHECK(feeder.food(soldier) == 40);
 
-  // `u.SetFood(0)` -- `ITAVERN_CALLTOARMS.VS` and
-  // `SETTLEMENT_BEHAVIOR_AMBIENT.VS`.
+  // Nor floored, and anything under 1 marks the unit hungry -- the flag
+  // `0x20000000` the body clears below 1. `u.SetFood(0)` is
+  // `ITAVERN_CALLTOARMS.VS` and `SETTLEMENT_BEHAVIOR_AMBIENT.VS`.
   CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
                   {handle, script::Value::integer(-5)})
             .status == script::HostStatus::ok);
+  CHECK(feeder.food(soldier) == -5);
+  CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                  {handle, script::Value::integer(0)})
+            .status == script::HostStatus::ok);
   CHECK(feeder.food(soldier) == 0);
+
+  // `ObjList::SetFood` (0x0055e890): each unit member's field, and a negative
+  // value is refused with a print -- nothing written.
+  {
+    ObjListPool& pool = objlist_pool_of(world);
+    const ObjListId list = pool.acquire_temporary(script::ScriptId{});
+    pool.mutable_items(list)->push_back(soldier);
+    const script::Value ol = make_objlist_value(list);
+    CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                    {ol, script::Value::integer(33)})
+              .status == script::HostStatus::ok);
+    CHECK(feeder.food(soldier) == 33);
+    CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                    {ol, script::Value::integer(-1)})
+              .status == script::HostStatus::ok);
+    CHECK(feeder.food(soldier) == 33);
+    CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                    {handle, script::Value::integer(0)})
+              .status == script::HostStatus::ok);
+  }
 
   // `u1.SetFeeding(false)` -- five shipped behaviours, every call a literal
   // boolean, and `Value::boolean` is `Value::integer(v ? 1 : 0)`.

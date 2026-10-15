@@ -2241,6 +2241,13 @@ HostOutcome m_radius(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(class_int(*world, *slot, "radius")));
 }
 
+/// `InHolder` with no argument, two bodies on one name. `Unit::InHolder`
+/// (0x005d6ff0) is `[unit+0x154] != 0xffff`, false with a print for an invalid
+/// receiver. `Squad::InHolder` (0x00427670) walks the squad's member deque and
+/// answers false at the first member that resolves and is not held; a member
+/// that does not resolve is stepped over, so an empty squad is in its holder.
+/// The squad handle itself is not checked (0x00443e30). The arity-1 form, a
+/// count against a settlement name, is `sim/economy.cpp`'s.
 HostOutcome m_in_holder(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("InHolder: no world");
