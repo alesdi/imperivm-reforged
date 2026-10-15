@@ -18,3 +18,13 @@
 0x00431ca0	partial	Settlement::TSArenaRecruit: as TSRecruitArmy with TSH_ArenaRecruit.vs and (set, num, list); same callee-trap gap
 0x00431dd0	partial	Settlement::TSTempleRecruit: as TSArenaRecruit with TSH_TempleRecruit.vs; same callee-trap gap
 0x004269a0	partial	Settlement::TSRecruitHero: answer starts as the invalid handle (0xffff,0); invalid receiver answers it; TSH_HeroRecruit.vs on the owner's player with (set, &hero), the by-ref slot read back; a failed run answers whatever the slot holds where run_script_now traps (labelled)
+0x004d35b0	verified	RunAIHelper/4: thunk -> core 0x004d2ee0 on the global helper manager [0x996888]: file data/ai helpers/<f>.vs, signature check void + count equal + every parameter by-value str (fixed; test a_helper_whose_signature_does_not_fit_starts_nothing), spawn untagged with no parent (fixed; test a_helper_started_by_an_ai_script_belongs_to_no_player), idmap[name]=id overwriting; missing file silent; the 0..127 thread-id pool cap (0x0069f910) not modelled
+0x004d3400	verified	RunAIHelper/2: thunk, count 0, then the /4 core rules; bound (fixed: was unregistered), no shipped site
+0x004d34c0	verified	RunAIHelper/3: thunk, count 1; bound (fixed), no shipped site
+0x004d36d0	verified	RunAIHelper/5: thunk, count 3; bound (fixed), no shipped site
+0x004d3850	verified	RunAIHelper/6: thunk, count 4; bound (fixed), no shipped site
+0x004d3a10	verified	RunAIHelper/7: thunk, count 5; bound (fixed), no shipped site
+0x004d3c20	verified	RunAIHelper/8: thunk, count 6; bound (fixed), no shipped site
+0x004d3e70	verified	RunAIHelper/9: thunk, count 7; bound (fixed), no shipped site
+0x004d1d80	verified	IsAIHelperRunning: map find (0x004d1cd0); the entry leaves when the thread ends (0x0069f7a0 -> hook 0x004d2160), so a finished helper answers false at once: table AND alive here (fixed; test the_helper_table_is_reaped_when_a_helper_ends); a self-stopped helper's step remainder not reproduced
+0x004d4100	verified	StopAIHelper: 0x004d32e0 find; miss does nothing; hit stops with notify (0x0069fee0,1) and the hook erases; units' commands untouched; self-stop is a deferred flag in retail, immediate here (labelled, no shipped site)

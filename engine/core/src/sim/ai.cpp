@@ -1794,14 +1794,27 @@ namespace {
 /// hand the helper", and this engine's registry keys on it, so all eight are
 /// bound to this one body.
 ///
-/// The core then validates the spawned script's own signature (0x004d2ff8
-/// onward): the return type must be void, the declared parameter count must
-/// **equal** the supplied count, and every declared parameter must be a
-/// string. All four shipped helpers open `// void, str GroupName, str Target`,
-/// so on retail data only the arity-4 form can ever spawn anything -- which is
-/// also the only form any of the 285 sites uses. The other seven are bound
-/// anyway, because a registration that exists and refuses is a different thing
-/// from a name that traps.
+/// The core (0x004d2ee0, a method of the **one global helper manager** at
+/// `[0x996888]`, not of any player's AI) first takes a free thread id from 0 to
+/// 127 in that manager (0x0069f910; none free is a silent nothing -- not
+/// reproduced, this engine has no such cap and no shipped mission runs 128
+/// helpers at once), formats the path, compiles the file or finds it in its
+/// `compiledhelpers` cache (0x004d1b10), and then validates the script's own
+/// signature (0x004d2ff8 onward): the return type must be void, the declared
+/// parameter count must **equal** the supplied count, and every declared
+/// parameter must be a by-value `str` (type 0xb, no reference). A file that
+/// fails any of it prints `Invalid parms for %s AI helper` and starts nothing.
+/// All four shipped helpers open `// void, str GroupName, str Target`, so on
+/// retail data only the arity-4 form can ever spawn anything -- which is also
+/// the only form any of the 285 sites uses, and the only one bound here (see
+/// the registration).
+///
+/// **The helper belongs to no player.** It runs in the helper manager, which
+/// tags nothing, so `AIGetPlayer` inside one answers 0 whoever started it, and
+/// its life is not tied to its caller's. Here it is spawned with no parent and
+/// no ownership record (it used to be adopted for the caller's AI, which no
+/// shipped helper could see: SIEGE.VS takes its player from `ol[0].player`,
+/// and every shipped caller is a map sequence, which no AI owns).
 ///
 /// **There is no already-running branch.** The only lookup the original makes
 /// before spawning is on the *path*, into a `compiledhelpers` vector; the
@@ -1839,38 +1852,52 @@ HostOutcome f_run_ai_helper(CallContext& ctx) {
   // ten other files whose basename ends in `GUARD.VS`.
   if (chunk == script::kNoChunk) return HostOutcome::ok_void();
 
+  // `Invalid parms for %s AI helper`: void, exactly as many parameters as were
+  // supplied, every one a by-value `str`.
+  const std::size_t supplied = ctx.count() - 2;
+  const script::Chunk& compiled = ctx.scheduler->chunk(chunk);
+  if (compiled.return_type != script::TypeTag::void_) return HostOutcome::ok_void();
+  if (compiled.parameter_count != supplied || compiled.locals.size() < supplied) {
+    return HostOutcome::ok_void();
+  }
+  for (std::size_t i = 0; i < supplied; ++i) {
+    const script::LocalInfo& parameter = compiled.locals[i];
+    if (parameter.type_name != "str" || parameter.is_out) return HostOutcome::ok_void();
+  }
+
   // Arguments 2..N-1 become the helper's parameters, in order. The original
   // pads to seven with the empty string and then hands the spawn only the
   // first `count`, so the padding is unobservable and is not reproduced.
   std::vector<Value> parameters;
-  parameters.reserve(ctx.count() - 2);
+  parameters.reserve(supplied);
   for (std::size_t i = 2; i < ctx.count(); ++i) parameters.push_back(ctx.arg(i));
 
   const script::ScriptId spawned =
-      ctx.scheduler->spawn(chunk, parameters, script::ObjectRef{}, ctx.script);
+      ctx.scheduler->spawn(chunk, parameters, script::ObjectRef{}, script::kNoScript);
   if (spawned == script::kNoScript) return HostOutcome::ok_void();
-  // Owned by whoever started it, so `AIGetPlayer` inside a helper answers the
-  // player whose sequence called it rather than -1.
-  const std::int32_t owner = ai->script_player(ctx.script, *ctx.scheduler);
-  if (owner > 0) ai->adopt(spawned, static_cast<PlayerId>(owner - 1));
   ai->set_helper(ctx.arg(0).as_string(), spawned);
   return HostOutcome::ok_void();
 }
 
-/// `IsAIHelperRunning(name)` -- 236 sites.
+/// `IsAIHelperRunning(name)` (0x004d1d80) -- 236 sites.
 ///
-/// **It consults the table and nothing else.** 0x004d1cd0 is a `std::map::find`
-/// and a comparison against `end()`; it never validates the id, never asks the
-/// scheduler whether the coroutine is alive. A key that was never inserted
-/// answers false, and a key whose helper finished on its own answers false
-/// too -- but only because the entry was *reaped*, which is a separate
-/// mechanism and the reason `reap_helpers` has to run every turn rather than
-/// being folded in here.
-///
-/// Reproducing the liveness test here instead would agree on every shipped
-/// site and disagree on exactly one thing: a helper that ended in the same
-/// turn as the query. That is the difference between polling and a callback,
-/// and the original is a callback, so the table is the authority.
+/// 0x004d1d80 pops the name and answers 0x004d1cd0, which is a
+/// `std::map::find` on the helper manager's name table and a comparison
+/// against `end()`; it never asks the thread manager anything. What makes
+/// that a liveness test is **when the table loses an entry**: the thread
+/// manager deletes a thread the moment it finishes or fails (0x0069f7a0, state
+/// 1 or 3) and calls the manager's completion hook at once (vtable +0x1c,
+/// 0x004d2160), which erases the node whose value is that id; a stop from
+/// outside does the same inside the stopping call (0x0069fee0). So a helper
+/// that has ended is out of the table before any other script runs, and the
+/// predicate answers false from then on. This engine erases by polling
+/// (`AiSystem::reap_helpers`, once a turn), so it answers the same thing by
+/// asking the scheduler as well: present in the table **and** still alive.
+/// (It used to read the table alone, and answered true for the rest of the
+/// turn after a helper returned.) The one window the original does keep -- a
+/// helper that stops itself runs on to the end of its step with its entry
+/// still there (0x0069fee0 only flags the running thread) -- is not
+/// reproduced; `StopAIHelper` describes that case.
 HostOutcome f_is_ai_helper_running(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsAIHelperRunning: no world");
@@ -1879,16 +1906,20 @@ HostOutcome f_is_ai_helper_running(CallContext& ctx) {
   }
   AiSystem* ai = ai_system_of(*world);
   if (ai == nullptr) return HostOutcome::ok_with(Value::boolean(false));
-  return HostOutcome::ok_with(
-      Value::boolean(ai->helper(ctx.arg(0).as_string()) != script::kNoScript));
+  const script::ScriptId id = ai->helper(ctx.arg(0).as_string());
+  const bool live = id != script::kNoScript &&
+                    (ctx.scheduler == nullptr || ctx.scheduler->alive(id));
+  return HostOutcome::ok_with(Value::boolean(live));
 }
 
 /// `StopAIHelper(name)` -- 179 sites.
 ///
-/// 0x004d32e0: find, and on a miss **return having done nothing at all** -- no
-/// diagnostic, no trap. On a hit, kill the coroutine; the map entry is erased
-/// as a consequence of the kill's completion notification rather than by this
-/// function, which is why the erase is here too but downstream of the kill.
+/// 0x004d4100 pops the name and calls the helper manager's 0x004d32e0: find,
+/// and on a miss **return having done nothing at all** -- no diagnostic, no
+/// trap. On a hit, stop the thread with notification (0x0069fee0 with 1),
+/// which deletes it and calls the completion hook inside the call, and that
+/// hook (0x004d2160) erases the entry; here the kill and the erase are the
+/// two lines below.
 ///
 /// **It does nothing to the objects the helper was commanding.** No command
 /// clearing, no group release: whatever `SetCommand` or `AttackArea` the helper
@@ -4574,16 +4605,17 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
   // 0, the same "keep the seat's".
 
   // The AI-helper runner. `RunAIHelper` is registered **eight times** in
-  // `gbr.exe` (0x004d4160, arities 2..9, every argument a string), and only
-  // arity 4 is bound here: it is the only one with a call site -- all 285 --
-  // and the only one that could ever spawn anything, because the core
-  // validates the helper's declared parameter count against the supplied one
-  // (0x004d300e) and all four shipped helpers open `// void, str GroupName,
-  // str Target`. The other seven follow the rectangle family's rule: read,
-  // recorded, and left unbound rather than added to an inventory the corpus
-  // does not declare. The body reads `ctx.count()` rather than assuming 4, so
-  // binding another arity is a one-line change if a caller ever appears.
-  registry.define(kFree, "RunAIHelper", 4, &f_run_ai_helper);               // 285
+  // `gbr.exe` (0x004d4160, arities 2..9, every argument a string; bodies
+  // 0x004d3400, 0x004d34c0, 0x004d35b0, 0x004d36d0, 0x004d3850, 0x004d3a10,
+  // 0x004d3c20, 0x004d3e70), each a thunk that pops its strings, pads the
+  // parameters to seven with "" and calls the one core with `arity - 2` as the
+  // count. All eight are bound to the one body, as `AIRun` and `Run` bind
+  // theirs: arity 4 has all 285 sites, and the others are what the original
+  // registers -- with the core's signature check (0x004d2ff8) they start
+  // nothing on retail data, whose four helpers all take two strings.
+  for (std::uint16_t arity = 2; arity <= 9; ++arity) {
+    registry.define(kFree, "RunAIHelper", arity, &f_run_ai_helper);         // 285 at 4
+  }
   // -- the node table; see `sim/gaika.hpp` for what it approximates ---------
   registry.define(kMember, "LSA", 0, &m_gaika_lsa);              // 42
   registry.define(kMember, "GetGaika", 0, &m_settlement_gaika);  // 27

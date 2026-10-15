@@ -2617,15 +2617,13 @@ TEST(stop_ai_helper_kills_the_named_one_and_ignores_the_rest) {
   CHECK(f.ai.helpers()[0].name == "B");
 }
 
-/// A helper that ends on its own leaves the table only when the reap runs.
+/// A helper that ends on its own leaves the table only when the reap runs, and
+/// `IsAIHelperRunning` answers false for it at once.
 ///
-/// This is the half that cannot be folded into `IsAIHelperRunning`: the
-/// original erases from a completion hook (0x004d2160), so between a helper's
-/// last statement and the next erase there is no window in which the predicate
-/// answers true for a dead one. Polling reproduces that as long as the poll is
-/// once a turn -- and this is the case that would pass just as well if
-/// `IsAIHelperRunning` asked the scheduler instead, which is why it asserts the
-/// table directly.
+/// The original erases from the completion hook (0x004d2160), which the thread
+/// manager calls the moment a thread finishes (0x0069f7a0), so there is no
+/// window in which the predicate answers true for a dead helper. This engine
+/// erases by a once-a-turn poll, so the predicate asks the scheduler too.
 TEST(the_helper_table_is_reaped_when_a_helper_ends) {
   Fixture f;
   FakeLibrary library;
@@ -2654,17 +2652,11 @@ TEST(the_helper_table_is_reaped_when_a_helper_ends) {
   };
 
   (void)f.scheduler.advance(100);
-  // Still there: the reap has not run. A `reap_helpers` folded into the
-  // predicate would already have dropped it.
+  // Still there: the reap has not run.
   CHECK(f.ai.helpers().size() == 2);
-  // **And the predicate still says true**, which is the whole of why it must
-  // read the table rather than ask the scheduler. `brief` has ended; its entry
-  // has not been erased yet; 0x004d1cd0 is a `find` and a comparison against
-  // `end()` and nothing else, so between the last statement of a helper and
-  // the erase that follows it the original answers true. Asking
-  // `Scheduler::alive` here would agree with the table on every other case in
-  // this file and disagree on exactly this one.
-  CHECK(running("brief"));
+  // **But the predicate already says false**: in the original the entry left
+  // the table when the thread ended, before anything else could ask.
+  CHECK(!running("brief"));
   CHECK(running("forever"));
 
   f.ai.reap_helpers(f.scheduler);
@@ -2702,6 +2694,67 @@ TEST(a_helper_is_handed_the_arguments_after_its_name_and_file) {
   // would leave both of them returning.
   CHECK(f.scheduler.alive(f.ai.helper("wanted")));
   CHECK(!f.scheduler.alive(f.ai.helper("other")));
+}
+
+/// `Invalid parms for %s AI helper` (0x004d2ff8 onward): a helper must be
+/// `void`, declare exactly as many parameters as were supplied, and take every
+/// one as a by-value `str`. Anything else starts nothing and records nothing.
+TEST(a_helper_whose_signature_does_not_fit_starts_nothing) {
+  Fixture f;
+  FakeLibrary library;
+  library.scheduler = &f.scheduler;
+  library.registry = &f.registry;
+  library.sources.emplace_back("DATA\\AI HELPERS\\RETURNS.VS",
+                               std::string("// int, str GroupName, str Target\nreturn 1;\n"));
+  library.sources.emplace_back("DATA\\AI HELPERS\\ONEPARM.VS",
+                               std::string("// void, str GroupName\nSleep(100000);\n"));
+  library.sources.emplace_back("DATA\\AI HELPERS\\INTPARM.VS",
+                               std::string("// void, str GroupName, int Target\nSleep(100000);\n"));
+  library.sources.emplace_back("DATA\\AI HELPERS\\OUTPARM.VS",
+                               std::string("// void, str GroupName, str *Target\nSleep(100000);\n"));
+  library.sources.emplace_back("DATA\\AI HELPERS\\GOOD.VS",
+                               std::string("// void, str GroupName, str Target\nSleep(100000);\n"));
+  f.context.library = &library;
+  const auto run = [&](const char* file) {
+    return f.call(script::CallKind::free_function, "RunAIHelper",
+                  {script::Value::string(file), script::Value::string(file),
+                   script::Value::string("a"), script::Value::string("b")},
+                  script::kNoScript);
+  };
+  for (const char* file : {"returns", "oneparm", "intparm", "outparm"}) {
+    CHECK(run(file).status == script::HostStatus::ok);
+  }
+  CHECK(f.ai.helpers().empty());
+  CHECK(f.scheduler.live_count() == 0);
+  // The one that fits does start, so the four above are refusals.
+  CHECK(run("good").status == script::HostStatus::ok);
+  CHECK(f.ai.helpers().size() == 1);
+  CHECK(f.scheduler.live_count() == 1);
+}
+
+/// **A helper belongs to no player.** It runs in the one global helper
+/// manager (`[0x996888]`), which tags nothing, so a helper an AI script starts
+/// is not that AI's: `AIGetPlayer` inside it answers 0.
+TEST(a_helper_started_by_an_ai_script_belongs_to_no_player) {
+  Fixture f;
+  FakeLibrary library;
+  library.scheduler = &f.scheduler;
+  library.registry = &f.registry;
+  library.sources.emplace_back("DATA\\AI HELPERS\\GUARD.VS", std::string(kForeverHelper));
+  f.context.library = &library;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  CHECK(f.ai.start(2, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(2)->root;
+  CHECK(f.call(script::CallKind::free_function, "RunAIHelper",
+               {script::Value::string("G"), script::Value::string("guard"),
+                script::Value::string("a"), script::Value::string("b")},
+               root)
+            .status == script::HostStatus::ok);
+  const script::ScriptId helper = f.ai.helper("G");
+  REQUIRE(helper != script::kNoScript);
+  CHECK(f.call(script::CallKind::free_function, "AIGetPlayer", {}, helper).value.as_integer() ==
+        0);
 }
 
 /// A missing helper file is silent: nothing spawns, nothing is recorded, and
@@ -2787,8 +2840,10 @@ TEST(ai_registration_overwrites_nothing) {
   // `AIGetSkillToDevelop/2`, the fifth trampoline, the two spell-siting
   // searches `BestMDPos/5` and `BestProtPos/4`, `ControlledNeighbors/1`,
   // `CanExplore/1` and `Recruit/4`, `GetDestPoint/1` and
-  // `PrepareAiTransportShip/5`.
-  CHECK(solo == 77);
+  // `PrepareAiTransportShip/5`, + the seven `RunAIHelper` arities beside the
+  // shipped 4 (2, 3, 5..9), which `gbr.exe` registers and the tenth round
+  // binds as `AIRun` and `Run` bind theirs.
+  CHECK(solo == 84);
   CHECK(with_ai == solo);
   CHECK(everyone > 0);
 
