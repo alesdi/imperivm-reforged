@@ -2898,8 +2898,19 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// The two synchronous-script entry points in this family, which differ only in
-/// their file and in the order they marshal their two arguments.
+/// The two synchronous-script entry points in this family, which differ in
+/// their file, in the order they marshal their two arguments, and in the width
+/// of the answer.
+///
+/// `GetStrat` (0x00421aa0 -> 0x0043d590) and `CalcPriority` (0x00421a00 ->
+/// 0x0043d900) both hand **`idPlayer - 1`** to the path resolver 0x0043d030
+/// with no range test of their own: a seat 0..15 with an AI and a profile
+/// name searches that profile's directory first, and anything else -- a seat
+/// of 16 or more included -- **still runs** the plain file. (A seat below 0
+/// indexes before the player table there; it is read as "no AI" here.) A run
+/// that fails answers 0, as does a negative return; `GetStrat` keeps the low
+/// 16 bits of the rest and `CalcPriority` all 32. The failed-run 0 is
+/// `run_script_now`'s labelled gap here.
 [[nodiscard]] HostOutcome gaika_script_call(CallContext& ctx, std::string_view file,
                                             const char* what, bool player_first) {
   AiSystem* ai = host_ai(ctx);
@@ -2908,10 +2919,10 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
     return HostOutcome::ok_with(Value::integer(0));
   }
   const std::int32_t asked = ctx.arg(1).as_integer();
-  if (asked < 1 || asked > 16) return HostOutcome::ok_with(Value::integer(0));
-  const auto owner = static_cast<PlayerId>(asked - 1);
+  const PlayerId owner =
+      asked >= 1 && asked <= 16 ? static_cast<PlayerId>(asked - 1) : kNoPlayer;
 
-  const std::uint32_t chunk = ai->find_script(*ctx.scheduler, owner, file);
+  const std::uint32_t chunk = ai_script_chunk(ctx, owner, file);
   // A file the installation does not have is 0 rather than a refusal: the
   // original's runner reports an error code and the caller turns it into 0.
   if (chunk == script::kNoChunk) return HostOutcome::ok_with(Value::integer(0));
@@ -2922,7 +2933,9 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
   const HostOutcome ran = run_script_now(ctx, chunk, args, what, result);
   if (ran.status != script::HostStatus::ok) return ran;
   const std::int32_t value = result.is_integer() ? result.as_integer() : 0;
-  return HostOutcome::ok_with(Value::integer(value < 0 ? 0 : value));
+  if (value < 0) return HostOutcome::ok_with(Value::integer(0));
+  // `GetStrat` is the one passing the node first, and the one masked.
+  return HostOutcome::ok_with(Value::integer(player_first ? value : (value & 0xffff)));
 }
 
 /// `g.GetPriority(idPlayer)` -- 7 sites.
@@ -2996,9 +3009,9 @@ HostOutcome f_laika(CallContext& ctx) {
 /// owner. Its declared signature is `int, GAIKA gaika, int idPlayer` -- which
 /// is this call's two arguments in this order, so they pass straight through.
 ///
-/// **A negative return is clamped to 0.** The original also truncates the
-/// result to sixteen bits; that is unobservable across a `[GAIKAStrat]` table
-/// of five entries and is not reproduced.
+/// **A negative return is clamped to 0, and the rest is truncated to sixteen
+/// bits**, both the original's (0x0043d590, 0x00421aa0); see
+/// `gaika_script_call`.
 ///
 /// A missing file answers 0 -- `GS_NONE` -- rather than refusing, which is the
 /// original's own answer and what `GAIKAMONITOR.VS`'s `if (Strat != 0)` is

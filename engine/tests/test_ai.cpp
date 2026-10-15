@@ -2229,6 +2229,31 @@ TEST(calc_priority_marshals_the_player_first) {
   CHECK(f.call(script::CallKind::member, "CalcPriority",
                {script::Value::integer(4), script::Value::integer(9)}, root)
             .value.as_integer() == 9004);
+  // **A seat past the sixteenth still runs the plain file** (0x0043d030 falls
+  // back to it for any seat of 16 or more); it is not answered 0 unasked.
+  CHECK(f.call(script::CallKind::member, "CalcPriority",
+               {script::Value::integer(1), script::Value::integer(20)}, root)
+            .value.as_integer() == 20001);
+}
+
+/// `GetStrat` keeps the low 16 bits of a non-negative answer (0x00421aa0 masks
+/// what 0x0043d590 returns), and runs for a seat outside 1..16 too.
+TEST(get_strat_masks_to_sixteen_bits_and_runs_for_any_seat) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, GAIKA gaika, int idPlayer\nreturn 65536 * 3 + idPlayer;\n",
+                "DATA/AI/GETGAIKASTRAT.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(1)->root;
+  f.ai.seed_gaika_view(1, 4);
+  CHECK(f.call(script::CallKind::member, "GetStrat",
+               {script::Value::integer(2), script::Value::integer(2)}, root)
+            .value.as_integer() == 2);
+  CHECK(f.call(script::CallKind::member, "GetStrat",
+               {script::Value::integer(2), script::Value::integer(30)}, root)
+            .value.as_integer() == 30);
 }
 
 /// The `AreaAI*` writers: **a named map area, and one write per node whose

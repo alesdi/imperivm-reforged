@@ -62,3 +62,18 @@
 0x004262f0	verified	Settlement::GetGaika: invalid handle -> 0, else the per-settlement node table by the settlement index (0x0044e9e0)
 0x00422e20	verified	GAIKA::Center: node record +8/+0xc by bare index, (0,0) only without a node vector; node 0 and unknown ids answer (0,0) here
 0x00697ba0	verified	rect::Center: ((l+r)/2, (t+b)/2) truncating; shares Center/0 and is now answered for a rect receiver (fixed: was unbound; test gaika_entry_points_read_the_table_the_way_the_scripts_do), no shipped site
+0x0042abe0	verified	GAIKA::GetPriority: player-1 <16 with an AI ([rec+0x88]), (short)g != 0, g&0xffff inside the slot map, slot != 0 -> record +0x10; every miss 0 (laika_of; a player <=1 below the table is read as no AI)
+0x0042adc0	verified	GAIKA::Prioritized: laika_of then byte +2 bit 0x01
+0x0042b3d0	verified	GAIKA::NoAttack: laika_of then byte +2 bit 0x10
+0x0042b520	verified	GAIKA::NoRecruit: laika_of then byte +2 bit 0x08
+0x0042ee40	verified	GAIKA::GetControlFlag: laika_of then byte +2 bit 0x20
+0x0042eda0	verified	GAIKA::SetControlFlag: laika_of then set or clear 0x20 by the bool argument
+0x0042b320	partial	GAIKA::LastSeen: laika_of then record +0xc; read matches, but the field is stamped by AiSystem::advance from exploration (labelled reading) where the original stamps it when sight is lost (per-player visibility sweep not modelled, design)
+0x0042ae70	partial	GAIKA::Explored: laika_of then 0x0041cb80: two session overrides (exploration setting in single player, reveal-all) answer true, else byte +2 bit 0x02; overrides not modelled and the bit is set from the exploration map (labelled reading of the unrecovered sweep)
+0x0042b270	partial	GAIKA::Revealed: laika_of then 0x0041cbd0: with fog of war on, bit 0x04, else Explored; the bit needs current per-player sight, which is not kept, so it reads false (design)
+0x0042ad30	verified	GAIKA::SetPriority: the player's AI, slot = map[g] (0 past the map) into 0x0041cf00: slot 0 or unchanged value does nothing; else write, set Prioritized, stable adjacent swaps up to slot 1 or down, map repaired (GaikaView::set_priority)
+0x0042ab40	verified	LAIKA(player, i): player-1 <16 with an AI, i&0xffff below the record count -> that rank slot's node id (+0), else 0
+0x00421aa0	partial	GAIKA::GetStrat: GetGAIKAStrat.vs on seat idPlayer-1 via 0x0043d030 (a seat >=16 still runs the plain file; fixed), (g, idPlayer), negative or failed -> 0, else &0xffff (fixed; test get_strat_masks_to_sixteen_bits_and_runs_for_any_seat); a callee trap traps the caller (run_script_now, labelled)
+0x00421a00	partial	GAIKA::CalcPriority: CalcGAIKAPriority.vs on seat idPlayer-1, (idPlayer, g), negative or failed -> 0, full 32 bits; out-of-range seat runs the plain file (fixed; test calc_priority_marshals_the_player_first); callee-trap gap
+0x00421ae0	verified	GAIKA::StratRunning: the player's AI [p*800+0x1034] (none -> 0), then 0x0041d150: g==0 -> 0, slot = map[g] (0 past the map), the record's strat (+4) zeroed when thread 0x34+g no longer runs; per-record script here
+0x00421b30	verified	GAIKA::RunStrat: 0x0041d1d0 on the player's AI (no null test in retail, nothing here): stop thread 0x34+g when strat != 0, write strat unconditionally, spawn <name>.vs (void, GAIKA gaika) tagged with the seat for non-zero; missing file starts nothing
