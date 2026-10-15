@@ -4994,6 +4994,28 @@ TEST(use_teleport_walks_a_squad_to_the_gate_through_it_and_on) {
     CHECK(verbs(champion) == std::vector<std::string>({"move", "teleport", "move"}));
     CHECK(verbs(behind).empty());
   }
+
+  // **A member binding none of the orders is stopped all the same** -- the
+  // tail dropped and the head ended around the appends -- and the state is a
+  // word (0x0042980b).
+  {
+    const ObjectId mute = b.soldier("Legionary", 2);
+    CHECK(b.world.set_position(mute, in_cell(1, 4)));
+    Command hold;
+    hold.arg_kind = CommandArgKind::point;
+    hold.point = in_cell(1, 4);
+    (void)b.commands.set_command(b.world, mute, "move", hold);
+    (void)b.commands.add_command(b.world, mute, false, "move", hold);
+    REQUIRE(b.commands.command_count(mute) == 2);
+    const SquadKey alone = b.band(2, 1, {mute});
+    CHECK(b.call(script::CallKind::member, "UseTeleport", 4,
+                 {pack_squad(alone), script::Value::object(kTypeObj, pad),
+                  script::Value::integer(0x10005), script::Value::string("move"),
+                  pack_point(onward)})
+              .value.truthy_scalar());
+    CHECK(b.commands.command_count(mute) <= 1);
+    CHECK(b.heroes.squads().find(alone)->state == 5);
+  }
 }
 
 // --------------------------------------------------------------------------

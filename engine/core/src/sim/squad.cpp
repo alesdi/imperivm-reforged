@@ -3122,10 +3122,13 @@ HostOutcome invade_through_gate_impl(CallContext& ctx) {
 ///
 /// ## What each member is given
 ///
-/// The squad takes the caller's state and the clock, `kSquadLocked` goes up for
-/// the walk and the pre-walk flags word is written back after it -- the same
-/// temporary lock `InvadeThroughGate` uses and for the same reason. Then, per
-/// member, its queue is replaced with up to three orders:
+/// The squad takes the caller's state -- a word (0x0042980b) -- and the script
+/// clock, `kSquadLocked` goes up for the walk and the pre-walk flags word is
+/// written back after it -- the same temporary lock `InvadeThroughGate` uses
+/// and for the same reason. Then, per member, the pending tail is dropped
+/// (`vtbl+0xc0(0)`), up to three orders are appended, and the head is ended
+/// (0x005b07d0) -- so a member whose class binds none of them is simply
+/// stopped, which this used to skip:
 ///
 ///   1. **`cmd` at the teleport's own door**, and only when `cmd` is one of
 ///      `move`, `advance` or `sneak`. 0x004298ac compares against exactly those
@@ -3175,8 +3178,12 @@ HostOutcome use_teleport_impl(CallContext& ctx) {
   CommandSystem* commands = command_system(*world);
   if (commands == nullptr) return no;
 
-  squad->state = ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
-  squad->state_time = world->time();
+  // The state as a word (0x0042980b) and the script clock.
+  const GameTime now = ctx.scheduler != nullptr ? ctx.scheduler->now() : world->time();
+  const std::uint16_t before = squad->flags;
+  squad_stamp_state(*squad, ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0,
+                    0, 0, now);
+  squad->flags = before;
 
   const std::string verb =
       ctx.count() > 3 && ctx.arg(3).is_string() ? std::string(ctx.arg(3).as_string()) : std::string();
@@ -3184,7 +3191,9 @@ HostOutcome use_teleport_impl(CallContext& ctx) {
   // The three verbs 0x004298ac compares against, and nothing else walks to the
   // teleport first.
   const bool walks = verb == "move" || verb == "advance" || verb == "sneak";
-  const Point door = enter_point_near(*world, teleport->id, leader, false);
+  // Measured from the leader's `posRH` (`vtbl+0xc8`, 0x004297da), which for a garrisoned
+  // leader is its town and not its holder record's (0, 0).
+  const Point door = enter_point_near(*world, teleport->id, unit_pos_rh(*world, leader), false);
 
   const std::vector<ObjectId> members(squad->members.begin(), squad->members.end());
   for (const ObjectId member : members) {
@@ -3218,6 +3227,11 @@ HostOutcome use_teleport_impl(CallContext& ctx) {
       onwards.arg_kind = CommandArgKind::point;
       onwards.point = onward;
       issue(verb, onwards);
+    }
+    // Nothing bound: the tail was still dropped and the head still ended.
+    if (!replaced) {
+      (void)commands->clear_commands(*world, member);
+      (void)commands->kill_command(*world, member);
     }
     const WorldObject* slot = world->find(member);
     if (slot != nullptr && slot->state.flags.is_hero) break;
