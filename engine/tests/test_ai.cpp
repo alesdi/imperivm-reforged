@@ -3660,8 +3660,10 @@ TEST(min_need_and_max_need_run_get_army_need_and_scale_by_optimism) {
   // Optimism of zero leaves the raw number rather than dividing by it.
   record->optimism = 0;
   CHECK(need("MinNeed", 3, 1) == raw);
+  // A negative one is divided by **unsigned** (0x0042c548): past two billion,
+  // so the share rounds to 0 and the floor makes it 1.
   record->optimism = -5;
-  CHECK(need("MinNeed", 3, 1) == raw);
+  CHECK(need("MinNeed", 3, 1) == 1);
 
   // A player outside 1..16 has no view to divide by, and the script still runs.
   CHECK(need("MinNeed", 3, 0) == 1000000 + 3 * 10000 + kThree);

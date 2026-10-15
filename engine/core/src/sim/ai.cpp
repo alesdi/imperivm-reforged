@@ -2122,7 +2122,7 @@ HostOutcome f_set_maika(CallContext& ctx) {
 ///
 /// So neither entry point computes a need. What they *add* is the last step:
 ///
-///     if (need > 0 && optimism > 0)  need = max(1, need * 100 / optimism)
+///     if (need > 0 && optimism != 0)  need = max(1, need * 100 / optimism)
 ///
 /// -- the need as a **percentage of this player's optimism about this node**,
 /// floored at 1 so that a real need never rounds away to nothing. `optimism`
@@ -2169,9 +2169,13 @@ HostOutcome m_gaika_need(CallContext& ctx) {
       }
     }
   }
-  if (need > 0 && optimism > 0) {
-    need = need * 100 / optimism;
-    if (need == 0) need = 1;
+  // **Unsigned**, both the product and the quotient (0x0042c548): a negative
+  // optimism -- `AreaAIOptimism` writes any integer -- divides by a number
+  // past two billion and floors the need at 1, rather than leaving it raw.
+  if (need > 0 && optimism != 0) {
+    const std::uint32_t share =
+        static_cast<std::uint32_t>(need) * 100u / static_cast<std::uint32_t>(optimism);
+    need = share == 0 ? 1 : static_cast<std::int32_t>(share);
   }
   return HostOutcome::ok_with(Value::integer(need));
 }
