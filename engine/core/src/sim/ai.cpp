@@ -2603,10 +2603,17 @@ HostOutcome m_gaika_dist_to_players(CallContext& ctx) {
 ///
 /// Each surviving squad's members are then offered to a **plain, unflagged**
 /// target filter (0x00421d70 constructs it with all six of 0x005d45a0's flags
-/// zero, so it is `BestTarget`'s filter exactly) after two tests of their own:
-/// the unit is not dead, and its holder handle at `[obj+0x154]` is `0xffff` --
-/// a garrisoned unit is not a target. `CombatSystem::best_target_among` is that
-/// filter, and it is deliberately the same code the other six run.
+/// zero, so it is `BestTarget`'s filter exactly) by 0x004282c0, in order, after
+/// two tests of their own: the unit is not dead, and its holder handle at
+/// `[obj+0x154]` is `0xffff`. The first member to fail either -- or to be
+/// missing -- **ends that squad's offer**: the helper returns there. It always
+/// returns 0, so the walk always goes on to the next squad, and the
+/// node-settlement query after the walk (0x00420c00) writes four locals nothing
+/// reads. `CombatSystem::best_target_among` is the filter, and it is
+/// deliberately the same code the other six run -- including its score, which
+/// is that system's and not the executable's, so the filter's own early stop
+/// (0x005db650 answering 0 for a candidate it scores under 50) is not
+/// reproduced here; see `sim/combat.cpp`.
 ///
 /// **There is no radius.** Every other member of the family gets its reach from
 /// the grid sweep it rides on; this one has no sweep, so a candidate on the far
@@ -2698,12 +2705,15 @@ HostOutcome m_best_target_in_gaika(CallContext& ctx) {
       // here", and the `& 6` mask refuses that. Where the squad is *going* is
       // therefore not read at all once it is standing here.
       if (squad.gaika_in != node) continue;
+      // 0x004282c0 **stops** at the first member that is missing, dead or
+      // inside a holder (`[obj+0x154] != 0xffff`) and offers none of the rest
+      // of that squad -- it returns rather than skips -- so a squad whose
+      // front man is garrisoned is not a target at all.
       for (const ObjectId member : squad.members) {
         const WorldObject* slot = world->find(member);
-        if (slot == nullptr) continue;
-        if (slot->state.health <= 0) continue;
-        // `[obj+0x154] != 0xffff`: a garrisoned unit is not offered.
-        if (slot->state.holder != kNoObject) continue;
+        if (slot == nullptr) break;
+        if (slot->state.health <= 0) break;
+        if (slot->state.holder != kNoObject) break;
         candidates.push_back(member);
       }
     }

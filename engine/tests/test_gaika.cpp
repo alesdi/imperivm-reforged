@@ -1605,6 +1605,25 @@ TEST(best_target_in_gaika_applies_the_squad_tests_one_at_a_time) {
   REQUIRE(b.world.remove_from_holder(enemy, in_cell(2, 3)));
   CHECK(best_in_gaika(b, caster) == enemy);
 
+  // **A failing member ends that squad's offer** -- 0x004282c0 returns there
+  // rather than skipping -- so a squad whose first member is garrisoned offers
+  // nobody, and one whose garrisoned member comes last still offers the rest.
+  {
+    const ObjectId inside = b.trooper("Archer", 2, 2, 4);
+    const ObjectId outside = b.trooper("Archer", 2, 3, 3);
+    b.arm();
+    REQUIRE(b.world.put_in_holder(inside, keep));
+    squad->eval = 0;  // the first squad out of the way
+    const SquadKey second = b.band(2, 1, {inside, outside});
+    CHECK(best_in_gaika(b, caster) == kNoObject);
+    Squad* other = b.heroes.squads().find(second);
+    REQUIRE(other != nullptr);
+    other->members = {outside, inside};
+    CHECK(best_in_gaika(b, caster) == outside);
+    other->eval = 0;
+    squad->eval = 10;
+  }
+
   CHECK(b.world.set_health(enemy, 0));
   CHECK(best_in_gaika(b, caster) == kNoObject);
 }
