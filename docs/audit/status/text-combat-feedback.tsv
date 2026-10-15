@@ -1,0 +1,16 @@
+0x004c9b70	partial	Translate: lookup 0x00689130 read and fixed (empty->"", all-digit key->itself, exact then tolower-folded, text and justtext both names with the later row winning 0x00689f40, empty result->key); gaps: the running script's file name as context (0x006a3a60) not passed (no shipped key carries one), map table (0xa77e90) merged into the pack's rather than asked second (differs only where the pack answers a name with itself)
+0x004c9ea0	partial	Translatef(key,a1): formatter 0x006897a0 read and fixed (each %s argument translated 0x00689a82, %% -> %, multi-digit N, bad placeholder -> "Bad parameter at pos P", finished text that is a name translated again 0x00689650); gaps: %d prints a pointer in the original (argument text written instead), N past the arguments left as written, same merged map table as Translate
+0x004ca150	partial	Translatef(key,a1,a2): as 0x004c9ea0
+0x004ca470	partial	Translatef(key,a1,a2,a3): as 0x004c9ea0; this arity was not registered and now is
+0x006a3f00	verified	pr(str): "%s" to the debug console (0x00619060), no check, no state
+0x006a3f70	verified	pr(int): "%d" to the debug console
+0x006a3fa0	partial	pr(bool): prints true/false; a VS bool reaches the host as an integer here, so it prints 1/0 (debug output only)
+0x005abb20	partial	Obj::pr(str): prints only when [obj+0x74] equals the debug era 0x00821354 (Obj::GetDebug's test); invalid receiver logs and answers nothing; not registered: every shipped site is commented out and the per-object debug flag is unmodelled
+0x005abbd0	partial	Obj::pr(int): as 0x005abb20 with "%d"
+0x005abc40	partial	Obj::pr(handle): as 0x005abb20, printing "(h:%d,o:%d)"
+0x00746ea0	verified	Breakpoint and the other names on this body: answers 0, touches nothing; for GetGAIKA(int) and GAIKA::ID the untouched VM stack makes the argument the answer (sim/ai.cpp, sim/squad.cpp identity functions)
+0x00697580	verified	ParseStr: skips leading spaces only (0x20), token to the first comma with trailing spaces cut, tail after the comma verbatim (fixed: tabs were trimmed and the tail was trimmed)
+0x00696a40	verified	Str2Int: CRT atol 0x00763919 -- isspace skip, one sign, digits with 32-bit wrap (fixed: no white-space skip, saturated)
+0x00696b40	verified	StrLen: bytes before NUL (0x00649b40); null string 0
+0x005a7fd0	partial	ClearDebug: adds one to the debug era 0x00821354 and nothing else (fixed: it cleared the debug console, which is cls's); the era and per-object flag ([obj+0x74], Obj::GetDebug) are unmodelled
+0x00697740	verified	StrMid: len capped at strlen-start when that is not more, floored at 0; negative start reads before the string in the original, answered as start 0
