@@ -273,6 +273,7 @@ void put_settlement(std::vector<std::byte>& out, const Settlement& s) {
   bytes::put_i32(out, s.sentries);
   bytes::put_i32(out, s.max_sentries);
   bytes::put_i32(out, s.sentries_ready);
+  bytes::put_i32(out, s.sentries_put_back);
   bytes::put_u32(out, s.supplied);
   bytes::put_u8(out, static_cast<std::uint32_t>(s.outpost_trade));
   put_bool(out, s.burning);
@@ -312,7 +313,8 @@ void put_settlement(std::vector<std::byte>& out, const Settlement& s) {
       !bytes::get_i32(reader, s.capture_health_percent) ||
       !bytes::get_i32(reader, s.anchor_max_health) || !bytes::get_i32(reader, s.sentries) ||
       !bytes::get_i32(reader, s.max_sentries) ||
-      !bytes::get_i32(reader, s.sentries_ready) || !reader.u32(s.supplied) ||
+      !bytes::get_i32(reader, s.sentries_ready) ||
+      !bytes::get_i32(reader, s.sentries_put_back) || !reader.u32(s.supplied) ||
       !get_enum(reader, s.outpost_trade,
                 static_cast<std::uint8_t>(OutpostTrade::gold_interest) + 1) ||
       !get_bool(reader, s.burning) || !reader.u32(buildings)) {

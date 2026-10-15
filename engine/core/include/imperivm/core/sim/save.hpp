@@ -318,7 +318,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// version-34 file has neither: scripts due on the same millisecond would run
 /// in id order rather than the order they went to sleep, and a player script
 /// already running could be started a second time.
-inline constexpr std::uint32_t kStateVectorVersion = 35;
+/// 36: a settlement carries the sentries put back into its wall
+/// (`Settlement::sentries_put_back`, `[settlement+0x100]`), which `DelSentry`
+/// spends before the roster. Hashed; a version-35 file would load every wall
+/// with none banked, and the next sentry to die would come off the roster.
+inline constexpr std::uint32_t kStateVectorVersion = 36;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

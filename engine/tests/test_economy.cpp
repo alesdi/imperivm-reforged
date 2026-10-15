@@ -4260,7 +4260,7 @@ TEST(reserve_for_writes_three_slots_and_refuses_the_running_research) {
 /// `GoldSpentOnTech` -- gold. An earlier note in this file had the reserve on
 /// food; the test pins the correction. `MaxAffordCount` and both command forms
 /// of `CanAfford` apply it unless `ReserveFor` names this command; the
-/// `(gold, food)` form never applies it.
+/// `(gold, food)` form applies it always (0x00425b1c).
 TEST(max_afford_count_and_can_afford_hold_the_reserve_back_from_gold) {
   BarrackBench b;
   const EnvScope scope = EnvScope::for_settlement(b.town);
@@ -4287,9 +4287,12 @@ TEST(max_afford_count_and_can_afford_hold_the_reserve_back_from_gold) {
   CHECK(afford("Feast", 6) == 1);
   CHECK(afford("Feast", 7) == 0);
   CHECK(b.truth("CanAfford", {b.settlement_value(), script::Value::string("Feast")}) == 1);
-  // The `(gold, food)` form passes the flag 0: the whole store counts.
-  CHECK(b.truth("CanAfford", {b.settlement_value(), script::Value::integer(700),
+  // The `(gold, food)` form subtracts the whole reserve too: 1000 - 400 = 600
+  // is what is left to spend, so 600 is affordable and 601 is not.
+  CHECK(b.truth("CanAfford", {b.settlement_value(), script::Value::integer(600),
                               script::Value::integer(0)}) == 1);
+  CHECK(b.truth("CanAfford", {b.settlement_value(), script::Value::integer(601),
+                              script::Value::integer(0)}) == 0);
   // And food is untouched by it: 100000 / 400 = 250 > 6, still gold-bound;
   // a food store that would bind at 5 binds at 5.
   b.set_store(1000, 2000, 50);

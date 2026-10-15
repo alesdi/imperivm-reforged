@@ -620,17 +620,23 @@ TEST(feeder_host_reads_and_writes_a_units_food) {
             .status == script::HostStatus::ok);
   CHECK(feeder.food(soldier) == 20);
 
-  // Clamped to `max_food`: `TTENT_BEHAVIOR.VS` writes `u.SetFood(u.maxfood)`
-  // and nothing may exceed it, which is why the dumps' `food` domain is 0..20.
+  // **Not clamped.** `Unit::SetFood` (0x005d7cd0) stores `[unit+0x16c]` as
+  // given: `OUTPOST_BEHAVIOR.VS`'s `u1.SetFood(20)` and the Danube sequences'
+  // `SetFood(40)` leave a unit over its `maxfood`.
   CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
-                  {handle, script::Value::integer(9999)})
+                  {handle, script::Value::integer(40)})
             .status == script::HostStatus::ok);
-  CHECK(feeder.food(soldier) == 20);
+  CHECK(feeder.food(soldier) == 40);
 
-  // `u.SetFood(0)` -- `ITAVERN_CALLTOARMS.VS` and
-  // `SETTLEMENT_BEHAVIOR_AMBIENT.VS`.
+  // Nor floored, and anything under 1 marks the unit hungry -- the flag
+  // `0x20000000` the body clears below 1. `u.SetFood(0)` is
+  // `ITAVERN_CALLTOARMS.VS` and `SETTLEMENT_BEHAVIOR_AMBIENT.VS`.
   CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
                   {handle, script::Value::integer(-5)})
+            .status == script::HostStatus::ok);
+  CHECK(feeder.food(soldier) == -5);
+  CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                  {handle, script::Value::integer(0)})
             .status == script::HostStatus::ok);
   CHECK(feeder.food(soldier) == 0);
 

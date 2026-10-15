@@ -149,6 +149,18 @@ bool FeederSystem::set_food(ObjectId unit, std::int32_t value) {
   return true;
 }
 
+bool FeederSystem::write_food(ObjectId unit, std::int32_t value) {
+  FeedingUnit* link = find(unit);
+  if (link == nullptr) return false;
+  link->food = value;
+  if (link->food > 0) {
+    clear_hungry(unit);
+  } else {
+    mark_hungry(unit);
+  }
+  return true;
+}
+
 bool FeederSystem::set_feeding(ObjectId unit, bool feeding) {
   FeedingUnit* link = find(unit);
   if (link == nullptr) return false;
