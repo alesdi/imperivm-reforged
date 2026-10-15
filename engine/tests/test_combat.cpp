@@ -3264,6 +3264,44 @@ TEST(combat_get_point_on_target_answers_the_targets_position) {
   CHECK((unpack_point(held.value) == Point{900, 400}));
 }
 
+/// The receiver and death checks the target accessors make before their
+/// answer: `IsValidTarget` (0x005aafd0) never reads `target_factor`,
+/// `CanAttack` (0x005ab060) refuses a dead target or receiver, `InRange`
+/// (0x005d72e0) refuses a held receiver, and `GetPointOnTarget` (0x004e3080)
+/// checks its receiver before its target.
+TEST(combat_target_accessors_check_what_the_binary_checks) {
+  using imperivm::core::script::Value;
+  SightBench b;
+  CombatProfile animal = melee(1, 0, 40);
+  animal.target_factor = -1;  // Crow, Deer, Eagle, Hen2
+  b.combat.set_profile(b.villager_class, animal);
+  const ObjectId sword = b.soldier(0, Point{0, 0});
+  const ObjectId deer = b.soldier(1, Point{30, 0}, b.villager_class);
+  const ObjectId foe = b.soldier(1, Point{40, 0});
+
+  CHECK(b.call("IsValidTarget", 1, {Value::object(1, sword), Value::object(1, deer)})
+            .value.as_integer() == 1);
+
+  CHECK(b.call("CanAttack", 1, {Value::object(1, sword), Value::object(1, foe)})
+            .value.as_integer() == 1);
+  b.combat.apply_damage(b.world, foe, b.combat.health(foe));
+  CHECK(b.call("CanAttack", 1, {Value::object(1, sword), Value::object(1, foe)})
+            .value.as_integer() == 0);
+
+  const ObjectId wall = b.world.spawn(NativeClass::building, nullptr, b.wall_class);
+  b.world.set_position(wall, Point{0, 0});
+  CHECK(b.call("InRange", 1, {Value::object(1, sword), Value::object(1, deer)})
+            .value.as_integer() == 1);
+  REQUIRE(b.world.put_in_holder(sword, wall));
+  CHECK(b.call("InRange", 1, {Value::object(1, sword), Value::object(1, deer)})
+            .value.as_integer() == 0);
+
+  const auto orphan =
+      b.call("GetPointOnTarget", 1, {Value::object(1, 999999), Value::object(1, deer)});
+  REQUIRE(is_point(orphan.value));
+  CHECK((unpack_point(orphan.value) == Point{0, 0}));
+}
+
 /// A hidden enemy is not an enemy in sight.
 ///
 /// Bit 21 of `[obj + 0x2c]` means *not visible* -- `Obj::IsVisible` negates it

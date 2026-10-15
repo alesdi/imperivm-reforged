@@ -2250,6 +2250,14 @@ HostOutcome host_can_attack(CallContext& ctx) {
   // left out for the reason given there -- it must refuse exactly what
   // `Attack` refuses, or `RAM_ATTACK.VS`'s `if (!.CanAttack(t)) break;
   // .Attack(t);` loop spins on a refusal that never suspends.
+  //
+  // Before either, it refuses a dead target and then a dead receiver, each
+  // through the dead virtual (`vtbl+0x50`), with a log line and `false`.
+  // A dying combatant is dead to it: its health is already at zero.
+  const auto dead = [&](const Combatant& c) {
+    return !combat->is_alive(c.id) || c.action == Action::dying;
+  };
+  if (dead(*d) || dead(*a)) return HostOutcome::ok_with(Value::boolean(false));
   const bool ok = combat->profile(a->class_index).can_attack() &&
                   combat->profile(d->class_index).can_be_attacked && combat->is_enemy(*a, *d) &&
                   combat->unit_can_attack(*a, *d);
@@ -2265,10 +2273,14 @@ HostOutcome host_is_valid_target(CallContext& ctx) {
   const CombatProfile theirs = combat->profile(d->class_index);
   // `Obj::IsValidTarget` (0x005aafd0) is nothing but the receiver's
   // `CanAttack` virtual, so a swordsman's `MELEE_ATTACK.VS` and
-  // `UNIT_AI_ATTACK_GATE.VS` leave at their first test of a building.
+  // `UNIT_AI_ATTACK_GATE.VS` leave at their first test of a building. An
+  // invalid target answers `false` without a log line, an invalid receiver
+  // with one. It does **not** read the class's `target_factor`: a factor of
+  // -1 keeps an animal out of every target sweep (0x005db650) and out of
+  // `EnemyInRange` (0x004dbea0), but a script that names one gets the
+  // virtual's answer.
   const bool ok = combat->is_enemy(*a, *d) && combat->is_alive(d->id) && d->health > 0 &&
-                  theirs.can_be_attacked && !theirs.never_targeted() &&
-                  combat->unit_can_attack(*a, *d);
+                  theirs.can_be_attacked && combat->unit_can_attack(*a, *d);
   return HostOutcome::ok_with(Value::boolean(ok));
 }
 
@@ -2296,6 +2308,13 @@ HostOutcome host_in_range(CallContext& ctx) {
   const Combatant* a = combat->find(id_of(ctx.arg(0)));
   const Combatant* d = combat->find(id_of(ctx.arg(1)));
   if (a == nullptr || d == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  // `Unit::InRange` (0x005d72e0) answers `false` for a receiver inside a
+  // holder (`[unit+0x154] != 0xffff`) before it measures anything.
+  if (World* world = world_of(ctx); world != nullptr) {
+    if (const ObjectState* state = world->state(a->id); state != nullptr && state->is_held()) {
+      return HostOutcome::ok_with(Value::boolean(false));
+    }
+  }
   Combatant attacker = *a;
   Combatant defender = *d;
   if (World* world = world_of(ctx); world != nullptr && combat->world_bound()) {
@@ -2684,16 +2703,21 @@ HostOutcome host_enemies_in_sight(CallContext& ctx) {
 /// the target's position, which is the same point the in-range arm answers and
 /// leaves `InRange` to say no by itself.
 ///
-/// A target that is not a combatant, or a receiver that is not, answers the
-/// target's world position when there is one and `(0, 0)` otherwise -- never a
-/// refusal, because the original prints (through the sink that is a bare `ret`
-/// in retail) and pushes a point either way.
+/// The receiver is checked first and the target second; either one naming no
+/// object prints (through the sink that is a bare `ret` in retail) and pushes
+/// `(0, 0)` -- never a refusal. A unit target's aim point, `vtbl+0xc8`, is
+/// its `posRH`: the town it garrisons while it is held, which is
+/// `unit_pos_rh`'s answer, not `resolve_position`'s.
 HostOutcome host_get_point_on_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  if (world->find(id_of(ctx.arg(0))) == nullptr) {
+    return HostOutcome::ok_with(pack_point(Point{0, 0}));
+  }
   const ObjectId target = id_of(ctx.arg(1));
   const WorldObject* slot = world->find(target);
   if (slot == nullptr) return HostOutcome::ok_with(pack_point(Point{0, 0}));
+  if (slot->state.flags.is_unit) return HostOutcome::ok_with(pack_point(unit_pos_rh(*world, target)));
   return HostOutcome::ok_with(pack_point(world->resolve_position(target)));
 }
 
