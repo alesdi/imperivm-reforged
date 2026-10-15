@@ -5404,7 +5404,9 @@ struct HospitalBench : ShoreBench {
     return id;
   }
 
-  /// A squad of `owner`'s, worth `eval`, standing in `in` and going nowhere.
+  /// A squad of `owner`'s, worth `eval`, standing in `in` and bound for it --
+  /// as placement files one. With no heading at all it would be *leaving*
+  /// (0x0044e1f0).
   SquadKey band(PlayerId owner, std::vector<ObjectId> members, GaikaId in, std::int32_t eval) {
     const SquadKey key = heroes.squads().create(owner);
     for (const ObjectId id : members) CHECK(heroes.squads().join(key, id));
@@ -5412,6 +5414,7 @@ struct HospitalBench : ShoreBench {
     CHECK(squad != nullptr);
     if (squad == nullptr) return key;
     squad->gaika_in = in;
+    squad->dest_gaika = in;
     squad->eval = eval;
     return key;
   }
@@ -5519,8 +5522,12 @@ TEST(nearest_hospital_weighs_the_enemies_standing_in_the_node) {
   b.heroes.squads().find(raiders)->gaika_in = at_hall;
   b.heroes.squads().find(raiders)->dest_gaika = at_village;
   CHECK(b.hospital(key) == at_hall);
-  b.heroes.squads().find(raiders)->dest_gaika = kNoGaika;
+  b.heroes.squads().find(raiders)->dest_gaika = at_hall;
   CHECK(b.hospital(key) == at_village);
+  // With no heading at all it is leaving, not staying (0x0044e235).
+  b.heroes.squads().find(raiders)->dest_gaika = kNoGaika;
+  CHECK(b.hospital(key) == at_hall);
+  b.heroes.squads().find(raiders)->dest_gaika = at_hall;
   // A strengthless squad does not count, whoever it is.
   raiders_worth(0);
   CHECK(b.hospital(key) == at_hall);
@@ -5545,11 +5552,12 @@ TEST(nearest_hospital_weighs_the_enemies_standing_in_the_node) {
   CHECK(standing(2, 0) == at_hall);
   CHECK(standing(5, 0) == at_hall);
 
-  // **Peaceful, and whose.** Player 14's peaceful squad does not count, nor
-  // 15's; player 3's peaceful squad does, and player 14's warlike one does.
+  // **No peaceful squad counts, whoever's**: the presence is asked with 0
+  // (0x0043194b) and 0x0044e1f0 refuses the flag on it, so the body's later
+  // "player 14 or 15" test never sees one. Player 14's warlike squad does.
   CHECK(standing(14, kSquadFlagPeaceful) == at_hall);
   CHECK(standing(15, kSquadFlagPeaceful) == at_hall);
-  CHECK(standing(3, kSquadFlagPeaceful) == at_village);
+  CHECK(standing(3, kSquadFlagPeaceful) == at_hall);
   CHECK(standing(14, 0) == at_village);
 }
 

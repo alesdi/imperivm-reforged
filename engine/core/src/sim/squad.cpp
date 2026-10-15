@@ -1626,16 +1626,35 @@ constexpr std::int32_t kAiEnemy = 4;
   return (id >= 1 && id <= 16) ? static_cast<PlayerId>(id - 1) : kNoPlayer;
 }
 
-/// Where a squad stands relative to a node, as a presence mask.
+/// Where a squad stands relative to a node, as a presence mask: 0x0044e1f0.
 ///
-/// **Reconstructed from the squad's own side, and that is the inference in this
-/// whole family.** Retail walks a deque stored *on* the node (0x004395f4 reads
-/// `[gaika+0x18]`). `sim/gaika.hpp` now has a node table, but it holds no such
-/// deque and its numbering is this engine's own approximation rather than the
-/// original's, so membership is still read back from the three GAIKA fields the
-/// squad carries: `gaika_in == g` and going nowhere else is staying,
-/// heading to `g` from elsewhere is coming, `gaika_in == g` with a destination
-/// elsewhere is leaving. Likely, and unproven.
+/// The presence itself is read off the squad, as the original reads it:
+///
+///   * a null squad is 0, and so is one carrying `SF_PEACEFUL` (`[squad+0x30]
+///     & 4`) unless the third argument is non-zero (0x0044e205). Every caller
+///     this function stands for passes 0 -- the four `GetSquads`, the census
+///     (0x0042f1a0..0x0042fc40, 0x00430a30), `AllEnemiesInHolder` (0x00430dc0),
+///     `NearestHospital` (0x004316b0) -- except `Count/3` (0x004330b0), which
+///     passes 1, and `GetAIControlledUnits`, which passes its flag; hence
+///     `take_peaceful`;
+///   * the heading is the squad's AI order's node (0x00444140), or
+///     `DestGAIKA` when it has none (`squad_ai_dest`);
+///   * heading here: staying (4) if `GAIKAIn` is here too, else coming (1);
+///   * heading elsewhere: leaving (2) if `GAIKAIn` is here, else 0. **A squad
+///     with no heading at all that stands here is leaving**, not staying: the
+///     heading 0 is simply "elsewhere" (0x0044e235). This answered staying for
+///     it. Every squad the placement files has a `DestGAIKA` (its own node,
+///     `enrol_new_units_in_squads`), so the case is a squad stood down to no
+///     node, or one formed at a point no node covers.
+///
+/// **Which squads are asked is reconstructed, and that is the inference in
+/// this whole family.** Retail walks a deque stored *on* the node (0x004395f4
+/// reads `[gaika+0x18]`). `sim/gaika.hpp` now has a node table, but it holds no
+/// such deque and its numbering is this engine's own approximation rather than
+/// the original's, so every squad is asked and the ones the answer puts
+/// nowhere near the node are the ones the deque would not hold. The order the
+/// survivors come in is the table's (player, index), not the deque's filing
+/// order.
 ///
 /// **Where a squad is heading is `AIDest`, not `DestGAIKA`.** Posting an
 /// order re-files the squad on the node table from its `DestGAIKA` to the
@@ -1650,13 +1669,89 @@ constexpr std::int32_t kAiEnemy = 4;
 /// lines and compares the results, and `SQUADMONITOR.VS` walks a `GetSquads`
 /// list and then evaluates the same node. Two copies of this rule that drifted
 /// would make those disagree in a way no test here would catch.
-[[nodiscard]] std::int32_t squad_presence(GaikaId node, const Squad& squad) noexcept {
+[[nodiscard]] std::int32_t squad_presence(GaikaId node, const Squad& squad,
+                                          bool take_peaceful = false) noexcept {
   if (node == kNoGaika) return 0;
-  const GaikaId heading = squad_ai_dest(squad);
-  if (squad.gaika_in == node) {
-    return (heading == kNoGaika || heading == node) ? kAiStaying : kAiLeaving;
+  if (!take_peaceful && (squad.flags & kSquadFlagPeaceful) != 0) return 0;
+  const bool in_here = squad.gaika_in == node;
+  if (squad_ai_dest(squad) == node) return in_here ? kAiStaying : kAiComing;
+  return in_here ? kAiLeaving : 0;
+}
+
+/// The radius, by the asking AI's level, inside which an enemy squad heading
+/// for a node is seen coming: 0x0081a794 indexed by the level (0x0044eca6), so
+/// 6,000 at 1 and 32,000 at 2. At 3 the index lands one past the three
+/// numbers on the next dword, 8,067,176, which no map is wide enough to
+/// exceed. Index 0 (1,000) is never read: the level is never 0.
+[[nodiscard]] constexpr std::int64_t seen_coming_radius(std::int32_t level) noexcept {
+  switch (level) {
+    case 1: return 6000;
+    case 2: return 32000;
+    default: return 8067176;
   }
-  return heading == node ? kAiComing : 0;
+}
+
+/// The asking AI's level, `[ai+0x68]`. The AI's constructor copies the player's
+/// game-setup difficulty and makes anything outside 1..3 a 3 (0x0041e100), and
+/// `AIStart` overwrites it with its own argument when it has one (0x00434ca0).
+/// Here that is `AiPlayer::difficulty`, `none` reading as the constructor's 3;
+/// which setup value reaches it is `sim/ai.hpp`'s inference, not this one's.
+/// 0 when the player has no AI running: the refinement below is then skipped,
+/// as 0x0044eb80 skips it for `[record+0x88]` null.
+[[nodiscard]] std::int32_t ai_level_of(World& world, PlayerId player) noexcept {
+  const AiSystem* ai = ai_system_of(world);
+  const AiPlayer* running = ai == nullptr ? nullptr : ai->player_ai(player);
+  if (running == nullptr || !running->active) return 0;
+  switch (running->difficulty) {
+    case AiDifficulty::easy: return 1;
+    case AiDifficulty::normal: return 2;
+    default: return 3;
+  }
+}
+
+/// 0x0044eb80: what an AI **sees** of an enemy squad's presence, which the
+/// four-argument `GetSquads` (and the census) run over every squad whose
+/// relation to the asker came back `AI_ENEMY`. This note used to call it a
+/// fog-of-war memory; it is a sight radius by level, and it reads only the
+/// enemy squad and the node:
+///
+///   * nothing changes for a squad already staying (4), or when the asker has
+///     no AI or no level;
+///   * the enemy's heading is re-read: its AI order's node **if the drain has
+///     already taken the order** (priority 0, node non-zero, 0x0044ec19),
+///     otherwise `DestGAIKA`, otherwise `GAIKAIn` -- a posted order the drain
+///     has not reached is not yet visible;
+///   * coming (1): kept only when that heading is this node and the squad's
+///     front member (0x00443df0, its `posRH`) stands within
+///     `seen_coming_radius(level)` of the node's centre (floored root,
+///     0x00417990); otherwise 0;
+///   * leaving (2) whose re-read heading is this node: staying (4).
+[[nodiscard]] std::int32_t seen_enemy_presence(World& world, const SquadTable& table,
+                                               const Squad& squad, GaikaId node,
+                                               std::int32_t presence, PlayerId asking) {
+  if (presence == kAiStaying) return presence;
+  const std::int32_t level = ai_level_of(world, asking);
+  if (level == 0) return presence;
+  GaikaId heading = kNoGaika;
+  if (squad.order >= 0) {
+    if (const AiOrderQueue* queue = table.orders(squad.key.player);
+        queue != nullptr && static_cast<std::size_t>(squad.order) < queue->todo.size()) {
+      const AiOrder& record = queue->todo[static_cast<std::size_t>(squad.order)];
+      if (record.priority == 0 && record.node != kNoGaika) heading = record.node;
+    }
+  }
+  if (heading == kNoGaika) heading = squad.dest_gaika != kNoGaika ? squad.dest_gaika : squad.gaika_in;
+  if (presence == kAiComing) {
+    if (heading != node || squad.members.empty()) return 0;
+    const GaikaNode* here = world.gaika().find(node);
+    const Point centre = here != nullptr ? here->center : Point{0, 0};
+    const Point at = unit_pos_rh(world, squad.members.front());
+    const std::int64_t dx = static_cast<std::int64_t>(at.x) - centre.x;
+    const std::int64_t dy = static_cast<std::int64_t>(at.y) - centre.y;
+    return isqrt(dx * dx + dy * dy) <= seen_coming_radius(level) ? presence : 0;
+  }
+  if (presence == kAiLeaving && heading == node) return kAiStaying;
+  return presence;
 }
 
 /// One player's relation to another as an `AI_*` mask: `AI_OWN` wins over
@@ -1705,29 +1800,35 @@ constexpr std::int32_t kAiEnemy = 4;
 /// returning one, which is why no host function here ever mints a `SquadList`
 /// and why the pool needs no mark-and-sweep.
 ///
-/// **Two arities ship**: four arguments at 16 sites and three at two, the
-/// three-argument form omitting the relation. `gbr.exe` registers four (one to
-/// four arguments after the receiver, 0x00437a20 through 0x00439500); the two
-/// the corpus never calls are registered here anyway, defaulting the way the
-/// shipped ones do, because a declared name with no body traps by name and
-/// these are the same body with fewer arguments.
+/// **Four bodies, one per arity, and they filter differently** -- which this
+/// used to paper over by defaulting the missing arguments of one body. Each
+/// frees the list the reference held (0x0043ff60), takes a fresh slot
+/// (0x0043ed10), walks the node's squad deque front to back and appends, then
+/// rewinds (0x0042a3c0):
 ///
-/// ## What is inferred, and it is the membership rule
+///   * `/1` (0x00437a20): **every** squad on the deque -- no strength, flag,
+///     presence or owner test at all;
+///   * `/2 (SL, presence)` (0x00439000): strength (`[squad+0x1c]`) non-zero,
+///     and `squad_presence` within the mask -- **any owner**;
+///   * `/3 (SL, presence, player)` (0x00439230): strength non-zero, the
+///     squad's owner the player's own, presence within the mask -- `/4` with
+///     `AI_OWN`;
+///   * `/4 (SL, presence, player, relation)` (0x00439500): strength non-zero,
+///     the relation (0x0044e250 of the player and the owner) within the mask,
+///     the presence, and for an enemy `seen_enemy_presence` between the two.
 ///
-/// Retail walks a deque stored **on the GAIKA node** (0x004395f4 reads
-/// `[gaika+0x18]`), and the node table `sim/gaika.hpp` now carries holds no
-/// such deque. So "a squad is in GAIKA *g*" is reconstructed from the
-/// squad's own side -- `gaika_in == g` for staying, `dest_gaika == g` for
-/// coming, `gaika_in == g` with a destination elsewhere for leaving -- which is
-/// likely and unproven. Those three fields are among the eight `TVXSquad`
-/// persists, which is what says they are world state rather than a view.
+/// The player is 1-based and decremented (0x004395a5); **one below 1 forces
+/// the relation to `AI_OWN`** for every squad rather than asking the table, and
+/// one past 16 makes 0x0044e250 answer 0, which matches no mask. The two forms
+/// nobody ships used to select nothing for want of a player.
 ///
-/// **Every list this fills is empty today, and that is worth saying plainly.**
-/// Nothing in this engine assigns a GAIKA to a squad, so no squad's fields name
-/// any node and no presence test can match. The loops above run zero times and
-/// terminate, which is the correct behaviour for an AI with no territory graph
-/// -- the same standing `Squad::AIDest` has had since it was written. What
-/// would change it is the GAIKA node itself; see `docs/plan.html`.
+/// A list nothing was appended to is freed and the reference set to -1 (an
+/// invalid list); here it stays an empty one, which reads the same through
+/// `EOL`, `Cur`, `Next`, `Size` and `Rewind`.
+///
+/// **What stays inferred is the deque** -- which squads it holds, and in what
+/// order; `squad_presence` says how that is reconstructed. This is the GAIKA
+/// node design's gap, not this body's.
 HostOutcome get_squads_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
@@ -1738,28 +1839,42 @@ HostOutcome get_squads_impl(CallContext& ctx) {
   }
 
   const GaikaId node = gaika_of(ctx.arg(0));
-  const std::int32_t presence = ctx.count() > 2 && ctx.arg(2).is_integer()
-                                    ? ctx.arg(2).as_integer()
-                                    : (kAiComing | kAiLeaving | kAiStaying);
-  const PlayerId player = player_arg(ctx, 3);
-  // The three-argument form omits the relation. `AI_OWN` is what all sixteen
-  // four-argument sites but one pass, and it is what "this player's squads"
-  // means, so it is the default rather than "any".
+  const std::size_t arity = ctx.count() - 1;
+  const std::int32_t presence =
+      arity >= 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
+  // The raw script number, decremented: below 0 is "nobody named".
+  const std::int32_t raw_player =
+      arity >= 3 && ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() - 1 : -1;
+  const PlayerId player =
+      raw_player >= 0 && raw_player < 16 ? static_cast<PlayerId>(raw_player) : kNoPlayer;
+  // `/3` is `/4` with `AI_OWN`.
   const std::int32_t relation =
-      ctx.count() > 4 && ctx.arg(4).is_integer() ? ctx.arg(4).as_integer() : kAiOwn;
+      arity >= 4 ? (ctx.arg(4).is_integer() ? ctx.arg(4).as_integer() : 0) : kAiOwn;
 
   std::vector<SquadKey>* out = squadlist_pool_of(*world).mutable_items(squadlist_of(ctx.arg(1)));
   if (out == nullptr) return HostOutcome::failed("GetSquads: receiver is not a live SquadList");
   out->clear();
 
   const PlayerTable& players = world->players();
-  for (const Squad& squad : heroes->squads().squads()) {
-    if ((squad_presence(node, squad) & presence) == 0) continue;
-    // A relation mask of zero -- `AI_NONE` -- selects nothing, which is what a
-    // filter that names no relation should do and is the rule
-    // `ClassFilter::parse` already follows for a name it could not resolve.
-    if ((squad_relation(players, player, squad) & relation) == 0) continue;
-    out->push_back(squad.key);
+  const SquadTable& table = heroes->squads();
+  for (const Squad& squad : table.squads()) {
+    if (arity <= 1) {
+      // `/1`: the deque whole. A squad is on it when the node is its place or
+      // its heading, peaceful or not.
+      if (squad_presence(node, squad, /*take_peaceful=*/true) != 0) out->push_back(squad.key);
+      continue;
+    }
+    if (squad.eval == 0) continue;
+    std::int32_t side = 0;
+    if (arity >= 3) {
+      side = raw_player < 0 ? kAiOwn : squad_relation(players, player, squad);
+      if ((side & relation) == 0) continue;
+    }
+    std::int32_t here = squad_presence(node, squad);
+    if (arity >= 3 && raw_player >= 0 && side == kAiEnemy) {
+      here = seen_enemy_presence(*world, table, squad, node, here, player);
+    }
+    if ((here & presence) != 0) out->push_back(squad.key);
   }
   // A freshly filled list is walked from the beginning; `GS_GUARD.VS` refills
   // and re-walks the same local every iteration of its outer loop.
@@ -2280,7 +2395,8 @@ HostOutcome eval_neighbors_impl(CallContext& ctx) {
     if (squad.eval == 0) continue;
     const std::int32_t relation = unnamed ? kAiOwn : squad_relation(players, player, squad);
     if ((relation & sides) == 0) continue;
-    if ((squad_presence(node, squad) & kAiStaying) == 0) continue;
+    // 0x004330b0 asks 0x0044e1f0 with 1: a peaceful squad is counted.
+    if ((squad_presence(node, squad, /*take_peaceful=*/true) & kAiStaying) == 0) continue;
     for (const ObjectId member : squad.members) {
       if (world.class_is_a(member, wanted)) ++total;
     }
@@ -3321,13 +3437,14 @@ HostOutcome calc_go_around_impl(CallContext& ctx) {
 /// The **enemy strength staying in the node** is summed first: every squad
 /// filed under the node whose strength is non-zero, whose owner the squad's
 /// player counts an enemy (`test bl, 4` on 0x0044e250's answer), and whose
-/// presence there carries `AI_STAYING` -- after the same memory adjustment
-/// (0x0044eb80) the census runs, which is a no-op here for the census's
-/// reason. **One exclusion differs from the census's.** A squad carrying
-/// `SF_PEACEFUL` is left out only when its owner is player 14 or 15
-/// (0x004319c6, 0x004319cb): the wildlife and the neutral-passive. A peaceful
-/// squad of a real player counts, where `GAIKA::Eval` skips it on the flag
-/// alone. The node's settlement query (0x00420c00) is then asked for its
+/// presence there carries `AI_STAYING` -- after the asking AI's sight of an
+/// enemy (0x0044eb80, `seen_enemy_presence`). **A peaceful squad never
+/// counts**: the presence is asked with 0 (0x0043194b), and 0x0044e1f0
+/// answers 0 for `SF_PEACEFUL` on that argument. The body then tests the flag
+/// again and skips it only for player 14 or 15 (0x004319c6, 0x004319cb), and
+/// this used to be read as "a real player's peaceful squad counts"; the flag
+/// never gets that far, so the second test decides nothing and is not
+/// reproduced. The node's settlement query (0x00420c00) is then asked for its
 /// garrison and the answer added when it reads as an enemy staying; the
 /// settlement is the asking player's own by gate 2, so that term is
 /// identically zero and is not reproduced.
@@ -3410,11 +3527,9 @@ HostOutcome nearest_hospital_impl(CallContext& ctx) {
       // and because the sum is the only thing the walk produces.
       if (other.eval == 0) continue;
       if ((relation_between(players, player, other.key.player) & kAiEnemy) == 0) continue;
-      if ((squad_presence(id, other) & kAiStaying) == 0) continue;
-      if ((other.flags & kSquadFlagPeaceful) != 0 &&
-          (other.key.player == kNeutralWildlife || other.key.player == kNeutralPassive)) {
-        continue;
-      }
+      const std::int32_t here = seen_enemy_presence(world, self.heroes->squads(), other, id,
+                                                    squad_presence(id, other), player);
+      if ((here & kAiStaying) == 0) continue;
       enemy += other.eval;
     }
     if (enemy > (3 * strength) / 4) continue;

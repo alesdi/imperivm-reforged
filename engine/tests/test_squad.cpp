@@ -1862,11 +1862,11 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
     squad->dest_gaika = dest;
   };
 
-  place(0, 3, 100, kHere, kNoGaika);       // own, staying
+  place(0, 3, 100, kHere, kHere);       // own, staying
   place(1, 2, 40, kHere, kHere);           // ally, staying (destination is here)
   place(2, 5, 250, kHere, kElsewhere);     // enemy, leaving
   place(2, 1, 7, kElsewhere, kHere);       // enemy, coming
-  place(3, 9, 999, kHere, kNoGaika);       // neither side: counted by nobody
+  place(3, 9, 999, kHere, kHere);       // neither side: counted by nobody
 
   const auto census = [&](const char* name, std::uint16_t arity, std::int32_t presence) {
     HostCall call(f.world,
@@ -1933,7 +1933,7 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   // A squad with no strength is skipped by both, which is the original's first
   // test and the reason `Eval` and `Count` can disagree about whether a node is
   // occupied at all.
-  place(0, 4, 0, kHere, kNoGaika);
+  place(0, 4, 0, kHere, kHere);
   CHECK(census("Count", 6, 4)[0] == 3);
   // And an `SF_PEACEFUL` squad is nobody's army. **This used to be written as
   // "player 14 or 15"**, which is where the wildlife and the neutral-passive
@@ -1953,7 +1953,7 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   CHECK(census("Eval", 6, 0xFFFF)[0] == 100);
   // and a player-14 squad that carries no such flag is counted, where the old
   // rule refused it.
-  place(14, 6, 500, kHere, kNoGaika);
+  place(14, 6, 500, kHere, kHere);
   CHECK(census("Eval", 6, 0xFFFF)[2] == 257 + 500);
 
   // A player number outside 1..16 names nobody, so nothing is anyone's. **Both
@@ -2074,6 +2074,7 @@ TEST(gaika_count_by_class_walks_the_staying_squads_and_then_the_settlement) {
     if (squad != nullptr) {
       squad->eval = 10;
       squad->gaika_in = in;
+      squad->dest_gaika = in;  // bound for where it stands, as placement files it
     }
     return key;
   };
@@ -2354,6 +2355,7 @@ TEST(all_enemies_in_holder_asks_the_settlement_first_and_then_the_squads_leaders
     if (squad != nullptr) {
       squad->eval = 10;
       squad->gaika_in = in;
+      squad->dest_gaika = in;  // bound for where it stands, as placement files it
     }
     return key;
   };
@@ -2903,8 +2905,8 @@ TEST(get_squads_and_the_census_agree_about_who_is_in_a_node) {
     squad->dest_gaika = dest;
     return key;
   };
-  const SquadKey mine = place(0, 2, kHere, kNoGaika);
-  (void)place(1, 1, kHere, kNoGaika);
+  const SquadKey mine = place(0, 2, kHere, kHere);
+  (void)place(1, 1, kHere, kHere);
   (void)place(0, 1, 8, 8);
 
   const SquadListId list = make_list(f.world);
@@ -3013,10 +3015,15 @@ TEST(squadlist_get_squads_filters_by_node_and_by_relation) {
   const SquadKey leaving = f.squad_of(1, 1);
   const SquadKey elsewhere = f.squad_of(1, 1);
   f.heroes.squads().find(staying)->gaika_in = 4;
+  f.heroes.squads().find(staying)->dest_gaika = 4;
   f.heroes.squads().find(coming)->dest_gaika = 4;
   f.heroes.squads().find(leaving)->gaika_in = 4;
   f.heroes.squads().find(leaving)->dest_gaika = 9;
   f.heroes.squads().find(elsewhere)->gaika_in = 7;
+  // Every form but `/1` skips a squad of no strength (`[squad+0x1c]`).
+  for (const SquadKey key : {staying, coming, leaving, elsewhere}) {
+    f.heroes.squads().find(key)->eval = 10;
+  }
 
   const SquadListId list = make_list(f.world);
   const auto fill = [&](std::int32_t presence, std::int32_t player, std::int32_t relation) {
@@ -3043,8 +3050,10 @@ TEST(squadlist_get_squads_filters_by_node_and_by_relation) {
   // Another player's squads are not this player's, whatever the presence mask.
   CHECK(fill(65535, 1, 1).empty());
   CHECK(fill(65535, 3, 1).empty());
-  // And a number outside 1..16 names nobody, at either end.
-  CHECK(fill(65535, 0, 1).empty());
+  // **A number below 1 forces `AI_OWN`** on every squad (0x00439500 skips the
+  // relation table for a negative index), and one past 16 names nobody.
+  CHECK(fill(65535, 0, 1) == std::vector<SquadKey>({staying, coming, leaving}));
+  CHECK(fill(65535, 0, 4).empty());
   CHECK(fill(65535, 17, 1).empty());
   // And `AI_NONE` selects nothing rather than everything.
   CHECK(fill(65535, 2, 0).empty());
@@ -3067,6 +3076,57 @@ TEST(squadlist_get_squads_filters_by_node_and_by_relation) {
   const SquadKey fresh = f.squad_of(3, 2);
   (void)fresh;
   CHECK(fill(65535, 3, 1).empty());
+}
+
+/// The four `GetSquads` bodies filter differently (0x00437a20, 0x00439000,
+/// 0x00439230, 0x00439500), and 0x0044e1f0 -- the presence every one but `/1`
+/// asks -- refuses a peaceful squad and calls a squad with no heading that
+/// stands in the node *leaving*.
+TEST(get_squads_filters_by_arity_and_presence_is_0x0044e1f0) {
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  constexpr GaikaId kHere = 4;
+  const auto place = [&](PlayerId owner, GaikaId in, GaikaId dest, std::int32_t eval) {
+    const SquadKey key = f.squad_of(owner, 1);
+    Squad* squad = f.heroes.squads().find(key);
+    squad->gaika_in = in;
+    squad->dest_gaika = dest;
+    squad->eval = eval;
+    return key;
+  };
+  const SquadKey mine = place(1, kHere, kHere, 10);
+  const SquadKey theirs = place(2, kHere, kHere, 10);
+  const SquadKey hollow = place(1, kHere, kHere, 0);
+  const SquadKey adrift = place(1, kHere, kNoGaika, 10);
+  const SquadKey tame = place(1, kHere, kHere, 10);
+  f.heroes.squads().find(tame)->flags = kSquadFlagPeaceful;
+
+  const SquadListId list = make_list(f.world);
+  const auto fill = [&](std::vector<Value> extra) {
+    std::vector<Value> args{Value::integer(kHere), make_squadlist_value(list)};
+    args.insert(args.end(), extra.begin(), extra.end());
+    HostCall call(f.world, {});
+    call.arguments = args;
+    call.context.arguments = call.arguments;
+    const auto arity = static_cast<std::uint16_t>(args.size() - 1);
+    CHECK(invoke(registry, CallKind::member, "GetSquads", arity, call).status == HostStatus::ok);
+    const std::span<const SquadKey> items = squadlist_pool_of(f.world).items(list);
+    return std::vector<SquadKey>(items.begin(), items.end());
+  };
+
+  // `/1`: the node's deque whole -- no strength, flag or owner test.
+  CHECK(fill({}) == std::vector<SquadKey>({mine, hollow, adrift, tame, theirs}));
+  // `/2`: strength and presence, any owner; the peaceful one is nowhere.
+  CHECK(fill({Value::integer(4)}) == std::vector<SquadKey>({mine, theirs}));
+  // No heading while standing here is leaving, not staying (0x0044e235).
+  CHECK(fill({Value::integer(2)}) == std::vector<SquadKey>({adrift}));
+  // `/3`: own only.
+  CHECK(fill({Value::integer(4), Value::integer(2)}) == std::vector<SquadKey>({mine}));
+  // `/4`: the relation mask.
+  CHECK(fill({Value::integer(4), Value::integer(2), Value::integer(4)}) ==
+        std::vector<SquadKey>({theirs}));
 }
 
 /// **`SquadList::Add` is the same name on another type**, and its body lives in

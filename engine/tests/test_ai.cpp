@@ -3056,6 +3056,65 @@ TEST(send_to_posts_an_order_and_the_drain_runs_aio_send_squad_with_the_squad_and
   CHECK(squad.dest_gaika == kNoGaika);
 }
 
+/// 0x0044eb80, which `GetSquads/4` runs over an enemy squad when the asker has
+/// an AI: a coming enemy is seen only within its level's radius of the node's
+/// centre (6,000 at level 1, 32,000 at 2), and a leaving one whose taken
+/// order -- or its `DestGAIKA` -- is this node reads as staying.
+TEST(get_squads_sees_an_enemy_coming_only_within_the_ai_levels_radius) {
+  SendToBench b;  // player 1 (script 2) runs an AI
+  World& world = b.f.world;
+  REQUIRE(world.players().is_enemy(1, 2));
+  REQUIRE(b.f.ai.start(1, "", AiDifficulty::easy, b.f.scheduler) == AiStartStatus::ok);
+
+  const auto enemy_at = [&](std::int32_t dx) -> SquadKey {
+    const SquadKey key = b.f.heroes.squads().create(2);
+    const ObjectId id = world.spawn(imperivm::core::NativeClass::unit, nullptr);
+    world.set_owner(id, 2);
+    world.set_health(id, 100);
+    CHECK(world.set_position(id, Point{b.centre.x + dx, b.centre.y}));
+    CHECK(b.f.heroes.squads().join(key, id));
+    Squad* squad = b.f.heroes.squads().find(key);
+    squad->eval = 10;
+    squad->gaika_in = b.home;
+    squad->dest_gaika = b.dest;
+    return key;
+  };
+  const SquadKey near = enemy_at(5000);
+  const SquadKey far = enemy_at(7000);
+
+  const SquadListId list = squadlist_pool_of(world).acquire(7, 0);
+  const auto fill = [&](std::int32_t presence) {
+    const script::HostOutcome out = b.f.call(
+        script::CallKind::member, "GetSquads",
+        {gaika_value(b.dest), make_squadlist_value(list), script::Value::integer(presence),
+         script::Value::integer(2), script::Value::integer(4 /*AI_ENEMY*/)},
+        script::kNoScript);
+    CHECK(out.status == script::HostStatus::ok);
+    const std::span<const SquadKey> items = squadlist_pool_of(world).items(list);
+    return std::vector<SquadKey>(items.begin(), items.end());
+  };
+  CHECK(fill(1 /*AI_COMING*/) == std::vector<SquadKey>({near}));
+  REQUIRE(b.f.ai.start(1, "", AiDifficulty::normal, b.f.scheduler) == AiStartStatus::ok);
+  CHECK(fill(1) == std::vector<SquadKey>({near, far}));
+
+  // Standing here and bound elsewhere: leaving, and seen leaving.
+  Squad* squad = b.f.heroes.squads().find(far);
+  squad->gaika_in = b.dest;
+  squad->dest_gaika = b.home;
+  CHECK(fill(4 /*AI_STAYING*/).empty());
+  CHECK(fill(2 /*AI_LEAVING*/) == std::vector<SquadKey>({far}));
+  // Bound here, but with an order elsewhere the drain has not taken yet
+  // (priority above 0): the order makes it leaving, and the enemy does not see
+  // the order -- it sees `DestGAIKA`, here, so staying.
+  squad->dest_gaika = b.dest;
+  REQUIRE(b.f.heroes.squads().post_order(far, b.home, 3));
+  CHECK(fill(4) == std::vector<SquadKey>({far}));
+  // Once the drain has taken it (priority 0) the order is what is seen.
+  REQUIRE(b.f.heroes.squads().post_order(far, b.home, 0));
+  CHECK(fill(4).empty());
+  CHECK(fill(2) == std::vector<SquadKey>({far}));
+}
+
 /// **A squad sent to the node it already stands in moves nobody**: the script's
 /// first branch is `ClrCmd(SS_IDLE, 0, SF_ADVCHOOSER)`, which ends what every
 /// member is doing. This is the case that put a town's sentries on its town
