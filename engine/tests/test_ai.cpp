@@ -2843,8 +2843,9 @@ TEST(ai_registration_overwrites_nothing) {
   // `CanExplore/1` and `Recruit/4`, `GetDestPoint/1` and
   // `PrepareAiTransportShip/5`, + the seven `RunAIHelper` arities beside the
   // shipped 4 (2, 3, 5..9), which `gbr.exe` registers and the tenth round
-  // binds as `AIRun` and `Run` bind theirs.
-  CHECK(solo == 84);
+  // binds as `AIRun` and `Run` bind theirs, + `LSA/1`, `LSA/2` and
+  // `GetGAIKA/2`, the point forms no shipped script calls.
+  CHECK(solo == 87);
   CHECK(with_ai == solo);
   CHECK(everyone > 0);
 

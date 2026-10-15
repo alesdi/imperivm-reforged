@@ -51,3 +51,14 @@
 0x0040d1d0	partial	SPFInitConnectData: sets the connect pass's range on the builder; engine no-op, same design
 0x004161d0	partial	SPFIncreaseConnect: 0x00415e30 then [builder+0x2c]=0; engine no-op, same design
 0x0040f8c0	partial	SPFDone: destroys the live structure, installs the built one, frees the builder; engine no-op, same design
+0x004225d0	partial	GAIKA::LSA: 0x0043cb00, node 0 -> 0, else the node record's 16-bit area (+0x10) by bare index; an id past the table answers 0 here; the node areas are this engine's partition (sim/lsa.hpp, design)
+0x00422600	partial	LSA(x, y): 0x0043cb30, the area of the node at the point (0x0044e3f0); bound (fixed: was unregistered), no shipped site; point-to-node is GaikaTable::at, the slot-grid approximation (design)
+0x00422630	partial	LSA(pt): as LSA(x, y); bound (fixed), no shipped site; same slot-grid approximation
+0x00425fd0	partial	Obj::LSA: 0x0043cb70, node at the object's raw position (vtbl+0x3c; a held unit is no node, area 0), no handle test; served by the member LSA/0 by receiver type (fixed), no shipped site; same approximation
+0x006a8720	partial	LSA(): a no-argument debugging command calling builders 0x0044e050 and 0x00450a50, answering nothing; not bound, no shipped site
+0x00424660	partial	GetGAIKA(Obj): 0x0044e650, null handle -> 0, raw position, posRH when x<0, negative -> 0; node from the slot grid approximated by GaikaTable::at (design)
+0x005bd090	partial	GetGAIKA(point) / point::GetGAIKA: 0x0044e3f0, 0 with no node vector, &0xffff; slot grid approximated (design)
+0x00421910	partial	GetGAIKA(x, y): the point body with two ints; bound (fixed; test gaika_entry_points_read_the_table_the_way_the_scripts_do), no shipped site; slot grid approximated
+0x004262f0	verified	Settlement::GetGaika: invalid handle -> 0, else the per-settlement node table by the settlement index (0x0044e9e0)
+0x00422e20	verified	GAIKA::Center: node record +8/+0xc by bare index, (0,0) only without a node vector; node 0 and unknown ids answer (0,0) here
+0x00697ba0	verified	rect::Center: ((l+r)/2, (t+b)/2) truncating; shares Center/0 and is now answered for a rect receiver (fixed: was unbound; test gaika_entry_points_read_the_table_the_way_the_scripts_do), no shipped site

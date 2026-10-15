@@ -916,6 +916,27 @@ TEST(gaika_entry_points_read_the_table_the_way_the_scripts_do) {
   CHECK(call(script::CallKind::free_function, "GetGAIKA",
              {script::Value::object(kTypeObj, w->anchor)})
             .value.as_integer() == 1);
+
+  // The forms `gbr.exe` registers beside those and no shipped script calls:
+  // `GetGAIKA(x, y)` (0x00421910), `LSA(pt)` / `LSA(x, y)` (0x00422630,
+  // 0x00422600, the node's area at a place) and `obj.LSA` (0x00425fd0, by the
+  // object's raw position).
+  const Point p = in_cell(9, 9);
+  CHECK(call(script::CallKind::free_function, "GetGAIKA",
+             {script::Value::integer(p.x), script::Value::integer(p.y)})
+            .value.as_integer() == 2);
+  const std::int32_t lsa2 = b.world.gaika().find(2)->lsa;
+  CHECK(call(script::CallKind::free_function, "LSA", {pack_point(p)}).value.as_integer() == lsa2);
+  CHECK(call(script::CallKind::free_function, "LSA",
+             {script::Value::integer(p.x), script::Value::integer(p.y)})
+            .value.as_integer() == lsa2);
+  CHECK(call(script::CallKind::member, "LSA", {script::Value::object(kTypeObj, w->anchor)})
+            .value.as_integer() == lsa);
+  // `rc.Center` (0x00697ba0) shares `Center/0` with the node: the midpoint,
+  // truncating toward zero.
+  CHECK(unpack_point(call(script::CallKind::member, "Center",
+                          {pack_rect(b.world, RectTable::Rect{-5, 10, 2, 21})})
+                         .value) == (Point{-1, 15}));
 }
 
 /// `g.GetDistToPlayers(player, &own, &ally, &enemy)` -- the three nearest town

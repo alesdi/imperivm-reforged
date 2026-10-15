@@ -2000,9 +2000,53 @@ HostOutcome f_stop_ai_helper(CallContext& ctx) {
 /// is what lets this engine number the areas itself; `sim/lsa.hpp` says so at
 /// length. A node with no area -- one whose centre fell off the terrain layer
 /// -- answers `kNoLsa`, which `IsWaterLsa` then reads as "not water".
+///
+/// **The bodies.** `GAIKA::LSA` (0x004225d0) is 0x0043cb00: node 0 answers 0,
+/// any other id the 16-bit area field of the node record (`+0x10`) through a
+/// bare index (0x0044e8e0) -- an id past the table reads off its end there and
+/// answers `kNoLsa` here, as node 0 does in both. The same name is registered
+/// four more times: `LSA(x, y)` (0x00422600) and `LSA(pt)` (0x00422630) are
+/// 0x0043cb30, the area of the node the point falls in (0x0044e3f0, then the
+/// node's `+0x10`); `obj.LSA` (0x00425fd0) is 0x0043cb70, the same for the
+/// object's **raw** position (`vtbl+0x3c`, not the holder's `posRH` that
+/// `GetGAIKA(obj)` falls back to -- a garrisoned unit's negative position is
+/// no node, so area 0) with no test of the handle; and a no-argument `LSA()`
+/// (0x006a8720), a debugging command that calls two builders (0x0044e050,
+/// 0x00450a50) and answers nothing, left unbound. No shipped script calls any
+/// but the GAIKA form; the others are bound below, the member one through this
+/// body by the receiver's type. The point-to-node step is `GaikaTable::at`,
+/// this engine's reading of the original's slot grid (`sim/gaika.hpp`).
+[[nodiscard]] LsaId lsa_at(World& world, Point where) {
+  const GaikaNode* node = world.gaika().find(world.gaika().at(world.lsa(), where));
+  return node == nullptr ? kNoLsa : node->lsa;
+}
+
 HostOutcome m_gaika_lsa(CallContext& ctx) {
+  if (ctx.count() > 0 && ctx.arg(0).is_object()) {
+    World* world = world_of(ctx);
+    if (world == nullptr) return HostOutcome::ok_with(Value::integer(kNoLsa));
+    const WorldObject* slot = world->find(ctx.arg(0).as_object().id);
+    if (slot == nullptr || slot->state.is_held()) return HostOutcome::ok_with(Value::integer(kNoLsa));
+    return HostOutcome::ok_with(Value::integer(lsa_at(*world, world->resolve_position(slot->id))));
+  }
   const GaikaNode* node = node_of(ctx);
   return HostOutcome::ok_with(Value::integer(node == nullptr ? kNoLsa : node->lsa));
+}
+
+/// `LSA(pt)` and `LSA(x, y)` -- see `m_gaika_lsa`.
+HostOutcome f_lsa_at(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr) return HostOutcome::ok_with(Value::integer(kNoLsa));
+  Point where{};
+  if (ctx.count() == 1 && is_point(ctx.arg(0))) {
+    where = unpack_point(ctx.arg(0));
+  } else if (ctx.count() == 2 && ctx.arg(0).is_integer() && ctx.arg(1).is_integer()) {
+    where = Point{static_cast<std::int32_t>(ctx.arg(0).as_integer()),
+                  static_cast<std::int32_t>(ctx.arg(1).as_integer())};
+  } else {
+    return HostOutcome::ok_with(Value::integer(kNoLsa));
+  }
+  return HostOutcome::ok_with(Value::integer(lsa_at(*world, where)));
 }
 
 /// `SS_STR(state)` -- 3 sites, and the inverse of the `SS_*` constants.
@@ -2396,7 +2440,23 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
 /// area's centroid. A GAIKA that names no node answers `(0, 0)` rather than a
 /// sentinel, because every shipped site feeds the result straight into a
 /// distance or a `Goto` and none of them tests it.
+///
+/// `GAIKA::Center` (0x00422e20) answers the node record's point at `+8`/`+0xc`
+/// through the bare index 0x0044e8e0, and `(0, 0)` only when the node vector
+/// does not exist; node 0 is the reserved record, whose point is `(0, 0)`.
+/// `GetGaikaCenter(int)` (0x00421bc0) is the same read with no vector test.
+/// **`rc.Center` (0x00697ba0) shares the key**, `(Center, 0)` on a `rect`:
+/// `((l + r) / 2, (t + b) / 2)`, C division truncating toward zero. No shipped
+/// script calls it (`sim/world_host.cpp`'s `m_rect_center` has the history);
+/// it is answered here by the receiver's type now that the GAIKA half exists.
 HostOutcome m_gaika_center(CallContext& ctx) {
+  if (ctx.count() > 0 && is_rect(ctx.arg(0))) {
+    World* world = world_of(ctx);
+    const RectTable::Rect* r = world == nullptr ? nullptr : unpack_rect(*world, ctx.arg(0));
+    if (r == nullptr) return HostOutcome::ok_with(pack_point(Point{}));
+    return HostOutcome::ok_with(
+        pack_point(Point{(r->left + r->right) / 2, (r->top + r->bottom) / 2}));
+  }
   const GaikaNode* node = node_of(ctx);
   return HostOutcome::ok_with(pack_point(node == nullptr ? Point{} : node->center));
 }
@@ -3236,6 +3296,21 @@ HostOutcome f_gaika_at_point(CallContext& ctx) {
   } else {
     return HostOutcome::ok_with(Value::integer(kNoGaika));
   }
+  return HostOutcome::ok_with(Value::integer(world->gaika().at(world->lsa(), where)));
+}
+
+/// `GetGAIKA(x, y)` (0x00421910): the point form's body (0x005bd090) with the
+/// coordinates as two integers -- 0x0044e3f0, 0 when the node vector does not
+/// exist, the answer masked to 16 bits. No shipped site; bound because it is
+/// the point form spelt differently.
+HostOutcome f_gaika_at_xy(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr || ctx.count() != 2 || !ctx.arg(0).is_integer() ||
+      !ctx.arg(1).is_integer()) {
+    return HostOutcome::ok_with(Value::integer(kNoGaika));
+  }
+  const Point where{static_cast<std::int32_t>(ctx.arg(0).as_integer()),
+                    static_cast<std::int32_t>(ctx.arg(1).as_integer())};
   return HostOutcome::ok_with(Value::integer(world->gaika().at(world->lsa(), where)));
 }
 
@@ -4740,7 +4815,9 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
     registry.define(kFree, "RunAIHelper", arity, &f_run_ai_helper);         // 285 at 4
   }
   // -- the node table; see `sim/gaika.hpp` for what it approximates ---------
-  registry.define(kMember, "LSA", 0, &m_gaika_lsa);              // 42
+  registry.define(kMember, "LSA", 0, &m_gaika_lsa);              // 42, and `obj.LSA` (0)
+  registry.define(kFree, "LSA", 1, &f_lsa_at);                   //  0, `LSA(pt)`
+  registry.define(kFree, "LSA", 2, &f_lsa_at);                   //  0, `LSA(x, y)`
   registry.define(kMember, "GetGaika", 0, &m_settlement_gaika);  // 27
   registry.define(kMember, "Center", 0, &m_gaika_center);        // 23
   registry.define(kMember, "GetDestPoint", 1, &m_gaika_dest_point);  //  1
@@ -4812,6 +4889,7 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
   // used to stand here alone -- see `f_gaika_at_point` on why the integer arm
   // has to keep being the identity.
   registry.define(kFree, "GetGAIKA", 1, &f_gaika_at_point);      // 27 with `Settlement::GetGaika`
+  registry.define(kFree, "GetGAIKA", 2, &f_gaika_at_xy);         //  0
   registry.define(kFree, "IsAIHelperRunning", 1, &f_is_ai_helper_running);  // 236
   registry.define(kFree, "StopAIHelper", 1, &f_stop_ai_helper);             // 179
 
