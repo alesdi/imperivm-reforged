@@ -619,9 +619,14 @@ class HeroSystem final : public System {
   /// The cap: `max_army + UnitsPerAdministrationLevel * Administration points`.
   [[nodiscard]] std::int32_t max_army(ObjectId hero) const;
   [[nodiscard]] std::int32_t army_size(ObjectId hero) const;
-  /// `HeroArmiesFullPerc(player)` -- how full a player's hero armies are, in
-  /// percent of their combined caps. 0 when the player has no hero.
-  [[nodiscard]] std::int32_t armies_full_percent(PlayerId player) const;
+  /// `HeroArmiesFullPerc(player)`'s sum, 0x00443f50 over the player's squad
+  /// vector (`[aiRecord+0x8c]`): every squad that is not empty and carries
+  /// none of `SF_NOAI`, `SF_PEACEFUL` and `SF_SENTRIES` (`flags & 0x25`), and
+  /// whose **front member** resolves and is a hero, adds that hero's army
+  /// size (`[hero+0x1e4]`) and cap (`[hero+0x1f8]`, `max_army`). The answer is
+  /// `held * 100 / cap`, truncated, and 0 while the caps sum to nothing. A
+  /// hero who leads no squad, or whose squad is flagged, is not counted.
+  [[nodiscard]] std::int32_t armies_full_percent(const World& world, PlayerId player) const;
 
   /// The hero a unit belongs to, or `kNoObject`. The dump's `hero handle`.
   [[nodiscard]] ObjectId hero_of(ObjectId unit) const;

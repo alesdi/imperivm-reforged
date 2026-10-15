@@ -313,16 +313,22 @@ bool HeroSystem::army_full(ObjectId id) const {
 
 bool HeroSystem::has_army(ObjectId id) const { return army_size(id) > 0; }
 
-std::int32_t HeroSystem::armies_full_percent(PlayerId player) const {
-  std::int64_t held = 0;
-  std::int64_t capacity = 0;
-  for (const HeroRecord& record : heroes_) {
-    if (record.squad.player != player) continue;
-    held += static_cast<std::int64_t>(record.army.size());
-    capacity += max_army(record.id);
+std::int32_t HeroSystem::armies_full_percent(const World& world, PlayerId player) const {
+  constexpr std::uint16_t kSkipped = 0x25;  // SF_NOAI | SF_PEACEFUL | SF_SENTRIES
+  std::int32_t held = 0;
+  std::int32_t capacity = 0;
+  for (const Squad& squad : squads_.squads()) {
+    if (squad.key.player != player) continue;
+    if ((squad.flags & kSkipped) != 0 || squad.members.empty()) continue;
+    const ObjectId front = squad.members.front();
+    if (world.find(front) == nullptr) continue;
+    const HeroRecord* record = hero(front);
+    if (record == nullptr) continue;
+    held += static_cast<std::int32_t>(record->army.size());
+    capacity += max_army(front);
   }
   if (capacity <= 0) return 0;
-  return static_cast<std::int32_t>(held * 100 / capacity);
+  return held * 100 / capacity;
 }
 
 ObjectId HeroSystem::hero_of(ObjectId id) const {
@@ -2018,10 +2024,18 @@ HostOutcome fn_has_freedom(CallContext& ctx) {
       (record != nullptr && record->has_freedom) || unit_has_freedom(*host->world, unit)));
 }
 
+/// `HeroArmiesFullPerc(player)` (0x00421f30) -- `ES_STRONGHOLD.VS`'s one
+/// site, `HeroArmiesFullPerc(set.player)`. The argument is a **script
+/// player**, decremented; at 16 or more the answer is 0, and otherwise the
+/// player's AI squad vector goes to 0x00443f50 -- `armies_full_percent`.
+/// This passed the script number through undecremented, so it answered for
+/// the next player up.
 HostOutcome fn_hero_armies_full_perc(CallContext& ctx) {
   HERO_STATE(ctx);
-  return HostOutcome::ok_with(Value::integer(
-      host->heroes->armies_full_percent(static_cast<PlayerId>(int_arg(ctx, 0)))));
+  const PlayerId player = player_from_script(int_arg(ctx, 0));
+  if (player == kNoPlayer) return HostOutcome::ok_with(Value::integer(0));
+  return HostOutcome::ok_with(
+      Value::integer(host->heroes->armies_full_percent(*host->world, player)));
 }
 
 // -- squads ----------------------------------------------------------------

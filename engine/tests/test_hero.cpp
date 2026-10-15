@@ -524,18 +524,57 @@ TEST(attaching_to_a_second_hero_leaves_the_first) {
   CHECK(f.heroes.squad_of(warrior) == f.heroes.squad_of(second));
 }
 
-TEST(armies_full_percent_is_over_a_players_heroes) {
+TEST(armies_full_percent_is_over_a_players_hero_led_squads) {
+  // 0x00443f50: the player's squads, skipping empty ones and those flagged
+  // SF_NOAI, SF_PEACEFUL or SF_SENTRIES (0x25), whose front member is a hero.
   Fixture f;
   const ObjectId a = f.spawn_hero(3);
   const ObjectId b = f.spawn_hero(3);
-  CHECK(f.heroes.armies_full_percent(3) == 0);
-  CHECK(f.heroes.armies_full_percent(4) == 0);  // no hero at all
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 0);
+  CHECK(f.heroes.armies_full_percent(f.world, 4) == 0);  // no hero at all
 
   for (int i = 0; i < 25; ++i) CHECK(f.heroes.attach(f.world, f.spawn_warrior(3), a));
-  // 25 of a combined 100.
-  CHECK(f.heroes.armies_full_percent(3) == 25);
   for (int i = 0; i < 25; ++i) CHECK(f.heroes.attach(f.world, f.spawn_warrior(3), b));
-  CHECK(f.heroes.armies_full_percent(3) == 50);
+  // 25 + 25 of a combined 100 -- once both lead a squad.
+  REQUIRE(f.heroes.squad_of(a).valid());
+  REQUIRE(f.heroes.squad_of(b).valid());
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 50);
+  // A flagged squad drops out, cap and all: 25 of 50.
+  Squad* flagged = f.heroes.squads().find(f.heroes.squad_of(b));
+  REQUIRE(flagged != nullptr);
+  flagged->flags = 0x20;  // SF_SENTRIES
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 50);
+  for (int i = 0; i < 5; ++i) CHECK(f.heroes.detach(f.world, f.heroes.hero(a)->army.front()));
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 40);  // 20 of 50
+  flagged->flags = 0x02;  // SF_ADVCHOOSER is not one of the three
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 45);  // 45 of 100
+}
+
+TEST(hero_armies_full_perc_takes_a_script_player) {
+  // 0x00421f30 decrements its argument, as every per-player entry point does.
+  Fixture f;
+  const ObjectId a = f.spawn_hero(3);
+  for (int i = 0; i < 10; ++i) CHECK(f.heroes.attach(f.world, f.spawn_warrior(3), a));
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  sim::HostContext context;
+  context.world = &f.world;
+  const auto perc = [&](std::int32_t player) -> std::int32_t {
+    const std::uint32_t index =
+        registry.find(script::CallKind::free_function, "HeroArmiesFullPerc", 1);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return -999;
+    script::CallContext ctx;
+    std::vector<script::Value> args{script::Value::integer(player)};
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.kind = script::CallKind::free_function;
+    return registry.entry(index).fn(ctx).value.as_integer();
+  };
+  CHECK(perc(player_to_script(3)) == 20);  // 10 of 50
+  CHECK(perc(player_to_script(3) + 1) == 0);
+  CHECK(perc(17) == 0);
 }
 
 // --------------------------------------------------------------------------
