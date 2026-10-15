@@ -3008,11 +3008,16 @@ namespace {
 ///     `kSyncHero` the walk ends and the rest of the squad gets nothing
 ///     (0x00429bcb). A hero leads; whoever is behind it in the deque is not
 ///     ordered separately.
-///   * **the lock is temporary.** `kSquadLocked` is raised before the walk and
-///     the *pre-walk* flags word is written back after it, on every exit path
-///     including the early one where the settlement cannot be found. It is a
-///     re-entrancy guard for the duration of the orders and not a lasting mark,
-///     which is what makes it invisible to `Squad::GetFlags` afterwards.
+///   * **the lock is temporary -- after a walk.** `kSquadLocked` is raised
+///     with the state and the stamp, before the settlement is looked at, and
+///     the *pre-walk* flags word is written back after the walk (0x00429c0c).
+///     The exit taken when the gate's settlement has no central building
+///     (0x00429adf) skips that write, so there the squad **stays locked**, its
+///     state and stamp already new. This note used to say the word came back
+///     on every path.
+///   * **each member's queue is replaced whatever its class binds**: the tail
+///     dropped, the bound ones of `advance` and `capture` appended, the head
+///     ended -- so a member binding neither is simply stopped.
 ///
 /// **One write is not reproduced.** Each ordered member gets
 /// `[unit+0x194] |= 0x80000`, bit 19 of the map's `UnitFlags` word --  one of
@@ -3040,40 +3045,58 @@ HostOutcome invade_through_gate_impl(CallContext& ctx) {
   if (squad == nullptr) return done;
   if ((squad->flags & kSquadFlagNoAi) != 0) return done;
 
-  squad->state = ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
-  squad->state_time = world->time();
+  // The state as a word and the script clock, then the lock raised over the
+  // walk (0x00429a9c..0x00429ab4) -- all before the settlement is looked at.
+  const GameTime now = ctx.scheduler != nullptr ? ctx.scheduler->now() : world->time();
+  const std::uint16_t before = squad->flags;
+  squad_stamp_state(*squad, ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0,
+                    0, 0, now);
+  squad->flags = static_cast<std::uint16_t>(before | kSquadLocked);
 
+  // **A gate whose settlement has no central building leaves the squad
+  // locked**: 0x00429adf leaves through the exit that skips the write-back
+  // (0x00429c0c restores the flags only after a walk). This lowered the lock
+  // on that path; the original does not. A gate with no settlement at all
+  // would fault there and is refused here before anything is written.
   const EconomySystem* economy = economy_of(*world);
   const Settlement* set =
       economy == nullptr ? nullptr : economy->settlements().for_object(gate->settlement);
-  // The lock goes up and comes straight back down; with no settlement to
-  // capture there is nothing to walk and nothing to undo, so it is never
-  // raised here at all. The original raises it one instruction earlier and
-  // restores it on this path too, which is the same word either way.
-  if (set == nullptr || set->anchor == kNoObject) return done;
+  if (set == nullptr || world->find(set->anchor) == nullptr) return done;
 
   CommandSystem* commands = command_system(*world);
-  if (commands == nullptr) return done;
-
-  const Point at = world->resolve_position(gate->id);
-  const std::vector<ObjectId> members(squad->members.begin(), squad->members.end());
-  for (const ObjectId member : members) {
-    if (world->find(member) == nullptr) continue;
-    if (!commands->script_for(*world, member, "advance").empty()) {
+  if (commands != nullptr) {
+    // The gate's stored position (`vtbl+0x3c`), a building's own.
+    const Point at = gate->state.position;
+    const std::vector<ObjectId> members(squad->members.begin(), squad->members.end());
+    for (const ObjectId member : members) {
+      if (world->find(member) == nullptr) continue;
+      // Per member, as 0x00429b20.. does: the pending tail dropped
+      // (`vtbl+0xc0(0)`), `advance` on the gate and `capture` on the central
+      // building appended where the class binds them, then the head ended
+      // (0x005b07d0) -- whether or not either was bound.
+      const bool advance_bound = !commands->script_for(*world, member, "advance").empty();
+      const bool capture_bound = !commands->script_for(*world, member, "capture").empty();
       Command advance;
       advance.arg_kind = CommandArgKind::point;
       advance.point = at;
-      (void)commands->set_command(*world, member, "advance", advance);
-    }
-    if (!commands->script_for(*world, member, "capture").empty()) {
       Command capture;
       capture.arg_kind = CommandArgKind::object;
       capture.object = set->anchor;
-      (void)commands->add_command(*world, member, false, "capture", capture);
+      if (advance_bound) {
+        (void)commands->set_command(*world, member, "advance", advance);
+        if (capture_bound) (void)commands->add_command(*world, member, false, "capture", capture);
+      } else if (capture_bound) {
+        (void)commands->set_command(*world, member, "capture", capture);
+      } else {
+        (void)commands->clear_commands(*world, member);
+        (void)commands->kill_command(*world, member);
+      }
+      const WorldObject* slot = world->find(member);
+      if (slot != nullptr && slot->state.flags.is_hero) break;
     }
-    const WorldObject* slot = world->find(member);
-    if (slot != nullptr && slot->state.flags.is_hero) break;
   }
+  // The pre-walk word back (0x00429c0c).
+  if (Squad* again = heroes->squads().find(key); again != nullptr) again->flags = before;
   return done;
 }
 

@@ -4642,6 +4642,40 @@ TEST(invade_through_gate_orders_every_member_to_advance_and_then_capture) {
             .status == script::HostStatus::ok);
   CHECK(verbs(mute).empty());
   CHECK(verbs(talker) == std::vector<std::string>({"advance", "capture"}));
+
+  // **And what it was doing is ended all the same**: the tail dropped and the
+  // head ended before the (here, absent) orders are appended.
+  {
+    Command hold;
+    hold.arg_kind = CommandArgKind::point;
+    hold.point = in_cell(10, 10);
+    (void)b.commands.set_command(b.world, mute, "move", hold);
+    (void)b.commands.add_command(b.world, mute, false, "move", hold);
+    REQUIRE(b.commands.command_count(mute) == 2);
+    CHECK(b.call(script::CallKind::member, "InvadeThroughGate", 2,
+                 {pack_squad(mixed), script::Value::object(kTypeObj, gate),
+                  script::Value::integer(3)})
+              .status == script::HostStatus::ok);
+    CHECK(b.commands.command_count(mute) <= 1);  // the tail is gone; the head is ended
+  }
+
+  // The state is a word (0x00429a9c).
+  CHECK(b.call(script::CallKind::member, "InvadeThroughGate", 2,
+               {pack_squad(mixed), script::Value::object(kTypeObj, gate),
+                script::Value::integer(0x10007)})
+            .status == script::HostStatus::ok);
+  CHECK(b.heroes.squads().find(mixed)->state == 7);
+
+  // **With the central building gone the squad is left locked** (0x00429adf
+  // exits past the write-back at 0x00429c0c), its state already written.
+  REQUIRE(b.world.despawn(anchor));
+  const SquadKey late = b.band(2, 1, {b.invader(10, 17)});
+  CHECK(b.call(script::CallKind::member, "InvadeThroughGate", 2,
+               {pack_squad(late), script::Value::object(kTypeObj, gate),
+                script::Value::integer(8)})
+            .status == script::HostStatus::ok);
+  CHECK(b.heroes.squads().find(late)->state == 8);
+  CHECK((b.heroes.squads().find(late)->flags & kSquadLocked) != 0);
 }
 
 /// `GAIKA::GetDestPoint(unit)` -- where a squad ordered to a node is actually
