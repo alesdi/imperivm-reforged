@@ -1,0 +1,39 @@
+# hero-squad: the hero (64) and squad (54) rows of host-ledger.md
+# squad
+0x00421170	verified	[squad+0x28] zero-extended word; now stored as a word by every writer (SetCmd/ClrCmd); no-squad handle 0 here (faults there)
+0x0042bbd0	verified	element under the cursor when the pool slot is in use and not at end (0x00420170), else 0
+0x004212c0	verified	[squad+0x22] word read; no-squad 0
+0x00421310	verified	front of the member deque (0x00443df0) as a handle, 0xffff for none
+0x004215c0	verified	order's node (0x00444140, needs the owner's AI) else DestGAIKA [squad+0x24]; squad_ai_dest
+0x005351a0	partial	Item::id answers the item's class name string (handle check, class at [obj+0x24]); no Item handle type in this engine and all 47 shipped .ID receivers are GAIKAs, so the shared ID key answers GAIKA::ID only
+0x0042bb80	verified	0x004201d0: false at end, else step and true unless the step landed on the end
+0x004272d0	verified	no-squad/SF_NOAI silent; word state, clock, flags set-then-clear with lock held; members ordered front to back as SetCommand's step, walk stops after a hero (0x0042742d) -- fixed
+0x00421460	verified	point form -> 0x0043ec00, same rules, hero stop at 0x0043ece7 -- fixed
+0x00427470	verified	SetCmdObj: invalid object prints and returns after state/clock/flags|lock are written (0x0042754f), nobody ordered, squad left locked; hero stop 0x00427626 -- fixed
+0x0042bae0	verified	true for an unresolved list, a slot not in use ([entry+0xc]) or cursor at end
+0x00697f20	verified	IntArray::size: count-1 of storage whose slot 0 is a sentinel (resize n -> n+1, 0x0068c820; subscript i -> storage i+1, 0x0068c850), so the written length; the subscript also grows on a read (0x00697e70), which ArrayPool::get does not -- not this body
+0x00422ca0	verified	[squad+0x50], the member deque's size
+0x0042bc40	verified	deque count only when not at end (0x00420170), else 0 -- fixed
+0x00698070	verified	StrArray::size: as IntArray::size over 8-byte elements
+0x00698300	partial	StrMap::size reads the map's count [+0x10]; this engine has no StrMap type and no shipped script declares one
+0x004217e0	verified	or byte [squad+0x30], 8; no NOAI test
+0x00421820	verified	and byte [squad+0x30], 0xf7
+0x0042bce0	verified	lock bit on every squad of the list from its first, regardless of cursor
+0x0042bde0	verified	unlock bit on every squad of the list from its first
+0x005d7400	verified	[squad+0x7c], written only zero by two constructors: false; an invalid/dead receiver pushes a wrong-sized value there, false here
+0x00421720	verified	(flags & mask) == mask, word compare
+0x004271d0	verified	no-squad/SF_NOAI silent; word state, clock, flags; vtbl+0xc0(1) on every member (0x005b1120: end from the back, head included), no hero stop -- fixed (silence, word)
+0x00421520	verified	player's AI present ([+0x88]), not SF_NOAI, post verb 1 with the node and n as words (0x004494c0)
+0x00421670	verified	player's AI present, then 0x00448a80 frees the squad's record
+0x0042bb30	verified	0x0042a3c0: cursor to begin, true when not empty
+0x00421860	verified	[squad+0xbc] raw; constructor 0
+0x004218b0	verified	[squad+0xc0] 16-bit handle, 0xffff from the constructor
+0x00421220	verified	[squad+0x20] word
+0x00421270	verified	[squad+0x24] word
+0x00421620	verified	0x00444140 only: the order's node, 0 without one
+0x00421400	verified	clock [0x00996ff4+0x1258] minus [squad+0x2c]; clamped at 0 here (two clocks), never negative there
+0x004210f0	verified	handle >> 4, no lookup
+0x00437a20	partial	GetSquads/1: every squad on the node's deque, no filter -- fixed (was own-only); which squads the deque holds, and their order, is the GAIKA node design's inference
+0x00439000	partial	GetSquads/2: strength, 0x0044e1f0 presence, any owner -- fixed (selected nothing); node deque inferred (design)
+0x00439230	partial	GetSquads/3: /4 with AI_OWN; strength filter and player<1 forcing own -- fixed; node deque inferred (design)
+0x00439500	partial	GetSquads/4: strength, relation, presence, 0x0044eb80 sight for enemies -- fixed; node deque and its order inferred (design)
