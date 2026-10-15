@@ -5135,6 +5135,28 @@ struct DetourBench : LinkBench {
 
 }  // namespace
 
+/// **The leader's position is its `posRH`** (0x0042e3e4, `vtbl+0xc8`): for a
+/// leader garrisoned in the centre town, the town's central building, which
+/// is the node's own centre. The side test is then skipped (`f(C)` is 0) and
+/// every neighbour scores 0, so each is shown to the script in table order
+/// and the last kept wins -- the west, since the squad came from the north.
+TEST(calc_go_around_measures_a_garrisoned_leader_from_its_town) {
+  DetourBench b;
+  b.check_maika(kNoGaika);
+  const ObjectId leader = b.unit("Walker", in_cell(7, 7));
+  const Settlement* centre =
+      b.economy.settlements().for_object(b.world.gaika().find(b.here)->settlement);
+  REQUIRE(centre != nullptr);
+  REQUIRE(garrison_enter(b.world, centre->id, leader, /*force=*/true));
+  const SquadKey key = b.band(2, {leader}, b.east, b.north);
+
+  const script::HostOutcome out = b.go_around(key);
+  CHECK(out.status == script::HostStatus::ok);
+  CHECK(out.value.truthy_scalar());
+  CHECK(b.shown(2) == b.east * 1000 + b.north * 100 + b.south * 10 + b.west);
+  CHECK(b.heroes.squads().find(key)->src_gaika == b.west);
+}
+
 /// The side test, the score, the script, and what a detour does to the squad.
 ///
 /// The leader stands east of the centre and a little north of the line to the

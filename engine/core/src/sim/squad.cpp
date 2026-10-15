@@ -3334,7 +3334,9 @@ HostOutcome calc_go_around_impl(CallContext& ctx) {
   // `neighbours` is non-empty only for an id that names a node.
   const GaikaNode& cur = *nodes.find(here);
 
-  const Point p = world.resolve_position(leader);
+  // The front member's `posRH` (`vtbl+0xc8`, 0x0042e3e4): a garrisoned leader
+  // stands at its town's central building, not at its holder record's (0, 0).
+  const Point p = unit_pos_rh(world, leader);
   const std::int32_t px = p.x, py = p.y;
   const std::int32_t cx = cur.center.x, cy = cur.center.y;
   const std::int32_t dx = dst->center.x, dy = dst->center.y;
