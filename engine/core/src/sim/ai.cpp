@@ -1047,15 +1047,33 @@ HostOutcome f_ai_start(CallContext& ctx) {
 ///     SPFDone();
 ///
 /// The nine are the driver interface of the original's *smart pathfinder*, the
-/// area-connectivity structure its AI queries walk. Each is a few instructions
-/// into a builder at 0x008c529c: the three `_Quant` calls (0x004129a0,
-/// 0x00415a40, 0x00415a90) do one slice of a pass and answer **whether more
-/// remains**; the five steps (0x004166b0, 0x0040dd10, 0x00412980, 0x0040d1d0,
-/// 0x004161d0) run one stage whole; `SPFDone` (0x0040f8c0) destroys the live
-/// structure at 0x008c528c, installs the built one and frees the builder. And
-/// it is the builder that starts the script: 0x004165d2 pushes
-/// `data/pathfinderinit.vs` and runs it, so the script exists to spread the
-/// build over frames, `Sleep` by `Sleep`.
+/// movement structure at 0x008c528c. Each is a few instructions into a
+/// builder at 0x008c529c, read without a null test:
+///
+///   * the three `_Quant` calls do one slice of a pass and answer **whether
+///     more remains**: 0x004129a0 answers 0x00411af0's result as a boolean;
+///     0x00415a40 runs one row of the connect pass (0x00415880 over the row
+///     counter at `[builder+0x18]`), advances the counter and answers whether
+///     it is still within the last row, `[builder+0x14]`; 0x00415a90 answers
+///     0x004159b0's result as a boolean;
+///   * the five steps run one stage whole and answer nothing: 0x004166b0 calls
+///     0x00416520; 0x0040dd10 calls 0x0040db30 and 0x00412980 calls 0x00411c00,
+///     each with the map's size and data from `[builder+4]`; 0x0040d1d0 only
+///     sets the connect pass's range -- 2 and 2 at `+8`/`+0xc`, the extent at
+///     `[[builder+4]+0x20]` less 3 at `+0x10`/`+0x14`, and the counter `+0x18`
+///     to the first;
+///     0x004161d0 calls 0x00415e30 and zeroes `[builder+0x2c]`;
+///   * `SPFDone` (0x0040f8c0) destroys the live structure through its virtual
+///     destructor, installs the built one (`[builder]`), tears the builder down
+///     (0x0040f7f0) and frees it.
+///
+/// It is the builder that starts the script: 0x004165a0 does nothing while a
+/// builder exists or the script is already running (0x006a2110), otherwise
+/// allocates the builder and starts `data/pathfinderinit.vs` attached to the
+/// world at priority 100 (0x006a07e0), freeing the builder again if that
+/// fails. Its two callers (0x0040acb0, which also creates the live structure,
+/// and 0x006a4140) are the original's moments to build; the script exists to
+/// spread the build over frames, `Sleep` by `Sleep`.
 ///
 /// **This engine has nothing left to build when the script runs.** Its area
 /// partition and connectivity are computed at map load by the rule
@@ -1067,6 +1085,14 @@ HostOutcome f_ai_start(CallContext& ctx) {
 /// Nothing here reads the structure the original would have built, which is
 /// what makes the answer derived rather than invented; the day something
 /// does, these nine become the driver of that.
+///
+/// **What differs, labelled.** The original's `_Quant` answers true for as
+/// many slices as the map needs, so its script runs for many frames where
+/// this one ends at the first; and nothing in this engine starts the script at
+/// all -- there is no builder and no rebuild moment, the movement pathfinder
+/// being this engine's own design. The nine are bound so the script, if
+/// something runs it, ends cleanly rather than trapping. Recorded `partial`
+/// for that design, not for an unread arm.
 HostOutcome f_spf_quant(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SPF: no world");
@@ -3132,8 +3158,12 @@ HostOutcome f_gaika_count(CallContext& ctx) {
 
 /// `IsWaterLsa(id)` -- 23 sites, free.
 ///
-/// Deep water, terrain index 13, which is what the areas were split on. An id
-/// that names no area is not water, which is also what a zero answers.
+/// 0x0042da30 pops the id and answers whether the area record's first word
+/// -- its type, at `[[0x008c8e54]+0x24] + id * 0xc0` -- is 1, water. Nothing
+/// else is read and nothing written. The id is not range-checked there, so an
+/// id past the table reads off its end; here it names no area and answers
+/// false, as the reserved record 0 (type 0) does in both. Water is deep water,
+/// terrain index 13, which is what the areas were split on (`sim/lsa.hpp`).
 HostOutcome f_is_water_lsa(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::ok_with(Value::boolean(false));
@@ -3214,27 +3244,43 @@ HostOutcome f_gaika_at_point(CallContext& ctx) {
 /// sweep's hits once `Breakpoint` stopped being one.
 ///
 /// 0x0042e820 answers **which teleport to take from `ptSrc` to `ptDst`**, or
-/// the invalid handle for "walk". In order:
+/// the invalid handle (`0xffff`) for "walk". It pops `ptDst`, `ptSrc` and the
+/// player, which it decrements and never range-checks. In order:
 ///
-///   1. Both points are placed in their LSA. Under 2000 units apart *and* in
-///      the same area, nothing is answered: the walk is short enough.
+///   1. Both points are placed in their LSA -- 0x0043cb30, the area of the node
+///      the point falls in (0x0044e3f0, then the node's `+0x10`), which this
+///      engine's node table makes the same as the area the point falls in. The
+///      straight walk is `isqrt(dx² + dy²)` (0x0067c3d0). Under 2000 units
+///      (`1999 <` fails) *and* in the same area, nothing is answered.
 ///   2. The budget a teleport has to beat is **two thirds of the straight
-///      walk** when the areas are the same, and **unbounded** when they differ
-///      -- the comparison is unsigned and the initial value is `0xffffffff`.
-///   3. Every settlement's own object is tried, in settlement-store order, and
-///      kept when it is a teleport (a dynamic type test here; a teleport with
-///      no pair is skipped a line later, so "has a destination" decides the
-///      same cases), when the node it stands in is in `ptSrc`'s area, and when
-///      its destination's position is in `ptDst`'s area. Its cost is the walk
-///      to it plus the walk from its destination to `ptDst`, and the least
-///      under the budget wins -- strictly less, so a tie keeps the earlier.
+///      walk**, unsigned and truncated, when the areas are the same, and
+///      **unbounded** when they differ -- the comparison is unsigned and the
+///      initial value is `0xffffffff`.
+///   3. Every settlement's own object (the world's settlement vector,
+///      `[world+0x4c]`, the object id at `+0x8c`) is tried in order and kept
+///      when it is a teleport (a dynamic cast to `CVXTeleport`; a teleport with
+///      no pair resolves no far end a few lines later, so "has a destination"
+///      decides the same cases), when the node **its position** falls in
+///      (0x0044e650, none -- skipped) is in `ptSrc`'s area (0x0043cb00), and
+///      when its far end (`[teleport+0x208]`, 0x005cd930) resolves and stands
+///      in `ptDst`'s area (0x0043cb70). Its cost is the walk from `ptSrc` to
+///      it plus the walk from its far end to `ptDst`, and the least under the
+///      budget wins -- strictly less, so a tie keeps the earlier.
+///   4. **Between the area test and the far end, a computer player's view is
+///      asked** (0x0042e974): when the player index is under 16 and the player
+///      has an AI, and that AI's view has a record for the teleport's node --
+///      the node within the slot vector and its slot non-zero -- the teleport
+///      is skipped unless 0x0041cb80 answers true. That is the test
+///      `GAIKA::Explored` (0x0042ae70) ends in: two session overrides, then the
+///      record's `Explored` bit. A player with no AI, or a node the view has no
+///      record for, is not gated at all.
 ///
-/// **One gate is not reproduced.** For a player that has an AI, 0x0042e974
-/// also asks 0x0041cb80 about the node's per-player LAIKA record, and that
-/// answer turns on two session flags -- `[0xa87c48]+0xda0` and
-/// `[world+0xb0]+0xf0` -- this engine does not carry and has not identified.
-/// A computer player therefore sees every teleport a human does. The
-/// condition that would lift this is naming those two flags.
+/// **Fixed in the tenth round:** the gate in step 4 was left out, on the
+/// reading that it turned on two unidentified session flags. It turns on them
+/// only through 0x0041cb80, the same function `Explored` answers with, and the
+/// engine already answers that from the bit -- the overrides are recorded at
+/// `m_laika_flag` as not carried. So a computer player now uses only teleports
+/// standing in nodes it has explored, as the original's does.
 HostOutcome f_find_teleport(CallContext& ctx) {
   const Value invalid = Value::object(script::ObjectRef{script::kNoType, 0});
   World* world = world_of(ctx);
@@ -3261,11 +3307,22 @@ HostOutcome f_find_teleport(CallContext& ctx) {
   std::uint32_t budget = from == to ? static_cast<std::uint32_t>(straight * 2 / 3) : 0xFFFFFFFFu;
   ObjectId best = kNoObject;
   const GaikaTable& gaika = world->gaika();
+  // Step 4's view: the asking player's, when it is a computer player.
+  const std::int32_t asked = ctx.arg(0).is_integer() ? ctx.arg(0).as_integer() : 0;
+  AiSystem* ai = host_ai(ctx);
+  const GaikaView* view = ai != nullptr && asked >= 1 && asked <= 16
+                              ? ai->gaika_view(static_cast<PlayerId>(asked - 1))
+                              : nullptr;
   for (const Settlement& s : economy->settlements().all()) {
     const WorldObject* teleport = world->find(s.object);
     if (teleport == nullptr || teleport->state.teleport_destination == kNoObject) continue;
-    const GaikaNode* node = gaika.find(gaika.for_settlement(s.object));
+    const GaikaId stands_in = gaika.at(areas, world->resolve_position(teleport->id));
+    const GaikaNode* node = gaika.find(stands_in);
     if (node == nullptr || node->lsa != from) continue;
+    if (view != nullptr) {
+      const Laika* record = view->find(stands_in);
+      if (record != nullptr && (record->flags & kLaikaExplored) == 0) continue;
+    }
     const WorldObject* far_end = world->find(teleport->state.teleport_destination);
     if (far_end == nullptr) continue;
     const Point out = world->resolve_position(far_end->id);
@@ -3283,7 +3340,25 @@ HostOutcome f_find_teleport(CallContext& ctx) {
 // -- ship needs ------------------------------------------------------------
 //
 // See the note in `sim/ai.hpp`. All four take `(idPlayer, lsa)`; the player
-// is the script's 1-based number and the LSA an id from `WaterLsa`.
+// is the script's 1-based number and the LSA an id from `WaterLsa`. Each body
+// pops `lsa` (pushed last) and then the player, and none range-checks either:
+//
+//   * `ShipNeeds` (0x004226f0) answers 0x0043ef00(player - 1, lsa), the int at
+//     `+0x14 + (player-1)*4` of the area record -- the need counter;
+//   * `IncShipNeeds` (0x0042d9f0) adds one to, and `ClrShipNeeds` (0x0042d9b0)
+//     zeroes, the int at `+0x10 + player*4` with the player **not**
+//     decremented. That is the same word: `0x10 + 4p` is `0x14 + 4(p-1)`, so
+//     the three agree on one counter per 1-based player, and this file keeps
+//     it at the 0-based index;
+//   * `Ships` (0x00422660) answers 0x0043ee40(player - 1, lsa), the int at
+//     `+0x54 + (player-1)*4` -- the ship count, which `sim/ai.hpp` says this
+//     engine computes rather than keeps (see `f_ships`).
+//
+// A player outside 1..16 is refused here (0, or nothing written), where the
+// original reads or writes a neighbouring word of the record -- player 0's
+// counter is the word at `+0x10`, player 17's the first ship count. No
+// shipped script passes such a number: every caller hands a player it read
+// from a squad or a settlement.
 
 /// The two arguments, or `false`.
 [[nodiscard]] bool ship_need_args(CallContext& ctx, PlayerId& player, LsaId& lsa) noexcept {
@@ -3322,6 +3397,24 @@ HostOutcome f_clr_ship_needs(CallContext& ctx) {
 
 /// `Ships(player, lsa)` -- 2 sites: the player's living ships standing in the
 /// area. A census, where the original keeps a count; see `sim/ai.hpp`.
+///
+/// **What the kept count counts**, so the difference is on record. The word
+/// at `+0x54 + owner*4` is raised by 0x0041f310 and lowered by 0x0041eee0
+/// (through 0x0044e900/0x0044e920), the hooks an object passes through when
+/// it is registered with, or removed from, the AI's tracking (19 and 6
+/// callers: creation, death, boarding, leaving a holder and the like). For a
+/// ship -- a cast to `CVXShip` -- the area is the one its position lies in
+/// (0x0044e940) when `[ship+0x154]` is `0xffff`, and otherwise one read
+/// through that holder chain (`+0x1f6`); the owner is `[[ship+0x70]+8]`. Both
+/// hooks skip objects carrying flag 0x8000000 at `+0x2c` or 0x800000 at
+/// `+0x194`; the raise also needs `[0x8c8e50]` set and `[0xa8734c]` clear,
+/// the lowering needs the AI manager (`[0x8c8e58]`), an owner and a squad
+/// (`[+0x174]`), and clamps at zero; both touch the count only while the area
+/// table (`[0x8c8e54]`) exists. The census agrees whenever the
+/// hooks have kept up with where every living ship is; it cannot reproduce a
+/// count the asymmetric gates let drift, nor the holder-chain area, nor the
+/// two unnamed flags. A design difference (`sim/ai.hpp`), kept.
+///
 /// The census behind `Ships` and `CheckLsaPath`: `fn` sees every living ship of
 /// `player` standing in `lsa`, ascending by id, and stops the walk by answering
 /// `true`. Answers whether it did.
@@ -3356,10 +3449,14 @@ HostOutcome f_ships(CallContext& ctx) {
 //
 // `CheckLsaPath(lsaSrc, lsaDst, player)` -- 3 sites, and the sole blocker of
 // both `EVALRECRUIT.VS` files. The executable's registration names it
-// `int, int lsaSrc, int lsaDst, int playerId`; the body (0x00423120) hands the
-// three to 0x00441b70 with an empty transport string, a `(-1, -1)` rendezvous
-// and no output list, which is the same worker the AI's own transport
-// planner (0x00431ac9) calls with a real one.
+// `int, int lsaSrc, int lsaDst, int playerId`; the body (0x00423120) pops the
+// three -- player on top, then `lsaDst`, then `lsaSrc` -- and hands them, the
+// player less one, to 0x00441b70 through 0x00441fe0, a thunk that adds no
+// output list, with an empty transport string and a `(-1, -1)` rendezvous.
+// `Squad::NearestHospital` makes the same call (0x00431ac9) with the same
+// empty order; `PrepareAiTransportShip` reaches the worker through the other
+// thunk, 0x00442010, with its own order and point and a list to fill. No
+// argument is range-checked by the body.
 //
 // ## The worker is a breadth-first search over the area graph
 //
@@ -3369,8 +3466,11 @@ HostOutcome f_ships(CallContext& ctx) {
 //
 //   1. `src == dst` answers **1** before anything is looked at -- two
 //      unknown ids that are equal answer 1 too.
-//   2. Areas of different **type** answer **0**: a land area is never on a
-//      path to a sea, whatever ships there are.
+//   2. Areas of different **type** (the record's first word: 1 water, 2
+//      ground, 0 the reserved record) answer **0**: a land area is never on a
+//      path to a sea, whatever ships there are. The original reads the two
+//      words unchecked, so an id past the table reads off it; here such an id
+//      is type 0 and is refused.
 //   3. Distances start at `0xffff`, `src` at 0, and a FIFO walk relaxes with a
 //      strict `>` -- a plain breadth-first search. A **water** neighbour is
 //      entered only when the player has a ship available in it (below), and
@@ -3388,45 +3488,93 @@ HostOutcome f_ships(CallContext& ctx) {
 //      `shipneed` on that candidate, if there is one, which is exactly what
 //      `IncShipNeeds` does by hand. Reached, the answer is the **number of
 //      areas on the path**, both ends included: `dist + 1`.
+//   6. The path itself is walked **back from `dst`**: at each area the
+//      first neighbour in its (ascending) list whose distance is one less is
+//      taken, and pushed on the front of the output list (0x00440c40), until
+//      `src` is reached -- so the list reads `src` first. The scan index is
+//      not reset when it steps, a quirk that can only change which of two
+//      equally short routes is named, never the count. Only
+//      `PrepareAiTransportShip` reads the list, and only element 1 of a
+//      three-area route: there the original names the first sea in `dst`'s
+//      list that was reached, and `lsa_route`'s parent links name the first
+//      sea reached in `src`'s list that touches `dst` -- the same area,
+//      because both lists ascend and both seas sit at distance 1.
 //
 // The player argument is the script's 1-based number, decremented once and
 // used as a table index throughout; one outside the table makes the ship
 // test match nothing and the bump write off the record, so it is refused
 // here -- the walk still runs, and answers 0 for two different areas.
 //
-// ## A ship is "available" by its current command
+// ## A ship is "available" by its current command, and by its transport order
 //
-// 0x00441730 walks the area's ship list for one owned by the player whose
-// *running* command is
+// 0x00441730 walks the area's ship list (the record's object list at `+0x94`,
+// 0x0044e9a0; only ships are entered in it, by 0x0041f310) and answers the
+// first ship that is alive (`vtbl+0x50`, IsDead, false), owned by the player
+// (`[[obj+0x70]+8]` against the 0-based index the caller passes), has a
+// running command (0x005ae130 with 0; none -- try the next), and whose verb is
 //
-//   * `"idle"` -- available;
-//   * `"boardunit"` -- available when the ship's AI-transport string equals
-//     the caller's and its rendezvous point equals the caller's. This caller
-//     passes `""` and `(-1, -1)`, and `sim/world_host.cpp`'s AI-transport
-//     note derives that every ship on this engine carries exactly those
-//     values, so a boarding ship counts;
+//   * `"idle"` (the literal at 0x007add84) -- available;
+//   * `"boardunit"` -- available when the ship's pending transport order
+//     equals the **caller's**: the string at `[ship+0x20c]` (0x005c6730)
+//     compared whole with the caller's text (0x00426df0), and the point at
+//     `[ship+0x228]`/`[+0x22c]` (0x005c6740) equal to the caller's on both
+//     coordinates. `CheckLsaPath` (0x00423120) and `Squad::NearestHospital`
+//     (the call at 0x00431ac9) pass `""` and `(-1, -1)`, so for them a
+//     boarding ship counts only while it carries no order -- once
+//     `PrepareAiTransportShip` has given it one it is somebody's crossing and
+//     no longer free. `PrepareAiTransportShip` passes its own verb and point,
+//     so for it a ship already boarding for this very crossing counts;
 //   * `"advance"` -- available when the owning AI's destination node shows no
 //     enemy presence: the ship's squad (`[obj+0x174]`) leads to a player AI
-//     record, that record's target node (0x00444140, `[+0x88]`) to its slot
-//     list, and each slot's enemy count and the node settlement's garrison
-//     are summed under the relation category. That census lives in the slot
-//     grid this engine does not model (`sim/gaika.hpp`), so an advancing ship
-//     **counts** here, and the enemy-presence clause is the named condition
-//     that would withhold it;
-//   * anything else, or no command at all -- not this ship; try the next.
+//     record (0x00444190; none -- available), that record's target node
+//     (0x00444140, with `[+0x24]` as the fallback) to its slot list, and each
+//     slot's enemy count and the node settlement's garrison (0x00420c00) are
+//     summed under the relation category (0x0044e250). That census lives in
+//     the slot grid this engine does not model (`sim/gaika.hpp`), so an
+//     advancing ship **counts** here, and the enemy-presence clause is the
+//     named condition that would withhold it;
+//   * anything else -- not this ship; try the next.
 //
 // The comparisons are byte-for-byte on the verb, so they are exact and
-// case-sensitive, as the original's `repe cmpsb` is. Any ship that passes
-// ends the walk: the caller reads the pointer as a boolean.
+// case-sensitive, as the original's `repe cmpsb` is. The first ship that
+// passes is the answer; the route search reads it as a boolean.
+//
+// **Fixed in the tenth round:** the route search accepted every boarding
+// ship whatever order it carried, on the argument that every ship carries
+// `""` and `(-1, -1)` -- true until `PrepareAiTransportShip` became their
+// writer. A ship tasked for one squad's crossing then also opened the sea to
+// every other `CheckLsaPath`, and to `PrepareAiTransportShip`'s own search
+// for a different order.
+//
+// **The scan order is this engine's and not the original's.** There the area
+// keeps a list of the ships standing in it and the walk is that list's order;
+// here `each_ship_in_area` sweeps the world ascending by object id. The two
+// agree on *which ships qualify* and can disagree on which qualifying ship is
+// first, which only `PrepareAiTransportShip` can see, and only when more than
+// one is free in the same sea.
 
-/// The crossability test above, on one water area.
-[[nodiscard]] bool ship_available_in(World& world, PlayerId player, LsaId lsa) {
+/// 0x00441730, above: the first ship of `player` in `lsa` that can carry the
+/// crossing `(order, where)`, or `kNoObject`. With no AI system every ship
+/// reads as carrying no order, the constructed `""` and `(-1, -1)`.
+[[nodiscard]] ObjectId ship_for_crossing(World& world, const AiSystem* ai, PlayerId player,
+                                         LsaId lsa, std::string_view order, Point where) {
   const CommandSystem* commands = command_system(world);
-  return each_ship_in_area(world, player, lsa, [&](const WorldObject& ship) {
-    if (commands == nullptr || commands->command_count(ship.id) == 0) return false;
+  if (commands == nullptr) return kNoObject;
+  const AiSystem::ShipTransport none{};
+  ObjectId found = kNoObject;
+  (void)each_ship_in_area(world, player, lsa, [&](const WorldObject& ship) {
+    if (commands->command_count(ship.id) == 0) return false;
     const std::string_view verb = commands->command_name(ship.id, 0);
-    return verb == "idle" || verb == "boardunit" || verb == "advance";
+    bool available = verb == "idle" || verb == "advance";
+    if (verb == "boardunit") {
+      const AiSystem::ShipTransport& carrying = ai == nullptr ? none : ai->ship_transport(ship.id);
+      available = carrying.order == order && carrying.where.x == where.x &&
+                  carrying.where.y == where.y;
+    }
+    if (available) found = ship.id;
+    return available;
   });
+  return found;
 }
 
 /// `CheckLsaPath`'s answer, and the route behind it. `LsaRoute` is declared in
@@ -3437,8 +3585,12 @@ HostOutcome f_ships(CallContext& ctx) {
 /// it.** The original's 0x00442010 fills a list of area ids and its caller
 /// reads element 1 -- the water the crossing goes through -- so the search that
 /// answers the length has to be the search that names the hop, or the two can
-/// disagree about which sea a ship is wanted in.
-LsaRoute lsa_route(World& world, AiSystem* ai, LsaId src, LsaId dst, PlayerId player) {
+/// disagree about which sea a ship is wanted in. `(order, where)` is the
+/// transport order a boarding ship must already carry to count as a way
+/// across: `""` and `(-1, -1)` for `CheckLsaPath` and `NearestHospital`, the
+/// caller's own for `PrepareAiTransportShip`.
+LsaRoute lsa_route(World& world, AiSystem* ai, LsaId src, LsaId dst, PlayerId player,
+                   std::string_view order, Point where) {
   LsaRoute out;
   if (src == dst) {
     out.answer = 1;
@@ -3479,7 +3631,10 @@ LsaRoute lsa_route(World& world, AiSystem* ai, LsaId src, LsaId dst, PlayerId pl
         // area, so neither is a difference a sweep can see.
         if (dist[at] > next) {
           if (crossable[at] < 0) {
-            crossable[at] = player != kNoPlayer && ship_available_in(world, player, there) ? 1 : 0;
+            const bool way_across =
+                player != kNoPlayer &&
+                ship_for_crossing(world, ai, player, there, order, where) != kNoObject;
+            crossable[at] = way_across ? 1 : 0;
           }
           if (crossable[at] != 0) {
             dist[at] = next;
@@ -3544,13 +3699,19 @@ HostOutcome f_check_lsa_path(CallContext& ctx) {
 ///
 /// ## What it does
 ///
-/// 0x0042e180 is short and hands the work to two places. It runs the **same**
-/// search `CheckLsaPath` runs, refuses anything but a length of 3, and takes
-/// **element 1 of the route** -- the water in the middle. Then it looks for a
-/// ship of the player's standing in that water (0x00441730), and if it finds
-/// one it writes the caller's `cmd` and `pt` onto it as a pending transport
-/// order and hands the ship back. Nothing found is the invalid handle, which
-/// the script tests.
+/// 0x0042e180 is short and hands the work to two places. It pops the point,
+/// the order text, the player (less one, unchecked) and the two areas, and
+/// runs the **same** search `CheckLsaPath` runs (0x00442010, the thunk that
+/// passes a list) -- **with its own order and point**, not `CheckLsaPath`'s
+/// empty ones, so a ship already boarding for exactly this crossing is a way
+/// across and one boarding for any other is not. It refuses anything but a
+/// length of 3 and takes **element 1 of the route** -- the water in the
+/// middle. Then it asks 0x00441730 for a ship of the player's standing in
+/// that water, under the same order and point, and if it finds one writes the
+/// caller's `cmd` and `pt` onto it (0x005c7dd0: the string at `[ship+0x20c]`,
+/// the point at `+0x228`/`+0x22c`) and hands the ship back by id. Anything
+/// else is the invalid handle (`0xffff`), which the script tests. The order
+/// text is released on every path (0x00695e70).
 ///
 /// The route is why `lsa_route` exists: the original's search fills a list of
 /// area ids and this reads index 1 out of it, so the search that answers the
@@ -3558,34 +3719,18 @@ HostOutcome f_check_lsa_path(CallContext& ctx) {
 ///
 /// ## Which ship
 ///
-/// **The acceptance rule is one this file already had**, written from the other
-/// side: `ship_available_in` is 0x00441730's predicate, and `CheckLsaPath` has
-/// been asking it of every water area since the pathfinder bootstrap. Living,
-/// the player's, standing in that area, and its **running command** is one of:
+/// `ship_for_crossing` is 0x00441730, read once and described above
+/// `lsa_route`: living, the player's, standing in that area, and running
+/// `idle` or `advance`, or `boardunit` while carrying this very order. The
+/// `advance` clause's enemy census is the documented approximation, and the
+/// scan order is the world's rather than the area list's -- both are said
+/// there.
 ///
-///   * `idle` -- available;
-///   * `boardunit` -- available when the ship's pending order equals the
-///     caller's, verb and point both. **That clause is now real.** It used to
-///     be documented as always true, because no writer existed and every ship
-///     carried the constructed `""` and `(-1, -1)`; this is the writer, so a
-///     ship already ferrying somebody else's crossing is now correctly
-///     refused;
-///   * `advance` -- available when the node its squad is heading for shows no
-///     enemy strength. **That clause is still the documented approximation**:
-///     the census is over the squads standing in a node, and this engine's
-///     answer is the one `sim/squad.cpp` gives for the whole family -- nothing
-///     assigns a node to a squad, so the sum is zero and an advancing ship
-///     counts. What would change it is the node table, not this file.
-///
-/// Anything else, or no command at all, is not this ship. The first that
-/// passes ends the walk: the original reads the pointer as a boolean.
-///
-/// **The scan order is this engine's and not the original's.** There the area
-/// keeps a list of the objects standing in it and the walk is that list's
-/// order; here `each_ship_in_area` sweeps the world ascending by object id and
-/// asks where each ship is. The two agree on *which ships qualify* and can
-/// disagree on which qualifying ship is first, which matters only when more
-/// than one is free in the same sea.
+/// **Fixed in the tenth round:** the route search here used the empty order,
+/// so a ship boarding for this crossing did not open the sea for its own
+/// second squad (the original's search passes the caller's order) and one
+/// boarding for another crossing did (it carries an order, and the old test
+/// accepted any boarding ship).
 HostOutcome f_prepare_ai_transport_ship(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("PrepareAiTransportShip: no world");
@@ -3600,8 +3745,14 @@ HostOutcome f_prepare_ai_transport_ship(CallContext& ctx) {
   // length of 0 and is refused one line later anyway.
   if (player == kNoPlayer) return none;
 
-  const LsaRoute route = lsa_route(*world, host_ai(ctx), ctx.arg(0).as_integer(),
-                                   ctx.arg(1).as_integer(), player);
+  const std::string order =
+      ctx.count() > 3 && ctx.arg(3).is_string() ? std::string(ctx.arg(3).as_string()) : std::string();
+  const Point where =
+      ctx.count() > 4 && is_point(ctx.arg(4)) ? unpack_point(ctx.arg(4)) : Point{-1, -1};
+
+  AiSystem* ai = host_ai(ctx);
+  const LsaRoute route = lsa_route(*world, ai, ctx.arg(0).as_integer(), ctx.arg(1).as_integer(),
+                                   player, order, where);
   // Three, and nothing else: one land hop is a march and more than one sea is
   // a crossing this entry point has no second ship for.
   //
@@ -3613,35 +3764,7 @@ HostOutcome f_prepare_ai_transport_ship(CallContext& ctx) {
   if (route.answer != 3 || route.path.size() < 2) return none;
   const LsaId crossing = route.path[1];
 
-  const std::string order =
-      ctx.count() > 3 && ctx.arg(3).is_string() ? std::string(ctx.arg(3).as_string()) : std::string();
-  const Point where =
-      ctx.count() > 4 && is_point(ctx.arg(4)) ? unpack_point(ctx.arg(4)) : Point{-1, -1};
-
-  AiSystem* ai = host_ai(ctx);
-  const CommandSystem* commands = command_system(*world);
-  ObjectId found = kNoObject;
-  (void)each_ship_in_area(*world, player, crossing, [&](const WorldObject& ship) {
-    // The count test is the original's shape and not load-bearing here:
-    // `command_name` answers `""` past the end, and no verb below matches that.
-    // Kept because the original reads the slot before it reads the string, and
-    // a reader who sees only the comparisons would think an empty queue could
-    // fall through one of them.
-    if (commands == nullptr || commands->command_count(ship.id) == 0) return false;
-    const std::string_view verb = commands->command_name(ship.id, 0);
-    if (verb == "idle" || verb == "advance") {
-      found = ship.id;
-      return true;
-    }
-    if (verb != "boardunit") return false;
-    // The one clause the transport order makes real.
-    if (ai == nullptr) return false;
-    const AiSystem::ShipTransport& carrying = ai->ship_transport(ship.id);
-    if (carrying.order != order) return false;
-    if (carrying.where.x != where.x || carrying.where.y != where.y) return false;
-    found = ship.id;
-    return true;
-  });
+  const ObjectId found = ship_for_crossing(*world, ai, player, crossing, order, where);
   if (found == kNoObject) return none;
 
   // 0x005c7dd0 and its neighbour, the pair `Ship::HasAiTransport` reads.

@@ -701,14 +701,17 @@ struct LsaRoute {
   std::vector<LsaId> path;
 };
 
-/// 0x00441b70 with an empty transport string and no rendezvous: the
-/// breadth-first search over the area graph that `CheckLsaPath`,
-/// `PrepareAiTransportShip` and `Squad::NearestHospital` all run. `player` is
-/// 0-based. **It has a side effect**: an unreachable `dst` bumps the player's
-/// ship need on the first shipless sea the walk saw, as the original does.
-/// `sim/ai.cpp` carries the whole reading.
+/// 0x00441b70: the breadth-first search over the area graph that
+/// `CheckLsaPath`, `PrepareAiTransportShip` and `Squad::NearestHospital` all
+/// run. `player` is 0-based. `(order, where)` is the transport order a
+/// boarding ship must carry to count as a way across a sea: the first two
+/// callers' empty string and `(-1, -1)` by default, `PrepareAiTransportShip`'s
+/// own when it asks. **It has a side effect**: an unreachable `dst` bumps the
+/// player's ship need on the first shipless sea the walk saw, as the original
+/// does. `sim/ai.cpp` carries the whole reading.
 [[nodiscard]] LsaRoute lsa_route(World& world, AiSystem* ai, LsaId src, LsaId dst,
-                                 PlayerId player);
+                                 PlayerId player, std::string_view order = {},
+                                 Point where = Point{-1, -1});
 
 /// The chunk `file` names on `player`'s AI search path -- the profile's own copy
 /// when it has one, the root `DATA/AI` copy otherwise -- or `script::kNoChunk`.

@@ -1933,6 +1933,7 @@ struct TeleportBench {
   std::vector<std::byte> pass = pass_blocking_water_sized(kLongIsland);
   World world;
   EconomySystem economy;
+  AiSystem ai;
   script::HostRegistry registry;
   HostContext context;
 
@@ -1947,6 +1948,7 @@ struct TeleportBench {
     REQUIRE(layer.ok());
     world.set_terrain(layer.value());
     REQUIRE(world.add_system(&economy));
+    REQUIRE(world.add_system(&ai));
     economy.start(world);
     world.mutable_lsa().build(world.terrain(), obstruction(pass));
     (void)register_all_hosts(registry);
@@ -2063,6 +2065,49 @@ TEST(find_teleport_picks_the_pair_that_beats_two_thirds_of_the_walk) {
   // A player with no AI and one outside the table answer alike.
   CHECK(b.find(0, in_cell(1, 3), in_cell(44, 3)) == a_in);
   CHECK(b.find(9, in_cell(1, 3), in_cell(44, 3)) == a_in);
+}
+
+/// **A computer player only takes a teleport standing in a node it has
+/// explored** (0x0042e974): the original asks 0x0041cb80 -- the test
+/// `GAIKA::Explored` ends in -- of the teleport's node in the player's own
+/// view, and skips the teleport when it answers false. A player with no view
+/// of that node is not asked at all.
+TEST(find_teleport_skips_a_teleport_in_a_node_the_computer_player_has_not_explored) {
+  TeleportBench b;
+  const ObjectId a_in = b.teleport(2, 3);
+  const ObjectId a_out = b.teleport(40, 3);
+  const ObjectId b_in = b.teleport(6, 3);
+  const ObjectId b_out = b.teleport(36, 3);
+  b.pair(a_in, a_out);
+  b.pair(b_in, b_out);
+  b.rebuild();
+  // Player 1 is a computer player with a fresh view: nothing explored.
+  b.ai.seed_gaika_view(0, b.world.gaika().count());
+  GaikaView* view = b.ai.gaika_view(0);
+  REQUIRE(view != nullptr);
+  const auto node_of = [&](ObjectId teleport) {
+    return b.world.gaika().at(b.world.lsa(), b.world.resolve_position(teleport));
+  };
+  Laika* near_a = view->find(node_of(a_in));
+  Laika* near_b = view->find(node_of(b_in));
+  Laika* far_a = view->find(node_of(a_out));
+  REQUIRE(near_a != nullptr && near_b != nullptr && far_a != nullptr);
+  REQUIRE(near_a != near_b && near_a != far_a);
+
+  // From cell 1 to cell 44 A wins for anybody who may use it.
+  CHECK(b.find(1, in_cell(1, 3), in_cell(44, 3)) == kNoObject);
+  // Player 2 has no AI here and is never asked.
+  CHECK(b.find(2, in_cell(1, 3), in_cell(44, 3)) == a_in);
+  // The far end's node being explored does not help: it is the near end's
+  // node that is asked.
+  far_a->flags |= kLaikaExplored;
+  CHECK(b.find(1, in_cell(1, 3), in_cell(44, 3)) == kNoObject);
+  // B explored and A not: B, though A is cheaper.
+  near_b->flags |= kLaikaExplored;
+  CHECK(b.find(1, in_cell(1, 3), in_cell(44, 3)) == b_in);
+  // Both explored: the cheaper again.
+  near_a->flags |= kLaikaExplored;
+  CHECK(b.find(1, in_cell(1, 3), in_cell(44, 3)) == a_in);
 }
 
 // --------------------------------------------------------------------------
@@ -2568,6 +2613,108 @@ TEST(check_lsa_path_counts_the_areas_and_needs_a_ship_to_cross) {
   CHECK(b.path(west, east, 1) == 0);
   // ...and with a ship present but busy, the sea is not short of ships.
   CHECK(b.ai.ship_needs(0, sea) == 2);
+}
+
+/// **A boarding ship is a way across only while its transport order is the
+/// caller's** (0x00441730's `boardunit` clause). `CheckLsaPath` (0x00423120)
+/// asks with `""` and `(-1, -1)`, so a ship `PrepareAiTransportShip` has
+/// already tasked for some crossing does not open the sea to it.
+TEST(check_lsa_path_does_not_cross_on_a_ship_boarding_for_a_crossing) {
+  ShoreBench b;
+  const LsaPartition& areas = b.world.lsa();
+  const LsaId sea = areas.at(in_cell(1, 1));
+  const LsaId west = areas.at(in_cell(6, 6));
+  const LsaId east = areas.at(in_cell(20, 6));
+  REQUIRE(sea != kNoLsa && west != kNoLsa && east != kNoLsa);
+
+  const ObjectId boat = b.ship(14, 6, 0, "boardunit");
+  // Carrying nothing -- the constructed `""` and `(-1, -1)` -- it counts.
+  CHECK(b.path(west, east, 1) == 3);
+  // Tasked for a crossing, it is that crossing's and nobody else's.
+  b.ai.set_ship_transport(boat, "move", in_cell(20, 6));
+  CHECK(b.path(west, east, 1) == 0);
+  // The player has a ship in that sea, so the refusal bumps no need.
+  CHECK(b.ai.ship_needs(0, sea) == 0);
+  // An empty order at a real point is still not the empty order at (-1, -1).
+  b.ai.set_ship_transport(boat, "", in_cell(20, 6));
+  CHECK(b.path(west, east, 1) == 0);
+  b.ai.clear_ship_transport(boat);
+  CHECK(b.path(west, east, 1) == 3);
+}
+
+namespace {
+
+/// Two seas, north and south, and two lands between them split by a cliff, so
+/// that both lands touch both seas: two three-area routes from west to east.
+constexpr std::initializer_list<std::string_view> kTwoStraits = {
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 0
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 1
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 2
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 3
+    "..............####..............",  // 4
+    "..............####..............",  // 5
+    "..............####..............",  // 6
+    "..............####..............",  // 7
+    "..............####..............",  // 8
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 9
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 10
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 11
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 12
+};
+
+}  // namespace
+
+/// **`PrepareAiTransportShip` searches with its own order** (0x0042e180 passes
+/// `cmd` and `pt` to the worker through 0x00442010): a sea whose only ship is
+/// boarding for a different crossing is no way across, so the route goes
+/// through the other sea and its idle ship is the one tasked.
+TEST(prepare_ai_transport_ship_routes_around_a_ship_boarding_for_another_crossing) {
+  ShoreBench b(kTwoStraits);
+  const LsaPartition& areas = b.world.lsa();
+  const LsaId north = areas.at(in_cell(6, 1));
+  const LsaId south = areas.at(in_cell(6, 11));
+  const LsaId west = areas.at(in_cell(6, 6));
+  const LsaId east = areas.at(in_cell(25, 6));
+  REQUIRE(areas.size() == 4);
+  REQUIRE(north != kNoLsa && south != kNoLsa && west != kNoLsa && east != kNoLsa);
+  REQUIRE(north != south && west != east);
+  REQUIRE(areas.water(north) && areas.water(south));
+  const auto touches = [&](LsaId land, LsaId sea) {
+    const std::span<const LsaId> list = areas.neighbours(land);
+    return std::find(list.begin(), list.end(), sea) != list.end();
+  };
+  REQUIRE(touches(west, north) && touches(west, south));
+  REQUIRE(touches(east, north) && touches(east, south));
+  // The lower-numbered sea is the one a tie of routes names first.
+  const LsaId first = std::min(north, south);
+  const LsaId second = std::max(north, south);
+  const std::int32_t first_row = first == north ? 1 : 11;
+  const std::int32_t second_row = first == north ? 11 : 1;
+
+  const Point beach = in_cell(25, 6);
+  const ObjectId tasked = b.ship(10, first_row, 0, "boardunit");
+  b.ai.set_ship_transport(tasked, "sneak", in_cell(2, 6));
+  const ObjectId idle = b.ship(10, second_row, 0, "idle");
+  REQUIRE(areas.at(b.world.resolve_position(tasked)) == first);
+  REQUIRE(areas.at(b.world.resolve_position(idle)) == second);
+
+  const auto prepare = [&](const char* verb, Point at) {
+    const script::HostOutcome out =
+        b.call(script::CallKind::free_function, "PrepareAiTransportShip",
+               {script::Value::integer(west), script::Value::integer(east),
+                script::Value::integer(1), script::Value::string(verb), pack_point(at)});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_object() ? out.value.as_object().id : kNoObject;
+  };
+  // Another crossing's ship closes the first sea; the second sea's idle ship
+  // carries this one.
+  CHECK(prepare("move", beach) == idle);
+  CHECK(b.ai.ship_transport(idle).order == "move");
+  CHECK(b.ai.ship_transport(tasked).order == "sneak");
+  // The tasked ship's own crossing still finds it: its order opens its sea.
+  b.commands.clear_commands(b.world, idle);
+  b.commands.set_command(b.world, idle, "move", Command{});
+  CHECK(prepare("sneak", in_cell(2, 6)) == tasked);
 }
 
 /// `SupplyCount`: the settlements of the same owner, on the class, whose own
