@@ -853,25 +853,34 @@ HostOutcome test_flags_impl(CallContext& ctx) {
 /// `TS_ATTACKATWILL.VS`, both on a hero's squad: `if (sq.TakeNearbyItems(
 /// sqLeader.sight))`, a hero picking up what lies about.
 ///
-/// `0x00429530` resolves the squad and its leader, and answers **false** unless
-/// the leader is a hero (`SyncFlags` bit 24), the squad's destination node is
-/// the one it is in (0x00444140 against `[squad+0x24]`: not on the march),
-/// the leader's running command is not already `getitems` (0x007adfd0), and
-/// the leader has room (`vtbl+0x104` items below `vtbl+0x108`, the count and
-/// the cap `Obj::item_count` and `max_items` read). Then it sweeps `range`
-/// around the leader for the **nearest item holder that still holds
-/// something** (0x00423630 with the predicate at 0x00422820: a `CVXItemHolder`
-/// whose count is non-zero, ranked by distance), builds a `getitems` command
-/// aimed at it from the leader's class (0x005aef20; a class that does not bind
-/// the method prints and answers false) and pushes it the way `SneakCommand`
-/// does (0x005b08d0: the runner cloned behind it, the runner ended), raises
-/// bit 19 of the leader's second flag word, and answers **true**.
+/// `0x00429530` resolves the squad and its **front member** (0x00443df0 --
+/// not a separate leader field), and answers **false** unless that member is
+/// a hero (`[obj+0x2c] & 0x01000000`), the squad's own `DestGAIKA` is where its
+/// AI is heading (0x00444140's order node, or `DestGAIKA` itself when there is
+/// no order, so only an order elsewhere fails it: not on the march), the
+/// member's command at index 0 (0x005ae130) is not already `getitems` --
+/// compared byte for byte, `std::string::compare` (0x00426df0 -> 0x00409350),
+/// so a different case is a different verb -- and it has room (`vtbl+0x104`
+/// items below `vtbl+0x108`, the count and the cap `Obj::item_count` and
+/// `max_items` read). Then it sweeps `range` around it for the **nearest
+/// item holder that still holds something** (0x00423630 with the predicate
+/// at 0x00422820: a `CVXItemHolder` whose count is non-zero, the nearer by
+/// floored root replacing the kept one only when strictly nearer), and, when
+/// the sweep kept one (0x00429640 tests the predicate's best slot), builds a
+/// `getitems` command aimed at it from the member's class (0x005aef20; a
+/// class that does not bind the method answers false) and pushes it the way
+/// `SneakCommand` does (0x005b08d0: the runner cloned behind it, the runner
+/// ended), raises bit 19 of the member's second flag word, and answers
+/// **true**.
+///
+/// This read the squad's `leader` field (the hero for a hero's squad, and
+/// nothing else, which agrees whenever the hero leads), compared the order's
+/// node with `GAIKAIn` instead of with `DestGAIKA`, and folded case.
 ///
 /// The bit is written by five routines in `.text` and read by none, so it is
-/// not kept. The node test passes here as it passes for every squad on this
-/// engine, both sides being `kNoGaika`, and the sweep is `objects_in_radius`
-/// over the holder class with the store's own count, ties to the lower id
-/// where the original's cell order decides.
+/// not kept. The sweep is `objects_in_radius` over the holder class with the
+/// store's own count, ties to the lower id where the original's cell order
+/// decides.
 HostOutcome take_nearby_items_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {
@@ -880,25 +889,16 @@ HostOutcome take_nearby_items_impl(CallContext& ctx) {
   }
   const std::int32_t range = ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
   World& world = *self.world;
-  const ObjectId leader = self.squad->leader;
+  if (self.squad->members.empty()) return HostOutcome::ok_with(Value::boolean(false));
+  const ObjectId leader = self.squad->members.front();
   const WorldObject* slot = world.find(leader);
   if (slot == nullptr || !slot->state.flags.is_hero) return HostOutcome::ok_with(Value::boolean(false));
-  // Both sides are `kNoGaika` on this engine, so the test is an equivalence
-  // the sweep labels; it is the original's, kept for the day a squad is sent.
-  if (self.squad->ai_dest != self.squad->gaika_in) return HostOutcome::ok_with(Value::boolean(false));
+  if (self.squad->dest_gaika != squad_ai_dest(*self.squad)) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
   CommandSystem* commands = command_system(world);
   if (commands == nullptr) return HostOutcome::ok_with(Value::boolean(false));
-  const auto same_verb = [](std::string_view a, std::string_view b) {
-    if (a.size() != b.size()) return false;
-    for (std::size_t i = 0; i < a.size(); ++i) {
-      if (std::tolower(static_cast<unsigned char>(a[i])) !=
-          std::tolower(static_cast<unsigned char>(b[i]))) {
-        return false;
-      }
-    }
-    return true;
-  };
-  if (same_verb(commands->command_name(leader, 0), "getitems")) {
+  if (commands->command_name(leader, 0) == "getitems") {
     return HostOutcome::ok_with(Value::boolean(false));
   }
   const ItemStore& items = self.heroes->items();

@@ -3386,6 +3386,56 @@ TEST(take_nearby_items_sneaks_getitems_at_the_nearest_full_holder) {
   CHECK(gone.status == HostStatus::ok && !gone.value.truthy_scalar());
 }
 
+/// 0x00429530 asks the squad's **front member** (0x00443df0), tests
+/// `DestGAIKA` against where the AI is heading (an order elsewhere fails, no
+/// order or an order to `DestGAIKA` passes), and compares the running verb
+/// byte for byte (0x00409350).
+TEST(take_nearby_items_asks_the_front_member_and_dest_gaika_against_the_order) {
+  Fixture f;
+  ItemCatalog catalog;
+  REQUIRE(catalog.load(bytes(kLootXml)).ok());
+  f.heroes.items().set_catalog(&catalog);
+  HostRegistry registry;
+  register_squad_host(registry);
+  register_command_host(registry);
+
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.unit_class);
+  f.world.set_position(hero, Point{1000, 1000});
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 100);
+  REQUIRE(f.world.find(hero)->state.flags.is_hero);
+  // No `leader` field: the hero is simply the first to join.
+  const SquadKey key = f.heroes.squads().create(1);
+  REQUIRE(f.heroes.squads().join(key, hero));
+  REQUIRE(f.heroes.squads().find(key)->leader == kNoObject);
+  f.heroes.squads().find(key)->dest_gaika = 3;
+  const ObjectId chest = f.world.spawn(NativeClass::item_holder, nullptr, f.unit_class);
+  f.world.set_position(chest, Point{1000, 1100});
+  REQUIRE(f.heroes.items().add(f.world, chest, "Rusty ring") != kNoObject);
+
+  const auto take = [&] {
+    (void)f.commands.forget(hero);
+    HostCall call(f.world, {pack_squad(key), Value::integer(400)});
+    const HostOutcome out = invoke(registry, CallKind::member, "TakeNearbyItems", 1, call);
+    CHECK(out.status == HostStatus::ok);
+    return out.value.truthy_scalar();
+  };
+  CHECK(take());                                         // no order: DestGAIKA is the heading
+  REQUIRE(f.heroes.squads().post_order(key, 5, 1));
+  CHECK(!take());                                        // an order elsewhere
+  REQUIRE(f.heroes.squads().post_order(key, 3, 1));
+  CHECK(take());                                         // an order to DestGAIKA
+
+  // Running `GETITEMS` is not running `getitems`.
+  (void)f.commands.forget(hero);
+  Command running;
+  running.verb = "GETITEMS";
+  (void)f.commands.add_command(f.world, hero, false, "GETITEMS", running);
+  REQUIRE(f.commands.command_name(hero, 0) == "GETITEMS");
+  HostCall call(f.world, {pack_squad(key), Value::integer(400)});
+  CHECK(invoke(registry, CallKind::member, "TakeNearbyItems", 1, call).value.truthy_scalar());
+}
+
 TEST(register_squad_host_defines_exactly_what_it_says_it_does) {
   HostRegistry registry;
   declare_shipped_surface(registry);
