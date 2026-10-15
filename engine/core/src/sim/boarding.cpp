@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "imperivm/core/game/class_graph.hpp"
+#include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/entrance.hpp"
 #include "imperivm/core/sim/hero.hpp"
@@ -302,36 +303,15 @@ Point take_random_point(World& world, std::vector<Point>& points) {
 }
 
 bool stand_point_free(World& world, const WorldObject& self, Point where) {
-  const ClassGraph* graph = world.class_graph();
-  // The reach: the ship's own radius, plus `ShipBattle`'s for a water unit and
-  // 40 for anything else. 0x0040a990 looks `ShipBattle` up by name whatever the
-  // receiver's class is; a graph without it contributes nothing.
-  std::int32_t reach = class_int(world, self, "radius");
-  if (class_flag(world, self, "water_unit")) {
-    if (graph != nullptr) reach += property_int(*graph, graph->find("ShipBattle"), "radius");
-  } else {
-    reach += 40;
-  }
-
-  std::vector<ObjectId> near;
-  world.objects_in_rect(where.x - reach, where.y - reach, where.x + reach, where.y + reach,
-                        ClassFilter{}, near);
-  for (const ObjectId id : near) {
-    if (id == self.id) continue;
-    const WorldObject* other = world.find(id);
-    if (other == nullptr) continue;
-    // 0x004094d0: a living unit with no path. Its fall-through admits an
-    // object with bit 18 of the SyncFlags word set, which nothing in this
-    // engine sets; see the header.
-    const std::uint32_t flags = world.sync_flags(id);
-    if ((flags & kSyncUnit) == 0 || other->state.health <= 0) continue;
-    if ((flags & kSyncHasPath) != 0) continue;
-    const Point at = world.resolve_position(id);
-    const std::int64_t dx = at.x - where.x;
-    const std::int64_t dy = at.y - where.y;
-    if (isqrt(dx * dx + dy * dy) < reach + class_int(world, *other, "radius")) return false;
-  }
-  return true;
+  // 0x0040a990 is the free-spot test the movement code asks too, and
+  // `MovementSystem::spot_free` is where it is read: the query window is the
+  // receiver's own radius plus `ShipBattle`'s for a water unit, 40 otherwise,
+  // but a neighbour blocks only nearer than **the two radii summed**
+  // (0x0040a880, handed the receiver's class radius) -- and a route lock
+  // that is not the receiver's own blocks the same way.
+  const MovementSystem* movement = movement_system(world);
+  if (movement == nullptr) return true;
+  return movement->spot_free(world, self.id, where, movement->radius_of(world, self.id));
 }
 
 // --------------------------------------------------------------------------
@@ -349,6 +329,59 @@ namespace {
 /// entry point below says what its default is.
 [[nodiscard]] const WorldObject* ship_receiver(const World& world, const Value& value) noexcept {
   return object_of(world, value);
+}
+
+/// 0x005c75c0, the one cancel both `NotifyBoardUnitCancel` and
+/// `CancelArmyBoard` reach: **only a unit that is on the list and not already
+/// aboard** is touched. It finds the unit in the ship's deque, then in the
+/// ship's holder; on a hit in the first and a miss in the second it erases the
+/// unit from the deque and writes the invalid handle into the unit's
+/// `[unit+0x18c]` -- `ship_to_board` -- whatever ship that named. A unit that
+/// is aboard keeps its place in the list. The `[ship+0x1d8]` latch that makes
+/// it a no-op while `NotifyShipBoardingCancel` runs is the header's subject.
+bool cancel_boarding(World& world, ObjectId ship, ObjectId unit) {
+  if (!world.boarding().listed(ship, unit)) return false;
+  WorldObject* slot = world.find(unit);
+  const ObjectId holder = holder_of_ship(world, ship);
+  if (slot != nullptr && holder != kNoObject && slot->state.holder == holder) return false;
+  (void)world.mutable_boarding().cancel(ship, unit);
+  if (slot != nullptr) slot->state.ship_to_board = kNoObject;
+  return true;
+}
+
+/// "In a ship" is `Unit::InShip`'s question (0x005319a0, the holder's ship
+/// slot), answered here the way `sim/world_host.cpp` answers it: the holder of
+/// a ship is `ship + 1`.
+[[nodiscard]] bool in_ship(const World& world, ObjectId id) {
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr || slot->state.holder == kNoObject) return false;
+  const WorldObject* before = world.find(slot->state.holder - 1);
+  return before != nullptr && before->object != nullptr && before->object->is_a(NativeClass::ship);
+}
+
+/// 0x0052fd60, `CancelArmyBoard`'s body, which `NotifyShipBoardingCancel`
+/// also runs for every hero aboard: one boolean for the hero -- is it in a
+/// ship -- and the same for each army member, and every member whose answer
+/// differs is detached (0x005db190; the walk starts again from the front after
+/// each, so the order does not matter). Then, only for a hero that is **not**
+/// in a ship and whose `ship_to_board` resolves, the cancel above.
+void split_army_at_the_gangplank(World& world, ObjectId hero) {
+  HeroSystem* heroes = hero_system_of(world);
+  if (heroes == nullptr) return;
+  const HeroRecord* record = heroes->hero(hero);
+  if (record == nullptr) return;
+  const bool hero_aboard = in_ship(world, hero);
+  // Copied out: `detach` writes the very list this walks.
+  const std::vector<ObjectId> army = record->army;
+  for (const ObjectId member : army) {
+    if (world.find(member) == nullptr) continue;
+    if (in_ship(world, member) != hero_aboard) (void)heroes->detach(world, member);
+  }
+  if (hero_aboard) return;
+  const WorldObject* slot = world.find(hero);
+  if (slot == nullptr) return;
+  const ObjectId ship = slot->state.ship_to_board;
+  if (world.find(ship) != nullptr) (void)cancel_boarding(world, ship, hero);
 }
 
 /// `Ship::NotifyBoardUnit(u)` -- 3 sites, and the sole blocker of `HERO_BOARD.VS`
@@ -400,15 +433,16 @@ HostOutcome m_notify_board_unit(CallContext& ctx) {
 /// `Ship::NotifyBoardUnitCancel(u)` -- 2 sites, both of them a boarding
 /// command's `..._ONFINISH` undoing itself.
 ///
-/// Off the list, and **nothing else**: 0x005c75c0 does not touch the unit, so
-/// `GetShipToBoard` keeps naming this ship afterwards. See the header.
+/// 0x005c7d00 prints a diagnostic and does nothing when the receiver or the
+/// argument names nothing, and otherwise runs `cancel_boarding`: off the list
+/// and `ship_to_board` cleared, unless the unit is already aboard.
 HostOutcome m_notify_board_unit_cancel(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("NotifyBoardUnitCancel: no world");
   const WorldObject* ship = ship_receiver(*world, ctx.arg(0));
   const WorldObject* unit = object_of(*world, ctx.arg(1));
   if (ship == nullptr || unit == nullptr) return HostOutcome::ok_void();
-  world->mutable_boarding().cancel(ship->id, unit->id);
+  (void)cancel_boarding(*world, ship->id, unit->id);
   return HostOutcome::ok_void();
 }
 
@@ -418,7 +452,14 @@ HostOutcome m_notify_board_unit_cancel(CallContext& ctx) {
 ///
 /// Each listed unit whose *running* command is one of the three boarding verbs
 /// has that command killed; a unit that has moved on to something else is left
-/// alone. Then the list is emptied whatever happened.
+/// alone. **Then every hero inside the ship's holder** (bit 0x1000000 of
+/// `[obj+0x2c]`, 0x005c77bf) runs `CancelArmyBoard`'s body (0x005c7818 ->
+/// 0x0052fd60): a hero that made it aboard drops the followers still ashore.
+/// Last the list is emptied whatever happened (0x005c7837).
+///
+/// The kill pass skips a member whose handle no longer resolves or that runs
+/// no command (`[unit+0x98]`); a dead unit's queue is empty in the original,
+/// which is what the `alive` test below stands for.
 ///
 /// The row is copied before anything is killed. In the original, killing one of
 /// these commands launches its `..._ONFINISH` script, which calls straight back
@@ -443,6 +484,10 @@ HostOutcome m_notify_ship_boarding_cancel(CallContext& ctx) {
       if (!is_boarding_verb(commands->command_name(unit, 0))) continue;
       commands->kill_command(*world, unit);
     }
+  }
+  for (const ObjectId passenger : passengers_of(*world, id)) {
+    if ((world->sync_flags(passenger) & kSyncHero) == 0) continue;
+    split_army_at_the_gangplank(*world, passenger);
   }
   world->mutable_boarding().clear(id);
   return HostOutcome::ok_void();
@@ -527,16 +572,25 @@ HostOutcome m_best_candidate_to_board(CallContext& ctx) {
 /// `UNIT_BOARD_COMMON.VS`: the walking unit asks, every two seconds, whether it
 /// has arrived.
 ///
-/// **150 world units, and no capacity check.** 0x005c7c00 measures
-/// `isqrt(dx² + dy²)` between the two and answers false at 150 or more; what it
-/// then calls (0x005c7840) refuses a unit that is already inside the holder and
-/// otherwise puts it in. Nothing on that path consults `max_units_to_board` --
-/// the capacity test is `UNIT_BOARD_COMMON.VS`'s own, on the line *after* this
-/// call, which is why a ship can end up one over. See the header.
+/// 0x005c7c00 resolves the argument, then the receiver, and answers false
+/// with a diagnostic when either names nothing. It measures
+/// `isqrt(dx² + dy²)` between the two `pos` and answers false at 150 or more.
+/// Within that, 0x005c7840 refuses a unit already inside the ship's holder and
+/// otherwise enters it through the holder entry 0x005d3e10 **without the force
+/// flag**, so **a full ship refuses**: 0x00532160 answers 0 when the holder's
+/// occupancy `[holder+0x14]` has reached its capacity `[holder+0x10]`
+/// (`max_units_to_board`). This used to board regardless of capacity.
 ///
-/// On success the unit comes off the list. It keeps its `ship_to_board`: the
-/// `..._ONFINISH` that follows will call `NotifyBoardUnitCancel` on a list the
-/// unit is no longer in, which is a no-op and is what the original does too.
+/// An admitted unit has its path and action dropped and stands at `(-1, -1)`
+/// in the holder -- what `garrison_enter` does for a settlement's -- and then
+/// comes off the list (0x0041ee70 on the deque, 0x005c78ef) and has its route
+/// cleared (0x005d3830). It keeps its `ship_to_board`.
+///
+/// **Not reproduced:** the holder entry takes the unit out of any old holder
+/// before it asks for room, so a held unit refused here would be left in
+/// none. A held unit's `pos` is `(-1, -1)`, which is 150 from a ship only at
+/// the map's corner. And the entry cancels the unit's feeder timer (`0x1f`),
+/// which `FeederSystem` does not keep.
 HostOutcome m_board_unit(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("BoardUnit: no world");
@@ -557,7 +611,17 @@ HostOutcome m_board_unit(CallContext& ctx) {
   if (isqrt(dx * dx + dy * dy) >= 150) return no;
 
   if (unit->state.holder == holder) return no;
+  if (static_cast<std::int32_t>(units_on_board(*world, ship_id)) >= capacity_of(*world, *ship)) {
+    return no;
+  }
+  if (MovementSystem* movement = movement_system(*world); movement != nullptr) {
+    movement->stop(*world, unit_id);
+  }
   if (!world->put_in_holder(unit_id, holder)) return no;
+  if (CombatSystem* combat = combat_system_of(*world); combat != nullptr) {
+    (void)combat->stop(unit_id);
+    combat->set_position(unit_id, kHeldPosition);
+  }
   world->mutable_boarding().cancel(ship_id, unit_id);
   return HostOutcome::ok_with(Value::boolean(true));
 }
@@ -598,38 +662,16 @@ HostOutcome m_get_ship_to_board(CallContext& ctx) {
 ///
 /// Then, and only when the hero is **not** aboard, it cancels the hero's own
 /// place in its ship's list, through the same `ship_to_board` the two unit
-/// `..._ONFINISH` scripts use. A hero that made it aboard has nothing to cancel.
+/// `..._ONFINISH` scripts use, which clears that field too. A hero that made
+/// it aboard has nothing to cancel. `split_army_at_the_gangplank` is the
+/// body; 0x0052fec0 only resolves the receiver, and does nothing past a
+/// diagnostic when it names nothing.
 HostOutcome m_cancel_army_board(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("CancelArmyBoard: no world");
   const WorldObject* hero = object_of(*world, ctx.arg(0));
   if (hero == nullptr) return HostOutcome::ok_void();
-  HeroSystem* heroes = hero_system_of(*world);
-  if (heroes == nullptr) return HostOutcome::ok_void();
-  const HeroRecord* record = heroes->hero(hero->id);
-  if (record == nullptr) return HostOutcome::ok_void();
-
-  // "In a ship" is `Unit::InShip`'s question, and it is answered here the way
-  // `sim/world_host.cpp` answers it: the holder of a ship is `ship + 1`.
-  const auto in_ship = [&](ObjectId id) {
-    const WorldObject* slot = world->find(id);
-    if (slot == nullptr || slot->state.holder == kNoObject) return false;
-    const WorldObject* before = world->find(slot->state.holder - 1);
-    return before != nullptr && before->object != nullptr &&
-           before->object->is_a(NativeClass::ship);
-  };
-
-  const bool hero_aboard = in_ship(hero->id);
-  // Copied out: `detach` writes the very list this walks.
-  const std::vector<ObjectId> army = record->army;
-  for (const ObjectId member : army) {
-    if (in_ship(member) != hero_aboard) (void)heroes->detach(*world, member);
-  }
-
-  if (!hero_aboard) {
-    const ObjectId ship = hero->state.ship_to_board;
-    if (world->find(ship) != nullptr) world->mutable_boarding().cancel(ship, hero->id);
-  }
+  split_army_at_the_gangplank(*world, hero->id);
   return HostOutcome::ok_void();
 }
 
@@ -682,8 +724,17 @@ HostOutcome m_unboard_units(CallContext& ctx) {
 /// `Ship::FindPointToStay()` -- 20 sites, all of them `SHIP_IDLE.VS`'s
 /// `.Goto(.FindPointToStay, 0, 2000, 0, -1)`.
 ///
-/// An unresolvable receiver answers `(0, 0)` without drawing, which is what
-/// 0x005c7020 pushes when the handle resolves to nothing.
+/// The receiver's area is taken once, before the first throw (0x0043cb70).
+/// Each try draws `dy` then `dx` from the world generator (0x005c709c,
+/// 0x005c70b9) and passes the point when its area is the ship's, its
+/// passability cell is free, and 0x0040a990 finds the spot free for a body of
+/// the ship's class radius (`stand_point_free`). The hundredth miss answers
+/// the ship's `pos`.
+///
+/// **An unresolvable receiver is a fault in the original**, not an answer:
+/// there is no validity test, and the area lookup dereferences the null
+/// object. This answers `(0, 0)` without drawing; the one shipped site asks
+/// it of the ship running its own idle.
 HostOutcome m_find_point_to_stay(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("FindPointToStay: no world");

@@ -92,10 +92,19 @@ struct Fixture {
              <properties maxhealth="500" max_units_to_board="2"/></class>)",
         R"(<class id="Soldier" parent="Object" cpp_class="CVXUnit">
              <properties maxhealth="100"/></class>)",
+        // Bodies with a size, for `FindPointToStay`'s free-spot test, which
+        // measures by the two radii summed.
+        R"(<class id="Skiff" parent="Object" cpp_class="CVXShip">
+             <properties maxhealth="500" radius="30" max_units_to_board="2"/></class>)",
+        R"(<class id="Sentry" parent="Object" cpp_class="CVXUnit">
+             <properties maxhealth="100" radius="20"/></class>)",
+        R"(<class id="Giant" parent="Object" cpp_class="CVXUnit">
+             <properties maxhealth="100" radius="200"/></class>)",
     };
     const char* names[] = {"object.sc.xml", "shipbattle.sc.xml", "barge.sc.xml",
-                           "soldier.sc.xml"};
-    for (int i = 0; i < 4; ++i) graph.add(bytes_of(docs[i]), names[i]);
+                           "soldier.sc.xml", "skiff.sc.xml",      "sentry.sc.xml",
+                           "giant.sc.xml"};
+    for (int i = 0; i < 7; ++i) graph.add(bytes_of(docs[i]), names[i]);
     graph.link();
     world.set_class_graph(&graph);
     ship_class = graph.find("Barge");
@@ -286,12 +295,13 @@ TEST(boarding_notify_appends_once_and_starts_one_boardunit_command) {
   CHECK(f.world.find(b)->state.ship_to_board == idler.ship);
 }
 
-/// A cancel takes the unit off the list and **leaves its field alone**.
+/// A cancel takes a unit that is not yet aboard off the list **and clears its
+/// field** (0x005c76ad writes the invalid handle into `[unit+0x18c]`); a unit
+/// already aboard is left listed and named.
 ///
-/// This is the asymmetry `UNIT_BOARD_ONFINISH.VS` is built on: it reaches the
-/// ship back through `.GetShipToBoard` precisely because the cancel it is about
-/// to perform has not yet run, and the field survives the one before it too.
-TEST(boarding_cancel_clears_the_list_and_not_the_units_own_field) {
+/// `UNIT_BOARD_ONFINISH.VS` reads `.GetShipToBoard` before it calls the
+/// cancel, so it finds its ship all the same.
+TEST(boarding_cancel_takes_a_walker_off_the_list_and_clears_its_field) {
   Fixture f;
   const World::ShipIds ship = f.make_ship(pt(0, 0));
   const ObjectId a = f.make_unit(pt(1000, 0));
@@ -302,13 +312,37 @@ TEST(boarding_cancel_clears_the_list_and_not_the_units_own_field) {
   REQUIRE(named.value.is_object());
   CHECK(named.value.as_object().id == ship.ship);
 
+  // A ship that has sunk reads as the invalid handle, which is what the
+  // `.IsValid` guard in both `..._ONFINISH` scripts is for.
+  const World::ShipIds wreck = f.make_ship(pt(4000, 0));
+  const ObjectId sailor = f.make_unit(pt(4100, 0));
+  f.call(script::CallKind::member, "NotifyBoardUnit", {f.obj(wreck.ship), f.obj(sailor)});
+  REQUIRE(f.world.despawn(wreck.ship));
+  const script::HostOutcome sunk =
+      f.call(script::CallKind::member, "GetShipToBoard", {f.obj(sailor)});
+  CHECK(sunk.value.is_object());
+  CHECK(sunk.value.as_object().type == script::kNoType);
+
+  // A listed unit that is already inside the holder is not cancelled: the
+  // second `find` at 0x005c7662 is over the holder, and a hit there leaves
+  // both the list and the field as they were.
+  const ObjectId inside = f.make_unit(pt(1, 0));
+  f.call(script::CallKind::member, "NotifyBoardUnit", {f.obj(ship.ship), f.obj(inside)});
+  REQUIRE(f.world.put_in_holder(inside, ship.holder));
+  f.call(script::CallKind::member, "NotifyBoardUnitCancel", {f.obj(ship.ship), f.obj(inside)});
+  CHECK(f.world.boarding().listed(ship.ship, inside));
+  CHECK(f.world.find(inside)->state.ship_to_board == ship.ship);
+  REQUIRE(f.world.remove_from_holder(inside, pt(1, 0)));
+  f.call(script::CallKind::member, "NotifyBoardUnitCancel", {f.obj(ship.ship), f.obj(inside)});
+
   f.call(script::CallKind::member, "NotifyBoardUnitCancel", {f.obj(ship.ship), f.obj(a)});
   CHECK(f.number(f.call(script::CallKind::member, "NumUnitsToBoard", {f.obj(ship.ship)})) == 0);
-  // Still named. Nothing in `gbr.exe` clears `[unit+0x18c]`.
+  // Cleared, whatever ship it named.
+  CHECK(f.world.find(a)->state.ship_to_board == kNoObject);
   const script::HostOutcome after =
       f.call(script::CallKind::member, "GetShipToBoard", {f.obj(a)});
   REQUIRE(after.value.is_object());
-  CHECK(after.value.as_object().id == ship.ship);
+  CHECK(after.value.as_object().type == script::kNoType);
 
   // **A ship whose last member cancels holds no row at all.** The original has
   // no such thing as a row -- every ship carries its deque, empty or not -- so
@@ -317,18 +351,14 @@ TEST(boarding_cancel_clears_the_list_and_not_the_units_own_field) {
   // the same world, and they have to hash alike.
   CHECK(f.world.boarding().rows() == 0);
 
-  // Cancelling a unit that is not on the list is a no-op rather than an error:
-  // it is what the second `..._ONFINISH` of a pair does.
+  // Cancelling a unit that is not on the list touches nothing -- not even the
+  // field, which the deque `find` exits before. A rival ship's stamp
+  // survives a cancel from a ship that never listed the unit.
+  const World::ShipIds rival = f.make_ship(pt(8000, 0));
+  f.call(script::CallKind::member, "NotifyBoardUnit", {f.obj(rival.ship), f.obj(a)});
   f.call(script::CallKind::member, "NotifyBoardUnitCancel", {f.obj(ship.ship), f.obj(a)});
   CHECK(f.number(f.call(script::CallKind::member, "NumUnitsToBoard", {f.obj(ship.ship)})) == 0);
-
-  // A ship that has sunk reads as the invalid handle, which is what the
-  // `.IsValid` guard in both `..._ONFINISH` scripts is for.
-  REQUIRE(f.world.despawn(ship.ship));
-  const script::HostOutcome sunk =
-      f.call(script::CallKind::member, "GetShipToBoard", {f.obj(a)});
-  CHECK(sunk.value.is_object());
-  CHECK(sunk.value.as_object().type == script::kNoType);
+  CHECK(f.world.find(a)->state.ship_to_board == rival.ship);
 }
 
 // --------------------------------------------------------------------------
@@ -371,8 +401,9 @@ TEST(boarding_only_are_units_to_board_prunes_the_dead) {
   CHECK(f.number(f.call(script::CallKind::member, "NumUnitsToBoard", {f.obj(ship.ship)})) == 0);
 }
 
-/// The full-ship clear compares for **equality**, and `BoardUnit` is what can
-/// put a ship past the number it compares against.
+/// The full-ship clear compares for **equality**. `BoardUnit` stops at the
+/// capacity, but a forced holder entry -- `SpawnGroupInHolder`'s -- can put a
+/// ship past it, and then the list is never cleared.
 TEST(boarding_full_ship_clear_is_an_equality_test) {
   Fixture f;
   const World::ShipIds ship = f.make_ship(pt(0, 0));
@@ -391,9 +422,9 @@ TEST(boarding_full_ship_clear_is_an_equality_test) {
   CHECK(!f.truthy(f.call(script::CallKind::member, "AreUnitsToBoard", {f.obj(ship.ship)})));
   CHECK(f.number(f.call(script::CallKind::member, "NumUnitsToBoard", {f.obj(ship.ship)})) == 0);
 
-  // Three of two, which `BoardUnit` will do because it checks distance and not
-  // capacity: the equality fails, so a fresh list is *not* cleared. That is the
-  // original's behaviour and the reason `>=` is not written here.
+  // Three of two, put there as a forced entry would: the equality fails, so a
+  // fresh list is *not* cleared. That is the original's behaviour and the
+  // reason `>=` is not written here.
   REQUIRE(f.world.put_in_holder(three, ship.holder));
   f.call(script::CallKind::member, "NotifyBoardUnit", {f.obj(ship.ship), f.obj(waiting)});
   CHECK(f.truthy(f.call(script::CallKind::member, "AreUnitsToBoard", {f.obj(ship.ship)})));
@@ -433,8 +464,9 @@ TEST(boarding_best_candidate_is_the_nearest_and_ties_go_to_the_earlier) {
   CHECK(f.number(f.call(script::CallKind::member, "NumUnitsToBoard", {f.obj(ship.ship)})) == 0);
 }
 
-/// `BoardUnit` is a 150-unit radius, a holder move, and a delisting.
-TEST(boarding_board_unit_needs_150_units_and_no_capacity) {
+/// `BoardUnit` is a 150-unit radius, a holder with room, a holder move, and a
+/// delisting.
+TEST(boarding_board_unit_needs_150_units_and_a_berth) {
   Fixture f;
   const World::ShipIds ship = f.make_ship(pt(0, 0));
   const ObjectId walker = f.make_unit(pt(200, 0));
@@ -455,21 +487,26 @@ TEST(boarding_board_unit_needs_150_units_and_no_capacity) {
   CHECK(f.truthy(f.call(script::CallKind::member, "BoardUnit", {f.obj(ship.ship), f.obj(walker)})));
   CHECK(f.world.find(walker)->state.holder == ship.holder);
   CHECK(f.number(f.call(script::CallKind::member, "NumUnitsToBoard", {f.obj(ship.ship)})) == 0);
-  // The field it was stamped with survives the boarding, as it survives a
-  // cancel: nothing clears it.
+  // The field it was stamped with survives the boarding: 0x005c78ef erases
+  // from the deque and leaves the unit's `[unit+0x18c]` alone.
   CHECK(f.world.find(walker)->state.ship_to_board == ship.ship);
 
   // Boarding again is false, because it is already inside -- the holder `find`
-  // at 0x005c7889, not a capacity test.
+  // at 0x005c7889.
   CHECK(!f.truthy(f.call(script::CallKind::member, "BoardUnit", {f.obj(ship.ship), f.obj(walker)})));
 
-  // **Past capacity, and it still boards.** Two berths, two aboard, and a third
-  // walks on. This is the case that makes the equality test above reachable.
+  // **A full ship refuses.** Two berths: the second boards, and the third is
+  // turned away by the holder entry (0x00532160 without the force flag) and
+  // stays ashore, still on the list it was asked onto.
   const ObjectId second = f.make_unit(pt(10, 0));
   const ObjectId third = f.make_unit(pt(20, 0));
+  f.call(script::CallKind::member, "NotifyBoardUnit", {f.obj(ship.ship), f.obj(third)});
   CHECK(f.truthy(f.call(script::CallKind::member, "BoardUnit", {f.obj(ship.ship), f.obj(second)})));
-  CHECK(f.truthy(f.call(script::CallKind::member, "BoardUnit", {f.obj(ship.ship), f.obj(third)})));
-  CHECK(f.number(f.call(script::CallKind::member, "UnitsCount", {f.obj(ship.ship)})) == 3);
+  CHECK(!f.truthy(f.call(script::CallKind::member, "BoardUnit", {f.obj(ship.ship), f.obj(third)})));
+  CHECK(f.world.find(third)->state.holder == kNoObject);
+  CHECK(f.world.find(third)->state.position == pt(20, 0));
+  CHECK(f.world.boarding().listed(ship.ship, third));
+  CHECK(f.number(f.call(script::CallKind::member, "UnitsCount", {f.obj(ship.ship)})) == 2);
   CHECK(f.number(f.call(script::CallKind::member, "UnitsMax", {f.obj(ship.ship)})) == 2);
 }
 
@@ -506,6 +543,48 @@ TEST(boarding_ship_cancel_kills_only_the_boarding_commands) {
   CHECK(f.commands.command_name(distracted, 0) == "attack");
   CHECK(f.commands.command_count(idle_hands) == 0);
   // Emptied whatever happened to the commands.
+  CHECK(f.number(f.call(script::CallKind::member, "NumUnitsToBoard", {f.obj(ship.ship)})) == 0);
+}
+
+/// After its kill pass `NotifyShipBoardingCancel` walks the ship's holder and
+/// runs `CancelArmyBoard`'s body for every hero aboard (0x005c77bf ..
+/// 0x005c7818): the followers still on the beach stop being that hero's. A
+/// hero ashore is not in the holder and is not asked.
+TEST(boarding_ship_cancel_splits_the_armies_of_the_heroes_aboard) {
+  Fixture f;
+  const World::ShipIds ship = f.make_ship(pt(0, 0));
+  const auto hero_at = [&](Point where) {
+    const ObjectId id = f.world.spawn(NativeClass::hero, nullptr, f.unit_class);
+    f.world.set_health(id, 400);
+    f.world.set_position(id, where);
+    f.heroes.register_hero(f.world, id);
+    return id;
+  };
+  const auto follower = [&](ObjectId hero, Point where) -> ObjectId {
+    const ObjectId id = f.make_unit(where);
+    f.heroes.register_unit(f.world, id);
+    return f.heroes.attach(f.world, id, hero) ? id : kNoObject;
+  };
+  const ObjectId captain = hero_at(pt(10, 0));
+  const ObjectId mate = follower(captain, pt(20, 0));
+  const ObjectId straggler = follower(captain, pt(900, 0));
+  const ObjectId landsman = hero_at(pt(2000, 0));
+  const ObjectId afloat = follower(landsman, pt(30, 0));
+  REQUIRE(mate != kNoObject);
+  REQUIRE(straggler != kNoObject);
+  REQUIRE(afloat != kNoObject);
+  REQUIRE(f.world.put_in_holder(captain, ship.holder));
+  REQUIRE(f.world.put_in_holder(mate, ship.holder));
+  REQUIRE(f.world.put_in_holder(afloat, ship.holder));
+  f.call(script::CallKind::member, "NotifyBoardUnit", {f.obj(ship.ship), f.obj(straggler)});
+
+  f.call(script::CallKind::member, "NotifyShipBoardingCancel", {f.obj(ship.ship)});
+
+  CHECK(f.heroes.hero_of(mate) == captain);
+  CHECK(f.heroes.hero_of(straggler) == kNoObject);
+  CHECK(f.heroes.army_size(captain) == 1);
+  // The hero ashore keeps the follower that is aboard: nobody asked it.
+  CHECK(f.heroes.hero_of(afloat) == landsman);
   CHECK(f.number(f.call(script::CallKind::member, "NumUnitsToBoard", {f.obj(ship.ship)})) == 0);
 }
 
@@ -573,6 +652,7 @@ TEST(boarding_cancel_army_board_drops_the_followers_on_the_other_side) {
   CHECK(g.heroes.hero_of(embarked) == kNoObject);
   // Off the queue, because the hero is not aboard.
   CHECK(g.number(g.call(script::CallKind::member, "NumUnitsToBoard", {g.obj(boat.ship)})) == 0);
+  CHECK(g.world.find(chief)->state.ship_to_board == kNoObject);
 }
 
 // --------------------------------------------------------------------------
@@ -958,12 +1038,21 @@ TEST(unboard_units_drops_only_the_listed_passengers_of_this_ship) {
 }
 
 /// `FindPointToStay`: two draws per try, y first; the first candidate that is
-/// in the ship's area, unblocked and clear of standing units wins; a hundred
-/// misses answer the ship's own position.
+/// in the ship's area, unblocked and a free spot wins; a hundred misses answer
+/// the ship's own position.
+///
+/// **A neighbour blocks only nearer than the two radii summed** (0x0040a880,
+/// handed the ship's class radius), and only when the query around the point
+/// -- the ship's radius plus `ShipBattle`'s for a water unit, 40 otherwise --
+/// finds its centre at all. The window used to be the blocking distance too.
 TEST(find_point_to_stay_is_the_first_candidate_that_passes_three_tests) {
   Fixture f;
   f.open_field(64);
-  const World::ShipIds ship = f.make_ship(pt(512, 512));
+  const World::ShipIds ship = f.make_ship(pt(5000, 5000));
+  // A 30-radius ship that is not a water unit: its query reaches 30 + 40.
+  const World::ShipIds skiff = f.world.spawn_ship(nullptr, f.graph.find("Skiff"));
+  f.world.set_position(skiff.ship, pt(512, 512));
+  f.world.set_health(skiff.ship, 500);
 
   // Open water, nobody about: the first throw lands.
   f.world.seed(31);
@@ -972,69 +1061,85 @@ TEST(find_point_to_stay_is_the_first_candidate_that_passes_three_tests) {
   const std::int32_t dx1 = oracle.between(-500, 500);
   const Point first = pt(512 + dx1, 512 + dy1);
   script::HostOutcome out =
-      f.call(script::CallKind::member, "FindPointToStay", {f.obj(ship.ship)});
+      f.call(script::CallKind::member, "FindPointToStay", {f.obj(skiff.ship)});
   CHECK(out.status == script::HostStatus::ok);
   CHECK(unpack_point(out.value) == first);
   CHECK(f.world.rng().state() == oracle.state());
 
-  // A living soldier standing on that very point blocks it: the Barge
-  // declares no radius and is not a water unit, so its reach is 40, and the
-  // soldier is at distance 0. The second throw is taken instead.
   const std::int32_t dy2 = oracle.between(-500, 500);
   const std::int32_t dx2 = oracle.between(-500, 500);
   const Point second = pt(512 + dx2, 512 + dy2);
-  {
-    const std::int64_t ddx = second.x - first.x;
-    const std::int64_t ddy = second.y - first.y;
-    // The seed was chosen so the second throw is clear of the first; a
-    // different generator would need a different seed here.
-    REQUIRE(ddx * ddx + ddy * ddy >= 40 * 40);
-  }
-  const ObjectId sentry = f.make_unit(first);
+  const auto apart = [](Point a, Point b) {
+    const std::int64_t dx = a.x - b.x;
+    const std::int64_t dy = a.y - b.y;
+    return dx * dx + dy * dy;
+  };
+  // The seed was chosen so the second throw is clear of every blocker placed
+  // near the first below; a different generator would need a different seed.
+  REQUIRE(apart(second, first) >= 300 * 300);
+
+  // A standing 20-radius sentry 49 from the point blocks it (49 < 30 + 20),
+  // and the second throw is taken instead.
+  const ObjectId sentry = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Sentry"));
+  f.world.set_health(sentry, 100);
+  f.world.set_position(sentry, pt(first.x + 49, first.y));
   f.world.seed(31);
-  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(ship.ship)});
+  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(skiff.ship)});
   CHECK(unpack_point(out.value) == second);
   CHECK(f.world.rng().state() == oracle.state());
 
-  // The same soldier walking does not block: 0x004094d0 admits only a unit
+  // At 50 it is clear, and at 60 -- inside the 70 the query reaches, which
+  // the blocking distance used to be measured from -- clear too.
+  for (const std::int32_t gap : {50, 60}) {
+    f.world.set_position(sentry, pt(first.x + gap, first.y));
+    f.world.seed(31);
+    out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(skiff.ship)});
+    CHECK(unpack_point(out.value) == first);
+  }
+  f.world.set_position(sentry, pt(first.x + 10, first.y));
+
+  // The same sentry walking does not block: 0x004094d0 admits only a unit
   // with no path.
   f.world.find(sentry)->state.flags.has_active_path = true;
   f.world.seed(31);
-  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(ship.ship)});
+  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(skiff.ship)});
   CHECK(unpack_point(out.value) == first);
   f.world.find(sentry)->state.flags.has_active_path = false;
-
-  // The blocking test is strict: a soldier at exactly the reach is clear.
-  f.world.set_position(sentry, pt(first.x + 40, first.y));
-  f.world.seed(31);
-  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(ship.ship)});
-  CHECK(unpack_point(out.value) == first);
-  f.world.set_position(sentry, pt(first.x + 39, first.y));
-  f.world.seed(31);
-  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(ship.ship)});
-  CHECK(unpack_point(out.value) == second);
-  f.world.set_position(sentry, first);
 
   // Nor does a dead one.
   f.world.set_health(sentry, 0);
   f.world.seed(31);
-  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(ship.ship)});
+  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(skiff.ship)});
   CHECK(unpack_point(out.value) == first);
   f.world.set_health(sentry, 100);
+  f.world.set_position(sentry, pt(0, 0));
 
-  // A water unit's reach is its own radius plus `ShipBattle`'s -- 90 and 90,
-  // so 180 -- and a soldier 200 away is clear where one 170 away is not. The
-  // barge is moved off the map first: a ship is a living unit too, and the
-  // one standing where the warship is would otherwise block its throws.
-  f.world.set_position(ship.ship, pt(5000, 5000));
+  // A 200-radius giant 150 away would block by the radii (150 < 230), but
+  // its centre is outside the 70 the query reaches, so it is never seen.
+  const ObjectId giant = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Giant"));
+  f.world.set_health(giant, 100);
+  f.world.set_position(giant, pt(first.x + 150, first.y));
+  f.world.seed(31);
+  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(skiff.ship)});
+  CHECK(unpack_point(out.value) == first);
+  f.world.set_position(giant, pt(first.x + 69, first.y));
+  f.world.seed(31);
+  out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(skiff.ship)});
+  CHECK(unpack_point(out.value) == second);
+  f.world.set_position(giant, pt(0, 0));
+
+  // A water unit's query reaches its own radius plus `ShipBattle`'s -- 90 and
+  // 90, so 180 -- but the sentry still blocks only nearer than 90 + 20: at 110
+  // it is clear, at 109 it is not.
+  f.world.set_position(skiff.ship, pt(5000, 4000));
   const World::ShipIds warship = f.world.spawn_ship(nullptr, f.graph.find("ShipBattle"));
   f.world.set_position(warship.ship, pt(512, 512));
   f.world.set_health(warship.ship, 100);
-  f.world.set_position(sentry, pt(first.x + 200, first.y));
+  f.world.set_position(sentry, pt(first.x + 110, first.y));
   f.world.seed(31);
   out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(warship.ship)});
   CHECK(unpack_point(out.value) == first);
-  f.world.set_position(sentry, pt(first.x + 170, first.y));
+  f.world.set_position(sentry, pt(first.x + 109, first.y));
   f.world.seed(31);
   out = f.call(script::CallKind::member, "FindPointToStay", {f.obj(warship.ship)});
   CHECK(unpack_point(out.value) == second);
