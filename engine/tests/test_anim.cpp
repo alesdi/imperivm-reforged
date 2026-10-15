@@ -512,6 +512,29 @@ TEST(anim_set_state_dispatches_on_the_handle_type) {
             .status == script::HostStatus::ok);
 }
 
+/// A squad's `StateTime` is the millisecond the script set it on, which is what
+/// `GetTime()` answers -- not the turn's end the world already stands at.
+///
+/// 0x004211c0 stamps the game's running time (`[game+0x1258]`), the clock the
+/// scripts' wheel moves one millisecond at a time; `SQUADMONITOR.VS` and
+/// `EVALRECRUIT.VS` subtract the stamp from `GetTime()`.
+TEST(anim_squad_set_state_stamps_the_scripts_millisecond) {
+  AnimBench b;
+  script::Scheduler clock;
+  b.scheduler = &clock;
+  const ObjectId leader = b.spawn();
+  const SquadKey key = b.heroes.squads().create(1, leader);
+  REQUIRE(key.valid());
+  b.world.advance_turns(8);
+  REQUIRE(b.world.time() == 800);
+  clock.set_now(730);
+  b.call("SetState", 1, {pack_squad(key), script::Value::integer(7)});
+  const Squad* squad = b.heroes.squads().find(key);
+  REQUIRE(squad != nullptr);
+  CHECK(squad->state == 7);
+  CHECK(squad->state_time == 730);
+}
+
 /// `StartDelayedAnim(slot, point, delay)` -- one site, and its delay is `-1`.
 ///
 /// `CATAPULT_IDLE.VS:32` is `.StartDelayedAnim(1, .pos, -1);`, and `-1` is the

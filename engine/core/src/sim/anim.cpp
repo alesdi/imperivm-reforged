@@ -419,6 +419,16 @@ HostOutcome m_get_anim_duration(CallContext& ctx) {
 /// **The squad half writes the time too.** `Squad::StateTime` is persisted as
 /// `StateSetTime` and its three corpus sites all compare it against `GetTime()`,
 /// so it is when the state was last set and not how long it has been held.
+/// 0x004211c0 splits the handle word (low four bits the player, the rest the
+/// index), looks the record up (0x00443e30) and writes the state as a 16-bit
+/// word at `+0x28` and the time at `+0x2c`, with no null check and no `SF_NOAI`
+/// refusal; a handle naming no squad faults there and is a no-op here. The
+/// state is kept 32 bits wide here, as every other writer keeps it; no shipped
+/// state needs more than 16.
+///
+/// `Squad::SetState(nState, nSetFlags, nClrFlags)` (0x00421380) is registered
+/// too, and is not bound: it is the same with `flags = (flags | set) & ~clr`,
+/// and both of its corpus sites (`SQUADMONITOR.VS`) are inside a comment.
 HostOutcome m_set_state(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetState: no world");
@@ -434,8 +444,13 @@ HostOutcome m_set_state(CallContext& ctx) {
     // restarts `StateTime`. This used to write only on a change, which is the
     // object half's rule and not the squad's; `SQUADMONITOR.VS` times its
     // idling from the stamp.
+    //
+    // The stamp is the game's running time (`[game+0x1258]`), which is the
+    // millisecond the script woke on -- the scheduler's `now`, as `GetTime`
+    // answers it -- not the turn's end the world already stands at. The three
+    // sites that read it subtract it from `GetTime()`.
     squad->state = state;
-    squad->state_time = world->time();
+    squad->state_time = ctx.scheduler != nullptr ? ctx.scheduler->now() : world->time();
     return HostOutcome::ok_void();
   }
 
@@ -449,42 +464,35 @@ HostOutcome m_set_state(CallContext& ctx) {
 /// `Obj::IsInState()` -- whether the object is holding a state rather than
 /// playing an animation. 2 sites, and one internal caller.
 ///
-/// **What the executable says, and what it does not.** `0x005ad860` is
-/// `0x0053cfc0 != 0`, and `0x0053cfc0` asks the object whether its component
-/// list at `[obj+0xc]` holds an entry keyed 27 -- answering *true when it does
-/// not*. What component 27 is has not been recovered: nothing in the executable
-/// names it, and the only other constant that list is searched for is 23, from
-/// an unrelated caller. So the reading here comes from the two places the
-/// answer is used rather than from the field.
+/// **What it reads.** `0x005ad860` is `0x0053cfc0 != 0`, and `0x0053cfc0` asks
+/// whether the object's pending-message list (`[obj+0xc]`, searched by
+/// 0x00687820) holds **no** message with id 27 -- the animation timer.
+/// `StartAnimation` (0x0053e6c0) arms it (0x00688240) for every animation it
+/// starts, the timer's handler (0x0053f6a0) re-arms it through the
+/// animation's phases and lets it lapse at the end, and `StopAnimation`
+/// (0x0053d730) and an off-map start cancel it (0x00687ce0). So an object is
+/// *in a state* exactly when no animation is playing on it.
 ///
-/// Both point the same way. `CROW_MOVE.VS` and `EAGLE_MOVE.VS` open with
+/// `CROW_MOVE.VS` and `EAGLE_MOVE.VS` open with
 ///
 ///     while (! .IsInState) Sleep(50);
 ///
-/// before their first `PlayAnim`, which is a bird waiting for whatever
-/// `CROW_IDLE.VS` last started to run out; and `Flying::PickFlyingPoint`
-/// (0x0051c530) takes the first flock-mate that is **not** in a state and *is*
-/// in the air, which is a bird whose heading is live because it is mid-flight.
-/// An entry that an action installs and its completion removes satisfies both,
-/// and the name is then literal: an object *in* a state is one that has settled
-/// into a pose.
+/// before their first `PlayAnim`: a bird waiting for whatever `CROW_IDLE.VS`
+/// last started to run out. `Flying::PickFlyingPoint` (0x0051c530) reads the
+/// same test.
 ///
-/// This engine already has that bit, hashed and saved: `WorldObject::animating`
-/// is set by `play_anim` and cleared by the turn loop when the sample finishes
-/// (`world.cpp`). So `IsInState` is its negation, and the wait above terminates
-/// for every animation this engine can start -- which the reading has to, or
-/// two shipped scripts would sleep for the rest of the match.
+/// This engine's bit for it is `WorldObject::animating`, set by `play_anim`
+/// and cleared by the turn loop when the strip finishes (`world.cpp`); so
+/// `IsInState` is its negation. **Approximated** in when the animation ends:
+/// the original's timer lapses at the declared `duration`, the strip's end
+/// here (`length_of`). An object with no entity at all is in a state in both.
 ///
-/// **What is still unknown**: whether an object with no entity at all -- 579 of
-/// the 889 declare no animation -- is in a state in the original. Here it is,
-/// because `animating` is false for it, and that is the answer that keeps the
-/// wait loop terminating.
+/// The receiver is not checked: a handle naming nothing hands a null object to
+/// the list search, which faults. This answers false.
 HostOutcome m_is_in_state(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("IsInState: no world");
-  // An unresolvable receiver reports and answers false, which is `setne` on the
-  // zero the diagnostic path leaves behind.
   return HostOutcome::ok_with(Value::boolean(slot != nullptr && !slot->animating));
 }
 
