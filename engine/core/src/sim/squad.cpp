@@ -3495,18 +3495,16 @@ HostOutcome nearest_hospital_impl(CallContext& ctx) {
   const PlayerTable& players = world.players();
   AiSystem* ai = ai_system_of(world);
   const PlayerId player = squad.key.player;
-  const Point at = world.resolve_position(leader);
+  // The front member's `posRH` (`vtbl+0xc8`, 0x00431720): for a garrisoned
+  // member its town's central building. `resolve_position` stopped at the
+  // holder record, (0, 0), and measured a garrisoned squad from the corner.
+  const Point at = unit_pos_rh(world, leader);
   const std::int32_t strength = squad.eval;
   const GaikaNode* standing = nodes.find(squad.gaika_in);
   const LsaId from = standing == nullptr ? kNoLsa : standing->lsa;
   const ClassGraph* graph = world.class_graph();
   const ClassIndex village = graph == nullptr ? kNoClass : graph->find("BaseVillage");
 
-  // `[squad+0x30] & 4` on a squad of player 14 or 15 -- the wildlife and the
-  // neutral-passive -- and only there. See the header for how this differs
-  // from the census.
-  constexpr PlayerId kNeutralWildlife = 14;
-  constexpr PlayerId kNeutralPassive = 15;
   constexpr std::int32_t kHospitalFood = 300;
 
   GaikaId best = kNoGaika;

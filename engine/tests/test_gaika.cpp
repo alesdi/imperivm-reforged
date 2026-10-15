@@ -5429,6 +5429,26 @@ struct HospitalBench : ShoreBench {
 
 }  // namespace
 
+/// **A garrisoned squad measures from its town**: the distance is from the
+/// front member's `posRH` (0x00431720), which for a member inside a
+/// settlement is the central building. Measured from the holder record's
+/// (0, 0), the town by the map's corner won.
+TEST(nearest_hospital_measures_a_garrisoned_squad_from_its_town) {
+  HospitalBench b;
+  const SettlementId by_corner = b.town(3, 3, 2);
+  const SettlementId by_home = b.town(12, 9, 2);
+  const SettlementId home = b.town(12, 7, 2, "Townhall", 10, /*food=*/0);
+  b.rebuild();
+  const GaikaId at_corner = b.node_of(by_corner);
+  const GaikaId at_home_side = b.node_of(by_home);
+  REQUIRE(at_corner != kNoGaika && at_home_side != kNoGaika && at_corner != at_home_side);
+
+  const ObjectId leader = b.walker(12, 7, 2);
+  REQUIRE(garrison_enter(b.world, home, leader, /*force=*/true));
+  const SquadKey key = b.band(2, {leader}, b.node_of(home), 100);
+  CHECK(b.hospital(key) == at_home_side);
+}
+
 /// The four gates, and the distance score with its two multipliers. The
 /// leader stands mid-island; a town 286 away and a village 271 away compete,
 /// and the village's half-again makes it 406.
