@@ -19,6 +19,7 @@
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/feeder.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
@@ -639,6 +640,26 @@ TEST(feeder_host_reads_and_writes_a_units_food) {
                   {handle, script::Value::integer(0)})
             .status == script::HostStatus::ok);
   CHECK(feeder.food(soldier) == 0);
+
+  // `ObjList::SetFood` (0x0055e890): each unit member's field, and a negative
+  // value is refused with a print -- nothing written.
+  {
+    ObjListPool& pool = objlist_pool_of(world);
+    const ObjListId list = pool.acquire_temporary(script::ScriptId{});
+    pool.mutable_items(list)->push_back(soldier);
+    const script::Value ol = make_objlist_value(list);
+    CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                    {ol, script::Value::integer(33)})
+              .status == script::HostStatus::ok);
+    CHECK(feeder.food(soldier) == 33);
+    CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                    {ol, script::Value::integer(-1)})
+              .status == script::HostStatus::ok);
+    CHECK(feeder.food(soldier) == 33);
+    CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                    {handle, script::Value::integer(0)})
+              .status == script::HostStatus::ok);
+  }
 
   // `u1.SetFeeding(false)` -- five shipped behaviours, every call a literal
   // boolean, and `Value::boolean` is `Value::integer(v ? 1 : 0)`.

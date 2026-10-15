@@ -1,0 +1,68 @@
+0x005c2490	verified	Settlement::GetCentralBuilding: handle word [s+0x8c], offset 0; invalid receiver prints, 0xffff
+0x0055eba0	verified	ObjList::InHolder: FIXED -- settlement scan matches the empty name to the first unnamed settlement (0x00409350); members cast to CVXUnit, counted when [u+0x154] == holder word [s+0x5e]; miss is 0; tests a_settlement_is_found_by_its_map_name_exactly_or_not_at_all (shared scan)
+0x00579ef0	verified	Query::InHolder: invalid query prints and answers 0, then Refresh (vtbl+0x20) and the same scan and count as ObjList::InHolder
+0x00427670	verified	Squad::InHolder: false at the first resolving member not held; unresolved members stepped over; empty squad true; prose at world_host.cpp m_in_holder
+0x005d6ff0	verified	Unit::InHolder: [u+0x154] != 0xffff; invalid receiver prints, false; prose at m_in_holder
+0x005c1fc0	verified	Settlement::gold: warehouse via [s+0x5c], +0x18; invalid receiver prints, 0
+0x005c3ad0	verified	GetSettlement: FIXED -- exact length+bytes compare over the settlement vector, empty name answers the first unnamed settlement; miss prints and pushes 0xffff; test a_settlement_is_found_by_its_map_name_exactly_or_not_at_all
+0x005ab2f0	verified	Obj::SetPlayer: invalid receiver prints; player 1..16 else printed refusal; vtbl+0xa0(p-1) -- building override redirects to the settlement worker (give_object_to)
+0x0055e710	verified	ObjList::SetPlayer: range 1..16 checked once, then vtbl+0xa0 on every resolving member
+0x00578de0	verified	Query::SetPlayer: Refresh, list, vtbl+0xa0 on each resolving member; no range check
+0x006a4240	inferred	free SetPlayer: debug command switching the human's player; zero shipped call sites, not bound (the 116 sites are the member forms); body not read
+0x005c4ff0	partial	Settlement::SetPlayer -> 0x005c4eb0: FIXED -- owner change zeroes roster/bank/in-wall sentries and clears supplied ([wh+0x38]), and no longer wipes the loan; test economy_capture_empties_the_wall_and_setting_the_current_owner_does_not. Gap: 0x005efa10's routing-list resets (0x005ef970) and the AI notification 0x0041e970 not modelled; per-player sentry upkeep (0x005c4930) not modelled
+0x005c3c70	verified	Settlement::Units: aliases the holder's list [holder+0x28]; miss prints and answers a fresh empty list
+0x005c2080	verified	Settlement::food: warehouse +0x1c; invalid receiver prints, 0
+0x0043ae40	verified	Squad::Units: fresh copy of the member deque in order; squad handle unchecked in the original (engine refuses by name)
+0x004278c0	partial	Squad::food: sum of [u+0x16c] over resolving members; engine sums FeedingUnit::food, so a member not in the feeder chain counts 0 (feeder enrolment design)
+0x005d8c50	partial	Unit::food: [u+0x16c], 0 with print when invalid; FIXED routing -- a unit with a settlement back-link no longer reads its town's food (settlement_at); test economy_a_unit_with_a_settlement_link_is_not_its_settlement. Gap: a unit outside the feeder chain answers 0 where the original reads its field
+0x0055e890	verified	ObjList::SetFood: FIXED (was unimplemented) -- negative prints and writes nothing, else [u+0x16c] on every member that casts to CVXUnit, no flag; no shipped site; test feeder_host_reads_and_writes_a_units_food
+0x005798b0	verified	Query::SetFood: invalid receiver prints; Refresh, then as ObjList::SetFood
+0x005c2140	verified	Settlement::SetFood: FIXED -- min(value, cap [wh+0x14]) with no floor; test economy_settlement_setters_clamp_only_from_above
+0x005c1d80	verified	Settlement::UnitsCount: [holder+0x40], the holder list's size; invalid prints, 0
+0x005c6de0	verified	Ship::UnitsCount: [[ship+0x1dc] holder +0x14] occupancy; invalid prints, 0; engine counts units_on_board
+0x005d7cd0	verified	Unit::SetFood: FIXED -- [u+0x16c] written unclamped (above maxfood and below 0), flag 0x20000000 set at >= 1 (feeder hungry mark); FeederSystem::write_food; test feeder_host_reads_and_writes_a_units_food
+0x005ebe70	partial	Wagon::SetFood: FIXED -- kind [+0x1d4]=1 then cargo [+0x1cc] via 0x005eb0a0, unclamped; test economy_wagon_set_food_and_set_gold_write_kind_and_cargo. Gap: 0x005eb0a0 kills an emptied wagon (vtbl+0xb0) outside the editor -- not reproduced
+0x005c1bc0	verified	Settlement::ForceAddUnit: unit then settlement resolved (each miss prints, void); holder entry 0x005d3e10 with force 1 = garrison_enter(force) + onenter hook
+0x005c21a0	verified	Settlement::SetGold: FIXED -- min(value, cap [wh+0x10]) with no floor; test economy_settlement_setters_clamp_only_from_above
+0x005ebec0	partial	Wagon::SetGold: FIXED -- kind 0 then cargo via 0x005eb0a0; test economy_wagon_set_food_and_set_gold_write_kind_and_cargo. Gap: emptied-wagon death not reproduced (as Wagon::SetFood)
+0x00535260	verified	Item::name: FIXED -- [item+8] handle -> [+0x24] definition -> its first string, the <item id> (reader 0x005361f0 at 0x0053638d); invalid prints, ""; test item_name_answers_the_definitions_id
+0x005aea60	partial	Obj::name: reverse lookup of the NamedObj at [obj+0x84] in the named-object manager (0x0054b3a0), "" when absent; engine looks up the object itself -- the +0x84 indirection is not modelled (agrees for every top-level object)
+0x005c2700	verified	Settlement::name: std::string at [s+0xcc]; invalid prints, ""
+0x005c2b70	verified	Settlement::population: [s+0x50]; invalid prints, 0
+0x004dfcd0	partial	Building::Research: runs the building's research method synchronously with the row's costs in the cmdcost globals, no affordability, no lab search, no queue, no payment. Gap (design): engine routes a building receiver to Settlement::Research; an out-of-queue method run is not available in CommandSystem. 22 campaign sites
+0x0042d1b0	partial	Settlement::Research: FIXED -- core with reserve flag 1, no exemption (0x0042d26b); test economy_research_holds_back_the_whole_reserve. Row lookup, idle lab (0x0042d010, running name "idle"), replace-issue 0x004efc00 match. Gap: the class reverse index [class+0x1f8] is taken as the cmdbar's tree reading without its builder traced, nsrc not applied (no lab row has one)
+0x00563cd0	verified	Building::GetDefendersMax: gate 0x00440060 on the building's settlement; slot 1 [+0x240], 2 [+0x244], else 0; receiver unchecked in the original
+0x005ef530	verified	Settlement::supplied: FIXED -- [wh+0x38] -> that warehouse's settlement; invalid receiver answers an invalid handle, not 0; test economy_handle_members_answer_an_invalid_handle_for_a_dead_settlement
+0x005d7050	verified	Unit::GetHolderSett: [u+0x154] holder -> [holder+0xc] settlement -> handle; any miss 0xffff
+0x00425050	verified	Settlement::IsStronghold: central class heir of BaseTownhall (0x0043ffc0/0x0059a220); false unprinted; equals SettlementKind (no shipped class descends from two bases)
+0x00425a90	verified	Settlement::CanAfford(gold, food): FIXED -- inlined core without population, food then gold, reserve 0x00425890 always subtracted (0x00425b1c); test max_afford_count_and_can_afford_hold_the_reserve_back_from_gold
+0x00428ba0	verified	Settlement::CanAfford(cmd): core with gold/food/pop costs, reserve unless ReserveFor names this command (0x00426df0); invalid prints, false; unknown command prints, false
+0x00428d40	verified	Settlement::CanAfford(cmd, count): FIXED -- count <= affordable with no floor on count (0x00428eb0); same reserve rule as CanAfford(cmd)
+0x005c27d0	verified	Settlement::SetLoyalty: 0..100 stored x10 at [s+0x54], else printed refusal
+0x005ec100	partial	Wagon::SetLoyalty: [w+0x1d8] = v*10 for 0..100. Gap (design): wagons carry no loyalty here (value, pending [+0x1dc], tick)
+0x00425320	verified	Settlement::IsIndependent: owner index 14 or 15; invalid false, unprinted
+0x005c2bc0	verified	Settlement::max_population: [s+0x4c]; invalid prints, 0
+0x00563f10	verified	Building::GetOutpostFood: outpost gate, then [+0x260]; else 0
+0x004250f0	verified	Settlement::IsOutpost: central class heir of Outpost (0x00440060); equals SettlementKind::outpost
+0x0042d0d0	partial	Settlement::FindResearchLab: row lookup ("No such upgrade"), lab walk 0x0042d010 with the idle flag clear, 0xffff for none; receiver unchecked in the original. Gap: as Research, the [class+0x1f8] index read as the class tree
+0x004250a0	verified	Settlement::IsVillage: central class heir of BaseVillage (0x00440010); equals SettlementKind::village
+0x005c2980	verified	Settlement::GoldConverted: owner's score block +0xb4 (gold_outpost) += argument; engine's extra per-settlement counter is read by nothing
+0x00425bb0	verified	Settlement::SpentGoldOnArmy: Env int /<root>/Settlement<id>/GoldSpentOnArmy<owner index> += argument
+0x005c54d0	verified	Building::GetEnterExit: every type-12 point that projects (0x005c5390), one world RNG draw (0, n-1); (-1,-1) for none
+0x005c3570	verified	Settlement::GetEnterExit: count buildings whose class has a type-12 point, one draw, walk to it (0x005c3460); 0xffff for none
+0x005c1b20	verified	Settlement::AddUnit: FIXED -- answers true when the unit or the settlement misses (each prints, pushes 1); else holder entry 0x005d3e10 force 0 and its answer; test economy_add_unit_answers_true_for_a_handle_that_does_not_resolve
+0x005c5b90	verified	Settlement::ObjectsAround: FIXED -- class name resolved whole (0x00409e40), unknown or empty matches nothing; CollectUnits both flags; invalid receiver empty list; test economy_objects_around_filters_on_the_class_tree
+0x005c2c10	verified	Settlement::loyalty: [s+0x54] / 10; invalid prints, 0
+0x005ec090	partial	Wagon::loyalty: [w+0x1d8] / 10. Gap (design): wagons carry no loyalty here, a wagon answers 0, so UNIT_CAPTURE/HERO_CAPTURE take a caravan at once
+0x005c2200	verified	Settlement::SetPopulation: FIXED -- min(value, max_population) with no floor; test economy_settlement_setters_clamp_only_from_above
+0x005c2a60	verified	Settlement::DelSentry: FIXED -- bank [+0x100] spent first, else roster [+0xfc] - 1 floored at 0 (was dropped); new Settlement::sentries_put_back, PutSentry fills it; test get_sentry_takes_one_out_of_the_wall_and_put_sentry_puts_one_back
+0x00420650	verified	Settlement::IsTeutonTent: FIXED -- central class id or altid == "TTent" exactly, not ancestry (TTentWinter false); test economy_is_teuton_tent_compares_the_class_name_and_is_ttent_its_ancestry
+0x005ef140	partial	Settlement::CreateMuleGold: FIXED -- invalid receiver answers an invalid handle; test economy_handle_members_answer_an_invalid_handle_for_a_dead_settlement. Gap (design): 0x005eed90 makes a race mule object in the holder with cargo clamped to max_load; EconomySystem's wagon table abstracts the journey and hands back no object
+0x004281a0	verified	Settlement::BestBarrack: member deque, eight-name test, CVXBarrack cast, damage tier != 3, unsigned queue < seed from argument; 0xffff when none
+0x005c3d40	partial	Settlement::Buildings: original aliases the ObjList at [s+0x60] (the member deque); engine snapshots by back-link (design: the roll is vector<SettlementBuilding>); agrees on loaded maps
+0x005ef040	partial	Settlement::CreateMuleFood: as CreateMuleGold with resource 1
+0x0042db30	verified	NearestStronghold(pt, id, flt): search 0x0042da70 with id-1 and the filter; BaseTownhall heirs, relation 0x0044e250, isqrt distance, strict less
+0x0042db90	verified	NearestStronghold(pt, id): filter AI_OWN (1)
+0x0042dbf0	verified	NearestStronghold(pt): the search with -1 (no filter); not bound -- no shipped site uses one argument
+0x005c1ce0	verified	Settlement::AllowCapture: byte argument stored at [s+0x3c] (CanBeCaptured's field); invalid prints
+0x00425980	verified	Settlement::StopReserving: Env int /<root>/Settlement<id>/Reserve<owner index> = 0; invalid prints

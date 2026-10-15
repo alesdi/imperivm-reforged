@@ -3499,6 +3499,23 @@ constexpr EconomyHostDef kEconomyHosts[] = {
          set_wagon_cargo(*wagon, Resource::food, int_arg(ctx, 1));
          return HostOutcome::ok_void();
        }
+       // `ObjList::SetFood` (0x0055e890) and `Query::SetFood` (0x005798b0, the
+       // query refreshed first): a negative value prints "the parameter
+       // should be positive!" and writes nothing; otherwise every member that
+       // casts to `CVXUnit` gets `[u+0x16c]` -- the field alone, **no flag**,
+       // so the hungry mark stays as it was. No shipped site calls either.
+       if (const Value& r = ctx.arg(0);
+           is_objlist(r) || (r.is_object() && r.as_object().type == kTypeQuery)) {
+         const std::int32_t value = int_arg(ctx, 1);
+         if (value < 0) return HostOutcome::ok_void();
+         FeederSystem* feeder = feeder_of(*world);
+         for (const ObjectId id : receiver_objects(*world, r)) {
+           const WorldObject* slot = world->find(id);
+           if (slot == nullptr || !slot->state.flags.is_unit || feeder == nullptr) continue;
+           if (FeedingUnit* link = feeder->find(id); link != nullptr) link->food = value;
+         }
+         return HostOutcome::ok_void();
+       }
        // 14 of the 32 sites are `Unit`, and they are the ordinary refill path:
        // `u.SetFood(u.food + give)` in `VILLAGE_BEHAVIOR_GIVEFOOD.VS`,
        // `u.SetFood(u.maxfood)` in `TTENT_BEHAVIOR.VS` and
@@ -3873,11 +3890,14 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     //      reads. Aliasing would mean keeping a parallel `vector<ObjectId>`
     //      beside it, which puts one fact in two places: exactly the drift the
     //      alias exists to prevent.
-    //   3. The membership here is the **back-link**, not the roll, for the
-    //      reason `World::buildings_in_settlement` records: on a retail map
-    //      `Settlement::buildings` is empty at load and `WorldObject::settlement`
-    //      is where the answer lives. A handle onto the empty roll would answer
-    //      every shipped site with nothing.
+    //   3. The membership here is the **back-link**, not the roll. That was
+    //      chosen while `Settlement::buildings` was empty at load; the loader
+    //      now files every member building into the roll (sim/session.cpp, in
+    //      document order), so the two agree on a loaded map and differ only
+    //      for a building that gained a back-link without `add_building`.
+    //      (The economy-1 audit read 0x005c3d40: the list it aliases is the
+    //      ObjList embedded at `+0x60`, whose deque is the `+0x6c..+0x78` one
+    //      `BestBarrack` walks -- the roll.)
     //
     // The filter is match-all: the registration is `[23, 1, 27]`, one argument
     // and it is the receiver, so there is no class to filter on.
@@ -3995,11 +4015,15 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        }
        return integer(static_cast<std::int32_t>(units_on_board(*world, slot->id)));
      }},
+    // `IsIndependent` (0x00425320): the owner's index `[[settlement+0x90]+8]`
+    // is 14 or 15 -- the two engine-reserved neutrals. An invalid receiver
+    // answers false, unprinted.
     {CallKind::member, "IsIndependent", 0,  // 26 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        return s == nullptr ? no_settlement(ctx) : boolean(s->independent());
      }},
+    // `max_population` (0x005c2bc0): `[settlement+0x4c]`, 0 with a print.
     {CallKind::member, "max_population", 0,  // 24 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4022,6 +4046,16 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        s->warehouse.gold = std::min(int_arg(ctx, 1), s->warehouse.max_gold);
        return HostOutcome::ok_void();
      }},
+    // `IsOutpost` (0x004250f0 -> 0x00440060), `IsVillage` (0x004250a0 ->
+    // 0x00440010) and `IsStronghold` (0x00425050 -> 0x0043ffc0) are one shape:
+    // the central building's class (`[[settlement+0x8c]+0x3c]`) walked up its
+    // parent links (`+0xe4`, 0x0059a220, itself included) looking for the
+    // class registered as `Outpost`, `BaseVillage` or `BaseTownhall`, each
+    // looked up once and cached. False for an invalid receiver, unprinted.
+    // `SettlementKind` is that ancestry taken once at creation, first match
+    // nearest the leaf; the two agree because no shipped class descends from
+    // two of these bases (checked over the installation's class graph) and an
+    // anchor's class does not change.
     {CallKind::member, "IsOutpost", 0,  // 19 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4179,6 +4213,11 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        Settlement* s = receiver(ctx);
        return s == nullptr ? no_settlement(ctx) : boolean(s->is_stronghold());
      }},
+    // `GoldConverted` (0x005c2980): the settlement's owner's score block
+    // (0x0051cce0 on `[[settlement+0x90]+8]`) gains the argument at `+0xb4`,
+    // `PlayerScoreCounters::gold_outpost`, unchecked for sign. That is all;
+    // `EconomySystem::record_gold_converted`'s per-settlement counter below is
+    // this engine's own and nothing reads it back.
     {CallKind::member, "GoldConverted", 1,  // 16 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4194,6 +4233,16 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        }
        return HostOutcome::ok_void();
      }},
+    // `loyalty`: `Settlement::loyalty` (0x005c2c10) is `[settlement+0x54] / 10`,
+    // 0 with a print for an invalid receiver. `Wagon::loyalty` (0x005ec090) is
+    // the same on the wagon, `[wagon+0x1d8] / 10`, and `Wagon::SetLoyalty`
+    // (0x005ec100) its setter (0..100, stored times ten, outside that range
+    // printed and refused). **Known gap, a design:** a wagon carries no
+    // loyalty here -- neither the value, nor the pending change
+    // `Wagon::DecreaseLoyalty` (0x005ec160) adds to `[+0x1dc]`, nor the tick
+    // that applies it -- so a wagon receiver answers 0, and `UNIT_CAPTURE.VS`
+    // and `HERO_CAPTURE.VS`'s `if (w.loyalty == 0) w.SetPlayer(...)` take a
+    // map's caravan at the first step.
     {CallKind::member, "loyalty", 0,  // 12 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4498,6 +4547,9 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        Settlement* s = receiver(ctx);
        return s == nullptr ? no_settlement(ctx) : integer(s->loan);
      }},
+    // `Settlement::SetLoyalty` (0x005c27d0): a value from 0 to 100 is stored
+    // as tenths at `[settlement+0x54]`; anything else prints "Loyalty must be
+    // between 0 and 100" and writes nothing. Not the pending change.
     {CallKind::member, "SetLoyalty", 1,
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
