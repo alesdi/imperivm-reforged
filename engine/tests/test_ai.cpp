@@ -4521,6 +4521,63 @@ TEST(gaika_eval_adds_the_settlement_skips_messengers_and_sees_as_the_ai_sees) {
   CHECK(eval6(1)[2] == 18);
 }
 
+/// **`MilitaryPresence` asks the node's settlement when no squad answers**
+/// (0x004313e0 -> 0x00420c00): a town hall whose wall is manned is a presence
+/// for its owner, and for "anybody" (a viewer of 0), but not for an ally.
+TEST(military_presence_counts_the_viewers_own_manned_wall) {
+  Fixture f;
+  imperivm::core::ClassGraph graph;
+  const auto add = [&](std::string_view xml, const char* source) {
+    CHECK(graph.add(bytes_of(xml), source).ok());
+  };
+  add(R"(<class id="Building" cpp_class="CVXBuilding" parent=""/>)", "b.sc.xml");
+  add(R"(<class id="RTownhall" cpp_class="CVXTownHall" parent="Building">
+      <properties race="RepublicanRome"/>
+    </class>)",
+      "rth.sc.xml");
+  add(R"(<class id="RSentry" cpp_class="CVXUnit" parent="">
+      <properties maxhealth="100" damage="20" armor_slash="10"/>
+    </class>)",
+      "rs.sc.xml");
+  graph.link();
+  f.world.set_class_graph(&graph);
+  const ObjectId hall =
+      f.world.spawn(imperivm::core::NativeClass::town_hall, nullptr, graph.find("RTownhall"));
+  f.world.set_owner(hall, 2);
+  f.world.set_position(hall, Point{1000, 1000});
+  SettlementInit init;
+  init.settlement_object = hall;
+  init.anchor = hall;
+  init.owner = 2;
+  init.kind = SettlementKind::stronghold;
+  const SettlementId town = f.economy.settlements().create(init);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  constexpr GaikaId kHere = 1;
+  REQUIRE(f.world.gaika().find(kHere) != nullptr);
+  REQUIRE(f.world.gaika().find(kHere)->settlement == hall);
+  f.world.players().set_relation_word(1, 2, 1);  // player 1 counts 2 a friend
+  f.world.players().set_relation_word(2, 1, 1);
+
+  const auto presence = [&](std::int32_t player) {
+    const script::HostOutcome out =
+        f.call(script::CallKind::member, "MilitaryPresence",
+               {gaika_value(kHere), script::Value::integer(player)}, 1);
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.truthy_scalar();
+  };
+  // An empty wall is no presence.
+  CHECK(!presence(3));
+  CHECK(!presence(0));
+  f.economy.settlements().find(town)->sentries_ready = 2;
+  CHECK(presence(3));    // script 3 is player 2, the owner
+  CHECK(presence(0));    // anybody
+  CHECK(!presence(2));   // an ally's wall is category 2
+  CHECK(!presence(17));  // past the table: category 0
+  // A village's wall is not asked: 0x0043ffc0 wants a town hall.
+  f.economy.settlements().find(town)->kind = SettlementKind::village;
+  CHECK(!presence(3));
+}
+
 /// `EnemyPlayersEval`: per enemy, the sum of its squads' `eval` less the
 /// no-AI, peaceful and sentry ones; least, most and mean out, total back.
 TEST(ai_enemy_players_eval_ranges_over_the_enemies_squads) {

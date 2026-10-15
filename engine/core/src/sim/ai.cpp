@@ -2216,25 +2216,23 @@ HostOutcome m_gaika_empty(CallContext& ctx) {
 /// `GAIKAMONITOR.VS` and its defensive twin, which are 45 call sites of AI
 /// between them.
 ///
-/// **Is there an army of mine or a friend's standing in this node.** 0x004313e0
-/// walks the same per-node squad container `BestTargetInGAIKA` walks, applies
-/// four tests to each squad, and answers true on the first that passes all
-/// four. The tests, in the original's order:
+/// **Is there an army of mine standing in this node** -- mine, not a friend's.
+/// 0x004313e0 walks the same per-node squad container `BestTargetInGAIKA`
+/// walks, applies four tests to each squad, and answers true on the first that
+/// passes all four. The tests, in the original's order:
 ///
 ///   * `[squad+0x1c] != 0` -- the squad's `eval`, so a squad with no strength
 ///     assessed does not count as a presence;
-///   * the relation. `0x0044e250(viewer, owner)` answers 1 outright when the
-///     two players are the same, and otherwise reads bit 0 of the viewer's own
-///     relation row at `player + 0x24 + owner*4` -- which is exactly the bit
-///     `PlayerTable::is_enemy` reads, the other way up. **A negative player
-///     skips the test entirely** (0x0043151d), so `MilitaryPresence(0)` -- the
-///     script number for "no player" after the entry point's `dec` -- asks
-///     whether anybody at all is here;
+///   * the category `0x0044e250(viewer, owner)` **masked with 1**. It answers 1
+///     only when the two players are the same -- an ally is 2, an enemy 4, and
+///     a viewer past the sixteenth player 0 -- so the walk counts the viewer's
+///     own squads and nobody else's. **A negative viewer takes category 1 for
+///     every squad** (0x0043151d), so `MilitaryPresence(0)` -- "no player"
+///     after the entry point's `dec` -- asks whether anybody at all is here;
 ///   * `0x0044e1f0(squad, node, 0)` masked with 6. Its 4 and 2 both mean "in
 ///     this node" and its 1 means "heading here", so a squad marching towards
-///     the node is not a presence in it. Same mask, same reasoning as
-///     `BestTargetInGAIKA`, and the `0x0044eb80` refinement between them is
-///     invisible here for the reason recorded there;
+///     the node is not a presence in it. 0x0044eb80 is called only for
+///     category 4, which the mask has already refused;
 ///   * `[squad+0x30] & 4` clear -- `kSquadFlagPeaceful`.
 ///
 /// **The fourth test cannot fail once the third has passed**, and it is not
@@ -2244,55 +2242,53 @@ HostOutcome m_gaika_empty(CallContext& ctx) {
 /// time 0x004315db re-reads the flag. One test is written here and this
 /// paragraph is why there is not a second.
 ///
-/// **It answers false on every shipped map today**, because nothing in this
-/// engine assigns a `GAIKAIn` to a squad -- the same standing as `g.Empty()`
-/// above, and the same consequence: both callers read it as
-/// `if (!gaika.MilitaryPresence(AIPlayer)) continue;` at the head of a `for`
-/// over every node, so false moves the walk on. A true answer would send the
-/// monitor into `RunStrat` for a node it knows nothing about.
+/// **When no squad passes, the node's settlement is asked** (0x00420c00): a
+/// settlement whose central building is a `BaseTownhall` (0x0043ffc0, a
+/// stronghold here) and whose sentry strength `[+0xf8]` (`sentry_strength`) is
+/// positive is a presence, always "staying", under the category
+/// 0x0044e250(viewer, its owner) -- 1 for a negative viewer -- so the viewer's
+/// own manned wall is an army in its own node, and nobody else's is.
+///
+/// Both callers read it as `if (!gaika.MilitaryPresence(AIPlayer)) continue;`
+/// at the head of a `for` over every node, so false moves the walk on.
 HostOutcome m_gaika_military_presence(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("MilitaryPresence: no world");
   const auto no = HostOutcome::ok_with(Value::boolean(false));
+  const auto yes = HostOutcome::ok_with(Value::boolean(true));
   if (ctx.count() < 2) return no;
   const GaikaId node = gaika_of(ctx.arg(0));
-  if (node == kNoGaika || world->gaika().find(node) == nullptr) return no;
+  const GaikaNode* here = node == kNoGaika ? nullptr : world->gaika().find(node);
+  if (here == nullptr) return no;
 
   // The argument is 1-based like every player number a script writes, and the
-  // entry point decrements it before the comparison. Anything the decrement
-  // leaves negative is "ask about everybody"; `player_from_script` maps exactly
-  // that range to `kNoPlayer`.
-  //
-  // The `kNoPlayer` arm of the test below is **kept although nothing shipped
-  // can tell it apart**, and that is the opposite call to the one `SetMAIKA`'s
-  // seven guards got. It is not defensive padding: it is the original's own
-  // branch at 0x0043151d, and it is load-bearing there, because 0x0044e250
-  // answers 0 -- *hostile* -- for a player number outside 0..15, so without the
-  // branch a negative player would see nothing rather than everything. That it
-  // is currently redundant here is a fact about `PlayerTable::is_enemy`
-  // answering false for an out-of-range viewer, which is a different promise
-  // from the one this line is making.
-  const std::int32_t asked = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  const PlayerId viewer = player_from_script(asked);
+  // entry point decrements it and nothing else: negative is everybody, past
+  // the sixteenth player is nobody.
+  const std::int32_t viewer = (ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0) - 1;
+  constexpr std::int32_t kAiOwn = 1;  // `AI_OWN`, 0x0044e250's same-player answer
+  const PlayerTable& players = world->players();
+  const auto category = [&](PlayerId owner) {
+    return viewer < 0 ? kAiOwn : ai_relation(players, viewer, owner);
+  };
 
   const HeroSystem* heroes = hero_system_of(*world);
   if (heroes == nullptr) return no;
-  const PlayerTable& players = world->players();
   for (const Squad& squad : heroes->squads().squads()) {
     if (squad.eval == 0) continue;
-    // 0x0044e250's `viewer == owner` short-circuit is **not** written a second
-    // time here: `PlayerTable::is_enemy` carries that rule already, and its own
-    // note says why -- a player's diagonal is `kRelationSelf` and the general
-    // rule answers it. Two copies would mean a fault in the shared one hid
-    // behind this one.
-    if (viewer != kNoPlayer && players.is_enemy(viewer, squad.key.player)) continue;
+    if ((category(squad.key.player) & kAiOwn) == 0) continue;
     if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
     if (squad.gaika_in != node) continue;
-    return HostOutcome::ok_with(Value::boolean(true));
+    return yes;
   }
-  return no;
-}
 
+  // The settlement, 0x00420c00.
+  const EconomySystem* economy = economy_of(*world);
+  if (here->settlement == kNoObject || economy == nullptr) return no;
+  const Settlement* set = economy->settlements().for_object(here->settlement);
+  if (set == nullptr || set->kind != SettlementKind::stronghold) return no;
+  if (sentry_strength(*world, *set) <= 0) return no;
+  return (category(set->owner) & kAiOwn) != 0 ? yes : no;
+}
 
 /// A point `length` units beyond `from`, on the ray that leaves `behind` and
 /// passes through it -- 0x00422bd0, whose scale factor arrives in `ebx`.

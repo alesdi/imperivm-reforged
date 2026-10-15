@@ -1812,10 +1812,10 @@ TEST(gaika_empty_is_true_until_a_squad_stands_in_the_node) {
 ///
 /// Same container, same "in the node" reading, three filters `Empty` does not
 /// apply: strength, the relation, and the peaceful flag. The relation is the
-/// one worth building carefully, because it is one-directional and reads the
-/// *squad's owner* rather than its members -- the same distinction
+/// one worth building carefully: it is "the viewer's own" (`category & 1`), and
+/// it reads the *squad's owner* rather than its members -- the same distinction
 /// `best_target_in_gaika_reads_the_squads_owner_and_not_its_members` draws.
-TEST(military_presence_wants_a_friendly_armed_squad_standing_in_this_node) {
+TEST(military_presence_wants_an_armed_squad_of_the_viewers_own_standing_in_this_node) {
   ArmyBench b;
   b.plant(3, 3);  // node 1 on the western island; node 2 is the eastern region
   b.rebuild();
@@ -1870,22 +1870,19 @@ TEST(military_presence_wants_a_friendly_armed_squad_standing_in_this_node) {
   squad->flags = static_cast<std::uint16_t>(squad->flags & ~kSquadFlagPeaceful);
   CHECK(presence(1, 2));
 
-  // -- the relation, and it is **one-directional**. Player 3 (script 4) is an
-  // enemy of player 1 until its own row says otherwise; changing player 1's
-  // row instead changes nothing, because 0x0044e250 reads the *viewer's*.
-  CHECK(!presence(1, 4));
-  b.world.players().set_relation_word(1, 3, kRelationFriendly);
+  // -- the relation is `category & 1`: **the viewer's own squads and nobody
+  // else's**. 0x0044e250 answers 2 for an ally, so player 3 (script 4) sees no
+  // presence here whether or not it counts player 1 a friend.
   CHECK(!presence(1, 4));
   b.world.players().set_relation_word(3, 1, kRelationFriendly);
-  CHECK(presence(1, 4));
-  b.world.players().set_relation_word(3, 1, 0);
+  b.world.players().set_relation_word(1, 3, kRelationFriendly);
   CHECK(!presence(1, 4));
-  // ...and a player is never its own enemy, which `PlayerTable::is_enemy`
-  // guarantees rather than this entry point: 0x0044e250 short-circuits on
-  // `viewer == owner` before it reads a row, and `is_enemy` carries the same
-  // rule for the whole engine. Asserted here anyway, because a squad's own
-  // player is the case both shipped callers ask about.
+  b.world.players().set_relation_word(3, 1, 0);
+  b.world.players().set_relation_word(1, 3, 0);
   CHECK(presence(1, 2));
+  // A viewer past the sixteenth player is nobody, not everybody: 0x0044e250
+  // answers 0 for it, and only a negative viewer takes category 1 outright.
+  CHECK(!presence(1, 17));
 
   // -- a stale node id answers false, and it is the *table* that says so. The
   // original cannot build this -- its container hangs off the node -- but here
