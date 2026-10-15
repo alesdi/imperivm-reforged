@@ -631,9 +631,42 @@ bool HeroSystem::use_skill(World& world, ObjectId hero_id, HeroSkill which) {
 // progression
 // --------------------------------------------------------------------------
 
-std::int32_t HeroSystem::experience_to_next_level(std::int32_t level) const {
-  const std::int32_t positive = level - constants_.exp_t > 0 ? level - constants_.exp_t : 0;
-  return positive * constants_.exp_a + constants_.exp_b;
+std::int32_t HeroSystem::experience_for_level(std::int32_t level) const {
+  // 0x005d26d0's table, entry by entry. The running total is kept in 32-bit
+  // wrapping arithmetic, as the builder keeps it, and only the entry read is
+  // divided -- the division is of the total, never of an increment.
+  if (level <= 1) return 0;
+  if (level > kMaxLevel + 1) level = kMaxLevel + 1;
+  std::uint32_t total = 0;
+  for (std::int32_t step = 1; step < level; ++step) {
+    const std::uint32_t ramp =
+        step > constants_.exp_t
+            ? static_cast<std::uint32_t>(step - constants_.exp_t) *
+                  static_cast<std::uint32_t>(constants_.exp_a)
+            : 0u;
+    total += ramp + static_cast<std::uint32_t>(constants_.exp_b);
+  }
+  return static_cast<std::int32_t>(total) / 100;
+}
+
+std::int32_t HeroSystem::level_for_experience(std::int32_t experience) const {
+  // Level 1's threshold is 0, so a negative total stops below it.
+  if (experience < 0) return 0;
+  // One pass over the same running total `experience_for_level` builds,
+  // rather than rebuilding it per level.
+  std::int32_t level = 1;
+  std::uint32_t total = 0;
+  while (level < kMaxLevel) {
+    const std::uint32_t ramp =
+        level > constants_.exp_t
+            ? static_cast<std::uint32_t>(level - constants_.exp_t) *
+                  static_cast<std::uint32_t>(constants_.exp_a)
+            : 0u;
+    total += ramp + static_cast<std::uint32_t>(constants_.exp_b);
+    if (static_cast<std::int32_t>(total) / 100 > experience) break;
+    ++level;
+  }
+  return level;
 }
 
 std::int32_t HeroSystem::experience_for_kill(std::int32_t target_level) const {
@@ -661,64 +694,95 @@ bool HeroSystem::add_kills(ObjectId id, std::int32_t amount) {
 bool HeroSystem::set_experience(ObjectId id, std::int32_t value) {
   UnitRecord* record = unit(id);
   if (record == nullptr) return false;
-  record->experience = value < 0 ? 0 : value;
+  record->experience = value;
+  return true;
+}
+
+bool HeroSystem::set_experience(World& world, ObjectId id, std::int32_t value) {
+  UnitRecord* record = unit(id);
+  if (record == nullptr) return false;
+  if (record->experience == value) return true;
+  // Nobility: a military unit landing inside the band is lifted to its top,
+  // once the owner has researched it. The class test comes first, then the
+  // band, then the environment read -- an exact, case-sensitive `researched`.
+  const std::int32_t low = experience_for_level(constants_.nobility_min_level);
+  const std::int32_t high = experience_for_level(constants_.nobility_max_level);
+  if (value >= low && value < high) {
+    const ClassGraph* graph = world.class_graph();
+    const ClassIndex military = graph != nullptr ? graph->find("Military") : kNoClass;
+    const WorldObject* slot = world.find(id);
+    if (military != kNoClass && slot != nullptr && world.class_is_a(id, military)) {
+      if (const EnvSystem* env = env_of(world); env != nullptr) {
+        const EnvScope scope = EnvScope::for_player(player_to_script(slot->state.owner));
+        if (env->env().read_string(scope, "Nobility") == "researched") value = high;
+      }
+    }
+  }
+  record->experience = value;
   return true;
 }
 
 std::int32_t HeroSystem::inherent_level(ObjectId id) const {
   const UnitRecord* record = unit(id);
-  return record != nullptr ? record->inherent_level : 0;
+  return record != nullptr ? level_for_experience(record->experience) : 0;
 }
 
 bool HeroSystem::set_level(ObjectId id, std::int32_t value) {
-  UnitRecord* record = unit(id);
+  const UnitRecord* record = unit(id);
   if (record == nullptr) return false;
-  record->inherent_level = value < 1 ? 1 : value;
-  return true;
+  const std::int32_t level = std::clamp(value, 1, kMaxLevel);
+  if (level == level_for_experience(record->experience)) return true;
+  return set_experience(id, experience_for_level(level));
+}
+
+bool HeroSystem::set_level(World& world, ObjectId id, std::int32_t value) {
+  const UnitRecord* record = unit(id);
+  if (record == nullptr) return false;
+  const std::int32_t level = std::clamp(value, 1, kMaxLevel);
+  if (level == level_for_experience(record->experience)) return true;
+  return set_experience(world, id, experience_for_level(level));
 }
 
 std::int32_t HeroSystem::level(ObjectId id) const {
   const UnitRecord* record = unit(id);
   if (record == nullptr) return 0;
-  const UnitModifiers mods = modifiers_for(id);
-  const std::int32_t effective = record->inherent_level + mods.level_add;
-  return effective > mods.level_floor ? effective : mods.level_floor;
+  const ItemBonus items = items_.total_bonus(id);
+  const HeroRecord* leader = hero(record->hero);
+  const HeroConstants& c = constants_;
+
+  // 1. The experience the level is read from.
+  std::int32_t experience = record->experience + items.experience;
+  if (leader != nullptr) {
+    const std::int32_t leadership = leader->skills[idx(HeroSkill::leadership)];
+    const std::int32_t percent =
+        c.army_bonus_experience_percent +
+        (leadership >= 0 ? c.exp_percent_per_leadership_level * leadership : 0);
+    experience += percent * experience_for_level(level(leader->id)) / 100 + 1;
+  }
+  // 2. Its level, and the additive levels.
+  std::int32_t effective = level_for_experience(experience) + items.level;
+  if (leader != nullptr && leader->effect_until[idx(HeroSkill::battle_cry)] > now_) {
+    effective += c.levels_per_battle_cry_level * leader->skills[idx(HeroSkill::battle_cry)];
+  }
+  // 3. Never below 1.
+  if (effective < 1) effective = 1;
+  // 4. Discipline's floor.
+  if (leader != nullptr) {
+    const std::int32_t discipline = leader->skills[idx(HeroSkill::discipline)];
+    if (discipline > 0) {
+      const std::int32_t floor = c.discipline_bonus_base + c.discipline_bonus_step * discipline;
+      if (effective < floor) effective = floor;
+    }
+  }
+  return effective;
 }
 
 std::int32_t HeroSystem::add_experience(ObjectId id, std::int32_t amount) {
-  UnitRecord* record = unit(id);
+  const UnitRecord* record = unit(id);
   if (record == nullptr || amount <= 0) return 0;
-
-  // A hero's warriors earn a premium: `heroarmyexpgain` on the hero class plus
-  // Leadership. The hero then takes a share of what its warrior earned.
-  std::int32_t awarded = amount;
-  const ObjectId leader = record->hero;
-  if (leader != kNoObject) {
-    const std::int32_t percent =
-        constants_.army_bonus_experience_percent +
-        constants_.exp_percent_per_leadership_level * skill(leader, HeroSkill::leadership);
-    awarded = apply_percent(amount, percent);
-  }
-
-  record->experience += awarded;
-  std::int32_t gained = 0;
-  for (std::int32_t threshold = experience_to_next_level(record->inherent_level);
-       threshold > 0 && record->experience >= threshold;
-       threshold = experience_to_next_level(record->inherent_level)) {
-    record->experience -= threshold;
-    ++record->inherent_level;
-    ++gained;
-  }
-
-  if (leader != kNoObject && constants_.exp_from_army_divider > 0) {
-    const std::int32_t share = awarded / constants_.exp_from_army_divider;
-    if (share > 0) {
-      // Recurses one level: a hero's own `hero` is null (`hero handle` is
-      // 65535 on every one of the 31 dumped heroes), so this terminates.
-      add_experience(leader, share);
-    }
-  }
-  return gained;
+  const std::int32_t before = level_for_experience(record->experience);
+  (void)set_experience(id, record->experience + amount);
+  return level_for_experience(record->experience) - before;
 }
 
 // --------------------------------------------------------------------------
@@ -925,7 +989,6 @@ void HeroSystem::hash(std::uint64_t& accumulator) const {
     fold_i32(accumulator, record.squad.index);
     fold(accumulator, record.squad.player);
     fold_i32(accumulator, record.experience);
-    fold_i32(accumulator, record.inherent_level);
     fold(accumulator, record.has_freedom ? 1u : 0u);
     fold_i32(accumulator, record.kills);
   }
@@ -1897,6 +1960,10 @@ HostOutcome fn_find_unit_below_ilevel(CallContext& ctx) {
   return none;
 }
 
+/// `Unit::hero` (0x005d7380): the 16-bit hero handle at `[unit+0x170]`, as an
+/// object with no offset -- 65535, an invalid object, for a unit with none.
+/// No look at whether that hero still lives. An unresolvable receiver prints
+/// and answers the same 65535.
 HostOutcome fn_hero(CallContext& ctx) {
   HERO_STATE(ctx);
   const ObjectId leader = host->heroes->hero_of(receiver(ctx));
@@ -2004,14 +2071,31 @@ HostOutcome fn_skill_in_effect(CallContext& ctx) {
 
 // -- progression -----------------------------------------------------------
 
+/// `Unit::experience` (0x005d75b0): the running total at `[unit+0x180]`;
+/// an unresolvable receiver prints and answers 0. See `HeroSystem::experience`.
 HostOutcome fn_experience(CallContext& ctx) {
   HERO_STATE(ctx);
   return HostOutcome::ok_with(Value::integer(host->heroes->experience(receiver(ctx))));
 }
 
+/// Whether `id` is an object `Unit::SetLevel`, `SetExperience` and `IncKills`
+/// may write: resolvable (their first refusal, "called for an uninitialized
+/// or invalid object") and not dead by its `IsDead` virtual (`vtbl+0x50`,
+/// no health; their second, "called for a dead object"). Both refusals print
+/// and write nothing.
+[[nodiscard]] bool writable_unit(const World& world, ObjectId id) {
+  const WorldObject* slot = world.find(id);
+  return slot != nullptr && slot->state.health > 0;
+}
+
+/// `Unit::SetExperience(n)` (0x005d7610): the two refusals of
+/// `writable_unit`, then the unit's `SetExperience` virtual with `n` and the
+/// refresh flag set -- `HeroSystem::set_experience`, Nobility and all.
 HostOutcome fn_set_experience(CallContext& ctx) {
   HERO_STATE(ctx);
-  host->heroes->set_experience(receiver(ctx), int_arg(ctx, 1));
+  const ObjectId id = receiver(ctx);
+  if (!writable_unit(*host->world, id)) return HostOutcome::ok_void();
+  (void)host->heroes->set_experience(*host->world, id, int_arg(ctx, 1));
   return HostOutcome::ok_void();
 }
 
@@ -2035,25 +2119,44 @@ HostOutcome fn_set_experience(CallContext& ctx) {
 HostOutcome fn_inc_kills(CallContext& ctx) {
   HERO_STATE(ctx);
   const ObjectId id = receiver(ctx);
-  const WorldObject* slot = host->world->find(id);
-  if (slot == nullptr || slot->state.health <= 0) return HostOutcome::ok_void();
+  if (!writable_unit(*host->world, id)) return HostOutcome::ok_void();
   (void)host->heroes->add_kills(id, int_arg(ctx, 1));
   return HostOutcome::ok_void();
 }
 
+/// `Unit::inherentlevel` (0x005d77a0, whose message calls it `inhlevel`):
+/// `HeroSystem::level_for_experience` of the running total, so items, the
+/// hero and Battle Cry never reach it. An unresolvable receiver prints and
+/// answers **1**.
 HostOutcome fn_inherent_level(CallContext& ctx) {
   HERO_STATE(ctx);
-  return HostOutcome::ok_with(Value::integer(host->heroes->inherent_level(receiver(ctx))));
+  const ObjectId id = receiver(ctx);
+  if (host->world->find(id) == nullptr) return HostOutcome::ok_with(Value::integer(1));
+  return HostOutcome::ok_with(Value::integer(host->heroes->inherent_level(id)));
 }
 
+/// `Unit::level` (0x005d7740): the unit's level virtual (`vtbl+0x114`), which
+/// for a unit is the stored `[unit+0x184]` that `RecalcBonuses` rebuilds --
+/// `HeroSystem::level` computes the same rebuild on demand. An unresolvable
+/// receiver prints and answers **1**, not 0.
 HostOutcome fn_level(CallContext& ctx) {
   HERO_STATE(ctx);
-  return HostOutcome::ok_with(Value::integer(host->heroes->level(receiver(ctx))));
+  const ObjectId id = receiver(ctx);
+  if (host->world->find(id) == nullptr) return HostOutcome::ok_with(Value::integer(1));
+  return HostOutcome::ok_with(Value::integer(host->heroes->level(id)));
 }
 
+/// `Unit::SetLevel(n)` (0x005d7690): the two refusals of `writable_unit`; then
+/// `n` clamped to `[1, 1000]`, and only when that differs from the inherent
+/// level (0x005d28c0 of the total) the unit's `SetExperience` virtual with
+/// that level's threshold (0x009bf87c). So `SetLevel` to the level a unit is
+/// already at keeps its progress, `UNIT_ON_KILL.VS`'s `SetLevel(4)` on a
+/// level-6 unit takes two levels away, and Nobility can lift the result.
 HostOutcome fn_set_level(CallContext& ctx) {
   HERO_STATE(ctx);
-  host->heroes->set_level(receiver(ctx), int_arg(ctx, 1));
+  const ObjectId id = receiver(ctx);
+  if (!writable_unit(*host->world, id)) return HostOutcome::ok_void();
+  (void)host->heroes->set_level(*host->world, id, int_arg(ctx, 1));
   return HostOutcome::ok_void();
 }
 

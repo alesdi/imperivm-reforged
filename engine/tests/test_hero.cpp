@@ -38,6 +38,7 @@
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/objlist.hpp"
+#include "imperivm/core/sim/player_host.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "test.hpp"
@@ -73,6 +74,11 @@ ClassGraph fixture_graph() {
             "sentry.sc.xml");
   graph.add(bytes(R"(<class id="RamUnit" cpp_class="CVXUnit" parent="Warrior"/>)"),
             "ramunit.sc.xml");
+  // The class the Nobility research reads (`Unit::SetExperience`'s virtual).
+  graph.add(bytes(R"(<class id="Military" cpp_class="CVXUnit" parent="Warrior"/>)"),
+            "military.sc.xml");
+  graph.add(bytes(R"(<class id="Legionary" cpp_class="CVXUnit" parent="Military"/>)"),
+            "legionary.sc.xml");
   graph.add(bytes(R"(<class id="BCatapultUnit" cpp_class="CVXUnit" parent="RamUnit"/>)"),
             "bcatapultunit.sc.xml");
   graph.add(bytes(R"(<class id="Keen" cpp_class="CVXUnit" parent="Warrior">
@@ -671,7 +677,7 @@ TEST(a_skill_cannot_be_bought_without_points_and_stops_at_ten) {
   CHECK(!f.heroes.set_skill(hero, HeroSkill::team_attack, 2));
   CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 0);
   // A level-up is a point without anyone granting it.
-  const std::int32_t next = f.heroes.experience_to_next_level(1);
+  const std::int32_t next = f.heroes.experience_for_level(2) - f.heroes.experience(hero);
   REQUIRE(next > 0);
   (void)f.heroes.add_experience(hero, next);
   CHECK(f.heroes.inherent_level(hero) == 2);
@@ -771,11 +777,14 @@ TEST(discipline_sets_a_level_floor_of_two_plus_points) {
   CHECK(f.heroes.attach(f.world, rookie, hero));
   f.grant(hero, 10);
 
-  CHECK(f.heroes.level(rookie) == 1);
+  // A level-10 hero's army addend is 40 * Exp[10] / 100 + 1 = 12, level 6:
+  // the floor only shows once it passes that.
+  const std::int32_t base = f.heroes.level(rookie);
+  CHECK(base == 6);
   for (std::int32_t points = 1; points <= 10; ++points) {
     REQUIRE(f.heroes.set_skill(hero, HeroSkill::discipline, points));
     CHECK(f.heroes.modifiers_for(rookie).level_floor == 2 + points);
-    CHECK(f.heroes.level(rookie) == 2 + points);
+    CHECK(f.heroes.level(rookie) == std::max(base, 2 + points));
     // It is a floor, not a write: the earned level is untouched.
     CHECK(f.heroes.inherent_level(rookie) == 1);
   }
@@ -788,11 +797,13 @@ TEST(discipline_never_lowers_a_veteran) {
   CHECK(f.heroes.attach(f.world, veteran, hero));
   CHECK(f.heroes.set_level(veteran, 12));
   f.grant(hero, 10);
+  // Exp[12] = 41 plus the level-10 hero's addend 12: 53, level 13.
+  CHECK(f.heroes.level(veteran) == 13);
 
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::discipline, 3));  // floor 5
-  CHECK(f.heroes.level(veteran) == 12);
+  CHECK(f.heroes.level(veteran) == 13);
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::discipline, 10));  // floor 12
-  CHECK(f.heroes.level(veteran) == 12);
+  CHECK(f.heroes.level(veteran) == 13);
 }
 
 TEST(a_detached_warrior_loses_the_floor) {
@@ -940,18 +951,25 @@ TEST(a_passive_skill_cannot_be_used_and_an_unlearned_one_cannot_either) {
 // experience
 // --------------------------------------------------------------------------
 
-TEST(the_experience_curve_is_the_one_const_ini_writes_out) {
+TEST(the_experience_table_sums_the_const_ini_recurrence_in_hundredths) {
   // ```ini
   // LevelExpDivider = 8 ; exp_gain = target_level / LevelExpDivider + 1;
   // ExpA=50  ExpB=125  ExpT=1
   // ; Exp[level] = Exp[Level-1] + Pos(level - T) * ExpA + ExpB
   // ```
+  // 0x005d26d0 sums the increments 125, 175, 225, ... into a running total
+  // from 0 at level 1 and divides each entry from level 2 on by 100 -- the
+  // total, not the increment, so the remainders carry.
   Fixture f;
   const HeroSystem& h = f.heroes;
-  CHECK(h.experience_to_next_level(1) == 125);   // Pos(0)*50 + 125
-  CHECK(h.experience_to_next_level(2) == 175);   // Pos(1)*50 + 125
-  CHECK(h.experience_to_next_level(5) == 325);   // Pos(4)*50 + 125
-  CHECK(h.experience_to_next_level(12) == 675);
+  CHECK(h.experience_for_level(0) == 0);
+  CHECK(h.experience_for_level(1) == 0);
+  CHECK(h.experience_for_level(2) == 1);     // 125 / 100
+  CHECK(h.experience_for_level(3) == 3);     // 300 / 100
+  CHECK(h.experience_for_level(4) == 5);     // 525 / 100
+  CHECK(h.experience_for_level(5) == 8);     // 800 / 100
+  CHECK(h.experience_for_level(12) == 41);   // 4125 / 100
+  CHECK(h.experience_for_level(24) == 155);  // 15525 / 100
 
   CHECK(h.experience_for_kill(0) == 1);
   CHECK(h.experience_for_kill(7) == 1);
@@ -959,81 +977,192 @@ TEST(the_experience_curve_is_the_one_const_ini_writes_out) {
   CHECK(h.experience_for_kill(24) == 4);
 }
 
-TEST(experience_accumulates_within_a_level_and_resets_on_level_up) {
-  // The dumps carry `level = 24` beside `experience = 74`, and the very first
-  // increment is 125, so the dumped counter is progress within a level rather
-  // than a running total.
+TEST(the_level_is_read_off_the_running_total) {
+  // 0x005d28c0: level L while the total is in [Exp[L], Exp[L+1]); 0 for a
+  // negative total; never past 1000.
+  Fixture f;
+  const HeroSystem& h = f.heroes;
+  CHECK(h.level_for_experience(-1) == 0);
+  CHECK(h.level_for_experience(0) == 1);
+  CHECK(h.level_for_experience(1) == 2);
+  CHECK(h.level_for_experience(2) == 2);
+  CHECK(h.level_for_experience(3) == 3);
+  CHECK(h.level_for_experience(40) == 11);
+  CHECK(h.level_for_experience(41) == 12);
+  CHECK(h.level_for_experience(155) == 24);
+  CHECK(h.level_for_experience(0x7fffffff) == HeroSystem::kMaxLevel);
+  CHECK(h.level_for_experience(h.experience_for_level(HeroSystem::kMaxLevel)) ==
+        HeroSystem::kMaxLevel);
+  CHECK(h.level_for_experience(h.experience_for_level(HeroSystem::kMaxLevel) - 1) ==
+        HeroSystem::kMaxLevel - 1);
+}
+
+TEST(experience_is_a_running_total_and_the_level_follows_it) {
+  // `MILITARY_ONDIE.VS`'s Warrior Tales and `PLAYER_WARRIORS_WISDOM.VS` both
+  // write `u.SetExperience(u.experience + 1)`: a total, which levels the unit
+  // up once it passes a threshold. Progress within a level, as this used to
+  // keep, made those writes raise a counter that no level ever came from.
   Fixture f;
   const ObjectId loner = f.spawn_warrior();
   CHECK(f.heroes.inherent_level(loner) == 1);
 
-  CHECK(f.heroes.add_experience(loner, 100) == 0);
-  CHECK(f.heroes.experience(loner) == 100);
-  CHECK(f.heroes.inherent_level(loner) == 1);
-
-  CHECK(f.heroes.add_experience(loner, 25) == 1);
+  CHECK(f.heroes.set_experience(loner, 1));
   CHECK(f.heroes.inherent_level(loner) == 2);
-  CHECK(f.heroes.experience(loner) == 0);
-
-  // 175 to leave level 2, 225 to leave level 3: 400 buys both at once.
-  CHECK(f.heroes.add_experience(loner, 400) == 2);
-  CHECK(f.heroes.inherent_level(loner) == 4);
-  CHECK(f.heroes.experience(loner) == 0);
+  CHECK(f.heroes.add_experience(loner, 2) == 1);
+  CHECK(f.heroes.experience(loner) == 3);
+  CHECK(f.heroes.inherent_level(loner) == 3);
+  // Two thresholds at once: 5 and 8.
+  CHECK(f.heroes.add_experience(loner, 5) == 2);
+  CHECK(f.heroes.inherent_level(loner) == 5);
+  // Unclamped: a negative total is level 0.
+  CHECK(f.heroes.set_experience(loner, -4));
+  CHECK(f.heroes.experience(loner) == -4);
+  CHECK(f.heroes.inherent_level(loner) == 0);
 }
 
-TEST(a_heros_warriors_earn_a_premium_and_the_hero_takes_a_share) {
-  // `HERO.SC.XML` `heroarmyexpgain="40"`, and CONST.INI
-  // `ArmyBonusExperiencePercent = 40`, `ExpFromArmyDivider = 3`,
-  // `ExpPercentPerLeadershipLevel = 2`.
+TEST(a_heros_army_stands_on_part_of_its_heros_experience) {
+  // `RecalcBonuses` (0x005d9df0) reads a warrior's level off its total plus
+  // the hero's army addend `[hero+0x2c0]`, which 0x0052fc50 sets to
+  // `(percent * Exp[hero level]) / 100 + 1` with percent
+  // `ArmyBonusExperiencePercent` 40 + `ExpPercentPerLeadershipLevel` 2 per
+  // Leadership point (0x0052d7a0). The award itself is not raised.
   Fixture f;
   const ObjectId hero = f.spawn_hero();
   const ObjectId warrior = f.spawn_warrior();
   CHECK(f.heroes.attach(f.world, warrior, hero));
-
-  CHECK(f.heroes.modifiers_for(warrior).experience_percent == 40);
-  // Level 12 both sides, so the awards land well below the 675 the next level
-  // costs and the counters can be read directly.
-  CHECK(f.heroes.set_level(warrior, 12));
-  CHECK(f.heroes.set_level(hero, 12));
-
-  f.heroes.add_experience(warrior, 100);
-  CHECK(f.heroes.experience(warrior) == 140);  // 100 + 40%
-  CHECK(f.heroes.experience(hero) == 46);      // 140 / 3, truncated
-
-  // "Increases the experience the hero provides to his attached warriors by 2%
-  // per skill point."
+  // The points first: `grant` is a `SetLevel`.
   f.grant(hero, 10);
-  REQUIRE(f.heroes.set_skill(hero, HeroSkill::leadership, 10));
-  CHECK(f.heroes.modifiers_for(warrior).experience_percent == 60);
-  CHECK(f.heroes.set_experience(warrior, 0));
-  CHECK(f.heroes.set_experience(hero, 0));
-  f.heroes.add_experience(warrior, 100);
-  CHECK(f.heroes.experience(warrior) == 160);
-  CHECK(f.heroes.experience(hero) == 53);
+  CHECK(f.heroes.set_level(hero, 12));  // Exp[12] = 41
+  CHECK(f.heroes.level(hero) == 12);
 
-  // A hero of its own has no premium and no one to pass a share to.
-  CHECK(f.heroes.modifiers_for(hero).experience_percent == 0);
+  // 40 * 41 / 100 + 1 = 17, which is level 7 (Exp[7] = 15, Exp[8] = 19).
+  CHECK(f.heroes.inherent_level(warrior) == 1);
+  CHECK(f.heroes.level(warrior) == 7);
+  CHECK(f.heroes.add_experience(warrior, 1) == 1);
+  CHECK(f.heroes.experience(warrior) == 1);  // no premium on the award
+  CHECK(f.heroes.experience(hero) == 41);    // and no share passed on here
+
+  // Leadership 10: 60 * 41 / 100 + 1 = 25, plus the warrior's 1: level 9.
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::leadership, 10));
+  CHECK(f.heroes.level(warrior) == 9);
+
+  // A hero of its own stands on nothing.
+  CHECK(f.heroes.inherent_level(hero) == 12);
+  CHECK(f.heroes.level(hero) == 12);
 }
 
-TEST(set_level_writes_the_inherent_level_the_way_the_mushroom_does) {
-  // `MUSHROOM.VS`: `.SetLevel(.inherentlevel + 1)`. Effective level then moves
-  // with the modifiers on top; the earned level does not.
+TEST(the_progression_entry_points_refuse_the_dead_and_answer_one_on_a_miss) {
+  // `Unit::SetLevel` (0x005d7690), `SetExperience` (0x005d7610): an
+  // unresolvable receiver and a dead one both print and write nothing.
+  // `Unit::level` (0x005d7740) and `inherentlevel` (0x005d77a0) answer 1 for
+  // an unresolvable receiver, `experience` (0x005d75b0) 0.
   Fixture f;
-  const ObjectId hero = f.spawn_hero();
+  EnvSystem env;
+  f.world.add_system(&env);
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  sim::HostContext context;
+  context.world = &f.world;
+  const auto call = [&](std::string_view name,
+                        std::vector<script::Value> args) -> script::HostOutcome {
+    const std::uint32_t index = registry.find(script::CallKind::member, name,
+                                              static_cast<std::uint16_t>(args.size() - 1));
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    return registry.entry(index).fn(ctx);
+  };
+  constexpr script::TypeId kUnit = 7;
+  const auto ref = [&](ObjectId id) { return script::Value::object(kUnit, id); };
+
+  const ObjectId alive = f.spawn_warrior();
+  const ObjectId dead = f.spawn_warrior();
+  CHECK(call("SetLevel", {ref(alive), script::Value::integer(5)}).status ==
+        script::HostStatus::ok);
+  CHECK(f.heroes.experience(alive) == 8);
+  CHECK(call("level", {ref(alive)}).value.as_integer() == 5);
+  CHECK(call("inherentlevel", {ref(alive)}).value.as_integer() == 5);
+  CHECK(call("experience", {ref(alive)}).value.as_integer() == 8);
+
+  f.world.set_health(dead, 0);
+  (void)call("SetLevel", {ref(dead), script::Value::integer(5)});
+  (void)call("SetExperience", {ref(dead), script::Value::integer(30)});
+  CHECK(f.heroes.experience(dead) == 0);
+
+  const script::Value nobody = ref(static_cast<ObjectId>(9999));
+  CHECK(call("level", {nobody}).value.as_integer() == 1);
+  CHECK(call("inherentlevel", {nobody}).value.as_integer() == 1);
+  CHECK(call("experience", {nobody}).value.as_integer() == 0);
+
+  // Nobility (0x005dbf70): once the owner's `Nobility` reads `researched`, a
+  // military unit whose new total lands in [Exp[8], Exp[12]) gets Exp[12].
+  const ObjectId legionary = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Legionary"));
+  f.world.set_owner(legionary, 1);
+  f.world.set_health(legionary, 200);
+  f.heroes.register_unit(f.world, legionary);
+  const std::int32_t low = f.heroes.experience_for_level(8);    // 19
+  const std::int32_t high = f.heroes.experience_for_level(12);  // 41
+  (void)call("SetExperience", {ref(legionary), script::Value::integer(low)});
+  CHECK(f.heroes.experience(legionary) == low);  // not researched yet
+  env.env().write_string(EnvScope::for_player(player_to_script(1)), "Nobility", "researched");
+  (void)call("SetExperience", {ref(legionary), script::Value::integer(low + 1)});
+  CHECK(f.heroes.experience(legionary) == high);
+  (void)call("SetLevel", {ref(legionary), script::Value::integer(9)});
+  CHECK(call("inherentlevel", {ref(legionary)}).value.as_integer() == 12);
+  // The band's top is outside it, and so is everything under its bottom.
+  (void)call("SetExperience", {ref(legionary), script::Value::integer(low - 1)});
+  CHECK(f.heroes.experience(legionary) == low - 1);
+  // And a unit outside `Military` is never lifted.
+  (void)call("SetExperience", {ref(alive), script::Value::integer(low)});
+  CHECK(f.heroes.experience(alive) == low);
+}
+
+TEST(set_level_writes_the_levels_threshold_the_way_the_mushroom_does) {
+  // `MUSHROOM.VS`: `.SetLevel(.inherentlevel + 1)`. 0x005d7690 clamps to
+  // [1, 1000] and, when that is not the level already, writes the level's
+  // threshold as the total.
+  Fixture f;
   const ObjectId warrior = f.spawn_warrior();
-  CHECK(f.heroes.attach(f.world, warrior, hero));
   CHECK(f.heroes.set_level(warrior, f.heroes.inherent_level(warrior) + 1));
   CHECK(f.heroes.inherent_level(warrior) == 2);
+  CHECK(f.heroes.experience(warrior) == 1);
   CHECK(f.heroes.level(warrior) == 2);
 
+  // At the level already: the progress within it stays.
+  CHECK(f.heroes.set_experience(warrior, 2));
+  CHECK(f.heroes.set_level(warrior, 2));
+  CHECK(f.heroes.experience(warrior) == 2);
+  // Down is a write too: `UNIT_ON_KILL.VS`'s `SetLevel(4)` on a level-6 unit.
+  CHECK(f.heroes.set_level(warrior, 6));
+  CHECK(f.heroes.set_level(warrior, 4));
+  CHECK(f.heroes.experience(warrior) == 5);
+  // The clamp: 0 is level 1, and past 1000 is 1000.
+  CHECK(f.heroes.set_level(warrior, 0));
+  CHECK(f.heroes.experience(warrior) == 0);
+  CHECK(f.heroes.set_level(warrior, 5000));
+  CHECK(f.heroes.inherent_level(warrior) == HeroSystem::kMaxLevel);
+}
+
+TEST(discipline_is_a_floor_under_the_armys_level) {
+  Fixture f;
+  const ObjectId hero = f.spawn_hero();
+  const ObjectId warrior = f.spawn_warrior();
+  CHECK(f.heroes.attach(f.world, warrior, hero));
+  // A level-1 hero's addend is 40 * 0 / 100 + 1 = 1: a fresh warrior stands
+  // at level 2 the moment it is attached.
+  CHECK(f.heroes.level(warrior) == 2);
   f.grant(hero, 10);
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::discipline, 6));
-  CHECK(f.heroes.level(warrior) == 8);
-  CHECK(f.heroes.inherent_level(warrior) == 2);
-  // `BONUSSCRIPTS\003 HERO.VS` places a hero with `SetLevel(12)`.
-  CHECK(f.heroes.set_level(hero, 12));
-  CHECK(f.heroes.inherent_level(hero) == 12);
-  CHECK(f.heroes.experience(hero) == 0);
+  CHECK(f.heroes.level(warrior) == 8);  // DisciplineBonusBase 2 + 6
+  CHECK(f.heroes.inherent_level(warrior) == 1);
+  // A floor: a veteran above it keeps its own.
+  CHECK(f.heroes.set_level(warrior, 20));
+  CHECK(f.heroes.level(warrior) > 20);
 }
 
 // --------------------------------------------------------------------------
@@ -1119,7 +1248,8 @@ TEST(item_bonuses_reach_the_owners_modifiers) {
   CHECK(mods.armor_slash_add == 10);
   CHECK(mods.armor_pierce_add == 10);
   CHECK(mods.level_add == 5);  // `Boar teeth` is `<bonus level="5">`
-  CHECK(f.heroes.level(warrior) == 6);
+  // Level 2 off the level-1 hero's addend of 1, and the teeth's 5 on top.
+  CHECK(f.heroes.level(warrior) == 7);
   // `UNIT.SC.XML` `maxhealth` is 200 in this fixture; the belt adds 600.
   CHECK(f.heroes.max_health_of(f.world, warrior) == 800);
 }

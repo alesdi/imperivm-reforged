@@ -802,9 +802,9 @@ Result<std::unique_ptr<GameSession>> GameSession::create(const script::HostRegis
 ///     level, indexed from 1), and `level_for_experience` (0x005d28c0) of
 ///     that is `L + 1`. So the map's `Level` is **0-based** and the unit's
 ///     level is one more: the 16,171 shipped units read 0..59, and a
-///     `Level="9"` legionary is level 10. Here that is `set_level(L + 1)`,
-///     the earned level, with the progress counter at zero -- the
-///     threshold exactly.
+///     `Level="9"` legionary is level 10. Here that is the same write, through
+///     `HeroSystem::set_experience` with the world, so the Nobility rule the
+///     virtual applies applies here too.
 ///   * `hs<Skill>="n"` -- `load_skill`; the balance derives from the level.
 ///   * `slot<n>="<item id>"` -- 0x005af5d0 takes every attribute whose name
 ///     starts `slot`, in document order, mints the item by id (0x00535640
@@ -824,7 +824,7 @@ void GameSession::Impl::apply_authored_attributes(const MapObjectList& map,
     std::int32_t level = 0;
     if (slot->state.flags.is_unit && parse_authored_int(placed.attribute("Level"), level) &&
         level >= 0) {
-      (void)hero.set_level(id, level + 1);
+      (void)hero.set_experience(world, id, hero.experience_for_level(level + 1));
     }
     for (const auto& [name, value] : placed.attributes) {
       if (name.size() > 2 && name[0] == 'h' && name[1] == 's' && slot->state.flags.is_hero) {

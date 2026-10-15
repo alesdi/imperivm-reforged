@@ -210,7 +210,7 @@ TEST(the_maps_level_skills_and_items_land_on_the_hero) {
   // threshold, and `level_for_experience` of that is 12.
   CHECK(heroes.inherent_level(aeneas) == 12);
   CHECK(heroes.level(aeneas) == 12);
-  CHECK(heroes.experience(aeneas) == 0);
+  CHECK(heroes.experience(aeneas) == 41);  // the running total: Exp[12]
   CHECK(heroes.skill(aeneas, HeroSkill::team_attack) == 3);
   CHECK(heroes.skill(aeneas, HeroSkill::administration) == 2);
   CHECK(heroes.skill(aeneas, HeroSkill::healing) == 0);

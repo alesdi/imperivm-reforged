@@ -318,7 +318,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// version-34 file has neither: scripts due on the same millisecond would run
 /// in id order rather than the order they went to sleep, and a player script
 /// already running could be started a second time.
-inline constexpr std::uint32_t kStateVectorVersion = 35;
+/// 36: a unit's `experience` (`UnitRecord`, the hero section) is `gbr.exe`'s
+/// running total at `[unit+0x180]`, and the inherent level is derived from it
+/// (0x005d28c0) rather than kept beside it. A version-35 file holds progress
+/// within the level and the level as a second word; read as a total, every
+/// veteran would load at level 1.
+inline constexpr std::uint32_t kStateVectorVersion = 36;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

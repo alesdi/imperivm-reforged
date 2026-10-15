@@ -197,6 +197,11 @@ struct HeroConstants {
   std::int32_t exp_t = 1;
   /// The share of a warrior's experience that reaches its hero.
   std::int32_t exp_from_army_divider = 3;
+  /// `NobilityMinLevel` / `NobilityMaxLevel` -- the band the Nobility
+  /// research lifts a military unit out of (`set_experience`). The original
+  /// reads them once, defaulting to 0 when the file is silent.
+  std::int32_t nobility_min_level = 8;
+  std::int32_t nobility_max_level = 12;
   /// `ArmyBonusExperiencePercent`, and `heroarmyexpgain="40"` on `Hero.SC.XML`.
   /// The same number in two places.
   std::int32_t army_bonus_experience_percent = 40;
@@ -298,9 +303,7 @@ struct UnitModifiers {
 
   /// Additive level: item `<bonus level=...>` plus Battle Cry while it lasts.
   std::int32_t level_add = 0;
-  /// Discipline's floor. The effective level is
-  /// `max(inherent + level_add, level_floor)`, so a level-9 veteran is not
-  /// dragged down to Discipline's 2 + points.
+  /// Discipline's floor; see `HeroSystem::level` for where it lands.
   std::int32_t level_floor = 0;
 
   /// Concealment: the chance in percent that an incoming attack misses.
@@ -341,11 +344,11 @@ struct UnitRecord {
   /// The dump's `hero handle`. `kNoObject` is its `65535`.
   ObjectId hero = kNoObject;
   SquadKey squad;
-  /// The dump's `experience`: progress toward the next level, **not** a running
-  /// total. See `experience_to_next_level`.
+  /// `[unit+0x180]`: the **running total**, 0 at spawn (the `CVXUnit`
+  /// constructor, 0x005d3170). The inherent level is not stored beside it but
+  /// derived from it every time it is asked for (0x005d28c0); see
+  /// `HeroSystem::level_for_experience`.
   std::int32_t experience = 0;
-  /// What `SetLevel` writes and `inherentlevel` reads. 1 at spawn.
-  std::int32_t inherent_level = 1;
   /// `Unit.HasFreedom` -- `UNIT_ATTACH.VS` refuses to attach a unit that has
   /// it, before anything else is checked. Independent villagers and the like.
   bool has_freedom = false;
@@ -677,35 +680,66 @@ class HeroSystem final : public System {
 
   // -- progression -----------------------------------------------------
 
-  /// Experience needed to leave `level`.
+  /// The highest level there is: `SetLevel` clamps to it (0x005d7690) and
+  /// `level_for_experience` stops at it.
+  static constexpr std::int32_t kMaxLevel = 1000;
+
+  /// The running total of experience at which `level` begins -- `gbr.exe`'s
+  /// table at 0x009bf87c, indexed by level and built once at start-up by
+  /// 0x005d26d0.
   ///
-  /// `CONST.INI` spells the recurrence out:
-  /// `Exp[level] = Exp[level-1] + Pos(level - T) * ExpA + ExpB`, with
-  /// `Pos(x) = x > 0 ? x : 0`, so the *increment* at `level` is
-  /// `max(level - ExpT, 0) * ExpA + ExpB` and that is what this returns.
+  /// `CONST.INI` spells the recurrence out --
+  /// `Exp[level] = Exp[level-1] + Pos(level - T) * ExpA + ExpB` -- and the
+  /// builder applies it with one step the comment does not mention: it sums
+  /// the increments for levels 1 to 1000 (`max(level - ExpT, 0) * ExpA +
+  /// ExpB`, so 125, 175, 225, ... with the shipped 50/125/1) into a running
+  /// total that starts at 0 for level 1, and then **divides every entry from
+  /// level 2 on by 100**, truncating the running total rather than each
+  /// increment. The constants are hundredths: level 2 begins at 1, level 3 at
+  /// 3, level 10 at 29, level 24 at 155. Levels outside `[0, 1001]` read the
+  /// nearest end; level 0 reads 0, as the table's unwritten first word does.
+  [[nodiscard]] std::int32_t experience_for_level(std::int32_t level) const;
+
+  /// The level a running total of experience stands at -- 0x005d28c0, which
+  /// `Unit::inherentlevel`, `SetLevel`, the skill-point balance, the
+  /// `RecalcBonuses` level and the training cap all go through.
   ///
-  /// **The reset reading is inferred.** Taken literally the recurrence is a
-  /// cumulative table, but the dumps carry `level = 24` beside
-  /// `experience = 74` and the first increment alone is 125, so the dumped
-  /// `experience` cannot be a running total. Reading it as progress within the
-  /// current level, reset on each level-up, is the only reading consistent with
-  /// both the constants and the measurements.
-  [[nodiscard]] std::int32_t experience_to_next_level(std::int32_t level) const;
+  /// A total of 0 is level 1, and so is anything below level 2's threshold.
+  /// A **negative** total is level 0: the walk compares it with level 1's 0
+  /// and gives up. Otherwise the level `L` with `experience_for_level(L) <=
+  /// total < experience_for_level(L + 1)`, found by walking up from level 1
+  /// (three levels a step in the original, the same answer), and never more
+  /// than `kMaxLevel`.
+  [[nodiscard]] std::int32_t level_for_experience(std::int32_t experience) const;
 
   /// `exp_gain = target_level / LevelExpDivider + 1`, verbatim from the file.
   [[nodiscard]] std::int32_t experience_for_kill(std::int32_t target_level) const;
 
-  /// Award experience to a unit, levelling it up as many times as it earns.
-  ///
-  /// An attached warrior's award is raised by its hero's
-  /// `experience_percent` -- `heroarmyexpgain="40"` on the hero class plus
-  /// Leadership -- and the hero itself receives
-  /// `awarded / ExpFromArmyDivider` in turn. Returns the levels gained.
+  /// Add to a unit's running total through `set_experience`, the way the
+  /// original credits experience everywhere (the blow, 0x00511550; the hero's
+  /// army share, 0x0052fc50): the unit's `SetExperience` virtual with the old
+  /// total plus the award. No percentages here -- a hero's army is helped by
+  /// a level addend (`level`), not by a larger award. Returns the inherent
+  /// levels gained. Nothing for a non-positive amount.
   std::int32_t add_experience(ObjectId unit, std::int32_t amount);
 
-  /// `Unit.SetExperience(n)` -- writes the raw counter, no levelling.
+  /// `Unit.SetExperience(n)` -- the unit's `SetExperience` virtual, 0x005dbf70.
+  ///
+  /// Writes `n` as the running total, unclamped -- a negative total is
+  /// level 0 -- and does nothing at all when `n` is the total already. With a
+  /// world, the **Nobility** rule runs first: a `Military` unit whose new
+  /// total lands in `[experience_for_level(NobilityMinLevel),
+  /// experience_for_level(NobilityMaxLevel))` -- 8 and 12 in `CONST.INI` --
+  /// while its owner's `Nobility` environment entry reads exactly
+  /// `researched` is given level `NobilityMaxLevel`'s threshold instead. The
+  /// original then refreshes the unit's bonuses (`RecalcBonuses`, which is
+  /// where its stored level is rebuilt; here `level` is computed when asked),
+  /// redraws its sprite when the level moved, and keeps the owner's highest
+  /// military level for the interface; neither of the last two is modelled.
+  /// False for a unit this system has no record for.
   bool set_experience(ObjectId unit, std::int32_t value);
-  /// `Unit.experience`.
+  bool set_experience(World& world, ObjectId unit, std::int32_t value);
+  /// `Unit.experience` -- the running total.
   [[nodiscard]] std::int32_t experience(ObjectId unit) const;
 
   /// `Unit::IncKills(n)` -- add to the unit's kill tally.
@@ -715,13 +749,42 @@ class HeroSystem final : public System {
   bool add_kills(ObjectId unit, std::int32_t amount);
   [[nodiscard]] std::int32_t kills(ObjectId unit) const;
 
-  /// `Unit.SetLevel(n)` -- writes the *inherent* level, which is what
-  /// `MUSHROOM.VS` does with `.SetLevel(.inherentlevel + 1)`.
+  /// `Unit.SetLevel(n)` (0x005d7690) -- `n` clamped to `[1, kMaxLevel]`, and
+  /// when that is not the inherent level already, the running total becomes
+  /// that level's threshold through `set_experience` (so Nobility applies).
+  /// A unit already at `n` keeps whatever progress it has within it, and a
+  /// lower `n` takes experience away. False for a unit with no record.
   bool set_level(ObjectId unit, std::int32_t level);
-  /// `Unit.inherentlevel`.
+  bool set_level(World& world, ObjectId unit, std::int32_t level);
+  /// `Unit.inherentlevel` -- `level_for_experience` of the running total
+  /// (0x005d77a0). 0 for a unit with no record.
   [[nodiscard]] std::int32_t inherent_level(ObjectId unit) const;
-  /// `Unit.level` -- the effective level:
-  /// `max(inherent + level_add, level_floor)`.
+  /// `Unit.level` -- the effective level.
+  ///
+  /// The original stores it at `[unit+0x184]` (what `Unit::level`,
+  /// 0x005d7740, reads through `vtbl+0x114`) and rebuilds it in
+  /// `RecalcBonuses` (0x005d9df0); here it is computed when asked, from what
+  /// that rebuild reads, in its order:
+  ///
+  ///   1. the running total, plus the items' `<bonus experience>`, plus --
+  ///      for a unit with a hero -- the hero's **army addend**
+  ///      `[hero+0x2c0]`, which 0x0052fc50 sets to `(percent *
+  ///      experience_for_level(hero's level)) / 100 + 1` with `percent` =
+  ///      `ArmyBonusExperiencePercent` + `ExpPercentPerLeadershipLevel` *
+  ///      Leadership (0x0052d7a0): an army stands on part of its hero's
+  ///      experience;
+  ///   2. `level_for_experience` of that, plus the items' `<bonus level>`,
+  ///      plus Battle Cry's `LevelsPerBattleCryLevel` per point while the
+  ///      hero's cry lasts (not for a hero itself);
+  ///   3. at least 1;
+  ///   4. and, under a hero with Discipline, at least `DisciplineBonusBase +
+  ///      DisciplineBonusStep * points` -- a floor, so a veteran keeps more.
+  ///
+  /// **Not modelled:** the formation bonus a hero's army in
+  /// `stand_position` takes from the hero's party record (`[hero+0x2b0]`,
+  /// its level word at `+0x6c`), and the timing -- the original's value is
+  /// as of the last `RecalcBonuses` and the addend as of the hero's last
+  /// tick. 0 for a unit with no record.
   [[nodiscard]] std::int32_t level(ObjectId unit) const;
 
   // -- modifiers -------------------------------------------------------
