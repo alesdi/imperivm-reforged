@@ -3986,11 +3986,12 @@ HostOutcome m_gaika_approaching_squads(CallContext& ctx) {
 // self rule folded in, so the three categories are `self`, `!is_enemy` and
 // `is_enemy` here.
 
-/// The three sums of 0x00423850's sweep, shared by `Eval` and
-/// `Unit::BestMDPos` -- which builds the very same `{point, range, range
-/// squared}` / `{flag mask -1, player, own, ally, enemy}` pair on its stack and
-/// hands it to the same sweep, so a second copy of this walk is how the two
-/// would come to disagree about what a crowd is worth.
+/// The three sums of 0x00423850's sweep, which `Eval` runs, and of its twin
+/// 0x00423a70, which `Unit::BestMDPos` runs on the very same `{point, range,
+/// range squared}` / `{flag mask -1, player, own, ally, enemy}` pair. The two
+/// walk the same cells and keep the same objects; they differ only in what a
+/// unit adds, which is `bodies`: 0x00423a70 `inc`s each bucket where
+/// 0x00423850 adds the unit's worth.
 ///
 /// The sweep clamps the square `pt +- range` to the map and visits the 256-unit
 /// grid cells it covers; a cell wholly inside the circle (0x00416810 answers
@@ -4011,7 +4012,7 @@ struct EvalSums {
 };
 
 [[nodiscard]] EvalSums eval_around(const World& world, const CombatSystem* combat, PlayerId player,
-                                   Point at, std::int64_t range) {
+                                   Point at, std::int64_t range, bool bodies = false) {
   EvalSums sums;
   if (range < 0) return sums;
   for (const WorldObject& slot : world.objects()) {
@@ -4021,7 +4022,7 @@ struct EvalSums {
     const std::int64_t dy = static_cast<std::int64_t>(slot.state.position.y) - at.y;
     if (dx * dx + dy * dy > range * range) continue;
     if (!PlayerTable::is_valid(slot.state.owner)) continue;
-    const std::int64_t worth = object_power(world, combat, slot);
+    const std::int64_t worth = bodies ? 1 : object_power(world, combat, slot);
     if (slot.state.owner == player) {
       sums.own += worth;
     } else if (world.players().is_enemy(player, slot.state.owner)) {
@@ -4058,64 +4059,6 @@ HostOutcome f_eval(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `Unit::BestMDPos(MDRange, MinRange, MaxRange, MinEval, bProtectFriendly)` --
-/// **where to drop a mass-damage spell**, and 2 sites that are the sole
-/// blockers of `DATA\SUBAI\GDRUID_IDLE.VS` and `DATA\SUBAI\GHOST_IDLE.VS`.
-///
-/// Both callers read it the same way: a point whose `x` is negative means *no*,
-/// and 0x00439de0 answers `(-1, -1)` for every refusal there is. The druid asks
-/// for a summoning site within 250 of itself worth 500; the ghost asks within
-/// its own attack range.
-///
-/// ## What it searches
-///
-/// **Not a circle.** Like `BestTargetInGAIKA`, this is the family member that
-/// walks a node's squad list instead of sweeping the grid, so the only
-/// candidate points in the whole world are *the positions of the enemy squads
-/// filed under the caster's own node*. The caster's node is its **squad's**
-/// `GAIKAIn` -- 0x00444190 hands back the squad, `[squad+0x22]` the node -- so
-/// a unit in no squad, or in a squad filed nowhere, gets no answer at all
-/// before anything is measured.
-///
-/// A squad is a candidate when it has strength (`Squad::Eval`), the caster's
-/// player counts it an enemy (bit 2 of 0x0044e250), and it is *here rather than
-/// heading here*: 0x0044e1f0 masked with 6, the same pair of tests
-/// `BestTargetInGAIKA` documents, including 0x0044eb80's refinement, which
-/// cannot cross the mask. The point offered is the squad's **first member's**
-/// (0x00443df0) held-aware position.
-///
-/// ## What it scores
-///
-/// For each candidate the routine builds the very same accumulator `Eval`
-/// builds -- `{point, MDRange}` against `{MDRange squared, the caster's player,
-/// own, ally, enemy}` -- and hands it to the same grid sweep, so the number is
-/// the `enemy` bucket of `Eval(caster.player, candidate, MDRange)`. With
-/// `bProtectFriendly` the caster's own and its allies' sums are **subtracted**,
-/// which is the whole of what the flag means: a spell that would catch its own
-/// side is worth less by exactly what it would catch.
-///
-/// A candidate survives when its distance from the caster is within
-/// `[MinRange, MaxRange]` inclusive and its score is at least `MinEval`. What
-/// then ranks them is the score **plus `MaxRange - distance`**, so a nearer
-/// crowd beats an equal one further off; a tie keeps the first offered, which
-/// is squad order. The winner is answered only if that ranked value is greater
-/// than 3 -- a literal in the original, not a derived bound -- and the search
-/// starts from `MinEval - 1`, so a `MinEval` of 4 or less is what makes the
-/// two rules distinguishable at all.
-///
-/// ## What is approximated
-///
-///   * **The node is this engine's node.** `sim/gaika.hpp` records the
-///     partition trade in full; the reading here is the original's.
-///   * **`Squad::GAIKAIn` and `Squad::Eval` are refreshed once a turn**
-///     (`revalue_squads`), where the original writes them inside the move and
-///     inside the health write. See `sim/squad.hpp`.
-///   * **0x00420c00 is not called.** The original asks its node for five things
-///     between the two loops -- a settlement's two counters, a relation
-///     category and two constants -- and then overwrites four of the five slots
-///     before reading any of them, using the fifth as a scratch point buffer.
-///     The call cannot affect the answer, and it is left out rather than
-///     reproduced.
 /// One candidate crowd: an enemy squad filed under the caster's node, the front
 /// member whose position is offered, and how far that is from the caster.
 struct Crowd {
@@ -4144,8 +4087,14 @@ struct SpellSite {
 /// it an enemy (bit 2 of 0x0044e250, read off the caster's own row), and it is
 /// *here rather than heading here*: 0x0044e1f0 masked with 6, the pair
 /// `BestTargetInGAIKA` documents, including 0x0044eb80's refinement, which
-/// cannot cross the mask. The point offered is the squad's **first member's**
-/// (0x00443df0) held-aware position.
+/// cannot cross the mask -- and 0x0044e1f0's third argument is 0, so **a
+/// peaceful squad is never a candidate**, wildlife at war with everybody
+/// included.
+///
+/// Both ends of the distance are `posRH` (`vtbl+0xc8`): the caster's and the
+/// squad's **first member's** (0x00443df0), and that member's `posRH` is also
+/// the point offered. For a garrisoned unit that is the town it stands in
+/// (`unit_pos_rh`), not the holder record `resolve_position` stops at.
 ///
 /// The distance band belongs to the second loop in both originals and is
 /// applied here instead, which nothing can tell apart: the collected list is
@@ -4167,15 +4116,16 @@ struct SpellSite {
   const PlayerTable& players = world.players();
   site.ok = true;
   site.mine = mine;
-  site.from = world.resolve_position(self);
+  site.from = unit_pos_rh(world, self);
   for (const Squad& squad : heroes->squads().squads()) {
     if (squad.eval == 0) continue;
     if (!players.is_enemy(mine, squad.key.player)) continue;
+    if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
     if (squad.gaika_in != node) continue;
     if (squad.members.empty()) continue;
     const ObjectId front = squad.members.front();
     if (world.find(front) == nullptr) continue;
-    const Point where = world.resolve_position(front);
+    const Point where = unit_pos_rh(world, front);
     const std::int64_t dx = static_cast<std::int64_t>(where.x) - site.from.x;
     const std::int64_t dy = static_cast<std::int64_t>(where.y) - site.from.y;
     const std::int64_t distance = isqrt(dx * dx + dy * dy);
@@ -4190,22 +4140,23 @@ struct SpellSite {
 /// blockers of `DATA\SUBAI\GDRUID_IDLE.VS` and `DATA\SUBAI\GHOST_IDLE.VS`.
 ///
 /// Both callers read it the same way: a point whose `x` is negative means *no*,
-/// and 0x00439de0 answers `(-1, -1)` for every refusal there is. The druid asks
-/// for a summoning site within 250 of itself worth 500; the ghost asks within
-/// its own attack range.
+/// and 0x00439de0 answers `(-1, -1)` for every refusal there is. Both ask for
+/// a crowd between 0 and 1000 away with a `MinEval` of 500; the druid's spell
+/// reaches 250 and the ghost's its own attack range.
 ///
 /// **Not a circle.** The candidate set is `crowds_in_casters_node`'s, above.
 ///
 /// ## What it scores
 ///
-/// For each candidate the routine builds the very same accumulator `Eval`
-/// builds -- `{point, MDRange, MDRange squared}` against `{a flag mask of -1,
-/// the caster's player, own, ally, enemy}` -- and hands it to the same grid
-/// sweep, so the number is the `enemy` bucket of `Eval(caster.player,
-/// candidate, MDRange)`. With `bProtectFriendly` the caster's own and its
-/// allies' sums are **subtracted**, which is the whole of what the flag means:
-/// a spell that would catch its own side is worth less by exactly what it
-/// would catch.
+/// For each candidate the routine builds the very accumulator `Eval` builds --
+/// `{point, MDRange, MDRange squared}` against `{a flag mask of -1, the
+/// caster's player, own, ally, enemy}` -- but hands it to **0x00423a70, not
+/// `Eval`'s 0x00423850**: the same cells and the same units, and each unit
+/// counts **1**, not its worth. So the score is a **head count** of the enemy
+/// units within `MDRange`, and the shipped `MinEval` of 500 asks for five
+/// hundred of them -- which is why a retail druid or ghost so rarely finds a
+/// site. With `bProtectFriendly` the caster's own and its allies' heads are
+/// **subtracted**, which is the whole of what the flag means.
 ///
 /// A candidate survives when its score is at least `MinEval`. What then ranks
 /// them is the score **plus `MaxRange - distance`**, so a nearer crowd beats an
@@ -4252,7 +4203,8 @@ HostOutcome m_best_md_pos(CallContext& ctx) {
   bool found = false;
   Point answer{};
   for (const Crowd& crowd : site.crowds) {
-    const EvalSums sums = eval_around(*world, combat, site.mine, crowd.where, md_range);
+    const EvalSums sums =
+        eval_around(*world, combat, site.mine, crowd.where, md_range, /*bodies=*/true);
     std::int64_t score = sums.enemy;
     if (protect_friendly) score -= sums.ally + sums.own;
     if (score < min_eval) continue;
@@ -4308,6 +4260,8 @@ struct ProtectCensus {
 [[nodiscard]] ProtectCensus protect_census(const World& world, PlayerId mine, Point at,
                                            std::int64_t range) {
   ProtectCensus census;
+  // 0x00423cd0's square inverts for a negative range and visits no cell.
+  if (range < 0) return census;
   const PlayerTable& players = world.players();
   for (const WorldObject& slot : world.objects()) {
     if (slot.internal != InternalKind::none) continue;

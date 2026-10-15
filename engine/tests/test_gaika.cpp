@@ -3586,8 +3586,10 @@ TEST(best_md_pos_reads_the_squads_owner_off_the_casters_own_row) {
   CHECK(best_md_pos(b, druid, 500, 0, 5000, 1, false) == in_cell(2, 4));
 }
 
-/// The distance band is inclusive at both ends, and the minimum is applied to
-/// the score before the ranking bonus is added to it.
+/// The distance band is inclusive at both ends, the minimum is applied to the
+/// score before the ranking bonus is added to it, and **the score is a head
+/// count**: 0x00423a70 `inc`s its buckets where `Eval`'s 0x00423850 adds each
+/// unit's worth.
 TEST(best_md_pos_bands_the_distance_and_floors_the_score) {
   SiegeBench b;
   b.plant(3, 3);
@@ -3595,9 +3597,11 @@ TEST(best_md_pos_bands_the_distance_and_floors_the_score) {
   const GaikaId node = b.world.gaika().at(b.world.lsa(), in_cell(2, 2));
   const ObjectId druid = b.trooper("Legionary", 1, 2, 2);
   const ObjectId mob = b.trooper("Archer", 2, 2, 4);
+  std::vector<ObjectId> crowd{mob};
+  for (int i = 0; i < 3; ++i) crowd.push_back(b.trooper("Archer", 2, 2, 4));
   b.arm();
   b.band(1, node, {druid});
-  b.band(2, node, {mob});
+  b.band(2, node, crowd);
 
   // Two cells apart, which is 128 world units.
   const Point target = in_cell(2, 4);
@@ -3605,28 +3609,57 @@ TEST(best_md_pos_bands_the_distance_and_floors_the_score) {
   CHECK(best_md_pos(b, druid, 500, 129, 5000, 1, false) == kNoPos);
   CHECK(best_md_pos(b, druid, 500, 0, 127, 1, false) == kNoPos);
 
-  // The score is what `Eval` puts in the enemy bucket for a circle of `MDRange`
-  // around the candidate -- one archer here, and nothing at all when the
-  // circle is too small to reach itself is not a case: the candidate is always
-  // inside its own circle, so the floor is what refuses it.
-  const std::int32_t alone = object_power(b.world, &b.combat, *b.world.find(mob));
-  REQUIRE(alone > 1);
-  CHECK(best_md_pos(b, druid, 500, 0, 5000, alone, false) == target);
-  CHECK(best_md_pos(b, druid, 500, 0, 5000, alone + 1, false) == kNoPos);
+  // Four archers in the circle score 4, whatever each is worth -- summing their
+  // worth would clear a floor of 5.
+  REQUIRE(object_power(b.world, &b.combat, *b.world.find(mob)) > 1);
+  CHECK(best_md_pos(b, druid, 500, 0, 5000, 4, false) == target);
+  CHECK(best_md_pos(b, druid, 500, 0, 5000, 5, false) == kNoPos);
 
   // And the literal 3: the ranked value is the score plus `MaxRange - distance`
-  // and it has to clear 3 whatever `MinEval` allowed. A unit with no attack at
-  // all is worth exactly 1 to the census -- the `+ 1` the formula ends on --
-  // so with `MaxRange` equal to the distance there is no bonus and 1 is
-  // refused, while three units of bonus carry the same candidate over.
-  CombatProfile harmless;
-  harmless.max_health = 200;
-  harmless.attack_interval = 1000;
-  b.combat.set_profile(b.graph.find("Archer"), harmless);
-  REQUIRE(object_power(b.world, &b.combat, *b.world.find(mob)) == 1);
-  CHECK(best_md_pos(b, druid, 500, 0, 128, 0, false) == kNoPos);
+  // and it has to clear 3 whatever `MinEval` allowed. With the three others
+  // moved out of a circle of 0 the score is 1, so with `MaxRange` equal to the
+  // distance there is no bonus and 1 is refused, while three units of bonus
+  // carry the same candidate over.
+  CHECK(best_md_pos(b, druid, 0, 0, 128, 0, false) == target);  // still 4 here
+  for (std::size_t i = 1; i < crowd.size(); ++i) {
+    CHECK(b.world.set_position(crowd[i], in_cell(2, 5)));
+  }
+  CHECK(best_md_pos(b, druid, 0, 0, 128, 0, false) == kNoPos);
   CHECK(best_md_pos(b, druid, 0, 0, 130, 0, false) == kNoPos);
-  CHECK(best_md_pos(b, druid, 500, 0, 131, 0, false) == target);
+  CHECK(best_md_pos(b, druid, 0, 0, 131, 0, false) == target);
+}
+
+/// The two ends of the distance are both `posRH`, so a garrisoned caster
+/// measures from its town rather than from the holder record; and a peaceful
+/// squad -- wildlife at war with everybody -- is never a candidate, because
+/// 0x0044e1f0's third argument is 0.
+TEST(best_md_pos_measures_from_pos_rh_and_never_offers_a_peaceful_squad) {
+  SiegeBench b;
+  const SettlementId town = b.plant(3, 3, 1);
+  b.rebuild();
+  const GaikaId node = b.world.gaika().at(b.world.lsa(), in_cell(2, 2));
+  const ObjectId druid = b.trooper("Legionary", 1, 2, 2);
+  std::vector<ObjectId> crowd;
+  for (int i = 0; i < 4; ++i) crowd.push_back(b.trooper("Archer", 2, 3, 5));
+  b.arm();
+  const SquadKey mine = b.band(1, node, {druid});
+  const SquadKey theirs = b.band(2, node, crowd);
+  CHECK(best_md_pos(b, druid, 500, 0, 5000, 1, false) == in_cell(3, 5));
+
+  // Peaceful: refused outright.
+  Squad* enemy = b.heroes.squads().find(theirs);
+  REQUIRE(enemy != nullptr);
+  enemy->flags = static_cast<std::uint16_t>(enemy->flags | kSquadFlagPeaceful);
+  CHECK(best_md_pos(b, druid, 500, 0, 5000, 1, false) == kNoPos);
+  enemy->flags = static_cast<std::uint16_t>(enemy->flags & ~kSquadFlagPeaceful);
+
+  // The druid garrisons its own town, two cells from the crowd. From the
+  // holder record it would stand at the map's corner, past a band of 300.
+  const Settlement* set = b.economy.settlements().find(town);
+  REQUIRE(set != nullptr);
+  REQUIRE(b.world.put_in_holder(druid, set->holder.object));
+  b.heroes.squads().find(mine)->gaika_in = node;
+  CHECK(best_md_pos(b, druid, 500, 0, 300, 1, false) == in_cell(3, 5));
 }
 
 /// Nearer wins between equals, the tie keeps the first offered, and
@@ -3881,6 +3914,8 @@ TEST(best_prot_pos_scores_the_size_of_the_engagement) {
   // Two against two: the score is four.
   CHECK(best_prot_pos(b, caster, 100, 0, 5000, 4) == mob);
   CHECK(best_prot_pos(b, caster, 100, 0, 5000, 5) == kNoObject);
+  // A negative range inverts 0x00423cd0's square and counts nobody.
+  CHECK(best_prot_pos(b, caster, -100, 0, 5000, 1) == kNoObject);
 
   // The distance band is the shared walk's, and it is inclusive at both ends:
   // the crowd is two cells away.
