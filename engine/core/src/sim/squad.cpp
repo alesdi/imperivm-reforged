@@ -604,32 +604,77 @@ void squad_set_cmd(World& world, Squad& squad, std::int32_t state, std::int32_t 
   // walls when `GS_KILLENEMIES.VS` sends every own squad in the node to
   // `ai_killall`.
   if ((squad.flags & kSquadFlagNoAi) != 0) return;
-  squad.state = state;
-  squad.state_time = now;
-  const auto set_mask = static_cast<std::uint16_t>(set_flags & 0xFFFF);
-  const auto clear_mask = static_cast<std::uint16_t>(clear_flags & 0xFFFF);
-  squad.flags = static_cast<std::uint16_t>((squad.flags | set_mask) & ~clear_mask);
+  squad_stamp_state(squad, state, set_flags, clear_flags, now);
   CommandSystem* commands = command_system(world);
   if (commands == nullptr) return;
   // Copied out before ordering: `set_command` can spawn a script, and a script
   // can leave a squad, and a span into a vector that moves is a crash waiting
   // for a bigger squad.
+  //
+  // **The walk stops at a hero.** All three walkers (0x004272d0 plain,
+  // 0x00427470 with an object, 0x0043ec00 the point core) order a member --
+  // the tail cleared with `vtbl+0xc0(0)`, the command built by 0x005aef20,
+  // appended through `vtbl+0xbc` and the head ended (0x005b07d0), exactly
+  // `Obj::SetCommand`'s step, except that a verb the class does not bind only
+  // prints and the walk goes on -- and then test the member's hero bit
+  // (`[obj+0x2c] & 0x01000000`; 0x0042742d, 0x00427626, 0x0043ece7) and
+  // leave the loop on it. An empty slot is skipped untested. A hero's squad is
+  // the hero at the front and his army behind him, so the order reaches the
+  // hero alone and the army goes where he leads it (`place_army`); this
+  // ordered every soldier of the army as well, each on its own route.
   const std::vector<ObjectId> members = squad.members;
   for (const ObjectId member : members) {
+    const WorldObject* slot = world.find(member);
+    if (slot == nullptr) continue;
+    const bool hero = slot->state.flags.is_hero;
     (void)commands->set_command(world, member, verb, prototype);
+    if (hero) break;
   }
+}
+
+void squad_stamp_state(Squad& squad, std::int32_t state, std::int32_t set_flags,
+                       std::int32_t clear_flags, GameTime now) noexcept {
+  // `[squad+0x28]` is a word: every writer stores the low sixteen bits
+  // (0x0042736d, 0x0042751f, 0x0043ec2f, and `ClrCmd`'s 0x00427235) and
+  // `State` (0x00421170) reads it back
+  // zero-extended, so a state outside 0..65535 reads back as its low half.
+  squad.state = static_cast<std::int32_t>(static_cast<std::uint16_t>(state));
+  squad.state_time = now;
+  const auto set_mask = static_cast<std::uint16_t>(set_flags & 0xFFFF);
+  const auto clear_mask = static_cast<std::uint16_t>(clear_flags & 0xFFFF);
+  squad.flags = static_cast<std::uint16_t>((squad.flags | set_mask) & ~clear_mask);
 }
 
 namespace {
 
-/// `SetCmd(nState, nSetFlags, nClrFlags, cmd[, arg])`. 30 sites.
+/// `SetCmd(nState, nSetFlags, nClrFlags, cmd[, arg])`. 30 sites, three bodies:
+/// `Squad::SetCmd/4` (0x004272d0, no argument), the point form (0x00421460,
+/// which hands everything to the core 0x0043ec00 that `Ship::ApplyAiTransport`
+/// shares) and `Squad::SetCmdObj` (0x00427470). Each, in order:
 ///
-/// State, then flags, then the command to every member in join order. The
-/// evidence for each of the three is in sim/squad.hpp's declaration; the
-/// body is `squad_set_cmd`, which `Ship::ApplyAiTransport` shares.
+///   1. resolves the handle (0x00443e30) and **returns silently** when it names
+///      no squad, or when the squad carries `SF_NOAI` -- nothing written;
+///   2. writes the state as a word, stamps the clock (`[squad+0x2c]`), and
+///      writes the flags set-then-clear **with `kSquadLocked` raised** over
+///      what follows (`squad_stamp_state`);
+///   3. the object form only: an object argument whose slot is empty prints
+///      "Parameter #5 ... invalid object" and returns there (0x0042754f) --
+///      **before** the walk and before the computed flags are written back,
+///      so nobody is ordered and the squad is left locked;
+///   4. walks the members front to back ordering each (`squad_set_cmd`, which
+///      says where the walk stops), and writes the computed flags back.
+///
+/// The lock held over the walk is invisible afterwards except on step 3's
+/// path. This trapped on a handle naming no squad, ordered every member with
+/// an argument-less command when the object was invalid -- `GS_CAPTURE.VS`
+/// passes `set.GetCentralBuilding`, which a settlement without one answers
+/// invalid -- and kept the state as a full 32-bit integer.
 HostOutcome set_cmd_impl(CallContext& ctx) {
   Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) {
+    if (self.error == kNoSquadFound) return HostOutcome::ok_void();
+    return HostOutcome::failed(self.error);
+  }
   if (ctx.count() < 5 || !ctx.arg(1).is_integer() || !ctx.arg(2).is_integer() ||
       !ctx.arg(3).is_integer() || !ctx.arg(4).is_string()) {
     return HostOutcome::failed(kNoVerb);
@@ -649,10 +694,20 @@ HostOutcome set_cmd_impl(CallContext& ctx) {
     if (is_point(argument)) {
       prototype.arg_kind = CommandArgKind::point;
       prototype.point = unpack_point(argument);
-    } else if (argument.is_object() && argument.as_object().type == kTypeObj &&
-               argument.as_object().id != kNoObject) {
+    } else if (argument.is_object() && (argument.as_object().type == kTypeObj ||
+                                        argument.as_object().type == script::kNoType)) {
+      // `SetCmdObj`: an empty slot is step 3's refusal.
+      const ObjectId target = argument.as_object().type == kTypeObj ? argument.as_object().id
+                                                                    : kNoObject;
+      if (target == kNoObject || self.world->find(target) == nullptr) {
+        if ((self.squad->flags & kSquadFlagNoAi) != 0) return HostOutcome::ok_void();
+        squad_stamp_state(*self.squad, ctx.arg(1).as_integer(), ctx.arg(2).as_integer(),
+                          ctx.arg(3).as_integer(), now);
+        self.squad->flags = static_cast<std::uint16_t>(self.squad->flags | kSquadLocked);
+        return HostOutcome::ok_void();
+      }
       prototype.arg_kind = CommandArgKind::object;
-      prototype.object = argument.as_object().id;
+      prototype.object = target;
     }
   }
 
@@ -926,18 +981,21 @@ HostOutcome take_nearby_items_impl(CallContext& ctx) {
 /// "how long since anything last happened to this squad".
 HostOutcome clr_cmd_impl(CallContext& ctx) {
   Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  // A handle naming no squad is a silent return (0x0042721d tests the lookup
+  // before anything else), not a refusal.
+  if (!self.ok()) {
+    if (self.error == kNoSquadFound) return HostOutcome::ok_void();
+    return HostOutcome::failed(self.error);
+  }
   if (ctx.count() < 4 || !ctx.arg(1).is_integer() || !ctx.arg(2).is_integer() ||
       !ctx.arg(3).is_integer()) {
     return HostOutcome::failed("ClrCmd: expected three integers");
   }
   if ((self.squad->flags & kSquadFlagNoAi) != 0) return HostOutcome::ok_void();
   const GameTime now = ctx.scheduler != nullptr ? ctx.scheduler->now() : self.world->time();
-  self.squad->state = ctx.arg(1).as_integer();
-  self.squad->state_time = now;
-  const auto set_mask = static_cast<std::uint16_t>(ctx.arg(2).as_integer() & 0xFFFF);
-  const auto clear_mask = static_cast<std::uint16_t>(ctx.arg(3).as_integer() & 0xFFFF);
-  const auto flags = static_cast<std::uint16_t>((self.squad->flags | set_mask) & ~clear_mask);
+  squad_stamp_state(*self.squad, ctx.arg(1).as_integer(), ctx.arg(2).as_integer(),
+                    ctx.arg(3).as_integer(), now);
+  const std::uint16_t flags = self.squad->flags;
   CommandSystem* commands = command_system(*self.world);
   if (commands == nullptr) {
     self.squad->flags = flags;

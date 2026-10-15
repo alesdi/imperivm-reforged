@@ -910,20 +910,115 @@ TEST(set_cmd_on_an_empty_squad_changes_state_and_orders_nobody) {
   CHECK(f.commands.tracked() == 0);
 }
 
-TEST(set_cmd_refuses_a_receiver_that_names_no_squad) {
-  // Unlike `AIDest`, this one mutates: silently ordering nothing would be a
-  // divergence rather than an answer.
+TEST(set_cmd_and_clr_cmd_on_a_handle_naming_no_squad_return_silently) {
+  // All four bodies test the lookup (0x00443e30) and leave on a null without a
+  // word (0x004272d0, 0x00427470, 0x0043ec00, `ClrCmd` 0x004271d0); this
+  // trapped. A verb that is not a string is still the host's refusal.
   Fixture f;
   HostRegistry registry;
   register_squad_host(registry);
   HostCall stale(f.world, {pack_squad(SquadKey{31, 5}), Value::integer(1), Value::integer(0),
                            Value::integer(0), Value::string("move")});
-  CHECK(invoke(registry, CallKind::member, "SetCmd", 4, stale).status == HostStatus::error);
+  CHECK(invoke(registry, CallKind::member, "SetCmd", 4, stale).status == HostStatus::ok);
+  HostCall stale_clr(f.world, {pack_squad(SquadKey{31, 5}), Value::integer(1),
+                               Value::integer(0), Value::integer(0)});
+  CHECK(invoke(registry, CallKind::member, "ClrCmd", 3, stale_clr).status == HostStatus::ok);
+  CHECK(f.commands.tracked() == 0);
 
   const SquadKey key = f.squad_of(1, 1);
   HostCall bad_verb(f.world, {pack_squad(key), Value::integer(1), Value::integer(0),
                               Value::integer(0), Value::integer(7)});
   CHECK(invoke(registry, CallKind::member, "SetCmd", 4, bad_verb).status == HostStatus::error);
+}
+
+TEST(set_cmd_stops_its_walk_after_ordering_a_hero) {
+  // 0x0042742d / 0x00427626 / 0x0043ece7: after ordering a member the walk
+  // tests its hero bit and leaves. Members ahead of the hero are ordered, the
+  // hero is, and nobody behind him -- his army follows him instead.
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  const SquadKey key = f.squad_of(1, 3);
+  const std::vector<ObjectId> members = f.heroes.squads().find(key)->members;
+  REQUIRE(members.size() == 3);
+  f.world.mutable_state(members[1])->flags.is_hero = true;
+
+  // All three shapes: no argument, a point, an object.
+  const ObjectId target = f.spawn(Point{900, 900}, 3);
+  const std::vector<std::vector<Value>> shapes{
+      {pack_squad(key), Value::integer(1), Value::integer(0), Value::integer(0),
+       Value::string("ai_killall")},
+      {pack_squad(key), Value::integer(1), Value::integer(0), Value::integer(0),
+       Value::string("move"), pack_point(Point{640, 480})},
+      {pack_squad(key), Value::integer(1), Value::integer(0), Value::integer(0),
+       Value::string("capture"), obj(target)},
+  };
+  for (const std::vector<Value>& args : shapes) {
+    for (const ObjectId member : members) (void)f.commands.clear_commands(f.world, member);
+    for (const ObjectId member : members) (void)f.commands.kill_command(f.world, member);
+    HostCall call(f.world, {});
+    call.arguments = args;
+    call.context.arguments = call.arguments;
+    const auto arity = static_cast<std::uint16_t>(args.size() - 1);
+    CHECK(invoke(registry, CallKind::member, "SetCmd", arity, call).status == HostStatus::ok);
+    const std::string verb = args[4].as_string();
+    CHECK(f.commands.command_name(members[0]) == verb);
+    CHECK(f.commands.command_name(members[1]) == verb);
+    CHECK(f.commands.command_name(members[2]) != verb);
+  }
+}
+
+TEST(set_cmd_obj_with_an_invalid_object_stamps_the_squad_locked_and_orders_nobody) {
+  // 0x00427470: the state, the clock and the flags -- with the lock bit raised
+  // for the walk -- are written before the object is checked, and an empty
+  // slot prints and returns at 0x0042754f, before the walk and before the
+  // computed flags are written back. `set.GetCentralBuilding` on a settlement
+  // without one is the shipped way in.
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  const SquadKey key = f.squad_of(1, 2);
+  Squad* squad = f.heroes.squads().find(key);
+  squad->flags = 0x0002;
+  f.world.advance(1500);
+
+  const Value invalid = Value::object(ObjectRef{script::kNoType, 0});
+  for (const Value& argument : {invalid, obj(kNoObject)}) {
+    HostCall call(f.world, {pack_squad(key), Value::integer(5), Value::integer(0x0010),
+                            Value::integer(0x0002), Value::string("enter"), argument});
+    CHECK(invoke(registry, CallKind::member, "SetCmd", 5, call).status == HostStatus::ok);
+    squad = f.heroes.squads().find(key);
+    CHECK(squad->state == 5);
+    CHECK(squad->state_time == f.world.time());
+    CHECK(squad->flags == (0x0010 | kSquadLocked));
+    CHECK(f.commands.tracked() == 0);
+    squad->flags = 0x0002;
+  }
+}
+
+TEST(set_cmd_and_clr_cmd_keep_the_state_as_a_word) {
+  // `[squad+0x28]` is written sixteen bits wide (0x0042736d, 0x00427235) and
+  // `State` (0x00421170) reads it zero-extended.
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+  const SquadKey key = f.squad_of(1, 1);
+
+  HostCall set(f.world, {pack_squad(key), Value::integer(-1), Value::integer(0),
+                         Value::integer(0), Value::string("ai_killall")});
+  CHECK(invoke(registry, CallKind::member, "SetCmd", 4, set).status == HostStatus::ok);
+  HostCall read(f.world, {pack_squad(key)});
+  HostOutcome state = invoke(registry, CallKind::member, "State", 0, read);
+  REQUIRE(state.status == HostStatus::ok);
+  CHECK(state.value.as_integer() == 0xFFFF);
+
+  HostCall clr(f.world, {pack_squad(key), Value::integer(0x10003), Value::integer(0),
+                         Value::integer(0)});
+  CHECK(invoke(registry, CallKind::member, "ClrCmd", 3, clr).status == HostStatus::ok);
+  state = invoke(registry, CallKind::member, "State", 0, read);
+  CHECK(state.value.as_integer() == 3);
 }
 
 // --------------------------------------------------------------------------
