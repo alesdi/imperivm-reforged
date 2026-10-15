@@ -114,11 +114,14 @@
 ///     query's purge slot, so between a named object's death and its
 ///     destruction `NamedObj::IsDead` answers true while a `Wait*` on the same
 ///     name still counts it. This engine has no such window.
-///   * **An invalid query handle answers `true`.** `0x005ed05f` re-checks the
-///     handle every poll and, on failure, ends the wait *successfully* after
-///     calling `0x00686eb0` -- which in the retail build is a bare `ret`, so
-///     the diagnostic is a dead string. A broken wait silently succeeds. This
-///     engine refuses by name instead: see `kDeadQuery`.
+///   * **An invalid query handle answers `true`, here as there.** `0x005ed05f`
+///     re-checks the handle every poll and, on failure, ends the wait
+///     *successfully* after calling `0x00686eb0` -- which in the retail build
+///     is a bare `ret`, so the diagnostic is a dead string. All eight query
+///     bodies and the five-argument `WaitConvRequest` do it, and so does a
+///     settlement or area name that resolves to nothing. This engine refused
+///     all of those by name for a while; it answers what the original answers
+///     now (`dead_query` in `sim/wait.cpp`).
 ///   * **Per-call scratch.** The original declares extra frame bytes at
 ///     registration (`0x00699eb0`'s fourth argument) that survive suspension,
 ///     and `WaitSettlementCapture` uses four of them to resolve its settlement
