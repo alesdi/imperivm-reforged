@@ -476,8 +476,8 @@ def test_a_seat_left_and_taken_back_twice_through_the_war(imconform, game_dir):
 
 #: The capture run's game and ceiling: a seed whose computers take a
 #: settlement from one another inside it (see the test).
-CAPTURE_SEED = 9
-CAPTURE_TURNS = 3_200
+CAPTURE_SEED = 11
+CAPTURE_TURNS = 4_000
 
 @pytest.mark.slow
 def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
@@ -499,8 +499,11 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     # settlement changes hands between players on nine seeds. The first is on
     # seed 12, at 1,498, but taken without a blow: no army of one player has
     # struck another's by then, which `imconform` refuses as a war never
-    # started. Seed 9 has both: the first kill between players at 667, and p1
-    # takes village #12 from p3 at turn 3,099. The peers are held to a war in
+    # started. Seed 9 had both: the first kill between players at 667, and p1
+    # took village #12 from p3 at turn 3,099. On the tenth round's tree the
+    # first blows between players come thousands of turns later on most seeds;
+    # the first capture between them is seed 11's, where p2 takes village #34
+    # from p3 at 3,908, after a kill at 3,855. The peers are held to a war in
     # which that happens; which seed shows it is the AI's, and the capture is
     # asserted on the solo run rather than assumed.
     solo = subprocess.run(
