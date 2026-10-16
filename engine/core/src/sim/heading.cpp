@@ -272,9 +272,13 @@ HostOutcome fn_get_vec(CallContext& ctx) {
   const Point from = unpack_point(ctx.arg(0));
   const Point to = unpack_point(ctx.arg(1));
   // The same arithmetic as `GetVecByDir` on the difference -- one copy of it,
-  // and the zero case above is that function's.
-  return HostOutcome::ok_with(
-      pack_point(vec_by_dir(Point{to.x - from.x, to.y - from.y}, ctx.arg(2).as_integer())));
+  // and the zero case above is that function's. The difference is a 32-bit
+  // `sub` (0x004c7c00), wrapping like the rest.
+  const auto dx = static_cast<std::int32_t>(static_cast<std::uint32_t>(to.x) -
+                                            static_cast<std::uint32_t>(from.x));
+  const auto dy = static_cast<std::int32_t>(static_cast<std::uint32_t>(to.y) -
+                                            static_cast<std::uint32_t>(from.y));
+  return HostOutcome::ok_with(pack_point(vec_by_dir(Point{dx, dy}, ctx.arg(2).as_integer())));
 }
 
 HostOutcome fn_on_left(CallContext& ctx) {
@@ -468,15 +472,27 @@ Point vec_of_angle(std::int32_t length, std::int32_t degrees) noexcept {
 }
 
 Point vec_by_dir(Point v, std::int32_t length) noexcept {
-  const std::int64_t x = v.x;
-  const std::int64_t y = v.y;
-  const std::int64_t current = isqrt(x * x + y * y);
+  // **32-bit throughout**, as 0x0051b6a0 is: the two squares are `imul` and
+  // `add` on 32-bit registers, wrapping, and the sum goes to the table root
+  // 0x0067c3d0 as an unsigned word; each component is then `imul` by the
+  // length -- wrapping again -- and `idiv` by the root, truncating toward
+  // zero. Both wraps need more than a map holds (a component past 46,340, or
+  // a product past 2^31), and both are reproduced rather than widened: a
+  // widened answer is the right vector and the wrong bird. Unsigned
+  // arithmetic gets the wrap without signed overflow; the root is at most
+  // 0xffff and never zero below, so the division cannot trap.
+  const auto ux = static_cast<std::uint32_t>(v.x);
+  const auto uy = static_cast<std::uint32_t>(v.y);
+  const std::uint32_t sum = ux * ux + uy * uy;
+  const auto root = static_cast<std::int32_t>(isqrt(static_cast<std::int64_t>(sum)));
   // `0x0051b6de`: a zero-length input answers the square root in both
   // components, which is zero. See the header -- this is where `GetVecByDir`
   // and `point::SetLen` part company.
-  if (current == 0) return Point{0, 0};
-  return Point{static_cast<std::int32_t>(x * length / current),
-               static_cast<std::int32_t>(y * length / current)};
+  if (root == 0) return Point{0, 0};
+  const auto ul = static_cast<std::uint32_t>(length);
+  const auto px = static_cast<std::int32_t>(ux * ul);
+  const auto py = static_cast<std::int32_t>(uy * ul);
+  return Point{px / root, py / root};
 }
 
 bool on_left(Point a, Point b) noexcept {

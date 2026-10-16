@@ -40,8 +40,14 @@
 ///   * **1** is written by nothing that was found: the stamp never produces it
 ///     and the feed gives it no value. This engine never writes it either.
 ///
-/// Every host reader is `!= 0`: `IsExplored` cannot tell 2 from 3, and
-/// `GetUnexploredPoint` looks for 0. **One equivalence is taken and labelled:**
+/// **The host reader looks inside a partial cell.** 0x00515950 answers 0 as
+/// false and 3 as true, and for 1 and 2 finds the slot's record holding the
+/// point and answers whether the 4-bit value of the 32-unit sub-cell the point
+/// falls in is non-zero (0x00514a60). So `IsExplored` and
+/// `GetUnexploredPoint` see the soft rim at 32-unit resolution: a point in a
+/// rim cell beyond the circle's reach is *not* explored. (This header used to
+/// say every reader was `state != 0`, and the engine answered true anywhere
+/// in a partial cell.) **One equivalence is taken and labelled:**
 /// a fine record whose thirty-two by thirty-two values are all 15 is promoted
 /// to state 3 and dropped. Every reader agrees -- the light cap is then
 /// `0x3c00`, which draws nothing and hides nothing, exactly as no cap does;
@@ -162,11 +168,15 @@ class ExplorationMap {
   [[nodiscard]] std::int32_t cells() const noexcept { return side_; }
   [[nodiscard]] bool empty() const noexcept { return side_ == 0; }
 
-  /// Whether `slot` has seen the cell `at` falls in: its state is not `never`.
+  /// Whether `slot` has explored the point `at`: 0x00515950.
   ///
-  /// A slot at or past `kSlots` is **explored everywhere**, which is the
-  /// original's short circuit; an empty map is explored nowhere, which is its
-  /// missing-manager path. A point outside the grid is not explored.
+  /// A `full` cell is explored and a `never` one is not; in a `partial` cell
+  /// the answer is the fine value of the 32-unit sub-cell `at` falls in, non-
+  /// zero. A slot outside `0..kSlots-1` -- compared **unsigned**, so a
+  /// negative slot too -- is **explored everywhere**, which is the original's
+  /// short circuit; an empty map is explored nowhere, which is its
+  /// missing-manager path. A point outside the grid is not explored (the
+  /// original reads outside its array).
   [[nodiscard]] bool explored(Point at, std::int32_t slot) const noexcept;
 
   /// The state of cell `(cx, cy)` for `slot`; `never` off the grid or for a
@@ -189,26 +199,17 @@ class ExplorationMap {
 
   /// The circle stamp, 0x00516450: fully explored inside `radius - 48`, the
   /// 96-unit ramp written into the fine records of the cells the annulus
-  /// `[radius - 48, radius + 48]` meets, nothing beyond. A negative radius
-  /// stamps nothing.
+  /// `[radius - 48, radius + 48]` meets, nothing beyond. A radius of zero
+  /// stamps nothing (0x00516450's first test); a negative one stamps nothing
+  /// here, where the original runs its loop over a negative box.
   void explore_circle(Point centre, std::int32_t radius, std::int32_t slot);
+
+  /// The stamp as the original calls it: once for every slot whose bit is set
+  /// in `mask` (a `viewflags` word, low byte).
+  void explore_circle_mask(Point centre, std::int32_t radius, std::uint32_t mask);
 
   /// `ExploreAll()`. Every cell, every slot, fully.
   void explore_all();
-
-  /// The centre of the nearest never-seen cell within `radius` of `from`, or
-  /// `found = false` when there is none.
-  ///
-  /// **Nearest, with ties going to the lower cell index** -- row-major order,
-  /// and therefore a function of the grid alone rather than of anything a
-  /// caller can vary. What the original picks is *not* established beyond "an
-  /// unexplored point inside the radius"; see the header's unknowns.
-  struct Search {
-    Point point;
-    bool found = false;
-  };
-  [[nodiscard]] Search nearest_unexplored(Point from, std::int32_t radius,
-                                          std::int32_t slot) const noexcept;
 
   /// The cells as the original packs them: one `uint16` a cell, two bits a
   /// slot, slot `s` at bits `2s..2s+1`.
@@ -253,7 +254,7 @@ class FogSystem final : public System {
   /// standing, so a script that asks on turn zero gets an honest answer.
   void start(World& world) override;
 
-  /// Stamp every object's owner's slot within its own `sight`.
+  /// Stamp, within its own `sight`, every slot in each object's owner's `viewflags`.
   void advance(World& world, const Turn& turn) override;
 
   /// **Deliberately empty.** `exploration` is one of the four channels the
@@ -279,6 +280,7 @@ class FogSystem final : public System {
     Point position;
     std::int32_t sight = 0;
     PlayerId owner = kNoPlayer;
+    std::uint32_t mask = 0;
     friend bool operator==(const Stamp&, const Stamp&) = default;
   };
   std::unordered_map<ObjectId, Stamp> stamped_;
@@ -292,6 +294,13 @@ class FogSystem final : public System {
 /// 1..16 in, 0..15 out, the same conversion `player_from_script` makes; the
 /// caller decides what to do with a slot at or past `ExplorationMap::kSlots`.
 [[nodiscard]] std::int32_t fog_slot_from_script(std::int32_t player) noexcept;
+
+/// The fog slots `player`'s stamps write: its record's `viewflags`
+/// (`record + 0x14`), low byte. Its own slot (inferred: the record constructor
+/// was not located) plus every player its own relations row grants share-view
+/// (bit 4) -- `SetRelation` (0x005652f0) keeps the word that way. Zero for an
+/// invalid player.
+[[nodiscard]] std::uint32_t fog_view_mask(const World& world, PlayerId player) noexcept;
 
 /// `IsExplored/2`, `ExploreArea/2`, `ExploreCircle/3`, `ExploreAll/0`,
 /// `GetUnexploredPoint/1`. Returns how many were newly implemented.

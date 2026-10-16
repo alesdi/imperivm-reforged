@@ -279,6 +279,20 @@ TEST(heading_vec_by_dir_leaves_the_zero_vector_alone) {
   CHECK((vec_by_dir(Point{1000, 1000}, 1) == Point{0, 0}));
 }
 
+/// `GetVecByDir` is 32-bit arithmetic in 0x0051b6a0, and it wraps twice: the
+/// sum of squares (handed to the table root 0x0067c3d0 as unsigned) and each
+/// component times the length (`imul`, then `idiv`). Widened, both lines
+/// below would be the geometric answer and not the executable's.
+TEST(heading_vec_by_dir_wraps_where_the_executable_does) {
+  // 50000^2 * 2 = 5e9 wraps to 705032704, whose root is 26552: 5,000,000 /
+  // 26552 = 188 on both axes, not 70.
+  CHECK((vec_by_dir(Point{50000, 50000}, 100) == Point{188, 188}));
+  // 3000 * 1,000,000 = 3e9 wraps to -1294967296; / 3000 truncates to -431655.
+  CHECK((vec_by_dir(Point{3000, 0}, 1000000) == Point{-431655, 0}));
+  // Inside a map nothing wraps and the answer is the geometric one.
+  CHECK((vec_by_dir(Point{30000, 40000}, 500) == Point{300, 400}));
+}
+
 /// `OnLeft` is a cross product in **32-bit** arithmetic, and it wraps.
 ///
 /// `0x0051b15d` multiplies two map coordinates into a signed 32-bit register

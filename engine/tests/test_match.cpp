@@ -309,14 +309,14 @@ TEST(match_end_game_records_the_first_report_and_keeps_it) {
   (void)setup_match(w.world, w.match, elimination_rules(), MatchOptions{});
 
   CHECK(w.match.outcome(0) == MatchOutcome::undecided);
-  w.match.end_game(0, true);
+  w.match.end_game(w.world, 0, true);
   CHECK(w.match.outcome(0) == MatchOutcome::lost);
   // A second report does not change it.
-  w.match.end_game(0, false);
+  w.match.end_game(w.world, 0, false);
   CHECK(w.match.outcome(0) == MatchOutcome::lost);
 
   // A slot that takes no part cannot report anything.
-  w.match.end_game(7, true);
+  w.match.end_game(w.world, 7, true);
   CHECK(w.match.outcome(7) == MatchOutcome::undecided);
 }
 
@@ -331,13 +331,15 @@ TEST(match_is_over_when_one_side_is_left_standing) {
   CHECK(!w.match.over(w.world));
   CHECK(w.match.winner(w.world) == kNoPlayer);
 
-  w.match.end_game(2, true);
+  w.match.end_game(w.world, 2, true);
   CHECK(!w.match.over(w.world));
 
-  w.match.end_game(1, true);
+  w.match.end_game(w.world, 1, true);
   CHECK(w.match.over(w.world));
   CHECK(w.match.winner(w.world) == 0);
-  CHECK(w.match.human_outcome() == MatchOutcome::undecided);
+  // The one side left is declared won by the last loss (0x00524090 ->
+  // 0x005651e0 -> 0x00523260), though no script reported it.
+  CHECK(w.match.human_outcome() == MatchOutcome::won);
 }
 
 TEST(match_is_over_the_moment_the_human_reports) {
@@ -349,7 +351,7 @@ TEST(match_is_over_the_moment_the_human_reports) {
 
   // The human loses while two enemies are still fighting each other. There is
   // no single side left, but the match this process is playing is decided.
-  w.match.end_game(0, true);
+  w.match.end_game(w.world, 0, true);
   CHECK(w.match.over(w.world));
   CHECK(w.match.human_outcome() == MatchOutcome::lost);
   // And the survivor the derivation names is not the human.
@@ -371,12 +373,12 @@ TEST(match_in_a_networked_game_is_not_over_when_one_human_reports) {
   (void)setup_match(w.world, w.match, elimination_rules(), options);
   CHECK(w.world.players().setup(1).control == PlayerControl::human);
 
-  w.match.end_game(0, true);
+  w.match.end_game(w.world, 0, true);
   CHECK(!w.match.over(w.world));
   // Each seat asks about itself: 0 has lost and 1 has not won yet.
   CHECK(match_status(w.world, 0).human_outcome == MatchOutcome::lost);
   CHECK(!match_status(w.world, 1).human_won);
-  w.match.end_game(2, true);
+  w.match.end_game(w.world, 2, true);
   CHECK(w.match.over(w.world));
   CHECK(w.match.winner(w.world) == 1);
   const MatchStatus one = match_status(w.world, 1);
@@ -397,20 +399,80 @@ TEST(match_allies_count_as_one_side) {
   (void)setup_match(w.world, w.match, elimination_rules(), MatchOptions{});
 
   CHECK(!w.match.over(w.world));
-  w.match.end_game(2, true);
+  w.match.end_game(w.world, 2, true);
   // Two standing players, allied: one side.
   CHECK(w.match.over(w.world));
   CHECK(w.match.winner(w.world) == 0);
 }
 
-TEST(match_with_nobody_left_has_no_winner) {
+TEST(match_the_last_one_standing_is_declared_won_and_cannot_lose_after) {
   MatchWorld w(1);
   w.enable(2, "Gaul", PlayerControl::computer);
   (void)setup_match(w.world, w.match, elimination_rules(), MatchOptions{});
-  w.match.end_game(0, true);
-  w.match.end_game(1, true);
+  w.match.end_game(w.world, 0, true);
+  // Player 1 is the only one still playing: one side, declared won.
+  CHECK(w.match.outcome(1) == MatchOutcome::won);
+  // And a player no longer playing (`+0x290 != 1`) is refused whole.
+  w.match.end_game(w.world, 1, true);
+  CHECK(w.match.outcome(1) == MatchOutcome::won);
   CHECK(w.match.over(w.world));
-  CHECK(w.match.winner(w.world) == kNoPlayer);
+  CHECK(w.match.winner(w.world) == 1);
+}
+
+/// `EndGame` as the game object's slot 0x48 (0x00524090) decides it: a win
+/// marks the reporter's team won and every other slot of the first eight still
+/// playing lost; a loss from slot 8 or above changes nothing (0x00522f90 tests
+/// the index below eight); two survivors are one side only when both carry the
+/// `allied` flag and neither holds the other an enemy (0x005651e0).
+TEST(match_end_game_follows_the_game_objects_slot_0x48) {
+  {
+    MatchWorld w(1);
+    w.enable(4, "Gaul", PlayerControl::computer);
+    // 0 and 1 a team: mutual bit 0 and both `allied` flags.
+    w.world.players().set(0, 1, Relation::allied, true);
+    w.world.players().set(1, 0, Relation::allied, true);
+    w.world.players().setup(0).allied_flag = true;
+    w.world.players().setup(1).allied_flag = true;
+    (void)setup_match(w.world, w.match, elimination_rules(), MatchOptions{});
+    w.match.end_game(w.world, 1, false);
+    CHECK(w.match.outcome(0) == MatchOutcome::won);
+    CHECK(w.match.outcome(1) == MatchOutcome::won);
+    CHECK(w.match.outcome(2) == MatchOutcome::lost);
+    CHECK(w.match.outcome(3) == MatchOutcome::lost);
+  }
+  {
+    // Ten players: a loss reported from slot 9 is no loss at all.
+    MatchWorld w(1);
+    w.enable(10, "Gaul", PlayerControl::computer);
+    (void)setup_match(w.world, w.match, elimination_rules(), MatchOptions{});
+    w.match.end_game(w.world, 9, true);
+    CHECK(w.match.outcome(9) == MatchOutcome::undecided);
+  }
+  {
+    // Two survivors allied both ways but without the `allied` flags are not
+    // one side, so nobody is declared won.
+    MatchWorld w(1);
+    w.enable(3, "Gaul", PlayerControl::computer);
+    w.world.players().set(0, 1, Relation::allied, true);
+    w.world.players().set(1, 0, Relation::allied, true);
+    (void)setup_match(w.world, w.match, elimination_rules(), MatchOptions{});
+    w.match.end_game(w.world, 2, true);
+    CHECK(w.match.outcome(0) == MatchOutcome::undecided);
+    CHECK(w.match.outcome(1) == MatchOutcome::undecided);
+    // With the flags they are, and the first survivor's team is declared won.
+    w.world.players().setup(0).allied_flag = true;
+    w.world.players().setup(1).allied_flag = true;
+    MatchWorld v(1);
+    v.enable(3, "Gaul", PlayerControl::computer);
+    v.world.players().set(0, 1, Relation::allied, true);
+    v.world.players().set(1, 0, Relation::allied, true);
+    v.world.players().setup(0).allied_flag = true;
+    v.world.players().setup(1).allied_flag = true;
+    (void)setup_match(v.world, v.match, elimination_rules(), MatchOptions{});
+    v.match.end_game(v.world, 2, true);
+    CHECK(v.match.outcome(0) == MatchOutcome::won);
+    CHECK(v.match.outcome(1) == MatchOutcome::won);
+  }
 }
 
 TEST(match_status_is_the_one_call_a_play_loop_makes) {
@@ -430,16 +492,17 @@ TEST(match_status_is_the_one_call_a_play_loop_makes) {
   // The elimination case, and the reason this is worth a function: both
   // computers report their own defeat, nobody reports a win, and the human's
   // victory is entirely the host's derivation.
-  w.match.end_game(1, true);
+  w.match.end_game(w.world, 1, true);
   CHECK(!match_status(w.world).human_won);
-  w.match.end_game(2, true);
+  w.match.end_game(w.world, 2, true);
 
   status = match_status(w.world);
   CHECK(status.over);
   CHECK(status.winner == 0);
   CHECK(status.human_won);
-  // And the human never said so itself.
-  CHECK(status.human_outcome == MatchOutcome::undecided);
+  // The human never said so itself; the last loss declared the one side left
+  // won (0x00524090).
+  CHECK(status.human_outcome == MatchOutcome::won);
 }
 
 TEST(match_status_says_defeat_when_the_human_is_eliminated) {
@@ -449,7 +512,7 @@ TEST(match_status_says_defeat_when_the_human_is_eliminated) {
   options.human = 0;
   (void)setup_match(w.world, w.match, elimination_rules(), options);
 
-  w.match.end_game(0, true);
+  w.match.end_game(w.world, 0, true);
   const MatchStatus status = match_status(w.world);
   CHECK(status.over);
   CHECK(!status.human_won);
@@ -468,7 +531,7 @@ TEST(match_status_counts_an_allys_survival_as_the_humans_win) {
   options.human = 1;
   (void)setup_match(w.world, w.match, elimination_rules(), options);
 
-  w.match.end_game(2, true);
+  w.match.end_game(w.world, 2, true);
   const MatchStatus status = match_status(w.world);
   CHECK(status.over);
   CHECK(status.winner == 0);
@@ -501,7 +564,7 @@ TEST(match_state_is_hashed_and_an_outcome_moves_it) {
   b.match.hash(hb);
   CHECK(ha == hb);
 
-  a.match.end_game(1, true);
+  a.match.end_game(a.world, 1, true);
   ha = 0;
   a.match.hash(ha);
   CHECK(ha != hb);
@@ -568,9 +631,19 @@ TEST(match_team_military_score_averages_over_mutual_allies_in_the_first_eight) {
   w.world.players().set(0, 1, Relation::allied, true);
   CHECK(w.match.team_military_score(w.world, 0) == alone);
 
-  // Mutual, and now the average moves: player 1 has dealt and taken nothing,
-  // so it rates the floor of 10.
+  // Mutual, but neither side's `allied` dword (`+0x64`) is set: still not a
+  // team. 0x00522e20 scans for others only when the asker's flag is set, and
+  // takes only a candidate whose flag is set.
   w.world.players().set(1, 0, Relation::allied, true);
+  CHECK(w.match.team_military_score(w.world, 0) == alone);
+  w.world.players().setup(0).allied_flag = true;
+  CHECK(w.match.team_military_score(w.world, 0) == alone);
+  w.world.players().setup(0).allied_flag = false;
+  w.world.players().setup(1).allied_flag = true;
+  CHECK(w.match.team_military_score(w.world, 0) == alone);
+  // Both flags, and now the average moves: player 1 has dealt and taken
+  // nothing, so it rates the floor of 10.
+  w.world.players().setup(0).allied_flag = true;
   CHECK(military_rating(w.match.score(1)) == 10);
   CHECK(w.match.team_military_score(w.world, 0) == (alone + 10) / 2);
   // And symmetrically, because the matrix is.
@@ -580,6 +653,7 @@ TEST(match_team_military_score_averages_over_mutual_allies_in_the_first_eight) {
   // eight. If it ran to sixteen this would be `(alone + 10 + 10) / 3`.
   w.world.players().set(0, 8, Relation::allied, true);
   w.world.players().set(8, 0, Relation::allied, true);
+  w.world.players().setup(8).allied_flag = true;
   CHECK(w.match.team_military_score(w.world, 0) == (alone + 10) / 2);
   // **And the relation is not symmetric even though the alliance is**, which
   // is the odd consequence of a scan narrower than the table: player 8 asks
@@ -587,13 +661,15 @@ TEST(match_team_military_score_averages_over_mutual_allies_in_the_first_eight) {
   // 8 is not on 0's.
   CHECK(w.match.team_military_score(w.world, 8) == (10 + alone) / 2);
 
-  // A slot that takes no part is not on anyone's team either, which is what
-  // stops sixteen empty rows dragging every average to 10.
+  // The `allied` flag is the whole filter: there is no participation test, so
+  // a slot that takes no part but is declared allied both ways still counts.
   w.world.players().set(0, 2, Relation::allied, true);
   w.world.players().set(2, 0, Relation::allied, true);
+  CHECK(w.match.team_military_score(w.world, 0) == (alone + 10) / 2);
+  w.world.players().setup(2).allied_flag = true;
   CHECK(w.match.team_military_score(w.world, 0) == (alone + 10 + 10) / 3);
   w.match.set_player(2, MatchPlayer{});  // participates = false
-  CHECK(w.match.team_military_score(w.world, 0) == (alone + 10) / 2);
+  CHECK(w.match.team_military_score(w.world, 0) == (alone + 10 + 10) / 3);
 
   // Out of range answers 0. The original faults here: all four score entry
   // points hand 0x00522e20 a null record and it reads `+0x64` off it.
@@ -827,9 +903,18 @@ TEST(match_host_entry_points_answer_from_the_match) {
 
   // `EndGame(int player, bool lose)`, 1-based like every other player argument.
   script::Value lose[] = {script::Value::integer(2), script::Value::boolean(true)};
+  // The three-argument form keeps the human's sentence; the two-argument form
+  // empties it for any player at all (0x004c9610 assigns "" to 0x0082e7ec).
+  script::Value said[] = {script::Value::integer(1), script::Value::boolean(false),
+                          script::Value::string("Ave")};
+  w.match.set_player(0, w.match.player(0));
+  (void)call("EndGame", 3, said);
+  CHECK(w.match.end_message() == "Ave");
   (void)call("EndGame", 2, lose);
+  CHECK(w.match.end_message().empty());
   CHECK(w.match.outcome(1) == MatchOutcome::lost);
-  CHECK(w.match.outcome(0) == MatchOutcome::undecided);
+  // The one player left is one side, and is declared won.
+  CHECK(w.match.outcome(0) == MatchOutcome::won);
 }
 
 TEST(difficulty_reads_back_what_was_set_and_refuses_everything_else) {
@@ -1638,20 +1723,23 @@ TEST(match_team_overall_score_is_the_military_team_over_a_different_term) {
   CHECK(alone == 210 * 10 / 100);
   CHECK(alone == 21);
 
-  // `gold_used` is the other half, and it is a thousandth. `Settlement::
-  // GoldSpent` is its one writer here.
+  // `gold_used` is the other half, and it is a five-hundredth: the
+  // `0x10624dd3` multiply shifted by five at 0x0056c9a5, not six.
+  // `Settlement::GoldSpent` is its one writer here.
   w.match.record_gold_spent(0, 5000);
-  CHECK(w.match.team_overall_score(w.world, 0) == 5 + 21);
+  CHECK(w.match.team_overall_score(w.world, 0) == 10 + 21);
 
   // The team is the same set, and one-directional alliance is not a team --
   // the property `team_military_score` is tested for, asserted again because
   // the two share the rule rather than the code.
+  w.world.players().setup(0).allied_flag = true;
+  w.world.players().setup(1).allied_flag = true;
   w.world.players().set(1, 0, Relation::allied, true);
-  CHECK(w.match.team_overall_score(w.world, 0) == 5 + 21);
+  CHECK(w.match.team_overall_score(w.world, 0) == 10 + 21);
   w.world.players().set(0, 1, Relation::allied, true);
   // Player 1 owns nothing, so its power is 0 and its whole term is 0.
   CHECK(w.match.power_score(w.world, 1) == 0);
-  CHECK(w.match.team_overall_score(w.world, 0) == (5 + 21) / 2);
+  CHECK(w.match.team_overall_score(w.world, 0) == (10 + 21) / 2);
 
   // Out of range answers 0 rather than faulting, as the military one does.
   CHECK(w.match.team_overall_score(w.world, kNoPlayer) == 0);
@@ -1663,7 +1751,7 @@ TEST(match_team_overall_score_is_the_military_team_over_a_different_term) {
   w.match.record_damage(w.world, 15, 0, 10000);
   CHECK(military_rating(w.match.score(0)) == (0 + 0 + 1000) * 100 / (0 + 10000 + 10000));
   CHECK(military_rating(w.match.score(0)) == 5);
-  CHECK(w.match.team_overall_score(w.world, 0) == (5 + 210 * 5 / 100) / 2);
+  CHECK(w.match.team_overall_score(w.world, 0) == (10 + 210 * 5 / 100) / 2);
 }
 
 /// `EvalGroup(name)` sums the census valuation over the named group's units:
@@ -1681,6 +1769,11 @@ TEST(match_eval_group_sums_the_power_of_the_groups_units) {
   CHECK(w.world.groups().add(group, b));
   CHECK(w.world.groups().add(group, gone));
   w.world.despawn(gone);
+  // A spawn template in the group is not in play: the group query's refresh
+  // (vtbl+0x20) answers the live members only, so it adds nothing.
+  const ObjectId mould = w.soldier("Heavy", 0, 4000);
+  w.world.mutable_state(mould)->flags.unspawned = true;
+  CHECK(w.world.groups().add(group, mould));
 
   script::HostRegistry registry;
   (void)register_match_host(registry);

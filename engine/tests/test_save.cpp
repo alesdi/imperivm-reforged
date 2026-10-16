@@ -1478,7 +1478,10 @@ TEST(save_match_section_round_trips) {
   match.set_player(0, slot);
   // The three-argument `EndGame`, whose message is display text and is
   // deliberately not hashed -- and has to survive a save all the same.
-  match.end_game(0, /*lost=*/true, "The legions are broken.");
+  const World world;
+  match.end_game(world, 0, /*lost=*/true, "The legions are broken.");
+  // Player 1 is the one side left standing, and 0x00524090 marks it won.
+  CHECK(match.outcome(1) == MatchOutcome::won);
   // Not the default, and not the neighbour of the default: a section that
   // dropped the field would restore 0 and a section that read it at the wrong
   // offset would restore something else, and only a value that is neither

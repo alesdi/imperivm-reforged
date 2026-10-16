@@ -617,6 +617,62 @@ TEST(conversation_an_undeclared_name_plays_nothing_and_is_not_a_trap) {
   CHECK(stage.campaign.results().get("T_Nothing").empty());
 }
 
+/// `RunConv` on a name the map does not declare answers the empty string,
+/// whatever a run of that name left behind: 0x0050cef0's first entry fails the
+/// load and pushes "" without suspending.
+TEST(conversation_run_conv_on_an_undeclared_name_answers_empty_not_the_old_result) {
+  Stage stage;
+  stage.campaign.results().set("T_Gone", "OLD");
+  CHECK(stage.run(
+      "//void\n"
+      "EnvWriteString(\"/answer\", RunConv(\"T_Gone\"));\n",
+      "gone.vs"));
+  CHECK(stage.env.env().read_string(EnvScope::root(), "/answer").empty());
+}
+
+/// `Init` on a name the map does not declare leaves the variable empty, and
+/// `SetActor` binds only a role the conversation declares.
+///
+/// 0x0050cde0 deletes the fresh conversation when the load fails; 0x0050a430
+/// then prints the uninitialized message, and 0x00509eb0 binds only a role
+/// whose name matches one of the conversation's `<actor name>`s.
+TEST(conversation_init_and_set_actor_bind_only_what_the_conversation_declares) {
+  Stage stage;
+  REQUIRE(stage.campaign.conversations().add(bytes_of(kGated)).ok());
+  ConversationPool& pool = stage.world.conversations();
+  const ConversationId id = pool.acquire(1, 0);
+  const script::Value conv = make_conversation_value(id);
+  const ObjectId herald = stage.world.spawn(NativeClass::decor, nullptr);
+  const auto call = [&](const char* name, std::uint16_t arity,
+                        std::vector<script::Value> args) {
+    const std::uint32_t index = stage.registry.find(script::CallKind::member, name, arity);
+    REQUIRE(index != script::kUnresolvedHost);
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &stage.context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    CHECK(stage.registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+  };
+  const script::Value unit = script::Value::object(kTypeObj, herald);
+
+  call("Init", 1, {conv, script::Value::string("T_Gate")});
+  CHECK(pool.name_of(id) == "T_Gate");
+  call("SetActor", 2, {conv, script::Value::string("Nobody"), unit});
+  call("SetActor", 2, {conv, script::Value::string("herald"), unit});
+  CHECK(pool.actors(id).empty());
+  call("SetActor", 2, {conv, script::Value::string("Herald"), unit});
+  REQUIRE(pool.actors(id).size() == 1);
+  CHECK(pool.actors(id)[0].role == "Herald");
+
+  // A name the map does not hold empties the variable, cast and all.
+  call("Init", 1, {conv, script::Value::string("T_Nothing")});
+  CHECK(pool.name_of(id).empty());
+  CHECK(pool.actors(id).empty());
+  call("SetActor", 2, {conv, script::Value::string("Herald"), unit});
+  CHECK(pool.actors(id).empty());
+}
+
 TEST(conversation_run_before_init_says_nothing) {
   Stage stage;
   REQUIRE(stage.campaign.conversations().add(bytes_of(kGated)).ok());

@@ -801,6 +801,10 @@ def test_balcans_eagles_fly_and_stay_over_the_map(imrun, game_dir):
 #: inside them.
 P1_GATES = ((14058, 1982), (12848, 2308), (14388, 2960), (13178, 3502))
 P1_INSIDE = (13600, 2700)
+#: Outside p1's walls, beyond its west gate (12848, 2308): where a friend is
+#: stood to be sent in. The west gate, because on the seed above nobody of
+#: p1's holds it open at the order turn, as somebody does the south one.
+P1_WEST_OUTSIDE = (12300, 2050)
 #: When the swordsman is sent in. By then p1's AI has trained a few and marched
 #: them out through its gates.
 ORDER_TURN = 300
@@ -826,15 +830,21 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
     a friend opens it, nobody closes it. The scan walks units only (the
     original's walk takes the unit mask), so the gate's own walls and towers,
     and the sentries on them (`ignore_passability`), are not friends there.
-    One of p1's swordsmen, standing outside the walls, is sent to the market
+    One of p1's swordsmen, stood outside the walls, is sent to the market
     inside: the gate it reaches is closed when it is sent, opens as it comes
     within 350, and it walks through to the market.
+
+    Which swordsman, and where it stands by the order turn, is the AI's and
+    moves with what its draws are spent on -- the fog's own draw
+    (`GetUnexploredPoint`, 0x005d99e0) walked the one this test used to find
+    outside to within 90 of the south gate, where it holds that gate open. So
+    it takes any of p1's that holds no gate open (none within the scan's 350)
+    and stands it outside the west gate, which nobody holds open.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
         pytest.skip("Crossroads.BFHP is not in this installation")
-    # Which swordsman: the first of p1's standing outside its walls, well away
-    # from every gate.
+    # Which swordsman: the first of p1's that holds no gate open.
     first = subprocess.run(
         [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "100",
          "--seed", str(LAYOUT_SEED)],
@@ -846,8 +856,7 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
         int(i)
         for i, x, y in re.findall(r"^\s+(\d+) ESwordsman p1 at \((-?\d+),(-?\d+)\) holder 0 ",
                                   first.stdout, re.MULTILINE)
-        if not _inside(int(x), int(y))
-        and min((int(x) - gx) ** 2 + (int(y) - gy) ** 2 for gx, gy in P1_GATES) > 450 ** 2
+        if min((int(x) - gx) ** 2 + (int(y) - gy) ** 2 for gx, gy in P1_GATES) > 350 ** 2
     ]
     assert candidates, first.stdout[-3000:]
     unit = candidates[0]
@@ -864,10 +873,13 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
          "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_GATES": "1", "IMRUN_WATCH": str(unit),
+             "IMRUN_PLACE": f"{P1_WEST_OUTSIDE[0]},{P1_WEST_OUTSIDE[1]}",
              "IMRUN_GOTO": f"{ORDER_TURN}:{unit}:{P1_INSIDE[0]},{P1_INSIDE[1]}"},
     )
     assert second.returncode == 0, second.stdout + second.stderr
     out = second.stdout
+    assert re.search(rf"^\s+place turn {ORDER_TURN}: {unit} at \(-?\d+,-?\d+\)$", out, re.MULTILINE), \
+        out[-3000:]
     assert re.search(rf"^\s+goto turn {ORDER_TURN}: {unit} to .*, 1 issued$", out, re.MULTILINE), \
         out[-3000:]
     track = [(int(t), int(x), int(y)) for t, x, y in
@@ -986,8 +998,9 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
 
     Numantia's Roman hero starts with his army attached; his owner's
     right-click sends him across open ground, which is `HERO_MOVE.VS`:
-    `FormSetupAndMoveTo`, `FormKeepMoving` while he has a route, and then the
-    army told to `stand_position`, whose first act is to `Stop` where it is.
+    `FormSetupAndMoveTo`, `FormKeepMoving` while he or a member of his column
+    has a route, and then the army told to `stand_position`, whose first act
+    is to `Stop` where it is.
     The hero's own `AddCommand(false, "stand_position")` finds nothing -- his
     `HERO_STAND_GROUND.VS` takes a point and the lookup is by name and
     signature (0x005aef20) -- so he goes back to `HERO_IDLE.VS`, which on
@@ -1036,8 +1049,22 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
         assert len(army) >= 20, out[-3000:]
         far = [a for a in army if a[1] * a[1] + a[2] * a[2] > 300 * 300]
         assert not far, (turn, far)
-    # The march is over, and the army stands where it was stood.
-    assert all(order == "stand_position" for *_, order in army), army
+    # The march is over, and the army is told to stand. Not on the turn the
+    # hero arrives: his `HasPath` (0x0052fe40) stays true while any member's
+    # route still follows the march, so `HERO_MOVE.VS` hands out
+    # `stand_position` once the last of them has come in, and until then the
+    # ones already there are idle. The first report with nobody still
+    # marching is where that has happened.
+    reports = sorted({int(t) for t in re.findall(r"^\s+army turn (\d+): ", out, re.MULTILINE)
+                      if int(t) > arrived[0]})
+    settled = None
+    for turn in reports:
+        orders = re.findall(rf"^\s+army turn {turn}: \d+ at .* order (\S+)$", out, re.MULTILINE)
+        if orders and "form_move" not in orders:
+            settled = orders
+            break
+    assert settled, out[-3000:]
+    assert all(order == "stand_position" for order in settled), settled
 
 
 # ---------------------------------------------------------------------------
@@ -1053,8 +1080,13 @@ SIEGE_TURN = 10
 @pytest.mark.parametrize("cls, stand, hurts", [
     # 20 beyond the outpost's edge, inside a sword's 17 + 15 + 345.
     ("RHastatus", (NUMANTIA_OUTPOST[0] + 365, NUMANTIA_OUTPOST[1]), False),
-    # 300 beyond it, inside a bow's reach.
-    ("RArcher", (NUMANTIA_OUTPOST[0] + 645, NUMANTIA_OUTPOST[1]), True),
+    # 300 beyond it on the west, inside a bow's reach. Not the east side:
+    # since a sequence reads Finished the moment its script ends (0x005b9f50),
+    # `seq3.vs`'s 28 `BestTarget` runs take a few turns rather than 28, so the
+    # Iberians' attackers are already advancing on their own outposts' ground
+    # there, and the archer's `unit_advance.vs` takes the first of them in
+    # squad sight for its target instead of the fort.
+    ("RArcher", (NUMANTIA_OUTPOST[0] - 645, NUMANTIA_OUTPOST[1]), True),
 ])
 def test_the_attack_button_on_a_fort_hurts_it_from_an_archer_and_not_from_a_sword(
         imrun, game_dir, cls, stand, hurts):

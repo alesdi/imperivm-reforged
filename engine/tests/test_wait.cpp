@@ -17,6 +17,8 @@
 
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/area.hpp"
+#include "imperivm/core/sim/campaign.hpp"
+#include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
@@ -313,22 +315,73 @@ TEST(env_int_between_reads_the_root_scope_and_shares_the_bounds_rule) {
   CHECK(outcome.suspend_for == kEnvPollInterval);
 }
 
-TEST(a_wait_on_a_dead_query_refuses_by_name_rather_than_answering_true) {
-  // The one place this engine deliberately differs. `gbr.exe` re-checks the
-  // handle every poll (0x005ed05f) and, when it fails, ends the wait
-  // *successfully* after calling 0x00686eb0 -- a bare `ret` in the retail
-  // build, so the diagnostic never prints. A dangling handle silently satisfies
-  // its condition. Reproducing that would be a wrong answer no test could see.
+TEST(env_int_between_puts_a_sequences_context_in_front_of_a_relative_key) {
+  // The read helper 0x006ac740 goes through `MakePath` (0x006ab0e0), as
+  // `EnvReadInt/1` does: a key with no leading `/` gets the running thread's
+  // context in front, and the sequence runner (0x005b9d40) makes that `/` for
+  // every sequence thread. Elsewhere the key is used as it is.
+  const HostRegistry registry = wait_registry();
+  World world;
+  EnvSystem env;
+  CampaignSystem campaign;
+  REQUIRE(world.add_system(&env));
+  REQUIRE(world.add_system(&campaign));
+  campaign.add_sequence("Seq1", "Sequences/seq1.vs");
+  campaign.find_sequence("Seq1")->running = 42;
+  env.env().write_int(EnvScope::root(), "/Charge", 2);
+
+  HostCall sequence(world, {str("Charge"), Value::integer(2), Value::integer(2),
+                            Value::integer(-1)});
+  sequence.context.script = 42;
+  CHECK(answered(invoke(registry, "WaitEnvIntBetween", 4, sequence), true));
+  HostCall other(world, {str("Charge"), Value::integer(2), Value::integer(2),
+                         Value::integer(-1)});
+  other.context.script = 43;
+  CHECK(polls(invoke(registry, "WaitEnvIntBetween", 4, other)));
+}
+
+TEST(a_wait_on_a_query_handle_that_names_nothing_ends_true_in_every_query_body) {
+  // Every query body re-checks the handle on every poll -- the table slot
+  // `0xa2a610[h & 0xffff]` plus the stored offset, non-null -- and on a miss
+  // calls 0x00686eb0 (a bare `ret` in retail) and completes the call answering
+  // **1**: 0x005ed05f for `WaitQueryCountBetween`, the same shape in the other
+  // seven. This engine used to refuse by name; it answers what they answer.
+  // The invalid handle a set operation answers for a side naming nothing is
+  // one such handle too: its slot is empty, and no body reads a type word.
   const HostRegistry registry = wait_registry();
   QueryWorld fixture(1);
-  fixture.world.despawn(fixture.query);
+  CommandSystem commands;
+  REQUIRE(fixture.world.add_system(&commands));
+  const ObjectId live =
+      fixture.world.create_query(objs_in_circle(Point{0, 0}, 1000, ClassFilter{}));
+  REQUIRE(fixture.world.despawn(fixture.query));
+  const Value dead = query_value(fixture.query);
+  const Value invalid = Value::object(script::ObjectRef{script::kNoType, 0});
+  const Value unit = Value::object(script::ObjectRef{kTypeObj, 1});
 
-  HostCall call(fixture.world, {query_value(fixture.query), Value::integer(1),
-                                Value::integer(-1), Value::integer(-1)});
-  const HostOutcome outcome = invoke(registry, "WaitQueryCountBetween", 4, call);
-  CHECK(outcome.status == HostStatus::error);
+  for (const Value& gone : {dead, invalid}) {
+    HostCall count(fixture.world, {gone, Value::integer(5), Value::integer(5),
+                                   Value::integer(-1)});
+    CHECK(answered(invoke(registry, "WaitQueryCountBetween", 4, count), true));
+    HostCall empty(fixture.world, {gone, Value::integer(-1)});
+    CHECK(answered(invoke(registry, "WaitEmptyQuery", 2, empty), true));
+    HostCall non_empty(fixture.world, {gone, Value::integer(-1)});
+    CHECK(answered(invoke(registry, "WaitNonEmptyQuery", 2, non_empty), true));
+    HostCall member(fixture.world, {unit, gone, Value::integer(-1)});
+    CHECK(answered(invoke(registry, "WaitObjInQuery", 3, member), true));
+    HostCall common(fixture.world, {query_value(live), gone, Value::integer(-1)});
+    CHECK(answered(invoke(registry, "WaitCommonObjects", 3, common), true));
+    HostCall idle(fixture.world, {gone, Value::integer(-1)});
+    CHECK(answered(invoke(registry, "WaitIdle", 2, idle), true));
+    HostCall health(fixture.world, {gone, Value::integer(200), Value::integer(300),
+                                    Value::integer(-1)});
+    CHECK(answered(invoke(registry, "WaitHealthBetween", 4, health), true));
+    HostCall area(fixture.world, {gone, Value::string("A_Nowhere"), Value::integer(-1)});
+    CHECK(answered(invoke(registry, "WaitUnitsInArea", 3, area), true));
+  }
 
-  // And an argument that is not a query handle at all is a different refusal.
+  // An argument that is not a handle at all is a different matter: the
+  // compiler cannot produce one, so it stays a refusal.
   HostCall wrong(fixture.world, {Value::integer(7), Value::integer(1), Value::integer(-1),
                                  Value::integer(-1)});
   CHECK(invoke(registry, "WaitQueryCountBetween", 4, wrong).status == HostStatus::error);
@@ -508,6 +561,39 @@ TEST(an_empty_query_reads_as_full_health_because_the_sums_are_equal) {
   CHECK(polls(between(0, 10)));  // the shipped bounds, and they do not fire
 }
 
+TEST(health_between_sums_each_objects_own_maximum_and_not_the_classs) {
+  // 0x005ed39a sums `[obj+0xc8]`, the maximum the object carries, which the
+  // class fills and a bonus or a level moves; the class's `maxhealth` was read
+  // here before. Two units at 25 of a class maximum of 100, each with 100 more
+  // put on by a bonus: 50 of 400, 12 per cent and not 25.
+  const HostRegistry registry = wait_registry();
+  HealthWorld fixture(2, 25);
+  CombatSystem combat;
+  REQUIRE(fixture.world.add_system(&combat));
+  const ClassIndex legionary = fixture.graph.lookup("Legionary");
+  CombatProfile profile;
+  profile.max_health = 100;
+  combat.set_profile(legionary, profile);
+  for (const WorldObject& slot : fixture.world.objects()) {
+    if (slot.internal != InternalKind::none) continue;
+    Combatant c;
+    c.id = slot.id;
+    c.class_index = legionary;
+    c.health = 25;
+    combat.add(c);
+    StatBonus more;
+    more.max_health = 100;
+    REQUIRE(combat.add_bonus(slot.id, more));
+  }
+  const auto between = [&](std::int32_t low, std::int32_t high) {
+    HostCall call(fixture.world, {query_value(fixture.query), Value::integer(low),
+                                  Value::integer(high), Value::integer(-1)});
+    return invoke(registry, "WaitHealthBetween", 4, call);
+  };
+  CHECK(answered(between(12, 12), true));
+  CHECK(polls(between(25, 25)));
+}
+
 namespace {
 
 /// A world with one named settlement, owned by `owner`.
@@ -565,18 +651,27 @@ TEST(an_unowned_settlement_is_not_captured_by_a_player_number_that_does_not_exis
   CHECK(polls(owned_by(17)));
 }
 
-TEST(a_settlement_name_that_resolves_nowhere_is_refused_rather_than_satisfied) {
-  // 0x005edc46 ends the wait *true* after calling a diagnostic that is a bare
-  // `ret` in the retail build, so a misspelt name silently succeeds. Refused by
-  // name here, for the same reason `kDeadQuery` is.
+TEST(a_settlement_name_that_resolves_nowhere_ends_the_wait_true) {
+  // 0x005edadb scans the settlement vector once, on the fresh frame, and keeps
+  // the first index whose name compares equal byte for byte -- or the vector's
+  // length when none does. Every poll then reads that index, and one out of
+  // range ends the wait **true** after the dead diagnostic (0x005edc46). This
+  // engine used to refuse by name.
   const HostRegistry registry = wait_registry();
   SettlementWorld fixture("S_Yard", 0);
   HostCall call(fixture.world,
-                {Value::string("S_Typo"), Value::integer(1), Value::integer(-1)});
-  CHECK(invoke(registry, "WaitSettlementCapture", 3, call).status == HostStatus::error);
-  // An empty name is not a wildcard either.
-  HostCall blank(fixture.world, {Value::string(""), Value::integer(1), Value::integer(-1)});
-  CHECK(invoke(registry, "WaitSettlementCapture", 3, blank).status == HostStatus::error);
+                {Value::string("S_Typo"), Value::integer(2), Value::integer(-1)});
+  CHECK(answered(invoke(registry, "WaitSettlementCapture", 3, call), true));
+  HostCall blank(fixture.world, {Value::string(""), Value::integer(2), Value::integer(-1)});
+  CHECK(answered(invoke(registry, "WaitSettlementCapture", 3, blank), true));
+
+  // The compare is a plain byte compare, so an empty name finds a settlement
+  // whose name is empty, and then the owner rule applies to it.
+  SettlementWorld unnamed("", 3);
+  HostCall owner(unnamed.world, {Value::string(""), Value::integer(4), Value::integer(-1)});
+  CHECK(answered(invoke(registry, "WaitSettlementCapture", 3, owner), true));
+  HostCall other(unnamed.world, {Value::string(""), Value::integer(2), Value::integer(-1)});
+  CHECK(polls(invoke(registry, "WaitSettlementCapture", 3, other)));
 }
 
 namespace {
@@ -656,15 +751,70 @@ TEST(units_in_an_area_is_two_tests_and_an_empty_query_fails_the_second) {
   CHECK(polls(invoke(registry, "WaitUnitsInArea", 3, straggler)));
 }
 
-TEST(an_area_name_that_resolves_nowhere_is_refused_rather_than_satisfied) {
-  // 0x005ee419 falls through to 0x005ee41d and answers **true** with no
-  // diagnostic at all -- not even the dead one the query path calls. A misspelt
-  // area name satisfies every wait on it. Refused here.
+TEST(an_area_name_that_resolves_nowhere_ends_the_wait_true) {
+  // 0x005ee419 finds no area and goes to 0x005ee566, which completes the call
+  // answering 1 without even the dead diagnostic. This engine used to refuse.
   const HostRegistry registry = wait_registry();
   AreaWorld fixture(1);
+  fixture.world.set_position(fixture.units[0], Point{5000, 5000});
   HostCall call(fixture.world,
                 {query_value(fixture.query), Value::string("A_Typo"), Value::integer(-1)});
-  CHECK(invoke(registry, "WaitUnitsInArea", 3, call).status == HostStatus::error);
+  CHECK(answered(invoke(registry, "WaitUnitsInArea", 3, call), true));
+}
+
+TEST(units_in_an_area_counts_units_only_and_a_held_unit_by_its_holder) {
+  // 0x005ee45d asks the area only about a member carrying the unit bit
+  // 0x400000; any other member is passed over as if it were inside. The area's
+  // own test (0x004d7df0, no player) puts a hidden member with no owner bit
+  // outside, and takes a held unit as inside when its holder stands inside --
+  // the grid sweep (0x004d7d70) finds the holder and 0x0053ee20 looks the
+  // unit's holder up in what it found.
+  const HostRegistry registry = wait_registry();
+  AreaWorld fixture(1);
+  const Value q = query_value(fixture.query);
+  const auto ask = [&] {
+    HostCall call(fixture.world, {q, Value::string("A_Ring"), Value::integer(-1)});
+    return invoke(registry, "WaitUnitsInArea", 3, call);
+  };
+  const ObjectId unit = fixture.units[0];
+  CHECK(answered(ask(), true));
+
+  // A building outside the ring does not stop the wait.
+  const ObjectId hut = fixture.world.spawn(NativeClass::building, nullptr);
+  fixture.world.set_position(hut, Point{5000, 0});
+  REQUIRE((fixture.world.sync_flags(hut) & kSyncUnit) == 0);
+  CHECK(answered(ask(), true));
+
+  // Hidden and owned by no one: outside, though it stands at the centre.
+  fixture.world.mutable_state(unit)->flags.hidden = true;
+  fixture.world.mutable_state(unit)->owner = kNoPlayer;
+  CHECK(polls(ask()));
+  // Hidden but owned: the mask is all ones, so its owner bit lets it through.
+  fixture.world.mutable_state(unit)->owner = 2;
+  CHECK(answered(ask(), true));
+  fixture.world.mutable_state(unit)->flags.hidden = false;
+
+  // Held: inside when the holder stands inside. A ring away from the origin,
+  // because a held unit's own position is `(-1, -1)` (vtbl+0x3c), and a ring
+  // that holds that point holds every garrisoned unit on the map.
+  const ObjectId far_marker = fixture.world.spawn_internal(InternalKind::query);
+  (void)fixture.world.named_objects().bind("A_Far", far_marker);
+  fixture.areas.areas().bind(far_marker, AreaShape::of_circle(Point{1000, 0}, 100));
+  const ObjectId tower = fixture.world.spawn(NativeClass::building, nullptr);
+  fixture.world.set_position(tower, Point{1050, 0});
+  REQUIRE(fixture.world.put_in_holder(unit, tower));
+  REQUIRE(fixture.world.named_objects().bind("Held", unit));
+  const auto index = static_cast<std::uint32_t>(fixture.world.named_objects().find("Held"));
+  const auto ask_held = [&](const char* area) {
+    HostCall call(fixture.world, {Value::object(script::ObjectRef{kTypeNamedObj, index}),
+                                  Value::string(area), Value::integer(-1)});
+    return invoke(registry, "WaitUnitsInArea", 3, call);
+  };
+  CHECK(answered(ask_held("A_Far"), true));
+  fixture.world.set_position(tower, Point{5000, 0});
+  CHECK(polls(ask_held("A_Far")));
+  // And the ring at the origin takes it wherever its holder stands.
+  CHECK(answered(ask_held("A_Ring"), true));
 }
 
 TEST(a_named_object_is_a_query_of_one_and_empties_when_the_object_dies) {
@@ -1068,4 +1218,26 @@ TEST(end_conv_setup_suspends_once_within_reach_and_finishes_otherwise) {
 
   HostCall gone(f.world, {obj_value(walker), obj_value(999999)});
   CHECK(invoke(registry, "EndConvSetup", 2, gone).status == HostStatus::ok);
+}
+
+TEST(the_five_argument_conversation_wait_ends_true_on_a_query_that_names_nothing) {
+  // 0x005ed480 resolves both `Query` handles on every entry, before anything
+  // is filed, and either one naming nothing completes the call answering 1
+  // with the out arguments untouched (0x005ed5c3 -> 0x005ed713) -- the query
+  // family's dead-handle exit. The three-argument body has none: a party that
+  // resolves nowhere files nothing and burns its timeout (see above).
+  const HostRegistry registry = wait_registry();
+  ConvWorld f;
+  const ObjectId walker = f.spawn(f.walker_class, Point{0, 0});
+  const ObjectId talkers = f.query_of(f.talker_class);
+  const ObjectId walkers = f.query_of(f.walker_class);
+  REQUIRE(f.world.despawn(talkers));
+  HostCall call(f.world, {query_value(walkers), query_value(talkers), Value::integer(-1),
+                          obj_value(walker), obj_value(walker)});
+  CHECK(answered(invoke(registry, "WaitConvRequest", 5, call), true));
+  CHECK(call.arguments[3].is_object() && call.arguments[3].as_object().id == walker);
+  CHECK(call.arguments[4].is_object() && call.arguments[4].as_object().id == walker);
+
+  HostCall three(f.world, {query_value(walkers), query_value(talkers), Value::integer(-1)});
+  CHECK(polls(invoke(registry, "WaitConvRequest", 3, three)));
 }

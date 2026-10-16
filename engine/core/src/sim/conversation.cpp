@@ -863,10 +863,14 @@ struct Self {
   // `GiveNote` on an undeclared id, and for the same reason: the shipped data
   // has a mission naming something its own container forgot to declare, and a
   // trap there would stop the mission rather than skip the line.
+  //
+  // `RunConv` (0x0050cef0) answers the **empty string** for one, whatever an
+  // earlier map's run of that name left behind: the load (0x0050c710) fails
+  // on the first entry, which prints *"'RunConv' : Conversation named '%s'
+  // not present!"* and pushes "" without suspending. `Conversation::Run` is
+  // `void`, and its variable was cleared by `Init`'s own failed load.
   const ConversationDefinition* definition = self.campaign->conversations().find(name);
-  if (definition == nullptr) {
-    return HostOutcome::ok_with(Value::string(std::string(self.campaign->results().get(name))));
-  }
+  if (definition == nullptr) return HostOutcome::ok_with(Value::string(""));
 
   const ConversationRun run =
       play_conversation(ctx, *definition, actors, self.campaign->results().get(name));
@@ -880,11 +884,22 @@ struct Self {
 
 /// `C_Conv.Init(name)` -- 54 sites, every one of them followed by `SetActor`
 /// and `Run` in the same script.
+///
+/// 0x0050cde0 takes its receiver by reference. A conversation the variable
+/// already holds is deleted, a fresh one is made (0x0050c590) and loaded by
+/// name from the map's catalogue (0x0050c710); a name the catalogue does not
+/// hold prints *"'Conversation::Init' : Conversation named '%s' not
+/// present!"*, deletes the fresh one and leaves the variable empty -- so the
+/// `SetActor` and `Run` after it are the uninitialized message. Here the
+/// variable's entry is bound to the name, or to nothing; either way its old
+/// cast goes (`ConversationPool::bind`).
 HostOutcome init_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   if (ctx.count() < 2 || !ctx.arg(1).is_string()) return HostOutcome::ok_void();
-  (void)self.pool->bind(self.id, ctx.arg(1).as_string());
+  const std::string_view name = ctx.arg(1).as_string();
+  const bool present = self.campaign->conversations().find(name) != nullptr;
+  (void)self.pool->bind(self.id, present ? name : std::string_view{});
   return HostOutcome::ok_void();
 }
 
@@ -894,10 +909,26 @@ HostOutcome init_impl(CallContext& ctx) {
 /// The binding is carried and not read: nothing in the simulation moves a
 /// camera or draws a name. It is world state all the same, because a save
 /// taken between `Init` and `Run` has to come back with the same roles bound.
+///
+/// 0x0050a430 resolves the unit first (a dead handle is a null actor), then
+/// the variable: empty prints *"Use of uninitialized 'Conversation'
+/// object!"* and binds nothing. Otherwise 0x00509eb0 walks the roles the
+/// conversation declares (`<actor name>`, in order) for the first whose name
+/// equals the argument byte for byte and sets its actor; a name it does not
+/// declare binds nothing (*"Possibly invalid actor name"*).
 HostOutcome set_actor_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   if (ctx.count() < 3 || !ctx.arg(1).is_string()) return HostOutcome::ok_void();
+  const std::string_view bound = self.pool->name_of(self.id);
+  if (bound.empty()) return HostOutcome::ok_void();
+  const ConversationDefinition* definition = self.campaign->conversations().find(bound);
+  const std::string_view role = ctx.arg(1).as_string();
+  if (definition == nullptr ||
+      std::find(definition->actors.begin(), definition->actors.end(), role) ==
+          definition->actors.end()) {
+    return HostOutcome::ok_void();
+  }
   const Value& who = ctx.arg(2);
   // A role bound to nothing is still a role: the shipped idiom is
   // `SetActor("Scipio", GetNamedObj("NO_Scipio").obj.AsUnit())`, and
@@ -951,6 +982,15 @@ HostOutcome run_conv_impl(CallContext& ctx) {
 }
 
 /// `ConvResult(name)` -- 5 sites, and one of them decides which map loads next.
+///
+/// 0x0050a4e0 reads the environment string at `/<name>/Return Value`
+/// (0x0050a3b0 builds the path, 0x006ac5c0 reads it), which is where a
+/// conversation's `return` and `ConvSetResult` (0x0050a680, through
+/// 0x006ac4a0) write it. **Design:** this engine keeps the results in their
+/// own table (`ConversationResults`) rather than under that key. Every shipped
+/// read is `ConvResult` in the map that ran the conversation, and no script
+/// names the key, so the answers agree; a script reading or clearing the key
+/// through the environment would see the difference.
 HostOutcome conv_result_impl(CallContext& ctx) {
   Self self = resolve_free(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);

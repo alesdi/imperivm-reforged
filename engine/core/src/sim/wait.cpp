@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "imperivm/core/sim/area.hpp"
+#include "imperivm/core/sim/campaign.hpp"
 #include "imperivm/core/sim/globals.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/conversation.hpp"
@@ -43,33 +44,21 @@ constexpr const char* kNoEnvSystem = "no env system on the world";
 /// The ten shipped sites that pass one are therefore *correct*, not sloppy,
 /// and this engine answers them the way the original does: see `evaluate`.
 constexpr const char* kNotAQuery = "expects a Query or a NamedObj";
-/// `gbr.exe` answers **true** here and swallows its own diagnostic: the failure
-/// path at 0x005ed05f calls 0x00686eb0, which is a bare `ret` in the retail
-/// build, and then completes the wait successfully. Reproducing that would turn
-/// every dangling handle into a silently satisfied condition -- a wrong answer
-/// wearing the shape of a right one, and one no test could see. Refused by name
-/// instead, and the divergence is recorded in the header.
+/// **A query handle that names nothing ends the wait true.** Every query
+/// body re-checks the handle on every poll (the table slot `0xa2a610[h & 0xffff]`
+/// plus the stored offset, non-null) and, on failure, calls the diagnostic
+/// printer 0x00686eb0 -- a bare `ret` in the retail build -- and completes the
+/// call answering 1 (0x005ed05f for `WaitQueryCountBetween`, and the same
+/// shape in all eight). This engine used to refuse by name instead; it answers
+/// what the original answers now. `dead_query` is that answer.
 /// The two verbs the original accepts as "at rest", compared against the
 /// object's command string at 0x005ece5a and 0x005ece6a.
 constexpr std::string_view kRestingVerb = "idle";
 constexpr std::string_view kStandstillVerb = "standstill";
 constexpr const char* kNoCommandSystem =
     "WaitIdle needs the command system, and this world has none";
-/// `gbr.exe` answers **true** and says nothing at all: the area lookup at
-/// 0x005ee3f1 returns 0, the `testl`/`jne` at 0x005ee419 falls through to
-/// 0x005ee41d, and the wait completes successfully without even reaching a
-/// diagnostic -- unlike the dead-query path, which at least calls the (dead)
-/// printer. A misspelt area name therefore satisfies every wait on it. Refused
-/// by name here for the same reason `kDeadQuery` is.
-constexpr const char* kNoSuchArea =
-    "no area of that name; gbr.exe answers true here and prints nothing, see "
-    "sim/wait.cpp";
 constexpr const char* kNoAreaSystem = "no area system on the world";
 constexpr const char* kNoEconomySystem = "no economy system on the world";
-/// 0x005edc46: an unresolvable settlement name ends the wait **true**, after
-/// calling the same dead diagnostic. Refused rather than reproduced.
-constexpr const char* kNoSuchSettlement =
-    "no settlement of that name; gbr.exe answers true here, see sim/wait.cpp";
 /// 0x005ed3d7 divides by `sumMax` after a guard that only covers
 /// `sumHP == sumMax`, so a query whose objects declare no `maxhealth` at all
 /// divides by zero -- a `#DE`, not a wrong answer. There is nothing to
@@ -77,11 +66,11 @@ constexpr const char* kNoSuchSettlement =
 constexpr const char* kNoMaxHealth =
     "WaitHealthBetween: the query's objects declare no maxhealth, which faults "
     "in gbr.exe rather than answering; see sim/wait.cpp";
-constexpr const char* kDeadQuery =
-    "the Query handle no longer names a query; gbr.exe answers true here and "
-    "swallows the diagnostic, see sim/wait.hpp";
 
 [[nodiscard]] HostOutcome answer(bool met) { return HostOutcome::ok_with(Value::boolean(met)); }
+
+/// What every query wait answers for a handle that names nothing: true.
+[[nodiscard]] HostOutcome dead_query() { return answer(true); }
 
 /// The shared tail of every entry point: the predicate has just been tested and
 /// did not hold, so either poll again or give up.
@@ -115,6 +104,15 @@ struct QueryResult {
 [[nodiscard]] QueryResult evaluate(World& world, const Value& value) {
   QueryResult out;
   if (!value.is_object()) return out;
+
+  // The invalid handle -- what a set operation answers when either side names
+  // nothing (`fn_set_op`) -- is a query handle naming nothing: the bodies never
+  // read a type word, only the table slot `0xa2a610[h & 0xffff]`, and the
+  // invalid handle's slot is empty. So it is a dead query, not a wrong type.
+  if (value.as_object().type == script::kNoType) {
+    out.ok = true;
+    return out;
+  }
 
   // A `NamedObj` is a `Query` whose membership is explicit rather than
   // computed: `CVXNamedObjQuery` (vtable 0x7c4830) holds a deque that
@@ -162,7 +160,7 @@ HostOutcome fn_query_count_between(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
   const QueryResult q = evaluate(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
-  if (!q.alive) return HostOutcome::failed(kDeadQuery);
+  if (!q.alive) return dead_query();
 
   const auto count = static_cast<std::int32_t>(q.objects.size());
   const std::int32_t low = int_arg(ctx, 1);
@@ -177,7 +175,7 @@ HostOutcome fn_empty_query(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
   const QueryResult q = evaluate(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
-  if (!q.alive) return HostOutcome::failed(kDeadQuery);
+  if (!q.alive) return dead_query();
   if (q.objects.empty()) return answer(true);
   return keep_waiting(ctx, timeout_arg(ctx, 1), kQueryPollInterval);
 }
@@ -189,7 +187,7 @@ HostOutcome fn_non_empty_query(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
   const QueryResult q = evaluate(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
-  if (!q.alive) return HostOutcome::failed(kDeadQuery);
+  if (!q.alive) return dead_query();
   if (!q.objects.empty()) return answer(true);
   return keep_waiting(ctx, timeout_arg(ctx, 1), kQueryPollInterval);
 }
@@ -201,7 +199,7 @@ HostOutcome fn_obj_in_query(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
   const QueryResult q = evaluate(*world, ctx.arg(1));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
-  if (!q.alive) return HostOutcome::failed(kDeadQuery);
+  if (!q.alive) return dead_query();
   if (ctx.arg(0).is_object()) {
     const auto wanted = static_cast<ObjectId>(ctx.arg(0).as_object().id);
     for (const ObjectId id : q.objects) {
@@ -221,7 +219,7 @@ HostOutcome fn_common_objects(CallContext& ctx) {
   const QueryResult a = evaluate(*world, ctx.arg(0));
   const QueryResult b = evaluate(*world, ctx.arg(1));
   if (!a.ok || !b.ok) return HostOutcome::failed(kNotAQuery);
-  if (!a.alive || !b.alive) return HostOutcome::failed(kDeadQuery);
+  if (!a.alive || !b.alive) return dead_query();
   // Both sides come out in ascending id order, so this is a merge rather than a
   // nested scan -- the same reasoning `evaluate_query`'s set ops use.
   std::size_t i = 0;
@@ -253,11 +251,26 @@ HostOutcome fn_env_int_between(CallContext& ctx) {
   if (env == nullptr) return HostOutcome::failed(kNoEnvSystem);
   if (!ctx.arg(0).is_string()) return HostOutcome::failed("WaitEnvIntBetween expects a key");
 
-  // The root scope with the key verbatim, exactly as `EnvReadInt/1` does it:
-  // `MakePath` (0x006ab0e0) leaves a path starting with `/` unchanged, and all
-  // 18 shipped sites start with one.
-  const std::int32_t value =
-      env->env().read_int(EnvScope::root(), ctx.arg(0).as_string());
+  // The read helper 0x006ac740 goes through `MakePath` (0x006ab0e0), exactly
+  // as `EnvReadInt/1` does: a key starting with `/` is used as it is, and any
+  // other key gets the running thread's context in front -- `/` inside a
+  // campaign sequence, nothing elsewhere (`sim/env.cpp`'s `thread_context`).
+  // All 18 shipped sites start with `/`.
+  const std::string_view key = ctx.arg(0).as_string();
+  std::string path;
+  if (key.empty() || key.front() != '/') {
+    if (const CampaignSystem* campaign = campaign_system_of(*world);
+        campaign != nullptr && ctx.script != script::kNoScript) {
+      for (const CampaignSystem::SequenceEntry& entry : campaign->sequences()) {
+        if (entry.running == ctx.script) {
+          path = "/";
+          break;
+        }
+      }
+    }
+  }
+  path.append(key);
+  const std::int32_t value = env->env().read_int(EnvScope::root(), path);
   const std::int32_t low = int_arg(ctx, 1);
   const std::int32_t high = int_arg(ctx, 2);
   if (value >= low && (value <= high || high < 0)) return answer(true);
@@ -297,7 +310,7 @@ HostOutcome fn_idle(CallContext& ctx) {
   if (commands == nullptr) return HostOutcome::failed(kNoCommandSystem);
   const QueryResult q = evaluate(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
-  if (!q.alive) return HostOutcome::failed(kDeadQuery);
+  if (!q.alive) return dead_query();
 
   if (!q.objects.empty()) {
     bool all_resting = true;
@@ -329,16 +342,16 @@ HostOutcome fn_idle(CallContext& ctx) {
 /// zero -- and unlike its two siblings this body has no size check anywhere.
 /// With the shipped `(0, 10)` bounds an empty query therefore keeps waiting.
 ///
-/// Health is `ObjectState::health`; the maximum is the class property
-/// `maxhealth`, which is where `Obj::maxhealth` reads it. The two fields the
-/// original sums are `[obj+0xc0]` and `[obj+0xc8]`, identified against
-/// `Obj::health` (0x005adac3) and `Obj::maxhealth` (0x005adb83).
+/// The two fields summed are `[obj+0xc0]` and `[obj+0xc8]` (0x005ed39a), the
+/// object's health and **its own** maximum -- `object_max_health`, which a
+/// level or a bonus moves -- not the class's `maxhealth`, which this used to
+/// read. A member whose handle no longer resolves is skipped.
 HostOutcome fn_health_between(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
   const QueryResult q = evaluate(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
-  if (!q.alive) return HostOutcome::failed(kDeadQuery);
+  if (!q.alive) return dead_query();
 
   std::int64_t sum_health = 0;
   std::int64_t sum_max = 0;
@@ -346,7 +359,7 @@ HostOutcome fn_health_between(CallContext& ctx) {
     const WorldObject* slot = world->find(id);
     if (slot == nullptr) continue;  // 0x005ed394 skips a null handle likewise
     sum_health += slot->state.health;
-    sum_max += class_int(*world, *slot, "maxhealth");
+    sum_max += object_max_health(*world, *slot);
   }
 
   std::int64_t percent = 100;
@@ -377,6 +390,15 @@ HostOutcome fn_health_between(CallContext& ctx) {
 /// reads the same two dereferences and *increments*, and `Obj::SetPlayer`
 /// (0x005ab329) subtracts one and rejects anything outside 1..16.
 ///
+/// **The name is resolved once**, on the call's first entry (the fresh-frame
+/// byte): 0x005edadb scans the settlement vector `[map+0x4c..0x50]` front to
+/// back with a byte compare against each settlement's name (`+0xd0`) and keeps
+/// the first index that matches -- or the vector's length when none does -- in
+/// the call's frame scratch. Every poll then reads that index: out of range or
+/// a null slot ends the wait **true** after the dead diagnostic (0x005edc46).
+/// This engine scans on every poll; a settlement's name never changes here, so
+/// the answer is the same.
+///
 /// An unresolvable player number must select **nothing**. `player_from_script`
 /// answers `kNoPlayer` for one, and `kNoPlayer` is also what an *unowned*
 /// settlement carries -- so comparing the two directly would make
@@ -390,8 +412,16 @@ HostOutcome fn_settlement_capture(CallContext& ctx) {
   }
   EconomySystem* economy = economy_of(*world);
   if (economy == nullptr) return HostOutcome::failed(kNoEconomySystem);
-  const Settlement* settlement = economy->settlements().find_by_name(ctx.arg(0).as_string());
-  if (settlement == nullptr) return HostOutcome::failed(kNoSuchSettlement);
+  // The first settlement whose name compares equal byte for byte -- an empty
+  // name included, which `find_by_name` deliberately refuses.
+  const Settlement* settlement = nullptr;
+  for (const Settlement& candidate : economy->settlements().all()) {
+    if (candidate.name == ctx.arg(0).as_string()) {
+      settlement = &candidate;
+      break;
+    }
+  }
+  if (settlement == nullptr) return answer(true);
 
   const PlayerId wanted = player_from_script(int_arg(ctx, 1));
   if (wanted != kNoPlayer && settlement->owner == wanted) return answer(true);
@@ -412,32 +442,52 @@ HostOutcome fn_settlement_capture(CallContext& ctx) {
 /// `{cx, cy, r, r2}` POD. It is *not* the sampler's `d2 < (r+1)^2`. See
 /// `sim/area.hpp`, which carries both rules and the reason they differ.
 ///
-/// **Two things in the original's filter are not reproduced, because they were
-/// not read.** It tests only objects carrying bit 0x400000 at `[obj+0x2c]`,
-/// treating the rest as satisfying; that bit is set from data and no `orl`
-/// writes it anywhere in the image. And an object that fails the shape test
-/// gets a second chance through a tile-walk keyed on a 16-bit handle at
-/// `[obj+0x154]` whose meaning was not established, so "outside the shape" may
-/// not always mean false there. This engine tests every object in the query,
-/// once, against the shape.
+/// **Units only, and a held unit by its holder** -- 0x005ee45d tests the
+/// member's handle, then the unit bit 0x400000 of its sync word, and only then
+/// asks the area (0x004d7df0, with no player). A member that is not a unit is
+/// passed over as if it were inside. The area's own test, in its order:
+///
+///   * a member carrying the hidden bit 0x200000 with no owner bit in the low
+///     sixteen (0x004d7e08, the player mask being all ones) is outside;
+///   * its position inside the shape (the rule above) is inside;
+///   * otherwise, a unit inside a holder (`[obj+0x154] != 0xffff`) is inside
+///     when the holder is among the objects the area's grid sweep finds
+///     (0x004d7d70 -> 0x004d6870 for a circle, 0x004d7db0 for a rectangle,
+///     then 0x0053ee20 looks the holder up in that list). The sweep finds
+///     objects standing on the map by the same `d2 <= r2` rule, so here: the
+///     holder is itself on the map and its position is inside the shape.
+///
+/// **An area name that resolves to nothing ends the wait true** without even
+/// the diagnostic (0x005ee419 -> 0x005ee566); this engine used to refuse.
 HostOutcome fn_units_in_area(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
   const QueryResult q = evaluate(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
-  if (!q.alive) return HostOutcome::failed(kDeadQuery);
+  if (!q.alive) return dead_query();
   if (!ctx.arg(1).is_string()) {
     return HostOutcome::failed("WaitUnitsInArea expects an area name");
   }
   if (area_system_of(*world) == nullptr) return HostOutcome::failed(kNoAreaSystem);
   const AreaShape* area = area_named(*world, ctx.arg(1).as_string());
-  if (area == nullptr) return HostOutcome::failed(kNoSuchArea);
+  if (area == nullptr) return answer(true);
 
+  const auto inside = [&](const WorldObject& slot) {
+    const std::uint32_t flags = world->sync_flags(slot.id);
+    if ((flags & kSyncHidden) != 0 && (flags & kSyncOwnerMask) == 0) return false;
+    if (area->contains_by_query_rule(slot.state.position)) return true;
+    if (slot.state.holder == kNoObject) return false;
+    const WorldObject* holder = world->find(slot.state.holder);
+    if (holder == nullptr || holder->state.holder != kNoObject) return false;
+    if (holder->state.flags.unspawned) return false;
+    return area->contains_by_query_rule(holder->state.position);
+  };
   bool all_inside = true;
   for (const ObjectId id : q.objects) {
     const WorldObject* slot = world->find(id);
     if (slot == nullptr) continue;
-    if (area->contains_by_query_rule(slot->state.position)) continue;
+    if ((world->sync_flags(id) & kSyncUnit) == 0) continue;
+    if (inside(*slot)) continue;
     all_inside = false;
     break;
   }
@@ -503,6 +553,17 @@ void conv_party(World& world, const Value& value, std::vector<ObjectId>& out) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
 
+  // The five-argument body's two `Query` handles are checked first, on every
+  // entry: either one naming nothing ends the call **true**, the out
+  // arguments untouched (0x005ed5c3 -> 0x005ed713), as every query wait does.
+  // The three-argument body has no such exit -- see below.
+  if (with_outputs) {
+    for (std::size_t i = 0; i < 2; ++i) {
+      const QueryResult side = evaluate(*world, ctx.arg(i));
+      if (side.ok && !side.alive) return answer(true);
+    }
+  }
+
   std::vector<ObjectId> walkers;
   std::vector<ObjectId> hosts;
   conv_party(*world, ctx.arg(0), walkers);
@@ -541,23 +602,30 @@ void conv_party(World& world, const Value& value, std::vector<ObjectId>& out) {
 /// walks to the other party and, once both are alive and it has arrived,
 /// calls this.
 ///
-/// `0x005ecc80` is registered as suspending over two `Obj`s. It is the
-/// **offer** side of the manager `sim/conversation.hpp` describes -- the
-/// same operation the input layer performs with the player's selection.
-/// On its first entry (the interpreter's fresh-frame byte, `first_call`
-/// here) it writes 300 into the scheduler's wait global and hands the two
-/// objects to the manager's slot `0x1c`, the offer: walk the pending
-/// records for one whose parties match the pair, apply the reach test,
-/// mark it met. A record completed answers 1 -- suspend for the 300 ms
-/// just written -- and no record, or a re-entry, answers 0: finish.
+/// `0x005ecc80` is registered as suspending over two `Obj`s. It writes 300
+/// into the scheduler's wait global on every entry, then:
 ///
-/// This engine keeps no records: `WaitConvRequest` is a predicate over the
-/// world, and the header records why. So what remains of the offer is the
-/// test the manager would have applied, `within_conversation_reach`, in
-/// either direction since the matcher works out which side matched; when
-/// the pair is within reach the call suspends once for 300 ms, as the
-/// completed offer does, and otherwise finishes at once. A handle naming
-/// nothing is a pair nothing could match.
+///   * on its first entry (the fresh-frame byte, `first_call` here) it calls
+///     the manager's slot `0x1c` (0x0050ec20): both objects resolve and are
+///     not dead (vtbl+0x50), and a **pending** record whose two party handles
+///     are exactly `(This, other)` -- an identity compare of the handle words,
+///     **no reach test** -- is marked met. Found, it answers 1: suspend 300;
+///   * otherwise, and on every re-entry, slot `0x18` (0x0050eb40) asks whether
+///     a **met** record for exactly that pair is still filed -- the waiting
+///     `WaitConvRequest` has not yet withdrawn it. Still there answers 1 again
+///     (another 300 ms); gone, or never there, answers **2, which ends the
+///     calling script** (`script/host.hpp`).
+///
+/// **Partial, recorded rather than redesigned.** This engine keeps no records
+/// (`WaitConvRequest` is a predicate over the world; the header says why), so
+/// it cannot complete a request by identity. What it does instead is the old
+/// reading: within reach in either direction it suspends once for 300 ms, and
+/// otherwise it finishes. At the one shipped site (`UNIT_GO_TALK.VS`) the call
+/// is the script's last statement, so finishing and ending agree, and the
+/// identity offer finds no record there in the original either -- the requests
+/// the shipped sequences file name a `NamedObj` or a `Query`, never the
+/// walking unit's own handle. What differs is a 300 ms suspension before the
+/// script ends when the pair stands within reach.
 HostOutcome fn_end_conv_setup(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("EndConvSetup: no world");

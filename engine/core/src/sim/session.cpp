@@ -1057,7 +1057,7 @@ MatchStatus GameSession::match_status(PlayerId viewer) const {
 }
 
 void GameSession::declare_match(PlayerId player, bool lost) {
-  if (MatchSystem* match = match_system_of(impl_->world)) match->end_game(player, lost);
+  if (MatchSystem* match = match_system_of(impl_->world)) match->end_game(impl_->world, player, lost);
 }
 
 const MaterialiseReport& GameSession::materialised() const noexcept { return impl_->materialised; }

@@ -374,6 +374,25 @@ HostOutcome m_dir(CallContext& ctx) {
 }
 
 /// `Flying::z` -- 5 sites, all `CROW_IDLE.VS`.
+///
+/// 0x0051bdf0 resolves the receiver by handle only (no dead test) and answers
+/// 0x0051b040: with `[obj+0x194] & 0x400000` (`in_air`) clear, the terrain
+/// height (0x0053eaa0) under the object's current position (`vtbl+0x40`);
+/// in the air and animating (component 27 present, 0x0053cfc0) with the clock
+/// inside the animation's window (0x0053cef0, both ends inclusive),
+/// `z_from + (z_to - z_from) * (now - start) / [obj+0x64]`; otherwise `z_from`
+/// (`[obj+0x1cc]`).
+///
+/// **What keeps "otherwise" right is the flying unit's animation-finished
+/// virtual** (0x0051b450, `vtbl+0x54` of the vtable at 0x007be750): at an
+/// animation's end it copies `z_to` into `z_from` -- or, for a landing
+/// animation (`[obj+0x1d4]`), clears `in_air` instead. This engine has no
+/// such hook; it answers the same numbers by clamping the clock at the
+/// window's end (`flying_z_at`), so `z` agrees. What does not agree is
+/// `in_air` after a landing animation runs out: here it stays set until the
+/// next `PlayAnim` with `z == -1` at ground level clears it (see
+/// `begin_flight_anim` and the header). Recorded at `PickFlyingPoint`, whose
+/// crowding term counts `in_air` neighbours.
 HostOutcome m_z(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
@@ -399,6 +418,18 @@ HostOutcome m_is_landing(CallContext& ctx) {
 }
 
 /// `Flying::PickFlyingPoint(n)` -- where to fly next. 0x0051c3d0.
+///
+/// The receiver by handle only; none answers (0, 0). The flock (0x004fee10,
+/// radius -1, the receiver's own class); the first mate that is animating and
+/// `in_air` lends its heading (0x0051c537); else the twelve-direction scan
+/// scored by 0x0051c2f0; then `SetLen(n)` (0x0067c3d0's root, zero vector to
+/// `(0, n)`) and the jitter, two draws of `[-n/5, n/5]`, Y first (0x0051c639).
+///
+/// **Known gap, in the state it reads:** the scan's crowding term counts
+/// `in_air` neighbours, and a bird whose landing animation has run out is
+/// still `in_air` here (no animation-finished hook; see `m_z`), where the
+/// original has cleared it (0x0051b450). The scores can differ; the number of
+/// draws cannot.
 HostOutcome m_pick_flying_point(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
@@ -427,6 +458,13 @@ HostOutcome m_pick_flying_point(CallContext& ctx) {
 /// test, and only decides whether the give-up roll happens at all -- so a bird
 /// with mates in front of it and none of them landable still usually gives up,
 /// and a bird entirely alone lands straight ahead without rolling.
+///
+/// **The straight-ahead spot is put to the landing test too**, with the bird
+/// itself as the one landing (0x0051cae5, `can_land` on the receiver): a spot
+/// that fails it answers (-1, -1), after the jitter has been drawn. The crow's
+/// `ptLand.x >= 0` guard then keeps it in the air. This engine used to return
+/// the spot untested, so a crow could be sent down onto a building or, as a
+/// land bird, into the sea.
 HostOutcome m_pick_landing_point(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
@@ -481,8 +519,9 @@ HostOutcome m_pick_landing_point(CallContext& ctx) {
 
   const Point step = set_len(heading, radius);
   const Point drift = jitter(*world, radius / 5);
-  return HostOutcome::ok_with(
-      pack_point(Point{at.x + step.x + drift.x, at.y + step.y + drift.y}));
+  const Point ahead_at{at.x + step.x + drift.x, at.y + step.y + drift.y};
+  if (!can_land_impl(*world, *slot, ahead_at)) return HostOutcome::ok_with(pack_point(Point{-1, -1}));
+  return HostOutcome::ok_with(pack_point(ahead_at));
 }
 
 /// `Flying::AdjustFlyDir(point)` -- steer away from the map's edge, in place.
@@ -513,6 +552,13 @@ HostOutcome m_adjust_fly_dir(CallContext& ctx) {
 ///
 /// The one shipped site is `CROW_IDLE.VS`'s `ptDir = crows.GetAverageDirection()`,
 /// guarded by `crows.count != 0` on the same line.
+///
+/// **It does not refresh the query.** 0x005799d0 reads the result accessor
+/// (`vtbl+0x20`) without the `Refresh` (`vtbl+0x1c`) `count` makes, so it
+/// averages whatever the last refresh left. This engine evaluates the query
+/// afresh; at the one shipped site the `count` on the same line has just
+/// refreshed it in the same instant, so the two agree there. A temporary
+/// handle argument is released (the `[+0x1c]` reference drop, 0x00571680).
 HostOutcome m_get_average_direction(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetAverageDirection: no world");

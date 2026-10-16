@@ -763,6 +763,56 @@ TEST(campaign_takes_no_entry_point_from_another_domain) {
   CHECK(register_campaign_host(mine) == campaign_host_entry_count());
 }
 
+/// 0x005036e0 returns having written nothing when there is no conquest object,
+/// when the state is outside 0..2, or when the lookup (0x00500f00) finds no
+/// territory of that id; 0x00501440 pushes the empty string with no conquest
+/// object. None of these traps, so the mission script runs on.
+TEST(campaign_a_territory_write_that_misses_is_silent_and_a_bonus_with_no_conquest_is_empty) {
+  const Result<ConquestMap> conquest = ConquestMap::parse(bytes_of(kTerritories));
+  REQUIRE(conquest.ok());
+  script::HostRegistry registry;
+  REQUIRE(register_campaign_host(registry) == campaign_host_entry_count());
+  const auto call = [&](World& world, const char* name,
+                        std::vector<script::Value> args) -> script::HostOutcome {
+    const std::uint32_t index = registry.find(script::CallKind::free_function, name,
+                                              static_cast<std::uint16_t>(args.size()));
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    HostContext context;
+    context.world = &world;
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    return registry.entry(index).fn(ctx);
+  };
+
+  World bare;
+  CHECK(call(bare, "SetTerritoryState", {script::Value::string("North"), script::Value::integer(1)})
+            .status == script::HostStatus::ok);
+  const script::HostOutcome none = call(bare, "ConquestBonus", {});
+  REQUIRE(none.status == script::HostStatus::ok);
+  CHECK(none.value.as_string().empty());
+
+  World world;
+  CampaignSystem campaign;
+  campaign.configure(*conquest);
+  REQUIRE(world.add_system(&campaign));
+  const TerritoryState before = campaign.state_of("North");
+  const TerritoryState other = before == TerritoryState::owned ? TerritoryState::enemy
+                                                               : TerritoryState::owned;
+  CHECK(call(world, "SetTerritoryState",
+             {script::Value::string("Nowhere"), script::Value::integer(1)})
+            .status == script::HostStatus::ok);
+  CHECK(call(world, "SetTerritoryState",
+             {script::Value::string("North"), script::Value::integer(7)})
+            .status == script::HostStatus::ok);
+  CHECK(campaign.state_of("North") == before);
+  CHECK(call(world, "SetTerritoryState",
+             {script::Value::string("North"),
+              script::Value::integer(static_cast<std::int32_t>(other))})
+            .status == script::HostStatus::ok);
+  CHECK(campaign.state_of("North") == other);
+}
+
 TEST(campaign_the_entry_points_run_from_a_compiled_script) {
   const Result<ConquestMap> conquest = ConquestMap::parse(bytes_of(kTerritories));
   REQUIRE(conquest.ok());
@@ -1155,6 +1205,33 @@ TEST(campaign_run_sequence_restarts_a_finished_one) {
   CHECK(s.status("Quick") == "Running");
   s.session->advance(/*turns=*/2, /*turn_length=*/800);
   CHECK(s.status("Quick") == "Finished");
+}
+
+/// **Finished at the instant its thread ends**, as the original's completion
+/// callback (0x005b9f50) has it -- not at the end of the turn. Numantia's
+/// `seq3.vs` is `RunSequence("BestTarget"); while (IsRunning("BestTarget"))
+/// Sleep(100);` once for each of 28 players; with the status written only
+/// after the turn's pass, every one of those polls read `"Running"` for the
+/// rest of the turn and the loop took a turn per player instead of 100 ms.
+TEST(campaign_a_sequence_is_finished_the_moment_its_script_ends_and_not_at_the_turns_end) {
+  //
+  // The poller first runs at 800, the end of the first turn; `Later` sleeps
+  // 2000 and so ends at 2800, inside the turn 2400..3200. The poller is due at
+  // 2800 too and was armed later, so it runs second and reads finished at
+  // 2800. Settled only after the pass, it read running until 3200 and the loop
+  // ran on into the next turn.
+  SequenceSession s;
+  s.scripts.add("sequences/seq4.vs",
+                "//void\nRunSequence(\"Later\");\nwhile (IsRunning(\"Later\")) Sleep(100);\n"
+                "EnvWriteInt(\"/Polled\", GetTime());\nwhile (1) Sleep(1000);\n");
+  const SequenceRef poller[] = {SequenceRef{"Poller", "CurrentGame/sequences/seq4.vs", "", true}};
+  REQUIRE(s.session->start_sequences(std::span(poller), /*base=*/"") == 1);
+  s.session->advance(/*turns=*/4, /*turn_length=*/800);
+  CHECK(s.status("Later") == "Finished");
+  REQUIRE(s.ran("/Polled"));
+  const EnvSystem* env = env_of(s.session->world());
+  REQUIRE(env != nullptr);
+  CHECK(env->env().read_int(EnvScope::root(), "/Polled") == 2800);
 }
 
 TEST(campaign_a_sequence_with_no_compiled_script_is_finished_rather_than_pending) {

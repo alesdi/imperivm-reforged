@@ -1100,11 +1100,13 @@ TEST(flying_scan_crowding_counts_only_airborne_neighbours) {
   CHECK(answer.y <= 100 + 24);
 }
 
-/// A crow entirely alone in the world lands straight ahead/// A crow entirely alone in the world lands straight ahead: there is no mate to
-/// try, no mate in front of it, and therefore no give-up roll at all.
+/// A crow entirely alone in the world lands straight ahead: there is no mate to
+/// try, no mate in front of it, and therefore no give-up roll at all. The spot
+/// is inside the 256-unit map with half a terrain cell to spare, so the
+/// landing test it now meets (0x0051cae5) passes.
 TEST(flying_pick_landing_point_lands_ahead_when_alone) {
   FlightBench b;
-  const ObjectId id = b.crow(pt(100, 100));
+  const ObjectId id = b.crow(pt(100, 60));
   b.world.find(id)->state.flags.in_air = true;  // it only asks while flying
   b.face(id, pt(100, 200));  // due north
 
@@ -1113,8 +1115,8 @@ TEST(flying_pick_landing_point_lands_ahead_when_alone) {
              {FlightBench::obj(id), script::Value::integer(120)})
           .value);
   CHECK(answer.x != -1);
-  CHECK(answer.y >= 100 + 120 - 24);
-  CHECK(answer.y <= 100 + 120 + 24);
+  CHECK(answer.y >= 60 + 120 - 24);
+  CHECK(answer.y <= 60 + 120 + 24);
 }
 
 /// A receiver that no longer resolves answers **(0, 0)**, which the crow's own
@@ -1326,9 +1328,9 @@ TEST(flying_pick_landing_point_draws_exactly_what_it_says) {
 TEST(flying_pick_landing_point_alone_draws_only_its_jitter) {
   FlightBench b;
   constexpr std::uint32_t kSeed = 0x51c6a0;
-  const ObjectId id = b.crow(pt(1000, 1000));
+  const ObjectId id = b.crow(pt(100, 60));
   b.world.find(id)->state.flags.in_air = true;
-  b.face(id, pt(1000, 1900));
+  b.face(id, pt(100, 960));
 
   b.world.rng().seed(kSeed);
   const Point answer = unpack_point(
@@ -1341,7 +1343,35 @@ TEST(flying_pick_landing_point_alone_draws_only_its_jitter) {
   const std::int32_t dy = reference.between(-24, 24);
   const std::int32_t dx = reference.between(-24, 24);
   CHECK(b.world.rng().state() == reference.state());
-  CHECK(answer == pt(1000 + dx, 1000 + 120 + dy));
+  CHECK(answer == pt(100 + dx, 60 + 120 + dy));
+}
+
+/// The straight-ahead spot meets the landing test with the bird itself as the
+/// one landing (0x0051cae5), and a spot that fails it is (-1, -1) -- after the
+/// jitter was drawn, so the generator moves the same either way.
+TEST(flying_pick_landing_point_refuses_a_straight_ahead_spot_it_cannot_land_on) {
+  FlightBench b;
+  constexpr std::uint32_t kSeed = 0x51cae5;
+  const ObjectId id = b.crow(pt(100, 60));
+  b.world.find(id)->state.flags.in_air = true;
+  b.face(id, pt(100, 960));
+  // Every 16-unit cell the jittered spot (100 +/- 24, 180 +/- 24) can fall in;
+  // without them the spot is a good one (the test above).
+  for (std::uint32_t cx = 4; cx <= 7; ++cx) {
+    for (std::uint32_t cy = 9; cy <= 12; ++cy) b.movement.mutable_grid().set_cell(cx, cy, true);
+  }
+
+  b.world.rng().seed(kSeed);
+  const Point answer = unpack_point(
+      b.call(script::CallKind::member, "PickLandingPoint", 1,
+             {FlightBench::obj(id), script::Value::integer(120)})
+          .value);
+  CHECK(answer == pt(-1, -1));
+  Rng reference;
+  reference.seed(kSeed);
+  (void)reference.between(-24, 24);
+  (void)reference.between(-24, 24);
+  CHECK(b.world.rng().state() == reference.state());
 }
 
 /// `PickFlyingPoint` draws twice, Y first, in `+/-(n/5)`.
