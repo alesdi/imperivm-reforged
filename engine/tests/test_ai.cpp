@@ -4487,6 +4487,11 @@ TEST(gaika_eval_adds_the_settlement_skips_messengers_and_sees_as_the_ai_sees) {
     CHECK(eval6(1 /*AI_COMING*/)[2] == 0);  // the wall only ever stays
     CHECK(eval3(4, 4 /*AI_ENEMY*/) == 50 + 3 * 49);
     CHECK(eval3(4, 1) == 130);
+    // Only a town hall offers its wall (0x00420c00 asks 0x0043ffc0 first): the
+    // same settlement as a village, sentries and all, adds nothing.
+    f.economy.settlements().find(town)->kind = SettlementKind::village;
+    CHECK(eval6(4)[2] == 50);
+    f.economy.settlements().find(town)->kind = SettlementKind::stronghold;
   }
 
   // A front member inside a holder is not hidden from anybody (`[obj+0x154]`).

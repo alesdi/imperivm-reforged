@@ -2217,7 +2217,9 @@ void add_squad_to_buckets(World& world, Census& out, std::int32_t category, cons
   if (here == nullptr || here->settlement == kNoObject || economy == nullptr) return out;
   if (world.find(here->settlement) == nullptr) return out;
   const Settlement* set = economy->settlements().for_object(here->settlement);
-  if (set == nullptr) return out;
+  // 0x0043ffc0: only a `BaseTownhall` heir offers its wall -- `stronghold` is
+  // that class test made at load. A village or outpost with sentries is not.
+  if (set == nullptr || set->kind != SettlementKind::stronghold) return out;
   const std::int32_t strength = sentry_strength(world, *set);
   if (strength <= 0) return out;
   const std::int32_t category = viewer < 0 ? kAiOwn : ai_relation(players, viewer, set->owner);
