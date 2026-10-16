@@ -4506,21 +4506,24 @@ HostOutcome f_enemy_players_eval(CallContext& ctx) {
 ///     its minimum.
 ///  7. `*nAvail -= sent`, floored at zero, and the answer is `sent`.
 ///
-/// ## The block that is skipped, and why that is faithful rather than partial
+/// ## The block that is skipped, and why that is a gap
 ///
 /// Between steps 5 and 6 the original runs a fourth filter, gated on two
 /// conditions: the under-fire flag is clear **and the MAIKA routing deque at
-/// `[0x8c8e54]+0x38` is non-empty**. It walks that deque for a way-point
-/// between each candidate squad's `GAIKAIn` (`[squad+0x22]`) and this node,
-/// drops the squads that have none, and abandons the whole recruit if the drops
-/// take the total below `nMin`.
+/// `[0x8c8e54]+0x38` is non-empty**. For each live candidate standing in some
+/// node other than this one (`GAIKAIn`, `[squad+0x22]`) it asks 0x0043eda0,
+/// once per source node, for a way-point between that node and this one,
+/// drops (marks -2) the squads that have none, and abandons the whole recruit
+/// if the drops take the total below `nMin`.
 ///
 /// **That deque is empty in this engine and always will be**, because the only
 /// thing that ever fills it is `SetMAIKA`, which `f_set_maika` accepts and
-/// drops for want of a routing table -- it says so at length. So the gate is
-/// false here for the same reason it is false on a retail map that never calls
-/// `SetMAIKA`, and skipping the block reproduces the original rather than
-/// approximating it. It is the first thing to restore alongside that table.
+/// drops for want of a routing table -- it says so at length. **In retail it is
+/// not empty**: `SQUADMONITOR.VS`, which every computer player runs, calls
+/// `SetMAIKA` from three places, so the filter is live there and can refuse a
+/// squad that has no recorded way across. Skipping it is therefore the routing
+/// table's gap showing through, not a reproduction, and it is the first thing
+/// to restore alongside that table.
 ///
 /// ## Four narrowings, named
 ///
@@ -4691,6 +4694,9 @@ HostOutcome m_gaika_recruit(CallContext& ctx) {
         const HostOutcome took_ran = run_script_now(ctx, take_chunk, take_args,
                                                     "CalcMaxTake failed", took, &take_locals);
         if (took_ran.status != script::HostStatus::ok) return took_ran;
+        // 0x0043d470 floors a negative take at 0; unfloored it refuses the
+        // same squads (a positive worth exceeds either), so the floor is not
+        // written.
         budget.take = took.is_integer() ? took.as_integer() : 0;
         budget.overneed = take_locals.size() > 2 && take_locals[2].is_integer()
                               ? take_locals[2].as_integer()
