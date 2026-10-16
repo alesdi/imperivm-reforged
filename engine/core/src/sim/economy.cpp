@@ -1806,8 +1806,9 @@ constexpr std::int32_t kOutpostUnresolved = -15000000;
 /// sentry class, answers **0**. The original would dereference the null the
 /// registry hands back and crash there; refusing is the same departure this
 /// file makes everywhere a class lookup can fail.
-[[nodiscard]] std::int32_t eval_sentries(World& world, const Settlement& set) {
-  if (set.sentries <= 0) return 0;
+/// `perSentry` alone, 0x005c4830: the figure both tallies multiply. Zero for a
+/// settlement with no sentry class, where the original would crash.
+[[nodiscard]] std::int32_t per_sentry_eval(World& world, const Settlement& set) {
   const ClassGraph* graph = world.class_graph();
   const ClassIndex sentry = sentry_class_of(world, set);
   if (graph == nullptr || sentry == kNoClass) return 0;
@@ -1822,8 +1823,12 @@ constexpr std::int32_t kOutpostUnresolved = -15000000;
   if (const EnvSystem* env = env_of(world); env != nullptr) {
     level = env->env().read_int(EnvScope::for_settlement(set.id), "SentriesLevel");
   }
-  const std::int32_t per = (power * (level + 13) * quarter) / 1000 + 1;
-  return per * set.sentries;
+  return (power * (level + 13) * quarter) / 1000 + 1;
+}
+
+[[nodiscard]] std::int32_t eval_sentries(World& world, const Settlement& set) {
+  if (set.sentries <= 0) return 0;
+  return per_sentry_eval(world, set) * set.sentries;
 }
 
 /// The string half. Same gate, same slot dispatch, `""` for every miss.
@@ -1985,6 +1990,36 @@ ObjectId settlement_lab_for(World& world, const Settlement& s, const CommandDef&
   return kNoObject;
 }
 
+/// The relation code `NearestStronghold`'s filter matches against.
+///
+/// `gbr.exe` 0x0044e250 answers **one** of three values and never a mask:
+/// `AI_OWN` (1) when the two players are the same, `AI_ALLY` (2) when `a`'s own
+/// row grants `b` bit 0, and `AI_ENEMY` (4) otherwise. Either index outside
+/// 0..15 gives 0, which no filter can intersect.
+///
+/// **One-directional**, like `Obj::IsEnemy` and unlike `are_allied`: it reads
+/// `a`'s row for `b` and never the transpose, so a one-sided truce makes `a`
+/// see an ally where `b` sees an enemy. The three constants are the same
+/// `AI_OWN`/`AI_ALLY`/`AI_ENEMY` `sim/squad.cpp`'s census selects on.
+std::int32_t ai_relation(const PlayerTable& players, std::int32_t a, PlayerId b) noexcept {
+  if (a < 0 || a >= static_cast<std::int32_t>(kPlayerCount)) return 0;
+  if (!PlayerTable::is_valid(b)) return 0;
+  const auto viewer = static_cast<PlayerId>(a);
+  if (viewer == b) return 1;                                     // AI_OWN
+  return players.has(viewer, b, Relation::allied) ? 2 : 4;       // AI_ALLY : AI_ENEMY
+}
+
+/// `[settlement+0xf8]`, the sentry strength 0x005c4930 caches on every write
+/// of the wall count `[+0xf4]`: `perSentry` times that count, 0 when it is 0
+/// or less. **Computed on read here rather than cached**, so the one way the
+/// two can differ is a `SentriesLevel` written between a wall change and the
+/// read -- the original keeps the old level's figure until the next write. No
+/// shipped script writes `SentriesLevel` (see `eval_sentries`).
+std::int32_t sentry_strength(World& world, const Settlement& set) {
+  if (set.sentries_ready <= 0) return 0;
+  return per_sentry_eval(world, set) * set.sentries_ready;
+}
+
 namespace {
 
 struct EconomyHostDef {
@@ -1997,26 +2032,6 @@ struct EconomyHostDef {
 // --------------------------------------------------------------------------
 // the AI's own bookkeeping, and the barracks walk
 // --------------------------------------------------------------------------
-
-/// The relation code `NearestStronghold`'s filter matches against.
-///
-/// `gbr.exe` 0x0044e250 answers **one** of three values and never a mask:
-/// `AI_OWN` (1) when the two players are the same, `AI_ALLY` (2) when `a`'s own
-/// row grants `b` bit 0, and `AI_ENEMY` (4) otherwise. Either index outside
-/// 0..15 gives 0, which no filter can intersect.
-///
-/// **One-directional**, like `Obj::IsEnemy` and unlike `are_allied`: it reads
-/// `a`'s row for `b` and never the transpose, so a one-sided truce makes `a`
-/// see an ally where `b` sees an enemy. The three constants are the same
-/// `AI_OWN`/`AI_ALLY`/`AI_ENEMY` `sim/squad.cpp`'s census selects on.
-[[nodiscard]] std::int32_t ai_relation(const PlayerTable& players, std::int32_t a,
-                                       PlayerId b) noexcept {
-  if (a < 0 || a >= static_cast<std::int32_t>(kPlayerCount)) return 0;
-  if (!PlayerTable::is_valid(b)) return 0;
-  const auto viewer = static_cast<PlayerId>(a);
-  if (viewer == b) return 1;                                     // AI_OWN
-  return players.has(viewer, b, Relation::allied) ? 2 : 4;       // AI_ALLY : AI_ENEMY
-}
 
 /// `NearestStronghold(pt, idPlayer[, filter])` -- 7 sites across two arities.
 ///

@@ -743,23 +743,42 @@ HostOutcome count_impl(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(found));
 }
 
-/// `sq.Eval` -- 9 sites, and **it answers 0 for now, deliberately and
-/// visibly.**
+/// `sq.Eval` -- 9 sites, and `SL.Eval` beside it -- none -- because the registry
+/// keys on the name and the arity and `gbr.exe` registers both at `[1, 1, *]`.
 ///
-/// `0x00421120` is a plain field read of `[squad+0x1c]`: the squad's strength,
-/// stored rather than computed, and the *input* to `GAIKA::Eval` rather than an
-/// overload of it. So this is state, and **nothing in this engine writes it** --
-/// the same standing `ai_dest` beside it already has and says it has.
+/// **`Squad::Eval` (0x00421120) is a plain field read** of `[squad+0x1c]`: the
+/// squad's strength, stored rather than computed, and the *input* to
+/// `GAIKA::Eval` rather than an overload of it. It resolves the handle
+/// (0x00443e30, the player nibble and the 12-bit index) and reads the field
+/// without testing the squad, so a handle naming no squad would read through a
+/// null there; it answers 0 here. `revalue_squads` writes the field once a turn
+/// (`sim/squad.hpp` says what that gives up).
 ///
-/// That is a real cost and it is worth naming rather than burying. Three of the
-/// shipped readers branch on it -- `if (sq.Eval == 0)` in `SQUADMONITOR.VS`,
-/// `coming += sq.Eval` in `GSH_SYNCHAPPROACH.VS` -- so a permanent zero makes
-/// the AI take the conservative branch every time. It is still the better of
-/// the two available answers: the alternative is a trap, which stops
-/// `SQUADMONITOR.VS` dead at its 479 call sites rather than letting it run and
-/// choose cautiously. Whatever computes squad strength is a thread of its own,
-/// and the day it lands this reader is already here and already correct.
+/// **`SquadList::Eval` (0x0042bc90) is not a sum of its squads**, though it
+/// looks like one. A list the pool does not hold (0x0043ed70) or one whose
+/// cursor stands at the end (0x00420170, the test `EOL` makes) answers 0;
+/// otherwise 0x0042a450 walks the list from its first entry to its last --
+/// and reads, at every step, **the entry under the cursor** (`[list+8]`, which
+/// the loop never advances; confirmed in the instructions at 0x0042a4d5). So
+/// the answer is the list's size times the strength of `SL.Cur`. No shipped
+/// script calls it; it is answered as the original answers it rather than
+/// trapping, the price of sharing a registry key with the squad form.
 HostOutcome eval_impl(CallContext& ctx) {
+  if (ctx.count() > 0 && is_squadlist(ctx.arg(0))) {
+    World* world = world_of(ctx);
+    if (world == nullptr) return HostOutcome::failed(kNoWorld);
+    HeroSystem* heroes = hero_system_of(*world);
+    if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
+    const SquadListPool& pool = squadlist_pool_of(*world);
+    const SquadListId id = squadlist_of(ctx.arg(0));
+    if (!pool.contains(id)) return HostOutcome::ok_with(Value::integer(0));
+    const std::span<const SquadKey> items = pool.items(id);
+    const std::size_t at = pool.cursor(id);
+    if (at >= items.size()) return HostOutcome::ok_with(Value::integer(0));
+    const Squad* current = heroes->squads().find(items[at]);
+    const std::int32_t each = current == nullptr ? 0 : current->eval;
+    return HostOutcome::ok_with(Value::integer(each * static_cast<std::int32_t>(items.size())));
+  }
   Self self = resolve(ctx);
   if (!self.ok()) {
     if (self.error == kNoSquadFound) return HostOutcome::ok_with(Value::integer(0));
@@ -1919,70 +1938,24 @@ HostOutcome fn_get_squad(CallContext& ctx) {
 }
 
 /// The region census: `GAIKA::Eval` and `GAIKA::Count`, four arities between
-/// them, and **one shape**.
-///
-/// Both walk the squads in a node, classify each by presence against the
-/// caller's first argument and by relation against the caller's player, and
-/// accumulate into three totals. `Eval` accumulates each squad's *strength*
-/// (`Squad::eval`, the `int` at `squad+0x1c`); `Count` accumulates *bodies*.
-/// `GETGAIKASTRAT.VS` calls the two back to back on one node with parallel
-/// variable names -- `nOwn/nAlly/nEnemy` then `nOwnC/nAllyC/nEnemyC` -- which
-/// is the clearest evidence in the corpus that the pair differs only in what it
-/// sums.
+/// them. `GETGAIKASTRAT.VS` calls the two back to back on one node with
+/// parallel variable names -- `nOwn/nAlly/nEnemy` then `nOwnC/nAllyC/nEnemyC`
+/// -- and they share their walk and their membership rule (`squad_presence`),
+/// but **since the tenth round `Eval` is no longer `Count` with another
+/// addend**: its four bodies were read whole, and they differ from what the
+/// shared walk below did in six places. `gaika_eval` is `Eval`'s; `census_of`
+/// stays `Count/6`'s (0x00430a30, not read in that round), with the rules this
+/// note always gave it.
 ///
 /// The out-parameter order is `own, ally, enemy, enemy_hidden`, left to right in
 /// the source; `gbr.exe` types all four as `0x101`, an `int` by reference.
 ///
-/// Two squads are skipped that a naive walk would count, and both are the
-/// original's:
-///
-///   * one whose **strength is zero** -- a squad that exists but has nothing in
-///     it -- and this is why `Eval` and `Count` can disagree about whether a
-///     node is occupied at all;
-///   * one carrying **`SF_PEACEFUL`** (`[squad+0x30] & 4`) -- the wildlife and
-///     the neutral-passive, which are not anybody's army.
-///
-/// **The second of those used to be written here as "player 14 or 15", and
-/// that was a guess standing in for a flag this file had not yet named.** It
-/// has one now: `kSquadFlagPeaceful` is bit 2 of the same sixteen-bit word
-/// `Squad::GetFlags` (0x004216d0) reads at `[squad+0x30]`, and
-/// `squad_flags_by_class` already sets it from `Peaceful` and `Animal`. The two
-/// readings agree on the shipped maps and disagree everywhere else: a peaceful
-/// squad belonging to a real player was counted, and a wildlife squad that a
-/// mission had made hostile was not.
-///
-/// **`enemy_hidden` is 0 and stays 0.** What fills it there is the *memory*
-/// adjustment at 0x0044eb80, which the walk runs over any squad whose relation
-/// came back `AI_ENEMY`: it reaches the asking player's AI record, looks the
-/// squad up in the per-node table the player *remembers* rather than sees, and
-/// rewrites the presence to `AI_STAYING` or to nothing accordingly. This engine
-/// has no fog-of-war memory of enemy force to draw on, so the adjustment is a
-/// no-op here and the honest answer is zero; the corpus survives it, because
-/// every one of the twelve shipped readers adds it to `enemy` or ignores it.
-///
-/// **This note used to name 0x00420c00 as that second pass, and that was
-/// wrong.** 0x00420c00 is the node's *settlement* query -- see
-/// `count_class_impl`, which reads it -- and the census calls it once after the
-/// squad walk to add the settlement's sentries to whichever of the three
-/// totals the settlement owner's relation selects. That contribution is still
-/// missing here, and it is missing for a reason rather than by oversight: for
-/// `Count` it is the settlement's ready-sentry count, which this engine has,
-/// but for `Eval` it is the sentry *strength*, which is
-/// `Settlement::EvalSentries` (0x005c4a60, still unwritten) times that count.
-/// Adding it to one and not the other would make `Eval` and `Count` disagree
-/// about a node in a way the original never does, and `GETGAIKASTRAT.VS` reads
-/// them back to back. See `docs/plan.html`.
-///
-/// ## These used to answer zero everywhere, and they no longer do
-///
-/// This note said that nothing assigned a GAIKA to a squad, so every total was
-/// zero. That stopped being true when the node table was built and squads were
-/// filed under nodes (`revalue_squads` sets `gaika_in`), and nothing here had
-/// to change for it, which is what binding the shape early was for. On
-/// Crossroads `GS_CAPTURE.VS` now prints its own count -- *GAIKA Own: 11 ...
-/// Enemy: 0* -- and reaches `SS_Capture` tens of thousands of times in 12,000
-/// turns. The approximation the totals inherit is the node table's; see
-/// `sim/gaika.hpp`.
+/// What `census_of` does for `Count`: walk every squad, skip one with no
+/// strength and one carrying `SF_PEACEFUL` (`[squad+0x30] & 4`, which is
+/// 0x0044e1f0's flag gate -- the census passes 0 for its third argument), keep
+/// those whose `squad_presence` meets the presence mask, and sort them into
+/// `own`/`ally`/`enemy` by `squad_relation`, summing bodies. `enemy_hidden`
+/// stays 0 there, and the node's settlement (0x00420c00) is not asked.
 struct Census {
   std::int32_t own = 0;
   std::int32_t ally = 0;
@@ -1995,6 +1968,14 @@ struct Census {
     if ((sides & kAiAlly) != 0) total += ally;
     if ((sides & kAiEnemy) != 0) total += enemy;
     return total;
+  }
+
+  /// Add `amount` to the bucket a 0x0044e250 category names: 1, 2 or 4, and
+  /// nothing for 0.
+  void add(std::int32_t category, std::int32_t amount) noexcept {
+    if (category == kAiOwn) own += amount;
+    if (category == kAiAlly) ally += amount;
+    if (category == kAiEnemy) enemy += amount;
   }
 };
 
@@ -2026,6 +2007,10 @@ struct CensusCall {
   GaikaId node = kNoGaika;
   std::int32_t presence = 0;
   PlayerId player = kNoPlayer;
+  /// The player argument decremented and nothing else, as every `GAIKA::Eval`
+  /// body holds it: negative names nobody **and selects every squad as its
+  /// own**, past the sixteenth player names nobody and selects nothing.
+  std::int32_t viewer = -1;
 };
 
 [[nodiscard]] CensusCall census_args(CallContext& ctx) {
@@ -2035,11 +2020,216 @@ struct CensusCall {
   // neither, and selects nothing rather than everything.
   call.presence = ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
   call.player = player_arg(ctx, 2);
+  call.viewer = ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() - 1 : -1;
   return call;
 }
 
-/// `g.Eval(presence, idPlayer, &own, &ally, &enemy, &enemy_hidden)` -- 19 sites,
-/// and `g.Count(...)` with the same shape -- 5.
+/// How far from a node's centre an enemy squad marching on it is still seen
+/// coming, by the asking AI's difficulty: the dword table at 0x0081a794,
+/// indexed by the difficulty itself (1..3), so its first entry (1000) is never
+/// read. Hard reads the dword **after** the table, which is 0x007b1868 --
+/// another datum's address, read as a distance: in effect, no limit.
+constexpr std::int32_t kComingSightByDifficulty[4] = {1000, 6000, 32000, 0x007b1868};
+
+/// 0x0044eb80, **the asking AI's view of an enemy squad's presence**, which
+/// every `GAIKA::Eval` body applies to a squad whose category is `AI_ENEMY`
+/// when the player argument names somebody.
+///
+/// It changes nothing unless the asking player has an AI record (`[player +
+/// 0x88]`, `AiSystem::player_ai` with `active`) whose difficulty (`[ai +
+/// 0x68]`) is not zero -- and a record's difficulty is never zero: the record's
+/// constructor (0x0041e100) takes the player's setup difficulty when it is 1..3
+/// and **3 otherwise**, and `AIStart` overwrites it only with a non-zero
+/// argument. `AiDifficulty::none` here is therefore 3. A squad already
+/// `AI_STAYING` is left alone (0x0044eb8c).
+///
+/// The squad's heading is then read **through its owner's order record**, and
+/// more strictly than 0x00444140 reads it for the presence: the order's node
+/// only when the squad has a record (`[squad+0x26] >= 0`), its owner has an AI,
+/// the record's priority (`+0x10`) is **0** -- the drain has taken it, so the
+/// squad is actually moving -- and its node (`+6`) is not 0; otherwise
+/// `DestGAIKA` (`[squad+0x24]`), and `GAIKAIn` (`[squad+0x22]`) if that is 0
+/// too. With it:
+///
+///   * **coming** (1) stays coming only if that heading is this node *and* the
+///     squad's front member (0x00443df0, its `posRH` through `vtbl+0xc8`)
+///     stands within `kComingSightByDifficulty[difficulty]` of the node's
+///     centre (`[node+8]`, the point `Center` answers), by the integer root of
+///     the squared distance (0x00417990 -> 0x0067c3d0), inclusive. Otherwise it
+///     is 0: an Easy AI does not see an enemy army coming from across the map;
+///   * **leaving** (2) becomes **staying** (4) when the heading is this node --
+///     an enemy squad whose order elsewhere has not been drained yet has not
+///     left.
+[[nodiscard]] std::int32_t enemy_presence_as_seen(World& world, const SquadTable& table,
+                                                  const Squad& squad, GaikaId node,
+                                                  std::int32_t viewer, std::int32_t presence) {
+  if (presence == kAiStaying) return presence;
+  if (viewer < 0 || viewer >= static_cast<std::int32_t>(kPlayerCount)) return presence;
+  const AiSystem* ai = ai_system_of(world);
+  const AiPlayer* record =
+      ai == nullptr ? nullptr : ai->player_ai(static_cast<PlayerId>(viewer));
+  if (record == nullptr || !record->active) return presence;
+  const auto difficulty = static_cast<std::int32_t>(record->difficulty);
+  const std::int32_t level = (difficulty >= 1 && difficulty <= 3) ? difficulty : 3;
+
+  GaikaId heading = kNoGaika;
+  if (squad.order >= 0) {
+    const AiPlayer* owner = ai->player_ai(squad.key.player);
+    const AiOrderQueue* queue = table.orders(squad.key.player);
+    if (owner != nullptr && owner->active && queue != nullptr &&
+        static_cast<std::size_t>(squad.order) < queue->todo.size()) {
+      const AiOrder& order = queue->todo[static_cast<std::size_t>(squad.order)];
+      if (order.priority == 0 && order.node != kNoGaika) heading = order.node;
+    }
+  }
+  if (heading == kNoGaika) heading = squad.dest_gaika != kNoGaika ? squad.dest_gaika : squad.gaika_in;
+
+  if (presence == kAiComing) {
+    if (heading != node || squad.members.empty()) return 0;
+    const GaikaNode* here = world.gaika().find(node);
+    if (here == nullptr || world.find(squad.members.front()) == nullptr) return 0;
+    const Point at = unit_pos_rh(world, squad.members.front());
+    const std::int64_t dx = static_cast<std::int64_t>(at.x) - here->center.x;
+    const std::int64_t dy = static_cast<std::int64_t>(at.y) - here->center.y;
+    return isqrt(dx * dx + dy * dy) <= kComingSightByDifficulty[level] ? presence : 0;
+  }
+  if (presence == kAiLeaving && heading == node) return kAiStaying;
+  return presence;
+}
+
+/// 0x00427e90, the six-argument form's accumulator, which is **not** a plain
+/// add -- the one-, two- and three-argument bodies add `Squad::Eval` straight
+/// into their total, and this one asks two questions of the squad first.
+///
+///   * **A squad of messengers is nobody's army.** When the front member
+///     (0x00443df0) carries the messenger bit (`[obj+0x2c] & 0x4000000`,
+///     `ObjectFlags::messenger`), a squad of one is not counted at all, and a
+///     larger one is counted only if some member is *not* a messenger
+///     (0x00426e30 counts the members whose word has every bit of the mask).
+///   * **`enemy_hidden` is the enemy strength the AI cannot see**: an
+///     `AI_ENEMY` squad is added to `enemy` and, when its front member is
+///     outside any holder (`[obj+0x154] == 0xffff`) and hidden (bit 21 of
+///     `+0x2c`, `ObjectFlags::hidden`), to `enemy_hidden` as well.
+///     `GS_CAPTURE.VS` subtracts it (`enemy -= enemy_hidden`). This total used
+///     to be documented as the memory adjustment and answered 0; the memory
+///     adjustment is the tail `gaika_eval` names, and this is the flag.
+void add_squad_to_buckets(World& world, Census& out, std::int32_t category, const Squad& squad) {
+  const WorldObject* front =
+      squad.members.empty() ? nullptr : world.find(squad.members.front());
+  if (front != nullptr && front->state.flags.messenger) {
+    if (squad.members.size() < 2) return;
+    std::size_t messengers = 0;
+    for (const ObjectId member : squad.members) {
+      const WorldObject* slot = world.find(member);
+      if (slot != nullptr && slot->state.flags.messenger) ++messengers;
+    }
+    if (messengers >= squad.members.size()) return;
+  }
+  out.add(category, squad.eval);
+  if (category == kAiEnemy && front != nullptr && !front->state.is_held() &&
+      front->state.flags.hidden) {
+    out.enemy_hidden += squad.eval;
+  }
+}
+
+/// **`GAIKA::Eval`, all four bodies**: 0x0042f1a0 (presence), 0x0042f3d0
+/// (presence, player), 0x0042f670 (presence, player, sides) and 0x0042fc40
+/// (presence, player, &own, &ally, &enemy, &enemy_hidden). Each is the same
+/// walk with a different gate and a different sink, and in order it:
+///
+///   1. **resolves the node** (0x0044e8e0, a bare index into the node vector:
+///      it cannot fail, so the walk runs for any id, and only the settlement
+///      and the sight range below need the node's record);
+///   2. **walks the squads filed under the node** -- the deque at
+///      `[node+0x18]`, rebuilt here from the squads' own fields by
+///      `squad_presence` (see its note for the inference) -- and for each with
+///      strength (`[squad+0x1c] != 0`):
+///        * its **category** is 0x0044e250(viewer, the squad's player nibble)
+///          -- 1, 2 or 4, one-directional, so a one-sided truce is an ally
+///          (`ai_relation`) -- or **1 outright when the viewer is negative**,
+///          that is when the player argument is 0 or less. The two-argument
+///          form keeps category 1 only (its answer is the *own* total), the
+///          three-argument form keeps `sides & category`, the six-argument
+///          form keeps any non-zero category;
+///        * its **presence** is 0x0044e1f0(squad, node, 0) -- the 0 makes a
+///          peaceful squad absent -- refined for an enemy by
+///          `enemy_presence_as_seen` (0x0044eb80);
+///        * if the presence meets the mask it is added: straight into the total
+///          by the short forms, through `add_squad_to_buckets` (0x00427e90) by
+///          the six-argument form. The bodies also test `[squad+0x30] & 4`
+///          together with a player nibble of 14 or 15 before adding, which
+///          cannot refuse anything the presence has let through;
+///   3. **asks the node's settlement** (0x00420c00): a settlement whose object
+///      is a `BaseTownhall` (0x0043ffc0) and whose sentry strength
+///      `[+0xf8]` is positive offers that strength as `AI_STAYING`, with the
+///      category 0x0044e250(viewer, owner) -- or 1 for a negative viewer --
+///      and it is added when the mask has `AI_STAYING` and the category passes
+///      the form's gate (to the category's bucket, in the six-argument form).
+///      The strength is `sentry_strength` (`sim/economy.cpp`);
+///   4. **the memory tail, which is not modelled**: when the mask has
+///      `AI_STAYING`, the three- and six-argument forms (the first only when
+///      `sides` has `AI_ENEMY`) look the node up in the asking AI's per-node
+///      record (`[ai+0x40]`, a vector of indices into `[ai+0x30]`, 0x18 bytes
+///      each) and, when the node is not in sight (0x0041cbd0 answers 0), add
+///      the **remembered** enemy strength (`record+8`) minus the enemy staying
+///      strength they can see -- the walk and the settlement redone with
+///      `AI_ENEMY` and `AI_STAYING` fixed. This engine keeps no per-player
+///      memory of enemy force, so the seen strength is answered; that is the
+///      AI-record design the ninth round left partial.
+///
+/// The six-argument form's failure arm writes three out-parameters and leaves
+/// `enemy_hidden` as it was, but it is reached only when the node vector does
+/// not exist at all; here all four are always written.
+///
+/// **Known gap, shared with `GetSquads`**: a squad standing in the node with no
+/// order and no `DestGAIKA` reads as staying (`squad_presence`), where
+/// 0x0044e1f0 would read it as leaving (its heading is 0, which is not the
+/// node). The engine mints hero squads with no `DestGAIKA`, so the change
+/// belongs to the squad roster's design, not to this census.
+[[nodiscard]] Census gaika_eval(World& world, HeroSystem& heroes, GaikaId node,
+                                std::int32_t presence, std::int32_t viewer, std::int32_t sides,
+                                bool buckets) {
+  Census out;
+  const PlayerTable& players = world.players();
+  const SquadTable& table = heroes.squads();
+  for (const Squad& squad : table.squads()) {
+    if (squad.eval == 0) continue;
+    const std::int32_t category =
+        viewer < 0 ? kAiOwn : ai_relation(players, viewer, squad.key.player);
+    if ((category & sides) == 0) continue;
+    std::int32_t here =
+        (squad.flags & kSquadFlagPeaceful) != 0 ? 0 : squad_presence(node, squad);
+    if (viewer >= 0 && category == kAiEnemy) {
+      here = enemy_presence_as_seen(world, table, squad, node, viewer, here);
+    }
+    if ((here & presence) == 0) continue;
+    if (buckets) {
+      add_squad_to_buckets(world, out, category, squad);
+    } else {
+      out.add(category, squad.eval);
+    }
+  }
+
+  // The settlement, 0x00420c00.
+  if ((presence & kAiStaying) == 0) return out;
+  const GaikaNode* here = world.gaika().find(node);
+  const EconomySystem* economy = economy_of(world);
+  if (here == nullptr || here->settlement == kNoObject || economy == nullptr) return out;
+  if (world.find(here->settlement) == nullptr) return out;
+  const Settlement* set = economy->settlements().for_object(here->settlement);
+  // 0x0043ffc0: only a `BaseTownhall` heir offers its wall -- `stronghold` is
+  // that class test made at load. A village or outpost with sentries is not.
+  if (set == nullptr || set->kind != SettlementKind::stronghold) return out;
+  const std::int32_t strength = sentry_strength(world, *set);
+  if (strength <= 0) return out;
+  const std::int32_t category = viewer < 0 ? kAiOwn : ai_relation(players, viewer, set->owner);
+  if ((category & sides) == 0) return out;
+  out.add(category, strength);
+  return out;
+}
+
+/// `g.Count(presence, idPlayer, &own, &ally, &enemy, &enemy_hidden)` -- 5
+/// sites. `census_of`'s; see the note above it.
 template <bool kBodies>
 HostOutcome census_out_impl(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -2056,13 +2246,32 @@ HostOutcome census_out_impl(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
+/// `g.Eval(presence, idPlayer, &own, &ally, &enemy, &enemy_hidden)` -- 19
+/// sites, 0x0042fc40. See `gaika_eval`.
+HostOutcome eval_out_impl(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr) return HostOutcome::failed(kNoWorld);
+  HeroSystem* heroes = hero_system_of(*world);
+  if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
+  if (ctx.count() < 7) return HostOutcome::failed("Eval: expected four out-parameters");
+  const CensusCall call = census_args(ctx);
+  const Census census =
+      gaika_eval(*world, *heroes, call.node, call.presence, call.viewer, 0xFFFF, true);
+  ctx.out(3) = Value::integer(census.own);
+  ctx.out(4) = Value::integer(census.ally);
+  ctx.out(5) = Value::integer(census.enemy);
+  ctx.out(6) = Value::integer(census.enemy_hidden);
+  return HostOutcome::ok_void();
+}
+
 /// `int g.Eval(presence, idPlayer[, sides])` -- 8 sites at three arguments and
-/// 2 at two.
+/// 2 at two: 0x0042f670 and 0x0042f3d0. See `gaika_eval`.
 ///
-/// The two-argument form answers the *own* total, which is what
-/// `GSH_INTERRUPTPASSING.VS:9`'s `lown = g.Eval(AI_LEAVING, AIPlayer)` names it.
-/// So the missing third argument defaults to `AI_OWN` rather than to `AI_ALL`,
-/// the same way `GetSquads`'s missing relation does and for the same reason.
+/// The two-argument form answers the *own* total -- its gate is `category &
+/// 1` (0x0042f4db) -- which is what `GSH_INTERRUPTPASSING.VS:9`'s `lown =
+/// g.Eval(AI_LEAVING, AIPlayer)` names it. The one-argument form (0x0042f1a0,
+/// presence alone, every squad counted as category 1 against a viewer of -1)
+/// has no shipped call site and is not bound, `ShowNotes`'s precedent.
 HostOutcome eval_total_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
@@ -2070,8 +2279,9 @@ HostOutcome eval_total_impl(CallContext& ctx) {
   if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
   const CensusCall call = census_args(ctx);
   const std::int32_t sides =
-      ctx.count() > 3 && ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : kAiOwn;
-  const Census census = census_of<false>(*world, *heroes, call.node, call.presence, call.player);
+      ctx.count() > 3 ? (ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0) : kAiOwn;
+  const Census census =
+      gaika_eval(*world, *heroes, call.node, call.presence, call.viewer, sides, false);
   return HostOutcome::ok_with(Value::integer(census.selected(sides)));
 }
 
@@ -4357,7 +4567,7 @@ std::size_t register_squad_host(HostRegistry& registry) {
   free_fn("GetSquad", 2, &fn_get_squad);    // 3
 
   // The region census. Four arities, one shape; see `census_of`.
-  member("Eval", 6, &census_out_impl<false>);   // 19
+  member("Eval", 6, &eval_out_impl);             // 19
   member("Eval", 3, &eval_total_impl);          //  8
   member("Eval", 2, &eval_total_impl);          //  2
   member("Count", 6, &census_out_impl<true>);   //  5

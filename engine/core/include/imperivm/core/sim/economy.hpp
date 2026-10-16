@@ -52,6 +52,7 @@
 namespace imperivm::core::sim {
 
 class World;
+class PlayerTable;
 
 /// The balance constants, all of them from `DATA\CONST.INI` in `data.pak`.
 ///
@@ -706,5 +707,16 @@ std::size_t register_economy_hosts(script::HostRegistry& registry);
 /// The number of entry points `register_economy_hosts` defines. Used by the
 /// tests to notice a silent regression in the table.
 [[nodiscard]] std::size_t economy_host_entry_count() noexcept;
+
+/// 0x0044e250: how 0-based player `a` sees player `b` -- 1 (`AI_OWN`), 2
+/// (`AI_ALLY`) or 4 (`AI_ENEMY`) from `a`'s row alone, 0 for an `a` outside
+/// the table or an invalid `b`. Shared by `NearestStronghold` and the region
+/// census (`sim/squad.cpp`).
+[[nodiscard]] std::int32_t ai_relation(const PlayerTable& players, std::int32_t a,
+                                       PlayerId b) noexcept;
+
+/// `[settlement+0xf8]`, the sentry strength the original caches on every
+/// write of the ready-wall count; see the definition.
+[[nodiscard]] std::int32_t sentry_strength(World& world, const Settlement& set);
 
 }  // namespace imperivm::core::sim

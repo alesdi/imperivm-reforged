@@ -6322,6 +6322,10 @@ HostOutcome m_rect_height(CallContext& ctx) { return m_rect_edge(ctx, 5); }
 /// toward zero. The same idiom `AreaCenter` uses at 0x004d8ce9, derived
 /// independently of it.
 ///
+/// **Served by `m_gaika_center` (`sim/ai.cpp`) since the tenth round**, which
+/// answers this rule for a `rect` receiver now that the GAIKA half exists; this
+/// body stays as the record of how it was left unbound until then.
+///
 /// **Deliberately not registered.** `rect::Center` has *zero* call sites in the
 /// installation, and every shipped `.Center` is on a GAIKA (`g.Center`,
 /// `sq.AIDest.Center`). Binding this body to the name would answer all of them

@@ -418,11 +418,11 @@ class AiSystem final : public System {
 
   /// `Settlement::EconomyScript` / `Settlement::TacticScript`.
   ///
-  /// Reports 0 (`ES_NONE` / `TS_NONE`) once the recorded coroutine is gone.
-  /// The original clears the slot from a script-completion hook; deriving it
-  /// from liveness instead is the same observable with one less thing to keep
-  /// in step, and it means a script that trapped does not wedge its settlement
-  /// forever.
+  /// Reports 0 (`ES_NONE` / `TS_NONE`) once the recorded coroutine is gone,
+  /// which is the original's own rule: 0x0041d2a0 asks the AI's thread manager
+  /// whether the settlement's fixed thread id still runs and zeroes the stored
+  /// id when it does not. This is the raw slot; the entry points add the
+  /// owner's-AI reading (`owner_slot` in `ai.cpp`).
   [[nodiscard]] std::int32_t economy_script(SettlementId settlement,
                                             const script::Scheduler& scheduler) const;
   [[nodiscard]] std::int32_t tactic_script(SettlementId settlement,
@@ -701,14 +701,17 @@ struct LsaRoute {
   std::vector<LsaId> path;
 };
 
-/// 0x00441b70 with an empty transport string and no rendezvous: the
-/// breadth-first search over the area graph that `CheckLsaPath`,
-/// `PrepareAiTransportShip` and `Squad::NearestHospital` all run. `player` is
-/// 0-based. **It has a side effect**: an unreachable `dst` bumps the player's
-/// ship need on the first shipless sea the walk saw, as the original does.
-/// `sim/ai.cpp` carries the whole reading.
+/// 0x00441b70: the breadth-first search over the area graph that
+/// `CheckLsaPath`, `PrepareAiTransportShip` and `Squad::NearestHospital` all
+/// run. `player` is 0-based. `(order, where)` is the transport order a
+/// boarding ship must carry to count as a way across a sea: the first two
+/// callers' empty string and `(-1, -1)` by default, `PrepareAiTransportShip`'s
+/// own when it asks. **It has a side effect**: an unreachable `dst` bumps the
+/// player's ship need on the first shipless sea the walk saw, as the original
+/// does. `sim/ai.cpp` carries the whole reading.
 [[nodiscard]] LsaRoute lsa_route(World& world, AiSystem* ai, LsaId src, LsaId dst,
-                                 PlayerId player);
+                                 PlayerId player, std::string_view order = {},
+                                 Point where = Point{-1, -1});
 
 /// The chunk `file` names on `player`'s AI search path -- the profile's own copy
 /// when it has one, the root `DATA/AI` copy otherwise -- or `script::kNoChunk`.
