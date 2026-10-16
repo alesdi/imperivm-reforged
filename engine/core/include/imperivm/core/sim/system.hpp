@@ -150,8 +150,9 @@ struct ObjectFlags {
   /// `Unit::Disease` (0x005d9140) sets it and, when the unit carries no
   /// effect handle at `+0x1c4`, spawns a visual of class index 0x1a and
   /// stores that handle beside it; the visual is presentation and is not
-  /// reproduced. Nothing in `.text` clears the bit through a script entry
-  /// point: a diseased unit stays diseased. `ECHARIOT_ENGAGE.VS` reads it to
+  /// reproduced. The unit's health store (0x005d3a80) clears it when health
+  /// changes and reaches the unit's maximum, so `Heal` and `SetHealth` to
+  /// full cure; nothing else does. `ECHARIOT_ENGAGE.VS` reads it to
   /// decide whether a chariot still owes the target a disease shot, so it is
   /// simulation state and is saved and hashed with the rest of this word.
   bool diseased = false;

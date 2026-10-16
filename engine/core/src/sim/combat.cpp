@@ -2068,48 +2068,144 @@ void sync_to_world(CallContext& ctx, const CombatSystem& combat, ObjectId id) {
   }
 }
 
+/// A world object the combat system does not hold, or null.
+///
+/// `gbr.exe` gives every object the same health and stamina fields and the
+/// same generic virtuals: `+0x98` and `+0x9c` store health and stamina raw
+/// (0x005a7a00, 0x005a7a30), `+0xa8` is the damage routine (0x005a7720),
+/// `+0xb0` the base death (0x005b16f0). So `Mist` and `CoverOfMercy`
+/// (`CVXScriptObj`, `CVXAreaEffect`) take `SetStamina`, `Heal` and `Damage`
+/// like a soldier does: `DRUID_MIST.VS` gives its mist `SetStamina(10)`,
+/// `MIST_IDLE.VS` runs while that stamina lasts, and `SUMMONING_BEHAVIOR.VS`
+/// counts it down and ends the object with `Damage(health)`. This engine
+/// registers neither class as a combatant (`is_combat_object`), so the
+/// mutators below fall back to the world object's own `ObjectState` for it.
+[[nodiscard]] WorldObject* script_object(CallContext& ctx, const CombatSystem& combat,
+                                         ObjectId id) {
+  if (combat.find(id) != nullptr) return nullptr;
+  World* world = world_of(ctx);
+  if (world == nullptr) return nullptr;
+  WorldObject* slot = world->find(id);
+  if (slot == nullptr || slot->internal != InternalKind::none) return nullptr;
+  return slot;
+}
+
+/// The unit health store, `vtbl+0x98` on a unit (0x005d3a80): when the value
+/// changes and reaches the unit's maximum, the disease bit (`[unit+0x194] &
+/// 2`) is cleared and its effect handle dropped. `Heal` and `SetHealth`
+/// reach it; the bit is `ObjectFlags::diseased`.
+void cure_at_full_health(CallContext& ctx, const CombatSystem& combat, ObjectId id,
+                         std::int32_t before) {
+  const Combatant* unit = combat.find(id);
+  World* world = world_of(ctx);
+  if (unit == nullptr || world == nullptr || unit->health == before) return;
+  if (unit->health < combat.max_health_of(*unit)) return;
+  if (ObjectState* state = world->mutable_state(id); state != nullptr) {
+    state->flags.diseased = false;
+  }
+}
+
+/// `Damage(n)` -- 60 sites. `Obj::Damage` (0x005ab5d0) answers a bool.
+///
+/// An invalid receiver logs and answers **true**. A negative `n` logs
+/// ("Negative damage in function 'Obj::Damage'") and answers false, changing
+/// nothing -- a log line, not a script error. A building runs its fire points
+/// first (0x004e0fd0, visual). Then the damage routine (0x005a7720): an
+/// object already dead answers true and is left alone; otherwise `n` is
+/// clamped to the health left, the new health stored, and an object now dead
+/// goes through its death virtual; the answer is whether it is dead now. No
+/// attacker is credited. The ambient-civilian immunity (`[obj+0x2c] &
+/// 0x4000000`, answer 0) is not modelled: the engine carries no such bit and
+/// no shipped script damages a villager.
 HostOutcome host_damage(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const std::int32_t amount = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  // The original refuses this: "Negative damage in function 'Obj::Damage'".
-  if (amount < 0) return HostOutcome::failed("Negative damage in function 'Obj::Damage'");
   const ObjectId victim = id_of(ctx.arg(0));
-  // `system_of` found the system *through* the world, so a non-null system
-  // means a non-null world. No second guard, for the reason `hit`'s `onkill`
-  // fire gives: a branch nothing can reach is a claim this engine is not
-  // making.
-  combat->apply_damage(*world_of(ctx), victim, amount);
+  World& world = *world_of(ctx);
+  if (world.find(victim) == nullptr && combat->find(victim) == nullptr) {
+    return HostOutcome::ok_with(Value::boolean(true));
+  }
+  if (amount < 0) return HostOutcome::ok_with(Value::boolean(false));
+  if (WorldObject* slot = script_object(ctx, *combat, victim); slot != nullptr) {
+    if (object_is_dead(*slot)) return HostOutcome::ok_with(Value::boolean(true));
+    const std::int32_t left = slot->state.health > amount ? slot->state.health - amount : 0;
+    (void)world.set_health(victim, left);
+    if (left > 0) return HostOutcome::ok_with(Value::boolean(false));
+    // The base death, 0x005b16f0: health 0, `ondie`, off the map, deleted.
+    erase_object(ctx, world, victim);
+    return HostOutcome::ok_with(Value::boolean(true));
+  }
+  combat->apply_damage(world, victim, amount);
   sync_to_world(ctx, *combat, victim);
-  return HostOutcome::ok_void();
+  const Combatant* after = combat->find(victim);
+  const bool dead = after == nullptr || !combat->is_alive(victim) ||
+                    after->action == Action::dying || after->health <= 0;
+  return HostOutcome::ok_with(Value::boolean(dead));
 }
 
+/// `Heal(n)` -- 45 sites. `Obj::Heal` (0x005ab690): an invalid receiver logs;
+/// a negative `n` logs and changes nothing; otherwise health becomes
+/// `min(health + n, maxhealth)` through the health store. The original has no
+/// dead check -- it writes a corpse's health too; this engine keeps
+/// `CombatSystem::heal`'s refusal of a dying unit, whose health is the dying
+/// state's own business here.
 HostOutcome host_heal(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const std::int32_t amount = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
+  if (amount < 0) return HostOutcome::ok_void();
   const ObjectId patient = id_of(ctx.arg(0));
+  if (WorldObject* slot = script_object(ctx, *combat, patient); slot != nullptr) {
+    World& world = *world_of(ctx);
+    const std::int64_t raised = static_cast<std::int64_t>(slot->state.health) + amount;
+    const std::int32_t cap = object_max_health(world, *slot);
+    (void)world.set_health(patient, static_cast<std::int32_t>(raised > cap ? cap : raised));
+    return HostOutcome::ok_void();
+  }
+  const std::int32_t before = combat->health(patient);
   combat->heal(patient, amount);
+  cure_at_full_health(ctx, *combat, patient, before);
   sync_to_world(ctx, *combat, patient);
   return HostOutcome::ok_void();
 }
 
+/// `SetHealth(n)` -- `Obj::SetHealth` (0x005ab4e0) stores `n` raw through the
+/// health store: no clamp, and no death even at 0.
 HostOutcome host_set_health(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
+  const ObjectId id = id_of(ctx.arg(0));
+  if (!ctx.arg(1).is_integer()) return HostOutcome::ok_void();
+  if (WorldObject* slot = script_object(ctx, *combat, id); slot != nullptr) {
+    (void)world_of(ctx)->set_health(id, ctx.arg(1).as_integer());
+    return HostOutcome::ok_void();
+  }
+  Combatant* unit = combat->find(id);
   if (unit == nullptr) return HostOutcome::ok_void();
-  unit->health = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : unit->health;
-  sync_to_world(ctx, *combat, unit->id);
+  const std::int32_t before = unit->health;
+  unit->health = ctx.arg(1).as_integer();
+  cure_at_full_health(ctx, *combat, id, before);
+  sync_to_world(ctx, *combat, id);
   return HostOutcome::ok_void();
 }
 
+/// `SetStamina(n)` -- `Obj::SetStamina` (0x005ab440) stores `n` raw through
+/// `vtbl+0x9c`: no clamp, no dead check.
 HostOutcome host_set_stamina(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
+  const ObjectId id = id_of(ctx.arg(0));
+  if (!ctx.arg(1).is_integer()) return HostOutcome::ok_void();
+  if (WorldObject* slot = script_object(ctx, *combat, id); slot != nullptr) {
+    if (ObjectState* state = world_of(ctx)->mutable_state(id); state != nullptr) {
+      state->stamina = ctx.arg(1).as_integer();
+    }
+    return HostOutcome::ok_void();
+  }
+  Combatant* unit = combat->find(id);
   if (unit == nullptr) return HostOutcome::ok_void();
-  unit->stamina = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : unit->stamina;
+  unit->stamina = ctx.arg(1).as_integer();
   sync_to_world(ctx, *combat, unit->id);
   return HostOutcome::ok_void();
 }
@@ -2145,13 +2241,27 @@ HostOutcome host_heal_stamina(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const std::int32_t amount = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  // Before the receiver is even resolved, as in the original: the sign test at
-  // 0x005ab72c comes after the receiver check but nothing between them has an
-  // effect, and refusing early makes the no-op unmistakable.
-  if (amount < 0) return HostOutcome::ok_void();
+  // The single form refuses a negative amount (0x005ab72c); the group form,
+  // `Query::HealStamina` (0x00579100), has no sign test but skips its dead
+  // members, and refreshes the query first.
+  const HostContext* context = host_context_of(ctx);
+  const bool single = ctx.arg(0).is_object() && context != nullptr &&
+                      ctx.arg(0).as_object().type == context->object_type;
+  if (single && amount < 0) return HostOutcome::ok_void();
   for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+    if (single) {
+      if (WorldObject* slot = script_object(ctx, *combat, id); slot != nullptr) {
+        const std::int32_t cap = class_int(*world, *slot, "maxstamina");
+        const std::int64_t raised = static_cast<std::int64_t>(slot->state.stamina) + amount;
+        slot->state.stamina = static_cast<std::int32_t>(raised > cap ? cap : raised);
+        continue;
+      }
+    }
     Combatant* unit = combat->find(id);
     if (unit == nullptr) continue;
+    if (!single && (!combat->is_alive(id) || unit->action == Action::dying || unit->health <= 0)) {
+      continue;
+    }
     const std::int32_t max = combat->max_stamina_of(*unit);
     const std::int64_t raised = static_cast<std::int64_t>(unit->stamina) + amount;
     unit->stamina = static_cast<std::int32_t>(raised > max ? max : raised);
@@ -2250,6 +2360,14 @@ HostOutcome host_can_attack(CallContext& ctx) {
   // left out for the reason given there -- it must refuse exactly what
   // `Attack` refuses, or `RAM_ATTACK.VS`'s `if (!.CanAttack(t)) break;
   // .Attack(t);` loop spins on a refusal that never suspends.
+  //
+  // Before either, it refuses a dead target and then a dead receiver, each
+  // through the dead virtual (`vtbl+0x50`), with a log line and `false`.
+  // A dying combatant is dead to it: its health is already at zero.
+  const auto dead = [&](const Combatant& c) {
+    return !combat->is_alive(c.id) || c.action == Action::dying;
+  };
+  if (dead(*d) || dead(*a)) return HostOutcome::ok_with(Value::boolean(false));
   const bool ok = combat->profile(a->class_index).can_attack() &&
                   combat->profile(d->class_index).can_be_attacked && combat->is_enemy(*a, *d) &&
                   combat->unit_can_attack(*a, *d);
@@ -2265,10 +2383,14 @@ HostOutcome host_is_valid_target(CallContext& ctx) {
   const CombatProfile theirs = combat->profile(d->class_index);
   // `Obj::IsValidTarget` (0x005aafd0) is nothing but the receiver's
   // `CanAttack` virtual, so a swordsman's `MELEE_ATTACK.VS` and
-  // `UNIT_AI_ATTACK_GATE.VS` leave at their first test of a building.
+  // `UNIT_AI_ATTACK_GATE.VS` leave at their first test of a building. An
+  // invalid target answers `false` without a log line, an invalid receiver
+  // with one. It does **not** read the class's `target_factor`: a factor of
+  // -1 keeps an animal out of every target sweep (0x005db650) and out of
+  // `EnemyInRange` (0x004dbea0), but a script that names one gets the
+  // virtual's answer.
   const bool ok = combat->is_enemy(*a, *d) && combat->is_alive(d->id) && d->health > 0 &&
-                  theirs.can_be_attacked && !theirs.never_targeted() &&
-                  combat->unit_can_attack(*a, *d);
+                  theirs.can_be_attacked && combat->unit_can_attack(*a, *d);
   return HostOutcome::ok_with(Value::boolean(ok));
 }
 
@@ -2296,6 +2418,13 @@ HostOutcome host_in_range(CallContext& ctx) {
   const Combatant* a = combat->find(id_of(ctx.arg(0)));
   const Combatant* d = combat->find(id_of(ctx.arg(1)));
   if (a == nullptr || d == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  // `Unit::InRange` (0x005d72e0) answers `false` for a receiver inside a
+  // holder (`[unit+0x154] != 0xffff`) before it measures anything.
+  if (World* world = world_of(ctx); world != nullptr) {
+    if (const ObjectState* state = world->state(a->id); state != nullptr && state->is_held()) {
+      return HostOutcome::ok_with(Value::boolean(false));
+    }
+  }
   Combatant attacker = *a;
   Combatant defender = *d;
   if (World* world = world_of(ctx); world != nullptr && combat->world_bound()) {
@@ -2414,6 +2543,43 @@ HostOutcome host_best_target(CallContext& ctx) {
   return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)))));
 }
 
+/// Whether the `*InSquadSight` family answers the invalid handle before it
+/// looks at anything: the receiver is invalid, dead or held.
+///
+/// The wrappers (0x005dcbc0, 0x005dcb00, 0x005dcc80, 0x005dcd40, 0x005dce00,
+/// 0x005dcf30) log and answer the invalid handle for an invalid receiver and,
+/// through `vtbl+0x50`, for a dead one. The core, 0x005dc950, then has two
+/// paths. A unit with a squad (`[unit+0x174]`, `HeroSystem::squad_of`) that is
+/// not held takes the **squad path**, which offers only the squad's own
+/// candidate deque at `squad+0x6c..0x7c` (walked by 0x005dbb20) and draws no
+/// circle -- and that deque is never filled: no instruction in `.text` pushes
+/// it (its count at `+0x7c` is written only by the two squad constructors,
+/// 0x0044440b and 0x0045402f, with zero; the only `lea [reg+0x6c]` near squad
+/// code feeds its clear, 0x006a3cc0), the same fact `IsEnemyInSquadSight`
+/// rests on in `sim/squad.cpp`. So an empty sweep returns the invalid handle
+/// (0x005dc9dd -> 0x005dcae9). A held unit -- with or without a squad -- gets
+/// the invalid handle on the other path. Only a free unit in no squad reaches
+/// the circle sweep `CombatSystem::best_target` models.
+///
+/// **The squad half is not reproduced, and that is a known gap.** Answering
+/// "no target" to every squad member was tried and measured: on Alesia the
+/// melee units in a fight then stood out of reach 1,904 times against 325 in
+/// reach (`test_alesias_armies_do_not_stand_on_one_another`), where the
+/// original's armies plainly fight. Whatever engages a squad member in
+/// `gbr.exe` when its scripts are told there is no target -- the unit's own
+/// idle acquisition, the squad's AI orders -- is not modelled to that extent
+/// here, and this engine's squad members get their fights from this answer.
+/// So a squad member is answered by the circle sweep, as a free unit is, until
+/// that mechanism is; see the audit's status note on 0x005dcbc0.
+[[nodiscard]] bool squad_sight_blind(CallContext& ctx, const CombatSystem& combat, ObjectId id) {
+  const Combatant* self = combat.find(id);
+  if (self == nullptr || !combat.is_alive(id) || self->action == Action::dying) return true;
+  World* world = world_of(ctx);
+  if (world == nullptr) return false;
+  const ObjectState* state = world->state(id);
+  return state != nullptr && state->is_held();
+}
+
 /// One acquisition under one variant's filter. The filter itself is
 /// `sim/combat.hpp`'s `TargetFilter`, which carries the disassembly.
 HostOutcome best_target_with(CallContext& ctx, const TargetFilter& filter) {
@@ -2422,26 +2588,40 @@ HostOutcome best_target_with(CallContext& ctx, const TargetFilter& filter) {
   return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)), filter)));
 }
 
-/// `BestTargetInSquadSightMisZeroDamage/0` -- 859 of Numantia's traps, because
-/// `DATA\SUBAI\UNIT_IDLE.VS` is what every idle unit runs. The one difference
-/// from `BestTargetInSquadSight/0` is argument 5 of `0x005dc950`, which makes
-/// `0x005db6a5` skip any candidate whose own `damage` is not positive: an idle
-/// unit auto-engages things that can fight back, and leaves peasants, wagons
-/// and wildlife alone until it is told otherwise.
-HostOutcome host_best_target_mis_zero_damage(CallContext& ctx) {
-  TargetFilter filter;
-  filter.require_armed = true;
-  return best_target_with(ctx, filter);
+/// The same, for the `*InSquadSight` family: `squad_sight_blind` first.
+HostOutcome squad_sight_target(CallContext& ctx, const TargetFilter& filter) {
+  CombatSystem* combat = system_of(ctx);
+  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  const ObjectId id = id_of(ctx.arg(0));
+  if (squad_sight_blind(ctx, *combat, id)) return HostOutcome::ok_with(ref_to(ctx, kNoObject));
+  return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id, filter)));
 }
 
-/// `BestNoIndependentTargetInSquadSight/0` -- argument 3, which clears bit 14
-/// of the attacker's enemy mask at `0x005d45b9`. `DATA\SUBAI\HERO_SNEAK.VS` is
-/// the caller: a sneaking hero picks fights with real players, not with the
-/// map's wildlife and garrisons.
+/// `BestTargetInSquadSight/0` -- 0x005dcbc0, the core with no flag.
+HostOutcome host_best_target_in_squad_sight(CallContext& ctx) {
+  return squad_sight_target(ctx, TargetFilter{});
+}
+
+/// `BestTargetInSquadSightMisZeroDamage/0` -- 0x005dcb00, what
+/// `DATA\SUBAI\UNIT_IDLE.VS` runs. It passes the core's last flag, which the
+/// squad path hands to the predicate's damage slot (0x005db6a5 would skip an
+/// unarmed candidate). **The circle path builds its predicate one argument
+/// over** (0x005dca31..0x005dca5a: the constructor 0x005d45a0 gets the
+/// exclusive flag in the independents slot, this flag in the exclusive slot,
+/// and 0 for damage), and the squad path never answers (see
+/// `squad_sight_blind`). So on the only path that answers, the flag lands in
+/// the exclusive slot, where without a class string it does nothing: the
+/// answer is `BestTargetInSquadSight/0`'s. `UNIT_IDLE.VS` agrees -- it
+/// re-tests `u.attack > 0 || AsDruid || AsWagon` on what comes back.
+HostOutcome host_best_target_mis_zero_damage(CallContext& ctx) {
+  return squad_sight_target(ctx, TargetFilter{});
+}
+
+/// `BestNoIndependentTargetInSquadSight/0` -- 0x005dcc80. Its flag is the one
+/// the circle path drops (0x005dca31), so the answer is
+/// `BestTargetInSquadSight/0`'s; `HERO_SNEAK.VS` is the one caller.
 HostOutcome host_best_target_no_independent(CallContext& ctx) {
-  TargetFilter filter;
-  filter.exclude_independents = true;
-  return best_target_with(ctx, filter);
+  return squad_sight_target(ctx, TargetFilter{});
 }
 
 /// `BestTargetInSquadSight_PreferUndiseased/0` -- argument 2, which adds 200
@@ -2452,7 +2632,7 @@ HostOutcome host_best_target_no_independent(CallContext& ctx) {
 /// on that ground alone -- see `TargetFilter` -- and the moment a disease
 /// state exists this must stop being an alias.
 HostOutcome host_best_target_prefer_undiseased(CallContext& ctx) {
-  return host_best_target(ctx);
+  return squad_sight_target(ctx, TargetFilter{});
 }
 
 /// `BestTargetInSquadSightExclusive/1` -- arguments 1 and 4 together, which
@@ -2491,19 +2671,26 @@ HostOutcome host_best_target_prefer_class(CallContext& ctx) {
   if (graph != nullptr && ctx.arg(1).is_string()) {
     filter.prefer_class = graph->find(ctx.arg(1).as_string());
   }
-  return best_target_with(ctx, filter);
+  return squad_sight_target(ctx, filter);
 }
 
+/// `BestTargetInSquadSightExclusive/1` -- 0x005dcf30. On the circle path its
+/// exclusive flag lands in the independents slot (0x005dca31): the enemy mask
+/// loses bit 14, so wildlife is excluded, and a class mismatch costs the
+/// +200 the plain string form charges instead of rejecting (0x005db789,
+/// with the exclusive slot holding the zero meant for the damage flag). A
+/// name nothing resolves therefore ranks every candidate the same: the
+/// unfiltered answer minus wildlife, not no answer.
 HostOutcome host_best_target_exclusive(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const ClassGraph* graph = combat->class_graph();
-  ClassIndex wanted = kNoClass;
-  if (graph != nullptr && ctx.arg(1).is_string()) wanted = graph->find(ctx.arg(1).as_string());
-  if (wanted == kNoClass) return HostOutcome::ok_with(ref_to(ctx, kNoObject));
   TargetFilter filter;
-  filter.only_class = wanted;
-  return best_target_with(ctx, filter);
+  filter.exclude_independents = true;
+  if (graph != nullptr && ctx.arg(1).is_string()) {
+    filter.prefer_class = graph->find(ctx.arg(1).as_string());
+  }
+  return squad_sight_target(ctx, filter);
 }
 
 /// `BestTargetForPos/0` -- `0x005dd280`, which is `0x005dd060` with the
@@ -2645,6 +2832,9 @@ HostOutcome host_enemies_in_sight(CallContext& ctx) {
     if (seen != nullptr && (!seen->state.flags.is_unit || seen->state.flags.hidden)) continue;
     if (combat->attack_of(other) <= 1) continue;
     if (!combat->is_enemy(*self, other)) continue;
+    // And the looker's `CanAttack` virtual must accept it (0x005d5180): a
+    // sentry or a ram that cannot hit the candidate is not in a fight with it.
+    if (!combat->unit_can_attack(*self, other)) continue;
     return HostOutcome::ok_with(Value::boolean(true));
   }
   return HostOutcome::ok_with(Value::boolean(false));
@@ -2684,16 +2874,21 @@ HostOutcome host_enemies_in_sight(CallContext& ctx) {
 /// the target's position, which is the same point the in-range arm answers and
 /// leaves `InRange` to say no by itself.
 ///
-/// A target that is not a combatant, or a receiver that is not, answers the
-/// target's world position when there is one and `(0, 0)` otherwise -- never a
-/// refusal, because the original prints (through the sink that is a bare `ret`
-/// in retail) and pushes a point either way.
+/// The receiver is checked first and the target second; either one naming no
+/// object prints (through the sink that is a bare `ret` in retail) and pushes
+/// `(0, 0)` -- never a refusal. A unit target's aim point, `vtbl+0xc8`, is
+/// its `posRH`: the town it garrisons while it is held, which is
+/// `unit_pos_rh`'s answer, not `resolve_position`'s.
 HostOutcome host_get_point_on_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  if (world->find(id_of(ctx.arg(0))) == nullptr) {
+    return HostOutcome::ok_with(pack_point(Point{0, 0}));
+  }
   const ObjectId target = id_of(ctx.arg(1));
   const WorldObject* slot = world->find(target);
   if (slot == nullptr) return HostOutcome::ok_with(pack_point(Point{0, 0}));
+  if (slot->state.flags.is_unit) return HostOutcome::ok_with(pack_point(unit_pos_rh(*world, target)));
   return HostOutcome::ok_with(pack_point(world->resolve_position(target)));
 }
 
@@ -2761,7 +2956,7 @@ void define_combat_host(script::HostRegistry& registry) {
   // `World::players()`, neither of which this domain's version handled. Both
   // domains defined it for a while and `host_setup.cpp`'s order decided which
   // one ran -- silently, because `define` replaces without saying so.
-  member("BestTargetInSquadSight", 0, &host_best_target);    //  69
+  member("BestTargetInSquadSight", 0, &host_best_target_in_squad_sight);  //  69
   member("Damage", 1, &host_damage);                         //  44
   member("TimeWithoutAttack", 0, &host_time_without_attack);  //   3
 
@@ -2785,18 +2980,12 @@ void define_combat_host(script::HostRegistry& registry) {
   member("BestTargetForPos", 0, &host_best_target_for_pos);
   member("BestTargetInRange", 2, &host_best_target_in_range);
   //
-  // **`BestTargetInSquadSight/1(str)` is deliberately left trapping.** Its
-  // rule is known exactly -- `0x005dce00` passes the class string with no
-  // other flag, and `0x005db789` adds 200 to the score of a candidate whose
-  // class name does not match -- and it is not expressible here. The
-  // executable's score is `target_factor + 40 * recent_target_count +
-  // surface_distance`, a linear sum in world units; this system's is
-  // `distance^2 * target_factor / target_priority`. 200 on the first scale
-  // reorders candidates a couple of hundred units apart. 200 on the second is
-  // indistinguishable from nothing, so implementing it would turn a soft
-  // preference into a no-op and hand back a plausible object instead of the
-  // right one. The corpus never calls it, so nothing is lost by waiting for a
-  // score this engine can put it on.
+  // `BestTargetInSquadSight/1(str)` is registered above, and its +200 for a
+  // class mismatch (0x005db789) is taken to its limit -- the named class
+  // always wins -- because this system's score (`distance^2 * factor /
+  // priority`) is not the executable's linear `target_factor + 40 * threat +
+  // surface_distance`, on which 200 means a couple of hundred units. See
+  // `TargetFilter::prefer_class`.
   //
   // `BestTargetInGAIKA/0` is not claimed here either, and it is **not**
   // refused: `0x0043bd35` registers it out of the GAIKA slice, its core

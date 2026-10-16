@@ -1,0 +1,86 @@
+0x004c9b70	partial	Translate: lookup 0x00689130 read and fixed (empty->"", all-digit key->itself, exact then tolower-folded, text and justtext both names with the later row winning 0x00689f40, empty result->key); gaps: the running script's file name as context (0x006a3a60) not passed (no shipped key carries one), map table (0xa77e90) merged into the pack's rather than asked second (differs only where the pack answers a name with itself)
+0x004c9ea0	partial	Translatef(key,a1): formatter 0x006897a0 read and fixed (each %s argument translated 0x00689a82, %% -> %, multi-digit N, bad placeholder -> "Bad parameter at pos P", finished text that is a name translated again 0x00689650); gaps: %d prints a pointer in the original (argument text written instead), N past the arguments left as written, same merged map table as Translate
+0x004ca150	partial	Translatef(key,a1,a2): as 0x004c9ea0
+0x004ca470	partial	Translatef(key,a1,a2,a3): as 0x004c9ea0; this arity was not registered and now is
+0x006a3f00	verified	pr(str): "%s" to the debug console (0x00619060), no check, no state
+0x006a3f70	verified	pr(int): "%d" to the debug console
+0x006a3fa0	partial	pr(bool): prints true/false; a VS bool reaches the host as an integer here, so it prints 1/0 (debug output only)
+0x005abb20	partial	Obj::pr(str): prints only when [obj+0x74] equals the debug era 0x00821354 (Obj::GetDebug's test); invalid receiver logs and answers nothing; not registered: every shipped site is commented out and the per-object debug flag is unmodelled
+0x005abbd0	partial	Obj::pr(int): as 0x005abb20 with "%d"
+0x005abc40	partial	Obj::pr(handle): as 0x005abb20, printing "(h:%d,o:%d)"
+0x00746ea0	verified	Breakpoint and the other names on this body: answers 0, touches nothing; for GetGAIKA(int) and GAIKA::ID the untouched VM stack makes the argument the answer (sim/ai.cpp, sim/squad.cpp identity functions)
+0x00697580	verified	ParseStr: skips leading spaces only (0x20), token to the first comma with trailing spaces cut, tail after the comma verbatim (fixed: tabs were trimmed and the tail was trimmed)
+0x00696a40	verified	Str2Int: CRT atol 0x00763919 -- isspace skip, one sign, digits with 32-bit wrap (fixed: no white-space skip, saturated)
+0x00696b40	verified	StrLen: bytes before NUL (0x00649b40); null string 0
+0x005a7fd0	partial	ClearDebug: adds one to the debug era 0x00821354 and nothing else (fixed: it cleared the debug console, which is cls's); the era and per-object flag ([obj+0x74], Obj::GetDebug) are unmodelled
+0x00697740	verified	StrMid: len capped at strlen-start when that is not more, floored at 0; negative start reads before the string in the original, answered as start 0
+0x005adde0	partial	Obj::range: [obj+0xd4], invalid -> 0; the unit rebuild (0x005d9df0) adds the stand_position formation's BonusRange (0x005da46b..) which the engine does not apply; a non-combatant answers 0 here where the original answers its class range
+0x005add80	partial	Obj::attack/damage: [obj+0xdc], invalid -> 0; engine attack_of lacks the rebuild's item, Epic/Team skill, formation and x2 (0x005da6e0, [hero+0x248]) terms
+0x005aafd0	partial	IsValidTarget: the receiver's CanAttack virtual only (invalid target false silently, invalid receiver logs); fixed: target_factor -1 no longer refused; gap: engine's strict is_enemy vs the virtual's wider rule
+0x005dcbc0	partial	BestTargetInSquadSight/0: invalid/dead receiver -> invalid; held -> invalid (fixed); a squad member takes the squad path, whose deque squad+0x6c..0x7c nothing pushes, and gets the invalid handle -- NOT applied: measured on Alesia it leaves armies standing out of reach (1904 vs 325), because what engages a squad member in the original is not modelled (design gap); free unit -> circle on hero/self at [+0xd0]; gap (design): score factor+40*threat+surface d with in-range <50 stop/-100, units only + catapult fallback, threat counters, grid order -- engine scores d^2*factor/priority
+0x005dce00	partial	BestTargetInSquadSight/1(str): as /0 (held guard fixed, squad-member gap as /0); class mismatch +200 (0x005db789) taken to its limit on the engine score scale
+0x005ab5d0	partial	Obj::Damage: answers is-dead, true for invalid receiver, n<0 logs and false (fixed: was void and a script error); clamp, store, death 0x005b16f0 -- now also on script objects such as Mist and CoverOfMercy (fixed); gap: ambient-civilian immunity [obj+0x2c]&0x4000000 not modelled
+0x00578ec0	partial	Query::Damage: no refresh, skips dead, no sign check, answers the kill count; engine has no Query form (Damage/1 on a group does nothing); no shipped site damages a group
+0x004df650	partial	Building::Attack: fire rate isqrt(military+min(other,10))*BaseFireRate/100 (0x005c2fb0), 0 -> false; per-building attack_delay and per-settlement cadence waits; fires once and answers true; gap (design): tower fire is script-driven per call in the original, CombatSystem::act acquisition here, with no garrison gate
+0x004e2d10	partial	Catapult::Attack(point): sets the shot point, activity 2, waits for the shot; gap (design): catapult fire is CATAPULT_AUTOFIRE-driven in the original and acquisition-driven here; the point overload reads pt.x as an object id
+0x005ab440	verified	Obj::SetStamina: raw store through vtbl+0x9c, no clamp, no dead check, invalid receiver no-op; fixed for objects the combat system does not hold
+0x005ddb50	partial	Unit::Attack: target stored before the gate, gate = CanAttack virtual + range 0x005a7800, refused -> false without suspending, accepted -> suspends until the swing ends; gaps: range half not modelled (shared reach measure with GotoAttack), suspension is attack_interval, refused path does not store the target
+0x005ab690	partial	Obj::Heal: n<0 changes nothing (fixed), min(h+n,max) through the health store, cure at full health (fixed), script objects (fixed); gap: the original writes a dying unit's health, the engine's heal refuses it
+0x00578ff0	partial	Query::Heal: refresh, skip dead, min(h+n,max), no sign check; engine has no Query form for Heal; no shipped site heals a group
+0x004e3230	partial	Catapult::InRange(point): isqrt(d2)-own radius in [min_range, range], no min<1 escape; gap (design, with Catapult::Attack): the point overload is not dispatched and reads pt.x as an object id
+0x005d72e0	partial	Unit::InRange: held receiver -> false (fixed); surface band isqrt(d2)-r1-r2 in [min,range], min<1 skips the inner bound; gap: engine measures min centre to centre and max squared, kept shared with GotoAttack's arrival (Balcans EPRIEST_IDLE spin)
+0x005adba0	partial	Obj::maxstamina: [obj+0xcc], invalid -> 0; non-combatants answer 0 here (a HeroGrave's holds the dead hero's level, and graves are not spawned); skill terms missing
+0x005d8d10	partial	Unit::maxstamina: the class record's value (+0x298), no bonus; one engine member serves both forms and adds the AddBonus term, which every shipped AddBonus passes as 0
+0x005ab700	verified	Obj::HealStamina: n<0 refused, min(s+n,maxstamina), no dead check; fixed for script objects
+0x00579100	verified	Query::HealStamina: refreshed members, dead skipped, no sign check (fixed: dead members were healed and negatives refused)
+0x005dd280	partial	BestTargetForPos: no squad gate, held -> invalid, surface d in [min,range]; gaps: the score design of /0, min measured centre to centre, buildings offered
+0x005ab060	partial	CanAttack: dead target then dead receiver -> false (fixed), CanAttack virtual, then range; gap: range half omitted so it refuses exactly what Attack refuses (RAM_ATTACK loop)
+0x004e3600	partial	Catapult::SetTarget: stores the handle at +0x228 unvalidated and mirrors it to the settlement's CatapultTowers' ui_target; gap (design, with Catapult::Attack): engine order_attack engages instead and mirrors nothing
+0x004c6b10	verified	InvalidateDamageFormulaParams: zeroes the reload flag 0x00996ae8; the engine caches nothing, so nothing to invalidate
+0x005dd2a0	partial	BestTargetInRange: ForPos's core centred on the point, r<1 -> [+0xd0], x==-1 -> own position (not reproduced); gaps as ForPos
+0x005dcb00	partial	BestTargetInSquadSightMisZeroDamage: the circle path shifts its flag into the exclusive slot (0x005dca31), so the answer is /0 (fixed: the engine filtered unarmed targets); held guard fixed; squad-member and score gaps as /0
+0x004e3710	partial	Catapult::ClearTarget: clears +0x228 and the settlement CatapultTowers' ui_target; gap (design): engine stop() idles the catapult and leaves the towers
+0x004dcc60	inferred	Building::BestTarget: box +-sight, units only, not hidden, first in [min,range] stops, else threat<=3 nearest; registered BestTarget/0 answers with the unit core here -- a separate handler belongs with the scripted tower-fire design
+0x004e2f60	inferred	Catapult::BestTarget: buildings first by max target_priority in [min,range], not Wall, nearly-destroyed spared unless a garrisoned centre; units only while [+0x22c]; answered with the unit core here, with the catapult-fire design
+0x004e3080	partial	Catapult::GetPointOnTarget: receiver checked first, (0,0) on either failure (fixed), unit target -> posRH (fixed); gap: the footprint walk for a building is not modelled (no per-object cell list)
+0x005dcf30	partial	BestTargetInSquadSightExclusive: on the circle path its flag lands in the independents slot -- wildlife excluded, mismatch +200 not rejected, unknown name -> unfiltered minus wildlife (fixed); held guard fixed; squad-member and score gaps as /0
+0x005dcd40	partial	BestTargetInSquadSight_PreferUndiseased: diseased candidate +200 on both paths; held guard fixed; gaps: Disease now sets a flag and the alias does not add the penalty; squad-member and score gaps as /0
+0x005d7f50	verified	TimeWithoutAttack: now - [unit+0x1a4], invalid -> 0
+0x005d74d0	partial	EnemiesInSight: invalid/dead/held -> false, circle [+0xd0] rim inclusive, enemy unit not dead with damage > 1 and the looker's CanAttack (fixed); gap: a hidden unit counts when the looker's player sees it, approximated as never
+0x005ab4e0	verified	Obj::SetHealth: raw store, no death at 0; the unit store cures disease on reaching max (fixed); script objects (fixed)
+0x005d2fb0	verified	SetExperienceModifier: player-1 signed <16, [record+0x84]; <=0 is an out-of-bounds write in the original, unreachable from shipped data
+0x005e0ce0	verified	Unit::AddBonus: args 1-4, argument 4 into both max slots, argument 5 unread, then the rebuild; the shipped site passes zeros so the rebuild's rescale is invisible
+0x005dcc80	partial	BestNoIndependentTargetInSquadSight: its flag is dropped on the circle path, so the answer is /0 (fixed: engine excluded wildlife); held guard fixed; squad-member and score gaps as /0
+0x005e0380	partial	Unit::RecalcBonuses: the rebuild 0x005d9df0 -- class stats, AddBonus record, items, skills, Toughness and Statue of Amon-Ra maxhealth, formation, DefensiveCry, level, then health and stamina rescaled by new/old max; engine derives stats on read without Toughness, Amon-Ra, formation, items, x2 and does no rescale
+0x005b4370	partial	rollover(): title (yellow translated rollover, hotkey form) + newline + translated description as the command loader 0x004f2240 composes them; engine joins the raw keys; tooltip text no script compares
+0x005b3020	partial	rollover(obj,bool): title, newline + cost line (gold/food/stamina-or-Loyality/pop icons, red when unaffordable by obj), description, then bool: red Not-enough lines; engine: raw keys and a plain cost line after the description
+0x005b39b0	partial	rollover(obj,class,bool): the (obj,bool) form plus a class Stats/Specials line before the description; costs are the described command's; engine looks the class up as a command row
+0x005b3da0	partial	rollover(obj,str): title + newline + translated str + description, obj unread; engine puts the message after the description, untranslated
+0x005b4080	partial	rollover_desc: title + newline + translated msg + (bool ? description : ""), no costs; engine treats bool as show-costs
+0x005186f0	verified	CreateFeedback(unit,class): effect object in an unsynced handle slot (0x0067b480), no answer; invalid unit or unknown class logs only
+0x005187c0	verified	CreateFeedback(unit,class,ms): as the 2-argument form with an expiry; unbound, no site
+0x005188a0	verified	CreateFeedback(point,class): effect at a point, unsynced slot, no answer
+0x005189d0	verified	CreateFeedback(point,class,ms): as the point form with an expiry; unbound, no site
+0x004c6cb0	verified	View: camera move and lock flag 0x00996ff8=bLock only for a point inside the map rect, inclusive (fixed: was unconditional)
+0x006b80f0	verified	ShowHint: 0 without a hint manager, never suspends; result discarded at every site
+0x004c7da0	partial	PlayMovie: synchronous with the game paused, answers whether it played, always ends with input unblocked 0x004c7f35 (fixed); engine plays nothing and answers false
+0x006a6d00	partial	SetShortcutSel: p-1 in 0..15 and num in 0..9 else nothing, non-empty list ORs 1<<num into /Player<p>/SelectionAssigned (fixed); gap: the group is copied as given, not refilled through the selection-add rules (0x005b9170)
+0x006a51e0	verified	SetFog: queued command to the display flag; the engine applies it at once, which no script can tell apart
+0x004c63e0	verified	BlockUserInput: interface block 0x005e31e0(1,1), hints closed; no answer
+0x004c6450	verified	UnblockUserInput: 0x005e31e0(0,1); no answer
+0x0055dc00	verified	UserNotification: panel only when player-1 is the local player; no answer
+0x004d5b40	verified	ShowAnnouncement(key,value): ticker table 0x00996890[0]; no getter
+0x004d5cd0	verified	ShowAnnouncement(player,...): per-player table 1..16; unbound, no shipped site
+0x005aba90	verified	Obj::PlaySound: invalid handle logs; positional play when on screen and visible to the local player
+0x004c60d0	verified	PlaySound(name): global play; the variant draw is the C runtime's rand (0x006b0da0), not the simulation's
+0x004c6150	verified	PlaySound(player,name): plays only when player-1 is the local player
+0x0060e630	verified	HideZoomMap: the panel's hide virtual only; hiding does not stamp the shown time
+0x006b8430	verified	ShowTutorial: ShowHint with the tutorial icon and the 0x005bde80 gate; result discarded
+0x004c6b30	partial	ViewPos: the screen centre converted to world (x snapped to 4, terrain height); engine returns the stored View point exactly, which the save-and-restore idiom cannot tell apart
+0x004d4ac0	verified	HideAnnouncement(key): hides the entry in table 0
+0x004d4bc0	verified	HideAnnouncement(player,key): per-player table 1..16; unbound, no shipped site
+0x006a3fe0	verified	cls: blanks every line of the console pr writes to and zeroes the count (0x00618a10 on [0x00996ff4]+0x44cc) (fixed: was a no-op)
+0x004c6570	verified	LockView: 0x00996ff8 = 1
+0x004c6580	verified	UnlockView: 0x00996ff8 = 0
+0x0060e650	partial	_ZoomMapLastShownTime: settings key /Player<local+1>/ZoomMapShown minus 1 (no map prefix, -1 in multiplayer), written now+1 by the panel; engine keeps a per-session stamp and answers -1 with no interface
+0x004e3500	partial	Catapult::GetCurrentTarget: pushes the handle at [cat+0x228] (0xffff -> null), invalid receiver logs and answers null; engine answers Combatant::target, which SetTarget sets only when order_attack accepts (design, with Catapult::SetTarget)
