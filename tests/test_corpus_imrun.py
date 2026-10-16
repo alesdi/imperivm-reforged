@@ -1080,8 +1080,13 @@ SIEGE_TURN = 10
 @pytest.mark.parametrize("cls, stand, hurts", [
     # 20 beyond the outpost's edge, inside a sword's 17 + 15 + 345.
     ("RHastatus", (NUMANTIA_OUTPOST[0] + 365, NUMANTIA_OUTPOST[1]), False),
-    # 300 beyond it, inside a bow's reach.
-    ("RArcher", (NUMANTIA_OUTPOST[0] + 645, NUMANTIA_OUTPOST[1]), True),
+    # 300 beyond it on the west, inside a bow's reach. Not the east side:
+    # since a sequence reads Finished the moment its script ends (0x005b9f50),
+    # `seq3.vs`'s 28 `BestTarget` runs take a few turns rather than 28, so the
+    # Iberians' attackers are already advancing on their own outposts' ground
+    # there, and the archer's `unit_advance.vs` takes the first of them in
+    # squad sight for its target instead of the fort.
+    ("RArcher", (NUMANTIA_OUTPOST[0] - 645, NUMANTIA_OUTPOST[1]), True),
 ])
 def test_the_attack_button_on_a_fort_hurts_it_from_an_archer_and_not_from_a_sword(
         imrun, game_dir, cls, stand, hurts):
