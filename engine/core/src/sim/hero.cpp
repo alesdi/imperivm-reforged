@@ -1487,6 +1487,27 @@ HostOutcome fn_autocast(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(state != nullptr && state->flags.autocast));
 }
 
+/// The squad a caster falls back on when its sight circle found nobody --
+/// the second phase of `FindUnitToLearn`, `FindUnitToHeal`,
+/// `FindUnitToRevitalize` and `FindUnitToHide` (0x00513ce0, 0x00513990,
+/// 0x00513aa0, 0x00513bb0): the caster's squad handle (`[unit+0x174]`)
+/// resolved through its player's squad vector (0x00444190), searched when the
+/// caster stands outside any holder **or** the squad carries `SF_ADVCHOOSER`
+/// (bit 1 of `[squad+0x30]`). Null for a caster in no squad, or held in a
+/// squad without the flag. The members are walked front to back with the
+/// entry point's own predicate and score, and **without** the circle's
+/// friendly mask or its stealth test: a squad is one player's.
+[[nodiscard]] const Squad* fallback_squad(const World& world, const HeroSystem& heroes,
+                                          const WorldObject& caster) {
+  const SquadKey key = heroes.squad_of(caster.id);
+  if (!key.valid()) return nullptr;
+  const Squad* squad = heroes.squads().find(key);
+  if (squad == nullptr) return nullptr;
+  if (caster.state.holder != kNoObject && (squad->flags & 0x02u) == 0) return nullptr;
+  (void)world;
+  return squad;
+}
+
 /// `Druid::FindUnitToLearn` -- **the single largest trap in the corpus sweep**,
 /// 480 hits from `DATA\SUBAI\BDRUID_IDLE.VS` alone.
 ///
@@ -1510,11 +1531,16 @@ HostOutcome fn_autocast(CallContext& ctx) {
 ///   * `[obj+0x154] == 0xffff` -- not inside a holder;
 ///   * not a `CVXShip`.
 ///
-/// **Two things are not reproduced, and both are named.** The scan's cell mask
-/// is the complement of the druid's own player-visibility bit, so the original
-/// only visits objects at least one *other* player can see -- this engine has
-/// no fog and `ExploreArea` is unimplemented for the same reason, so there is
-/// no visibility to filter on. And the original takes the first match in its
+/// The scan's mask is the druid's player's **friendly** word (0x00514080 with
+/// `[record+0x10] ^ 0xffff`, the same mask heal and revitalize build), so a
+/// candidate is an ally; this used to take an enemy too. When the circle
+/// finds nobody, the druid's squad is searched (`fallback_squad`, 0x00513840)
+/// with the same predicate, and **the last** member that passes wins -- the
+/// walk overwrites its answer and does not stop.
+///
+/// **Not reproduced:** the stealth half of the mask (the caster's team-vision
+/// bits against a hidden candidate; a hidden object is no candidate here, the
+/// section note says why), and the first match's order -- the original's
 /// 256-unit grid's cell order, which is not the nearest and not reproducible
 /// without that grid; this takes the first in ascending object id, which is
 /// spawn order, equally not the nearest, and identical on every peer.
@@ -1536,37 +1562,47 @@ HostOutcome fn_find_unit_to_learn(CallContext& ctx) {
   const std::int32_t mine = heroes->experience(self);
   const ClassGraph* graph = world->class_graph();
 
-  for (const WorldObject& other : world->objects()) {
+  // 0x00511ff0, the predicate both passes use.
+  const auto learnable = [&](const WorldObject& other) {
     // The self test is the original's and is redundant *given* the strict
-    // comparison below -- nothing has more experience than itself -- so a fault
-    // injected into it survives the suite. Kept because the original keeps it
-    // and because the redundancy is between two clauses that could move
-    // independently.
-    if (other.id == self) continue;
-    if (other.internal != InternalKind::none) continue;
-    if (other.state.health <= 0) continue;             // `vtbl[0x50]`, IsDead
-    if (other.state.holder != kNoObject) continue;     // `[obj+0x154] != 0xffff`
-    if (other.object != nullptr && other.object->is_a(NativeClass::ship)) continue;
-    if (heroes->experience(other.id) <= mine) continue;
-    // Three class exclusions, each tested the way `sim/world_host.cpp`'s
-    // `class_is` states the rule: a name the graph cannot resolve reads as
-    // false. `ClassFilter::parse` keeps that guarantee on its own -- it leaves
-    // `match_all` false with count 0 for an unresolved name -- so there is no
-    // guard to write here beyond the parse itself.
+    // comparison below -- nothing has more experience than itself. Kept
+    // because the original keeps it.
+    if (other.id == self) return false;
+    if (other.internal != InternalKind::none) return false;
+    if (!other.state.flags.is_unit) return false;            // a unit, or null
+    if (other.state.health <= 0) return false;              // `vtbl[0x50]`, IsDead
+    if (other.state.holder != kNoObject) return false;      // `[obj+0x154] != 0xffff`
+    if (other.object != nullptr && other.object->is_a(NativeClass::ship)) return false;
+    if (heroes->experience(other.id) <= mine) return false;
+    // Three class exclusions; a name the graph cannot resolve reads as false.
     if (graph != nullptr && other.class_index != kNoClass) {
-      bool excluded = false;
       for (const std::string_view base : {"Sentry", "RamUnit", "Peaceful"}) {
-        if (world->matches_filter(other, ClassFilter::parse(base, graph))) excluded = true;
+        if (world->matches_filter(other, ClassFilter::parse(base, graph))) return false;
       }
-      if (excluded) continue;
     }
+    return true;
+  };
+
+  for (const WorldObject& other : world->objects()) {
+    if (!learnable(other)) continue;
+    if (world->players().is_enemy(druid->state.owner, other.state.owner)) continue;  // the mask
+    if (other.state.flags.hidden) continue;
     const Point at = world->resolve_position(other.id);
     const std::int64_t dx = at.x - from.x;
     const std::int64_t dy = at.y - from.y;
     if (dx * dx + dy * dy > static_cast<std::int64_t>(sight) * sight) continue;
     return HostOutcome::ok_with(Value::object(receiver_type(ctx), other.id));
   }
-  return none;
+  // The squad pass: the last member that passes.
+  ObjectId last = kNoObject;
+  if (const Squad* squad = fallback_squad(*world, *heroes, *druid); squad != nullptr) {
+    for (const ObjectId member : squad->members) {
+      const WorldObject* other = world->find(member);
+      if (other != nullptr && learnable(*other)) last = member;
+    }
+  }
+  if (last == kNoObject) return none;
+  return HostOutcome::ok_with(Value::object(receiver_type(ctx), last));
 }
 
 // --------------------------------------------------------------------------
@@ -1618,12 +1654,20 @@ HostOutcome fn_find_unit_to_learn(CallContext& ctx) {
 // stealth half becomes "a hidden object is not a candidate", which is the
 // conservative side.
 //
-// **The AI-roster fallback.** When the circle finds nothing, heal makes a
-// second unbounded pass over the caster's AI player's friendly roster, and
-// curse and cripple scan the *enemy* roster **instead of** the circle when the
-// caster belongs to one. Those rosters are the GAIKA machinery's, which
-// `sim/gaika.hpp` refuses to model. So every search here is the circle and only
-// the circle, and a caster under an AI reaches fewer targets than it would.
+// **The squad passes.** These were read as an "AI roster" this engine could
+// not have; they are the caster's own squad (`[unit+0x174]`, resolved through
+// its player's squad vector by 0x00444190), searched when the caster is not
+// held or the squad carries `SF_ADVCHOOSER`:
+//
+//   * learn, heal, revitalize and hide search the squad's **members** when
+//     the circle found nobody -- `fallback_squad`, which the first three now
+//     do; hide's predicate wants an enemy, which a squadmate never is, so its
+//     pass is left out as it cannot answer;
+//   * curse and cripple search the squad's **second** handle deque
+//     (`[squad+0x70]`..`+0x7c`, 0x005d94f0 / 0x005138c0) **instead of** the
+//     circle. This engine's `Squad` carries no such list, so a squadded
+//     caster still scans its circle there -- a known gap, and the one reason
+//     curse and cripple stay partial.
 //
 // **The retail caster/candidate mix-up in curse is not reproduced.** Four
 // consecutive clauses of `0x005d4760` test `pred[8]` -- the caster -- where the
@@ -1677,12 +1721,16 @@ HostOutcome fn_find_unit_to_heal(CallContext& ctx) {
   if (caster == nullptr) return none;
 
   // `self.level + GetConst("HealAmount")`: the very amount the script will heal.
+  // 0x00511e90 reads the caster's level virtual (`vtbl+0x114`, what
+  // `Unit::level` answers) -- not a class property, which this used to read
+  // and which no shipped caster class declares, so the threshold lost the
+  // druid's level.
   std::int32_t heal_amount = 0;
   if (EnvSystem* env = env_of(*world); env != nullptr) {
     (void)env->constant("HealAmount", heal_amount);
   }
-  const std::int32_t threshold =
-      class_int_property(*world, self, "level", 0) + heal_amount;
+  HeroSystem* heroes = hero_system_of(*world);
+  const std::int32_t threshold = (heroes != nullptr ? heroes->level(self) : 0) + heal_amount;
   const std::int32_t range = class_int_property(*world, self, "range", 0);
   const std::int32_t sight = caster_sight(*world, self);
 
@@ -1716,6 +1764,32 @@ HostOutcome fn_find_unit_to_heal(CallContext& ctx) {
       best_score = score;
     }
   }
+  // The squad pass (0x00513620): predicate 0x00511e20 -- a unit, alive,
+  // below its cap, not a ship, not the caster, not held, not a `RamUnit`, not
+  // a messenger -- and the same score, least wins, first of equals kept.
+  const Squad* squad = (best == kNoObject && heroes != nullptr)
+                           ? fallback_squad(*world, *heroes, *caster)
+                           : nullptr;
+  if (squad != nullptr) {
+    for (const ObjectId id : squad->members) {
+      const WorldObject* other = world->find(id);
+      if (other == nullptr || !other->state.flags.is_unit || other->state.health <= 0) continue;
+      if (other->id == self || other->state.holder != kNoObject) continue;
+      if (other->object != nullptr && other->object->is_a(NativeClass::ship)) continue;
+      if (is_a(*world, *other, "RamUnit") || other->state.flags.messenger) continue;
+      const std::int32_t max_health = class_int_property(*world, id, "maxhealth", 0);
+      if (max_health <= 0 || other->state.health >= max_health) continue;
+      std::int64_t score = 1000;
+      if (max_health - other->state.health >= threshold) {
+        const std::int64_t reach = edge_distance(*world, *caster, *other) - range;
+        score = (300LL * other->state.health) / max_health + (reach > 0 ? reach : 0);
+      }
+      if (best == kNoObject || score < best_score) {
+        best = id;
+        best_score = score;
+      }
+    }
+  }
   if (best == kNoObject) return none;
   return HostOutcome::ok_with(Value::object(receiver_type(ctx), best));
 }
@@ -1729,8 +1803,14 @@ HostOutcome fn_find_unit_to_heal(CallContext& ctx) {
 /// declines to model for the reason the section note gives. What differs is the
 /// predicate and the score, and both are worth having in full.
 ///
+/// **It is about stamina**, which this read as health: the predicate and the
+/// score read `[obj+0xc4]` and `[obj+0xcc]` -- stamina and its cap, where
+/// heal reads `+0xc0` and `+0xc8` -- and `GDRUID_IDLE.VS` answers the target
+/// with `tgt.HealStamina(revitalize_amount)` behind `tgt.stamina <
+/// tgt.maxstamina`.
+///
 /// **The predicate** (`0x00511f00`, which never reads the caster it is handed):
-/// alive; `health < maxhealth`; **not a `CVXDruid`** and not a `CVXShip`, both
+/// alive; `stamina < maxstamina`; **not a `CVXDruid`** and not a `CVXShip`, both
 /// tested against the RTTI descriptor rather than by name; not inside a holder;
 /// not a heir of `RamUnit`; not a messenger. The scan adds the two it applies
 /// itself: the candidate must carry `kSyncUnit`, and its owner must be in the
@@ -1741,7 +1821,7 @@ HostOutcome fn_find_unit_to_heal(CallContext& ctx) {
 /// **The score minimises, and its three terms are all divergent from heal's:**
 ///
 ///   * a candidate that `RevitalizeAmount` would take *past* its own
-///     `maxhealth` is parked at a flat **1000** rather than rejected -- the same
+///     `maxstamina` is parked at a flat **1000** rather than rejected -- the same
 ///     device heal uses for the too-lightly-wounded, pointing the other way. It
 ///     still wins if nothing better is standing there.
 ///   * everything else scores `max(0, edgeDistance - range) + 256`. The `+256`
@@ -1767,6 +1847,12 @@ HostOutcome fn_find_unit_to_revitalize(CallContext& ctx) {
     (void)env->constant("RevitalizeAmount", revitalize_amount);
   }
   const std::int32_t range = class_int_property(*world, self, "range", 0);
+  HeroSystem* heroes = hero_system_of(*world);
+  // `[obj+0xcc]`, the class's `maxstamina`.
+  const auto stamina_cap = [&](ObjectId id) {
+    return heroes != nullptr ? heroes->max_stamina_of(*world, id)
+                             : class_int_property(*world, id, "maxstamina", 10);
+  };
 
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
@@ -1785,11 +1871,11 @@ HostOutcome fn_find_unit_to_revitalize(CallContext& ctx) {
     if (other->object != nullptr && other->object->is_a(NativeClass::druid)) continue;
     if (is_a(*world, *other, "RamUnit")) continue;
     if (other->state.flags.messenger) continue;
-    const std::int32_t max_health = class_int_property(*world, id, "maxhealth", 0);
-    if (max_health <= 0 || other->state.health >= max_health) continue;
+    const std::int32_t cap = stamina_cap(id);
+    if (other->state.stamina >= cap) continue;
 
     std::int64_t score = 0;
-    if (other->state.health + revitalize_amount > max_health) {
+    if (other->state.stamina + revitalize_amount > cap) {
       // Would overshoot the ceiling: parked at the top of the range, not
       // rejected. Heal's flat 1000 is the same device for the opposite case.
       score = 1000;
@@ -1801,6 +1887,35 @@ HostOutcome fn_find_unit_to_revitalize(CallContext& ctx) {
     if (best == kNoObject || score < best_score) {
       best = id;
       best_score = score;
+    }
+  }
+  // The squad pass (0x00513700): the same predicate and score without the
+  // scan's two clauses, least wins.
+  const Squad* squad = (best == kNoObject && heroes != nullptr)
+                           ? fallback_squad(*world, *heroes, *caster)
+                           : nullptr;
+  if (squad != nullptr) {
+    for (const ObjectId id : squad->members) {
+      const WorldObject* other = world->find(id);
+      if (other == nullptr || !other->state.flags.is_unit || other->state.health <= 0) continue;
+      if (other->state.holder != kNoObject) continue;
+      if (other->object != nullptr && (other->object->is_a(NativeClass::druid) ||
+                                       other->object->is_a(NativeClass::ship))) {
+        continue;
+      }
+      if (is_a(*world, *other, "RamUnit") || other->state.flags.messenger) continue;
+      const std::int32_t cap = stamina_cap(id);
+      if (other->state.stamina >= cap) continue;
+      std::int64_t score = 1000;
+      if (other->state.stamina + revitalize_amount <= cap) {
+        const std::int64_t reach = edge_distance(*world, *caster, *other) - range;
+        score = (reach > 0 ? reach : 0) + 256;
+        if (other->state.flags.is_hero) score /= 2;
+      }
+      if (best == kNoObject || score < best_score) {
+        best = id;
+        best_score = score;
+      }
     }
   }
   if (best == kNoObject) return none;

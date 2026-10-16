@@ -2732,38 +2732,41 @@ TEST(hero_can_see_is_a_stealth_test_and_the_argument_is_the_one_looked_at) {
 /// 256, and parks the ones the spell would overshoot at a flat 1000.
 ///
 /// The score is `max(0, edgeDistance - range) + 256`, so distance is the only
-/// thing that separates two candidates the spell fits -- health does not enter
-/// it at all, which is the sharpest difference from `FindUnitToHeal`. A
-/// candidate whose `health + RevitalizeAmount` would pass its own `maxhealth`
+/// thing that separates two candidates the spell fits -- stamina does not
+/// enter it at all, which is the sharpest difference from `FindUnitToHeal`. A
+/// candidate whose `stamina + RevitalizeAmount` would pass its own `maxstamina`
 /// scores 1000 instead, and 1000 is above every reachable real score by
 /// construction: that is what the `+256` floor is for.
 TEST(hero_find_unit_to_revitalize_minimises_reach_and_parks_the_overtopped) {
   CasterBench b;
+  // It is stamina (`[obj+0xc4]` against `[obj+0xcc]`), and the shipped
+  // `RevitalizeAmount` is 4 against the class's `maxstamina` of 10.
+  b.env.set_constant("RevitalizeAmount", 4);
   const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
   CHECK(b.found("FindUnitToRevitalize", druid) == kNoObject);
 
-  // At full health: not wounded, not a candidate.
-  (void)b.spawn(b.plain_class, Point{100, 0}, 1, 200);
+  // At full stamina: not a candidate.
+  (void)b.spawn(b.plain_class, Point{100, 0}, 1, 200, 10);
   CHECK(b.found("FindUnitToRevitalize", druid) == kNoObject);
 
-  // 160 + 60 overshoots 200: parked at 1000, and still the answer alone.
-  const ObjectId topped = b.spawn(b.plain_class, Point{100, 0}, 1, 160);
+  // 7 + 4 overshoots 10: parked at 1000, and still the answer alone.
+  const ObjectId topped = b.spawn(b.plain_class, Point{100, 0}, 1, 200, 7);
   CHECK(b.found("FindUnitToRevitalize", druid) == topped);
 
-  // 140 + 60 lands exactly on 200, so it is *not* an overshoot -- the test is
+  // 6 + 4 lands exactly on 10, so it is *not* an overshoot -- the test is
   // strictly greater. 380 units of edge less 50 of range, plus the floor: 586.
-  const ObjectId far_fit = b.spawn(b.plain_class, Point{400, 0}, 1, 140);
+  const ObjectId far_fit = b.spawn(b.plain_class, Point{400, 0}, 1, 200, 6);
   CHECK(b.found("FindUnitToRevitalize", druid) == far_fit);
 
   // Inside the caster's own reach the distance term clamps to zero, so this
   // scores the bare floor of 256 and wins.
-  const ObjectId near_fit = b.spawn(b.plain_class, Point{60, 0}, 1, 140);
+  const ObjectId near_fit = b.spawn(b.plain_class, Point{60, 0}, 1, 200, 6);
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
 
-  // **Health does not order two candidates that both fit.** A far one at 60
-  // health is far more wounded than the near one at 140 and still loses, which
-  // is the whole difference from heal's health fraction.
-  const ObjectId far_worse = b.spawn(b.plain_class, Point{400, 0}, 1, 60);
+  // **Stamina does not order two candidates that both fit.** A far one at 1 is
+  // far more tired than the near one at 6 and still loses, which is the whole
+  // difference from heal's health fraction.
+  const ObjectId far_worse = b.spawn(b.plain_class, Point{400, 0}, 1, 200, 1);
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
   (void)far_worse;
 
@@ -2790,7 +2793,7 @@ TEST(hero_find_unit_to_revitalize_minimises_reach_and_parks_the_overtopped) {
   // distance term clamps at zero and the floor is a constant. So a nearer
   // in-range candidate does not displace an earlier one: the tie goes to the
   // lower object id, which is the deterministic answer and not an accident.
-  const ObjectId closer = b.spawn(b.plain_class, Point{30, 0}, 1, 140);
+  const ObjectId closer = b.spawn(b.plain_class, Point{30, 0}, 1, 200, 6);
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
   (void)closer;
 
@@ -2800,7 +2803,7 @@ TEST(hero_find_unit_to_revitalize_minimises_reach_and_parks_the_overtopped) {
   // tie the earlier object already wins, and the assertion would pass whether
   // the exclusion existed or not. The fault sweep found all three that way.
   const auto blocker = [&](ClassIndex which, NativeClass native, PlayerId owner) {
-    const ObjectId id = b.spawn(which, Point{30, 0}, owner, 140, 0, native);
+    const ObjectId id = b.spawn(which, Point{30, 0}, owner, 200, 6, native);
     b.world.mutable_state(id)->flags.is_hero = true;
     return id;
   };
@@ -2816,6 +2819,74 @@ TEST(hero_find_unit_to_revitalize_minimises_reach_and_parks_the_overtopped) {
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
   (void)blocker(b.mage_class, NativeClass::druid, 1);
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
+}
+
+/// `FindUnitToHeal`'s threshold is the caster's **level** (0x00511e90 reads
+/// `vtbl+0x114`, what `Unit::level` answers) plus `HealAmount` -- not a class
+/// property, which is what the bench's `level="3"` used to feed.
+TEST(hero_find_unit_to_heal_parks_by_the_casters_own_level) {
+  CasterBench b;
+  const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
+  REQUIRE(b.heroes.set_level(druid, 30));  // threshold 30 + 40 = 70
+  // 50 down at point-blank: 225 under the old threshold of 43, parked at 1000
+  // under 70. 100 down and 380 out: 150 + 330 = 480 either way.
+  const ObjectId grazed = b.spawn(b.plain_class, Point{30, 0}, 1, 150);
+  const ObjectId hurt = b.spawn(b.plain_class, Point{400, 0}, 1, 100);
+  CHECK(b.found("FindUnitToHeal", druid) == hurt);
+  REQUIRE(b.heroes.set_level(druid, 1));  // threshold 41
+  CHECK(b.found("FindUnitToHeal", druid) == grazed);
+}
+
+/// `FindUnitToLearn`'s scan takes allies only: its mask is the friendly word
+/// heal's is (0x00514080 with `[record+0x10] ^ 0xffff`).
+TEST(hero_find_unit_to_learn_takes_an_ally_only) {
+  CasterBench b;
+  const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
+  b.world.players().set(1, 2, Relation::allied, false);
+  const ObjectId foe = b.spawn(b.plain_class, Point{30, 0}, 2);
+  REQUIRE(b.heroes.set_experience(foe, 50));
+  CHECK(b.found("FindUnitToLearn", druid) == kNoObject);
+  const ObjectId friend_ = b.spawn(b.plain_class, Point{60, 0}, 1);
+  REQUIRE(b.heroes.set_experience(friend_, 50));
+  CHECK(b.found("FindUnitToLearn", druid) == friend_);
+}
+
+/// When the sight circle finds nobody, the caster's own squad is searched
+/// (0x00444190, then 0x00513840 / 0x00513620 / 0x00513700) -- if the caster
+/// is not held, or its squad carries `SF_ADVCHOOSER`. Learn keeps the **last**
+/// member that passes; heal and revitalize the least score.
+TEST(hero_casters_fall_back_on_their_own_squad) {
+  CasterBench b;
+  // A `CVXDruid` proper: revitalize's predicate refuses one, the caster too.
+  const ObjectId druid =
+      b.spawn(b.caster_class, Point{0, 0}, 1, 100, 0, NativeClass::druid);
+  // Far beyond the 900 of sight.
+  const ObjectId first = b.spawn(b.plain_class, Point{5000, 0}, 1, 100, 2);
+  const ObjectId second = b.spawn(b.plain_class, Point{6000, 0}, 1, 120, 3);
+  REQUIRE(b.heroes.set_experience(first, 10));
+  REQUIRE(b.heroes.set_experience(second, 10));
+  CHECK(b.found("FindUnitToLearn", druid) == kNoObject);
+  CHECK(b.found("FindUnitToHeal", druid) == kNoObject);
+  CHECK(b.found("FindUnitToRevitalize", druid) == kNoObject);
+
+  const SquadKey key = b.heroes.squads().create(1, druid);
+  for (const ObjectId id : {druid, first, second}) {
+    REQUIRE(b.heroes.squads().join(key, id));
+    b.heroes.unit(id)->squad = key;
+  }
+  CHECK(b.found("FindUnitToLearn", druid) == second);  // the last that passes
+  // Heal: 300 * 100 / 200 + reach against 300 * 120 / 200 + more reach.
+  CHECK(b.found("FindUnitToHeal", druid) == first);
+  // Revitalize: nearer wins, both fit (2 + 60 and 3 + 60 overshoot 10, so
+  // both park at 1000 and the first is kept).
+  CHECK(b.found("FindUnitToRevitalize", druid) == first);
+
+  // Held, in a squad without SF_ADVCHOOSER: no squad pass.
+  const ObjectId bag = b.spawn(b.plain_class, Point{0, 0}, 1);
+  REQUIRE(b.world.put_in_holder(druid, bag));
+  CHECK(b.found("FindUnitToLearn", druid) == kNoObject);
+  b.heroes.squads().find(key)->flags = 0x02;
+  CHECK(b.found("FindUnitToLearn", druid) == second);
 }
 
 /// `FindUnitToHide` answers nothing, for everybody, and that is the finding
@@ -2861,12 +2932,13 @@ TEST(hero_find_unit_to_hide_answers_nothing_for_ally_enemy_and_self) {
 /// preferred -- which is a much stronger preference than a tie-break.
 TEST(hero_find_unit_to_revitalize_halves_a_heros_score) {
   CasterBench b;
+  b.env.set_constant("RevitalizeAmount", 4);
   const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
   // 380 - 50 + 256 = 586.
-  const ObjectId plain = b.spawn(b.plain_class, Point{400, 0}, 1, 140);
+  const ObjectId plain = b.spawn(b.plain_class, Point{400, 0}, 1, 200, 6);
   // 580 - 50 + 256 = 786, and half of that is 393. Half as good a position and
   // a better answer.
-  const ObjectId champion = b.spawn(b.plain_class, Point{600, 0}, 1, 140);
+  const ObjectId champion = b.spawn(b.plain_class, Point{600, 0}, 1, 200, 6);
   b.world.mutable_state(champion)->flags.is_hero = true;
   CHECK(b.found("FindUnitToRevitalize", druid) == champion);
 
@@ -2883,9 +2955,10 @@ TEST(hero_find_unit_to_revitalize_halves_a_heros_score) {
   // the floor the hero scores 428 against 456 and wins, and without it 300
   // against 200 and loses.
   CasterBench c;
+  c.env.set_constant("RevitalizeAmount", 4);
   const ObjectId caster = c.spawn(c.caster_class, Point{0, 0}, 1, 100);
-  const ObjectId ordinary = c.spawn(c.plain_class, Point{270, 0}, 1, 140);
-  const ObjectId marginal = c.spawn(c.plain_class, Point{670, 0}, 1, 140);
+  const ObjectId ordinary = c.spawn(c.plain_class, Point{270, 0}, 1, 200, 6);
+  const ObjectId marginal = c.spawn(c.plain_class, Point{670, 0}, 1, 200, 6);
   c.world.mutable_state(marginal)->flags.is_hero = true;
   CHECK(c.found("FindUnitToRevitalize", caster) == marginal);
   (void)ordinary;
