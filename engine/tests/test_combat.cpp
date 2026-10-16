@@ -1999,21 +1999,22 @@ TEST(the_target_selection_family_is_defined_answers_and_refuses_a_null_context) 
 
   const Value me = Value::object(1, 1);
   CHECK(call("BestTargetInSquadSight", 0, {me}).value.as_object().id == 2);
-  CHECK(call("BestTargetInSquadSightMisZeroDamage", 0, {me}).value.as_object().id == 3);
-  // No class graph behind this system, so `Exclusive` can resolve no name and
-  // answers "nothing" rather than failing -- which is what the executable's
-  // string compare does too.
+  // The circle path builds its predicate one argument over (0x005dca31), so
+  // the damage flag lands where it does nothing: the unarmed peasant is still
+  // the answer, and `UNIT_IDLE.VS` re-tests `.attack` itself.
+  CHECK(call("BestTargetInSquadSightMisZeroDamage", 0, {me}).value.as_object().id == 2);
+  CHECK(call("BestNoIndependentTargetInSquadSight", 0, {me}).value.as_object().id == 2);
+  // `Exclusive`'s flag lands in the independents slot: a name that resolves
+  // to nothing is a penalty every candidate takes, so the ranking is the
+  // unfiltered one minus wildlife -- the same answer as the plain `/1`.
   CHECK(call("BestTargetInSquadSightExclusive", 1, {me, Value::string("GSwordsman")})
             .value.as_object()
-            .id == sim::kNoObject);
-  // **And the plain `/1` answers the opposite on the same input**, because a
-  // name that resolves to nothing is a penalty every candidate takes rather
-  // than a rejection every candidate fails. Same board, same string, and the
-  // two entry points part company on it.
+            .id == 2);
   CHECK(call("BestTargetInSquadSight", 1, {me, Value::string("GSwordsman")})
             .value.as_object()
             .id == 2);
 }
+
 
 // ---------------------------------------------------------------------------
 // profiles
@@ -3348,6 +3349,48 @@ TEST(combat_mutators_reach_script_objects_and_cure_at_full_health) {
   b.combat.find(sick)->health = 999;
   (void)b.call("Heal", 1, {Value::object(1, sick), Value::integer(-1)});
   CHECK(b.combat.health(sick) == 999);
+}
+
+/// A unit in a squad takes the core's squad path (0x005dc950), whose
+/// candidate deque at `squad+0x6c` nothing ever fills, so every
+/// `*InSquadSight` form answers the invalid handle for it; a held unit
+/// answers it on the other path. `BestTargetForPos` has no squad gate.
+TEST(the_in_squad_sight_family_is_blind_for_a_squad_member_and_a_held_unit) {
+  using imperivm::core::script::Value;
+  SightBench b;
+  HeroSystem heroes;
+  b.world.add_system(&heroes);
+  const ObjectId me = b.soldier(0, Point{0, 0});
+  const ObjectId foe = b.soldier(1, Point{30, 0});
+  const auto best = [&](const char* name) {
+    return b.call(name, 0, {Value::object(1, me)}).value.as_object().id;
+  };
+  CHECK(best("BestTargetInSquadSight") == foe);
+
+  UnitRecord& record = heroes.register_unit(b.world, me);
+  record.squad = heroes.squads().create(0, me);
+  REQUIRE(heroes.squad_of(me).valid());
+  CHECK(best("BestTargetInSquadSight") == kNoObject);
+  CHECK(best("BestTargetInSquadSightMisZeroDamage") == kNoObject);
+  CHECK(best("BestNoIndependentTargetInSquadSight") == kNoObject);
+  CHECK(best("BestTargetInSquadSight_PreferUndiseased") == kNoObject);
+  CHECK(best("BestTargetForPos") == foe);
+}
+
+/// `EnemiesInSight` counts a candidate only when the looker's `CanAttack`
+/// virtual accepts it (0x005d5180).
+TEST(combat_enemies_in_sight_needs_the_lookers_can_attack) {
+  SightBench b;
+  CombatProfile unarmed = melee(16, 12, 200);
+  unarmed.damage_type = DamageType::none;
+  b.combat.set_profile(b.villager_class, unarmed);
+  const ObjectId looker = b.soldier(0, Point{0, 0}, b.villager_class);
+  (void)b.soldier(1, Point{100, 0});
+  // The virtual reads the world's objects, which a started system holds.
+  b.combat.start(b.world);
+  CHECK(!b.enemies_in_sight(looker));
+  b.combat.set_profile(b.villager_class, melee(16, 12, 200));
+  CHECK(b.enemies_in_sight(looker));
 }
 
 /// A hidden enemy is not an enemy in sight.

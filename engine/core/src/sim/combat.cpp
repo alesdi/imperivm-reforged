@@ -2543,6 +2543,33 @@ HostOutcome host_best_target(CallContext& ctx) {
   return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)))));
 }
 
+/// Whether the `*InSquadSight` family answers the invalid handle before it
+/// looks at anything: the receiver is invalid, dead, held, or in a squad.
+///
+/// The wrappers (0x005dcbc0, 0x005dcb00, 0x005dcc80, 0x005dcd40, 0x005dce00,
+/// 0x005dcf30) log and answer the invalid handle for an invalid receiver and,
+/// through `vtbl+0x50`, for a dead one. The core, 0x005dc950, then has two
+/// paths. A unit with a squad (`[unit+0x174]`, `HeroSystem::squad_of`) that is
+/// not held takes the **squad path**, which offers only the squad's own
+/// candidate deque at `squad+0x6c..0x7c` (walked by 0x005dbb20) and draws no
+/// circle -- and that deque is never filled: no instruction in `.text` pushes
+/// it (its count at `+0x7c` is written only by the two squad constructors,
+/// 0x0044440b and 0x0045402f, with zero; the only `lea [reg+0x6c]` near squad
+/// code feeds its clear, 0x006a3cc0), the same fact `IsEnemyInSquadSight`
+/// rests on in `sim/squad.cpp`. So an empty sweep returns the invalid handle
+/// (0x005dc9dd -> 0x005dcae9). A held unit -- with or without a squad -- gets
+/// the invalid handle on the other path. Only a free unit in no squad reaches
+/// the circle sweep `CombatSystem::best_target` models.
+[[nodiscard]] bool squad_sight_blind(CallContext& ctx, const CombatSystem& combat, ObjectId id) {
+  const Combatant* self = combat.find(id);
+  if (self == nullptr || !combat.is_alive(id) || self->action == Action::dying) return true;
+  World* world = world_of(ctx);
+  if (world == nullptr) return false;
+  if (const ObjectState* state = world->state(id); state != nullptr && state->is_held()) return true;
+  const HeroSystem* heroes = hero_system_of(*world);
+  return heroes != nullptr && heroes->squad_of(id).valid();
+}
+
 /// One acquisition under one variant's filter. The filter itself is
 /// `sim/combat.hpp`'s `TargetFilter`, which carries the disassembly.
 HostOutcome best_target_with(CallContext& ctx, const TargetFilter& filter) {
@@ -2551,26 +2578,40 @@ HostOutcome best_target_with(CallContext& ctx, const TargetFilter& filter) {
   return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)), filter)));
 }
 
-/// `BestTargetInSquadSightMisZeroDamage/0` -- 859 of Numantia's traps, because
-/// `DATA\SUBAI\UNIT_IDLE.VS` is what every idle unit runs. The one difference
-/// from `BestTargetInSquadSight/0` is argument 5 of `0x005dc950`, which makes
-/// `0x005db6a5` skip any candidate whose own `damage` is not positive: an idle
-/// unit auto-engages things that can fight back, and leaves peasants, wagons
-/// and wildlife alone until it is told otherwise.
-HostOutcome host_best_target_mis_zero_damage(CallContext& ctx) {
-  TargetFilter filter;
-  filter.require_armed = true;
-  return best_target_with(ctx, filter);
+/// The same, for the `*InSquadSight` family: `squad_sight_blind` first.
+HostOutcome squad_sight_target(CallContext& ctx, const TargetFilter& filter) {
+  CombatSystem* combat = system_of(ctx);
+  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  const ObjectId id = id_of(ctx.arg(0));
+  if (squad_sight_blind(ctx, *combat, id)) return HostOutcome::ok_with(ref_to(ctx, kNoObject));
+  return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id, filter)));
 }
 
-/// `BestNoIndependentTargetInSquadSight/0` -- argument 3, which clears bit 14
-/// of the attacker's enemy mask at `0x005d45b9`. `DATA\SUBAI\HERO_SNEAK.VS` is
-/// the caller: a sneaking hero picks fights with real players, not with the
-/// map's wildlife and garrisons.
+/// `BestTargetInSquadSight/0` -- 0x005dcbc0, the core with no flag.
+HostOutcome host_best_target_in_squad_sight(CallContext& ctx) {
+  return squad_sight_target(ctx, TargetFilter{});
+}
+
+/// `BestTargetInSquadSightMisZeroDamage/0` -- 0x005dcb00, what
+/// `DATA\SUBAI\UNIT_IDLE.VS` runs. It passes the core's last flag, which the
+/// squad path hands to the predicate's damage slot (0x005db6a5 would skip an
+/// unarmed candidate). **The circle path builds its predicate one argument
+/// over** (0x005dca31..0x005dca5a: the constructor 0x005d45a0 gets the
+/// exclusive flag in the independents slot, this flag in the exclusive slot,
+/// and 0 for damage), and the squad path never answers (see
+/// `squad_sight_blind`). So on the only path that answers, the flag lands in
+/// the exclusive slot, where without a class string it does nothing: the
+/// answer is `BestTargetInSquadSight/0`'s. `UNIT_IDLE.VS` agrees -- it
+/// re-tests `u.attack > 0 || AsDruid || AsWagon` on what comes back.
+HostOutcome host_best_target_mis_zero_damage(CallContext& ctx) {
+  return squad_sight_target(ctx, TargetFilter{});
+}
+
+/// `BestNoIndependentTargetInSquadSight/0` -- 0x005dcc80. Its flag is the one
+/// the circle path drops (0x005dca31), so the answer is
+/// `BestTargetInSquadSight/0`'s; `HERO_SNEAK.VS` is the one caller.
 HostOutcome host_best_target_no_independent(CallContext& ctx) {
-  TargetFilter filter;
-  filter.exclude_independents = true;
-  return best_target_with(ctx, filter);
+  return squad_sight_target(ctx, TargetFilter{});
 }
 
 /// `BestTargetInSquadSight_PreferUndiseased/0` -- argument 2, which adds 200
@@ -2581,7 +2622,7 @@ HostOutcome host_best_target_no_independent(CallContext& ctx) {
 /// on that ground alone -- see `TargetFilter` -- and the moment a disease
 /// state exists this must stop being an alias.
 HostOutcome host_best_target_prefer_undiseased(CallContext& ctx) {
-  return host_best_target(ctx);
+  return squad_sight_target(ctx, TargetFilter{});
 }
 
 /// `BestTargetInSquadSightExclusive/1` -- arguments 1 and 4 together, which
@@ -2620,19 +2661,26 @@ HostOutcome host_best_target_prefer_class(CallContext& ctx) {
   if (graph != nullptr && ctx.arg(1).is_string()) {
     filter.prefer_class = graph->find(ctx.arg(1).as_string());
   }
-  return best_target_with(ctx, filter);
+  return squad_sight_target(ctx, filter);
 }
 
+/// `BestTargetInSquadSightExclusive/1` -- 0x005dcf30. On the circle path its
+/// exclusive flag lands in the independents slot (0x005dca31): the enemy mask
+/// loses bit 14, so wildlife is excluded, and a class mismatch costs the
+/// +200 the plain string form charges instead of rejecting (0x005db789,
+/// with the exclusive slot holding the zero meant for the damage flag). A
+/// name nothing resolves therefore ranks every candidate the same: the
+/// unfiltered answer minus wildlife, not no answer.
 HostOutcome host_best_target_exclusive(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const ClassGraph* graph = combat->class_graph();
-  ClassIndex wanted = kNoClass;
-  if (graph != nullptr && ctx.arg(1).is_string()) wanted = graph->find(ctx.arg(1).as_string());
-  if (wanted == kNoClass) return HostOutcome::ok_with(ref_to(ctx, kNoObject));
   TargetFilter filter;
-  filter.only_class = wanted;
-  return best_target_with(ctx, filter);
+  filter.exclude_independents = true;
+  if (graph != nullptr && ctx.arg(1).is_string()) {
+    filter.prefer_class = graph->find(ctx.arg(1).as_string());
+  }
+  return squad_sight_target(ctx, filter);
 }
 
 /// `BestTargetForPos/0` -- `0x005dd280`, which is `0x005dd060` with the
@@ -2774,6 +2822,9 @@ HostOutcome host_enemies_in_sight(CallContext& ctx) {
     if (seen != nullptr && (!seen->state.flags.is_unit || seen->state.flags.hidden)) continue;
     if (combat->attack_of(other) <= 1) continue;
     if (!combat->is_enemy(*self, other)) continue;
+    // And the looker's `CanAttack` virtual must accept it (0x005d5180): a
+    // sentry or a ram that cannot hit the candidate is not in a fight with it.
+    if (!combat->unit_can_attack(*self, other)) continue;
     return HostOutcome::ok_with(Value::boolean(true));
   }
   return HostOutcome::ok_with(Value::boolean(false));
@@ -2895,7 +2946,7 @@ void define_combat_host(script::HostRegistry& registry) {
   // `World::players()`, neither of which this domain's version handled. Both
   // domains defined it for a while and `host_setup.cpp`'s order decided which
   // one ran -- silently, because `define` replaces without saying so.
-  member("BestTargetInSquadSight", 0, &host_best_target);    //  69
+  member("BestTargetInSquadSight", 0, &host_best_target_in_squad_sight);  //  69
   member("Damage", 1, &host_damage);                         //  44
   member("TimeWithoutAttack", 0, &host_time_without_attack);  //   3
 
@@ -2919,18 +2970,12 @@ void define_combat_host(script::HostRegistry& registry) {
   member("BestTargetForPos", 0, &host_best_target_for_pos);
   member("BestTargetInRange", 2, &host_best_target_in_range);
   //
-  // **`BestTargetInSquadSight/1(str)` is deliberately left trapping.** Its
-  // rule is known exactly -- `0x005dce00` passes the class string with no
-  // other flag, and `0x005db789` adds 200 to the score of a candidate whose
-  // class name does not match -- and it is not expressible here. The
-  // executable's score is `target_factor + 40 * recent_target_count +
-  // surface_distance`, a linear sum in world units; this system's is
-  // `distance^2 * target_factor / target_priority`. 200 on the first scale
-  // reorders candidates a couple of hundred units apart. 200 on the second is
-  // indistinguishable from nothing, so implementing it would turn a soft
-  // preference into a no-op and hand back a plausible object instead of the
-  // right one. The corpus never calls it, so nothing is lost by waiting for a
-  // score this engine can put it on.
+  // `BestTargetInSquadSight/1(str)` is registered above, and its +200 for a
+  // class mismatch (0x005db789) is taken to its limit -- the named class
+  // always wins -- because this system's score (`distance^2 * factor /
+  // priority`) is not the executable's linear `target_factor + 40 * threat +
+  // surface_distance`, on which 200 means a couple of hundred units. See
+  // `TargetFilter::prefer_class`.
   //
   // `BestTargetInGAIKA/0` is not claimed here either, and it is **not**
   // refused: `0x0043bd35` registers it out of the GAIKA slice, its core

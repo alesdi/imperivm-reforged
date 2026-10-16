@@ -863,7 +863,16 @@ inline constexpr std::int32_t kProjectileSpeed = 800;
 /// disease exists, that stops being true** and this filter must gain the
 /// preference.
 ///
-/// The three hard filters -- damage, independents, exclusive class -- are exact.
+/// The three hard filters -- damage, independents, exclusive class -- are exact
+/// as filters, **but the circle path does not pass them where their names
+/// say.** 0x005dc950 builds the no-squad predicate one argument over
+/// (0x005dca31..0x005dca5a): the damage flag lands in the exclusive slot and
+/// does nothing, the independents flag is dropped, and the exclusive flag
+/// lands in the independents slot. The host entry points in `combat.cpp`
+/// therefore set `exclude_independents` for `Exclusive` (with a soft class
+/// preference) and nothing for the other two, and every squad member or held
+/// unit is answered before this filter is consulted (`squad_sight_blind`).
+/// `require_armed` and `only_class` are kept for callers inside the engine.
 struct TargetFilter {
   /// `BestTargetInSquadSightMisZeroDamage`. Skip a candidate whose own attack
   /// is not strictly positive. Measured against `Obj::attack`, so it is
