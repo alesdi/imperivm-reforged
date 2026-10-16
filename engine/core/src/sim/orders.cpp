@@ -1236,9 +1236,9 @@ HostOutcome fn_is_selection_assigned(CallContext& ctx) {
 /// Reads `/Player<n>/SelectionAssigned` out of the environment store and asks
 /// whether any bit is set. **No bounds check**: 0x004c6a00 formats the number
 /// it was given straight into the key, so player 99 reads a key nothing has
-/// written and answers false. Nothing in this engine sets a bit -- the writers
-/// are the input layer's, and `SetShortcutSel` is not one of them -- which is
-/// exactly the distinction `GENERALADVICE6.VS` is drawing.
+/// written and answers false. The writers are the input layer's and
+/// `SetShortcutSel`'s, which ORs its slot's bit in for a non-empty list
+/// (0x006a6d00 -> 0x004e5940; `sim/feedback.cpp`).
 HostOutcome fn_was_selection_assigned(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr || ctx.count() < 1 || !ctx.arg(0).is_integer()) {

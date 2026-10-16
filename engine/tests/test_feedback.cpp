@@ -24,6 +24,8 @@
 #include <string>
 #include <string_view>
 
+#include "builder.hpp"
+#include "imperivm/core/formats/grid.hpp"
 #include "imperivm/core/script/compiler.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/script/scheduler.hpp"
@@ -596,6 +598,45 @@ TEST(feedback_a_control_group_outlives_the_script_that_set_it) {
       "read_group.vs"));
   CHECK(stage.env.env().read_int(EnvScope::root(), "/count") == 2);
   CHECK(stage.env.env().read_int(EnvScope::root(), "/empty") == 0);
+}
+
+/// `SetShortcutSel` (0x006a6d00) refuses a player outside 1..16 or a slot
+/// outside 0..9, and ORs the slot's bit into `/Player<p>/SelectionAssigned`
+/// for a non-empty list (0x004e5940). `View` (0x004c6cb0) ignores a point
+/// outside the map, lock included. `PlayMovie` (0x004c7da0) ends with input
+/// unblocked (0x004c7f35).
+TEST(feedback_shortcut_bit_view_gate_and_movie_unblock_follow_the_binary) {
+  Stage stage;
+  imperivm::test::Builder grid;
+  grid.text(kGridMagic).u32(32).u32(8).u32(256).u32(256);
+  for (int i = 0; i < 64; ++i) grid.u8(0);
+  const Result<Grid> height = Grid::parse(grid.span());
+  REQUIRE(height.ok());
+  stage.world.set_height(height.value());
+  const ObjectId one = stage.world.spawn(NativeClass::unit, nullptr);
+  stage.world.mutable_state(one)->health = 1;
+  REQUIRE(stage.world.named_objects().bind("NO_One", one));
+
+  CHECK(stage.run(
+      "//void\n"
+      "ObjList ol;\n"
+      "ObjList none;\n"
+      "ol.Add(GetNamedObj(\"NO_One\").obj);\n"
+      "SetShortcutSel(1, 2, ol);\n"
+      "SetShortcutSel(1, 5, none);\n"
+      "SetShortcutSel(17, 3, ol);\n"
+      "SetShortcutSel(2, 10, ol);\n"
+      "View(Point(100, 100), true);\n"
+      "View(Point(9000, 100), false);\n"
+      "BlockUserInput();\n"
+      "PlayMovie(\"movies\\\\intro.avi\");\n",
+      "chrome2.vs"));
+  CHECK(stage.env.env().read_int(EnvScope::root(), "/Player1/SelectionAssigned") == 4);
+  CHECK(stage.env.env().read_int(EnvScope::root(), "/Player2/SelectionAssigned") == 0);
+  CHECK(stage.shortcuts.group(1, 10).empty());
+  CHECK(stage.view.x == 100);
+  CHECK(stage.view.locked);  // the out-of-map View changed nothing
+  CHECK(!stage.view.input_blocked);
 }
 
 TEST(feedback_a_control_group_drops_an_object_that_dies) {
