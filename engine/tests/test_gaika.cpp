@@ -4881,6 +4881,40 @@ TEST(invade_through_gate_orders_every_member_to_advance_and_then_capture) {
             .status == script::HostStatus::ok);
   CHECK(verbs(mute).empty());
   CHECK(verbs(talker) == std::vector<std::string>({"advance", "capture"}));
+
+  // **And what it was doing is ended all the same**: the tail dropped and the
+  // head ended before the (here, absent) orders are appended.
+  {
+    Command hold;
+    hold.arg_kind = CommandArgKind::point;
+    hold.point = in_cell(10, 10);
+    (void)b.commands.set_command(b.world, mute, "move", hold);
+    (void)b.commands.add_command(b.world, mute, false, "move", hold);
+    REQUIRE(b.commands.command_count(mute) == 2);
+    CHECK(b.call(script::CallKind::member, "InvadeThroughGate", 2,
+                 {pack_squad(mixed), script::Value::object(kTypeObj, gate),
+                  script::Value::integer(3)})
+              .status == script::HostStatus::ok);
+    CHECK(b.commands.command_count(mute) <= 1);  // the tail is gone; the head is ended
+  }
+
+  // The state is a word (0x00429a9c).
+  CHECK(b.call(script::CallKind::member, "InvadeThroughGate", 2,
+               {pack_squad(mixed), script::Value::object(kTypeObj, gate),
+                script::Value::integer(0x10007)})
+            .status == script::HostStatus::ok);
+  CHECK(b.heroes.squads().find(mixed)->state == 7);
+
+  // **With the central building gone the squad is left locked** (0x00429adf
+  // exits past the write-back at 0x00429c0c), its state already written.
+  REQUIRE(b.world.despawn(anchor));
+  const SquadKey late = b.band(2, 1, {b.invader(10, 17)});
+  CHECK(b.call(script::CallKind::member, "InvadeThroughGate", 2,
+               {pack_squad(late), script::Value::object(kTypeObj, gate),
+                script::Value::integer(8)})
+            .status == script::HostStatus::ok);
+  CHECK(b.heroes.squads().find(late)->state == 8);
+  CHECK((b.heroes.squads().find(late)->flags & kSquadLocked) != 0);
 }
 
 /// `GAIKA::GetDestPoint(unit)` -- where a squad ordered to a node is actually
@@ -5203,6 +5237,28 @@ TEST(use_teleport_walks_a_squad_to_the_gate_through_it_and_on) {
     CHECK(verbs(champion) == std::vector<std::string>({"move", "teleport", "move"}));
     CHECK(verbs(behind).empty());
   }
+
+  // **A member binding none of the orders is stopped all the same** -- the
+  // tail dropped and the head ended around the appends -- and the state is a
+  // word (0x0042980b).
+  {
+    const ObjectId mute = b.soldier("Legionary", 2);
+    CHECK(b.world.set_position(mute, in_cell(1, 4)));
+    Command hold;
+    hold.arg_kind = CommandArgKind::point;
+    hold.point = in_cell(1, 4);
+    (void)b.commands.set_command(b.world, mute, "move", hold);
+    (void)b.commands.add_command(b.world, mute, false, "move", hold);
+    REQUIRE(b.commands.command_count(mute) == 2);
+    const SquadKey alone = b.band(2, 1, {mute});
+    CHECK(b.call(script::CallKind::member, "UseTeleport", 4,
+                 {pack_squad(alone), script::Value::object(kTypeObj, pad),
+                  script::Value::integer(0x10005), script::Value::string("move"),
+                  pack_point(onward)})
+              .value.truthy_scalar());
+    CHECK(b.commands.command_count(mute) <= 1);
+    CHECK(b.heroes.squads().find(alone)->state == 5);
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -5377,6 +5433,28 @@ struct DetourBench : LinkBench {
 };
 
 }  // namespace
+
+/// **The leader's position is its `posRH`** (0x0042e3e4, `vtbl+0xc8`): for a
+/// leader garrisoned in the centre town, the town's central building, which
+/// is the node's own centre. The side test is then skipped (`f(C)` is 0) and
+/// every neighbour scores 0, so each is shown to the script in table order
+/// and the last kept wins -- the west, since the squad came from the north.
+TEST(calc_go_around_measures_a_garrisoned_leader_from_its_town) {
+  DetourBench b;
+  b.check_maika(kNoGaika);
+  const ObjectId leader = b.unit("Walker", in_cell(7, 7));
+  const Settlement* centre =
+      b.economy.settlements().for_object(b.world.gaika().find(b.here)->settlement);
+  REQUIRE(centre != nullptr);
+  REQUIRE(garrison_enter(b.world, centre->id, leader, /*force=*/true));
+  const SquadKey key = b.band(2, {leader}, b.east, b.north);
+
+  const script::HostOutcome out = b.go_around(key);
+  CHECK(out.status == script::HostStatus::ok);
+  CHECK(out.value.truthy_scalar());
+  CHECK(b.shown(2) == b.east * 1000 + b.north * 100 + b.south * 10 + b.west);
+  CHECK(b.heroes.squads().find(key)->src_gaika == b.west);
+}
 
 /// The side test, the score, the script, and what a detour does to the squad.
 ///
@@ -5647,7 +5725,9 @@ struct HospitalBench : ShoreBench {
     return id;
   }
 
-  /// A squad of `owner`'s, worth `eval`, standing in `in` and going nowhere.
+  /// A squad of `owner`'s, worth `eval`, standing in `in` and bound for it --
+  /// as placement files one. With no heading at all it would be *leaving*
+  /// (0x0044e1f0).
   SquadKey band(PlayerId owner, std::vector<ObjectId> members, GaikaId in, std::int32_t eval) {
     const SquadKey key = heroes.squads().create(owner);
     for (const ObjectId id : members) CHECK(heroes.squads().join(key, id));
@@ -5655,6 +5735,7 @@ struct HospitalBench : ShoreBench {
     CHECK(squad != nullptr);
     if (squad == nullptr) return key;
     squad->gaika_in = in;
+    squad->dest_gaika = in;
     squad->eval = eval;
     return key;
   }
@@ -5668,6 +5749,26 @@ struct HospitalBench : ShoreBench {
 };
 
 }  // namespace
+
+/// **A garrisoned squad measures from its town**: the distance is from the
+/// front member's `posRH` (0x00431720), which for a member inside a
+/// settlement is the central building. Measured from the holder record's
+/// (0, 0), the town by the map's corner won.
+TEST(nearest_hospital_measures_a_garrisoned_squad_from_its_town) {
+  HospitalBench b;
+  const SettlementId by_corner = b.town(3, 3, 2);
+  const SettlementId by_home = b.town(12, 9, 2);
+  const SettlementId home = b.town(12, 7, 2, "Townhall", 10, /*food=*/0);
+  b.rebuild();
+  const GaikaId at_corner = b.node_of(by_corner);
+  const GaikaId at_home_side = b.node_of(by_home);
+  REQUIRE(at_corner != kNoGaika && at_home_side != kNoGaika && at_corner != at_home_side);
+
+  const ObjectId leader = b.walker(12, 7, 2);
+  REQUIRE(garrison_enter(b.world, home, leader, /*force=*/true));
+  const SquadKey key = b.band(2, {leader}, b.node_of(home), 100);
+  CHECK(b.hospital(key) == at_home_side);
+}
 
 /// The four gates, and the distance score with its two multipliers. The
 /// leader stands mid-island; a town 286 away and a village 271 away compete,
@@ -5762,8 +5863,12 @@ TEST(nearest_hospital_weighs_the_enemies_standing_in_the_node) {
   b.heroes.squads().find(raiders)->gaika_in = at_hall;
   b.heroes.squads().find(raiders)->dest_gaika = at_village;
   CHECK(b.hospital(key) == at_hall);
-  b.heroes.squads().find(raiders)->dest_gaika = kNoGaika;
+  b.heroes.squads().find(raiders)->dest_gaika = at_hall;
   CHECK(b.hospital(key) == at_village);
+  // With no heading at all it is leaving, not staying (0x0044e235).
+  b.heroes.squads().find(raiders)->dest_gaika = kNoGaika;
+  CHECK(b.hospital(key) == at_hall);
+  b.heroes.squads().find(raiders)->dest_gaika = at_hall;
   // A strengthless squad does not count, whoever it is.
   raiders_worth(0);
   CHECK(b.hospital(key) == at_hall);
@@ -5788,11 +5893,12 @@ TEST(nearest_hospital_weighs_the_enemies_standing_in_the_node) {
   CHECK(standing(2, 0) == at_hall);
   CHECK(standing(5, 0) == at_hall);
 
-  // **Peaceful, and whose.** Player 14's peaceful squad does not count, nor
-  // 15's; player 3's peaceful squad does, and player 14's warlike one does.
+  // **No peaceful squad counts, whoever's**: the presence is asked with 0
+  // (0x0043194b) and 0x0044e1f0 refuses the flag on it, so the body's later
+  // "player 14 or 15" test never sees one. Player 14's warlike squad does.
   CHECK(standing(14, kSquadFlagPeaceful) == at_hall);
   CHECK(standing(15, kSquadFlagPeaceful) == at_hall);
-  CHECK(standing(3, kSquadFlagPeaceful) == at_village);
+  CHECK(standing(3, kSquadFlagPeaceful) == at_hall);
   CHECK(standing(14, 0) == at_village);
 }
 

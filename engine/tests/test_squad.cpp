@@ -945,20 +945,115 @@ TEST(set_cmd_on_an_empty_squad_changes_state_and_orders_nobody) {
   CHECK(f.commands.tracked() == 0);
 }
 
-TEST(set_cmd_refuses_a_receiver_that_names_no_squad) {
-  // Unlike `AIDest`, this one mutates: silently ordering nothing would be a
-  // divergence rather than an answer.
+TEST(set_cmd_and_clr_cmd_on_a_handle_naming_no_squad_return_silently) {
+  // All four bodies test the lookup (0x00443e30) and leave on a null without a
+  // word (0x004272d0, 0x00427470, 0x0043ec00, `ClrCmd` 0x004271d0); this
+  // trapped. A verb that is not a string is still the host's refusal.
   Fixture f;
   HostRegistry registry;
   register_squad_host(registry);
   HostCall stale(f.world, {pack_squad(SquadKey{31, 5}), Value::integer(1), Value::integer(0),
                            Value::integer(0), Value::string("move")});
-  CHECK(invoke(registry, CallKind::member, "SetCmd", 4, stale).status == HostStatus::error);
+  CHECK(invoke(registry, CallKind::member, "SetCmd", 4, stale).status == HostStatus::ok);
+  HostCall stale_clr(f.world, {pack_squad(SquadKey{31, 5}), Value::integer(1),
+                               Value::integer(0), Value::integer(0)});
+  CHECK(invoke(registry, CallKind::member, "ClrCmd", 3, stale_clr).status == HostStatus::ok);
+  CHECK(f.commands.tracked() == 0);
 
   const SquadKey key = f.squad_of(1, 1);
   HostCall bad_verb(f.world, {pack_squad(key), Value::integer(1), Value::integer(0),
                               Value::integer(0), Value::integer(7)});
   CHECK(invoke(registry, CallKind::member, "SetCmd", 4, bad_verb).status == HostStatus::error);
+}
+
+TEST(set_cmd_stops_its_walk_after_ordering_a_hero) {
+  // 0x0042742d / 0x00427626 / 0x0043ece7: after ordering a member the walk
+  // tests its hero bit and leaves. Members ahead of the hero are ordered, the
+  // hero is, and nobody behind him -- his army follows him instead.
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  const SquadKey key = f.squad_of(1, 3);
+  const std::vector<ObjectId> members = f.heroes.squads().find(key)->members;
+  REQUIRE(members.size() == 3);
+  f.world.mutable_state(members[1])->flags.is_hero = true;
+
+  // All three shapes: no argument, a point, an object.
+  const ObjectId target = f.spawn(Point{900, 900}, 3);
+  const std::vector<std::vector<Value>> shapes{
+      {pack_squad(key), Value::integer(1), Value::integer(0), Value::integer(0),
+       Value::string("ai_killall")},
+      {pack_squad(key), Value::integer(1), Value::integer(0), Value::integer(0),
+       Value::string("move"), pack_point(Point{640, 480})},
+      {pack_squad(key), Value::integer(1), Value::integer(0), Value::integer(0),
+       Value::string("capture"), obj(target)},
+  };
+  for (const std::vector<Value>& args : shapes) {
+    for (const ObjectId member : members) (void)f.commands.clear_commands(f.world, member);
+    for (const ObjectId member : members) (void)f.commands.kill_command(f.world, member);
+    HostCall call(f.world, {});
+    call.arguments = args;
+    call.context.arguments = call.arguments;
+    const auto arity = static_cast<std::uint16_t>(args.size() - 1);
+    CHECK(invoke(registry, CallKind::member, "SetCmd", arity, call).status == HostStatus::ok);
+    const std::string verb = args[4].as_string();
+    CHECK(f.commands.command_name(members[0]) == verb);
+    CHECK(f.commands.command_name(members[1]) == verb);
+    CHECK(f.commands.command_name(members[2]) != verb);
+  }
+}
+
+TEST(set_cmd_obj_with_an_invalid_object_stamps_the_squad_locked_and_orders_nobody) {
+  // 0x00427470: the state, the clock and the flags -- with the lock bit raised
+  // for the walk -- are written before the object is checked, and an empty
+  // slot prints and returns at 0x0042754f, before the walk and before the
+  // computed flags are written back. `set.GetCentralBuilding` on a settlement
+  // without one is the shipped way in.
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  const SquadKey key = f.squad_of(1, 2);
+  Squad* squad = f.heroes.squads().find(key);
+  squad->flags = 0x0002;
+  f.world.advance(1500);
+
+  const Value invalid = Value::object(ObjectRef{script::kNoType, 0});
+  for (const Value& argument : {invalid, obj(kNoObject)}) {
+    HostCall call(f.world, {pack_squad(key), Value::integer(5), Value::integer(0x0010),
+                            Value::integer(0x0002), Value::string("enter"), argument});
+    CHECK(invoke(registry, CallKind::member, "SetCmd", 5, call).status == HostStatus::ok);
+    squad = f.heroes.squads().find(key);
+    CHECK(squad->state == 5);
+    CHECK(squad->state_time == f.world.time());
+    CHECK(squad->flags == (0x0010 | kSquadLocked));
+    CHECK(f.commands.tracked() == 0);
+    squad->flags = 0x0002;
+  }
+}
+
+TEST(set_cmd_and_clr_cmd_keep_the_state_as_a_word) {
+  // `[squad+0x28]` is written sixteen bits wide (0x0042736d, 0x00427235) and
+  // `State` (0x00421170) reads it zero-extended.
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+  const SquadKey key = f.squad_of(1, 1);
+
+  HostCall set(f.world, {pack_squad(key), Value::integer(-1), Value::integer(0),
+                         Value::integer(0), Value::string("ai_killall")});
+  CHECK(invoke(registry, CallKind::member, "SetCmd", 4, set).status == HostStatus::ok);
+  HostCall read(f.world, {pack_squad(key)});
+  HostOutcome state = invoke(registry, CallKind::member, "State", 0, read);
+  REQUIRE(state.status == HostStatus::ok);
+  CHECK(state.value.as_integer() == 0xFFFF);
+
+  HostCall clr(f.world, {pack_squad(key), Value::integer(0x10003), Value::integer(0),
+                         Value::integer(0)});
+  CHECK(invoke(registry, CallKind::member, "ClrCmd", 3, clr).status == HostStatus::ok);
+  state = invoke(registry, CallKind::member, "State", 0, read);
+  CHECK(state.value.as_integer() == 3);
 }
 
 // --------------------------------------------------------------------------
@@ -1262,18 +1357,19 @@ TEST(eval_attach_scores_a_heros_squad_by_its_standing_against_min_and_its_level)
     return out.value.is_integer() ? out.value.as_integer() : -1;
   };
 
-  // Five bodies against a floor of 5: standing 1; level 23 is a factor of 3.
-  CHECK(eval(hero, 5) == 3);
+  // Five bodies against a floor of 5: standing 1; level 23 is a factor of
+  // 23 / 5 + 1 = 5 (0x00424633: `imul 0x66666667`, `sar 1` -- a fifth).
+  CHECK(eval(hero, 5) == 5);
   // Against a floor of 2: three over, standing 4.
-  CHECK(eval(hero, 2) == 12);
+  CHECK(eval(hero, 2) == 20);
   // Short of a floor of 8 by three: 100 less the shortfall, 97.
-  CHECK(eval(hero, 8) == 97 * 3);
-  // The level factor truncates: 29 is still 3, 30 is 4, 9 is 1.
-  CHECK(f.heroes.set_level(hero, 29));
-  CHECK(eval(hero, 5) == 3);
-  CHECK(f.heroes.set_level(hero, 30));
-  CHECK(eval(hero, 5) == 4);
-  CHECK(f.heroes.set_level(hero, 9));
+  CHECK(eval(hero, 8) == 97 * 5);
+  // The level factor truncates: 24 is still 5, 25 is 6, 4 is 1.
+  CHECK(f.heroes.set_level(hero, 24));
+  CHECK(eval(hero, 5) == 5);
+  CHECK(f.heroes.set_level(hero, 25));
+  CHECK(eval(hero, 5) == 6);
+  CHECK(f.heroes.set_level(hero, 4));
   CHECK(eval(hero, 5) == 1);
 
   // **Bound elsewhere is 0**, and `AIDest` falls back to `DestGAIKA` on
@@ -1400,6 +1496,16 @@ TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
   CHECK(coming(key) == 0);
   CHECK(f.heroes.squads().join(others, leader));
   CHECK(coming(others) == 450);
+
+  // **A held leader is measured from its stored `(-1, -1)`** (`vtbl+0x3c`,
+  // 0x0042a7fc), not from what holds it: the far store, 50 from the keep the
+  // leader stands in, is out of a range of 200.
+  const ObjectId keep = f.world.spawn(NativeClass::building, nullptr);
+  f.world.set_position(keep, Point{1100, 150});
+  const ObjectId front = f.heroes.squads().find(others)->members.front();
+  REQUIRE(f.world.put_in_holder(front, keep));
+  REQUIRE(f.world.resolve_position(front) == (Point{1100, 150}));
+  CHECK(!send(others, 50, 200));
 
   // An empty squad and a handle naming none answer false and 0.
   const SquadKey hollow = f.heroes.squads().create(1);
@@ -1646,6 +1752,16 @@ TEST(squadlist_walks_with_a_cursor_the_list_carries) {
   CHECK(squadlist_pool_of(f.world).cursor(list) == 1);
   HostCall size(f.world, {make_squadlist_value(list)});
   CHECK(invoke(registry, CallKind::member, "Size", 0, size).value.as_integer() == 2);
+
+  // **But 0 once the cursor is at the end**: 0x0042bc40 asks `EOL`'s test
+  // (0x00420170) first and answers the count only when it is not at the end.
+  CHECK(!next());
+  HostCall size_at_end(f.world, {make_squadlist_value(list)});
+  CHECK(invoke(registry, CallKind::member, "Size", 0, size_at_end).value.as_integer() == 0);
+  HostCall again(f.world, {make_squadlist_value(list)});
+  CHECK(invoke(registry, CallKind::member, "Rewind", 0, again).value.as_integer() != 0);
+  HostCall size_rewound(f.world, {make_squadlist_value(list)});
+  CHECK(invoke(registry, CallKind::member, "Size", 0, size_rewound).value.as_integer() == 2);
 }
 
 /// An empty list is at its end from the start, and a handle that names nothing
@@ -1794,11 +1910,11 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
     squad->dest_gaika = dest;
   };
 
-  place(0, 3, 100, kHere, kNoGaika);       // own, staying
+  place(0, 3, 100, kHere, kHere);       // own, staying
   place(1, 2, 40, kHere, kHere);           // ally, staying (destination is here)
   place(2, 5, 250, kHere, kElsewhere);     // enemy, leaving
   place(2, 1, 7, kElsewhere, kHere);       // enemy, coming
-  place(3, 9, 999, kHere, kNoGaika);       // a one-sided truce: an ally to Eval
+  place(3, 9, 999, kHere, kHere);          // a one-sided truce: an ally to Eval
 
   const auto census = [&](const char* name, std::uint16_t arity, std::int32_t presence) {
     HostCall call(f.world,
@@ -1865,7 +1981,7 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   // A squad with no strength is skipped by both, which is the original's first
   // test and the reason `Eval` and `Count` can disagree about whether a node is
   // occupied at all.
-  place(0, 4, 0, kHere, kNoGaika);
+  place(0, 4, 0, kHere, kHere);
   CHECK(census("Count", 6, 4)[0] == 3);
   // And an `SF_PEACEFUL` squad is nobody's army. **This used to be written as
   // "player 14 or 15"**, which is where the wildlife and the neutral-passive
@@ -1885,7 +2001,7 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   CHECK(census("Eval", 6, 0xFFFF)[0] == 100);
   // and a player-14 squad that carries no such flag is counted, where the old
   // rule refused it.
-  place(14, 6, 500, kHere, kNoGaika);
+  place(14, 6, 500, kHere, kHere);
   CHECK(census("Eval", 6, 0xFFFF)[2] == 257 + 500);
 
   // A player number outside 1..16 names nobody, so nothing is anyone's. **Both
@@ -2018,6 +2134,7 @@ TEST(gaika_count_by_class_walks_the_staying_squads_and_then_the_settlement) {
     if (squad != nullptr) {
       squad->eval = 10;
       squad->gaika_in = in;
+      squad->dest_gaika = in;  // bound for where it stands, as placement files it
     }
     return key;
   };
@@ -2298,6 +2415,7 @@ TEST(all_enemies_in_holder_asks_the_settlement_first_and_then_the_squads_leaders
     if (squad != nullptr) {
       squad->eval = 10;
       squad->gaika_in = in;
+      squad->dest_gaika = in;  // bound for where it stands, as placement files it
     }
     return key;
   };
@@ -2847,8 +2965,8 @@ TEST(get_squads_and_the_census_agree_about_who_is_in_a_node) {
     squad->dest_gaika = dest;
     return key;
   };
-  const SquadKey mine = place(0, 2, kHere, kNoGaika);
-  (void)place(1, 1, kHere, kNoGaika);
+  const SquadKey mine = place(0, 2, kHere, kHere);
+  (void)place(1, 1, kHere, kHere);
   (void)place(0, 1, 8, 8);
 
   const SquadListId list = make_list(f.world);
@@ -2957,10 +3075,15 @@ TEST(squadlist_get_squads_filters_by_node_and_by_relation) {
   const SquadKey leaving = f.squad_of(1, 1);
   const SquadKey elsewhere = f.squad_of(1, 1);
   f.heroes.squads().find(staying)->gaika_in = 4;
+  f.heroes.squads().find(staying)->dest_gaika = 4;
   f.heroes.squads().find(coming)->dest_gaika = 4;
   f.heroes.squads().find(leaving)->gaika_in = 4;
   f.heroes.squads().find(leaving)->dest_gaika = 9;
   f.heroes.squads().find(elsewhere)->gaika_in = 7;
+  // Every form but `/1` skips a squad of no strength (`[squad+0x1c]`).
+  for (const SquadKey key : {staying, coming, leaving, elsewhere}) {
+    f.heroes.squads().find(key)->eval = 10;
+  }
 
   const SquadListId list = make_list(f.world);
   const auto fill = [&](std::int32_t presence, std::int32_t player, std::int32_t relation) {
@@ -2987,8 +3110,10 @@ TEST(squadlist_get_squads_filters_by_node_and_by_relation) {
   // Another player's squads are not this player's, whatever the presence mask.
   CHECK(fill(65535, 1, 1).empty());
   CHECK(fill(65535, 3, 1).empty());
-  // And a number outside 1..16 names nobody, at either end.
-  CHECK(fill(65535, 0, 1).empty());
+  // **A number below 1 forces `AI_OWN`** on every squad (0x00439500 skips the
+  // relation table for a negative index), and one past 16 names nobody.
+  CHECK(fill(65535, 0, 1) == std::vector<SquadKey>({staying, coming, leaving}));
+  CHECK(fill(65535, 0, 4).empty());
   CHECK(fill(65535, 17, 1).empty());
   // And `AI_NONE` selects nothing rather than everything.
   CHECK(fill(65535, 2, 0).empty());
@@ -3011,6 +3136,57 @@ TEST(squadlist_get_squads_filters_by_node_and_by_relation) {
   const SquadKey fresh = f.squad_of(3, 2);
   (void)fresh;
   CHECK(fill(65535, 3, 1).empty());
+}
+
+/// The four `GetSquads` bodies filter differently (0x00437a20, 0x00439000,
+/// 0x00439230, 0x00439500), and 0x0044e1f0 -- the presence every one but `/1`
+/// asks -- refuses a peaceful squad and calls a squad with no heading that
+/// stands in the node *leaving*.
+TEST(get_squads_filters_by_arity_and_presence_is_0x0044e1f0) {
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+
+  constexpr GaikaId kHere = 4;
+  const auto place = [&](PlayerId owner, GaikaId in, GaikaId dest, std::int32_t eval) {
+    const SquadKey key = f.squad_of(owner, 1);
+    Squad* squad = f.heroes.squads().find(key);
+    squad->gaika_in = in;
+    squad->dest_gaika = dest;
+    squad->eval = eval;
+    return key;
+  };
+  const SquadKey mine = place(1, kHere, kHere, 10);
+  const SquadKey theirs = place(2, kHere, kHere, 10);
+  const SquadKey hollow = place(1, kHere, kHere, 0);
+  const SquadKey adrift = place(1, kHere, kNoGaika, 10);
+  const SquadKey tame = place(1, kHere, kHere, 10);
+  f.heroes.squads().find(tame)->flags = kSquadFlagPeaceful;
+
+  const SquadListId list = make_list(f.world);
+  const auto fill = [&](std::vector<Value> extra) {
+    std::vector<Value> args{Value::integer(kHere), make_squadlist_value(list)};
+    args.insert(args.end(), extra.begin(), extra.end());
+    HostCall call(f.world, {});
+    call.arguments = args;
+    call.context.arguments = call.arguments;
+    const auto arity = static_cast<std::uint16_t>(args.size() - 1);
+    CHECK(invoke(registry, CallKind::member, "GetSquads", arity, call).status == HostStatus::ok);
+    const std::span<const SquadKey> items = squadlist_pool_of(f.world).items(list);
+    return std::vector<SquadKey>(items.begin(), items.end());
+  };
+
+  // `/1`: the node's deque whole -- no strength, flag or owner test.
+  CHECK(fill({}) == std::vector<SquadKey>({mine, hollow, adrift, tame, theirs}));
+  // `/2`: strength and presence, any owner; the peaceful one is nowhere.
+  CHECK(fill({Value::integer(4)}) == std::vector<SquadKey>({mine, theirs}));
+  // No heading while standing here is leaving, not staying (0x0044e235).
+  CHECK(fill({Value::integer(2)}) == std::vector<SquadKey>({adrift}));
+  // `/3`: own only.
+  CHECK(fill({Value::integer(4), Value::integer(2)}) == std::vector<SquadKey>({mine}));
+  // `/4`: the relation mask.
+  CHECK(fill({Value::integer(4), Value::integer(2), Value::integer(4)}) ==
+        std::vector<SquadKey>({theirs}));
 }
 
 /// **`SquadList::Add` is the same name on another type**, and its body lives in
@@ -3268,6 +3444,65 @@ TEST(take_nearby_items_sneaks_getitems_at_the_nearest_full_holder) {
   HostCall none(f.world, {Value::object(kTypeSquad, (1u << 16) | 999u), Value::integer(400)});
   const HostOutcome gone = invoke(registry, CallKind::member, "TakeNearbyItems", 1, none);
   CHECK(gone.status == HostStatus::ok && !gone.value.truthy_scalar());
+}
+
+/// 0x00429530 asks the squad's **front member** (0x00443df0), tests
+/// `DestGAIKA` against where the AI is heading (an order elsewhere fails, no
+/// order or an order to `DestGAIKA` passes), and compares the running verb
+/// byte for byte (0x00409350).
+TEST(take_nearby_items_asks_the_front_member_and_dest_gaika_against_the_order) {
+  Fixture f;
+  ItemCatalog catalog;
+  REQUIRE(catalog.load(bytes(kLootXml)).ok());
+  f.heroes.items().set_catalog(&catalog);
+  HostRegistry registry;
+  register_squad_host(registry);
+  register_command_host(registry);
+
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.unit_class);
+  f.world.set_position(hero, Point{1000, 1000});
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 100);
+  REQUIRE(f.world.find(hero)->state.flags.is_hero);
+  // No `leader` field: the hero is simply the first to join.
+  const SquadKey key = f.heroes.squads().create(1);
+  REQUIRE(f.heroes.squads().join(key, hero));
+  REQUIRE(f.heroes.squads().find(key)->leader == kNoObject);
+  f.heroes.squads().find(key)->dest_gaika = 3;
+  const ObjectId chest = f.world.spawn(NativeClass::item_holder, nullptr, f.unit_class);
+  f.world.set_position(chest, Point{1000, 1100});
+  REQUIRE(f.heroes.items().add(f.world, chest, "Rusty ring") != kNoObject);
+
+  const auto take = [&] {
+    (void)f.commands.forget(hero);
+    HostCall call(f.world, {pack_squad(key), Value::integer(400)});
+    const HostOutcome out = invoke(registry, CallKind::member, "TakeNearbyItems", 1, call);
+    CHECK(out.status == HostStatus::ok);
+    return out.value.truthy_scalar();
+  };
+  CHECK(take());                                         // no order: DestGAIKA is the heading
+  REQUIRE(f.heroes.squads().post_order(key, 5, 1));
+  CHECK(!take());                                        // an order elsewhere
+  REQUIRE(f.heroes.squads().post_order(key, 3, 1));
+  CHECK(take());                                         // an order to DestGAIKA
+
+  // Running `GETITEMS` is not running `getitems`.
+  (void)f.commands.forget(hero);
+  Command running;
+  running.verb = "GETITEMS";
+  (void)f.commands.add_command(f.world, hero, false, "GETITEMS", running);
+  REQUIRE(f.commands.command_name(hero, 0) == "GETITEMS");
+  HostCall call(f.world, {pack_squad(key), Value::integer(400)});
+  CHECK(invoke(registry, CallKind::member, "TakeNearbyItems", 1, call).value.truthy_scalar());
+
+  // The sweep is centred on the hero's stored position (`vtbl+0x3c`,
+  // 0x00429627), `(-1, -1)` while he is held: the chest 100 from the tower he
+  // stands in is not swept.
+  const ObjectId tower = f.world.spawn(NativeClass::building, nullptr);
+  f.world.set_position(tower, Point{1000, 1000});
+  REQUIRE(f.world.put_in_holder(hero, tower));
+  REQUIRE(f.world.resolve_position(hero) == (Point{1000, 1000}));
+  CHECK(!take());
 }
 
 TEST(register_squad_host_defines_exactly_what_it_says_it_does) {
@@ -3574,6 +3809,11 @@ ClassGraph training_graph() {
       <properties maxhealth="1000" radius="64"/>
     </class>)"),
             "hall.sc.xml");
+  // A unit class binding nothing at all, `enter` included.
+  graph.add(bytes(R"(<class id="Mute" cpp_class="CVXUnit" parent="">
+      <properties maxhealth="200"/>
+    </class>)"),
+            "mute.sc.xml");
   graph.link();
   return graph;
 }
@@ -3866,6 +4106,37 @@ TEST(train_sends_the_rest_inside_and_answers_four_only_when_nothing_else_happene
   const ObjectId still = f.spawn(f.mage);
   REQUIRE(f.world.put_in_holder(still, box));
   CHECK(f.train(f.list_of({f.squad({still})}), 4, 10, hall) == 0);
+}
+
+/// Three details of 0x004366c0: a list whose cursor is at its end answers 0
+/// and touches nothing (0x00420170 before the rewind); the answer becomes 4
+/// before the class is asked for `enter` (0x00436c7a); and the running verb is
+/// compared byte for byte (0x00436c56), so `ENTER` is not `enter`.
+TEST(train_reads_the_lists_cursor_sets_four_before_the_class_and_compares_verbs_exactly) {
+  TrainFixture f;
+  const ObjectId hall = f.world.spawn(NativeClass::building, nullptr, f.hall);
+
+  // A walked list: nothing done, 0.
+  const ObjectId idle = f.spawn(f.mage);
+  const SquadListId walked = f.list_of({f.squad({idle})});
+  squadlist_pool_of(f.world).set_cursor(walked, 1);
+  CHECK(f.train(walked, 4, 10, hall) == 0);
+  CHECK(f.verb_at(idle, 0) == "<none>");
+
+  // A unit whose class binds no `enter`: ordered nothing, and the answer is 4.
+  const ObjectId mute = f.spawn(f.graph.find("Mute"));
+  CHECK(f.train(f.list_of({f.squad({mute})}), 4, 10, hall) == 4);
+  CHECK(f.verb_at(mute, 0) == "<none>");
+
+  // A unit running `ENTER` is not already entering: it is ordered `enter`.
+  const ObjectId shouting = f.spawn(f.mage);
+  Command loud;
+  loud.arg_kind = CommandArgKind::object;
+  loud.object = hall;
+  (void)f.commands.set_command(f.world, shouting, "ENTER", loud);
+  REQUIRE(f.verb_at(shouting, 0) == "ENTER");
+  CHECK(f.train(f.list_of({f.squad({shouting})}), 4, 10, hall) == 4);
+  CHECK(f.verb_at(shouting, 0) == "enter");
 }
 
 TEST(train_skips_no_ai_squads_and_handles_that_name_nothing) {

@@ -322,7 +322,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (`Settlement::sentries_put_back`, `[settlement+0x100]`), which `DelSentry`
 /// spends before the roster. Hashed; a version-35 file would load every wall
 /// with none banked, and the next sentry to die would come off the roster.
-inline constexpr std::uint32_t kStateVectorVersion = 36;
+/// 37: a unit's `experience` (`UnitRecord`, the hero section) is `gbr.exe`'s
+/// running total at `[unit+0x180]`, and the inherent level is derived from it
+/// (0x005d28c0) rather than kept beside it. A version-36 file holds progress
+/// within the level and the level as a second word; read as a total, every
+/// veteran would load at level 1.
+inline constexpr std::uint32_t kStateVectorVersion = 37;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

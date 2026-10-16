@@ -1119,7 +1119,6 @@ void HeroSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, r.squad.index);
     bytes::put_u8(out, r.squad.player);
     bytes::put_i32(out, r.experience);
-    bytes::put_i32(out, r.inherent_level);
     put_bool(out, r.has_freedom);
     bytes::put_i32(out, r.kills);
   }
@@ -1169,7 +1168,7 @@ Status HeroSystem::deserialize(std::span<const std::byte> data) {
     UnitRecord r;
     if (!reader.u32(r.id) || !reader.u32(r.hero) || !bytes::get_i32(reader, r.squad.index) ||
         !reader.u8(r.squad.player) || !bytes::get_i32(reader, r.experience) ||
-        !bytes::get_i32(reader, r.inherent_level) || !get_bool(reader, r.has_freedom) ||
+        !get_bool(reader, r.has_freedom) ||
         !bytes::get_i32(reader, r.kills)) {
       return FormatError::truncated;
     }
