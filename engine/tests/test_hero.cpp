@@ -1339,6 +1339,79 @@ TEST(the_progression_entry_points_refuse_the_dead_and_answer_one_on_a_miss) {
   CHECK(f.heroes.experience(alive) == low);
 }
 
+TEST(the_item_transfers_check_their_receiver_as_the_bodies_do) {
+  // GiveItem 0x005aca10: the receiver must hold the item. DropItem 0x005acdf0
+  // answers false on every path and drops at the point. RemoveItem(name)
+  // 0x005ad190 is void and takes the first of the name only; RemoveItem(i)
+  // 0x005ad230 is 1-based. ExchangeItem 0x005ac800 wants the receiver to hold
+  // the item.
+  Fixture f;
+  ItemCatalog catalog;
+  REQUIRE(catalog.load(bytes(kItemsXml)).ok());
+  f.heroes.items().set_catalog(&catalog);
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  sim::HostContext context;
+  context.world = &f.world;
+  const auto call = [&](std::string_view name,
+                        std::vector<script::Value> args) -> script::HostOutcome {
+    const std::uint32_t index = registry.find(script::CallKind::member, name,
+                                              static_cast<std::uint16_t>(args.size() - 1));
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    return registry.entry(index).fn(ctx);
+  };
+  const auto ref = [](ObjectId id) { return script::Value::object(7, id); };
+  ItemStore& items = f.heroes.items();
+
+  const ObjectId a = f.spawn_warrior();
+  const ObjectId b = f.spawn_warrior();
+  const ObjectId c = f.spawn_warrior();
+  const ObjectId belt = items.add(f.world, a, "King's Belt");
+  REQUIRE(belt != kNoObject);
+
+  // Not the holder: refused, and the belt stays with `a`.
+  CHECK(call("GiveItem", {ref(b), ref(belt), ref(c)}).value.as_integer() == 0);
+  CHECK(items.find(belt)->owner == a);
+  f.world.set_health(c, 0);
+  CHECK(call("GiveItem", {ref(a), ref(belt), ref(c)}).value.as_integer() == 0);
+  f.world.set_health(c, 200);
+  CHECK(call("GiveItem", {ref(a), ref(belt), ref(c)}).value.as_integer() == 1);
+  CHECK(items.find(belt)->owner == c);
+
+  // DropItem: false whatever happens, the item put down at the point.
+  CHECK(call("DropItem", {ref(c), ref(belt), pack_point(Point{700, 900})}).value.as_integer() ==
+        0);
+  CHECK(items.find(belt)->owner == kNoObject);
+
+  // RemoveItem by name: void, the first only.
+  const ObjectId t1 = items.add(f.world, b, "Boar teeth");
+  const ObjectId t2 = items.add(f.world, b, "Boar teeth");
+  const script::HostOutcome removed = call("RemoveItem", {ref(b), script::Value::string("Boar teeth")});
+  CHECK(removed.value.is_nil());
+  CHECK(items.find(t1) == nullptr);
+  CHECK(items.find(t2) != nullptr);
+  // By index, 1-based; 0 and past the end do nothing.
+  (void)call("RemoveItem", {ref(b), script::Value::integer(0)});
+  (void)call("RemoveItem", {ref(b), script::Value::integer(2)});
+  CHECK(items.find(t2) != nullptr);
+  (void)call("RemoveItem", {ref(b), script::Value::integer(1)});
+  CHECK(items.find(t2) == nullptr);
+
+  // ExchangeItem: only an item the receiver holds.
+  const ObjectId guild = items.add(f.world, a, "Bear teeth amulet");
+  CHECK(call("ExchangeItem", {ref(b), ref(guild), script::Value::string("Boar teeth")})
+            .value.as_integer() == 0);
+  CHECK(call("ExchangeItem", {ref(a), ref(guild), script::Value::string("Boar teeth")})
+            .value.as_integer() == 1);
+}
+
 TEST(set_level_writes_the_levels_threshold_the_way_the_mushroom_does) {
   // `MUSHROOM.VS`: `.SetLevel(.inherentlevel + 1)`. 0x005d7690 clamps to
   // [1, 1000] and, when that is not the level already, writes the level's

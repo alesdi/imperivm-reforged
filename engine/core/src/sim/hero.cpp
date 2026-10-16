@@ -1174,8 +1174,8 @@ script::TypeId receiver_type(CallContext& ctx) {
 [[nodiscard]] bool both_alive(const World& world, ObjectId receiver_id, ObjectId argument) {
   const WorldObject* self = world.find(receiver_id);
   const WorldObject* other = world.find(argument);
-  return self != nullptr && self->state.health > 0 && other != nullptr &&
-         other->state.health > 0;
+  return self != nullptr && !object_is_dead(*self) && other != nullptr &&
+         !object_is_dead(*other);
 }
 
 /// `Unit::AttachTo(hero)` (0x005de090): the four refusals of `both_alive`,
@@ -2278,7 +2278,7 @@ HostOutcome fn_experience(CallContext& ctx) {
 /// and write nothing.
 [[nodiscard]] bool writable_unit(const World& world, ObjectId id) {
   const WorldObject* slot = world.find(id);
-  return slot != nullptr && slot->state.health > 0;
+  return slot != nullptr && !object_is_dead(*slot);
 }
 
 /// `Unit::SetExperience(n)` (0x005d7610): the two refusals of
@@ -2513,16 +2513,42 @@ HostOutcome fn_open_item_holder(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(moved > 0));
 }
 
+/// `Obj::GiveItem(item, to)` (0x005aca10): false for an unresolvable or dead
+/// receiver (`object_is_dead`, the IsDead virtual -- never true of a
+/// building, so a ruin gives), an unresolvable item, an unresolvable or dead
+/// recipient, and **an item the receiver does not hold** (`[item+0x20]`).
+/// Then the item leaves the receiver and is offered to the recipient's add
+/// virtual; refused, it goes back and the answer is false. This checked none
+/// of the receiver's side. `RUIN_BEHAVIOR.VS`, `HERO_GIVEITEM.VS`.
 HostOutcome fn_give_item(CallContext& ctx) {
   HERO_STATE(ctx);
-  return HostOutcome::ok_with(Value::boolean(
-      host->heroes->items().give(*host->world, object_arg(ctx, 1), object_arg(ctx, 2))));
+  World& world = *host->world;
+  const ObjectId giver = receiver(ctx);
+  const ObjectId item = object_arg(ctx, 1);
+  const ObjectId to = object_arg(ctx, 2);
+  const auto no = HostOutcome::ok_with(Value::boolean(false));
+  const ItemInstance* held = host->heroes->items().find(item);
+  if (!both_alive(world, giver, to) || held == nullptr || held->owner != giver) return no;
+  return HostOutcome::ok_with(Value::boolean(host->heroes->items().give(world, item, to)));
 }
 
+/// `Obj::PutItem(item, holder)` (0x005acc90, whose messages call it
+/// `StoreItem`): false for an unresolvable or dead receiver, an unresolvable
+/// item or an unresolvable holder -- the holder's life is not asked. Then the
+/// item leaves the receiver and the holder's add virtual takes it or hands it
+/// back; the answer is whether it took it.
 HostOutcome fn_put_item(CallContext& ctx) {
   HERO_STATE(ctx);
-  return HostOutcome::ok_with(Value::boolean(
-      host->heroes->items().put(*host->world, object_arg(ctx, 1), object_arg(ctx, 2))));
+  World& world = *host->world;
+  const ObjectId me = receiver(ctx);
+  const WorldObject* slot = world.find(me);
+  const ObjectId item = object_arg(ctx, 1);
+  const ObjectId holder = object_arg(ctx, 2);
+  if (slot == nullptr || object_is_dead(*slot) || host->heroes->items().find(item) == nullptr ||
+      world.find(holder) == nullptr) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
+  return HostOutcome::ok_with(Value::boolean(host->heroes->items().put(world, item, holder)));
 }
 
 /// The **ambient item**: what `This` is for a script the engine started on an
@@ -2633,17 +2659,33 @@ HostOutcome fn_use_item(CallContext& ctx) {
       Value::boolean(host->heroes->items().use(*host->world, object_arg(ctx, 1), 1)));
 }
 
+/// `RemoveItem` -- two `Obj` registrations, both **void**, on the argument's
+/// type: `RemoveItem(index)` (0x005ad230), 1-based, removing and destroying
+/// the item there when the index is in `[1, item_count]`, as `Spoils of War`'s
+/// inline script does; and `RemoveItem(name)` (0x005ad190), removing and
+/// destroying **the first** held item of that name (the find-by-name
+/// virtual), as `GODS GIFT.VS` does -- not every one, which this did, and it
+/// answered a bool. An unresolvable receiver does nothing.
+///
+/// `ItemHolder::RemoveItem` (0x0053cb20), the `ItemHolder`-typed
+/// registration, takes the first match out of the holder **without
+/// destroying it** and prints when there is none; no shipped script calls it
+/// on an `ItemHolder` variable, and the registry here cannot tell the two
+/// receivers apart, so this body serves both.
 HostOutcome fn_remove_item(CallContext& ctx) {
   HERO_STATE(ctx);
-  // Overloaded at the call sites: `RemoveItem(index)` in `Spoils of War`,
-  // `RemoveItem("God's Gift")` in the kill script for it.
+  World& world = *host->world;
+  const ObjectId me = receiver(ctx);
+  if (world.find(me) == nullptr) return HostOutcome::ok_void();
+  ItemStore& items = host->heroes->items();
   if (!ctx.arg(1).is_integer()) {
-    return HostOutcome::ok_with(Value::boolean(
-        host->heroes->items().remove_all_of_type(*host->world, receiver(ctx),
-                                                 string_arg(ctx, 1)) > 0));
+    const ObjectId first = items.find_of_type(me, string_arg(ctx, 1));
+    if (first != kNoObject) (void)items.remove(world, first);
+    return HostOutcome::ok_void();
   }
-  return HostOutcome::ok_with(Value::boolean(host->heroes->items().remove_at(
-      *host->world, receiver(ctx), static_cast<std::size_t>(int_arg(ctx, 1)))));
+  const std::int32_t index = int_arg(ctx, 1);
+  if (index > 0) (void)items.remove_at(world, me, static_cast<std::size_t>(index));
+  return HostOutcome::ok_void();
 }
 
 HostOutcome fn_remove_items_of_type(CallContext& ctx) {
@@ -2658,21 +2700,45 @@ HostOutcome fn_get_item_index(CallContext& ctx) {
       host->heroes->items().index_of(receiver(ctx), object_arg(ctx, 1)))));
 }
 
+/// `Obj::ExchangeItem(item, name)` (0x005ac800): false for an unresolvable
+/// receiver; otherwise the item named is minted (exact name), and when the
+/// receiver holds `item` the new one takes its slot (`vtbl+0x100`) and the
+/// answer is true. `VETERAN GUILD.VS`'s Guild becoming a Medal.
+///
+/// **Known gap:** the original's replacement is a new item object with a new
+/// handle in the old one's slot; here the held item is retyped and recharged
+/// in place, keeping its handle -- the store orders a holder's items by id,
+/// so a new id could not take the old slot.
 HostOutcome fn_exchange_item(CallContext& ctx) {
   HERO_STATE(ctx);
+  const ObjectId me = receiver(ctx);
+  const ObjectId item = object_arg(ctx, 1);
+  if (host->world->find(me) == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  const ItemInstance* held = host->heroes->items().find(item);
+  if (held == nullptr || held->owner != me) return HostOutcome::ok_with(Value::boolean(false));
   return HostOutcome::ok_with(
-      Value::boolean(host->heroes->items().exchange(object_arg(ctx, 1), string_arg(ctx, 2))));
+      Value::boolean(host->heroes->items().exchange(item, string_arg(ctx, 2))));
 }
 
+/// `Obj::DropItem(item, pt)` (0x005acdf0): an unresolvable or dead receiver
+/// or an unresolvable item does nothing; an item the receiver holds is put
+/// down at `pt` (`vtbl+0x10c`). **The answer is false whatever happens** --
+/// the body pushes 0 on every path, the drop included -- which is why both
+/// shipped sites ignore it. This dropped at the receiver's own feet and
+/// answered whether it had.
 HostOutcome fn_drop_item(CallContext& ctx) {
   HERO_STATE(ctx);
-  // The point argument is a host `point` value this system does not own, so the
-  // item is dropped where its owner stands, which is where the shipped scripts
-  // walk to before calling it anyway.
+  World& world = *host->world;
+  const ObjectId me = receiver(ctx);
+  const WorldObject* slot = world.find(me);
   const ObjectId item = object_arg(ctx, 1);
-  const Point at = host->world->resolve_position(receiver(ctx));
-  return HostOutcome::ok_with(
-      Value::boolean(host->heroes->items().drop(*host->world, item, at)));
+  const ItemInstance* held = host->heroes->items().find(item);
+  if (slot != nullptr && !object_is_dead(*slot) && held != nullptr && held->owner == me) {
+    const Point at = ctx.count() > 2 && is_point(ctx.arg(2)) ? unpack_point(ctx.arg(2))
+                                                             : world.resolve_position(me);
+    (void)host->heroes->items().drop(world, item, at);
+  }
+  return HostOutcome::ok_with(Value::boolean(false));
 }
 
 // `GetUseCount()` and `ItemUsed(n)` are free functions with no receiver: an
