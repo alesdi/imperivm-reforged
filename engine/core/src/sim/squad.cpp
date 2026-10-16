@@ -1293,9 +1293,10 @@ HostOutcome leader_impl(CallContext& ctx) {
 ///
 /// A read of stored state, exactly as `AIDest` is, and one of the three GAIKA
 /// fields `TVXSquad` persists -- which is what says it is world state rather
-/// than a view something recomputes. Nothing here fills it, so on a squad no
-/// loader has touched it answers `kNoGaika`, which is 0; `SQUADMONITOR.VS`
-/// compares `sq.GAIKAIn == sq.AIDest` and both being 0 is a case it handles.
+/// than a view something recomputes. 0x004212c0 resolves the handle and reads
+/// the word at `[squad+0x22]`; a handle naming no squad faults there and
+/// answers `kNoGaika` here. `revalue_squads` keeps it filed under the node the
+/// front member stands in (0x0041f530's job in the original).
 HostOutcome gaika_in_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {
@@ -1949,14 +1950,14 @@ HostOutcome get_squads_impl(CallContext& ctx) {
 /// the same units come back again on the next call until a caller changes the
 /// world.
 ///
-/// ## It answers an empty list today, and says so plainly
+/// ## What stays inferred
 ///
-/// Two independent reasons, both of them facts about this engine rather than
-/// about the original: nothing assigns a GAIKA to any squad, so test 4 selects
-/// nothing; and `Squad::Eval` is stored-but-unfilled, so test 1 would select
-/// nothing either. The filter chain is written out in full anyway because it is
-/// fully recovered and because it is what has to be right the day either of
-/// those changes.
+/// This note used to say the list was always empty, because no squad had a
+/// node or a strength; `revalue_squads` now gives them both. What is still
+/// this engine's reading is the node's squad deque -- which squads it holds,
+/// and their order, which decides who is taken first (`squad_presence`). And
+/// the class argument is one name there (0x00409e40, then `IsHeirOf`), where
+/// `ClassFilter` also reads a comma list; every shipped call passes one name.
 ///
 /// An empty list is the right answer rather than a refusal, and that is
 /// measured too: the original's own diagnostics for an invalid node index and
