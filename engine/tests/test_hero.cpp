@@ -1339,6 +1339,29 @@ TEST(the_progression_entry_points_refuse_the_dead_and_answer_one_on_a_miss) {
   CHECK(f.heroes.experience(alive) == low);
 }
 
+TEST(hero_skill_id_matches_the_section_names_exactly) {
+  // 0x005c8d10: strcmp over the SKILLS.INI names; the hs* constants and other
+  // spellings are not names.
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  const auto id = [&](std::string_view name) -> std::int32_t {
+    const std::uint32_t index = registry.find(script::CallKind::free_function, "HeroSkillId", 1);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return -999;
+    std::vector<script::Value> args{script::Value::string(std::string(name))};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.kind = script::CallKind::free_function;
+    return registry.entry(index).fn(ctx).value.as_integer();
+  };
+  CHECK(id("Battle cry") == static_cast<std::int32_t>(HeroSkill::battle_cry));
+  CHECK(id("Euphoria") == static_cast<std::int32_t>(HeroSkill::euphoria));
+  CHECK(id("battle cry") == -1);
+  CHECK(id("hsBattleCry") == -1);
+  CHECK(id("Divine grace") == -1);
+}
+
 TEST(the_item_transfers_check_their_receiver_as_the_bodies_do) {
   // GiveItem 0x005aca10: the receiver must hold the item. DropItem 0x005acdf0
   // answers false on every path and drops at the point. RemoveItem(name)

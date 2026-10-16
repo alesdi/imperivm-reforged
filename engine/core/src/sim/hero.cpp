@@ -2207,8 +2207,20 @@ HostOutcome fn_get_squad(CallContext& ctx) {
 
 // -- skills ----------------------------------------------------------------
 
+/// `HeroSkillId(name)` (0x0052d9a0 -> 0x005c8d10): an exact, case-sensitive
+/// comparison of `name` with each of the 25 `SKILLS.INI` section names in
+/// table order, the index of the first equal one, -1 for none. Only the
+/// section names: the `hs*` constants are the map loader's table (0x00824b68),
+/// which `hero_skill_id` also serves, and which this entry point used to
+/// accept too, in any case. `ACTIVATE_HERO_SKILL.VS` and
+/// `VERIFY_HERO_SKILL.VS` pass the command's `param`, `"Battle cry"` and its
+/// siblings -- and `"Divine grace"`, which is no skill and answers -1.
 HostOutcome fn_hero_skill_id(CallContext& ctx) {
-  return HostOutcome::ok_with(Value::integer(hero_skill_id(string_arg(ctx, 0))));
+  const std::string_view name = string_arg(ctx, 0);
+  for (std::size_t i = 0; i < kHeroSkillCount; ++i) {
+    if (kSkillNames[i] == name) return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(i)));
+  }
+  return HostOutcome::ok_with(Value::integer(-1));
 }
 
 /// `Hero::GetSkill(id)` (0x0052f550): an unresolvable receiver prints and
