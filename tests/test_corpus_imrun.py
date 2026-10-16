@@ -801,6 +801,10 @@ def test_balcans_eagles_fly_and_stay_over_the_map(imrun, game_dir):
 #: inside them.
 P1_GATES = ((14058, 1982), (12848, 2308), (14388, 2960), (13178, 3502))
 P1_INSIDE = (13600, 2700)
+#: Outside p1's walls, beyond its west gate (12848, 2308): where a friend is
+#: stood to be sent in. The west gate, because on the seed above nobody of
+#: p1's holds it open at the order turn, as somebody does the south one.
+P1_WEST_OUTSIDE = (12300, 2050)
 #: When the swordsman is sent in. By then p1's AI has trained a few and marched
 #: them out through its gates.
 ORDER_TURN = 300
@@ -826,15 +830,21 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
     a friend opens it, nobody closes it. The scan walks units only (the
     original's walk takes the unit mask), so the gate's own walls and towers,
     and the sentries on them (`ignore_passability`), are not friends there.
-    One of p1's swordsmen, standing outside the walls, is sent to the market
+    One of p1's swordsmen, stood outside the walls, is sent to the market
     inside: the gate it reaches is closed when it is sent, opens as it comes
     within 350, and it walks through to the market.
+
+    Which swordsman, and where it stands by the order turn, is the AI's and
+    moves with what its draws are spent on -- the fog's own draw
+    (`GetUnexploredPoint`, 0x005d99e0) walked the one this test used to find
+    outside to within 90 of the south gate, where it holds that gate open. So
+    it takes any of p1's that holds no gate open (none within the scan's 350)
+    and stands it outside the west gate, which nobody holds open.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
         pytest.skip("Crossroads.BFHP is not in this installation")
-    # Which swordsman: the first of p1's standing outside its walls, well away
-    # from every gate.
+    # Which swordsman: the first of p1's that holds no gate open.
     first = subprocess.run(
         [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "100",
          "--seed", str(LAYOUT_SEED)],
@@ -846,8 +856,7 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
         int(i)
         for i, x, y in re.findall(r"^\s+(\d+) ESwordsman p1 at \((-?\d+),(-?\d+)\) holder 0 ",
                                   first.stdout, re.MULTILINE)
-        if not _inside(int(x), int(y))
-        and min((int(x) - gx) ** 2 + (int(y) - gy) ** 2 for gx, gy in P1_GATES) > 450 ** 2
+        if min((int(x) - gx) ** 2 + (int(y) - gy) ** 2 for gx, gy in P1_GATES) > 350 ** 2
     ]
     assert candidates, first.stdout[-3000:]
     unit = candidates[0]
@@ -864,10 +873,13 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
          "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_GATES": "1", "IMRUN_WATCH": str(unit),
+             "IMRUN_PLACE": f"{P1_WEST_OUTSIDE[0]},{P1_WEST_OUTSIDE[1]}",
              "IMRUN_GOTO": f"{ORDER_TURN}:{unit}:{P1_INSIDE[0]},{P1_INSIDE[1]}"},
     )
     assert second.returncode == 0, second.stdout + second.stderr
     out = second.stdout
+    assert re.search(rf"^\s+place turn {ORDER_TURN}: {unit} at \(-?\d+,-?\d+\)$", out, re.MULTILINE), \
+        out[-3000:]
     assert re.search(rf"^\s+goto turn {ORDER_TURN}: {unit} to .*, 1 issued$", out, re.MULTILINE), \
         out[-3000:]
     track = [(int(t), int(x), int(y)) for t, x, y in
