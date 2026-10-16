@@ -4029,6 +4029,18 @@ namespace {
 /// same node, same priority as it stands (0x00447527..0x0044755d); see
 /// `regroup_into_fresh_squads`.
 ///
+/// **A known gap, and a design one: the regroup does not merge.** Train calls
+/// the same worker `Squadize` does (0x00447330, at 0x00436ce8 and 0x00436d5f),
+/// and that worker runs the assignment (0x00446a70) on every body and lists
+/// only the squads left with one member -- so bodies of one call merge into
+/// each other's fresh squads under the proximity rule (`squadize_bodies`).
+/// Here each trainee and each enterer gets a squad of its own. Using
+/// `squadize_bodies` instead needs the hero case settled first: 0x00447330 has
+/// no hero branch of its own, 0x00446a70's only re-sets the `DestGAIKA` of the
+/// squad a hero is in, and whether a hero's army follows him into his fresh
+/// squad turns on the join (0x00445a50), which is not read. Until it is, the
+/// one-squad-each reading stays, labelled.
+///
 /// ## What the answer is not
 ///
 /// 0 is a receiver that names no list, and an empty one. Nothing here spends
@@ -4045,15 +4057,11 @@ struct TrainScan {
 
 constexpr std::string_view kTrainingVerbs[] = {"train", "waitarmytrain", "unittrain"};
 
-[[nodiscard]] bool same_verb(std::string_view a, std::string_view b) noexcept {
-  if (a.size() != b.size()) return false;
-  for (std::size_t i = 0; i < a.size(); ++i) {
-    const char x = a[i] >= 'A' && a[i] <= 'Z' ? static_cast<char>(a[i] + ('a' - 'A')) : a[i];
-    const char y = b[i] >= 'A' && b[i] <= 'Z' ? static_cast<char>(b[i] + ('a' - 'A')) : b[i];
-    if (x != y) return false;
-  }
-  return true;
-}
+/// Both of Train's verb tests -- `train`/`waitarmytrain`/`unittrain`
+/// (0x00429100) and the running `enter` (0x00436c56) -- compare the command's
+/// name byte for byte, a bounded `repe cmpsb` against the literal with the
+/// lengths equal: **case counts**. This folded case.
+[[nodiscard]] bool same_verb(std::string_view a, std::string_view b) noexcept { return a == b; }
 
 /// 0x00429100: a `train`-family command anywhere in the queue.
 [[nodiscard]] bool is_training(const CommandSystem& commands, ObjectId unit) {
@@ -4187,7 +4195,11 @@ HostOutcome train_impl(CallContext& ctx) {
   CommandSystem* commands = command_system(world);
   if (commands == nullptr) return HostOutcome::failed(kNoCommands);
   const std::span<const SquadKey> keys = list.pool->items(list.id);
-  if (keys.empty()) return HostOutcome::ok_with(Value::integer(0));
+  // **A list whose cursor stands at its end answers 0 and does nothing**:
+  // 0x004366c0 asks `EOL`'s test (0x00420170) first, and only then rewinds
+  // (0x0042a3c0) and walks the list from its first squad. An empty list is
+  // the same case.
+  if (list.pool->cursor(list.id) >= keys.size()) return HostOutcome::ok_with(Value::integer(0));
 
   const std::int32_t train_state = ctx.arg(1).as_integer();
   const std::int32_t enter_state = ctx.arg(2).as_integer();
@@ -4255,8 +4267,11 @@ HostOutcome train_impl(CallContext& ctx) {
         same_verb(queue->running()->verb, "enter")) {
       continue;
     }
-    if (commands->script_for(world, id, "enter").empty()) continue;
+    // 4 is set **before** the class is asked for `enter` (0x00436c7a, then
+    // 0x005aef20): a unit whose class binds no `enter` still makes the answer
+    // 4, and is then given nothing.
     if (answer == 0) answer = 4;
+    if (commands->script_for(world, id, "enter").empty()) continue;
     Command enter;
     if (enter_target != kNoObject) {
       enter.arg_kind = CommandArgKind::object;

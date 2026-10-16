@@ -3760,6 +3760,11 @@ ClassGraph training_graph() {
       <properties maxhealth="1000" radius="64"/>
     </class>)"),
             "hall.sc.xml");
+  // A unit class binding nothing at all, `enter` included.
+  graph.add(bytes(R"(<class id="Mute" cpp_class="CVXUnit" parent="">
+      <properties maxhealth="200"/>
+    </class>)"),
+            "mute.sc.xml");
   graph.link();
   return graph;
 }
@@ -4052,6 +4057,37 @@ TEST(train_sends_the_rest_inside_and_answers_four_only_when_nothing_else_happene
   const ObjectId still = f.spawn(f.mage);
   REQUIRE(f.world.put_in_holder(still, box));
   CHECK(f.train(f.list_of({f.squad({still})}), 4, 10, hall) == 0);
+}
+
+/// Three details of 0x004366c0: a list whose cursor is at its end answers 0
+/// and touches nothing (0x00420170 before the rewind); the answer becomes 4
+/// before the class is asked for `enter` (0x00436c7a); and the running verb is
+/// compared byte for byte (0x00436c56), so `ENTER` is not `enter`.
+TEST(train_reads_the_lists_cursor_sets_four_before_the_class_and_compares_verbs_exactly) {
+  TrainFixture f;
+  const ObjectId hall = f.world.spawn(NativeClass::building, nullptr, f.hall);
+
+  // A walked list: nothing done, 0.
+  const ObjectId idle = f.spawn(f.mage);
+  const SquadListId walked = f.list_of({f.squad({idle})});
+  squadlist_pool_of(f.world).set_cursor(walked, 1);
+  CHECK(f.train(walked, 4, 10, hall) == 0);
+  CHECK(f.verb_at(idle, 0) == "<none>");
+
+  // A unit whose class binds no `enter`: ordered nothing, and the answer is 4.
+  const ObjectId mute = f.spawn(f.graph.find("Mute"));
+  CHECK(f.train(f.list_of({f.squad({mute})}), 4, 10, hall) == 4);
+  CHECK(f.verb_at(mute, 0) == "<none>");
+
+  // A unit running `ENTER` is not already entering: it is ordered `enter`.
+  const ObjectId shouting = f.spawn(f.mage);
+  Command loud;
+  loud.arg_kind = CommandArgKind::object;
+  loud.object = hall;
+  (void)f.commands.set_command(f.world, shouting, "ENTER", loud);
+  REQUIRE(f.verb_at(shouting, 0) == "ENTER");
+  CHECK(f.train(f.list_of({f.squad({shouting})}), 4, 10, hall) == 4);
+  CHECK(f.verb_at(shouting, 0) == "enter");
 }
 
 TEST(train_skips_no_ai_squads_and_handles_that_name_nothing) {
