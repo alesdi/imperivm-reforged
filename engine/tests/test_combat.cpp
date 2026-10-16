@@ -3351,30 +3351,30 @@ TEST(combat_mutators_reach_script_objects_and_cure_at_full_health) {
   CHECK(b.combat.health(sick) == 999);
 }
 
-/// A unit in a squad takes the core's squad path (0x005dc950), whose
-/// candidate deque at `squad+0x6c` nothing ever fills, so every
-/// `*InSquadSight` form answers the invalid handle for it; a held unit
-/// answers it on the other path. `BestTargetForPos` has no squad gate.
-TEST(the_in_squad_sight_family_is_blind_for_a_squad_member_and_a_held_unit) {
+/// The `*InSquadSight` family answers the invalid handle for a held unit
+/// (0x005dc950's other path) and for a dead one (the wrappers' `vtbl+0x50`
+/// test); `BestTargetForPos` has its own held test.
+TEST(the_in_squad_sight_family_is_blind_for_a_held_or_dead_unit) {
   using imperivm::core::script::Value;
   SightBench b;
-  HeroSystem heroes;
-  b.world.add_system(&heroes);
   const ObjectId me = b.soldier(0, Point{0, 0});
   const ObjectId foe = b.soldier(1, Point{30, 0});
-  const auto best = [&](const char* name) {
-    return b.call(name, 0, {Value::object(1, me)}).value.as_object().id;
+  const auto best = [&](const char* name, ObjectId who) {
+    return b.call(name, 0, {Value::object(1, who)}).value.as_object().id;
   };
-  CHECK(best("BestTargetInSquadSight") == foe);
+  CHECK(best("BestTargetInSquadSight", me) == foe);
 
-  UnitRecord& record = heroes.register_unit(b.world, me);
-  record.squad = heroes.squads().create(0, me);
-  REQUIRE(heroes.squad_of(me).valid());
-  CHECK(best("BestTargetInSquadSight") == kNoObject);
-  CHECK(best("BestTargetInSquadSightMisZeroDamage") == kNoObject);
-  CHECK(best("BestNoIndependentTargetInSquadSight") == kNoObject);
-  CHECK(best("BestTargetInSquadSight_PreferUndiseased") == kNoObject);
-  CHECK(best("BestTargetForPos") == foe);
+  const ObjectId wall = b.world.spawn(NativeClass::building, nullptr, b.wall_class);
+  b.world.set_position(wall, Point{0, 0});
+  REQUIRE(b.world.put_in_holder(me, wall));
+  CHECK(best("BestTargetInSquadSight", me) == kNoObject);
+  CHECK(best("BestTargetInSquadSightMisZeroDamage", me) == kNoObject);
+  CHECK(best("BestNoIndependentTargetInSquadSight", me) == kNoObject);
+  CHECK(best("BestTargetInSquadSight_PreferUndiseased", me) == kNoObject);
+
+  const ObjectId other = b.soldier(0, Point{0, 10});
+  b.combat.apply_damage(b.world, other, b.combat.health(other));
+  CHECK(best("BestTargetInSquadSight", other) == kNoObject);
 }
 
 /// `EnemiesInSight` counts a candidate only when the looker's `CanAttack`

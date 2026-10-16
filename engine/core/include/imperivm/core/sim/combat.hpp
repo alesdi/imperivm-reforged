@@ -870,8 +870,9 @@ inline constexpr std::int32_t kProjectileSpeed = 800;
 /// does nothing, the independents flag is dropped, and the exclusive flag
 /// lands in the independents slot. The host entry points in `combat.cpp`
 /// therefore set `exclude_independents` for `Exclusive` (with a soft class
-/// preference) and nothing for the other two, and every squad member or held
-/// unit is answered before this filter is consulted (`squad_sight_blind`).
+/// preference) and nothing for the other two, and a held or dead unit is
+/// answered before this filter is consulted (`squad_sight_blind`, which also
+/// says why the original's "no target for a squad member" is not applied).
 /// `require_armed` and `only_class` are kept for callers inside the engine.
 struct TargetFilter {
   /// `BestTargetInSquadSightMisZeroDamage`. Skip a candidate whose own attack

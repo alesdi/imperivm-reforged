@@ -2544,7 +2544,7 @@ HostOutcome host_best_target(CallContext& ctx) {
 }
 
 /// Whether the `*InSquadSight` family answers the invalid handle before it
-/// looks at anything: the receiver is invalid, dead, held, or in a squad.
+/// looks at anything: the receiver is invalid, dead or held.
 ///
 /// The wrappers (0x005dcbc0, 0x005dcb00, 0x005dcc80, 0x005dcd40, 0x005dce00,
 /// 0x005dcf30) log and answer the invalid handle for an invalid receiver and,
@@ -2560,14 +2560,24 @@ HostOutcome host_best_target(CallContext& ctx) {
 /// (0x005dc9dd -> 0x005dcae9). A held unit -- with or without a squad -- gets
 /// the invalid handle on the other path. Only a free unit in no squad reaches
 /// the circle sweep `CombatSystem::best_target` models.
+///
+/// **The squad half is not reproduced, and that is a known gap.** Answering
+/// "no target" to every squad member was tried and measured: on Alesia the
+/// melee units in a fight then stood out of reach 1,904 times against 325 in
+/// reach (`test_alesias_armies_do_not_stand_on_one_another`), where the
+/// original's armies plainly fight. Whatever engages a squad member in
+/// `gbr.exe` when its scripts are told there is no target -- the unit's own
+/// idle acquisition, the squad's AI orders -- is not modelled to that extent
+/// here, and this engine's squad members get their fights from this answer.
+/// So a squad member is answered by the circle sweep, as a free unit is, until
+/// that mechanism is; see the audit's status note on 0x005dcbc0.
 [[nodiscard]] bool squad_sight_blind(CallContext& ctx, const CombatSystem& combat, ObjectId id) {
   const Combatant* self = combat.find(id);
   if (self == nullptr || !combat.is_alive(id) || self->action == Action::dying) return true;
   World* world = world_of(ctx);
   if (world == nullptr) return false;
-  if (const ObjectState* state = world->state(id); state != nullptr && state->is_held()) return true;
-  const HeroSystem* heroes = hero_system_of(*world);
-  return heroes != nullptr && heroes->squad_of(id).valid();
+  const ObjectState* state = world->state(id);
+  return state != nullptr && state->is_held();
 }
 
 /// One acquisition under one variant's filter. The filter itself is
