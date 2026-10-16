@@ -986,8 +986,9 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
 
     Numantia's Roman hero starts with his army attached; his owner's
     right-click sends him across open ground, which is `HERO_MOVE.VS`:
-    `FormSetupAndMoveTo`, `FormKeepMoving` while he has a route, and then the
-    army told to `stand_position`, whose first act is to `Stop` where it is.
+    `FormSetupAndMoveTo`, `FormKeepMoving` while he or a member of his column
+    has a route, and then the army told to `stand_position`, whose first act
+    is to `Stop` where it is.
     The hero's own `AddCommand(false, "stand_position")` finds nothing -- his
     `HERO_STAND_GROUND.VS` takes a point and the lookup is by name and
     signature (0x005aef20) -- so he goes back to `HERO_IDLE.VS`, which on
@@ -1036,8 +1037,22 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
         assert len(army) >= 20, out[-3000:]
         far = [a for a in army if a[1] * a[1] + a[2] * a[2] > 300 * 300]
         assert not far, (turn, far)
-    # The march is over, and the army stands where it was stood.
-    assert all(order == "stand_position" for *_, order in army), army
+    # The march is over, and the army is told to stand. Not on the turn the
+    # hero arrives: his `HasPath` (0x0052fe40) stays true while any member's
+    # route still follows the march, so `HERO_MOVE.VS` hands out
+    # `stand_position` once the last of them has come in, and until then the
+    # ones already there are idle. The first report with nobody still
+    # marching is where that has happened.
+    reports = sorted({int(t) for t in re.findall(r"^\s+army turn (\d+): ", out, re.MULTILINE)
+                      if int(t) > arrived[0]})
+    settled = None
+    for turn in reports:
+        orders = re.findall(rf"^\s+army turn {turn}: \d+ at .* order (\S+)$", out, re.MULTILINE)
+        if orders and "form_move" not in orders:
+            settled = orders
+            break
+    assert settled, out[-3000:]
+    assert all(order == "stand_position" for order in settled), settled
 
 
 # ---------------------------------------------------------------------------
