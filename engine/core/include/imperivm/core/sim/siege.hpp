@@ -23,13 +23,17 @@
 ///    candidate when catapults are wanted and it is not a hero, cannot hurt
 ///    the target (`Unit::CanAttack`, below), is an heir of `Military` and does
 ///    not carry the `freedom` special. Everyone else is an attacker, and the
-///    attackers that *can* hurt the target have their class `damage` summed.
+///    attackers that *can* hurt the target have their own damage summed --
+///    `[obj+0xdc]` (0x00438664), what `Unit::AddBonus` raises, not the
+///    class's. A member whose handle does not resolve is in neither list.
 /// 3. **Reconsiders, from that sum.** A target that is not the central
 ///    building keeps its catapults only if five times the sum is below its
 ///    health. The central building runs a five-round skirmish against the
 ///    garrison's total health instead: each round the sum splits between
-///    building and garrison in proportion to the building's remaining health,
-///    and if the garrison is gone within five rounds nothing is built.
+///    building and garrison in proportion to the building's remaining health
+///    over **its own** maximum (`[obj+0xc8]`, 0x00438798; a zero maximum
+///    divides by zero there and sends everything to the garrison here), and
+///    if the garrison is gone within five rounds nothing is built.
 /// 4. **Picks the engine.** The crews vote on a race by majority (lowest race
 ///    id on a tie, the map is walked in key order) and the race picks the
 ///    catapult class through the same eight-way table `PlaceCatapult` uses.
@@ -39,7 +43,9 @@
 ///    this target gets the nearest unassigned crews up to its holder's cap,
 ///    and its position becomes the plan's rally point.
 /// 6. **Places new ones** while crews remain and the cap allows: the site is
-///    the nearest free siege site to the *first unit's* position (the site
+///    the nearest free siege site to the *first unit's* `posRH` (0x00438960;
+///    a garrisoned first unit asks from its town's central building, and the
+///    stand-back below asks from each attacker's `posRH` too; the site
 ///    rule is below), the engine is placed exactly as `PlaceCatapult` places
 ///    it, aimed at the target, and crewed to its holder's cap.
 /// 7. **Issues the orders.** Each crew leaves its hero, drops its pending
@@ -48,7 +54,10 @@
 ///    siege state and their old squads' AI orders (0x00447330,
 ///    `regroup_into_fresh_squads`) -- so a crew's `OrderDest` is still the
 ///    besieged node and `GS_SIEGE.VS` does not send it there again. Crews
-///    that found no engine rejoin the attackers.
+///    that found no engine rejoin the attackers. 0x00436490 regroups each
+///    engine's crews as it reaches the next engine's; the regrouping gives
+///    every unit a squad of its own, so one call over all the crews in the
+///    same order makes the same squads.
 /// 8. **Sends the attackers.** With fewer than ten units crewing (the new
 ///    crews plus whoever was already inside), and either no catapults wanted
 ///    or a majority of melee units among the attackers, everyone attacks --

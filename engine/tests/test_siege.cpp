@@ -446,6 +446,9 @@ TEST(siege_skips_the_engines_when_the_attackers_can_bring_the_target_down) {
   // the next four rounds, 127 in all -- so two defenders at 200 are still
   // standing after the fifth and the engines stay wanted.
   SiegeBench e;
+  // The hall is a combatant, and its own maximum (`[obj+0xc8]`, which the
+  // skirmish divides by) is the combat profile's: the class graph it reads.
+  e.combat.set_class_graph(&e.graph);
   const SiegeBench::Town sound = e.town("Outpost", Point{4000, 4000}, 2, false, SettlementKind::outpost);
   REQUIRE(e.economy.garrison_add(sound.id, e.unit("GSwordsman", Point{4000, 4000}, 2)));
   REQUIRE(e.economy.garrison_add(sound.id, e.unit("GSwordsman", Point{4000, 4000}, 2)));
@@ -612,6 +615,82 @@ TEST(siege_caps_britons_at_one_engine) {
   const std::vector<ObjectId> engines = b.catapults();
   REQUIRE(engines.size() == 1);
   CHECK(b.world.find(engines[0])->class_index == b.graph.find("BCatapult"));
+}
+
+/// **The planner reads the objects' own numbers**: the attackers' damage is
+/// `[obj+0xdc]` (0x00438664), what `Unit::AddBonus` raises, and the central
+/// building's skirmish divides by its own `[obj+0xc8]` (0x00438798). Both used
+/// to be the class's.
+TEST(siege_weighs_the_objects_own_damage_and_maximum) {
+  // Two longbows at 200 against a gate at 2,001: 5 x 400 is below it, so
+  // engines are wanted -- until one bow carries +1 attack, and 5 x 401 is not.
+  for (const std::int32_t bonus : {0, 1}) {
+    SiegeBench b;
+    b.combat.set_class_graph(&b.graph);
+    const SiegeBench::Town town = b.town("TownHall", Point{4400, 5000}, 2, true);
+    REQUIRE(town.gate != kNoObject);
+    b.world.set_health(town.gate, 2001);
+    std::vector<ObjectId> units = b.army("GSwordsman", 3, Point{5600, 4400});
+    const std::vector<ObjectId> bows = b.army("GLongbow", 2, Point{5700, 4400});
+    units.insert(units.end(), bows.begin(), bows.end());
+    (void)b.combat.reconcile(b.world);
+    if (bonus != 0) {
+      StatBonus delta;
+      delta.attack = bonus;
+      REQUIRE(b.combat.add_bonus(bows[0], delta));
+    }
+    const SiegeReport report = b.run(units, town.gate, 1, 7);
+    CHECK(report.wanted_catapults == (bonus == 0));
+  }
+
+  // A sound hall against one longbow, two defenders at 100 each: with the
+  // class's 3,000 as its maximum the garrison takes 127 in five rounds and
+  // the engines stay wanted. Raise the hall's own maximum to 6,000 and the
+  // first round already splits the 200 evenly -- 100, then 104 -- so the
+  // garrison is gone in the second and nothing is built.
+  for (const std::int32_t extra : {0, 3000}) {
+    SiegeBench e;
+    // The objects' own numbers are the combat profile's, which reads the
+    // class graph the session hands it; the bench does not by default.
+    e.combat.set_class_graph(&e.graph);
+    const SiegeBench::Town sound =
+        e.town("Outpost", Point{4000, 4000}, 2, false, SettlementKind::outpost);
+    REQUIRE(e.economy.garrison_add(sound.id, e.unit("GSwordsman", Point{4000, 4000}, 2)));
+    REQUIRE(e.economy.garrison_add(sound.id, e.unit("GSwordsman", Point{4000, 4000}, 2)));
+    if (extra != 0) {
+      StatBonus delta;
+      delta.max_health = extra;
+      REQUIRE(e.combat.add_bonus(sound.hall, delta));
+    }
+    CHECK(object_max_health(e.world, *e.world.find(sound.hall)) == 3000 + extra);
+    std::vector<ObjectId> again = e.army("GSwordsman", 15, Point{4700, 4000});
+    again.push_back(e.unit("GLongbow", Point{4900, 4000}));
+    const SiegeReport held = e.run(again, sound.hall, 2, 7);
+    CHECK(held.wanted_catapults == (extra == 0));
+  }
+}
+
+/// **The site is the one nearest the first unit's `posRH`** (0x00438960), so
+/// a first unit garrisoned in its own town asks from that town's hall. Its
+/// holder record stands at (0, 0), which is what the site query used to be
+/// handed: the wall's far end, site 8, is the one nearer the map's corner.
+TEST(siege_asks_for_a_site_from_the_first_units_pos_rh) {
+  SiegeBench b;
+  const SiegeBench::Town town = b.town("TownHall", Point{4400, 5000}, 2, true);
+  REQUIRE(town.gate != kNoObject);
+  const SiegeBench::Town home = b.town("TownHall", Point{5700, 4600}, 1, false);
+  REQUIRE(home.id != kNoSettlement);
+  const ObjectId inside = b.unit("GSwordsman", Point{5700, 4600});
+  REQUIRE(garrison_enter(b.world, home.id, inside, true));
+  REQUIRE(b.world.find(inside)->state.is_held());
+
+  std::vector<ObjectId> units{inside};
+  const std::vector<ObjectId> rest = b.army("GSwordsman", 14, Point{5300, 4380});
+  units.insert(units.end(), rest.begin(), rest.end());
+  CHECK(b.run(units, town.gate, 1, 7).placed == 1);
+  const std::vector<ObjectId> engines = b.catapults();
+  REQUIRE(engines.size() == 1);
+  CHECK(b.world.find(engines[0])->state.position == (Point{5528, 4493}));
 }
 
 /// **`Squad::Siege` writes the state, refuses `SF_NOAI`, and its crews leave
