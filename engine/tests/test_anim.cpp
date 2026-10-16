@@ -31,7 +31,7 @@ using namespace imperivm::core::sim;
 namespace {
 
 /// Three animations: slot 13 (264 units), slot 19 (300, action moment 100) and
-/// slot 1, whose sheet is `pingpong`. Slot 5 is deliberately absent, because a
+/// slot 1, whose sheet is `pingpong` and which declares 150 over a 200 strip. Slot 5 is deliberately absent, because a
 /// missing slot is an ordinary case and not an error.
 constexpr std::string_view kEntityXml = R"(<?xml version="1.0"?>
 <entity name="fixture" type="vx/unit" variations="8">
@@ -68,7 +68,7 @@ constexpr std::string_view kEntityXml = R"(<?xml version="1.0"?>
       <frame idx="4" duration="100"/>
       <frame idx="5" duration="0"/>
     </anim>
-    <anim idx="1" name="fire" startstate="1" endstate="1" frames="6" duration="0"
+    <anim idx="1" name="fire" startstate="1" endstate="1" frames="6" duration="150"
           default_duration="0" action_time="0" step="0">
       <replace layer="1" image="3"/>
       <frame idx="1" duration="0"/>
@@ -257,12 +257,12 @@ TEST(anim_the_flying_play_anim_numbers_its_slots_one_lower) {
   AnimBench b;
   const ObjectId id = b.spawn();
 
-  // 0 here is slot 1, which the fixture declares: four frames of 50.
+  // 0 here is slot 1, which the fixture declares: `duration="150"`.
   const script::HostOutcome out =
       b.call("PlayAnim", 3, {AnimBench::obj(id), script::Value::integer(0),
                              AnimBench::point(100, 100), script::Value::integer(-1)});
   CHECK(out.status == script::HostStatus::suspend);
-  CHECK(out.suspend_for == 200);
+  CHECK(out.suspend_for == 150);
   CHECK(b.world.find(id)->object->anim.anim_slot == 1);
 
   // 18 here is slot 19, which it also declares.
@@ -288,6 +288,50 @@ TEST(anim_the_flying_play_anim_numbers_its_slots_one_lower) {
                                AnimBench::point(100, 100), script::Value::integer(z)});
     CHECK(ok.status == script::HostStatus::suspend);
   }
+}
+
+/// `Flying::PlayAnim` checks its slot before it writes anything, and clamps its
+/// point into the map.
+///
+/// 0x0051bb10 range-checks Z, then the slot (negative, past the entity's last,
+/// or naming nothing prints and returns without suspending), and only then
+/// clamps the point into the map rectangle (0x00422b70) and writes the flight
+/// state. A bad slot used to fly the bird to the point and suspend.
+TEST(anim_flying_play_anim_refuses_a_bad_slot_before_it_moves_and_clamps_its_point) {
+  AnimBench b;
+  b.movement.set_grid(ObstructionGrid(64, 64));
+  const ObjectId id = b.spawn();
+  const Point before = b.world.resolve_position(id);
+
+  for (const std::int32_t bad : {-1, 4, 200}) {
+    const script::HostOutcome out =
+        b.call("PlayAnim", 3, {AnimBench::obj(id), script::Value::integer(bad),
+                               AnimBench::point(900, 900), script::Value::integer(-1)});
+    CHECK(out.status == script::HostStatus::ok);
+    CHECK(b.world.resolve_position(id) == before);
+  }
+
+  const script::HostOutcome edge =
+      b.call("PlayAnim", 3, {AnimBench::obj(id), script::Value::integer(0),
+                             AnimBench::point(-500, 300), script::Value::integer(-1)});
+  CHECK(edge.status == script::HostStatus::suspend);
+  CHECK((b.world.resolve_position(id) == Point{0, 300}));
+}
+
+/// An object off the map -- inside a holder, or taken away -- plays nothing.
+///
+/// `StartAnimation` (0x0053e6c0) returns before it starts anything when the
+/// object's own position is the invalid point.
+TEST(anim_an_object_off_the_map_plays_nothing) {
+  AnimBench b;
+  const ObjectId id = b.spawn();
+  (void)b.world.set_position(id, kHeldPosition);
+  CHECK(b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(19),
+                                AnimBench::point(500, 500)})
+            .status == script::HostStatus::ok);
+  CHECK(b.world.find(id)->object->anim.anim_slot != 19);
+  CHECK(!b.world.find(id)->animating);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 0);
 }
 
 /// `TimeToAnimFinish` counts down, and answers **0** in every degenerate case.
@@ -410,13 +454,46 @@ TEST(anim_get_anim_and_the_two_duration_readers) {
   // `GetAnimDuration` takes one less for the same animation.
   CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(12)}) == 264);
   CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(18)}) == 300);
-  CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(0)}) == 200);
+  CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(0)}) == 150);
   // Which is to say the two disagree about every number.
   CHECK(b.number("GetAnimTime", 1, {AnimBench::obj(id), script::Value::integer(12)}) == 0);
 
   // The original dereferences null here rather than checking; this answers 0.
   CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(9999), script::Value::integer(0)}) == 0);
   CHECK(b.number("GetAnim", 0, {AnimBench::obj(9999)}) == 0);
+}
+
+/// Every length a script sees is the entity's declared `duration`, not the
+/// frame strip's sum.
+///
+/// The loader stores `<anim duration>` at `[anim+0x4c]` and the whole family
+/// reads that one field: `GetAnimTime` (0x005a9c50), `GetAnimDuration`
+/// (0x0051c180), `Flying::PlayAnim`'s suspension (0x0051bcba), and the end
+/// `TimeToAnimFinish` counts down to, which `StartAnimation` (0x0053e6c0)
+/// sets at the start plus it. The two disagree in 127 shipped animations --
+/// the barrack horses' idle is 1000 over a 1200 strip. Slot 1 here declares
+/// 150 over four frames of 50.
+TEST(anim_scripts_see_the_declared_duration_not_the_frame_strip) {
+  AnimBench b;
+  const ObjectId id = b.spawn();
+  CHECK(b.number("GetAnimTime", 1, {AnimBench::obj(id), script::Value::integer(1)}) == 150);
+  CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(0)}) == 150);
+
+  const script::HostOutcome play =
+      b.call("PlayAnim", 2, {AnimBench::obj(id), script::Value::integer(1),
+                             AnimBench::point(100, 100)});
+  CHECK(play.status == script::HostStatus::suspend);
+  CHECK(play.suspend_for == 150);
+
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(1),
+                          AnimBench::point(100, 100)});
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 150);
+  b.world.advance_turns(1);
+  // The strip is still running (100 of its 200), the declared length nearly over.
+  CHECK(b.world.find(id)->animating);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 50);
+  b.world.advance_turns(1);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 0);
 }
 
 /// `SetState` is two entry points wearing one name, and the squad half is the
@@ -448,6 +525,14 @@ TEST(anim_set_state_dispatches_on_the_handle_type) {
   CHECK(b.world.find(id)->object->anim.state_idx == 1);
   CHECK(b.world.find(id)->object->anim.anim_slot == 13);
 
+  // Resting in it already, `CObj::SetState` returns before it writes
+  // anything (0x0053e860): the pose's loop runs on.
+  b.world.advance_turns(1);
+  const std::int32_t looped = b.world.find(id)->object->anim.elapsed_ms;
+  REQUIRE(looped != 0);
+  b.call("SetState", 1, {AnimBench::obj(id), script::Value::integer(1)});
+  CHECK(b.world.find(id)->object->anim.elapsed_ms == looped);
+
   // The squad half, on a squad handle rather than an object one.
   const ObjectId leader = b.spawn();
   const SquadKey key = b.heroes.squads().create(1, leader);
@@ -477,6 +562,54 @@ TEST(anim_set_state_dispatches_on_the_handle_type) {
   CHECK(b.call("SetState", 1, {script::Value::object(kTypeSquad, 0x7FFF),
                                script::Value::integer(1)})
             .status == script::HostStatus::ok);
+}
+
+/// A squad's `StateTime` is the millisecond the script set it on, which is what
+/// `GetTime()` answers -- not the turn's end the world already stands at.
+///
+/// 0x004211c0 stamps the game's running time (`[game+0x1258]`), the clock the
+/// scripts' wheel moves one millisecond at a time; `SQUADMONITOR.VS` and
+/// `EVALRECRUIT.VS` subtract the stamp from `GetTime()`.
+TEST(anim_squad_set_state_stamps_the_scripts_millisecond) {
+  AnimBench b;
+  script::Scheduler clock;
+  b.scheduler = &clock;
+  const ObjectId leader = b.spawn();
+  const SquadKey key = b.heroes.squads().create(1, leader);
+  REQUIRE(key.valid());
+  b.world.advance_turns(8);
+  REQUIRE(b.world.time() == 800);
+  clock.set_now(730);
+  b.call("SetState", 1, {pack_squad(key), script::Value::integer(7)});
+  const Squad* squad = b.heroes.squads().find(key);
+  REQUIRE(squad != nullptr);
+  CHECK(squad->state == 7);
+  CHECK(squad->state_time == 730);
+}
+
+/// A state's own loop is the pose the object rests in, not a playing animation,
+/// and neither is one that has run to its end.
+///
+/// The original's playing slot `[obj+0x50]` is set by `StartAnimation`
+/// (0x0053e6c0) and cleared to -1 by entering a state (0x0053e860) and by the
+/// animation's end (0x0053f6a0); `GetAnim` (0x005a9fd0) answers 0 for -1, and
+/// `TimeToAnimFinish` (0x005a9f20) and `TimeToActionMoment` answer 0.
+TEST(anim_a_states_loop_and_a_finished_animation_are_not_playing) {
+  AnimBench b;
+  const ObjectId id = b.spawn();
+  REQUIRE(b.world.enter_state(id, 1));
+  REQUIRE(b.world.find(id)->object->anim.anim_slot == 13);
+  REQUIRE(b.world.find(id)->animating);
+  b.world.advance_turns(1);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 0);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 0);
+
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(13),
+                          AnimBench::point(100, 100)});
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 13);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 264);
+  b.world.advance_turns(3);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 0);
 }
 
 /// `StartDelayedAnim(slot, point, delay)` -- one site, and its delay is `-1`.

@@ -14,33 +14,33 @@
 /// This is the distinction the whole family turns on, and it would be missed.
 /// A unit carries a **second**, separate field -- `[unit+0x18c]`, which
 /// `Unit::GetShipToBoard` reads and `ObjectState::ship_to_board` is -- and it
-/// is *not* a membership flag. `Ship::NotifyBoardUnit` writes it and **nothing
-/// ever clears it**: not the cancel (`0x005c75c0` erases from the deque and
-/// touches no unit), not a successful board, not the ship-wide cancel. So it
-/// says *which ship last asked for this unit*, and it outlives the asking.
+/// is *not* a membership flag. `Ship::NotifyBoardUnit` writes it, and only one
+/// thing clears it: the cancel (`0x005c75c0`), which writes the invalid handle
+/// when it takes a unit that is not yet aboard off the list -- whatever ship
+/// the field then named. A successful board leaves it, and so does the
+/// ship-wide cancel. So it says *which ship last asked for this unit*, and it
+/// outlives a boarding that succeeded.
 ///
-/// The two shipped `..._ONFINISH` scripts are written for exactly that:
+/// The two shipped `..._ONFINISH` scripts read it before they cancel:
 ///
 ///     if( .GetShipToBoard.IsValid ) .GetShipToBoard.NotifyBoardUnitCancel( this );
 ///
-/// -- a cancelled boarding command finds its ship again through a field that is
-/// still set precisely because nothing cleared it. Deriving the ship's list
-/// from that field instead of storing it would therefore be wrong twice: a
-/// cancelled unit would still look like a member, and a unit that two ships had
-/// asked for could only name one of them. The original lets it be in both
-/// deques at once, and `BoardingTable` below does too.
+/// Deriving the ship's list from that field instead of storing it would be
+/// wrong twice: a boarded unit would still look like a member, and a unit that
+/// two ships had asked for could only name one of them. The original lets it
+/// be in both deques at once, and `BoardingTable` below does too.
 ///
 /// ## What each entry point comes to
 ///
 /// | entry point | `gbr.exe` | |
 /// |---|---|---|
 /// | `Ship::NotifyBoardUnit` | 0x005c7fa0 | append unless already listed or already aboard; start the ship's `boardunit` command; stamp the unit's `ship_to_board` |
-/// | `Ship::NotifyBoardUnitCancel` | 0x005c7d00 | erase from the list; the unit's field is left alone |
-/// | `Ship::NotifyShipBoardingCancel` | 0x005c7d70 | kill each listed unit's boarding command, then empty the list |
+/// | `Ship::NotifyBoardUnitCancel` | 0x005c7d00 | unless already aboard: erase from the list and clear the unit's field |
+/// | `Ship::NotifyShipBoardingCancel` | 0x005c7d70 | kill each listed unit's boarding command, split the army of each hero aboard, then empty the list |
 /// | `Ship::AreUnitsToBoard` | 0x005c7920 | empty the list when the ship is full, prune the dead, answer "not empty" |
 /// | `Ship::NumUnitsToBoard` | 0x005c6f60 | the size, with **no** prune |
 /// | `Ship::BestCandidateToBoard` | 0x005c7a20 | prune the dead, then the nearest |
-/// | `Ship::BoardUnit` | 0x005c7c00 | within 150, and not already aboard: into the holder, off the list |
+/// | `Ship::BoardUnit` | 0x005c7c00 | within 150, not already aboard, and the ship not full: into the holder, off the list |
 /// | `Unit::GetShipToBoard` | 0x005d80d0 | the stamped field, whatever it now names |
 /// | `Hero::CancelArmyBoard` | 0x0052fec0 | drop the followers that are on the wrong side of the gangplank |
 /// | `Ship::UnboardAllUnits` | 0x005c85c0 | every passenger onto a random free land point nearby, until the points run out |
@@ -58,12 +58,11 @@
 /// "at capacity"
 ///
 /// `AreUnitsToBoard` empties the list when the holder's occupancy **equals**
-/// its capacity (`[holder+0x14] == [holder+0x10]`). Nothing in the original
-/// stops a ship going past: `Ship::BoardUnit` does not check capacity at all,
-/// and `UNIT_BOARD_COMMON.VS` tests `ship.UnitsCount == ship.UnitsMax` only
-/// *after* it has already called `BoardUnit`. So a ship that is over capacity
-/// never clears its list, and `==` is kept here rather than the `>=` that would
-/// read as an improvement.
+/// its capacity (`[holder+0x14] == [holder+0x10]`). `Ship::BoardUnit` stops at
+/// the capacity -- its holder entry is the unforced one (0x00532160) -- but a
+/// forced entry does not: `SpawnGroupInHolder` enters each copy with the force
+/// flag, past the cap. A ship that is over capacity never clears its list, and
+/// `==` is kept here rather than the `>=` that would read as an improvement.
 ///
 /// ## The re-entrancy latch is not reproduced, and can be shown not to matter
 ///
@@ -73,7 +72,10 @@
 /// `..._ONFINISH` scripts its own `KillCommand`s launch call back into it. Its
 /// two operations are the only reader and the only writer of the field, the
 /// walk ends by emptying the list unconditionally, and this engine copies the
-/// row before it kills anything -- so there is no arrangement in which the
+/// row before it kills anything. Here an `onfinish` runs as a script after the
+/// call has returned and the list is empty, so its cancel finds nothing and --
+/// as under the latch -- clears no unit's field; and the heroes the walk itself
+/// asks are aboard, which never cancel. So there is no arrangement in which the
 /// latch changes the state anything can observe afterwards. It is left out, and
 /// this paragraph is why.
 ///
@@ -224,10 +226,10 @@ std::size_t prune_boarding_list(World& world, ObjectId ship);
 // each member that is aboard *this* ship and skipping the rest; a list that
 // names units aboard another ship or ashore leaves them where they are.
 //
-// ## Three things 0x005d3f20 does that are not reproduced
+// ## What 0x005d3f20 does that is not reproduced
 //
 // The routine that actually moves the unit has three clauses around its
-// kernel, and none of them can fire for a ship in the shipped data:
+// kernel that cannot fire for a ship in the shipped data:
 //
 //   * a **rate limit** -- it refuses while `[owner+0x9c] + [owner+0xa0] > now`
 //     and stamps `[owner+0x9c] = now` after a drop, where the owner is the
@@ -246,6 +248,13 @@ std::size_t prune_boarding_list(World& world, ObjectId ship);
 // Each is left out on the strength of that argument and no other; the
 // condition that would lift any of them is a ship that sets the field.
 //
+// Two more clauses can fire, and are left out for want of the state they
+// write: a unit that leaves with no food (`[unit+0x16c]` zero) has a food
+// search scheduled by the feeder (0x00518b80: nothing for a ship, otherwise a
+// delay of `FoodSearchFreq` plus a draw from the world generator), which
+// `FeederSystem` schedules on its own terms; and the unit's AI record gets the
+// clock at `+0x5f8`, which no reader here was traced to.
+//
 // ## `FindPointToStay` is a hundred throws of two dice
 //
 // 0x005c7020 tries up to **100** candidates. Each is the ship's position plus
@@ -257,16 +266,16 @@ std::size_t prune_boarding_list(World& world, ObjectId ship);
 //      is the `[area+0x10]` word the original compares; a world with no
 //      partition constrains nothing, as the original does with no area table);
 //   2. its passability cell is free; and
-//   3. it is clear of other **standing, living units** -- 0x0040a990's query
-//      over a square of half-side `reach` around the point, where `reach` is
-//      the ship's own class `radius` plus, for a `water_unit`, the `radius` of
-//      the class named `ShipBattle`, and 40 otherwise. A neighbour blocks when
-//      its distance to the point is under `reach` plus its own class `radius`.
-//      The query's filter (0x004094d0) admits a unit that is alive and has no
-//      path, and otherwise only an object with bit 18 of its `SyncFlags` word
-//      set -- a runtime bit this engine does not carry -- so buildings and
-//      walking units do not count here. The passability test is what keeps a
-//      ship off a building.
+//   3. it is a **free spot** for the ship (0x0040a990, handed the ship's class
+//      radius): `MovementSystem::spot_free`, which reads it. The query finds
+//      what stands within the ship's radius plus, for a `water_unit`, the
+//      `radius` of the class named `ShipBattle`, and 40 otherwise; of those a
+//      standing, living unit blocks when it is nearer than **the two radii
+//      summed**, and so does a route lock that is not the ship's own (the
+//      filter 0x004094d0's bit-18 arm). Buildings and walking units do not
+//      count; the passability test is what keeps a ship off a building. This
+//      used to measure from the query's reach rather than the ship's radius,
+//      and to ignore the locks.
 //
 // After a hundred misses it answers the ship's own position, having consumed
 // two hundred draws. `SHIP_IDLE.VS` then `Goto`s there, which is a no-op.
@@ -298,7 +307,8 @@ std::size_t unboard_all(World& world, ObjectId ship);
 Point take_random_point(World& world, std::vector<Point>& points);
 
 /// 0x0040a990: whether `self` could stand at `where` for the purposes of
-/// `FindPointToStay`. See the header section for the reach and the filter.
+/// `FindPointToStay` -- `MovementSystem::spot_free` for a body of `self`'s
+/// class radius. True in a world with no movement system.
 [[nodiscard]] bool stand_point_free(World& world, const WorldObject& self, Point where);
 
 /// The half-side of the drop-point square, and the lattice's edge in cells.

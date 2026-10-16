@@ -149,6 +149,18 @@ bool FeederSystem::set_food(ObjectId unit, std::int32_t value) {
   return true;
 }
 
+bool FeederSystem::write_food(ObjectId unit, std::int32_t value) {
+  FeedingUnit* link = find(unit);
+  if (link == nullptr) return false;
+  link->food = value;
+  if (link->food > 0) {
+    clear_hungry(unit);
+  } else {
+    mark_hungry(unit);
+  }
+  return true;
+}
+
 bool FeederSystem::set_feeding(ObjectId unit, bool feeding) {
   FeedingUnit* link = find(unit);
   if (link == nullptr) return false;
@@ -441,51 +453,102 @@ struct FeederHostDef {
   HostFn fn;
 };
 
-/// Resolve argument 0 as a unit in the chain, or null.
-///
-/// A null `CallContext::user` gives a null world here and therefore a null
-/// link, which every entry point below turns into `HostOutcome::failed`. That
-/// is the contract, not a defensive check.
-[[nodiscard]] FeedingUnit* receiver(CallContext& ctx) noexcept {
-  World* world = world_of(ctx);
-  if (world == nullptr || ctx.count() == 0) return nullptr;
-  const Value& value = ctx.arg(0);
-  if (!value.is_object()) return nullptr;
-  const ObjectRef ref = value.as_object();
-  if (ref.type != kTypeObj) return nullptr;
-  FeederSystem* feeder = feeder_of(*world);
-  return feeder == nullptr ? nullptr : feeder->find(ref.id);
+/// The world's feeder, or null. A null `CallContext::user` gives a null world
+/// here, which every entry point below turns into `HostOutcome::failed`: this
+/// engine's missing wiring, not the script's.
+[[nodiscard]] FeederSystem* host_feeder(CallContext& ctx, World*& world) noexcept {
+  world = world_of(ctx);
+  if (world == nullptr) return nullptr;
+  return feeder_of(*world);
 }
 
-[[nodiscard]] HostOutcome no_unit() {
-  return HostOutcome::failed("receiver does not resolve to a feeding unit");
+[[nodiscard]] HostOutcome no_feeder() {
+  return HostOutcome::failed("no feeder on the world");
+}
+
+/// The unit's chain link, enrolling a unit the reconcile has not reached yet;
+/// null for an object that is no living unit.
+[[nodiscard]] FeedingUnit* link_of(World& world, FeederSystem& feeder, ObjectId id) {
+  (void)feeder.enrol_if_eligible(world, id);
+  return feeder.find(id);
+}
+
+/// `SetFeeding`'s argument is a **byte** (0x005d7ef0 and 0x00579db0 read the
+/// top byte of the stack), so only the low eight bits decide.
+[[nodiscard]] bool feeding_arg(CallContext& ctx) noexcept {
+  if (ctx.count() < 2 || !ctx.arg(1).is_integer()) return true;
+  return (ctx.arg(1).as_integer() & 0xff) != 0;
 }
 
 constexpr FeederHostDef kFeederHosts[] = {
     // 11 call sites, all `.AsUnit.maxfood`, and `UNIT.SC.XML` and `HERO.SC.XML`
     // both display `.AsUnit.food + '/' + .AsUnit.maxfood` from it.
+    //
+    // 0x005d8cb0: a handle naming nothing prints *"The function
+    // 'scUnitMaxFood' called for an uninitialized or invalid object."* and
+    // answers 0; otherwise it answers the class's `max_food` (`[[obj+0x3c] +
+    // 0x2b4]`) -- a class field, so a unit the chain has dropped (a dead one)
+    // still answers it. Here: the chain link's, which is the class's read at
+    // enrolment, or the class's read now.
     {CallKind::member, "maxfood", 0,
      +[](CallContext& ctx) -> HostOutcome {
-       FeedingUnit* link = receiver(ctx);
-       if (link == nullptr) return no_unit();
-       return HostOutcome::ok_with(Value::integer(link->max_food));
+       World* world = nullptr;
+       FeederSystem* feeder = host_feeder(ctx, world);
+       if (feeder == nullptr) return no_feeder();
+       if (ctx.count() == 0 || !ctx.arg(0).is_object()) return HostOutcome::ok_with(Value::integer(0));
+       const ObjectId id = ctx.arg(0).as_object().id;
+       if (ctx.arg(0).as_object().type != kTypeObj || world->find(id) == nullptr) {
+         return HostOutcome::ok_with(Value::integer(0));
+       }
+       if (const FeedingUnit* link = link_of(*world, *feeder, id); link != nullptr) {
+         return HostOutcome::ok_with(Value::integer(link->max_food));
+       }
+       return HostOutcome::ok_with(Value::integer(
+           to_int(class_property(*world, id, "max_food"), feeder->rules().default_max_food)));
      }},
     // 14 call sites across five behaviours: `SETTLEMENT_BEHAVIOR_AMBIENT.VS`
     // switches the hens and the ambient peasants off, `TTENT_BEHAVIOR.VS`
     // switches its commanded Teutons back on, `OUTPOST_BEHAVIOR.VS` and
     // `FISH_IDLE.VS` switch off. Every call passes a literal boolean.
+    //
+    // **Two bodies under one name**, and the handle type picks:
+    //
+    //   * `Unit::SetFeeding` (0x005d7ef0): a handle naming nothing prints and
+    //     does nothing; otherwise bit 0x20000 of the unit's flags word
+    //     `[obj+0x194]` is set or cleared, and nothing else is checked -- a
+    //     dead unit takes the write, which nothing then reads;
+    //   * `Query::SetFeeding` (0x00579db0): a handle naming nothing prints and
+    //     does nothing; an empty result prints *"...was called for an empty
+    //     query"*; otherwise every member that is a unit (the `CVXUnit` cast)
+    //     and not dead (`vtbl+0x50`) gets the same write, and a temporary
+    //     handle is released (0x00571680). It walks the query's last result
+    //     (`vtbl+0x20`, no refresh); this engine evaluates it now, which is
+    //     the same set whenever the query was read on the same instant.
+    //
+    // The bit is `FeedingUnit::feeds` here. A receiver that is no living unit
+    // in the chain was a trap; it is the original's silent no-op now.
     {CallKind::member, "SetFeeding", 1,
      +[](CallContext& ctx) -> HostOutcome {
-       FeedingUnit* link = receiver(ctx);
-       if (link == nullptr) return no_unit();
-       // `Value::boolean` is `Value::integer(v ? 1 : 0)`, so a shipped
-       // `SetFeeding(false)` arrives as the integer zero.
-       bool feeding = true;
-       if (ctx.count() > 1) {
-         const Value& value = ctx.arg(1);
-         feeding = value.is_integer() ? value.as_integer() != 0 : true;
+       World* world = nullptr;
+       FeederSystem* feeder = host_feeder(ctx, world);
+       if (feeder == nullptr) return no_feeder();
+       if (ctx.count() == 0 || !ctx.arg(0).is_object()) return HostOutcome::ok_void();
+       const bool feeding = feeding_arg(ctx);
+       if (ctx.arg(0).as_object().type == kTypeQuery) {
+         for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+           const WorldObject* slot = world->find(id);
+           if (slot == nullptr || !slot->state.flags.is_unit || slot->state.health <= 0) continue;
+           if (FeedingUnit* link = link_of(*world, *feeder, id); link != nullptr) {
+             link->feeds = feeding;
+           }
+         }
+         return HostOutcome::ok_void();
        }
-       link->feeds = feeding;
+       if (ctx.arg(0).as_object().type != kTypeObj) return HostOutcome::ok_void();
+       if (FeedingUnit* link = link_of(*world, *feeder, ctx.arg(0).as_object().id);
+           link != nullptr) {
+         link->feeds = feeding;
+       }
        return HostOutcome::ok_void();
      }},
 };

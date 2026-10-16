@@ -52,6 +52,7 @@
 namespace imperivm::core::sim {
 
 class World;
+class PlayerTable;
 
 /// The balance constants, all of them from `DATA\CONST.INI` in `data.pak`.
 ///
@@ -322,19 +323,25 @@ class EconomySystem final : public System {
   /// the literal 100 and `GetConst("MinPopulation")`.
   bool set_population(SettlementId id, std::int32_t value);
   /// `AddToPopulation`, which is not capped in either direction -- see above.
+  ///
+  /// `gbr.exe` 0x005c2250: a receiver that does not resolve prints and does
+  /// nothing; otherwise one `add` to `settlement + 0x50`, so a negative delta
+  /// can take the population below zero. Every shipped site adds (1, 10, 59,
+  /// 99 or a conquest's carried population), so no shipped play reaches one.
   bool add_population(SettlementId id, std::int32_t delta);
   /// `AddToMaxPopulation`: raise (or lower) the ceiling itself.
   ///
   /// `gbr.exe` 0x005c2290 is one `add` to `settlement + 0x4c` and no clamp of
-  /// any kind. The four shipped sites all raise it -- `ONFINISH_RESEARCH.VS`'s
-  /// "Housing" by 20, and three campaign sequences -- and the zero floor here
-  /// is the same belt-and-braces guard `add_population` carries.
+  /// any kind, after the same print-and-return for a receiver that does not
+  /// resolve. The four shipped sites all raise it -- `ONFINISH_RESEARCH.VS`'s
+  /// "Housing" by 20, and three campaign sequences.
   bool add_max_population(SettlementId id, std::int32_t delta);
 
   // -- transport ---------------------------------------------------------
 
   /// Name the settlement this one ships its surplus to. `StartSupplyFood` /
-  /// `StopSupply` with `kNoSettlement`.
+  /// `StopSupply` with `kNoSettlement`. Any id is stored as given, the
+  /// settlement's own included (0x005ef380 tests nothing).
   bool set_supplied(SettlementId id, SettlementId target);
 
   /// `CreateMuleGold` / `CreateMuleFood`: take `amount` out of the warehouse
@@ -434,7 +441,21 @@ class EconomySystem final : public System {
 
   // -- sentries ----------------------------------------------------------
 
+  /// `AddMaxSentries(n)`, 0x005c2b30: one `add` to the ceiling at
+  /// `[set+0x104]`. No clamp, and a receiver that does not resolve is
+  /// ignored without a print.
   bool add_max_sentries(SettlementId id, std::int32_t count);
+  /// `AddSentries(n)`, 0x005c4ac0: one `add` to the roster at `[set+0xfc]`,
+  /// and the wall pool `[set+0xf4]` moved by the same `n` through its
+  /// upkeep-keeping setter (0x005c4930). **No clamp in either**: a negative
+  /// `n` takes both below zero, and that is what
+  /// `2_Great_Battles_Numantia` map 2's first sequence relies on --
+  /// `GetSettlement("Numantia").AddSentries(-12)` before the town hall's
+  /// `TOWNHALL_SENTRIES_CONTROL.VS` has added any, so the town starts twelve
+  /// sentries in debt and the control loop (`max - curr`, at most
+  /// `SentriesAddCount` a pass) takes that many more passes to man its walls.
+  /// Clamping at zero made the call do nothing at all. A receiver that does
+  /// not resolve is ignored without a print.
   bool add_sentries(SettlementId id, std::int32_t count);
 
   // -- burning -----------------------------------------------------------
@@ -520,7 +541,6 @@ class EconomySystem final : public System {
   void tick_loyalty(Settlement& s);
   void tick_loyalty_gain(World& world, Settlement& s);
   void tick_outpost_trade(World& world, Settlement& s);
-  void tick_loan(Settlement& s);
 
   EconomyRules rules_{};
   SettlementStore store_;
@@ -687,5 +707,16 @@ std::size_t register_economy_hosts(script::HostRegistry& registry);
 /// The number of entry points `register_economy_hosts` defines. Used by the
 /// tests to notice a silent regression in the table.
 [[nodiscard]] std::size_t economy_host_entry_count() noexcept;
+
+/// 0x0044e250: how 0-based player `a` sees player `b` -- 1 (`AI_OWN`), 2
+/// (`AI_ALLY`) or 4 (`AI_ENEMY`) from `a`'s row alone, 0 for an `a` outside
+/// the table or an invalid `b`. Shared by `NearestStronghold` and the region
+/// census (`sim/squad.cpp`).
+[[nodiscard]] std::int32_t ai_relation(const PlayerTable& players, std::int32_t a,
+                                       PlayerId b) noexcept;
+
+/// `[settlement+0xf8]`, the sentry strength the original caches on every
+/// write of the ready-wall count; see the definition.
+[[nodiscard]] std::int32_t sentry_strength(World& world, const Settlement& set);
 
 }  // namespace imperivm::core::sim

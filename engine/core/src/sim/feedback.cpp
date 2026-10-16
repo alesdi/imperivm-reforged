@@ -6,6 +6,8 @@
 #include <algorithm>
 
 #include "imperivm/core/sim/command.hpp"
+#include "imperivm/core/sim/env.hpp"
+#include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/player.hpp"
@@ -166,10 +168,26 @@ HostOutcome fn_rollover_desc_3(CallContext& ctx) {
 ///
 /// The shipped idiom saves the camera with `ViewPos()`, moves it here, and
 /// moves it back; both halves are this entry point.
+///
+/// 0x004c6cb0 does both -- the camera move and the lock flag at 0x00996ff8 --
+/// **only for a point inside the map** (`[0x009a721c]+0xb4..0xc0`, both
+/// corners inclusive). A point outside it changes nothing, the lock included.
 HostOutcome fn_view(CallContext& ctx) {
   ViewState* view = view_of(ctx);
   if (view == nullptr || ctx.count() < 1) return HostOutcome::ok_void();
   const Point where = unpack_point(ctx.arg(0));
+  if (World* world = world_of(ctx); world != nullptr) {
+    std::int32_t high = 0;
+    if (const MatchSystem* match = match_system_of(*world); match != nullptr) {
+      high = match->rules().map_size - 1;
+    }
+    if (high <= 0 && world->height().extent_x() > 0) {
+      high = static_cast<std::int32_t>(world->height().extent_x()) - 1;
+    }
+    if (high > 0 && (where.x < 0 || where.y < 0 || where.x > high || where.y > high)) {
+      return HostOutcome::ok_void();
+    }
+  }
   view->x = where.x;
   view->y = where.y;
   // The second argument is `bLock` in the executable's own signature. The
@@ -282,11 +300,18 @@ HostOutcome fn_user_notification(CallContext& ctx) {
 /// `5_Great_Battles_Britain:seq13.vs` calls it immediately before
 /// `ShowAnnouncement`.
 ///
-/// A core with no HUD has nothing to clear, and unlike `BlockUserInput` beside
-/// it there is no flag a script can read back -- `gbr.exe` registers no getter
-/// and no shipped script asks. So this stores nothing, for the same reason.
+/// That widget group is the one `pr` writes to: both bodies take the object at
+/// `[0x00996ff4]+0x44cc`, `pr` appending a line through 0x00619060 and `cls`
+/// blanking every line and zeroing the line count through 0x00618a10. So
+/// `cls` empties the `DebugSink`, the same seam `pr` writes to -- which is
+/// what `DEBUG_SELECTION.VS`'s `ClearDebug(); ...; cls();` relies on, and not
+/// `ClearDebug`'s job (see `sim/text.cpp`). It answers nothing and there is no
+/// flag a script can read back.
 HostOutcome fn_cls(CallContext& ctx) {
-  (void)ctx;
+  if (HostContext* context = host_context_of(ctx);
+      context != nullptr && context->debug != nullptr) {
+    context->debug->clear();
+  }
   return HostOutcome::ok_void();
 }
 
@@ -302,17 +327,37 @@ HostOutcome fn_set_input_block(CallContext& ctx) {
 /// and is released when that script ends; a control group outlives the sequence
 /// that set it, and keeping the handle would leave the group pointing at a
 /// released pool entry.
+///
+/// 0x006a6d00 refuses a player whose `p - 1` is outside 0..15 or a slot
+/// outside 0..9, changing nothing. Otherwise it rebuilds the group from the
+/// list and, **when the list is not empty**, ORs `1 << slot` into the settings
+/// key `/Player<p>/SelectionAssigned` (0x004e5940, `p` 1-based, no map
+/// prefix) -- the key `WasSelectionAssigned` reads (`sim/orders.cpp`). The
+/// group is refilled through the selection-add rules (0x005b9170: a live,
+/// owned script object; a higher selection tier replaces the group), which
+/// are not reproduced: the list is copied as it is.
 HostOutcome fn_set_shortcut_sel(CallContext& ctx) {
   World* world = world_of(ctx);
   ShortcutTable* shortcuts = shortcuts_of(ctx);
   if (world == nullptr || shortcuts == nullptr || ctx.count() < 3) {
     return HostOutcome::ok_void();
   }
-  const PlayerId player = ctx.arg(0).is_integer()
-                              ? player_from_script(ctx.arg(0).as_integer())
-                              : kNoPlayer;
-  const std::int32_t slot = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : -1;
-  shortcuts->assign(player, slot, objlist_pool_of(*world).items(objlist_of(ctx.arg(2))));
+  if (!ctx.arg(0).is_integer() || !ctx.arg(1).is_integer()) return HostOutcome::ok_void();
+  const std::int32_t number = ctx.arg(0).as_integer();
+  const std::int32_t slot = ctx.arg(1).as_integer();
+  if (number - 1 < 0 || number - 1 > 15 || slot < 0 || slot > 9) return HostOutcome::ok_void();
+  const PlayerId player = player_from_script(number);
+  const std::span<const ObjectId> items = objlist_pool_of(*world).items(objlist_of(ctx.arg(2)));
+  const bool any = !items.empty();
+  shortcuts->assign(player, slot, items);
+  if (any) {
+    if (EnvSystem* env = env_of(*world); env != nullptr) {
+      const std::string key = "/Player" + std::to_string(number) + "/SelectionAssigned";
+      const std::int32_t was = env->env().read_int(EnvScope::root(), key);
+      const std::int32_t now = was | (1 << slot);
+      if (now != was) env->env().write_int(EnvScope::root(), key, now);
+    }
+  }
   return HostOutcome::ok_void();
 }
 
@@ -345,8 +390,14 @@ HostOutcome fn_get_shortcut_sel(CallContext& ctx) {
 /// Registered `bool` and discarded at every site, so nothing in the corpus
 /// separates one answer from another. `false` is what a movie nothing played
 /// would say.
+///
+/// 0x004c7da0 plays the movie synchronously, the game paused, and answers
+/// whether it played (stored at 0x004c7ee8, read back at 0x004c7f51); the
+/// script does not suspend. **Whatever happens, it ends by unblocking the
+/// player's input** (0x004c7f35), so a sequence's `BlockUserInput(); ...
+/// PlayMovie(...)` leaves input free.
 HostOutcome fn_play_movie(CallContext& ctx) {
-  (void)ctx;
+  if (ViewState* view = view_of(ctx); view != nullptr) view->input_blocked = false;
   return HostOutcome::ok_with(Value::boolean(false));
 }
 

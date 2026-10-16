@@ -260,6 +260,12 @@ class FeederSystem final : public System {
   /// `Unit::SetFood`, clamped to `[0, max_food]`. Returns false for a unit that
   /// is not in the chain.
   bool set_food(ObjectId unit, std::int32_t value);
+  /// The script's `Unit::SetFood` (0x005d7cd0): `[unit+0x16c]` written
+  /// **unclamped** -- above `max_food` and below zero alike -- with the hungry
+  /// mark following the value as `set_food`'s does (the original's flag
+  /// `0x20000000`, set at 1 and above). Returns false for a unit that is not
+  /// in the chain.
+  bool write_food(ObjectId unit, std::int32_t value);
   /// `Unit::SetFeeding`.
   bool set_feeding(ObjectId unit, bool feeding);
   [[nodiscard]] bool feeding(ObjectId unit) const noexcept;

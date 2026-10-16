@@ -365,6 +365,14 @@ void install_deferred_erase(script::Scheduler& scheduler) noexcept;
 [[nodiscard]] std::int32_t class_int(const World& world, const WorldObject& slot,
                                      std::string_view key) noexcept;
 
+/// Take `id` out of the world as `Erase` does: the `ondie` hook, the
+/// detaches, its coroutines, deferred to the end of the step when it is the
+/// object whose script is running. Exported for the base death virtual
+/// (0x005b16f0) that `Obj::Damage` reaches on an object the combat system
+/// does not hold -- a `Mist`, a `CoverOfMercy` -- which zeroes health, fires
+/// `ondie` and marks the object deleted, the same steps.
+void erase_object(script::CallContext& ctx, World& world, ObjectId id);
+
 /// One object's own maximum health -- the `[obj+0xc8]` `.maxhealth` reads.
 ///
 /// Exported because `ObjList::ObjInjured` (0x00561090) compares health against

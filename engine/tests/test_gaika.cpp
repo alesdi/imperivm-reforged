@@ -916,6 +916,27 @@ TEST(gaika_entry_points_read_the_table_the_way_the_scripts_do) {
   CHECK(call(script::CallKind::free_function, "GetGAIKA",
              {script::Value::object(kTypeObj, w->anchor)})
             .value.as_integer() == 1);
+
+  // The forms `gbr.exe` registers beside those and no shipped script calls:
+  // `GetGAIKA(x, y)` (0x00421910), `LSA(pt)` / `LSA(x, y)` (0x00422630,
+  // 0x00422600, the node's area at a place) and `obj.LSA` (0x00425fd0, by the
+  // object's raw position).
+  const Point p = in_cell(9, 9);
+  CHECK(call(script::CallKind::free_function, "GetGAIKA",
+             {script::Value::integer(p.x), script::Value::integer(p.y)})
+            .value.as_integer() == 2);
+  const std::int32_t lsa2 = b.world.gaika().find(2)->lsa;
+  CHECK(call(script::CallKind::free_function, "LSA", {pack_point(p)}).value.as_integer() == lsa2);
+  CHECK(call(script::CallKind::free_function, "LSA",
+             {script::Value::integer(p.x), script::Value::integer(p.y)})
+            .value.as_integer() == lsa2);
+  CHECK(call(script::CallKind::member, "LSA", {script::Value::object(kTypeObj, w->anchor)})
+            .value.as_integer() == lsa);
+  // `rc.Center` (0x00697ba0) shares `Center/0` with the node: the midpoint,
+  // truncating toward zero.
+  CHECK(unpack_point(call(script::CallKind::member, "Center",
+                          {pack_rect(b.world, RectTable::Rect{-5, 10, 2, 21})})
+                         .value) == (Point{-1, 15}));
 }
 
 /// `g.GetDistToPlayers(player, &own, &ally, &enemy)` -- the three nearest town
@@ -1584,6 +1605,25 @@ TEST(best_target_in_gaika_applies_the_squad_tests_one_at_a_time) {
   REQUIRE(b.world.remove_from_holder(enemy, in_cell(2, 3)));
   CHECK(best_in_gaika(b, caster) == enemy);
 
+  // **A failing member ends that squad's offer** -- 0x004282c0 returns there
+  // rather than skipping -- so a squad whose first member is garrisoned offers
+  // nobody, and one whose garrisoned member comes last still offers the rest.
+  {
+    const ObjectId inside = b.trooper("Archer", 2, 2, 4);
+    const ObjectId outside = b.trooper("Archer", 2, 3, 3);
+    b.arm();
+    REQUIRE(b.world.put_in_holder(inside, keep));
+    squad->eval = 0;  // the first squad out of the way
+    const SquadKey second = b.band(2, 1, {inside, outside});
+    CHECK(best_in_gaika(b, caster) == kNoObject);
+    Squad* other = b.heroes.squads().find(second);
+    REQUIRE(other != nullptr);
+    other->members = {outside, inside};
+    CHECK(best_in_gaika(b, caster) == outside);
+    other->eval = 0;
+    squad->eval = 10;
+  }
+
   CHECK(b.world.set_health(enemy, 0));
   CHECK(best_in_gaika(b, caster) == kNoObject);
 }
@@ -1791,10 +1831,10 @@ TEST(gaika_empty_is_true_until_a_squad_stands_in_the_node) {
 ///
 /// Same container, same "in the node" reading, three filters `Empty` does not
 /// apply: strength, the relation, and the peaceful flag. The relation is the
-/// one worth building carefully, because it is one-directional and reads the
-/// *squad's owner* rather than its members -- the same distinction
+/// one worth building carefully: it is "the viewer's own" (`category & 1`), and
+/// it reads the *squad's owner* rather than its members -- the same distinction
 /// `best_target_in_gaika_reads_the_squads_owner_and_not_its_members` draws.
-TEST(military_presence_wants_a_friendly_armed_squad_standing_in_this_node) {
+TEST(military_presence_wants_an_armed_squad_of_the_viewers_own_standing_in_this_node) {
   ArmyBench b;
   b.plant(3, 3);  // node 1 on the western island; node 2 is the eastern region
   b.rebuild();
@@ -1849,22 +1889,19 @@ TEST(military_presence_wants_a_friendly_armed_squad_standing_in_this_node) {
   squad->flags = static_cast<std::uint16_t>(squad->flags & ~kSquadFlagPeaceful);
   CHECK(presence(1, 2));
 
-  // -- the relation, and it is **one-directional**. Player 3 (script 4) is an
-  // enemy of player 1 until its own row says otherwise; changing player 1's
-  // row instead changes nothing, because 0x0044e250 reads the *viewer's*.
-  CHECK(!presence(1, 4));
-  b.world.players().set_relation_word(1, 3, kRelationFriendly);
+  // -- the relation is `category & 1`: **the viewer's own squads and nobody
+  // else's**. 0x0044e250 answers 2 for an ally, so player 3 (script 4) sees no
+  // presence here whether or not it counts player 1 a friend.
   CHECK(!presence(1, 4));
   b.world.players().set_relation_word(3, 1, kRelationFriendly);
-  CHECK(presence(1, 4));
-  b.world.players().set_relation_word(3, 1, 0);
+  b.world.players().set_relation_word(1, 3, kRelationFriendly);
   CHECK(!presence(1, 4));
-  // ...and a player is never its own enemy, which `PlayerTable::is_enemy`
-  // guarantees rather than this entry point: 0x0044e250 short-circuits on
-  // `viewer == owner` before it reads a row, and `is_enemy` carries the same
-  // rule for the whole engine. Asserted here anyway, because a squad's own
-  // player is the case both shipped callers ask about.
+  b.world.players().set_relation_word(3, 1, 0);
+  b.world.players().set_relation_word(1, 3, 0);
   CHECK(presence(1, 2));
+  // A viewer past the sixteenth player is nobody, not everybody: 0x0044e250
+  // answers 0 for it, and only a negative viewer takes category 1 outright.
+  CHECK(!presence(1, 17));
 
   // -- a stale node id answers false, and it is the *table* that says so. The
   // original cannot build this -- its container hangs off the node -- but here
@@ -1933,6 +1970,7 @@ struct TeleportBench {
   std::vector<std::byte> pass = pass_blocking_water_sized(kLongIsland);
   World world;
   EconomySystem economy;
+  AiSystem ai;
   script::HostRegistry registry;
   HostContext context;
 
@@ -1947,6 +1985,7 @@ struct TeleportBench {
     REQUIRE(layer.ok());
     world.set_terrain(layer.value());
     REQUIRE(world.add_system(&economy));
+    REQUIRE(world.add_system(&ai));
     economy.start(world);
     world.mutable_lsa().build(world.terrain(), obstruction(pass));
     (void)register_all_hosts(registry);
@@ -2063,6 +2102,49 @@ TEST(find_teleport_picks_the_pair_that_beats_two_thirds_of_the_walk) {
   // A player with no AI and one outside the table answer alike.
   CHECK(b.find(0, in_cell(1, 3), in_cell(44, 3)) == a_in);
   CHECK(b.find(9, in_cell(1, 3), in_cell(44, 3)) == a_in);
+}
+
+/// **A computer player only takes a teleport standing in a node it has
+/// explored** (0x0042e974): the original asks 0x0041cb80 -- the test
+/// `GAIKA::Explored` ends in -- of the teleport's node in the player's own
+/// view, and skips the teleport when it answers false. A player with no view
+/// of that node is not asked at all.
+TEST(find_teleport_skips_a_teleport_in_a_node_the_computer_player_has_not_explored) {
+  TeleportBench b;
+  const ObjectId a_in = b.teleport(2, 3);
+  const ObjectId a_out = b.teleport(40, 3);
+  const ObjectId b_in = b.teleport(6, 3);
+  const ObjectId b_out = b.teleport(36, 3);
+  b.pair(a_in, a_out);
+  b.pair(b_in, b_out);
+  b.rebuild();
+  // Player 1 is a computer player with a fresh view: nothing explored.
+  b.ai.seed_gaika_view(0, b.world.gaika().count());
+  GaikaView* view = b.ai.gaika_view(0);
+  REQUIRE(view != nullptr);
+  const auto node_of = [&](ObjectId teleport) {
+    return b.world.gaika().at(b.world.lsa(), b.world.resolve_position(teleport));
+  };
+  Laika* near_a = view->find(node_of(a_in));
+  Laika* near_b = view->find(node_of(b_in));
+  Laika* far_a = view->find(node_of(a_out));
+  REQUIRE(near_a != nullptr && near_b != nullptr && far_a != nullptr);
+  REQUIRE(near_a != near_b && near_a != far_a);
+
+  // From cell 1 to cell 44 A wins for anybody who may use it.
+  CHECK(b.find(1, in_cell(1, 3), in_cell(44, 3)) == kNoObject);
+  // Player 2 has no AI here and is never asked.
+  CHECK(b.find(2, in_cell(1, 3), in_cell(44, 3)) == a_in);
+  // The far end's node being explored does not help: it is the near end's
+  // node that is asked.
+  far_a->flags |= kLaikaExplored;
+  CHECK(b.find(1, in_cell(1, 3), in_cell(44, 3)) == kNoObject);
+  // B explored and A not: B, though A is cheaper.
+  near_b->flags |= kLaikaExplored;
+  CHECK(b.find(1, in_cell(1, 3), in_cell(44, 3)) == b_in);
+  // Both explored: the cheaper again.
+  near_a->flags |= kLaikaExplored;
+  CHECK(b.find(1, in_cell(1, 3), in_cell(44, 3)) == a_in);
 }
 
 // --------------------------------------------------------------------------
@@ -2570,6 +2652,108 @@ TEST(check_lsa_path_counts_the_areas_and_needs_a_ship_to_cross) {
   CHECK(b.ai.ship_needs(0, sea) == 2);
 }
 
+/// **A boarding ship is a way across only while its transport order is the
+/// caller's** (0x00441730's `boardunit` clause). `CheckLsaPath` (0x00423120)
+/// asks with `""` and `(-1, -1)`, so a ship `PrepareAiTransportShip` has
+/// already tasked for some crossing does not open the sea to it.
+TEST(check_lsa_path_does_not_cross_on_a_ship_boarding_for_a_crossing) {
+  ShoreBench b;
+  const LsaPartition& areas = b.world.lsa();
+  const LsaId sea = areas.at(in_cell(1, 1));
+  const LsaId west = areas.at(in_cell(6, 6));
+  const LsaId east = areas.at(in_cell(20, 6));
+  REQUIRE(sea != kNoLsa && west != kNoLsa && east != kNoLsa);
+
+  const ObjectId boat = b.ship(14, 6, 0, "boardunit");
+  // Carrying nothing -- the constructed `""` and `(-1, -1)` -- it counts.
+  CHECK(b.path(west, east, 1) == 3);
+  // Tasked for a crossing, it is that crossing's and nobody else's.
+  b.ai.set_ship_transport(boat, "move", in_cell(20, 6));
+  CHECK(b.path(west, east, 1) == 0);
+  // The player has a ship in that sea, so the refusal bumps no need.
+  CHECK(b.ai.ship_needs(0, sea) == 0);
+  // An empty order at a real point is still not the empty order at (-1, -1).
+  b.ai.set_ship_transport(boat, "", in_cell(20, 6));
+  CHECK(b.path(west, east, 1) == 0);
+  b.ai.clear_ship_transport(boat);
+  CHECK(b.path(west, east, 1) == 3);
+}
+
+namespace {
+
+/// Two seas, north and south, and two lands between them split by a cliff, so
+/// that both lands touch both seas: two three-area routes from west to east.
+constexpr std::initializer_list<std::string_view> kTwoStraits = {
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 0
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 1
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 2
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 3
+    "..............####..............",  // 4
+    "..............####..............",  // 5
+    "..............####..............",  // 6
+    "..............####..............",  // 7
+    "..............####..............",  // 8
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 9
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 10
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 11
+    "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",  // 12
+};
+
+}  // namespace
+
+/// **`PrepareAiTransportShip` searches with its own order** (0x0042e180 passes
+/// `cmd` and `pt` to the worker through 0x00442010): a sea whose only ship is
+/// boarding for a different crossing is no way across, so the route goes
+/// through the other sea and its idle ship is the one tasked.
+TEST(prepare_ai_transport_ship_routes_around_a_ship_boarding_for_another_crossing) {
+  ShoreBench b(kTwoStraits);
+  const LsaPartition& areas = b.world.lsa();
+  const LsaId north = areas.at(in_cell(6, 1));
+  const LsaId south = areas.at(in_cell(6, 11));
+  const LsaId west = areas.at(in_cell(6, 6));
+  const LsaId east = areas.at(in_cell(25, 6));
+  REQUIRE(areas.size() == 4);
+  REQUIRE(north != kNoLsa && south != kNoLsa && west != kNoLsa && east != kNoLsa);
+  REQUIRE(north != south && west != east);
+  REQUIRE(areas.water(north) && areas.water(south));
+  const auto touches = [&](LsaId land, LsaId sea) {
+    const std::span<const LsaId> list = areas.neighbours(land);
+    return std::find(list.begin(), list.end(), sea) != list.end();
+  };
+  REQUIRE(touches(west, north) && touches(west, south));
+  REQUIRE(touches(east, north) && touches(east, south));
+  // The lower-numbered sea is the one a tie of routes names first.
+  const LsaId first = std::min(north, south);
+  const LsaId second = std::max(north, south);
+  const std::int32_t first_row = first == north ? 1 : 11;
+  const std::int32_t second_row = first == north ? 11 : 1;
+
+  const Point beach = in_cell(25, 6);
+  const ObjectId tasked = b.ship(10, first_row, 0, "boardunit");
+  b.ai.set_ship_transport(tasked, "sneak", in_cell(2, 6));
+  const ObjectId idle = b.ship(10, second_row, 0, "idle");
+  REQUIRE(areas.at(b.world.resolve_position(tasked)) == first);
+  REQUIRE(areas.at(b.world.resolve_position(idle)) == second);
+
+  const auto prepare = [&](const char* verb, Point at) {
+    const script::HostOutcome out =
+        b.call(script::CallKind::free_function, "PrepareAiTransportShip",
+               {script::Value::integer(west), script::Value::integer(east),
+                script::Value::integer(1), script::Value::string(verb), pack_point(at)});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_object() ? out.value.as_object().id : kNoObject;
+  };
+  // Another crossing's ship closes the first sea; the second sea's idle ship
+  // carries this one.
+  CHECK(prepare("move", beach) == idle);
+  CHECK(b.ai.ship_transport(idle).order == "move");
+  CHECK(b.ai.ship_transport(tasked).order == "sneak");
+  // The tasked ship's own crossing still finds it: its order opens its sea.
+  b.commands.clear_commands(b.world, idle);
+  b.commands.set_command(b.world, idle, "move", Command{});
+  CHECK(prepare("sneak", in_cell(2, 6)) == tasked);
+}
+
 /// `SupplyCount`: the settlements of the same owner, on the class, whose own
 /// `BestToSupply` is the receiver.
 TEST(supply_count_is_the_villages_that_feed_this_stronghold) {
@@ -2681,6 +2865,26 @@ TEST(approaching_squads_sums_the_strength_on_its_way_to_the_node) {
       b.call(script::CallKind::member, "AIDest", {pack_squad(fallback)});
   CHECK(dest.status == script::HostStatus::ok);
   CHECK(gaika_of(dest.value) == here);
+
+  // **An AI squad has no leader**, and 0x0042c060 measures its front member
+  // (0x00443df0), so it counts like any other.
+  const SquadKey troop = b.heroes.squads().create(0);
+  const ObjectId first = leader(0, Point{centre.x + 200, centre.y});
+  CHECK(b.heroes.squads().join(troop, first));
+  CHECK(b.heroes.squads().join(troop, leader(0, Point{centre.x + 5000, centre.y})));
+  Squad* sq = b.heroes.squads().find(troop);
+  REQUIRE(sq != nullptr);
+  sq->leader = kNoObject;
+  sq->gaika_in = there;
+  sq->ai_dest = here;
+  sq->eval = 1000;
+  CHECK(coming(1, 300) == 1000);
+  // Measured from the stored position, `vtbl+0x3c`: a front member inside a
+  // holder stands at `(-1, -1)`, not where its holder does.
+  const World::SettlementIds keep = b.world.spawn_settlement(0);
+  REQUIRE(b.world.set_position(keep.holder, Point{centre.x + 10, centre.y}));
+  REQUIRE(b.world.put_in_holder(first, keep.holder));
+  CHECK(coming(1, 300) == 0);
 }
 
 /// A partition alone, for the slot-grid cases that need no systems.
@@ -3382,8 +3586,10 @@ TEST(best_md_pos_reads_the_squads_owner_off_the_casters_own_row) {
   CHECK(best_md_pos(b, druid, 500, 0, 5000, 1, false) == in_cell(2, 4));
 }
 
-/// The distance band is inclusive at both ends, and the minimum is applied to
-/// the score before the ranking bonus is added to it.
+/// The distance band is inclusive at both ends, the minimum is applied to the
+/// score before the ranking bonus is added to it, and **the score is a head
+/// count**: 0x00423a70 `inc`s its buckets where `Eval`'s 0x00423850 adds each
+/// unit's worth.
 TEST(best_md_pos_bands_the_distance_and_floors_the_score) {
   SiegeBench b;
   b.plant(3, 3);
@@ -3391,9 +3597,11 @@ TEST(best_md_pos_bands_the_distance_and_floors_the_score) {
   const GaikaId node = b.world.gaika().at(b.world.lsa(), in_cell(2, 2));
   const ObjectId druid = b.trooper("Legionary", 1, 2, 2);
   const ObjectId mob = b.trooper("Archer", 2, 2, 4);
+  std::vector<ObjectId> crowd{mob};
+  for (int i = 0; i < 3; ++i) crowd.push_back(b.trooper("Archer", 2, 2, 4));
   b.arm();
   b.band(1, node, {druid});
-  b.band(2, node, {mob});
+  b.band(2, node, crowd);
 
   // Two cells apart, which is 128 world units.
   const Point target = in_cell(2, 4);
@@ -3401,28 +3609,57 @@ TEST(best_md_pos_bands_the_distance_and_floors_the_score) {
   CHECK(best_md_pos(b, druid, 500, 129, 5000, 1, false) == kNoPos);
   CHECK(best_md_pos(b, druid, 500, 0, 127, 1, false) == kNoPos);
 
-  // The score is what `Eval` puts in the enemy bucket for a circle of `MDRange`
-  // around the candidate -- one archer here, and nothing at all when the
-  // circle is too small to reach itself is not a case: the candidate is always
-  // inside its own circle, so the floor is what refuses it.
-  const std::int32_t alone = object_power(b.world, &b.combat, *b.world.find(mob));
-  REQUIRE(alone > 1);
-  CHECK(best_md_pos(b, druid, 500, 0, 5000, alone, false) == target);
-  CHECK(best_md_pos(b, druid, 500, 0, 5000, alone + 1, false) == kNoPos);
+  // Four archers in the circle score 4, whatever each is worth -- summing their
+  // worth would clear a floor of 5.
+  REQUIRE(object_power(b.world, &b.combat, *b.world.find(mob)) > 1);
+  CHECK(best_md_pos(b, druid, 500, 0, 5000, 4, false) == target);
+  CHECK(best_md_pos(b, druid, 500, 0, 5000, 5, false) == kNoPos);
 
   // And the literal 3: the ranked value is the score plus `MaxRange - distance`
-  // and it has to clear 3 whatever `MinEval` allowed. A unit with no attack at
-  // all is worth exactly 1 to the census -- the `+ 1` the formula ends on --
-  // so with `MaxRange` equal to the distance there is no bonus and 1 is
-  // refused, while three units of bonus carry the same candidate over.
-  CombatProfile harmless;
-  harmless.max_health = 200;
-  harmless.attack_interval = 1000;
-  b.combat.set_profile(b.graph.find("Archer"), harmless);
-  REQUIRE(object_power(b.world, &b.combat, *b.world.find(mob)) == 1);
-  CHECK(best_md_pos(b, druid, 500, 0, 128, 0, false) == kNoPos);
+  // and it has to clear 3 whatever `MinEval` allowed. With the three others
+  // moved out of a circle of 0 the score is 1, so with `MaxRange` equal to the
+  // distance there is no bonus and 1 is refused, while three units of bonus
+  // carry the same candidate over.
+  CHECK(best_md_pos(b, druid, 0, 0, 128, 0, false) == target);  // still 4 here
+  for (std::size_t i = 1; i < crowd.size(); ++i) {
+    CHECK(b.world.set_position(crowd[i], in_cell(2, 5)));
+  }
+  CHECK(best_md_pos(b, druid, 0, 0, 128, 0, false) == kNoPos);
   CHECK(best_md_pos(b, druid, 0, 0, 130, 0, false) == kNoPos);
-  CHECK(best_md_pos(b, druid, 500, 0, 131, 0, false) == target);
+  CHECK(best_md_pos(b, druid, 0, 0, 131, 0, false) == target);
+}
+
+/// The two ends of the distance are both `posRH`, so a garrisoned caster
+/// measures from its town rather than from the holder record; and a peaceful
+/// squad -- wildlife at war with everybody -- is never a candidate, because
+/// 0x0044e1f0's third argument is 0.
+TEST(best_md_pos_measures_from_pos_rh_and_never_offers_a_peaceful_squad) {
+  SiegeBench b;
+  const SettlementId town = b.plant(3, 3, 1);
+  b.rebuild();
+  const GaikaId node = b.world.gaika().at(b.world.lsa(), in_cell(2, 2));
+  const ObjectId druid = b.trooper("Legionary", 1, 2, 2);
+  std::vector<ObjectId> crowd;
+  for (int i = 0; i < 4; ++i) crowd.push_back(b.trooper("Archer", 2, 3, 5));
+  b.arm();
+  const SquadKey mine = b.band(1, node, {druid});
+  const SquadKey theirs = b.band(2, node, crowd);
+  CHECK(best_md_pos(b, druid, 500, 0, 5000, 1, false) == in_cell(3, 5));
+
+  // Peaceful: refused outright.
+  Squad* enemy = b.heroes.squads().find(theirs);
+  REQUIRE(enemy != nullptr);
+  enemy->flags = static_cast<std::uint16_t>(enemy->flags | kSquadFlagPeaceful);
+  CHECK(best_md_pos(b, druid, 500, 0, 5000, 1, false) == kNoPos);
+  enemy->flags = static_cast<std::uint16_t>(enemy->flags & ~kSquadFlagPeaceful);
+
+  // The druid garrisons its own town, two cells from the crowd. From the
+  // holder record it would stand at the map's corner, past a band of 300.
+  const Settlement* set = b.economy.settlements().find(town);
+  REQUIRE(set != nullptr);
+  REQUIRE(b.world.put_in_holder(druid, set->holder.object));
+  b.heroes.squads().find(mine)->gaika_in = node;
+  CHECK(best_md_pos(b, druid, 500, 0, 300, 1, false) == in_cell(3, 5));
 }
 
 /// Nearer wins between equals, the tie keeps the first offered, and
@@ -3677,6 +3914,8 @@ TEST(best_prot_pos_scores_the_size_of_the_engagement) {
   // Two against two: the score is four.
   CHECK(best_prot_pos(b, caster, 100, 0, 5000, 4) == mob);
   CHECK(best_prot_pos(b, caster, 100, 0, 5000, 5) == kNoObject);
+  // A negative range inverts 0x00423cd0's square and counts nobody.
+  CHECK(best_prot_pos(b, caster, -100, 0, 5000, 1) == kNoObject);
 
   // The distance band is the shared walk's, and it is inclusive at both ends:
   // the crowd is two cells away.
@@ -4642,6 +4881,40 @@ TEST(invade_through_gate_orders_every_member_to_advance_and_then_capture) {
             .status == script::HostStatus::ok);
   CHECK(verbs(mute).empty());
   CHECK(verbs(talker) == std::vector<std::string>({"advance", "capture"}));
+
+  // **And what it was doing is ended all the same**: the tail dropped and the
+  // head ended before the (here, absent) orders are appended.
+  {
+    Command hold;
+    hold.arg_kind = CommandArgKind::point;
+    hold.point = in_cell(10, 10);
+    (void)b.commands.set_command(b.world, mute, "move", hold);
+    (void)b.commands.add_command(b.world, mute, false, "move", hold);
+    REQUIRE(b.commands.command_count(mute) == 2);
+    CHECK(b.call(script::CallKind::member, "InvadeThroughGate", 2,
+                 {pack_squad(mixed), script::Value::object(kTypeObj, gate),
+                  script::Value::integer(3)})
+              .status == script::HostStatus::ok);
+    CHECK(b.commands.command_count(mute) <= 1);  // the tail is gone; the head is ended
+  }
+
+  // The state is a word (0x00429a9c).
+  CHECK(b.call(script::CallKind::member, "InvadeThroughGate", 2,
+               {pack_squad(mixed), script::Value::object(kTypeObj, gate),
+                script::Value::integer(0x10007)})
+            .status == script::HostStatus::ok);
+  CHECK(b.heroes.squads().find(mixed)->state == 7);
+
+  // **With the central building gone the squad is left locked** (0x00429adf
+  // exits past the write-back at 0x00429c0c), its state already written.
+  REQUIRE(b.world.despawn(anchor));
+  const SquadKey late = b.band(2, 1, {b.invader(10, 17)});
+  CHECK(b.call(script::CallKind::member, "InvadeThroughGate", 2,
+               {pack_squad(late), script::Value::object(kTypeObj, gate),
+                script::Value::integer(8)})
+            .status == script::HostStatus::ok);
+  CHECK(b.heroes.squads().find(late)->state == 8);
+  CHECK((b.heroes.squads().find(late)->flags & kSquadLocked) != 0);
 }
 
 /// `GAIKA::GetDestPoint(unit)` -- where a squad ordered to a node is actually
@@ -4782,7 +5055,10 @@ TEST(gaika_dest_point_aims_a_squad_at_the_ground_outside_the_nearest_gate) {
   }
 
   // **An offset that leaves the map is refused, not clamped**: the original
-  // tests all four edges and falls back to the central building. The northern
+  // tests all four edges and keeps what it already had, which is **the gate**
+  // -- the gate loop wrote it into the running answer before the step was
+  // tried (0x00427b80), so the refusal does not go back to the central
+  // building. The northern
   // gate's offset goes *negative*, so the low edges are what refuse it -- a
   // test of the far edges alone would let it through.
   {
@@ -4795,7 +5071,8 @@ TEST(gaika_dest_point_aims_a_squad_at_the_ground_outside_the_nearest_gate) {
     MatchRules tight;
     tight.map_size = 100000;  // wide enough that only the low edge can refuse
     match->configure(tight, 0, false);
-    CHECK(ask(node, scout) == centre);
+    CHECK(ask(node, scout) == north_at);
+    CHECK(ask(node, scout) != centre);
     // ...and a rectangle the offset fits inside lets it through again. It has
     // to be the southern gate: 450 north of the northern one is off the top of
     // any map, the town standing three cells from the edge.
@@ -4959,6 +5236,28 @@ TEST(use_teleport_walks_a_squad_to_the_gate_through_it_and_on) {
               .value.truthy_scalar());
     CHECK(verbs(champion) == std::vector<std::string>({"move", "teleport", "move"}));
     CHECK(verbs(behind).empty());
+  }
+
+  // **A member binding none of the orders is stopped all the same** -- the
+  // tail dropped and the head ended around the appends -- and the state is a
+  // word (0x0042980b).
+  {
+    const ObjectId mute = b.soldier("Legionary", 2);
+    CHECK(b.world.set_position(mute, in_cell(1, 4)));
+    Command hold;
+    hold.arg_kind = CommandArgKind::point;
+    hold.point = in_cell(1, 4);
+    (void)b.commands.set_command(b.world, mute, "move", hold);
+    (void)b.commands.add_command(b.world, mute, false, "move", hold);
+    REQUIRE(b.commands.command_count(mute) == 2);
+    const SquadKey alone = b.band(2, 1, {mute});
+    CHECK(b.call(script::CallKind::member, "UseTeleport", 4,
+                 {pack_squad(alone), script::Value::object(kTypeObj, pad),
+                  script::Value::integer(0x10005), script::Value::string("move"),
+                  pack_point(onward)})
+              .value.truthy_scalar());
+    CHECK(b.commands.command_count(mute) <= 1);
+    CHECK(b.heroes.squads().find(alone)->state == 5);
   }
 }
 
@@ -5134,6 +5433,28 @@ struct DetourBench : LinkBench {
 };
 
 }  // namespace
+
+/// **The leader's position is its `posRH`** (0x0042e3e4, `vtbl+0xc8`): for a
+/// leader garrisoned in the centre town, the town's central building, which
+/// is the node's own centre. The side test is then skipped (`f(C)` is 0) and
+/// every neighbour scores 0, so each is shown to the script in table order
+/// and the last kept wins -- the west, since the squad came from the north.
+TEST(calc_go_around_measures_a_garrisoned_leader_from_its_town) {
+  DetourBench b;
+  b.check_maika(kNoGaika);
+  const ObjectId leader = b.unit("Walker", in_cell(7, 7));
+  const Settlement* centre =
+      b.economy.settlements().for_object(b.world.gaika().find(b.here)->settlement);
+  REQUIRE(centre != nullptr);
+  REQUIRE(garrison_enter(b.world, centre->id, leader, /*force=*/true));
+  const SquadKey key = b.band(2, {leader}, b.east, b.north);
+
+  const script::HostOutcome out = b.go_around(key);
+  CHECK(out.status == script::HostStatus::ok);
+  CHECK(out.value.truthy_scalar());
+  CHECK(b.shown(2) == b.east * 1000 + b.north * 100 + b.south * 10 + b.west);
+  CHECK(b.heroes.squads().find(key)->src_gaika == b.west);
+}
 
 /// The side test, the score, the script, and what a detour does to the squad.
 ///
@@ -5404,7 +5725,9 @@ struct HospitalBench : ShoreBench {
     return id;
   }
 
-  /// A squad of `owner`'s, worth `eval`, standing in `in` and going nowhere.
+  /// A squad of `owner`'s, worth `eval`, standing in `in` and bound for it --
+  /// as placement files one. With no heading at all it would be *leaving*
+  /// (0x0044e1f0).
   SquadKey band(PlayerId owner, std::vector<ObjectId> members, GaikaId in, std::int32_t eval) {
     const SquadKey key = heroes.squads().create(owner);
     for (const ObjectId id : members) CHECK(heroes.squads().join(key, id));
@@ -5412,6 +5735,7 @@ struct HospitalBench : ShoreBench {
     CHECK(squad != nullptr);
     if (squad == nullptr) return key;
     squad->gaika_in = in;
+    squad->dest_gaika = in;
     squad->eval = eval;
     return key;
   }
@@ -5425,6 +5749,26 @@ struct HospitalBench : ShoreBench {
 };
 
 }  // namespace
+
+/// **A garrisoned squad measures from its town**: the distance is from the
+/// front member's `posRH` (0x00431720), which for a member inside a
+/// settlement is the central building. Measured from the holder record's
+/// (0, 0), the town by the map's corner won.
+TEST(nearest_hospital_measures_a_garrisoned_squad_from_its_town) {
+  HospitalBench b;
+  const SettlementId by_corner = b.town(3, 3, 2);
+  const SettlementId by_home = b.town(12, 9, 2);
+  const SettlementId home = b.town(12, 7, 2, "Townhall", 10, /*food=*/0);
+  b.rebuild();
+  const GaikaId at_corner = b.node_of(by_corner);
+  const GaikaId at_home_side = b.node_of(by_home);
+  REQUIRE(at_corner != kNoGaika && at_home_side != kNoGaika && at_corner != at_home_side);
+
+  const ObjectId leader = b.walker(12, 7, 2);
+  REQUIRE(garrison_enter(b.world, home, leader, /*force=*/true));
+  const SquadKey key = b.band(2, {leader}, b.node_of(home), 100);
+  CHECK(b.hospital(key) == at_home_side);
+}
 
 /// The four gates, and the distance score with its two multipliers. The
 /// leader stands mid-island; a town 286 away and a village 271 away compete,
@@ -5519,8 +5863,12 @@ TEST(nearest_hospital_weighs_the_enemies_standing_in_the_node) {
   b.heroes.squads().find(raiders)->gaika_in = at_hall;
   b.heroes.squads().find(raiders)->dest_gaika = at_village;
   CHECK(b.hospital(key) == at_hall);
-  b.heroes.squads().find(raiders)->dest_gaika = kNoGaika;
+  b.heroes.squads().find(raiders)->dest_gaika = at_hall;
   CHECK(b.hospital(key) == at_village);
+  // With no heading at all it is leaving, not staying (0x0044e235).
+  b.heroes.squads().find(raiders)->dest_gaika = kNoGaika;
+  CHECK(b.hospital(key) == at_hall);
+  b.heroes.squads().find(raiders)->dest_gaika = at_hall;
   // A strengthless squad does not count, whoever it is.
   raiders_worth(0);
   CHECK(b.hospital(key) == at_hall);
@@ -5545,11 +5893,12 @@ TEST(nearest_hospital_weighs_the_enemies_standing_in_the_node) {
   CHECK(standing(2, 0) == at_hall);
   CHECK(standing(5, 0) == at_hall);
 
-  // **Peaceful, and whose.** Player 14's peaceful squad does not count, nor
-  // 15's; player 3's peaceful squad does, and player 14's warlike one does.
+  // **No peaceful squad counts, whoever's**: the presence is asked with 0
+  // (0x0043194b) and 0x0044e1f0 refuses the flag on it, so the body's later
+  // "player 14 or 15" test never sees one. Player 14's warlike squad does.
   CHECK(standing(14, kSquadFlagPeaceful) == at_hall);
   CHECK(standing(15, kSquadFlagPeaceful) == at_hall);
-  CHECK(standing(3, kSquadFlagPeaceful) == at_village);
+  CHECK(standing(3, kSquadFlagPeaceful) == at_hall);
   CHECK(standing(14, 0) == at_village);
 }
 

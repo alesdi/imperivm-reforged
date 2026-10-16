@@ -1,0 +1,121 @@
+# hero-squad: the hero (64) and squad (54) rows of host-ledger.md
+# squad
+0x00421170	verified	[squad+0x28] zero-extended word; now stored as a word by every writer (SetCmd/ClrCmd); no-squad handle 0 here (faults there)
+0x0042bbd0	verified	element under the cursor when the pool slot is in use and not at end (0x00420170), else 0
+0x004212c0	verified	[squad+0x22] word read; no-squad 0
+0x00421310	verified	front of the member deque (0x00443df0) as a handle, 0xffff for none
+0x004215c0	verified	order's node (0x00444140, needs the owner's AI) else DestGAIKA [squad+0x24]; squad_ai_dest
+0x005351a0	partial	Item::id answers the item's class name string (handle check, class at [obj+0x24]); no Item handle type in this engine and all 47 shipped .ID receivers are GAIKAs, so the shared ID key answers GAIKA::ID only
+0x0042bb80	verified	0x004201d0: false at end, else step and true unless the step landed on the end
+0x004272d0	verified	no-squad/SF_NOAI silent; word state, clock, flags set-then-clear with lock held; members ordered front to back as SetCommand's step, walk stops after a hero (0x0042742d) -- fixed
+0x00421460	verified	point form -> 0x0043ec00, same rules, hero stop at 0x0043ece7 -- fixed
+0x00427470	verified	SetCmdObj: invalid object prints and returns after state/clock/flags|lock are written (0x0042754f), nobody ordered, squad left locked; hero stop 0x00427626 -- fixed
+0x0042bae0	verified	true for an unresolved list, a slot not in use ([entry+0xc]) or cursor at end
+0x00697f20	verified	IntArray::size: count-1 of storage whose slot 0 is a sentinel (resize n -> n+1, 0x0068c820; subscript i -> storage i+1, 0x0068c850), so the written length; the subscript also grows on a read (0x00697e70), which ArrayPool::get does not -- not this body
+0x00422ca0	verified	[squad+0x50], the member deque's size
+0x0042bc40	verified	deque count only when not at end (0x00420170), else 0 -- fixed
+0x00698070	verified	StrArray::size: as IntArray::size over 8-byte elements
+0x00698300	partial	StrMap::size reads the map's count [+0x10]; this engine has no StrMap type and no shipped script declares one
+0x004217e0	verified	or byte [squad+0x30], 8; no NOAI test
+0x00421820	verified	and byte [squad+0x30], 0xf7
+0x0042bce0	verified	lock bit on every squad of the list from its first, regardless of cursor
+0x0042bde0	verified	unlock bit on every squad of the list from its first
+0x005d7400	verified	[squad+0x7c], written only zero by two constructors: false; an invalid/dead receiver pushes a wrong-sized value there, false here
+0x00421720	verified	(flags & mask) == mask, word compare
+0x004271d0	verified	no-squad/SF_NOAI silent; word state, clock, flags; vtbl+0xc0(1) on every member (0x005b1120: end from the back, head included), no hero stop -- fixed (silence, word)
+0x00421520	verified	player's AI present ([+0x88]), not SF_NOAI, post verb 1 with the node and n as words (0x004494c0)
+0x00421670	verified	player's AI present, then 0x00448a80 frees the squad's record
+0x0042bb30	verified	0x0042a3c0: cursor to begin, true when not empty
+0x00421860	verified	[squad+0xbc] raw; constructor 0
+0x004218b0	verified	[squad+0xc0] 16-bit handle, 0xffff from the constructor
+0x00421220	verified	[squad+0x20] word
+0x00421270	verified	[squad+0x24] word
+0x00421620	verified	0x00444140 only: the order's node, 0 without one
+0x00421400	verified	clock [0x00996ff4+0x1258] minus [squad+0x2c]; clamped at 0 here (two clocks), never negative there
+0x004210f0	verified	handle >> 4, no lookup
+0x00437a20	partial	GetSquads/1: every squad on the node's deque, no filter -- fixed (was own-only); which squads the deque holds, and their order, is the GAIKA node design's inference
+0x00439000	partial	GetSquads/2: strength, 0x0044e1f0 presence, any owner -- fixed (selected nothing); node deque inferred (design)
+0x00439230	partial	GetSquads/3: /4 with AI_OWN; strength filter and player<1 forcing own -- fixed; node deque inferred (design)
+0x00439500	partial	GetSquads/4: strength, relation, presence, 0x0044eb80 sight for enemies -- fixed; node deque and its order inferred (design)
+0x004316b0	verified	own settlement, holder room, food >= 300; enemy staying strength via 0x0044e1f0(.,0) + 0x0044eb80 (no peaceful squad ever counts), 3/4 and 1/2 truncating, village x3/2, area-path factor, strict min; measured from the front member's posRH -- fixed (posRH, sight, peaceful)
+0x00429530	verified	front member a hero, DestGAIKA == heading, running verb compared byte for byte, room; sweep centred on the stored position, nearest non-empty holder by floored root of posRHs, getitems sneaked -- fixed (front member, node test, case, positions); ties keep the lower id where the cell order decides
+0x00421fb0	verified	sum of [squad+0x1c] over the player's squad table skipping flags & 0x25; 1-based, out of range 0 (arg <= 0 reads below the player table there)
+0x004220c0	verified	MilEval's sum over every player whose relation to the asker (0x0044e250) is not enemy (4)
+0x00422240	verified	MilEval's sum over every player the asker's relation calls enemy (4)
+0x00422c40	verified	length of the player's squad table; here the highest live index + 1, which reaches the same squads (the original's emptied slots name empty squads)
+0x00430dc0	verified	settlement node, owner hostile to the asker; every enemy squad of strength present (mask 6, 0x0044eb80 cannot cross it) must have its front member held (0x00422e80 flags any [+0x154] == -1); dead tail 0x00420c00
+0x00424550	verified	hero, squad <= 50, same AIDest; (n-min+1 | n-min+100) * (level/5 + 1) -- fixed (was /10)
+0x0042a5b0	partial	sums food cargo of Wagon-class members of the player's peaceful squads (from index 1) whose running object-command targets a unit of this squad; here wagons are economy rows with a follow field (wagon design), summed by follow membership
+0x0042a750	partial	phase 1 (redirect an existing wagon) not reproducible on the wagon design; phase 2 own store >= 100 food within range, nearest strictly, from the leader's stored position -- fixed (stored position); load clamped, follow on the leader
+0x0042e300	verified	side test, |dot| score, CheckMAIKA, SrcGAIKA rewrite, move + rebuilt runner per member, hero stop (0x004179e0); from the front member's posRH -- fixed
+0x004299e0	verified	building, very broken, live squad, not NOAI; word state, script clock, lock; no central building leaves the squad locked (0x00429adf); per member tail dropped, advance/capture appended where bound, head ended; hero stop -- fixed
+0x004296b0	verified	CVXTeleport, live squad with a front member; word state, clock, lock; per member tail dropped, cmd to the door (move/advance/sneak only, exact), teleport, cmd to pt, head ended; hero stop -- fixed (stopped member, word, door from posRH)
+0x00430800	partial	census over the node's neighbours, refusing a neighbour whose settlement is a TTent, a BaseTownhall heir or an independent guarded outpost; with the flag (the one shipped site, GETARMYNEED) each neighbour is first gated on 0x0041cbd0 -- with fog on, the node's Revealed bit, which nothing here sets (current-sight design), so the original's answer is the zeros this still answers; the flag-off census is not implemented
+0x0043a920	partial	strength, own relation (any for player < 1), 0x0044e1f0 presence gated by the peaceful flag, then per member unit, alive, IsHeirOf the one class name, not UNITFLAG_NOAI, countdown; the node's squad deque and its order are the GAIKA design's inference; ClassFilter also reads comma lists (no shipped site passes one)
+0x00425530	partial	frees the list, fresh slot, worker 0x00447330 (fresh squad per body at state 0xffff, assignment 0x00446a70, single-member squads listed, then state and clock on each); the hero case (0x00445a50's join) is unread and here a hero keeps his squad, which the placeholder then sticks to when he has an army; stamp is the world's clock, not the script's
+0x004366c0	partial	walked list 0; bins A/B/C, thresholds, train/enter lists as read (0x004369c1..); enter loop sets 4 before the class test, exact verbs -- fixed; the regroup is 0x00447330, which merges a call's bodies; here each gets its own squad (regroup design, waits on 0x00445a50's hero case)
+# hero
+0x005d7690	verified	clamp [1,1000]; only when that is not the inherent level, SetExperience virtual with Exp[n] (0x009bf87c); invalid or dead receiver writes nothing (was: stored a level beside a progress counter)
+0x005d7380	verified	16-bit hero handle at +0x170, 65535 when none or on a miss; no liveness test
+0x005d77a0	verified	level_for_experience (0x005d28c0) of the running total +0x180; miss -> 1 (was 0)
+0x005d75b0	verified	the running total at +0x180 (was progress within the level); miss -> 0
+0x005d7740	partial	vtbl+0x114 = stored +0x184, rebuilt by RecalcBonuses 0x005d9df0: total + item exp + hero army addend (0x0052fc50/0x0052d7a0), its level + item levels + Battle Cry, >= 1, Discipline floor; computed on demand here; the stand_position party bonus ([hero+0x2b0]+0x6c) and the recalc timing not modelled; miss -> 1
+0x005d7610	partial	invalid/dead refused; 0x005dbf70: unchanged total no-op, unclamped write, Nobility lift for Military in [Exp[8],Exp[12]); the owner's highest-military-level record (player+0x50) and its UI notice and the sprite refresh not modelled
+0x005d7810	verified	invalid or dead receiver writes nothing; +0x188 += n unclamped
+0x0053c5a0	partial	ItemHolder::AddItem answers whether the name minted (true even when the full holder refused); served by Obj::AddItem's body, which answers whether it was added -- no shipped ItemHolder-typed receiver calls it
+0x005ac910	partial	mint by exact name (0x00535640, two catalogues; the lookup fix is 9693e17), add virtual (count < inventory_size, 0x005b60a0), RecalcBonuses; the GetItem effect object (0x00518650 entry 27) and the equip_script start (flag 7, 0x0053baa0) not modelled -- no item-script runner (design)
+0x0053c910	verified	walk of held items, exact name compare; miss -> false; same answer as Obj::HasItem's
+0x004263e0	verified	find-by-name virtual 0x005afd60 (front-to-back, exact, length-checked) >= 0; miss -> false
+0x00421090	verified	packs ((n << 4) & 0xffff) | ((player - 1) & 0xf), no lookup; sim/squad.cpp fn_get_squad (an out-of-range player answers the no-squad handle)
+0x00424510	verified	16-bit squad handle at +0x174 (0 for none), miss -> 0, no print
+0x0052f550	verified	signed byte [hero+0x1fc+id], -1 for not offered (was 0), id unsigned < 25 else -1, miss -> -1
+0x0052f4f0	verified	id < 25 and points in [-1,10] else nothing; writer 0x0052def0 with no balance check (was refused), -1 withdraws the skill; Scout moves the hero's sight by SightPerScoutLevel per point difference clamped [100,2048] with the SetSight reveal
+0x0052f680	verified	0x0052da80: min(level, 10 per offered skill) - spent, unfloored (was floored at 0); miss -> -1
+0x00421f30	verified	player decremented (was not: answered for the next player), >= 16 -> 0; 0x00443f50 over the player's squads: non-empty, flags & 0x25 clear, front member a hero -> sum army / sum cap * 100
+0x0052e4b0	verified	army count [+0x1e4] != 0; miss -> false
+0x0052e320	verified	army count >= cap is the answer's negation of count < cap ([+0x1f8]); miss -> true
+0x0052e380	verified	[hero+0x1f8], the cap with Administration; miss -> 0
+0x0052ff00	verified	any resolving army member with a holder (+0x154 != 0xffff) -> false; empty army true; miss -> false
+0x0052ee40	verified	now - [hero+0x2b8] (army last struck); miss -> now
+0x005de090	verified	invalid/dead receiver or hero -> false; 0x005ddf50: self, count == cap, hero sight 0 or edge distance (0x005a77b0) > sight -> false; already in army -> true; no owner/freedom test (were refused here; no sight test before); the joined unit's effect objects not modelled
+0x005db3b0	verified	registered void (was a bool); invalid/dead receiver or hero, or a hero not the unit's (+0x170) -> nothing; else DetachHero 0x005db190
+0x0052fd20	verified	0x0052fb00: pops the army, DetachHero on each member whose hero handle is this hero; miss prints
+0x0052f620	verified	0x0052f140: id < 25 and points > 0 else false; any such skill true (passive did nothing, was refused), running one restarts (was refused); party walk 0x005f5520 hero + army: Healing incl. hero, Charge/Rush/Frenzy skip heroes, Rush damage per stamina gained, Frenzy floor half via the damage virtual; per-member effect objects not modelled
+0x00426480	partial	name, not object (was an object and one charge spent): find by name (vtbl+0xfc), item at it, use_script compiled (type flag bit 0) and the item not already running one -> starts a CVXItemScript thread, answer = it started; no item-script runner in this engine (design) -- answers false for every shipped call as before
+0x00427aa0	verified	every member's flag bit 30 at +0x198 or RamUnit (0x00540460); empty squad true; squad from the handle with no null check
+0x005d7d30	verified	flag bit 30 at +0x198 or RamUnit heir; miss -> false
+0x00513ce0	partial	friendly mask (was any player), predicate 0x00511ff0, first match; squad pass 0x00513840 keeps the last member passing (added); spawn templates excluded (Danube trap); grid cell order and team-vision stealth bits not modelled
+0x00513990	partial	threshold = level virtual + HealAmount (was a class property), score 300*h/max + max(0, edge - range), 1000 park, least wins; squad pass 0x00513620 (added); grid order and stealth bits not modelled
+0x00513aa0	partial	stamina [+0xc4]/[+0xcc] (was health); +256 floor, hero halves, 1000 park, least wins; squad pass 0x00513700 (added); grid order and stealth bits not modelled
+0x00513bb0	verified	friendly mask then IsEnemy required: empty on any data; its squad pass (0x005137e0 -> 0x005121e0) wants an enemy squadmate, also empty
+0x00513e10	partial	enemy mask, most stamina behind 0x00512260; a squadded caster (not held, or SF_ADVCHOOSER) walks the squad deque at [squad+0x70] instead of its circle -- that deque not modelled (design)
+0x005d9cb0	partial	enemy mask, most attack; squadded caster walks [squad+0x70] (0x005d94f0) instead of its circle -- not modelled; the retail caster-for-candidate clauses recorded at the section note
+0x005132f0	partial	0x00512360: nearest-by-grid search (0x0053eaf0, predicate 0x005122f0: unit, alive, inherent level < n, not Sentry, Military or BaseMage) within sight, then not caster, not enemy, not held, not messenger; first in id order here, not the grid's
+0x00513390	partial	the radius overload of 0x005132f0; no shipped site, not bound
+0x0052d9a0	verified	0x005c8d10: exact strcmp over the 25 SKILLS.INI names, -1 for none (was case-insensitive and took the hs* constants)
+0x0052f5c0	verified	effect slot [hero+0x218+4*id] != -1, the end time 0x0052d8f0 stamps and the hero's timer clears; no id bound in the original (out-of-range reads past the array), false here; miss -> false
+0x0052f6e0	verified	[party+0x54/0x58] = pt - 1024; miss does nothing
+0x0052f7e0	verified	[party+0x5c/0x60] + 1024, the settled pair formation writes (not modelled, so (1024,1024)); miss -> (-1,-1)
+0x0052f850	verified	[party+0x54] or [+0x58] nonzero; miss -> false
+0x0052f740	verified	bit 2 of [hero+0x194]; the retail miss path's stack bug not reproduced (answers false)
+0x0052f790	verified	sets or clears bit 2 of [hero+0x194]; miss prints
+0x00531440	partial	player decremented; 0x00531060: own heroes' classes dropped, icon clash only narrows; Range(0, n-1) on the narrow list, else the wide; the candidate set (subtree of the named class) inferred and the campaign availability table (0x0059a350, which can redraw) not modelled
+0x00534a30	verified	ambient This cast to CVXItemScript, [item+0x28] -= n, destroyed at < 1; not an item -> prints, nothing
+0x00534aa0	verified	ambient item's [item+0x28]; not an item -> 0
+0x00534b10	partial	free SetUseCount(v) on the ambient item, unclamped; not bound -- no shipped free call (the 3 sites are Item::SetUseCount)
+0x00535000	verified	[item+0x28]; unresolvable -> -1, resolves but not an item -> 0
+0x00535100	verified	[item+0x28] = v unclamped; otherwise prints
+0x0053cb20	partial	ItemHolder::RemoveItem(name): first match taken out without destroying, prints when none; served by Obj::RemoveItem's body -- no shipped ItemHolder-typed receiver
+0x005ac800	partial	invalid receiver or an item it does not hold -> false (owner check added); the original mints a new item into the old slot (new handle), here retyped in place -- the store orders items by id
+0x005aca10	verified	invalid/dead giver or recipient, invalid item, item not the giver's -> false (giver checks added); refused add hands it back
+0x005acba0	verified	back-to-front transfer while room, delete_empty holder destroyed, answer = any moved; the floating caption is UI; a non-full refusal (unreachable) not reproduced
+0x005acc90	verified	invalid/dead receiver, invalid item or holder -> false (receiver checks added); holder add or hand back
+0x005acdf0	verified	answers false on every path (was the drop's success); an item the receiver holds dropped at the point argument (was at the receiver's feet)
+0x005acf10	verified	find-by-name then item at index, its handle; miss 0xffff
+0x005ad190	verified	void (was bool); first held item of the name removed and destroyed (was every one)
+0x005ad230	verified	void (was bool); 1-based index in [1, count] removed and destroyed
+0x005ad310	verified	vtbl+0xf4(n - 1), its handle; outside or miss 0xffff
+0x005ad390	verified	vtbl+0x104 item count; miss 0
+0x005ad3f0	verified	vtbl+0x108, the class's +0x29c (inventory_size, atol); miss 0
+0x005b0450	verified	back-to-front, every exact-name match removed and destroyed, count; miss 0
+0x006a5a00	partial	free GetItem(name): mints the item into the ambient object when it is a unit; not bound -- no shipped free call (the one site is Obj::GetItem)

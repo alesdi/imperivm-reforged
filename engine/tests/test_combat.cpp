@@ -1729,11 +1729,17 @@ TEST(the_combat_host_slice_is_defined_and_reaches_the_system) {
   CHECK(call("InRange", 1, {me, them}).value.as_integer() == 1);
   CHECK(call("BestTargetInSquadSight", 0, {me}).value.as_object().id == 2);
 
-  call("Damage", 1, {them, Value::integer(50)});
+  // `Damage` answers whether the object is dead now (0x005ab5d0).
+  CHECK(call("Damage", 1, {them, Value::integer(50)}).value.as_integer() == 0);
   CHECK(combat.health(2) == 150);
-  // The original refuses negative damage by name; so does this.
+  // The original refuses negative damage by name -- a log line and `false`,
+  // not a script error -- and changes nothing.
   const auto refused = call("Damage", 1, {them, Value::integer(-1)});
-  CHECK(refused.status == imperivm::core::script::HostStatus::error);
+  CHECK(refused.status == imperivm::core::script::HostStatus::ok);
+  CHECK(refused.value.as_integer() == 0);
+  CHECK(combat.health(2) == 150);
+  // An invalid receiver answers true.
+  CHECK(call("Damage", 1, {Value::object(1, 777), Value::integer(5)}).value.as_integer() == 1);
 
   call("Heal", 1, {them, Value::integer(10)});
   CHECK(combat.health(2) == 160);
@@ -1993,21 +1999,22 @@ TEST(the_target_selection_family_is_defined_answers_and_refuses_a_null_context) 
 
   const Value me = Value::object(1, 1);
   CHECK(call("BestTargetInSquadSight", 0, {me}).value.as_object().id == 2);
-  CHECK(call("BestTargetInSquadSightMisZeroDamage", 0, {me}).value.as_object().id == 3);
-  // No class graph behind this system, so `Exclusive` can resolve no name and
-  // answers "nothing" rather than failing -- which is what the executable's
-  // string compare does too.
+  // The circle path builds its predicate one argument over (0x005dca31), so
+  // the damage flag lands where it does nothing: the unarmed peasant is still
+  // the answer, and `UNIT_IDLE.VS` re-tests `.attack` itself.
+  CHECK(call("BestTargetInSquadSightMisZeroDamage", 0, {me}).value.as_object().id == 2);
+  CHECK(call("BestNoIndependentTargetInSquadSight", 0, {me}).value.as_object().id == 2);
+  // `Exclusive`'s flag lands in the independents slot: a name that resolves
+  // to nothing is a penalty every candidate takes, so the ranking is the
+  // unfiltered one minus wildlife -- the same answer as the plain `/1`.
   CHECK(call("BestTargetInSquadSightExclusive", 1, {me, Value::string("GSwordsman")})
             .value.as_object()
-            .id == sim::kNoObject);
-  // **And the plain `/1` answers the opposite on the same input**, because a
-  // name that resolves to nothing is a penalty every candidate takes rather
-  // than a rejection every candidate fails. Same board, same string, and the
-  // two entry points part company on it.
+            .id == 2);
   CHECK(call("BestTargetInSquadSight", 1, {me, Value::string("GSwordsman")})
             .value.as_object()
             .id == 2);
 }
+
 
 // ---------------------------------------------------------------------------
 // profiles
@@ -3059,6 +3066,7 @@ struct SightBench {
   ClassIndex soldier_class = kNoClass;
   ClassIndex villager_class = kNoClass;
   ClassIndex wall_class = kNoClass;
+  ClassIndex fog_class = kNoClass;
 
   SightBench() {
     // A real graph, because `EnemiesInSight` reads `WorldObject::sight` -- the
@@ -3072,10 +3080,14 @@ struct SightBench {
              <properties sight="120" maxhealth="40"/></class>)",
         R"(<class id="Wall" parent="Object" cpp_class="CVXBuilding">
              <properties sight="300" maxhealth="4000"/></class>)",
+        R"(<class id="Fog" parent="Object" cpp_class="CVXScriptObj">
+             <properties maxhealth="100" maxstamina="0"/></class>)",
     };
-    const char* names[] = {"object.sc.xml", "soldier.sc.xml", "villager.sc.xml", "wall.sc.xml"};
-    for (int i = 0; i < 4; ++i) graph.add(bytes_of(docs[i]), names[i]);
+    const char* names[] = {"object.sc.xml", "soldier.sc.xml", "villager.sc.xml", "wall.sc.xml",
+                           "fog.sc.xml"};
+    for (int i = 0; i < 5; ++i) graph.add(bytes_of(docs[i]), names[i]);
     graph.link();
+    fog_class = graph.find("Fog");
     soldier_class = graph.find("Soldier");
     villager_class = graph.find("Villager");
     wall_class = graph.find("Wall");
@@ -3262,6 +3274,123 @@ TEST(combat_get_point_on_target_answers_the_targets_position) {
                             imperivm::core::script::Value::object(1, rider)});
   REQUIRE(is_point(held.value));
   CHECK((unpack_point(held.value) == Point{900, 400}));
+}
+
+/// The receiver and death checks the target accessors make before their
+/// answer: `IsValidTarget` (0x005aafd0) never reads `target_factor`,
+/// `CanAttack` (0x005ab060) refuses a dead target or receiver, `InRange`
+/// (0x005d72e0) refuses a held receiver, and `GetPointOnTarget` (0x004e3080)
+/// checks its receiver before its target.
+TEST(combat_target_accessors_check_what_the_binary_checks) {
+  using imperivm::core::script::Value;
+  SightBench b;
+  CombatProfile animal = melee(1, 0, 40);
+  animal.target_factor = -1;  // Crow, Deer, Eagle, Hen2
+  b.combat.set_profile(b.villager_class, animal);
+  const ObjectId sword = b.soldier(0, Point{0, 0});
+  const ObjectId deer = b.soldier(1, Point{30, 0}, b.villager_class);
+  const ObjectId foe = b.soldier(1, Point{40, 0});
+
+  CHECK(b.call("IsValidTarget", 1, {Value::object(1, sword), Value::object(1, deer)})
+            .value.as_integer() == 1);
+
+  CHECK(b.call("CanAttack", 1, {Value::object(1, sword), Value::object(1, foe)})
+            .value.as_integer() == 1);
+  b.combat.apply_damage(b.world, foe, b.combat.health(foe));
+  CHECK(b.call("CanAttack", 1, {Value::object(1, sword), Value::object(1, foe)})
+            .value.as_integer() == 0);
+
+  const ObjectId wall = b.world.spawn(NativeClass::building, nullptr, b.wall_class);
+  b.world.set_position(wall, Point{0, 0});
+  CHECK(b.call("InRange", 1, {Value::object(1, sword), Value::object(1, deer)})
+            .value.as_integer() == 1);
+  REQUIRE(b.world.put_in_holder(sword, wall));
+  CHECK(b.call("InRange", 1, {Value::object(1, sword), Value::object(1, deer)})
+            .value.as_integer() == 0);
+
+  const auto orphan =
+      b.call("GetPointOnTarget", 1, {Value::object(1, 999999), Value::object(1, deer)});
+  REQUIRE(is_point(orphan.value));
+  CHECK((unpack_point(orphan.value) == Point{0, 0}));
+}
+
+/// A script object the combat system does not hold -- a `Mist`, a
+/// `CoverOfMercy` -- takes the generic mutators like any object (0x005a7a00,
+/// 0x005a7a30, 0x005a7720, 0x005b16f0): `SetStamina` stores, `Damage` takes
+/// it to zero and removes it. And a unit's health store (0x005d3a80) cures
+/// its disease when it reaches full health.
+TEST(combat_mutators_reach_script_objects_and_cure_at_full_health) {
+  using imperivm::core::script::Value;
+  SightBench b;
+  const ObjectId fog = b.world.spawn(NativeClass::script_obj, nullptr, b.fog_class);
+  REQUIRE(b.world.set_health(fog, 100));
+  REQUIRE(b.combat.find(fog) == nullptr);
+
+  (void)b.call("SetStamina", 1, {Value::object(1, fog), Value::integer(10)});
+  CHECK(b.world.state(fog)->stamina == 10);
+
+  const auto hurt = b.call("Damage", 1, {Value::object(1, fog), Value::integer(30)});
+  CHECK(hurt.value.as_integer() == 0);
+  CHECK(b.world.state(fog)->health == 70);
+  (void)b.call("Heal", 1, {Value::object(1, fog), Value::integer(500)});
+  CHECK(b.world.state(fog)->health == 100);  // capped at the class maximum
+  const auto ended = b.call("Damage", 1, {Value::object(1, fog), Value::integer(100)});
+  CHECK(ended.value.as_integer() == 1);
+  CHECK(b.world.find(fog) == nullptr);
+
+  const ObjectId sick = b.soldier(0, Point{0, 0});
+  b.world.mutable_state(sick)->flags.diseased = true;
+  (void)b.call("SetHealth", 1, {Value::object(1, sick), Value::integer(150)});
+  CHECK(b.world.state(sick)->flags.diseased);  // not yet full
+  (void)b.call("Heal", 1, {Value::object(1, sick), Value::integer(100)});
+  CHECK(!b.world.state(sick)->flags.diseased);
+
+  // A negative heal changes nothing, not even the clamp.
+  b.combat.find(sick)->health = 999;
+  (void)b.call("Heal", 1, {Value::object(1, sick), Value::integer(-1)});
+  CHECK(b.combat.health(sick) == 999);
+}
+
+/// The `*InSquadSight` family answers the invalid handle for a held unit
+/// (0x005dc950's other path) and for a dead one (the wrappers' `vtbl+0x50`
+/// test); `BestTargetForPos` has its own held test.
+TEST(the_in_squad_sight_family_is_blind_for_a_held_or_dead_unit) {
+  using imperivm::core::script::Value;
+  SightBench b;
+  const ObjectId me = b.soldier(0, Point{0, 0});
+  const ObjectId foe = b.soldier(1, Point{30, 0});
+  const auto best = [&](const char* name, ObjectId who) {
+    return b.call(name, 0, {Value::object(1, who)}).value.as_object().id;
+  };
+  CHECK(best("BestTargetInSquadSight", me) == foe);
+
+  const ObjectId wall = b.world.spawn(NativeClass::building, nullptr, b.wall_class);
+  b.world.set_position(wall, Point{0, 0});
+  REQUIRE(b.world.put_in_holder(me, wall));
+  CHECK(best("BestTargetInSquadSight", me) == kNoObject);
+  CHECK(best("BestTargetInSquadSightMisZeroDamage", me) == kNoObject);
+  CHECK(best("BestNoIndependentTargetInSquadSight", me) == kNoObject);
+  CHECK(best("BestTargetInSquadSight_PreferUndiseased", me) == kNoObject);
+
+  const ObjectId other = b.soldier(0, Point{0, 10});
+  b.combat.apply_damage(b.world, other, b.combat.health(other));
+  CHECK(best("BestTargetInSquadSight", other) == kNoObject);
+}
+
+/// `EnemiesInSight` counts a candidate only when the looker's `CanAttack`
+/// virtual accepts it (0x005d5180).
+TEST(combat_enemies_in_sight_needs_the_lookers_can_attack) {
+  SightBench b;
+  CombatProfile unarmed = melee(16, 12, 200);
+  unarmed.damage_type = DamageType::none;
+  b.combat.set_profile(b.villager_class, unarmed);
+  const ObjectId looker = b.soldier(0, Point{0, 0}, b.villager_class);
+  (void)b.soldier(1, Point{100, 0});
+  // The virtual reads the world's objects, which a started system holds.
+  b.combat.start(b.world);
+  CHECK(!b.enemies_in_sight(looker));
+  b.combat.set_profile(b.villager_class, melee(16, 12, 200));
+  CHECK(b.enemies_in_sight(looker));
 }
 
 /// A hidden enemy is not an enemy in sight.

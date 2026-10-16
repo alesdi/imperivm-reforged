@@ -153,8 +153,11 @@ struct Squad {
 
   /// `Squad.State` -- 89 corpus sites, the most read member on the type. One of
   /// the `SS_*` values `DATA/AI/AI.INI` declares as data (`sim/ai_profile.hpp`),
-  /// with `0` the engine-hardcoded `SS_IDLE` sentinel. Held as the raw integer:
+  /// with `0` the engine-hardcoded `SS_IDLE` sentinel. Held as the raw number:
   /// the names are a profile's to define, so nothing here may enumerate them.
+  /// **A word** in the original (`[squad+0x28]`, written sixteen bits wide and
+  /// read back zero-extended), so it only ever holds 0..65535; see
+  /// `squad_stamp_state`.
   std::int32_t state = 0;
   /// `Squad.StateTime`. `TVXSquad` persists it as `StateSetTime`, so it is the
   /// game time the state was last set rather than a duration; `StateTime`'s
@@ -823,6 +826,12 @@ class SquadListPool {
 void squad_set_cmd(World& world, Squad& squad, std::int32_t state, std::int32_t set_flags,
                    std::int32_t clear_flags, std::string_view verb, const Command& prototype,
                    GameTime now);
+
+/// The head every `SetCmd`/`ClrCmd` body shares, after its `SF_NOAI` refusal:
+/// the state as a **word** (the low sixteen bits, which `State` reads back
+/// zero-extended), the clock, and the flags set-then-clear.
+void squad_stamp_state(Squad& squad, std::int32_t state, std::int32_t set_flags,
+                       std::int32_t clear_flags, GameTime now) noexcept;
 
 // --------------------------------------------------------------------------
 // the host slice

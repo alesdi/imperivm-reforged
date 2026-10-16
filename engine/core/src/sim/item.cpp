@@ -18,16 +18,6 @@ void fold(std::uint64_t& h, std::uint64_t value) noexcept {
   }
 }
 
-char lower(char c) noexcept { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; }
-
-bool iequal(std::string_view a, std::string_view b) noexcept {
-  if (a.size() != b.size()) return false;
-  for (std::size_t i = 0; i < a.size(); ++i) {
-    if (lower(a[i]) != lower(b[i])) return false;
-  }
-  return true;
-}
-
 /// The `file://` prefix every script reference in `ITEMS.XML` carries.
 std::string_view strip_scheme(std::string_view path) noexcept {
   constexpr std::string_view kScheme = "file://";
@@ -114,7 +104,7 @@ ItemTypeIndex ItemCatalog::add(ItemDefinition definition) {
 
 ItemTypeIndex ItemCatalog::find(std::string_view id) const {
   for (std::size_t i = 0; i < defs_.size(); ++i) {
-    if (iequal(defs_[i].id, id)) return static_cast<ItemTypeIndex>(i);
+    if (defs_[i].id == id) return static_cast<ItemTypeIndex>(i);
   }
   return kNoItemType;
 }

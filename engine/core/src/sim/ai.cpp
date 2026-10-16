@@ -831,6 +831,18 @@ int g_sync_depth = 0;
 /// `TSRecruitHero` needs it and it is a pointer rather than a second overload
 /// so that the one caller that does is the only one that pays for the copy.
 ///
+/// **A callee that fails traps the caller here, and that is a known gap.** The
+/// original's synchronous launcher (0x006a0360) reports a failed run as a
+/// non-zero status, and every trampoline read in the tenth round's audit
+/// (0x0043d740, 0x0043d820, the four recruiters, 0x00426c00) carries on with
+/// what it had -- 0, the list it minted, whatever the by-reference slot holds
+/// -- after at most a message through the retail no-op sink; 0x00426680 counts
+/// the skill as weight 0, which `m_ai_get_skill_to_develop` does too. This runner returns
+/// the failure instead, so the trap sweep sees a callee that broke: with the
+/// shipped scripts a failing callee is this engine's bug, not the game's, and
+/// a silent default would hide it. A missing script file is not a failure of
+/// that kind, and each caller answers its own default for it.
+///
 /// **Exported, not local.** `sim/squad.cpp` runs `CheckMAIKA.vs` from
 /// `Squad::CalcGoAround` through the same trampoline shape (0x0043d670 beside
 /// 0x0043d740), and one runner is one set of refusals.
@@ -911,12 +923,26 @@ std::uint32_t ai_script_chunk(CallContext& ctx, PlayerId player, std::string_vie
 
 namespace {
 
-/// `AIGetPlayer` -- the 1-based player whose AI owns the running script, or -1.
+/// `AIGetPlayer` (0x00421cb0) -- the 1-based player whose AI owns the running
+/// script, and **0** for a script no AI owns.
+///
+/// The body is one call and an increment: 0x0043caa0 reads the running
+/// script's owner tag (the text field at +0x44 of the current script record),
+/// answers -1 when the field is null and its `atol` otherwise, and the entry
+/// point pushes that **plus one**. The tag is written by the AI's own spawn
+/// (0x0041cd00 formats `[ai+0x24]`, the 0-based seat, with `%d` and stores it
+/// through 0x0069d040), so an AI-owned script reads its seat + 1 and anything
+/// else reads -1 + 1 = 0. No argument, no receiver, no failure arm.
+/// `AiSystem::script_player` keeps -1 for "no owner" because its other callers
+/// (the script-slot and helper families) test for it; only this entry point
+/// adds the original's increment to that case. All nine shipped sites run
+/// inside an AI, so the retail scripts never see the 0.
 HostOutcome f_ai_get_player(CallContext& ctx) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed("AIGetPlayer: no world");
   if (ctx.scheduler == nullptr) return HostOutcome::failed("AIGetPlayer: no scheduler");
-  return HostOutcome::ok_with(Value::integer(ai->script_player(ctx.script, *ctx.scheduler)));
+  const std::int32_t owner = ai->script_player(ctx.script, *ctx.scheduler);
+  return HostOutcome::ok_with(Value::integer(owner < 0 ? 0 : owner));
 }
 
 /// `AIStart(player, profile, difficulty)` -- 20 sites, every one of them inside
@@ -938,9 +964,19 @@ HostOutcome f_ai_get_player(CallContext& ctx) {
 ///   * the player is validated **1..16** and passed down 0-based, which is
 ///     `player_arg`'s rule everywhere else. `Function "AIStart": Player number
 ///     should be between 1 and 16` is the original's own message.
-///   * the profile name is **uppercased** (0x00435030-0x0043505c, an inline
-///     `a`..`z` fold) before the lookup, and an unknown one refuses with
-///     `AIStart: invalid AI profile` and starts nothing.
+///   * the profile name must match a listed profile **exactly, case and
+///     all**. The wrapper does copy the argument into a stack buffer and fold
+///     `a`..`z` there (0x00435030-0x0043505c), but the key it then pushes to
+///     the lookup (0x0043506d: the address of the slot holding the *original*
+///     string) is not that buffer, so the fold is dead. The lookup, 0x00426ea0,
+///     walks the profile list comparing length and bytes with no folding, and
+///     the list holds uppercased directory names (0x00443190). So
+///     `"DEFENSIVE"` would match and `"Defensive"` is refused with `AIStart:
+///     invalid AI profile`, starting nothing. The core (0x00434ca0) uppercases
+///     the stored copy afterwards, a no-op on a name that matched. Here that is
+///     a refusal of any argument with a lower-case letter in it, ahead of
+///     `AiSystem::start`'s folded lookup. The two-argument form (0x00434e60)
+///     has the same dead fold and the same exact lookup.
 ///   * the difficulty argument is 0, 1 or 2 -- the core increments before
 ///     validating against 1..3 -- and anything else refuses with
 ///     `AIStart: invalid diffivulty`, the typo included. `ai_start_difficulty`
@@ -987,10 +1023,12 @@ HostOutcome f_ai_start(CallContext& ctx) {
   const PlayerId player = player_from_script(ctx.arg(0).as_integer());
   if (player == kNoPlayer) return HostOutcome::ok_void();
   if (ctx.arg(1).as_string().empty()) return HostOutcome::ok_void();  // `invalid AI profile`
+  // An exact match against uppercased names: a lower-case letter matches none.
+  if (upper(ctx.arg(1).as_string()) != ctx.arg(1).as_string()) return HostOutcome::ok_void();
   const AiDifficulty difficulty = ai_start_difficulty(ctx.arg(2).as_integer());
   if (difficulty == AiDifficulty::none) return HostOutcome::ok_void();
   // `AiSystem::add_profile` uppercases on the way in and `start` looks up by
-  // the uppercased name, so the fold happens once, there.
+  // the uppercased name; the check above has made that fold the identity.
   (void)ai_start(*world, player, ctx.arg(1).as_string(), difficulty, *ctx.scheduler);
   return HostOutcome::ok_void();
 }
@@ -1009,15 +1047,33 @@ HostOutcome f_ai_start(CallContext& ctx) {
 ///     SPFDone();
 ///
 /// The nine are the driver interface of the original's *smart pathfinder*, the
-/// area-connectivity structure its AI queries walk. Each is a few instructions
-/// into a builder at 0x008c529c: the three `_Quant` calls (0x004129a0,
-/// 0x00415a40, 0x00415a90) do one slice of a pass and answer **whether more
-/// remains**; the five steps (0x004166b0, 0x0040dd10, 0x00412980, 0x0040d1d0,
-/// 0x004161d0) run one stage whole; `SPFDone` (0x0040f8c0) destroys the live
-/// structure at 0x008c528c, installs the built one and frees the builder. And
-/// it is the builder that starts the script: 0x004165d2 pushes
-/// `data/pathfinderinit.vs` and runs it, so the script exists to spread the
-/// build over frames, `Sleep` by `Sleep`.
+/// movement structure at 0x008c528c. Each is a few instructions into a
+/// builder at 0x008c529c, read without a null test:
+///
+///   * the three `_Quant` calls do one slice of a pass and answer **whether
+///     more remains**: 0x004129a0 answers 0x00411af0's result as a boolean;
+///     0x00415a40 runs one row of the connect pass (0x00415880 over the row
+///     counter at `[builder+0x18]`), advances the counter and answers whether
+///     it is still within the last row, `[builder+0x14]`; 0x00415a90 answers
+///     0x004159b0's result as a boolean;
+///   * the five steps run one stage whole and answer nothing: 0x004166b0 calls
+///     0x00416520; 0x0040dd10 calls 0x0040db30 and 0x00412980 calls 0x00411c00,
+///     each with the map's size and data from `[builder+4]`; 0x0040d1d0 only
+///     sets the connect pass's range -- 2 and 2 at `+8`/`+0xc`, the extent at
+///     `[[builder+4]+0x20]` less 3 at `+0x10`/`+0x14`, and the counter `+0x18`
+///     to the first;
+///     0x004161d0 calls 0x00415e30 and zeroes `[builder+0x2c]`;
+///   * `SPFDone` (0x0040f8c0) destroys the live structure through its virtual
+///     destructor, installs the built one (`[builder]`), tears the builder down
+///     (0x0040f7f0) and frees it.
+///
+/// It is the builder that starts the script: 0x004165a0 does nothing while a
+/// builder exists or the script is already running (0x006a2110), otherwise
+/// allocates the builder and starts `data/pathfinderinit.vs` attached to the
+/// world at priority 100 (0x006a07e0), freeing the builder again if that
+/// fails. Its two callers (0x0040acb0, which also creates the live structure,
+/// and 0x006a4140) are the original's moments to build; the script exists to
+/// spread the build over frames, `Sleep` by `Sleep`.
 ///
 /// **This engine has nothing left to build when the script runs.** Its area
 /// partition and connectivity are computed at map load by the rule
@@ -1029,6 +1085,14 @@ HostOutcome f_ai_start(CallContext& ctx) {
 /// Nothing here reads the structure the original would have built, which is
 /// what makes the answer derived rather than invented; the day something
 /// does, these nine become the driver of that.
+///
+/// **What differs, labelled.** The original's `_Quant` answers true for as
+/// many slices as the map needs, so its script runs for many frames where
+/// this one ends at the first; and nothing in this engine starts the script at
+/// all -- there is no builder and no rebuild moment, the movement pathfinder
+/// being this engine's own design. The nine are bound so the script, if
+/// something runs it, ends cleanly rather than trapping. Recorded `partial`
+/// for that design, not for an unread arm.
 HostOutcome f_spf_quant(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SPF: no world");
@@ -1131,14 +1195,62 @@ HostOutcome m_ai(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean((flags & kSquadFlagNoAi) == 0));
 }
 
-/// `set.EconomyScript` / `set.TacticScript`.
+/// The economy or tactic slot of `set` **as its current owner's AI sees it**:
+/// what `set.EconomyScript` (0x00426190) and `set.TacticScript` (0x00426290)
+/// answer, and what `RunEconomyScript` tests before it stops anything.
+///
+/// The two entry points resolve the handle and take the settlement's owner
+/// record (`[set+0x90]`) and that player's AI (`[player+0x88]`); **no AI
+/// answers 0** -- a human's settlement has no economy script whatever ran on
+/// it before. With an AI they call 0x0041d2a0 / 0x0041d410 on it, which read
+/// the AI's own per-settlement array (`[ai+0x70]` for economy, `[ai+0x80]` for
+/// tactic, a 16-bit id at the settlement's index `[set+0x1c]`), first asking
+/// the AI's thread manager whether the settlement's fixed thread id (economy
+/// `base + 0x34 + 2*index`, tactic one more; `base` is the helper-table count)
+/// still runs (0x0069f950) and zeroing the stored id when it does not. The
+/// answer is the stored id masked to 16 bits.
+///
+/// **Both the array and the threads are the AI's**, so the slot is per
+/// (AI, settlement). This engine keeps one slot per settlement
+/// (`AiSettlementScripts`) and recovers the per-AI reading by asking who owns
+/// the recorded script: a live script another seat started -- the settlement
+/// has changed hands and the old owner's economy script has not yet noticed --
+/// is not in the new owner's array, so it reads 0 here as it does there. What
+/// that does not reproduce is a seat recapturing a settlement while its *own*
+/// old script still runs and a third seat's has overwritten the slot (the
+/// original still sees the first); labelled, and a per-AI slot table is the
+/// fix. The receiver failing to resolve is a null dereference in the original;
+/// here it traps.
+[[nodiscard]] std::int32_t owner_slot(AiSystem& ai, const Settlement& set, AiEnum family,
+                                      const script::Scheduler& scheduler,
+                                      script::ScriptId* running = nullptr) {
+  const AiPlayer* seat = ai.player_ai(set.owner);
+  if (seat == nullptr || !seat->active) return 0;
+  const std::int32_t id = family == AiEnum::economy_script
+                              ? ai.economy_script(set.id, scheduler)
+                              : ai.tactic_script(set.id, scheduler);
+  if (id == 0) return 0;
+  script::ScriptId script = script::kNoScript;
+  for (const AiSettlementScripts& slot : ai.settlement_scripts()) {
+    if (slot.settlement != set.id) continue;
+    script = family == AiEnum::economy_script ? slot.economy_script : slot.tactic_script;
+    break;
+  }
+  if (ai.script_player(script, scheduler) != static_cast<std::int32_t>(set.owner) + 1) return 0;
+  if (running != nullptr) *running = script;
+  return id & 0xffff;
+}
+
+/// `set.EconomyScript` / `set.TacticScript` -- `owner_slot`, which describes
+/// both bodies.
 HostOutcome m_economy_script(CallContext& ctx) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed("EconomyScript: no world");
   if (ctx.scheduler == nullptr) return HostOutcome::failed("EconomyScript: no scheduler");
   const Settlement* set = receiver_settlement(ctx);
   if (set == nullptr) return HostOutcome::failed("EconomyScript: receiver is not a settlement");
-  return HostOutcome::ok_with(Value::integer(ai->economy_script(set->id, *ctx.scheduler)));
+  return HostOutcome::ok_with(
+      Value::integer(owner_slot(*ai, *set, AiEnum::economy_script, *ctx.scheduler)));
 }
 
 HostOutcome m_tactic_script(CallContext& ctx) {
@@ -1147,28 +1259,43 @@ HostOutcome m_tactic_script(CallContext& ctx) {
   if (ctx.scheduler == nullptr) return HostOutcome::failed("TacticScript: no scheduler");
   const Settlement* set = receiver_settlement(ctx);
   if (set == nullptr) return HostOutcome::failed("TacticScript: receiver is not a settlement");
-  return HostOutcome::ok_with(Value::integer(ai->tactic_script(set->id, *ctx.scheduler)));
+  return HostOutcome::ok_with(
+      Value::integer(owner_slot(*ai, *set, AiEnum::tactic_script, *ctx.scheduler)));
 }
 
-/// `set.GetEconomyScript(idPlayer)` / `set.GetTacticScript(idPlayer)`.
+/// `set.GetEconomyScript(idPlayer)` / `set.GetTacticScript(idPlayer)`
+/// (0x004260f0 / 0x004261f0).
 ///
-/// Both are `Settlement::GetXxxScript` in `gbr.exe` and both are one call into
-/// the identically named `.vs` file, whose declared signature is
-/// `int, Settlement set, int idPlayer` -- exactly this call's arguments, in
-/// this order. So the arguments pass straight through.
+/// Each pops the player and the settlement and calls 0x0043d740 / 0x0043d820
+/// with **`idPlayer - 1`**: the seat whose script directory is searched is the
+/// argument's, not the running script's. That resolves the file through
+/// 0x0043d030 -- `<the seat's AI profile name>/<file>` when the seat (0..15)
+/// has an AI with a non-empty profile name and that file exists, the plain
+/// name otherwise, which is `ai_script_chunk` -- and runs it synchronously
+/// (0x006a0360) with the declared `int, Settlement set, int idPlayer`: the
+/// settlement's id and `idPlayer` again, so the arguments pass straight
+/// through. The answer is the script's return value when the run succeeded
+/// **and the value is not negative**, masked to 16 bits; a negative value, a
+/// script that returns nothing, a missing file or a failed run all answer 0.
+/// No receiver check: an invalid handle is dereferenced. Here a missing file
+/// answers 0 as there, and a callee that traps traps the caller (the shared
+/// `run_script_now`, labelled there) where retail answers 0.
 HostOutcome get_script_common(CallContext& ctx, const char* file, const char* what) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed(what);
   if (ctx.scheduler == nullptr) return HostOutcome::failed(what);
   if (ctx.count() != 2) return HostOutcome::failed(what);
-  const std::int32_t player = ai->script_player(ctx.script, *ctx.scheduler);
-  const PlayerId owner = player > 0 ? static_cast<PlayerId>(player - 1) : kNoPlayer;
-  const std::uint32_t chunk = owner == kNoPlayer ? ctx.scheduler->find_chunk(file)
-                                                 : ai->find_script(*ctx.scheduler, owner, file);
+  const std::int64_t seat = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
+  const PlayerId owner = seat >= 1 && seat <= 16 ? static_cast<PlayerId>(seat - 1) : kNoPlayer;
+  const std::uint32_t chunk = ai_script_chunk(ctx, owner, file);
+  if (chunk == script::kNoChunk) return HostOutcome::ok_with(Value::integer(0));
   Value result;
   const HostOutcome ran = run_script_now(ctx, chunk, ctx.arguments, what, result);
   if (ran.status != script::HostStatus::ok) return ran;
-  return HostOutcome::ok_with(result.is_integer() ? result : Value::integer(0));
+  if (!result.is_integer() || result.as_integer() < 0) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
+  return HostOutcome::ok_with(Value::integer(result.as_integer() & 0xffff));
 }
 
 HostOutcome m_get_economy_script(CallContext& ctx) {
@@ -1179,18 +1306,35 @@ HostOutcome m_get_tactic_script(CallContext& ctx) {
   return get_script_common(ctx, "GetTacticScript.vs", "GetTacticScript failed");
 }
 
-/// `set.RunEconomyScript(id)` / `set.RunTacticScript(id)`.
+/// `set.RunEconomyScript(id)` / `set.RunTacticScript(id)` (0x00426140 /
+/// 0x00426240).
 ///
-/// `CVXAI::RunEconomyScript` (0x0041d310) writes the id into the settlement's
-/// slot and spawns the script the id names. The name comes from the profile's
-/// own enum table -- the same table `GS_STR`/`SS_STR` print through -- and the
-/// file is that name plus `.vs`, which every `ES_*`, `GS_*` and `TS_*` entry in
-/// `[EconomyScripts]`, `[GAIKAStrat]` and `[TacticScripts]` has a matching
-/// `[Scripts]` line for.
+/// Each pops the id and the settlement and calls 0x0041d310 / 0x0041d480 **on
+/// the settlement owner's AI** (`this` is `[[set+0x90]+0x88]`, loaded at
+/// 0x0042616b; no null test, so a settlement whose owner has no AI is a crash
+/// in the original and nothing at all here). That routine, in order:
 ///
-/// The spawned script takes the settlement as its one parameter
-/// (`ES_Village.vs = void, Settlement set`), and its parent is the caller, so
-/// `AIGetPlayer` inside it resolves.
+///   1. reads the owner's slot (`owner_slot`'s rule) and, when it is
+///      non-zero, **stops the thread running in the settlement's fixed id**
+///      (0x0069fee0) -- a second `RunEconomyScript` replaces the first script
+///      rather than running beside it;
+///   2. **writes the id, unconditionally** -- 0 included, which is how a
+///      caller stops the slot's script and clears it;
+///   3. for a non-zero id, takes its name from the constant table (0x0043f1b0;
+///      an id past the table's end names `""`), appends `.vs`, and starts it in
+///      the owner's thread manager at the settlement's fixed id through
+///      0x0041cd00, with the signature `void, Settlement set` and the
+///      settlement as its argument, tagged with the owner's seat so
+///      `AIGetPlayer` inside it answers the owner. A name with no script file
+///      makes 0x0041cd00 answer -1 and start nothing: no message, and the id
+///      stays written, which the next read turns back into 0 because no
+///      thread runs at that id.
+///
+/// The constant names here come from the profile family by family
+/// (`AiProfile::constant_name`), which is this engine's numbering of the same
+/// names (`sim/ai_profile.hpp` says why it differs from retail's single
+/// table). The spawned script's parent is the caller, which only matters for
+/// the ownership walk; it is adopted for the owner explicitly.
 HostOutcome run_script_common(CallContext& ctx, AiEnum family, const char* what) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed(what);
@@ -1198,32 +1342,38 @@ HostOutcome run_script_common(CallContext& ctx, AiEnum family, const char* what)
   if (ctx.count() != 2 || !ctx.arg(1).is_integer()) return HostOutcome::failed(what);
   const Settlement* set = receiver_settlement(ctx);
   if (set == nullptr) return HostOutcome::failed(what);
+  const PlayerId owner = set->owner;
+  const AiPlayer* seat = ai->player_ai(owner);
+  if (seat == nullptr || !seat->active) return HostOutcome::ok_void();
 
-  const std::int32_t id = ctx.arg(1).as_integer();
-  // The sentinel is 0 and means "no script"; running it is a no-op, not an
-  // error. `EconomyMonitor.vs` already guards against it, but `AIRun`-shaped
-  // entry points in this corpus are habitually called with whatever came back.
+  // Step 1: the owner's own running script goes first.
+  script::ScriptId running = script::kNoScript;
+  if (owner_slot(*ai, *set, family, *ctx.scheduler, &running) != 0) {
+    ctx.scheduler->kill(running);
+  }
+  // Step 2: the 16-bit id is written whatever it is.
+  const std::int32_t id = static_cast<std::int32_t>(ctx.arg(1).as_integer() & 0xffff);
+  const auto write = [&](ScriptId script) {
+    if (family == AiEnum::economy_script) {
+      ai->set_economy_script(set->id, id, script);
+    } else {
+      ai->set_tactic_script(set->id, id, script);
+    }
+  };
+  write(script::kNoScript);
   if (id == 0) return HostOutcome::ok_void();
 
-  const std::int32_t player = ai->script_player(ctx.script, *ctx.scheduler);
-  if (player <= 0) return HostOutcome::failed(what);
-  const PlayerId owner = static_cast<PlayerId>(player - 1);
-
+  // Step 3.
   const std::string file = ai->script_file_for(owner, family, id);
-  if (file.empty()) return HostOutcome::failed(what);
+  if (file.empty()) return HostOutcome::ok_void();
   const std::uint32_t chunk = ai->find_script(*ctx.scheduler, owner, file);
-  if (chunk == script::kNoChunk) return HostOutcome::failed(what);
-
+  if (chunk == script::kNoChunk) return HostOutcome::ok_void();
   const Value argument = ctx.arg(0);
   const ScriptId spawned = ctx.scheduler->spawn(chunk, std::span<const Value>(&argument, 1),
                                                 script::ObjectRef{}, ctx.script);
-  if (spawned == script::kNoScript) return HostOutcome::failed(what);
+  if (spawned == script::kNoScript) return HostOutcome::ok_void();
   ai->adopt(spawned, owner);
-  if (family == AiEnum::economy_script) {
-    ai->set_economy_script(set->id, id, spawned);
-  } else {
-    ai->set_tactic_script(set->id, id, spawned);
-  }
+  write(spawned);
   return HostOutcome::ok_void();
 }
 
@@ -1282,10 +1432,14 @@ HostOutcome m_ts_adv_hero_skills(CallContext& ctx) {
   // pass-through below, which hands `ctx.arguments` to a callee whose
   // parameter list is fixed at three.
   if (ctx.count() != 3) return HostOutcome::failed(kWhat);
-  // The original's own guard: any of the three arguments naming nothing prints
-  // and returns without running the helper. A receiver that is not an object
-  // handle at all is the same case, and the helper's `if (!hero.IsValid)`
-  // would answer it identically if it ran.
+  // The original's own guard (0x00426c00): only the **hero** is tested -- the
+  // two arrays are resolved and passed on as they are -- and a hero naming
+  // nothing prints and returns without running the helper. A receiver that is
+  // not an object handle at all is the same case, and the helper's `if
+  // (!hero.IsValid)` would answer it identically if it ran. The search path
+  // is the hero's player (`[[hero+0x70]+8]` into 0x0043d030). A failed run
+  // prints `TSHeroSkills: Error running script!` and returns; here it traps
+  // (`run_script_now`'s labelled gap).
   if (!ctx.arg(0).is_object()) return HostOutcome::ok_void();
 
   const WorldObject* slot = world->find(ctx.arg(0).as_object().id);
@@ -1666,14 +1820,27 @@ namespace {
 /// hand the helper", and this engine's registry keys on it, so all eight are
 /// bound to this one body.
 ///
-/// The core then validates the spawned script's own signature (0x004d2ff8
-/// onward): the return type must be void, the declared parameter count must
-/// **equal** the supplied count, and every declared parameter must be a
-/// string. All four shipped helpers open `// void, str GroupName, str Target`,
-/// so on retail data only the arity-4 form can ever spawn anything -- which is
-/// also the only form any of the 285 sites uses. The other seven are bound
-/// anyway, because a registration that exists and refuses is a different thing
-/// from a name that traps.
+/// The core (0x004d2ee0, a method of the **one global helper manager** at
+/// `[0x996888]`, not of any player's AI) first takes a free thread id from 0 to
+/// 127 in that manager (0x0069f910; none free is a silent nothing -- not
+/// reproduced, this engine has no such cap and no shipped mission runs 128
+/// helpers at once), formats the path, compiles the file or finds it in its
+/// `compiledhelpers` cache (0x004d1b10), and then validates the script's own
+/// signature (0x004d2ff8 onward): the return type must be void, the declared
+/// parameter count must **equal** the supplied count, and every declared
+/// parameter must be a by-value `str` (type 0xb, no reference). A file that
+/// fails any of it prints `Invalid parms for %s AI helper` and starts nothing.
+/// All four shipped helpers open `// void, str GroupName, str Target`, so on
+/// retail data only the arity-4 form can ever spawn anything -- which is also
+/// the only form any of the 285 sites uses, and the only one bound here (see
+/// the registration).
+///
+/// **The helper belongs to no player.** It runs in the helper manager, which
+/// tags nothing, so `AIGetPlayer` inside one answers 0 whoever started it, and
+/// its life is not tied to its caller's. Here it is spawned with no parent and
+/// no ownership record (it used to be adopted for the caller's AI, which no
+/// shipped helper could see: SIEGE.VS takes its player from `ol[0].player`,
+/// and every shipped caller is a map sequence, which no AI owns).
 ///
 /// **There is no already-running branch.** The only lookup the original makes
 /// before spawning is on the *path*, into a `compiledhelpers` vector; the
@@ -1711,38 +1878,52 @@ HostOutcome f_run_ai_helper(CallContext& ctx) {
   // ten other files whose basename ends in `GUARD.VS`.
   if (chunk == script::kNoChunk) return HostOutcome::ok_void();
 
+  // `Invalid parms for %s AI helper`: void, exactly as many parameters as were
+  // supplied, every one a by-value `str`.
+  const std::size_t supplied = ctx.count() - 2;
+  const script::Chunk& compiled = ctx.scheduler->chunk(chunk);
+  if (compiled.return_type != script::TypeTag::void_) return HostOutcome::ok_void();
+  if (compiled.parameter_count != supplied || compiled.locals.size() < supplied) {
+    return HostOutcome::ok_void();
+  }
+  for (std::size_t i = 0; i < supplied; ++i) {
+    const script::LocalInfo& parameter = compiled.locals[i];
+    if (parameter.type_name != "str" || parameter.is_out) return HostOutcome::ok_void();
+  }
+
   // Arguments 2..N-1 become the helper's parameters, in order. The original
   // pads to seven with the empty string and then hands the spawn only the
   // first `count`, so the padding is unobservable and is not reproduced.
   std::vector<Value> parameters;
-  parameters.reserve(ctx.count() - 2);
+  parameters.reserve(supplied);
   for (std::size_t i = 2; i < ctx.count(); ++i) parameters.push_back(ctx.arg(i));
 
   const script::ScriptId spawned =
-      ctx.scheduler->spawn(chunk, parameters, script::ObjectRef{}, ctx.script);
+      ctx.scheduler->spawn(chunk, parameters, script::ObjectRef{}, script::kNoScript);
   if (spawned == script::kNoScript) return HostOutcome::ok_void();
-  // Owned by whoever started it, so `AIGetPlayer` inside a helper answers the
-  // player whose sequence called it rather than -1.
-  const std::int32_t owner = ai->script_player(ctx.script, *ctx.scheduler);
-  if (owner > 0) ai->adopt(spawned, static_cast<PlayerId>(owner - 1));
   ai->set_helper(ctx.arg(0).as_string(), spawned);
   return HostOutcome::ok_void();
 }
 
-/// `IsAIHelperRunning(name)` -- 236 sites.
+/// `IsAIHelperRunning(name)` (0x004d1d80) -- 236 sites.
 ///
-/// **It consults the table and nothing else.** 0x004d1cd0 is a `std::map::find`
-/// and a comparison against `end()`; it never validates the id, never asks the
-/// scheduler whether the coroutine is alive. A key that was never inserted
-/// answers false, and a key whose helper finished on its own answers false
-/// too -- but only because the entry was *reaped*, which is a separate
-/// mechanism and the reason `reap_helpers` has to run every turn rather than
-/// being folded in here.
-///
-/// Reproducing the liveness test here instead would agree on every shipped
-/// site and disagree on exactly one thing: a helper that ended in the same
-/// turn as the query. That is the difference between polling and a callback,
-/// and the original is a callback, so the table is the authority.
+/// 0x004d1d80 pops the name and answers 0x004d1cd0, which is a
+/// `std::map::find` on the helper manager's name table and a comparison
+/// against `end()`; it never asks the thread manager anything. What makes
+/// that a liveness test is **when the table loses an entry**: the thread
+/// manager deletes a thread the moment it finishes or fails (0x0069f7a0, state
+/// 1 or 3) and calls the manager's completion hook at once (vtable +0x1c,
+/// 0x004d2160), which erases the node whose value is that id; a stop from
+/// outside does the same inside the stopping call (0x0069fee0). So a helper
+/// that has ended is out of the table before any other script runs, and the
+/// predicate answers false from then on. This engine erases by polling
+/// (`AiSystem::reap_helpers`, once a turn), so it answers the same thing by
+/// asking the scheduler as well: present in the table **and** still alive.
+/// (It used to read the table alone, and answered true for the rest of the
+/// turn after a helper returned.) The one window the original does keep -- a
+/// helper that stops itself runs on to the end of its step with its entry
+/// still there (0x0069fee0 only flags the running thread) -- is not
+/// reproduced; `StopAIHelper` describes that case.
 HostOutcome f_is_ai_helper_running(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsAIHelperRunning: no world");
@@ -1751,16 +1932,20 @@ HostOutcome f_is_ai_helper_running(CallContext& ctx) {
   }
   AiSystem* ai = ai_system_of(*world);
   if (ai == nullptr) return HostOutcome::ok_with(Value::boolean(false));
-  return HostOutcome::ok_with(
-      Value::boolean(ai->helper(ctx.arg(0).as_string()) != script::kNoScript));
+  const script::ScriptId id = ai->helper(ctx.arg(0).as_string());
+  const bool live = id != script::kNoScript &&
+                    (ctx.scheduler == nullptr || ctx.scheduler->alive(id));
+  return HostOutcome::ok_with(Value::boolean(live));
 }
 
 /// `StopAIHelper(name)` -- 179 sites.
 ///
-/// 0x004d32e0: find, and on a miss **return having done nothing at all** -- no
-/// diagnostic, no trap. On a hit, kill the coroutine; the map entry is erased
-/// as a consequence of the kill's completion notification rather than by this
-/// function, which is why the erase is here too but downstream of the kill.
+/// 0x004d4100 pops the name and calls the helper manager's 0x004d32e0: find,
+/// and on a miss **return having done nothing at all** -- no diagnostic, no
+/// trap. On a hit, stop the thread with notification (0x0069fee0 with 1),
+/// which deletes it and calls the completion hook inside the call, and that
+/// hook (0x004d2160) erases the entry; here the kill and the erase are the
+/// two lines below.
 ///
 /// **It does nothing to the objects the helper was commanding.** No command
 /// clearing, no group release: whatever `SetCommand` or `AttackArea` the helper
@@ -1815,9 +2000,53 @@ HostOutcome f_stop_ai_helper(CallContext& ctx) {
 /// is what lets this engine number the areas itself; `sim/lsa.hpp` says so at
 /// length. A node with no area -- one whose centre fell off the terrain layer
 /// -- answers `kNoLsa`, which `IsWaterLsa` then reads as "not water".
+///
+/// **The bodies.** `GAIKA::LSA` (0x004225d0) is 0x0043cb00: node 0 answers 0,
+/// any other id the 16-bit area field of the node record (`+0x10`) through a
+/// bare index (0x0044e8e0) -- an id past the table reads off its end there and
+/// answers `kNoLsa` here, as node 0 does in both. The same name is registered
+/// four more times: `LSA(x, y)` (0x00422600) and `LSA(pt)` (0x00422630) are
+/// 0x0043cb30, the area of the node the point falls in (0x0044e3f0, then the
+/// node's `+0x10`); `obj.LSA` (0x00425fd0) is 0x0043cb70, the same for the
+/// object's **raw** position (`vtbl+0x3c`, not the holder's `posRH` that
+/// `GetGAIKA(obj)` falls back to -- a garrisoned unit's negative position is
+/// no node, so area 0) with no test of the handle; and a no-argument `LSA()`
+/// (0x006a8720), a debugging command that calls two builders (0x0044e050,
+/// 0x00450a50) and answers nothing, left unbound. No shipped script calls any
+/// but the GAIKA form; the others are bound below, the member one through this
+/// body by the receiver's type. The point-to-node step is `GaikaTable::at`,
+/// this engine's reading of the original's slot grid (`sim/gaika.hpp`).
+[[nodiscard]] LsaId lsa_at(World& world, Point where) {
+  const GaikaNode* node = world.gaika().find(world.gaika().at(world.lsa(), where));
+  return node == nullptr ? kNoLsa : node->lsa;
+}
+
 HostOutcome m_gaika_lsa(CallContext& ctx) {
+  if (ctx.count() > 0 && ctx.arg(0).is_object()) {
+    World* world = world_of(ctx);
+    if (world == nullptr) return HostOutcome::ok_with(Value::integer(kNoLsa));
+    const WorldObject* slot = world->find(ctx.arg(0).as_object().id);
+    if (slot == nullptr || slot->state.is_held()) return HostOutcome::ok_with(Value::integer(kNoLsa));
+    return HostOutcome::ok_with(Value::integer(lsa_at(*world, world->resolve_position(slot->id))));
+  }
   const GaikaNode* node = node_of(ctx);
   return HostOutcome::ok_with(Value::integer(node == nullptr ? kNoLsa : node->lsa));
+}
+
+/// `LSA(pt)` and `LSA(x, y)` -- see `m_gaika_lsa`.
+HostOutcome f_lsa_at(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr) return HostOutcome::ok_with(Value::integer(kNoLsa));
+  Point where{};
+  if (ctx.count() == 1 && is_point(ctx.arg(0))) {
+    where = unpack_point(ctx.arg(0));
+  } else if (ctx.count() == 2 && ctx.arg(0).is_integer() && ctx.arg(1).is_integer()) {
+    where = Point{static_cast<std::int32_t>(ctx.arg(0).as_integer()),
+                  static_cast<std::int32_t>(ctx.arg(1).as_integer())};
+  } else {
+    return HostOutcome::ok_with(Value::integer(kNoLsa));
+  }
+  return HostOutcome::ok_with(Value::integer(lsa_at(*world, where)));
 }
 
 /// `SS_STR(state)` -- 3 sites, and the inverse of the `SS_*` constants.
@@ -1893,7 +2122,7 @@ HostOutcome f_set_maika(CallContext& ctx) {
 ///
 /// So neither entry point computes a need. What they *add* is the last step:
 ///
-///     if (need > 0 && optimism > 0)  need = max(1, need * 100 / optimism)
+///     if (need > 0 && optimism != 0)  need = max(1, need * 100 / optimism)
 ///
 /// -- the need as a **percentage of this player's optimism about this node**,
 /// floored at 1 so that a real need never rounds away to nothing. `optimism`
@@ -1940,9 +2169,13 @@ HostOutcome m_gaika_need(CallContext& ctx) {
       }
     }
   }
-  if (need > 0 && optimism > 0) {
-    need = need * 100 / optimism;
-    if (need == 0) need = 1;
+  // **Unsigned**, both the product and the quotient (0x0042c548): a negative
+  // optimism -- `AreaAIOptimism` writes any integer -- divides by a number
+  // past two billion and floors the need at 1, rather than leaving it raw.
+  if (need > 0 && optimism != 0) {
+    const std::uint32_t share =
+        static_cast<std::uint32_t>(need) * 100u / static_cast<std::uint32_t>(optimism);
+    need = share == 0 ? 1 : static_cast<std::int32_t>(share);
   }
   return HostOutcome::ok_with(Value::integer(need));
 }
@@ -1987,25 +2220,23 @@ HostOutcome m_gaika_empty(CallContext& ctx) {
 /// `GAIKAMONITOR.VS` and its defensive twin, which are 45 call sites of AI
 /// between them.
 ///
-/// **Is there an army of mine or a friend's standing in this node.** 0x004313e0
-/// walks the same per-node squad container `BestTargetInGAIKA` walks, applies
-/// four tests to each squad, and answers true on the first that passes all
-/// four. The tests, in the original's order:
+/// **Is there an army of mine standing in this node** -- mine, not a friend's.
+/// 0x004313e0 walks the same per-node squad container `BestTargetInGAIKA`
+/// walks, applies four tests to each squad, and answers true on the first that
+/// passes all four. The tests, in the original's order:
 ///
 ///   * `[squad+0x1c] != 0` -- the squad's `eval`, so a squad with no strength
 ///     assessed does not count as a presence;
-///   * the relation. `0x0044e250(viewer, owner)` answers 1 outright when the
-///     two players are the same, and otherwise reads bit 0 of the viewer's own
-///     relation row at `player + 0x24 + owner*4` -- which is exactly the bit
-///     `PlayerTable::is_enemy` reads, the other way up. **A negative player
-///     skips the test entirely** (0x0043151d), so `MilitaryPresence(0)` -- the
-///     script number for "no player" after the entry point's `dec` -- asks
-///     whether anybody at all is here;
+///   * the category `0x0044e250(viewer, owner)` **masked with 1**. It answers 1
+///     only when the two players are the same -- an ally is 2, an enemy 4, and
+///     a viewer past the sixteenth player 0 -- so the walk counts the viewer's
+///     own squads and nobody else's. **A negative viewer takes category 1 for
+///     every squad** (0x0043151d), so `MilitaryPresence(0)` -- "no player"
+///     after the entry point's `dec` -- asks whether anybody at all is here;
 ///   * `0x0044e1f0(squad, node, 0)` masked with 6. Its 4 and 2 both mean "in
 ///     this node" and its 1 means "heading here", so a squad marching towards
-///     the node is not a presence in it. Same mask, same reasoning as
-///     `BestTargetInGAIKA`, and the `0x0044eb80` refinement between them is
-///     invisible here for the reason recorded there;
+///     the node is not a presence in it. 0x0044eb80 is called only for
+///     category 4, which the mask has already refused;
 ///   * `[squad+0x30] & 4` clear -- `kSquadFlagPeaceful`.
 ///
 /// **The fourth test cannot fail once the third has passed**, and it is not
@@ -2015,55 +2246,53 @@ HostOutcome m_gaika_empty(CallContext& ctx) {
 /// time 0x004315db re-reads the flag. One test is written here and this
 /// paragraph is why there is not a second.
 ///
-/// **It answers false on every shipped map today**, because nothing in this
-/// engine assigns a `GAIKAIn` to a squad -- the same standing as `g.Empty()`
-/// above, and the same consequence: both callers read it as
-/// `if (!gaika.MilitaryPresence(AIPlayer)) continue;` at the head of a `for`
-/// over every node, so false moves the walk on. A true answer would send the
-/// monitor into `RunStrat` for a node it knows nothing about.
+/// **When no squad passes, the node's settlement is asked** (0x00420c00): a
+/// settlement whose central building is a `BaseTownhall` (0x0043ffc0, a
+/// stronghold here) and whose sentry strength `[+0xf8]` (`sentry_strength`) is
+/// positive is a presence, always "staying", under the category
+/// 0x0044e250(viewer, its owner) -- 1 for a negative viewer -- so the viewer's
+/// own manned wall is an army in its own node, and nobody else's is.
+///
+/// Both callers read it as `if (!gaika.MilitaryPresence(AIPlayer)) continue;`
+/// at the head of a `for` over every node, so false moves the walk on.
 HostOutcome m_gaika_military_presence(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("MilitaryPresence: no world");
   const auto no = HostOutcome::ok_with(Value::boolean(false));
+  const auto yes = HostOutcome::ok_with(Value::boolean(true));
   if (ctx.count() < 2) return no;
   const GaikaId node = gaika_of(ctx.arg(0));
-  if (node == kNoGaika || world->gaika().find(node) == nullptr) return no;
+  const GaikaNode* here = node == kNoGaika ? nullptr : world->gaika().find(node);
+  if (here == nullptr) return no;
 
   // The argument is 1-based like every player number a script writes, and the
-  // entry point decrements it before the comparison. Anything the decrement
-  // leaves negative is "ask about everybody"; `player_from_script` maps exactly
-  // that range to `kNoPlayer`.
-  //
-  // The `kNoPlayer` arm of the test below is **kept although nothing shipped
-  // can tell it apart**, and that is the opposite call to the one `SetMAIKA`'s
-  // seven guards got. It is not defensive padding: it is the original's own
-  // branch at 0x0043151d, and it is load-bearing there, because 0x0044e250
-  // answers 0 -- *hostile* -- for a player number outside 0..15, so without the
-  // branch a negative player would see nothing rather than everything. That it
-  // is currently redundant here is a fact about `PlayerTable::is_enemy`
-  // answering false for an out-of-range viewer, which is a different promise
-  // from the one this line is making.
-  const std::int32_t asked = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  const PlayerId viewer = player_from_script(asked);
+  // entry point decrements it and nothing else: negative is everybody, past
+  // the sixteenth player is nobody.
+  const std::int32_t viewer = (ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0) - 1;
+  constexpr std::int32_t kAiOwn = 1;  // `AI_OWN`, 0x0044e250's same-player answer
+  const PlayerTable& players = world->players();
+  const auto category = [&](PlayerId owner) {
+    return viewer < 0 ? kAiOwn : ai_relation(players, viewer, owner);
+  };
 
   const HeroSystem* heroes = hero_system_of(*world);
   if (heroes == nullptr) return no;
-  const PlayerTable& players = world->players();
   for (const Squad& squad : heroes->squads().squads()) {
     if (squad.eval == 0) continue;
-    // 0x0044e250's `viewer == owner` short-circuit is **not** written a second
-    // time here: `PlayerTable::is_enemy` carries that rule already, and its own
-    // note says why -- a player's diagonal is `kRelationSelf` and the general
-    // rule answers it. Two copies would mean a fault in the shared one hid
-    // behind this one.
-    if (viewer != kNoPlayer && players.is_enemy(viewer, squad.key.player)) continue;
+    if ((category(squad.key.player) & kAiOwn) == 0) continue;
     if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
     if (squad.gaika_in != node) continue;
-    return HostOutcome::ok_with(Value::boolean(true));
+    return yes;
   }
-  return no;
-}
 
+  // The settlement, 0x00420c00.
+  const EconomySystem* economy = economy_of(*world);
+  if (here->settlement == kNoObject || economy == nullptr) return no;
+  const Settlement* set = economy->settlements().for_object(here->settlement);
+  if (set == nullptr || set->kind != SettlementKind::stronghold) return no;
+  if (sentry_strength(*world, *set) <= 0) return no;
+  return (category(set->owner) & kAiOwn) != 0 ? yes : no;
+}
 
 /// A point `length` units beyond `from`, on the ray that leaves `behind` and
 /// passes through it -- 0x00422bd0, whose scale factor arrives in `ebx`.
@@ -2110,9 +2339,10 @@ HostOutcome m_gaika_military_presence(CallContext& ctx) {
 ///     the nearest **gate** among the settlement's buildings to the *unit*,
 ///     then a point **450 world units beyond it, along the line from the town
 ///     centre through that gate**. No gate leaves the answer at the central
-///     building, and so does an offset point that falls outside the map
-///     rectangle -- the original tests all four edges and *refuses*, it does
-///     not clamp;
+///     building. An offset point that falls outside the map rectangle is
+///     refused -- the original tests all four edges inclusively and does not
+///     clamp -- and the answer is then **the gate itself**, because the gate
+///     loop wrote it into the running answer before the step was tried;
 ///   * when it is a heir of **`Outpost`** (0x00440060) there is a second
 ///     branch, and it is the one thing here not read to the end. Its guards
 ///     are: the settlement's owner is not **player 15**, the neutral-passive
@@ -2199,7 +2429,10 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
   const std::int32_t extent = match == nullptr ? 0 : match->rules().map_size;
   if (extent <= 0) return answer(out);
   const std::int32_t edge = extent - 1;
-  if (out.x < 0 || out.x > edge || out.y < 0 || out.y > edge) return answer(centre);
+  // Refused, the running answer is the **gate**: the gate loop has already
+  // moved it there (0x00427d9c onward) and the step only replaces it when it
+  // passes all four edges.
+  if (out.x < 0 || out.x > edge || out.y < 0 || out.y > edge) return answer(best);
   return answer(out);
 }
 
@@ -2211,7 +2444,23 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
 /// area's centroid. A GAIKA that names no node answers `(0, 0)` rather than a
 /// sentinel, because every shipped site feeds the result straight into a
 /// distance or a `Goto` and none of them tests it.
+///
+/// `GAIKA::Center` (0x00422e20) answers the node record's point at `+8`/`+0xc`
+/// through the bare index 0x0044e8e0, and `(0, 0)` only when the node vector
+/// does not exist; node 0 is the reserved record, whose point is `(0, 0)`.
+/// `GetGaikaCenter(int)` (0x00421bc0) is the same read with no vector test.
+/// **`rc.Center` (0x00697ba0) shares the key**, `(Center, 0)` on a `rect`:
+/// `((l + r) / 2, (t + b) / 2)`, C division truncating toward zero. No shipped
+/// script calls it (`sim/world_host.cpp`'s `m_rect_center` has the history);
+/// it is answered here by the receiver's type now that the GAIKA half exists.
 HostOutcome m_gaika_center(CallContext& ctx) {
+  if (ctx.count() > 0 && is_rect(ctx.arg(0))) {
+    World* world = world_of(ctx);
+    const RectTable::Rect* r = world == nullptr ? nullptr : unpack_rect(*world, ctx.arg(0));
+    if (r == nullptr) return HostOutcome::ok_with(pack_point(Point{}));
+    return HostOutcome::ok_with(
+        pack_point(Point{(r->left + r->right) / 2, (r->top + r->bottom) / 2}));
+  }
   const GaikaNode* node = node_of(ctx);
   return HostOutcome::ok_with(pack_point(node == nullptr ? Point{} : node->center));
 }
@@ -2354,10 +2603,17 @@ HostOutcome m_gaika_dist_to_players(CallContext& ctx) {
 ///
 /// Each surviving squad's members are then offered to a **plain, unflagged**
 /// target filter (0x00421d70 constructs it with all six of 0x005d45a0's flags
-/// zero, so it is `BestTarget`'s filter exactly) after two tests of their own:
-/// the unit is not dead, and its holder handle at `[obj+0x154]` is `0xffff` --
-/// a garrisoned unit is not a target. `CombatSystem::best_target_among` is that
-/// filter, and it is deliberately the same code the other six run.
+/// zero, so it is `BestTarget`'s filter exactly) by 0x004282c0, in order, after
+/// two tests of their own: the unit is not dead, and its holder handle at
+/// `[obj+0x154]` is `0xffff`. The first member to fail either -- or to be
+/// missing -- **ends that squad's offer**: the helper returns there. It always
+/// returns 0, so the walk always goes on to the next squad, and the
+/// node-settlement query after the walk (0x00420c00) writes four locals nothing
+/// reads. `CombatSystem::best_target_among` is the filter, and it is
+/// deliberately the same code the other six run -- including its score, which
+/// is that system's and not the executable's, so the filter's own early stop
+/// (0x005db650 answering 0 for a candidate it scores under 50) is not
+/// reproduced here; see `sim/combat.cpp`.
 ///
 /// **There is no radius.** Every other member of the family gets its reach from
 /// the grid sweep it rides on; this one has no sweep, so a candidate on the far
@@ -2449,12 +2705,15 @@ HostOutcome m_best_target_in_gaika(CallContext& ctx) {
       // here", and the `& 6` mask refuses that. Where the squad is *going* is
       // therefore not read at all once it is standing here.
       if (squad.gaika_in != node) continue;
+      // 0x004282c0 **stops** at the first member that is missing, dead or
+      // inside a holder (`[obj+0x154] != 0xffff`) and offers none of the rest
+      // of that squad -- it returns rather than skips -- so a squad whose
+      // front man is garrisoned is not a target at all.
       for (const ObjectId member : squad.members) {
         const WorldObject* slot = world->find(member);
-        if (slot == nullptr) continue;
-        if (slot->state.health <= 0) continue;
-        // `[obj+0x154] != 0xffff`: a garrisoned unit is not offered.
-        if (slot->state.holder != kNoObject) continue;
+        if (slot == nullptr) break;
+        if (slot->state.health <= 0) break;
+        if (slot->state.holder != kNoObject) break;
         candidates.push_back(member);
       }
     }
@@ -2653,8 +2912,19 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// The two synchronous-script entry points in this family, which differ only in
-/// their file and in the order they marshal their two arguments.
+/// The two synchronous-script entry points in this family, which differ in
+/// their file, in the order they marshal their two arguments, and in the width
+/// of the answer.
+///
+/// `GetStrat` (0x00421aa0 -> 0x0043d590) and `CalcPriority` (0x00421a00 ->
+/// 0x0043d900) both hand **`idPlayer - 1`** to the path resolver 0x0043d030
+/// with no range test of their own: a seat 0..15 with an AI and a profile
+/// name searches that profile's directory first, and anything else -- a seat
+/// of 16 or more included -- **still runs** the plain file. (A seat below 0
+/// indexes before the player table there; it is read as "no AI" here.) A run
+/// that fails answers 0, as does a negative return; `GetStrat` keeps the low
+/// 16 bits of the rest and `CalcPriority` all 32. The failed-run 0 is
+/// `run_script_now`'s labelled gap here.
 [[nodiscard]] HostOutcome gaika_script_call(CallContext& ctx, std::string_view file,
                                             const char* what, bool player_first) {
   AiSystem* ai = host_ai(ctx);
@@ -2663,10 +2933,10 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
     return HostOutcome::ok_with(Value::integer(0));
   }
   const std::int32_t asked = ctx.arg(1).as_integer();
-  if (asked < 1 || asked > 16) return HostOutcome::ok_with(Value::integer(0));
-  const auto owner = static_cast<PlayerId>(asked - 1);
+  const PlayerId owner =
+      asked >= 1 && asked <= 16 ? static_cast<PlayerId>(asked - 1) : kNoPlayer;
 
-  const std::uint32_t chunk = ai->find_script(*ctx.scheduler, owner, file);
+  const std::uint32_t chunk = ai_script_chunk(ctx, owner, file);
   // A file the installation does not have is 0 rather than a refusal: the
   // original's runner reports an error code and the caller turns it into 0.
   if (chunk == script::kNoChunk) return HostOutcome::ok_with(Value::integer(0));
@@ -2677,7 +2947,9 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
   const HostOutcome ran = run_script_now(ctx, chunk, args, what, result);
   if (ran.status != script::HostStatus::ok) return ran;
   const std::int32_t value = result.is_integer() ? result.as_integer() : 0;
-  return HostOutcome::ok_with(Value::integer(value < 0 ? 0 : value));
+  if (value < 0) return HostOutcome::ok_with(Value::integer(0));
+  // `GetStrat` is the one passing the node first, and the one masked.
+  return HostOutcome::ok_with(Value::integer(player_first ? value : (value & 0xffff)));
 }
 
 /// `g.GetPriority(idPlayer)` -- 7 sites.
@@ -2751,9 +3023,9 @@ HostOutcome f_laika(CallContext& ctx) {
 /// owner. Its declared signature is `int, GAIKA gaika, int idPlayer` -- which
 /// is this call's two arguments in this order, so they pass straight through.
 ///
-/// **A negative return is clamped to 0.** The original also truncates the
-/// result to sixteen bits; that is unobservable across a `[GAIKAStrat]` table
-/// of five entries and is not reproduced.
+/// **A negative return is clamped to 0, and the rest is truncated to sixteen
+/// bits**, both the original's (0x0043d590, 0x00421aa0); see
+/// `gaika_script_call`.
 ///
 /// A missing file answers 0 -- `GS_NONE` -- rather than refusing, which is the
 /// original's own answer and what `GAIKAMONITOR.VS`'s `if (Strat != 0)` is
@@ -2973,8 +3245,12 @@ HostOutcome f_gaika_count(CallContext& ctx) {
 
 /// `IsWaterLsa(id)` -- 23 sites, free.
 ///
-/// Deep water, terrain index 13, which is what the areas were split on. An id
-/// that names no area is not water, which is also what a zero answers.
+/// 0x0042da30 pops the id and answers whether the area record's first word
+/// -- its type, at `[[0x008c8e54]+0x24] + id * 0xc0` -- is 1, water. Nothing
+/// else is read and nothing written. The id is not range-checked there, so an
+/// id past the table reads off its end; here it names no area and answers
+/// false, as the reserved record 0 (type 0) does in both. Water is deep water,
+/// terrain index 13, which is what the areas were split on (`sim/lsa.hpp`).
 HostOutcome f_is_water_lsa(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::ok_with(Value::boolean(false));
@@ -3050,32 +3326,63 @@ HostOutcome f_gaika_at_point(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(world->gaika().at(world->lsa(), where)));
 }
 
+/// `GetGAIKA(x, y)` (0x00421910): the point form's body (0x005bd090) with the
+/// coordinates as two integers -- 0x0044e3f0, 0 when the node vector does not
+/// exist, the answer masked to 16 bits. No shipped site; bound because it is
+/// the point form spelt differently.
+HostOutcome f_gaika_at_xy(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr || ctx.count() != 2 || !ctx.arg(0).is_integer() ||
+      !ctx.arg(1).is_integer()) {
+    return HostOutcome::ok_with(Value::integer(kNoGaika));
+  }
+  const Point where{static_cast<std::int32_t>(ctx.arg(0).as_integer()),
+                    static_cast<std::int32_t>(ctx.arg(1).as_integer())};
+  return HostOutcome::ok_with(Value::integer(world->gaika().at(world->lsa(), where)));
+}
+
 /// `FindTeleport(player, ptSrc, ptDst)` -- 5 sites in 5 scripts, and the
 /// sole blocker of `UNIT_ATTACH.VS` and `WAGON_FOLLOW.VS`; 493 of the trap
 /// sweep's hits once `Breakpoint` stopped being one.
 ///
 /// 0x0042e820 answers **which teleport to take from `ptSrc` to `ptDst`**, or
-/// the invalid handle for "walk". In order:
+/// the invalid handle (`0xffff`) for "walk". It pops `ptDst`, `ptSrc` and the
+/// player, which it decrements and never range-checks. In order:
 ///
-///   1. Both points are placed in their LSA. Under 2000 units apart *and* in
-///      the same area, nothing is answered: the walk is short enough.
+///   1. Both points are placed in their LSA -- 0x0043cb30, the area of the node
+///      the point falls in (0x0044e3f0, then the node's `+0x10`), which this
+///      engine's node table makes the same as the area the point falls in. The
+///      straight walk is `isqrt(dx² + dy²)` (0x0067c3d0). Under 2000 units
+///      (`1999 <` fails) *and* in the same area, nothing is answered.
 ///   2. The budget a teleport has to beat is **two thirds of the straight
-///      walk** when the areas are the same, and **unbounded** when they differ
-///      -- the comparison is unsigned and the initial value is `0xffffffff`.
-///   3. Every settlement's own object is tried, in settlement-store order, and
-///      kept when it is a teleport (a dynamic type test here; a teleport with
-///      no pair is skipped a line later, so "has a destination" decides the
-///      same cases), when the node it stands in is in `ptSrc`'s area, and when
-///      its destination's position is in `ptDst`'s area. Its cost is the walk
-///      to it plus the walk from its destination to `ptDst`, and the least
-///      under the budget wins -- strictly less, so a tie keeps the earlier.
+///      walk**, unsigned and truncated, when the areas are the same, and
+///      **unbounded** when they differ -- the comparison is unsigned and the
+///      initial value is `0xffffffff`.
+///   3. Every settlement's own object (the world's settlement vector,
+///      `[world+0x4c]`, the object id at `+0x8c`) is tried in order and kept
+///      when it is a teleport (a dynamic cast to `CVXTeleport`; a teleport with
+///      no pair resolves no far end a few lines later, so "has a destination"
+///      decides the same cases), when the node **its position** falls in
+///      (0x0044e650, none -- skipped) is in `ptSrc`'s area (0x0043cb00), and
+///      when its far end (`[teleport+0x208]`, 0x005cd930) resolves and stands
+///      in `ptDst`'s area (0x0043cb70). Its cost is the walk from `ptSrc` to
+///      it plus the walk from its far end to `ptDst`, and the least under the
+///      budget wins -- strictly less, so a tie keeps the earlier.
+///   4. **Between the area test and the far end, a computer player's view is
+///      asked** (0x0042e974): when the player index is under 16 and the player
+///      has an AI, and that AI's view has a record for the teleport's node --
+///      the node within the slot vector and its slot non-zero -- the teleport
+///      is skipped unless 0x0041cb80 answers true. That is the test
+///      `GAIKA::Explored` (0x0042ae70) ends in: two session overrides, then the
+///      record's `Explored` bit. A player with no AI, or a node the view has no
+///      record for, is not gated at all.
 ///
-/// **One gate is not reproduced.** For a player that has an AI, 0x0042e974
-/// also asks 0x0041cb80 about the node's per-player LAIKA record, and that
-/// answer turns on two session flags -- `[0xa87c48]+0xda0` and
-/// `[world+0xb0]+0xf0` -- this engine does not carry and has not identified.
-/// A computer player therefore sees every teleport a human does. The
-/// condition that would lift this is naming those two flags.
+/// **Fixed in the tenth round:** the gate in step 4 was left out, on the
+/// reading that it turned on two unidentified session flags. It turns on them
+/// only through 0x0041cb80, the same function `Explored` answers with, and the
+/// engine already answers that from the bit -- the overrides are recorded at
+/// `m_laika_flag` as not carried. So a computer player now uses only teleports
+/// standing in nodes it has explored, as the original's does.
 HostOutcome f_find_teleport(CallContext& ctx) {
   const Value invalid = Value::object(script::ObjectRef{script::kNoType, 0});
   World* world = world_of(ctx);
@@ -3102,11 +3409,22 @@ HostOutcome f_find_teleport(CallContext& ctx) {
   std::uint32_t budget = from == to ? static_cast<std::uint32_t>(straight * 2 / 3) : 0xFFFFFFFFu;
   ObjectId best = kNoObject;
   const GaikaTable& gaika = world->gaika();
+  // Step 4's view: the asking player's, when it is a computer player.
+  const std::int32_t asked = ctx.arg(0).is_integer() ? ctx.arg(0).as_integer() : 0;
+  AiSystem* ai = host_ai(ctx);
+  const GaikaView* view = ai != nullptr && asked >= 1 && asked <= 16
+                              ? ai->gaika_view(static_cast<PlayerId>(asked - 1))
+                              : nullptr;
   for (const Settlement& s : economy->settlements().all()) {
     const WorldObject* teleport = world->find(s.object);
     if (teleport == nullptr || teleport->state.teleport_destination == kNoObject) continue;
-    const GaikaNode* node = gaika.find(gaika.for_settlement(s.object));
+    const GaikaId stands_in = gaika.at(areas, world->resolve_position(teleport->id));
+    const GaikaNode* node = gaika.find(stands_in);
     if (node == nullptr || node->lsa != from) continue;
+    if (view != nullptr) {
+      const Laika* record = view->find(stands_in);
+      if (record != nullptr && (record->flags & kLaikaExplored) == 0) continue;
+    }
     const WorldObject* far_end = world->find(teleport->state.teleport_destination);
     if (far_end == nullptr) continue;
     const Point out = world->resolve_position(far_end->id);
@@ -3124,7 +3442,25 @@ HostOutcome f_find_teleport(CallContext& ctx) {
 // -- ship needs ------------------------------------------------------------
 //
 // See the note in `sim/ai.hpp`. All four take `(idPlayer, lsa)`; the player
-// is the script's 1-based number and the LSA an id from `WaterLsa`.
+// is the script's 1-based number and the LSA an id from `WaterLsa`. Each body
+// pops `lsa` (pushed last) and then the player, and none range-checks either:
+//
+//   * `ShipNeeds` (0x004226f0) answers 0x0043ef00(player - 1, lsa), the int at
+//     `+0x14 + (player-1)*4` of the area record -- the need counter;
+//   * `IncShipNeeds` (0x0042d9f0) adds one to, and `ClrShipNeeds` (0x0042d9b0)
+//     zeroes, the int at `+0x10 + player*4` with the player **not**
+//     decremented. That is the same word: `0x10 + 4p` is `0x14 + 4(p-1)`, so
+//     the three agree on one counter per 1-based player, and this file keeps
+//     it at the 0-based index;
+//   * `Ships` (0x00422660) answers 0x0043ee40(player - 1, lsa), the int at
+//     `+0x54 + (player-1)*4` -- the ship count, which `sim/ai.hpp` says this
+//     engine computes rather than keeps (see `f_ships`).
+//
+// A player outside 1..16 is refused here (0, or nothing written), where the
+// original reads or writes a neighbouring word of the record -- player 0's
+// counter is the word at `+0x10`, player 17's the first ship count. No
+// shipped script passes such a number: every caller hands a player it read
+// from a squad or a settlement.
 
 /// The two arguments, or `false`.
 [[nodiscard]] bool ship_need_args(CallContext& ctx, PlayerId& player, LsaId& lsa) noexcept {
@@ -3163,6 +3499,24 @@ HostOutcome f_clr_ship_needs(CallContext& ctx) {
 
 /// `Ships(player, lsa)` -- 2 sites: the player's living ships standing in the
 /// area. A census, where the original keeps a count; see `sim/ai.hpp`.
+///
+/// **What the kept count counts**, so the difference is on record. The word
+/// at `+0x54 + owner*4` is raised by 0x0041f310 and lowered by 0x0041eee0
+/// (through 0x0044e900/0x0044e920), the hooks an object passes through when
+/// it is registered with, or removed from, the AI's tracking (19 and 6
+/// callers: creation, death, boarding, leaving a holder and the like). For a
+/// ship -- a cast to `CVXShip` -- the area is the one its position lies in
+/// (0x0044e940) when `[ship+0x154]` is `0xffff`, and otherwise one read
+/// through that holder chain (`+0x1f6`); the owner is `[[ship+0x70]+8]`. Both
+/// hooks skip objects carrying flag 0x8000000 at `+0x2c` or 0x800000 at
+/// `+0x194`; the raise also needs `[0x8c8e50]` set and `[0xa8734c]` clear,
+/// the lowering needs the AI manager (`[0x8c8e58]`), an owner and a squad
+/// (`[+0x174]`), and clamps at zero; both touch the count only while the area
+/// table (`[0x8c8e54]`) exists. The census agrees whenever the
+/// hooks have kept up with where every living ship is; it cannot reproduce a
+/// count the asymmetric gates let drift, nor the holder-chain area, nor the
+/// two unnamed flags. A design difference (`sim/ai.hpp`), kept.
+///
 /// The census behind `Ships` and `CheckLsaPath`: `fn` sees every living ship of
 /// `player` standing in `lsa`, ascending by id, and stops the walk by answering
 /// `true`. Answers whether it did.
@@ -3197,10 +3551,14 @@ HostOutcome f_ships(CallContext& ctx) {
 //
 // `CheckLsaPath(lsaSrc, lsaDst, player)` -- 3 sites, and the sole blocker of
 // both `EVALRECRUIT.VS` files. The executable's registration names it
-// `int, int lsaSrc, int lsaDst, int playerId`; the body (0x00423120) hands the
-// three to 0x00441b70 with an empty transport string, a `(-1, -1)` rendezvous
-// and no output list, which is the same worker the AI's own transport
-// planner (0x00431ac9) calls with a real one.
+// `int, int lsaSrc, int lsaDst, int playerId`; the body (0x00423120) pops the
+// three -- player on top, then `lsaDst`, then `lsaSrc` -- and hands them, the
+// player less one, to 0x00441b70 through 0x00441fe0, a thunk that adds no
+// output list, with an empty transport string and a `(-1, -1)` rendezvous.
+// `Squad::NearestHospital` makes the same call (0x00431ac9) with the same
+// empty order; `PrepareAiTransportShip` reaches the worker through the other
+// thunk, 0x00442010, with its own order and point and a list to fill. No
+// argument is range-checked by the body.
 //
 // ## The worker is a breadth-first search over the area graph
 //
@@ -3210,8 +3568,11 @@ HostOutcome f_ships(CallContext& ctx) {
 //
 //   1. `src == dst` answers **1** before anything is looked at -- two
 //      unknown ids that are equal answer 1 too.
-//   2. Areas of different **type** answer **0**: a land area is never on a
-//      path to a sea, whatever ships there are.
+//   2. Areas of different **type** (the record's first word: 1 water, 2
+//      ground, 0 the reserved record) answer **0**: a land area is never on a
+//      path to a sea, whatever ships there are. The original reads the two
+//      words unchecked, so an id past the table reads off it; here such an id
+//      is type 0 and is refused.
 //   3. Distances start at `0xffff`, `src` at 0, and a FIFO walk relaxes with a
 //      strict `>` -- a plain breadth-first search. A **water** neighbour is
 //      entered only when the player has a ship available in it (below), and
@@ -3229,45 +3590,93 @@ HostOutcome f_ships(CallContext& ctx) {
 //      `shipneed` on that candidate, if there is one, which is exactly what
 //      `IncShipNeeds` does by hand. Reached, the answer is the **number of
 //      areas on the path**, both ends included: `dist + 1`.
+//   6. The path itself is walked **back from `dst`**: at each area the
+//      first neighbour in its (ascending) list whose distance is one less is
+//      taken, and pushed on the front of the output list (0x00440c40), until
+//      `src` is reached -- so the list reads `src` first. The scan index is
+//      not reset when it steps, a quirk that can only change which of two
+//      equally short routes is named, never the count. Only
+//      `PrepareAiTransportShip` reads the list, and only element 1 of a
+//      three-area route: there the original names the first sea in `dst`'s
+//      list that was reached, and `lsa_route`'s parent links name the first
+//      sea reached in `src`'s list that touches `dst` -- the same area,
+//      because both lists ascend and both seas sit at distance 1.
 //
 // The player argument is the script's 1-based number, decremented once and
 // used as a table index throughout; one outside the table makes the ship
 // test match nothing and the bump write off the record, so it is refused
 // here -- the walk still runs, and answers 0 for two different areas.
 //
-// ## A ship is "available" by its current command
+// ## A ship is "available" by its current command, and by its transport order
 //
-// 0x00441730 walks the area's ship list for one owned by the player whose
-// *running* command is
+// 0x00441730 walks the area's ship list (the record's object list at `+0x94`,
+// 0x0044e9a0; only ships are entered in it, by 0x0041f310) and answers the
+// first ship that is alive (`vtbl+0x50`, IsDead, false), owned by the player
+// (`[[obj+0x70]+8]` against the 0-based index the caller passes), has a
+// running command (0x005ae130 with 0; none -- try the next), and whose verb is
 //
-//   * `"idle"` -- available;
-//   * `"boardunit"` -- available when the ship's AI-transport string equals
-//     the caller's and its rendezvous point equals the caller's. This caller
-//     passes `""` and `(-1, -1)`, and `sim/world_host.cpp`'s AI-transport
-//     note derives that every ship on this engine carries exactly those
-//     values, so a boarding ship counts;
+//   * `"idle"` (the literal at 0x007add84) -- available;
+//   * `"boardunit"` -- available when the ship's pending transport order
+//     equals the **caller's**: the string at `[ship+0x20c]` (0x005c6730)
+//     compared whole with the caller's text (0x00426df0), and the point at
+//     `[ship+0x228]`/`[+0x22c]` (0x005c6740) equal to the caller's on both
+//     coordinates. `CheckLsaPath` (0x00423120) and `Squad::NearestHospital`
+//     (the call at 0x00431ac9) pass `""` and `(-1, -1)`, so for them a
+//     boarding ship counts only while it carries no order -- once
+//     `PrepareAiTransportShip` has given it one it is somebody's crossing and
+//     no longer free. `PrepareAiTransportShip` passes its own verb and point,
+//     so for it a ship already boarding for this very crossing counts;
 //   * `"advance"` -- available when the owning AI's destination node shows no
 //     enemy presence: the ship's squad (`[obj+0x174]`) leads to a player AI
-//     record, that record's target node (0x00444140, `[+0x88]`) to its slot
-//     list, and each slot's enemy count and the node settlement's garrison
-//     are summed under the relation category. That census lives in the slot
-//     grid this engine does not model (`sim/gaika.hpp`), so an advancing ship
-//     **counts** here, and the enemy-presence clause is the named condition
-//     that would withhold it;
-//   * anything else, or no command at all -- not this ship; try the next.
+//     record (0x00444190; none -- available), that record's target node
+//     (0x00444140, with `[+0x24]` as the fallback) to its slot list, and each
+//     slot's enemy count and the node settlement's garrison (0x00420c00) are
+//     summed under the relation category (0x0044e250). That census lives in
+//     the slot grid this engine does not model (`sim/gaika.hpp`), so an
+//     advancing ship **counts** here, and the enemy-presence clause is the
+//     named condition that would withhold it;
+//   * anything else -- not this ship; try the next.
 //
 // The comparisons are byte-for-byte on the verb, so they are exact and
-// case-sensitive, as the original's `repe cmpsb` is. Any ship that passes
-// ends the walk: the caller reads the pointer as a boolean.
+// case-sensitive, as the original's `repe cmpsb` is. The first ship that
+// passes is the answer; the route search reads it as a boolean.
+//
+// **Fixed in the tenth round:** the route search accepted every boarding
+// ship whatever order it carried, on the argument that every ship carries
+// `""` and `(-1, -1)` -- true until `PrepareAiTransportShip` became their
+// writer. A ship tasked for one squad's crossing then also opened the sea to
+// every other `CheckLsaPath`, and to `PrepareAiTransportShip`'s own search
+// for a different order.
+//
+// **The scan order is this engine's and not the original's.** There the area
+// keeps a list of the ships standing in it and the walk is that list's order;
+// here `each_ship_in_area` sweeps the world ascending by object id. The two
+// agree on *which ships qualify* and can disagree on which qualifying ship is
+// first, which only `PrepareAiTransportShip` can see, and only when more than
+// one is free in the same sea.
 
-/// The crossability test above, on one water area.
-[[nodiscard]] bool ship_available_in(World& world, PlayerId player, LsaId lsa) {
+/// 0x00441730, above: the first ship of `player` in `lsa` that can carry the
+/// crossing `(order, where)`, or `kNoObject`. With no AI system every ship
+/// reads as carrying no order, the constructed `""` and `(-1, -1)`.
+[[nodiscard]] ObjectId ship_for_crossing(World& world, const AiSystem* ai, PlayerId player,
+                                         LsaId lsa, std::string_view order, Point where) {
   const CommandSystem* commands = command_system(world);
-  return each_ship_in_area(world, player, lsa, [&](const WorldObject& ship) {
-    if (commands == nullptr || commands->command_count(ship.id) == 0) return false;
+  if (commands == nullptr) return kNoObject;
+  const AiSystem::ShipTransport none{};
+  ObjectId found = kNoObject;
+  (void)each_ship_in_area(world, player, lsa, [&](const WorldObject& ship) {
+    if (commands->command_count(ship.id) == 0) return false;
     const std::string_view verb = commands->command_name(ship.id, 0);
-    return verb == "idle" || verb == "boardunit" || verb == "advance";
+    bool available = verb == "idle" || verb == "advance";
+    if (verb == "boardunit") {
+      const AiSystem::ShipTransport& carrying = ai == nullptr ? none : ai->ship_transport(ship.id);
+      available = carrying.order == order && carrying.where.x == where.x &&
+                  carrying.where.y == where.y;
+    }
+    if (available) found = ship.id;
+    return available;
   });
+  return found;
 }
 
 /// `CheckLsaPath`'s answer, and the route behind it. `LsaRoute` is declared in
@@ -3278,8 +3687,12 @@ HostOutcome f_ships(CallContext& ctx) {
 /// it.** The original's 0x00442010 fills a list of area ids and its caller
 /// reads element 1 -- the water the crossing goes through -- so the search that
 /// answers the length has to be the search that names the hop, or the two can
-/// disagree about which sea a ship is wanted in.
-LsaRoute lsa_route(World& world, AiSystem* ai, LsaId src, LsaId dst, PlayerId player) {
+/// disagree about which sea a ship is wanted in. `(order, where)` is the
+/// transport order a boarding ship must already carry to count as a way
+/// across: `""` and `(-1, -1)` for `CheckLsaPath` and `NearestHospital`, the
+/// caller's own for `PrepareAiTransportShip`.
+LsaRoute lsa_route(World& world, AiSystem* ai, LsaId src, LsaId dst, PlayerId player,
+                   std::string_view order, Point where) {
   LsaRoute out;
   if (src == dst) {
     out.answer = 1;
@@ -3320,7 +3733,10 @@ LsaRoute lsa_route(World& world, AiSystem* ai, LsaId src, LsaId dst, PlayerId pl
         // area, so neither is a difference a sweep can see.
         if (dist[at] > next) {
           if (crossable[at] < 0) {
-            crossable[at] = player != kNoPlayer && ship_available_in(world, player, there) ? 1 : 0;
+            const bool way_across =
+                player != kNoPlayer &&
+                ship_for_crossing(world, ai, player, there, order, where) != kNoObject;
+            crossable[at] = way_across ? 1 : 0;
           }
           if (crossable[at] != 0) {
             dist[at] = next;
@@ -3385,13 +3801,19 @@ HostOutcome f_check_lsa_path(CallContext& ctx) {
 ///
 /// ## What it does
 ///
-/// 0x0042e180 is short and hands the work to two places. It runs the **same**
-/// search `CheckLsaPath` runs, refuses anything but a length of 3, and takes
-/// **element 1 of the route** -- the water in the middle. Then it looks for a
-/// ship of the player's standing in that water (0x00441730), and if it finds
-/// one it writes the caller's `cmd` and `pt` onto it as a pending transport
-/// order and hands the ship back. Nothing found is the invalid handle, which
-/// the script tests.
+/// 0x0042e180 is short and hands the work to two places. It pops the point,
+/// the order text, the player (less one, unchecked) and the two areas, and
+/// runs the **same** search `CheckLsaPath` runs (0x00442010, the thunk that
+/// passes a list) -- **with its own order and point**, not `CheckLsaPath`'s
+/// empty ones, so a ship already boarding for exactly this crossing is a way
+/// across and one boarding for any other is not. It refuses anything but a
+/// length of 3 and takes **element 1 of the route** -- the water in the
+/// middle. Then it asks 0x00441730 for a ship of the player's standing in
+/// that water, under the same order and point, and if it finds one writes the
+/// caller's `cmd` and `pt` onto it (0x005c7dd0: the string at `[ship+0x20c]`,
+/// the point at `+0x228`/`+0x22c`) and hands the ship back by id. Anything
+/// else is the invalid handle (`0xffff`), which the script tests. The order
+/// text is released on every path (0x00695e70).
 ///
 /// The route is why `lsa_route` exists: the original's search fills a list of
 /// area ids and this reads index 1 out of it, so the search that answers the
@@ -3399,34 +3821,18 @@ HostOutcome f_check_lsa_path(CallContext& ctx) {
 ///
 /// ## Which ship
 ///
-/// **The acceptance rule is one this file already had**, written from the other
-/// side: `ship_available_in` is 0x00441730's predicate, and `CheckLsaPath` has
-/// been asking it of every water area since the pathfinder bootstrap. Living,
-/// the player's, standing in that area, and its **running command** is one of:
+/// `ship_for_crossing` is 0x00441730, read once and described above
+/// `lsa_route`: living, the player's, standing in that area, and running
+/// `idle` or `advance`, or `boardunit` while carrying this very order. The
+/// `advance` clause's enemy census is the documented approximation, and the
+/// scan order is the world's rather than the area list's -- both are said
+/// there.
 ///
-///   * `idle` -- available;
-///   * `boardunit` -- available when the ship's pending order equals the
-///     caller's, verb and point both. **That clause is now real.** It used to
-///     be documented as always true, because no writer existed and every ship
-///     carried the constructed `""` and `(-1, -1)`; this is the writer, so a
-///     ship already ferrying somebody else's crossing is now correctly
-///     refused;
-///   * `advance` -- available when the node its squad is heading for shows no
-///     enemy strength. **That clause is still the documented approximation**:
-///     the census is over the squads standing in a node, and this engine's
-///     answer is the one `sim/squad.cpp` gives for the whole family -- nothing
-///     assigns a node to a squad, so the sum is zero and an advancing ship
-///     counts. What would change it is the node table, not this file.
-///
-/// Anything else, or no command at all, is not this ship. The first that
-/// passes ends the walk: the original reads the pointer as a boolean.
-///
-/// **The scan order is this engine's and not the original's.** There the area
-/// keeps a list of the objects standing in it and the walk is that list's
-/// order; here `each_ship_in_area` sweeps the world ascending by object id and
-/// asks where each ship is. The two agree on *which ships qualify* and can
-/// disagree on which qualifying ship is first, which matters only when more
-/// than one is free in the same sea.
+/// **Fixed in the tenth round:** the route search here used the empty order,
+/// so a ship boarding for this crossing did not open the sea for its own
+/// second squad (the original's search passes the caller's order) and one
+/// boarding for another crossing did (it carries an order, and the old test
+/// accepted any boarding ship).
 HostOutcome f_prepare_ai_transport_ship(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("PrepareAiTransportShip: no world");
@@ -3441,8 +3847,14 @@ HostOutcome f_prepare_ai_transport_ship(CallContext& ctx) {
   // length of 0 and is refused one line later anyway.
   if (player == kNoPlayer) return none;
 
-  const LsaRoute route = lsa_route(*world, host_ai(ctx), ctx.arg(0).as_integer(),
-                                   ctx.arg(1).as_integer(), player);
+  const std::string order =
+      ctx.count() > 3 && ctx.arg(3).is_string() ? std::string(ctx.arg(3).as_string()) : std::string();
+  const Point where =
+      ctx.count() > 4 && is_point(ctx.arg(4)) ? unpack_point(ctx.arg(4)) : Point{-1, -1};
+
+  AiSystem* ai = host_ai(ctx);
+  const LsaRoute route = lsa_route(*world, ai, ctx.arg(0).as_integer(), ctx.arg(1).as_integer(),
+                                   player, order, where);
   // Three, and nothing else: one land hop is a march and more than one sea is
   // a crossing this entry point has no second ship for.
   //
@@ -3454,35 +3866,7 @@ HostOutcome f_prepare_ai_transport_ship(CallContext& ctx) {
   if (route.answer != 3 || route.path.size() < 2) return none;
   const LsaId crossing = route.path[1];
 
-  const std::string order =
-      ctx.count() > 3 && ctx.arg(3).is_string() ? std::string(ctx.arg(3).as_string()) : std::string();
-  const Point where =
-      ctx.count() > 4 && is_point(ctx.arg(4)) ? unpack_point(ctx.arg(4)) : Point{-1, -1};
-
-  AiSystem* ai = host_ai(ctx);
-  const CommandSystem* commands = command_system(*world);
-  ObjectId found = kNoObject;
-  (void)each_ship_in_area(*world, player, crossing, [&](const WorldObject& ship) {
-    // The count test is the original's shape and not load-bearing here:
-    // `command_name` answers `""` past the end, and no verb below matches that.
-    // Kept because the original reads the slot before it reads the string, and
-    // a reader who sees only the comparisons would think an empty queue could
-    // fall through one of them.
-    if (commands == nullptr || commands->command_count(ship.id) == 0) return false;
-    const std::string_view verb = commands->command_name(ship.id, 0);
-    if (verb == "idle" || verb == "advance") {
-      found = ship.id;
-      return true;
-    }
-    if (verb != "boardunit") return false;
-    // The one clause the transport order makes real.
-    if (ai == nullptr) return false;
-    const AiSystem::ShipTransport& carrying = ai->ship_transport(ship.id);
-    if (carrying.order != order) return false;
-    if (carrying.where.x != where.x || carrying.where.y != where.y) return false;
-    found = ship.id;
-    return true;
-  });
+  const ObjectId found = ship_for_crossing(*world, ai, player, crossing, order, where);
   if (found == kNoObject) return none;
 
   // 0x005c7dd0 and its neighbour, the pair `Ship::HasAiTransport` reads.
@@ -3503,14 +3887,17 @@ HostOutcome f_prepare_ai_transport_ship(CallContext& ctx) {
 ///   * have the node as their **AI destination** -- 0x00444140's computed half
 ///     with `DestGAIKA` as the fallback, which is `Squad::AIDest` (0x004215c0)
 ///     to the instruction, so `squad_ai_dest` is the one reading for both;
-///   * have a leader that resolves;
-///   * whose leader stands **strictly within** `dist` of the centre --
-///     `isqrt(dx² + dy²) < dist`.
+///   * have a **front member** (0x00443df0, the first of `members`) that
+///     resolves -- not a leader: the AI's own squads have none, and reading
+///     the leader here skipped every one of them, so the strength a
+///     computer player had marching on a node read 0 to `GETGAIKASTRAT.VS`;
+///   * whose front member's **stored** position (`vtbl+0x3c`, so a member
+///     inside a holder reads `(-1, -1)` rather than its holder's) is
+///     **strictly within** `dist` of the centre -- `isqrt(dx² + dy²) < dist`.
 ///
-/// `Squad::eval` is stored and nothing on this engine writes it yet, which
-/// `sim/squad.hpp` records; the walk is complete regardless, on the precedent
-/// of `EnemyPlayersEval`. A player outside the table answers 0, as does a
-/// GAIKA that names no node.
+/// A squad with no strength is walked and adds nothing. The player is tested
+/// only against 16 there, and a 0 reads the record before the table; here a
+/// player outside `1..16` answers 0, as does a GAIKA that names no node.
 /// `g.ControlledNeighbors(player)` -- 1 site, and the sole blocker of
 /// `DATA\AI\DEFENSIVE\MAIN.VS`.
 ///
@@ -3579,9 +3966,10 @@ HostOutcome m_gaika_approaching_squads(CallContext& ctx) {
   for (const Squad& squad : heroes->squads().squads()) {
     if (squad.key.player != player || squad.gaika_in == here) continue;
     if (squad_ai_dest(squad) != here) continue;
-    const WorldObject* leader = world->find(squad.leader);
-    if (leader == nullptr) continue;
-    const Point at = world->resolve_position(leader->id);
+    if (squad.members.empty()) continue;
+    const WorldObject* front = world->find(squad.members.front());
+    if (front == nullptr) continue;
+    const Point at = front->state.position;
     const std::int64_t dx = static_cast<std::int64_t>(at.x) - node->center.x;
     const std::int64_t dy = static_cast<std::int64_t>(at.y) - node->center.y;
     if (isqrt(dx * dx + dy * dy) < within) coming += squad.eval;
@@ -3598,17 +3986,25 @@ HostOutcome m_gaika_approaching_squads(CallContext& ctx) {
 // self rule folded in, so the three categories are `self`, `!is_enemy` and
 // `is_enemy` here.
 
-/// `Eval(player, pt, range, *own, *ally, *enemy)` -- 2 sites. 0x00426580
-/// sweeps the object grid within `range` of `pt` (distance squared against
-/// range squared, so the edge counts) for **units** -- bit 22, alive or not,
-/// but not held, because a garrisoned unit is off the grid -- and adds each
-/// one's census valuation (`object_power`, 16 bits of it) to the bucket its
-/// owner's category against `player` names. The three are out-parameters and
-/// start at zero.
-/// The three sums, shared with `Unit::BestMDPos` -- which builds the very same
-/// `{point, range}` / `{range squared, player, own, ally, enemy}` pair on its
-/// stack and hands it to the same sweep, so a second copy of this walk is how
-/// the two would come to disagree about what a crowd is worth.
+/// The three sums of 0x00423850's sweep, which `Eval` runs, and of its twin
+/// 0x00423a70, which `Unit::BestMDPos` runs on the very same `{point, range,
+/// range squared}` / `{flag mask -1, player, own, ally, enemy}` pair. The two
+/// walk the same cells and keep the same objects; they differ only in what a
+/// unit adds, which is `bodies`: 0x00423a70 `inc`s each bucket where
+/// 0x00423850 adds the unit's worth.
+///
+/// The sweep clamps the square `pt +- range` to the map and visits the 256-unit
+/// grid cells it covers; a cell wholly inside the circle (0x00416810 answers
+/// 2) is taken whole, a cell the circle cuts (1) object by object against the
+/// squared range, inclusive. So the set is "on the grid, within `range` of
+/// `pt`", and a **negative range inverts the square and visits nothing**. Every
+/// object whose flag word meets the mask -- all of them, at -1 -- goes to the
+/// visitor 0x004231f0, which keeps only **units** (bit 22 of `+0x2c`), alive or
+/// not, and a held unit is not on the grid at all. Each kept unit adds its
+/// census valuation (0x004439d0, `object_power`, masked to 16 bits) to the
+/// bucket 0x0044e250(player, its owner) names: 1 own, 2 ally (bit 0 of the
+/// viewer's relation word for the owner, so a one-sided truce is an ally), 4
+/// enemy, and 0 -- counted nowhere -- for an owner past the sixteenth.
 struct EvalSums {
   std::int64_t own = 0;
   std::int64_t ally = 0;
@@ -3616,8 +4012,9 @@ struct EvalSums {
 };
 
 [[nodiscard]] EvalSums eval_around(const World& world, const CombatSystem* combat, PlayerId player,
-                                   Point at, std::int64_t range) {
+                                   Point at, std::int64_t range, bool bodies = false) {
   EvalSums sums;
+  if (range < 0) return sums;
   for (const WorldObject& slot : world.objects()) {
     if (slot.internal != InternalKind::none || !slot.state.flags.is_unit) continue;
     if (slot.state.is_held()) continue;
@@ -3625,7 +4022,7 @@ struct EvalSums {
     const std::int64_t dy = static_cast<std::int64_t>(slot.state.position.y) - at.y;
     if (dx * dx + dy * dy > range * range) continue;
     if (!PlayerTable::is_valid(slot.state.owner)) continue;
-    const std::int64_t worth = object_power(world, combat, slot);
+    const std::int64_t worth = bodies ? 1 : object_power(world, combat, slot);
     if (slot.state.owner == player) {
       sums.own += worth;
     } else if (world.players().is_enemy(player, slot.state.owner)) {
@@ -3637,6 +4034,14 @@ struct EvalSums {
   return sums;
 }
 
+/// `Eval(player, pt, range, *own, *ally, *enemy)` -- 2 sites. 0x00426580 pops
+/// the three out-parameters, the range, the point and the player, zeroes the
+/// three sums and runs `eval_around`'s sweep with `player - 1` as the viewer,
+/// then writes own, ally and enemy back -- always, zero when nothing counted.
+/// The player is not range-checked: past 16 the viewer is outside the table
+/// and 0x0044e250 answers 0 for everything (all three stay 0, as here); 0 or
+/// less makes it index a record before the table, which is not a player, and
+/// here answers zeros (labelled; no shipped site passes it).
 HostOutcome f_eval(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Eval: no world");
@@ -3654,64 +4059,6 @@ HostOutcome f_eval(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `Unit::BestMDPos(MDRange, MinRange, MaxRange, MinEval, bProtectFriendly)` --
-/// **where to drop a mass-damage spell**, and 2 sites that are the sole
-/// blockers of `DATA\SUBAI\GDRUID_IDLE.VS` and `DATA\SUBAI\GHOST_IDLE.VS`.
-///
-/// Both callers read it the same way: a point whose `x` is negative means *no*,
-/// and 0x00439de0 answers `(-1, -1)` for every refusal there is. The druid asks
-/// for a summoning site within 250 of itself worth 500; the ghost asks within
-/// its own attack range.
-///
-/// ## What it searches
-///
-/// **Not a circle.** Like `BestTargetInGAIKA`, this is the family member that
-/// walks a node's squad list instead of sweeping the grid, so the only
-/// candidate points in the whole world are *the positions of the enemy squads
-/// filed under the caster's own node*. The caster's node is its **squad's**
-/// `GAIKAIn` -- 0x00444190 hands back the squad, `[squad+0x22]` the node -- so
-/// a unit in no squad, or in a squad filed nowhere, gets no answer at all
-/// before anything is measured.
-///
-/// A squad is a candidate when it has strength (`Squad::Eval`), the caster's
-/// player counts it an enemy (bit 2 of 0x0044e250), and it is *here rather than
-/// heading here*: 0x0044e1f0 masked with 6, the same pair of tests
-/// `BestTargetInGAIKA` documents, including 0x0044eb80's refinement, which
-/// cannot cross the mask. The point offered is the squad's **first member's**
-/// (0x00443df0) held-aware position.
-///
-/// ## What it scores
-///
-/// For each candidate the routine builds the very same accumulator `Eval`
-/// builds -- `{point, MDRange}` against `{MDRange squared, the caster's player,
-/// own, ally, enemy}` -- and hands it to the same grid sweep, so the number is
-/// the `enemy` bucket of `Eval(caster.player, candidate, MDRange)`. With
-/// `bProtectFriendly` the caster's own and its allies' sums are **subtracted**,
-/// which is the whole of what the flag means: a spell that would catch its own
-/// side is worth less by exactly what it would catch.
-///
-/// A candidate survives when its distance from the caster is within
-/// `[MinRange, MaxRange]` inclusive and its score is at least `MinEval`. What
-/// then ranks them is the score **plus `MaxRange - distance`**, so a nearer
-/// crowd beats an equal one further off; a tie keeps the first offered, which
-/// is squad order. The winner is answered only if that ranked value is greater
-/// than 3 -- a literal in the original, not a derived bound -- and the search
-/// starts from `MinEval - 1`, so a `MinEval` of 4 or less is what makes the
-/// two rules distinguishable at all.
-///
-/// ## What is approximated
-///
-///   * **The node is this engine's node.** `sim/gaika.hpp` records the
-///     partition trade in full; the reading here is the original's.
-///   * **`Squad::GAIKAIn` and `Squad::Eval` are refreshed once a turn**
-///     (`revalue_squads`), where the original writes them inside the move and
-///     inside the health write. See `sim/squad.hpp`.
-///   * **0x00420c00 is not called.** The original asks its node for five things
-///     between the two loops -- a settlement's two counters, a relation
-///     category and two constants -- and then overwrites four of the five slots
-///     before reading any of them, using the fifth as a scratch point buffer.
-///     The call cannot affect the answer, and it is left out rather than
-///     reproduced.
 /// One candidate crowd: an enemy squad filed under the caster's node, the front
 /// member whose position is offered, and how far that is from the caster.
 struct Crowd {
@@ -3740,8 +4087,14 @@ struct SpellSite {
 /// it an enemy (bit 2 of 0x0044e250, read off the caster's own row), and it is
 /// *here rather than heading here*: 0x0044e1f0 masked with 6, the pair
 /// `BestTargetInGAIKA` documents, including 0x0044eb80's refinement, which
-/// cannot cross the mask. The point offered is the squad's **first member's**
-/// (0x00443df0) held-aware position.
+/// cannot cross the mask -- and 0x0044e1f0's third argument is 0, so **a
+/// peaceful squad is never a candidate**, wildlife at war with everybody
+/// included.
+///
+/// Both ends of the distance are `posRH` (`vtbl+0xc8`): the caster's and the
+/// squad's **first member's** (0x00443df0), and that member's `posRH` is also
+/// the point offered. For a garrisoned unit that is the town it stands in
+/// (`unit_pos_rh`), not the holder record `resolve_position` stops at.
 ///
 /// The distance band belongs to the second loop in both originals and is
 /// applied here instead, which nothing can tell apart: the collected list is
@@ -3763,15 +4116,16 @@ struct SpellSite {
   const PlayerTable& players = world.players();
   site.ok = true;
   site.mine = mine;
-  site.from = world.resolve_position(self);
+  site.from = unit_pos_rh(world, self);
   for (const Squad& squad : heroes->squads().squads()) {
     if (squad.eval == 0) continue;
     if (!players.is_enemy(mine, squad.key.player)) continue;
+    if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
     if (squad.gaika_in != node) continue;
     if (squad.members.empty()) continue;
     const ObjectId front = squad.members.front();
     if (world.find(front) == nullptr) continue;
-    const Point where = world.resolve_position(front);
+    const Point where = unit_pos_rh(world, front);
     const std::int64_t dx = static_cast<std::int64_t>(where.x) - site.from.x;
     const std::int64_t dy = static_cast<std::int64_t>(where.y) - site.from.y;
     const std::int64_t distance = isqrt(dx * dx + dy * dy);
@@ -3786,22 +4140,23 @@ struct SpellSite {
 /// blockers of `DATA\SUBAI\GDRUID_IDLE.VS` and `DATA\SUBAI\GHOST_IDLE.VS`.
 ///
 /// Both callers read it the same way: a point whose `x` is negative means *no*,
-/// and 0x00439de0 answers `(-1, -1)` for every refusal there is. The druid asks
-/// for a summoning site within 250 of itself worth 500; the ghost asks within
-/// its own attack range.
+/// and 0x00439de0 answers `(-1, -1)` for every refusal there is. Both ask for
+/// a crowd between 0 and 1000 away with a `MinEval` of 500; the druid's spell
+/// reaches 250 and the ghost's its own attack range.
 ///
 /// **Not a circle.** The candidate set is `crowds_in_casters_node`'s, above.
 ///
 /// ## What it scores
 ///
-/// For each candidate the routine builds the very same accumulator `Eval`
-/// builds -- `{point, MDRange, MDRange squared}` against `{a flag mask of -1,
-/// the caster's player, own, ally, enemy}` -- and hands it to the same grid
-/// sweep, so the number is the `enemy` bucket of `Eval(caster.player,
-/// candidate, MDRange)`. With `bProtectFriendly` the caster's own and its
-/// allies' sums are **subtracted**, which is the whole of what the flag means:
-/// a spell that would catch its own side is worth less by exactly what it
-/// would catch.
+/// For each candidate the routine builds the very accumulator `Eval` builds --
+/// `{point, MDRange, MDRange squared}` against `{a flag mask of -1, the
+/// caster's player, own, ally, enemy}` -- but hands it to **0x00423a70, not
+/// `Eval`'s 0x00423850**: the same cells and the same units, and each unit
+/// counts **1**, not its worth. So the score is a **head count** of the enemy
+/// units within `MDRange`, and the shipped `MinEval` of 500 asks for five
+/// hundred of them -- which is why a retail druid or ghost so rarely finds a
+/// site. With `bProtectFriendly` the caster's own and its allies' heads are
+/// **subtracted**, which is the whole of what the flag means.
 ///
 /// A candidate survives when its score is at least `MinEval`. What then ranks
 /// them is the score **plus `MaxRange - distance`**, so a nearer crowd beats an
@@ -3848,7 +4203,8 @@ HostOutcome m_best_md_pos(CallContext& ctx) {
   bool found = false;
   Point answer{};
   for (const Crowd& crowd : site.crowds) {
-    const EvalSums sums = eval_around(*world, combat, site.mine, crowd.where, md_range);
+    const EvalSums sums =
+        eval_around(*world, combat, site.mine, crowd.where, md_range, /*bodies=*/true);
     std::int64_t score = sums.enemy;
     if (protect_friendly) score -= sums.ally + sums.own;
     if (score < min_eval) continue;
@@ -3904,6 +4260,8 @@ struct ProtectCensus {
 [[nodiscard]] ProtectCensus protect_census(const World& world, PlayerId mine, Point at,
                                            std::int64_t range) {
   ProtectCensus census;
+  // 0x00423cd0's square inverts for a negative range and visits no cell.
+  if (range < 0) return census;
   const PlayerTable& players = world.players();
   for (const WorldObject& slot : world.objects()) {
     if (slot.internal != InternalKind::none) continue;
@@ -4148,21 +4506,24 @@ HostOutcome f_enemy_players_eval(CallContext& ctx) {
 ///     its minimum.
 ///  7. `*nAvail -= sent`, floored at zero, and the answer is `sent`.
 ///
-/// ## The block that is skipped, and why that is faithful rather than partial
+/// ## The block that is skipped, and why that is a gap
 ///
 /// Between steps 5 and 6 the original runs a fourth filter, gated on two
 /// conditions: the under-fire flag is clear **and the MAIKA routing deque at
-/// `[0x8c8e54]+0x38` is non-empty**. It walks that deque for a way-point
-/// between each candidate squad's `GAIKAIn` (`[squad+0x22]`) and this node,
-/// drops the squads that have none, and abandons the whole recruit if the drops
-/// take the total below `nMin`.
+/// `[0x8c8e54]+0x38` is non-empty**. For each live candidate standing in some
+/// node other than this one (`GAIKAIn`, `[squad+0x22]`) it asks 0x0043eda0,
+/// once per source node, for a way-point between that node and this one,
+/// drops (marks -2) the squads that have none, and abandons the whole recruit
+/// if the drops take the total below `nMin`.
 ///
 /// **That deque is empty in this engine and always will be**, because the only
 /// thing that ever fills it is `SetMAIKA`, which `f_set_maika` accepts and
-/// drops for want of a routing table -- it says so at length. So the gate is
-/// false here for the same reason it is false on a retail map that never calls
-/// `SetMAIKA`, and skipping the block reproduces the original rather than
-/// approximating it. It is the first thing to restore alongside that table.
+/// drops for want of a routing table -- it says so at length. **In retail it is
+/// not empty**: `SQUADMONITOR.VS`, which every computer player runs, calls
+/// `SetMAIKA` from three places, so the filter is live there and can refuse a
+/// squad that has no recorded way across. Skipping it is therefore the routing
+/// table's gap showing through, not a reproduction, and it is the first thing
+/// to restore alongside that table.
 ///
 /// ## Four narrowings, named
 ///
@@ -4333,6 +4694,9 @@ HostOutcome m_gaika_recruit(CallContext& ctx) {
         const HostOutcome took_ran = run_script_now(ctx, take_chunk, take_args,
                                                     "CalcMaxTake failed", took, &take_locals);
         if (took_ran.status != script::HostStatus::ok) return took_ran;
+        // 0x0043d470 floors a negative take at 0; unfloored it refuses the
+        // same squads (a positive worth exceeds either), so the floor is not
+        // written.
         budget.take = took.is_integer() ? took.as_integer() : 0;
         budget.overneed = take_locals.size() > 2 && take_locals[2].is_integer()
                               ? take_locals[2].as_integer()
@@ -4437,21 +4801,30 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
   registry.define(kFree, "AIStop", 1, &f_ai_stop);     //  1, in a container, and a trap message
   // The one- and two-argument forms (0x00434e20, 0x00434e60) are **not**
   // bound: no script in the installation writes either, and the surface
-  // has no entry for them to fill. `ShowNotes`'s precedent.
+  // has no entry for them to fill. `ShowNotes`'s precedent. Read, for the day
+  // one is: the one-argument form checks 1..16 and calls the core with no
+  // name and difficulty 0, so the new AI keeps what its constructor
+  // (0x0041e100) seeds -- the seat's own playerdata profile string and its
+  // difficulty, anything outside 1..3 made 3. The two-argument form is the
+  // three-argument one's exact, case-sensitive profile check with difficulty
+  // 0, the same "keep the seat's".
 
   // The AI-helper runner. `RunAIHelper` is registered **eight times** in
-  // `gbr.exe` (0x004d4160, arities 2..9, every argument a string), and only
-  // arity 4 is bound here: it is the only one with a call site -- all 285 --
-  // and the only one that could ever spawn anything, because the core
-  // validates the helper's declared parameter count against the supplied one
-  // (0x004d300e) and all four shipped helpers open `// void, str GroupName,
-  // str Target`. The other seven follow the rectangle family's rule: read,
-  // recorded, and left unbound rather than added to an inventory the corpus
-  // does not declare. The body reads `ctx.count()` rather than assuming 4, so
-  // binding another arity is a one-line change if a caller ever appears.
-  registry.define(kFree, "RunAIHelper", 4, &f_run_ai_helper);               // 285
+  // `gbr.exe` (0x004d4160, arities 2..9, every argument a string; bodies
+  // 0x004d3400, 0x004d34c0, 0x004d35b0, 0x004d36d0, 0x004d3850, 0x004d3a10,
+  // 0x004d3c20, 0x004d3e70), each a thunk that pops its strings, pads the
+  // parameters to seven with "" and calls the one core with `arity - 2` as the
+  // count. All eight are bound to the one body, as `AIRun` and `Run` bind
+  // theirs: arity 4 has all 285 sites, and the others are what the original
+  // registers -- with the core's signature check (0x004d2ff8) they start
+  // nothing on retail data, whose four helpers all take two strings.
+  for (std::uint16_t arity = 2; arity <= 9; ++arity) {
+    registry.define(kFree, "RunAIHelper", arity, &f_run_ai_helper);         // 285 at 4
+  }
   // -- the node table; see `sim/gaika.hpp` for what it approximates ---------
-  registry.define(kMember, "LSA", 0, &m_gaika_lsa);              // 42
+  registry.define(kMember, "LSA", 0, &m_gaika_lsa);              // 42, and `obj.LSA` (0)
+  registry.define(kFree, "LSA", 1, &f_lsa_at);                   //  0, `LSA(pt)`
+  registry.define(kFree, "LSA", 2, &f_lsa_at);                   //  0, `LSA(x, y)`
   registry.define(kMember, "GetGaika", 0, &m_settlement_gaika);  // 27
   registry.define(kMember, "Center", 0, &m_gaika_center);        // 23
   registry.define(kMember, "GetDestPoint", 1, &m_gaika_dest_point);  //  1
@@ -4523,6 +4896,7 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
   // used to stand here alone -- see `f_gaika_at_point` on why the integer arm
   // has to keep being the identity.
   registry.define(kFree, "GetGAIKA", 1, &f_gaika_at_point);      // 27 with `Settlement::GetGaika`
+  registry.define(kFree, "GetGAIKA", 2, &f_gaika_at_xy);         //  0
   registry.define(kFree, "IsAIHelperRunning", 1, &f_is_ai_helper_running);  // 236
   registry.define(kFree, "StopAIHelper", 1, &f_stop_ai_helper);             // 179
 

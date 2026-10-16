@@ -329,7 +329,7 @@ enum class MatchOutcome : std::uint8_t {
 /// averages over the same team `GetTeamMilitaryScore` averages over and whose
 /// per-member term is
 ///
-///     gold_used / 1000  +  (power_score * military_rating) / 100
+///     gold_used / 500  +  (power_score * military_rating) / 100
 ///
 /// -- `military_rating` being the very expression above, reused verbatim as the
 /// middle factor. Two of the three were here from the start. The other two are
@@ -423,8 +423,27 @@ struct PlayerScoreCounters {
 
 /// How many player slots `0x00522e20` scans for teammates.
 ///
-/// Eight, not sixteen. See `MatchSystem::team_military_score`.
+/// Eight, not sixteen: the loop bound is `0x1900` over the 800-byte player
+/// stride, and a dead `0x3200` test inside it is the leftover of a sixteen-slot
+/// version. So a mutual ally in slot 8 or above is on nobody's team, while the
+/// asking player is on its own from any slot.
 inline constexpr PlayerId kTeamScanSlots = 8;
+
+/// The team 0x00522e20 builds for `player`, in its order -- what both team
+/// scores average over and what `EndGame`'s win declares the winners.
+///
+/// The player itself, unconditionally and first. Then, **only if the player's
+/// own `allied` dword (`[record+0x64]`, `PlayerSetup::allied_flag`) is
+/// non-zero**, every other slot of the first eight (`kTeamScanSlots`) whose
+/// `allied` dword is non-zero and whose relation word with the player has bit
+/// 0 in both directions. That is `DiplAreAllied`'s predicate (0x00564c10)
+/// exactly. There is no participation or still-playing test here. An invalid
+/// player answers an empty team (the original passes a null record and faults
+/// at `+0x64`).
+///
+/// This used to be "mutual bit 0 among participants": `allied_flag` was then
+/// unmodelled, and `participates` stood in for it.
+[[nodiscard]] std::vector<PlayerId> match_team_of(const World& world, PlayerId player);
 
 /// One player's military rating -- the per-member term of
 /// `GetTeamMilitaryScore`.
@@ -525,24 +544,49 @@ class MatchSystem final : public System, public WorldObserver {
 
   // -- the rule ----------------------------------------------------------
 
-  /// `EndGame(player, lose)`.
+  /// `EndGame(player, lose)` as the game object's slot 0x48 (0x00524090)
+  /// decides it -- both host bodies forward `(player - 1, lose != 0)` there.
   ///
-  /// Records and never overwrites: the first outcome a player reports is the
-  /// one it keeps. `2 SCORE LIMIT.VS` returns immediately after calling it and
-  /// so does `1 ELIMINATION.VS`, so a second report is a script restarted by
-  /// hand rather than a change of mind. Out-of-range and non-participating
-  /// players are ignored.
-  void end_game(PlayerId player, bool lost);
+  /// * **A player not still playing is refused whole** (0x005240b3: the
+  ///   record's lifecycle word `+0x290` must be 1). Here that is a
+  ///   participant whose outcome is `undecided`; an index outside 0..15 is
+  ///   ignored (the original reads through a null record).
+  /// * **A win** (`lose == 0`) runs 0x00523260 on the reporter: every member
+  ///   of its team (`match_team_of`, 0x00522e20) still playing becomes `won`
+  ///   (`+0x290 = 3`); then every slot of the first eight still playing that
+  ///   is not among the members just marked becomes `lost` (0x00522f90,
+  ///   `+0x290 = 2`). A win ends the match for everybody in the first eight.
+  /// * **A loss** marks the reporter `lost` -- but only a slot below eight:
+  ///   0x00522f90 tests the record's index `< 8`, so slots 8..15 report a
+  ///   defeat that changes nothing. Then 0x00522ec0 gathers the first eight's
+  ///   slots still playing and 0x005651e0 asks whether they are one side: none
+  ///   or one is; two or more are only when every one of them has its `allied`
+  ///   dword set (`+0x64`) and none holds another in its enemy mask (`+0x10`,
+  ///   kept by 0x005652f0 as "my relation word for it has bit 0 clear" --
+  ///   `PlayerTable::is_enemy`). If they are, 0x00523260 runs on the first of
+  ///   them, which marks its team `won` as above; if nobody is left, the local
+  ///   player is marked `lost` (0x00524262) -- here the single-player human.
+  ///
+  /// The end screens, the "You won" chat line and the session teardown that
+  /// follow (0x0051d4c0, 0x005cd4f0, the tail at 0x00524390) are display and
+  /// are not reproduced. `over()` and `winner()` remain derivations on top.
+  void end_game(const World& world, PlayerId player, bool lost);
 
   /// `EndGame(player, lose, message)` -- the three-argument form.
   ///
-  /// Same outcome rule, plus the sentence the end screen shows. The message is
-  /// kept **only when `player` is the human**, which is what 0x004c9660 does:
-  /// it divides `(current_player - players_base)` by the 800-byte player
-  /// stride, compares that index against `player - 1`, and assigns the string
-  /// into the game object only on a match. Every other player's message is
-  /// evaluated, freed, and dropped.
-  void end_game(PlayerId player, bool lost, std::string_view message);
+  /// The message is kept **only when `player` is the human**, which is what
+  /// 0x004c9660 does: it divides `(current_player - players_base)` by the
+  /// 800-byte player stride, compares that index against `player - 1`, and
+  /// assigns the string into the game's end-message string (0x0082e7ec) only
+  /// on a match, before and whatever the outcome rule then does. Every other
+  /// player's message is evaluated, freed, and dropped. Then the outcome rule
+  /// above.
+  void end_game(const World& world, PlayerId player, bool lost, std::string_view message);
+
+  /// What the two-argument `EndGame` body (0x004c9610) does before the rule:
+  /// it assigns the empty string to the same end-message string (0x0082e7ec)
+  /// the three-argument form writes -- for **any** player, local or not.
+  void clear_end_message() noexcept { end_message_.clear(); }
 
   /// The sentence the last `EndGame/3` naming the human carried, or empty.
   ///
@@ -614,27 +658,12 @@ class MatchSystem final : public System, public WorldObserver {
   /// `GetTeamMilitaryScore(player)` -- the average of `military_rating` over
   /// the player's team, or 0 for a team with no members.
   ///
-  /// **"Team" is the alliance matrix, and it wants both directions.**
-  /// 0x00522e20 puts the player itself in the list unconditionally and first,
-  /// then scans for others whose row grants this player bit 0 *and* whose bit 0
-  /// this player grants back -- which is `PlayerTable::are_allied`. It is not a
-  /// team id and there is no such field.
-  ///
-  /// **It scans eight slots, not sixteen**, and that is transcribed rather than
-  /// corrected: the loop bound is `esi < 0x1900` over a `0x320` stride, and a
-  /// dead `cmp esi, 0x3200` inside the body is the leftover of a sixteen-slot
-  /// version. So a mutual ally in slot 8 or above is not on anyone's team,
-  /// while the caller itself is on its own team from any slot.
-  ///
-  /// The membership filter on the others is `CVXPlayer + 0x64`, **the same
-  /// unmodelled field `PlayerTable::are_allied` already declines to require** --
-  /// `DiplAreAllied` (0x00564c10) wants it non-zero on both sides and this scan
-  /// wants it non-zero on the candidate. It is not among the nine the
-  /// serialiser names and nothing in the shipped data reaches it. `participates`
-  /// stands in: it excludes disabled slots and the two engine neutrals, which
-  /// is the same set that gets a victory script. Without some such filter every
-  /// empty slot would join every team and rate 10, which is plainly what the
-  /// original's filter is for.
+  /// "Team" is `match_team_of` (0x00522e20), which the military and the
+  /// overall score both call: the player itself first and from any slot, then
+  /// -- only when its own `allied` flag is set -- every other slot of the first
+  /// eight whose `allied` flag is set and whose relation with it is bit 0 both
+  /// ways. No participation test: a disabled slot that a map declares allied
+  /// would count.
   ///
   /// A player number outside 1..16 **faults** in the original: the four score
   /// entry points pass a null record into 0x00522e20, which dereferences it at
@@ -683,7 +712,11 @@ class MatchSystem final : public System, public WorldObserver {
   /// The same team average `team_military_score` takes, over the per-member
   /// term 0x0056c900 computes:
   ///
-  ///     gold_used / 1000  +  (power_score * military_rating) / 100
+  ///     gold_used / 500  +  (power_score * military_rating) / 100
+  ///
+  /// The `/ 500` is the `0x10624dd3` multiply followed by a shift of five
+  /// (0x0056c999..0x0056c9a5); a shift of six would be the `/ 1000` this used
+  /// to divide by.
   ///
   /// -- `military_rating` being `team_military_score`'s own per-member term,
   /// reused verbatim as the middle factor rather than recomputed differently.
@@ -750,6 +783,10 @@ class MatchSystem final : public System, public WorldObserver {
   [[nodiscard]] Status deserialize(std::span<const std::byte> bytes);
 
  private:
+  /// 0x00523260: `player`'s team still playing wins, the rest of the first
+  /// eight still playing loses. See `end_game`.
+  void declare_team_won(const World& world, PlayerId player);
+
   MatchRules rules_;
   std::array<MatchPlayer, kPlayerCount> players_{};
   PlayerId human_ = kNoPlayer;

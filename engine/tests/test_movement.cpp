@@ -28,7 +28,9 @@
 #include "imperivm/core/game/localization.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/movement.hpp"
+#include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/session.hpp"
 #include "imperivm/core/sim/path.hpp"
@@ -2075,7 +2077,9 @@ TEST(host_geometry_reads_the_grid) {
   CHECK(unpack_point(clipped.value) == (Point{32 * 16 - 1, 0}));
 }
 
-TEST(set_formation_refuses_a_name_the_file_does_not_declare) {
+/// `Hero::SetFormation` (0x0052eca0) prints an unknown name into the dead
+/// printer and goes on: the hero keeps the formation it had.
+TEST(set_formation_ignores_a_name_the_file_does_not_declare) {
   HostRegistry registry;
   register_movement_host(registry);
 
@@ -2088,11 +2092,10 @@ TEST(set_formation_refuses_a_name_the_file_does_not_declare) {
   attach(world, movement);
   const ObjectId hero = spawn_unit(world, movement, Point{100, 100}, 100);
 
-  HostCall bad(world, {Value::object(kTypeObj, hero), Value::string("Testudo")});
-  CHECK(invoke(registry, CallKind::member, "SetFormation", 1, bad).status == HostStatus::error);
-
   HostCall good(world, {Value::object(kTypeObj, hero), Value::string("Line")});
   CHECK(invoke(registry, CallKind::member, "SetFormation", 1, good).status == HostStatus::ok);
+  HostCall bad(world, {Value::object(kTypeObj, hero), Value::string("Testudo")});
+  CHECK(invoke(registry, CallKind::member, "SetFormation", 1, bad).status == HostStatus::ok);
   HostCall read(world, {Value::object(kTypeObj, hero)});
   CHECK(invoke(registry, CallKind::member, "formation", 0, read).value.as_string() == "Line");
 
@@ -2119,9 +2122,10 @@ TEST(a_host_call_without_a_world_fails_rather_than_guessing) {
   CHECK(outcome.error != nullptr);
 }
 
-/// `DoCarryNothing` is the walk slot at or below the default; the two carry
-/// setters move it to 16 or 17 for the ambient villager classes and leave
-/// every other class alone.
+/// `DoCarryNothing` is the walk index at zero -- slot 1 here, the script's
+/// numbering, one above the index the original stores (0x005d8350 writes
+/// `n - 1`). The two carry setters store index 16 or 17, slots 17 or 18, for
+/// the ambient villager classes and leave every other class alone.
 TEST(the_carry_trio_is_the_walk_animation_slot) {
   HostRegistry registry;
   register_movement_host(registry);
@@ -2169,15 +2173,15 @@ TEST(the_carry_trio_is_the_walk_animation_slot) {
   CHECK(carries_nothing(plain));
 
   set("SetCarryWaterAnim", water);
-  CHECK(movement.state(water).walk_anim == 16);
+  CHECK(movement.state(water).walk_anim == 17);
   CHECK(!carries_nothing(water));
   set("SetCarryGoodsAnim", water);
-  CHECK(movement.state(water).walk_anim == 17);
+  CHECK(movement.state(water).walk_anim == 18);
   // A plain villager carries goods on the water slot and no water at all.
   set("SetCarryWaterAnim", plain);
   CHECK(movement.state(plain).walk_anim == 1);
   set("SetCarryGoodsAnim", plain);
-  CHECK(movement.state(plain).walk_anim == 16);
+  CHECK(movement.state(plain).walk_anim == 17);
   CHECK(!carries_nothing(plain));
   // A peasant, and an heir of the class, are left alone.
   set("SetCarryGoodsAnim", peasant);
@@ -2193,6 +2197,10 @@ TEST(the_carry_trio_is_the_walk_animation_slot) {
   // A slot the original would call "something" -- the deer's grazing 13 --
   // reads the same way here.
   movement.state(water).walk_anim = 13;
+  CHECK(!carries_nothing(water));
+  // `SetWalkAnim(0)` stores index -1, which is not zero: something carried.
+  HostCall zero(world, {Value::object(script::ObjectRef{kTypeObj, water}), Value::integer(0)});
+  CHECK(invoke(registry, CallKind::member, "SetWalkAnim", 1, zero).status == HostStatus::ok);
   CHECK(!carries_nothing(water));
   // And a handle to nothing answers false.
   CHECK(!carries_nothing(999999));
@@ -2227,4 +2235,361 @@ TEST(goto_enter_drops_the_combat_target) {
   (void)invoke(registry, CallKind::member, "GotoEnter", 5, enter);
   CHECK(combat.find(unit)->target == kNoObject);
   CHECK(combat.find(unit)->attacks == 0);
+}
+
+// --------------------------------------------------------------------------
+// the host slice against gbr.exe's bodies
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// A movement-and-commands world on an open field, for the host bodies that
+/// touch a unit's command queue.
+struct HostField {
+  World world;
+  CommandSystem commands;
+  HeroSystem heroes;
+  MovementSystem movement;
+  HostRegistry registry;
+
+  explicit HostField(ObstructionGrid grid = open_field(64)) {
+    movement.set_grid(std::move(grid));
+    world.add_system(&commands);
+    world.add_system(&heroes);
+    attach(world, movement);
+    register_movement_host(registry);
+  }
+
+  ObjectId unit(Point where, NativeClass kind = NativeClass::unit) {
+    const ObjectId id = world.spawn(kind, nullptr);
+    CHECK(world.set_position(id, where));
+    world.set_owner(id, 1);
+    movement.state(id).speed = 100;
+    return id;
+  }
+
+  /// One member call with `script` as the running script.
+  HostOutcome call(std::string_view name, std::initializer_list<Value> args,
+                   script::ScriptId script = script::kNoScript) {
+    HostCall c(world, args);
+    c.context.script = script;
+    return invoke(registry, CallKind::member, name,
+                  static_cast<std::uint16_t>(args.size() - 1), c);
+  }
+
+  /// `id` running `verb`, its coroutine `script`.
+  void running(ObjectId id, std::string_view verb, script::ScriptId script) {
+    (void)commands.set_command(world, id, verb, Command{});
+    CommandQueue* queue = commands.find(id);
+    REQUIRE(queue != nullptr);
+    REQUIRE(!queue->entries.empty());
+    queue->entries.front().script = script;
+    queue->entries.front().started = true;
+  }
+};
+
+}  // namespace
+
+/// Every body in the slice opens with the handle check and, on a miss,
+/// formats its complaint into 0x00686eb0 -- a bare `ret` in retail -- and
+/// pushes a default. The script goes on.
+TEST(a_receiver_that_names_nothing_gets_each_bodys_default) {
+  HostField f;
+  const ObjectId gone = f.unit(Point{100, 100});
+  const ObjectId other = f.unit(Point{300, 100});
+  REQUIRE(f.world.despawn(gone));
+  for (const Value& dead :
+       {Value::object(kTypeObj, gone), Value::object(script::ObjectRef{script::kNoType, 0})}) {
+    const Value to = pack_point(Point{500, 100});
+    const auto go = [&](const Value& where) {
+      return f.call("Goto", {dead, where, Value::integer(0), Value::integer(1000),
+                             Value::boolean(true), Value::integer(-1)});
+    };
+    // The point form answers true (0x005d61b0), the object form false.
+    const HostOutcome point_goto = go(to);
+    CHECK(point_goto.status == HostStatus::ok);
+    CHECK(point_goto.value.as_integer() == 1);
+    const HostOutcome object_goto = go(Value::object(kTypeObj, other));
+    CHECK(object_goto.status == HostStatus::ok);
+    CHECK(object_goto.value.as_integer() == 0);
+
+    const auto answers = [&](std::string_view name, std::initializer_list<Value> args) {
+      const HostOutcome out = f.call(name, args);
+      CHECK(out.status == HostStatus::ok);
+      return out.value;
+    };
+    CHECK(answers("Stop", {dead, Value::integer(1000)}).as_integer() == 0);
+    CHECK(answers("HasPath", {dead}).as_integer() == 0);
+    CHECK(answers("DoCarryNothing", {dead}).as_integer() == 0);
+    CHECK(answers("PathTo", {dead, to, Value::integer(0), Value::integer(0)}).as_integer() == -1);
+    CHECK(answers("TimeWithoutWalking", {dead}).as_integer() == 0);
+    CHECK(answers("speed", {dead}).as_integer() == 0);
+    CHECK(answers("FormRadius", {dead}).as_integer() == 0);
+    CHECK(unpack_point(answers("dest", {dead})) == kHeldPosition);
+    CHECK(unpack_point(answers("GetDir", {dead})) == (Point{0, 1}));
+    CHECK(answers("formation", {dead}).as_string().empty());
+    // The setters do nothing and say nothing.
+    (void)answers("Face", {dead, to});
+    (void)answers("SetPos", {dead, to});
+    (void)answers("SetSpeedFactor", {dead, Value::integer(7)});
+    (void)answers("SetWalkAnim", {dead, Value::integer(13)});
+    (void)answers("SetWalkAnim", {dead});
+    (void)answers("SetCarryWaterAnim", {dead});
+    (void)answers("SetFormation", {dead, Value::string("Line")});
+    // `PathDestFound` makes no check and faults: refused by name.
+    CHECK(f.call("PathDestFound", {dead}).status == HostStatus::error);
+  }
+  // A receiver of another shape is not a handle the compiler can produce.
+  CHECK(f.call("HasPath", {Value::integer(4)}).status == HostStatus::error);
+}
+
+/// 0x005d61b0 clamps its destination into `[map+0xb4]..[map+0xc0]` and
+/// writes it back into its own argument before anything else.
+TEST(a_point_goto_walks_to_its_destination_clamped_to_the_map) {
+  HostField f;  // 64 cells, so the map runs 0..1023
+  const ObjectId unit = f.unit(Point{100, 100});
+  CHECK(goto_once(f.registry, f.world, unit, Point{5000, -300}, 1000, -1).status ==
+        HostStatus::suspend);
+  REQUIRE(f.movement.find(unit) != nullptr);
+  CHECK(f.movement.find(unit)->has_path);
+  CHECK(f.movement.find(unit)->target == (Point{1023, 0}));
+}
+
+/// The object `Goto` routes only to a target it may approach (0x005d40c0 at
+/// 0x005d4291..0x005d42d7), and a target that is the mover answers true.
+TEST(an_object_goto_routes_only_to_a_target_it_may_approach) {
+  HostField f;
+  const ObjectId walker = f.unit(Point{100, 100});
+  const auto go = [&](ObjectId target) {
+    return f.call("Goto", {Value::object(kTypeObj, walker), Value::object(kTypeObj, target),
+                           Value::integer(0), Value::integer(751), Value::boolean(true),
+                           Value::integer(-1)});
+  };
+  const auto refused = [&](const HostOutcome& out) {
+    return out.status == HostStatus::suspend && out.value.as_integer() == 0 &&
+           out.suspend_for == 751 && !f.movement.find(walker)->has_path;
+  };
+
+  const HostOutcome self = go(walker);
+  CHECK(self.status == HostStatus::ok);
+  CHECK(self.value.as_integer() == 1);
+
+  // A unit inside a holder.
+  const ObjectId tower = f.unit(Point{600, 100}, NativeClass::building);
+  const ObjectId inside = f.unit(Point{600, 140});
+  REQUIRE(f.world.put_in_holder(inside, tower));
+  CHECK(refused(go(inside)));
+
+  // A hidden unit of another side, and one of the walker's own.
+  const ObjectId lurker = f.unit(Point{600, 400});
+  f.world.set_owner(lurker, 2);
+  f.world.mutable_state(lurker)->flags.hidden = true;
+  CHECK(refused(go(lurker)));
+  const ObjectId scout = f.unit(Point{400, 600});
+  f.world.mutable_state(scout)->flags.hidden = true;
+  CHECK(go(scout).status == HostStatus::suspend);
+  CHECK(f.movement.find(walker)->has_path);
+  CHECK(f.movement.find(walker)->target_object == scout);
+}
+
+/// A unit standing at `(-1, -1)` with no holder -- what `Disappear` leaves --
+/// waits 500 ms and runs the call again (0x005d6312).
+TEST(a_goto_by_a_unit_standing_nowhere_asks_again_every_half_second) {
+  HostField f;
+  const ObjectId unit = f.unit(Point{100, 100});
+  REQUIRE(f.world.set_position(unit, kHeldPosition));
+  const HostOutcome out = goto_once(f.registry, f.world, unit, Point{500, 500}, 2000, -1);
+  CHECK(out.status == HostStatus::retry);
+  CHECK(out.suspend_for == 500);
+  CHECK(!f.movement.find(unit)->has_path);
+}
+
+/// `TimeWithoutWalking` (0x005d6ee0) is the clock less the `Goto` failure
+/// stamp `[unit+0x150]`, 0 while it is clear -- not how long the unit has
+/// stood still.
+TEST(time_without_walking_is_how_long_goto_has_failed_to_lay_a_route) {
+  HostField f(sealed_cell(9, 10));
+  const ObjectId sealed = f.unit(Point{9 * 16 + 8, 10 * 16 + 8});
+  const ObjectId idle = f.unit(Point{400, 400});
+  const auto without = [&](ObjectId id) {
+    return f.call("TimeWithoutWalking", {Value::object(kTypeObj, id)}).value.as_integer();
+  };
+  f.world.advance(3000);
+  // Three seconds standing about is not three seconds without a route.
+  CHECK(without(idle) == 0);
+  CHECK(without(sealed) == 0);
+
+  CHECK(goto_once(f.registry, f.world, sealed, Point{2000, 2000}, 1000, -1).status ==
+        HostStatus::suspend);
+  CHECK(without(sealed) == 0);
+  f.world.advance(1500);
+  CHECK(without(sealed) == 1500);
+  // A route laid clears the stamp.
+  f.movement.set_grid(open_field(32));
+  CHECK(goto_once(f.registry, f.world, sealed, Point{400, 160}, 1000, -1).status ==
+        HostStatus::suspend);
+  CHECK(without(sealed) == 0);
+}
+
+/// `dest` (0x005d6f50) is where the route goes -- the route record's
+/// `vtbl+0x10`, the media's last point -- and the unit's `posRH` without one;
+/// `PathDestFound` (0x005d8830) is the same last point, or `(-1, -1)`.
+TEST(dest_and_path_dest_found_answer_the_end_of_the_route) {
+  HostField f(sealed_cell(20, 6));
+  const ObjectId unit = f.unit(Point{100, 100});
+  const Value self = Value::object(kTypeObj, unit);
+  const auto point_of = [&](std::string_view name) {
+    const HostOutcome out = f.call(name, {self});
+    CHECK(out.status == HostStatus::ok);
+    return unpack_point(out.value);
+  };
+  CHECK(point_of("dest") == (Point{100, 100}));
+  CHECK(point_of("PathDestFound") == kHeldPosition);
+
+  // Into the sealed cell: the route that is laid stops short of the order.
+  const Point walled{20 * 16 + 8, 6 * 16 + 8};
+  (void)goto_once(f.registry, f.world, unit, walled, 1000, -1);
+  const MoveState* move = f.movement.find(unit);
+  REQUIRE(move != nullptr);
+  REQUIRE(move->has_path);
+  REQUIRE(!move->waypoints.empty());
+  CHECK(move->waypoints.back() != walled);
+  CHECK(point_of("dest") == move->waypoints.back());
+  CHECK(point_of("PathDestFound") == move->waypoints.back());
+}
+
+/// `PathTo`'s object form (0x005de390) goes to the target's `posRH` with both
+/// class radii added to the range, answers -1 for a target that names nothing,
+/// and a unit aboard a ship answers 1,000,000 (0x005de1e1).
+TEST(path_to_an_object_reaches_its_edge_and_a_passenger_answers_a_million) {
+  EdgeField f;
+  const ObjectId walker = f.place("Walker", Point{1000, 1000});
+  const ObjectId camp = f.place("Camp", Point{1100, 1000});
+  const auto path_to = [&](ObjectId who, const Value& where) {
+    HostCall call(f.world, {Value::object(kTypeObj, who), where, Value::integer(0),
+                            Value::integer(0)});
+    const HostOutcome out = invoke(f.registry, CallKind::member, "PathTo", 3, call);
+    CHECK(out.status == HostStatus::ok);
+    return out.value.is_integer() ? out.value.as_integer() : -999;
+  };
+  // 100 between centres: a walk of 100 to the point, and none to the object,
+  // whose band is 15 + 100 wide.
+  CHECK(path_to(walker, pack_point(Point{1100, 1000})) == 100);
+  CHECK(path_to(walker, Value::object(kTypeObj, camp)) == 0);
+
+  const ObjectId doomed = f.place("Walker", Point{1000, 1400});
+  REQUIRE(f.world.despawn(doomed));
+  CHECK(path_to(walker, Value::object(kTypeObj, doomed)) == -1);
+
+  const World::ShipIds ship = f.world.spawn_ship(nullptr);
+  REQUIRE(f.world.set_position(ship.ship, Point{2000, 2000}));
+  const ObjectId sailor = f.place("Walker", Point{2000, 2100});
+  REQUIRE(f.world.put_in_holder(sailor, ship.holder));
+  CHECK(path_to(sailor, pack_point(Point{1000, 1000})) == 1000000);
+}
+
+/// `Hero::FormRadius` (0x0052ec40 -> 0x005f2350) is the formation's radius
+/// `[form+0x34]` when it has members and one, and the hero's class `radius`
+/// otherwise -- not the ranks' spacing `formation_radius`.
+TEST(form_radius_is_the_formations_reach_or_the_heros_own_radius) {
+  ClassGraph graph;
+  graph.add(as_bytes(R"(<class id="Leader" cpp_class="CVXHero" parent="">
+    <properties speed="100" radius="22" formation_radius="26"/></class>)"),
+            "leader.sc.xml");
+  graph.link();
+  HostField f;
+  f.world.set_class_graph(&graph);
+  f.movement.set_class_graph(&graph);
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, graph.find("Leader"));
+  REQUIRE(f.world.set_position(hero, Point{300, 300}));
+  const auto radius = [&]() {
+    return f.call("FormRadius", {Value::object(kTypeObj, hero)}).value.as_integer();
+  };
+  CHECK(radius() == 22);
+  f.movement.state(hero).form_extent = 240;
+  // A radius with no army behind it is not the formation's.
+  CHECK(radius() == 22);
+  HeroRecord& record = f.heroes.register_hero(f.world, hero);
+  record.army.push_back(f.unit(Point{340, 300}));
+  CHECK(radius() == 240);
+}
+
+/// A hero's `HasPath` (0x0052fe40) is its own route or any member of its army
+/// whose route follows the formation; a held unit has none (0x005d6e7f).
+TEST(a_hero_has_a_path_while_his_column_is_still_marching) {
+  HostField f;
+  const ObjectId hero = f.unit(Point{300, 300}, NativeClass::hero);
+  const ObjectId marcher = f.unit(Point{200, 300});
+  const ObjectId stray = f.unit(Point{200, 500});
+  HeroRecord& record = f.heroes.register_hero(f.world, hero);
+  record.army = {marcher, stray};
+  const auto has_path = [&](ObjectId id) {
+    return f.call("HasPath", {Value::object(kTypeObj, id)}).value.as_integer() != 0;
+  };
+  // A member on an errand of its own is not the march.
+  (void)f.movement.order_goto(f.world, stray, Point{900, 900}, 0);
+  REQUIRE(f.movement.find(stray)->has_path);
+  CHECK(!has_path(hero));
+  (void)f.movement.order_goto(f.world, marcher, Point{800, 300}, 0, 0, hero);
+  REQUIRE(f.movement.find(marcher)->has_path);
+  CHECK(has_path(hero));
+
+  const ObjectId tower = f.unit(Point{700, 700}, NativeClass::building);
+  REQUIRE(f.world.put_in_holder(stray, tower));
+  CHECK(!has_path(stray));
+}
+
+/// `Obj::Face` (0x005ac4a0) and `Obj::SetPos` (0x005ac130) end the object's
+/// commands (`vtbl+0xc0` with 1) unless the call comes from its own command
+/// script; `ObjList::Face` (0x0055e5d0) ends every member's.
+TEST(face_and_set_pos_from_another_script_end_the_objects_commands) {
+  HostField f;
+  const ObjectId a = f.unit(Point{100, 100});
+  const ObjectId b = f.unit(Point{300, 100});
+  const Value pt = pack_point(Point{100, 600});
+  f.running(a, "guard", 5);
+  f.running(b, "guard", 6);
+
+  // From a's own command script: a keeps its command.
+  CHECK(f.call("Face", {Value::object(kTypeObj, a), pt}, 5).status == HostStatus::ok);
+  CHECK(f.commands.command_name(a) == "guard");
+  CHECK(f.call("SetPos", {Value::object(kTypeObj, a), pack_point(Point{120, 100})}, 5).status ==
+        HostStatus::ok);
+  CHECK(f.commands.command_name(a) == "guard");
+  CHECK(position_of(f.world, a) == (Point{120, 100}));
+
+  // From b's script, a sequence, or nothing at all: a's commands end.
+  CHECK(f.call("Face", {Value::object(kTypeObj, a), pt}, 6).status == HostStatus::ok);
+  CHECK(f.commands.command_name(a) != "guard");
+  f.running(a, "guard", 5);
+  CHECK(f.call("SetPos", {Value::object(kTypeObj, a), pack_point(Point{140, 100})}).status ==
+        HostStatus::ok);
+  CHECK(f.commands.command_name(a) != "guard");
+
+  // The list form faces every member and ends every member's commands, its
+  // own script or not.
+  f.running(a, "guard", 5);
+  const ObjListId list = f.world.objlists().acquire_temporary(5);
+  f.world.objlists().mutable_items(list)->assign({a, b});
+  CHECK(f.call("Face", {make_objlist_value(list), pt}, 5).status == HostStatus::ok);
+  CHECK(f.commands.command_name(a) != "guard");
+  CHECK(f.commands.command_name(b) != "guard");
+  CHECK(f.movement.state(b).facing.y > 0);
+  CHECK(f.movement.state(b).facing.x < 0);
+}
+
+/// The unit's own `SetPos` (0x005d39e0) takes a held unit out of its holder
+/// before it places it, unless the point is `(-1, -1)`.
+TEST(set_pos_takes_a_held_unit_out_of_its_holder) {
+  HostField f;
+  const ObjectId tower = f.unit(Point{500, 500}, NativeClass::building);
+  const ObjectId unit = f.unit(Point{500, 540});
+  REQUIRE(f.world.put_in_holder(unit, tower));
+  CHECK(f.call("SetPos", {Value::object(kTypeObj, unit), pack_point(kHeldPosition)}).status ==
+        HostStatus::ok);
+  CHECK(f.world.state(unit)->is_held());
+  CHECK(f.call("SetPos", {Value::object(kTypeObj, unit), pack_point(Point{800, 800})}).status ==
+        HostStatus::ok);
+  CHECK(!f.world.state(unit)->is_held());
+  CHECK(position_of(f.world, unit) == (Point{800, 800}));
 }

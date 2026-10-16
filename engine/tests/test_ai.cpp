@@ -15,6 +15,7 @@
 // the way `gbr.exe` refuses it, and this domain's registration overwrites
 // nothing another domain already implemented.
 
+#include <array>
 #include <cstdio>
 #include <span>
 #include <string>
@@ -468,7 +469,9 @@ TEST(ai_get_player_survives_a_prune) {
   CHECK(f.ai.script_player(monitor, f.scheduler) == 1);
 }
 
-TEST(ai_get_player_answers_minus_one_outside_any_ai) {
+/// 0x0043caa0 answers -1 for a script with no owner tag and 0x00421cb0 adds
+/// one to whatever it answers, so the entry point says **0**, not -1.
+TEST(ai_get_player_answers_zero_outside_any_ai) {
   Fixture f;
   const std::uint32_t chunk =
       build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/SUBAI/IDLE.VS");
@@ -478,9 +481,9 @@ TEST(ai_get_player_answers_minus_one_outside_any_ai) {
   const script::HostOutcome out =
       f.call(script::CallKind::free_function, "AIGetPlayer", {}, loose);
   CHECK(out.status == script::HostStatus::ok);
-  CHECK(out.value.as_integer() == -1);
-  // And with no running script at all, which is the case 0x0043caa0 answers -1
-  // for by name.
+  CHECK(out.value.as_integer() == 0);
+  // The internal resolver keeps -1 for "no owner"; the increment belongs to
+  // the entry point.
   CHECK(f.ai.script_player(script::kNoScript, f.scheduler) == -1);
 }
 
@@ -661,7 +664,11 @@ TEST(run_economy_script_spawns_the_file_the_profile_names) {
   CHECK(cleared.value.as_integer() == 0);
 }
 
-TEST(run_economy_script_refuses_an_id_the_profile_does_not_declare) {
+/// An id that names no script starts nothing **and does not trap**: 0x0043f1b0
+/// names `""` past its table and 0x0041cd00 answers -1 for a file the library
+/// does not hold, silently. The id is still written (0x0041d310 writes before
+/// it spawns), and reads back 0 because no thread runs at the slot's id.
+TEST(run_economy_script_of_an_id_that_names_nothing_starts_nothing_quietly) {
   Fixture f;
   REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
           script::kNoChunk);
@@ -669,18 +676,154 @@ TEST(run_economy_script_refuses_an_id_the_profile_does_not_declare) {
   const script::ScriptId root = f.ai.player_ai(1)->root;
   const script::Value handle = f.settlement_value(f.make_settlement(1));
 
-  // 99 names nothing. Refusing beats spawning something plausible.
   const script::HostOutcome out = f.call(script::CallKind::member, "RunEconomyScript",
                                          {handle, script::Value::integer(99)}, root);
-  CHECK(out.status == script::HostStatus::error);
+  CHECK(out.status == script::HostStatus::ok);
   CHECK(f.scheduler.live_count() == 1);
+  CHECK(f.call(script::CallKind::member, "EconomyScript", {handle}, root).value.as_integer() ==
+        0);
 
-  // The sentinel is a no-op rather than an error: `ES_NONE` means "nothing to
-  // run", and the corpus passes whatever came back.
-  const script::HostOutcome none = f.call(script::CallKind::member, "RunEconomyScript",
-                                          {handle, script::Value::integer(0)}, root);
-  CHECK(none.status == script::HostStatus::ok);
+  // A declared id whose file the library lacks is the same quiet nothing.
+  const std::int32_t es_village = f.profile.constant(AiEnum::economy_script, "ES_Village");
+  const script::HostOutcome missing = f.call(script::CallKind::member, "RunEconomyScript",
+                                             {handle, script::Value::integer(es_village)}, root);
+  CHECK(missing.status == script::HostStatus::ok);
   CHECK(f.scheduler.live_count() == 1);
+}
+
+/// **A second run replaces the first, and 0 stops it.** 0x0041d310 stops the
+/// thread at the settlement's fixed id when the slot is non-zero (0x0069fee0),
+/// then writes the new id unconditionally and spawns only for a non-zero one.
+TEST(run_economy_script_replaces_the_running_script_and_zero_stops_it) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void, Settlement set\nSleep(100000);\n",
+                "DATA/AI/ES_VILLAGE.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void, Settlement set\nSleep(100000);\n",
+                "DATA/AI/ES_STRONGHOLD.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(1)->root;
+  const script::Value handle = f.settlement_value(f.make_settlement(1));
+  const std::int32_t es_village = f.profile.constant(AiEnum::economy_script, "ES_Village");
+  const std::int32_t es_stronghold = f.profile.constant(AiEnum::economy_script, "ES_Stronghold");
+  const auto run = [&](std::int32_t id) {
+    return f.call(script::CallKind::member, "RunEconomyScript",
+                  {handle, script::Value::integer(id)}, root);
+  };
+  const auto slot = [&] {
+    return f.call(script::CallKind::member, "EconomyScript", {handle}, root).value.as_integer();
+  };
+
+  CHECK(run(es_village).status == script::HostStatus::ok);
+  const script::ScriptId first = f.scheduler.scripts().back().id;
+  CHECK(f.scheduler.live_count() == 2);
+  CHECK(slot() == es_village);
+
+  CHECK(run(es_stronghold).status == script::HostStatus::ok);
+  CHECK(!f.scheduler.alive(first));
+  CHECK(f.scheduler.live_count() == 2);  // the root and the replacement only
+  CHECK(slot() == es_stronghold);
+  const script::ScriptId second = f.scheduler.scripts().back().id;
+  CHECK(second != first);
+
+  CHECK(run(0).status == script::HostStatus::ok);
+  CHECK(!f.scheduler.alive(second));
+  CHECK(f.scheduler.live_count() == 1);
+  CHECK(slot() == 0);
+}
+
+/// **The slot is the settlement owner's AI's**, not the settlement's: the
+/// readers ask `[[set+0x90]+0x88]` and read that AI's own array (0x00426190 ->
+/// 0x0041d2a0), and `RunEconomyScript` runs on that AI (0x0042616b).
+TEST(economy_script_slots_belong_to_the_settlements_current_owner) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void, Settlement set\nSleep(100000);\n",
+                "DATA/AI/ES_VILLAGE.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(f.ai.start(2, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root1 = f.ai.player_ai(1)->root;
+  const script::ScriptId root2 = f.ai.player_ai(2)->root;
+  const SettlementId set = f.make_settlement(1);
+  const script::Value handle = f.settlement_value(set);
+  const std::int32_t es_village = f.profile.constant(AiEnum::economy_script, "ES_Village");
+  const auto slot = [&](script::ScriptId caller) {
+    return f.call(script::CallKind::member, "EconomyScript", {handle}, caller).value.as_integer();
+  };
+
+  // Player 2's script starts it, but it runs on the owner's AI: tagged seat 1.
+  CHECK(f.call(script::CallKind::member, "RunEconomyScript",
+               {handle, script::Value::integer(es_village)}, root2)
+            .status == script::HostStatus::ok);
+  const script::ScriptId first = f.scheduler.scripts().back().id;
+  CHECK(f.ai.script_player(first, f.scheduler) == 2);
+  CHECK(slot(root1) == es_village);
+  CHECK(slot(root2) == es_village);  // whoever asks: the owner's array is read
+
+  // The settlement changes hands. Its old economy script has not ended, but it
+  // is in seat 1's array, and seat 2's says nothing runs there.
+  f.economy.settlements().find(set)->owner = 2;
+  CHECK(f.scheduler.alive(first));
+  CHECK(slot(root1) == 0);
+  // So seat 2 starts its own, and does not stop seat 1's thread.
+  CHECK(f.call(script::CallKind::member, "RunEconomyScript",
+               {handle, script::Value::integer(es_village)}, root2)
+            .status == script::HostStatus::ok);
+  CHECK(f.scheduler.alive(first));
+  const script::ScriptId second = f.scheduler.scripts().back().id;
+  CHECK(f.ai.script_player(second, f.scheduler) == 3);
+  CHECK(slot(root1) == es_village);
+
+  // A settlement whose owner has no AI has no slot, whatever runs on it.
+  f.economy.settlements().find(set)->owner = 4;
+  CHECK(f.scheduler.alive(second));
+  CHECK(slot(root1) == 0);
+  // And running on it starts nothing (a null AI in the original).
+  CHECK(f.call(script::CallKind::member, "RunEconomyScript",
+               {handle, script::Value::integer(es_village)}, root1)
+            .status == script::HostStatus::ok);
+  CHECK(f.scheduler.live_count() == 4);
+}
+
+/// `GetEconomyScript(idPlayer)` searches **`idPlayer - 1`'s** directory
+/// (0x004260f0 -> 0x0043d740 -> 0x0043d030), not the caller's, and answers a
+/// non-negative return masked to 16 bits and 0 for a negative one.
+TEST(get_economy_script_searches_the_arguments_seat_and_masks_the_answer) {
+  Fixture f;
+  AiProfile defensive;
+  const auto parsed = AiProfile::parse(bytes_of(kProfileIni));
+  REQUIRE(parsed.ok());
+  defensive = parsed.value();
+  f.ai.add_profile("DEFENSIVE", &defensive, "DATA\\AI\\DEFENSIVE\\");
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n",
+                "DATA/AI/DEFENSIVE/MAIN.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// int, Settlement set, int idPlayer\nreturn 5;\n",
+                "DATA/AI/GETECONOMYSCRIPT.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// int, Settlement set, int idPlayer\nreturn 65543;\n",
+                "DATA/AI/DEFENSIVE/GETECONOMYSCRIPT.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// int, Settlement set, int idPlayer\nreturn -3;\n",
+                "DATA/AI/GETTACTICSCRIPT.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(f.ai.start(3, "DEFENSIVE", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root1 = f.ai.player_ai(1)->root;
+  const script::Value handle = f.settlement_value(f.make_settlement(1));
+  const auto get = [&](const char* name, std::int32_t seat) {
+    return f.call(script::CallKind::member, name, {handle, script::Value::integer(seat)}, root1);
+  };
+
+  // Seat 1's script asks about seat 3 (1-based 4): the DEFENSIVE copy runs,
+  // and its 65543 is 7 in 16 bits.
+  CHECK(get("GetEconomyScript", 4).value.as_integer() == 7);
+  // About itself: the root copy.
+  CHECK(get("GetEconomyScript", 2).value.as_integer() == 5);
+  // A negative return is 0.
+  const script::HostOutcome negative = get("GetTacticScript", 2);
+  CHECK(negative.status == script::HostStatus::ok);
+  CHECK(negative.value.as_integer() == 0);
 }
 
 TEST(get_economy_script_runs_the_script_and_returns_its_value) {
@@ -2086,6 +2229,31 @@ TEST(calc_priority_marshals_the_player_first) {
   CHECK(f.call(script::CallKind::member, "CalcPriority",
                {script::Value::integer(4), script::Value::integer(9)}, root)
             .value.as_integer() == 9004);
+  // **A seat past the sixteenth still runs the plain file** (0x0043d030 falls
+  // back to it for any seat of 16 or more); it is not answered 0 unasked.
+  CHECK(f.call(script::CallKind::member, "CalcPriority",
+               {script::Value::integer(1), script::Value::integer(20)}, root)
+            .value.as_integer() == 20001);
+}
+
+/// `GetStrat` keeps the low 16 bits of a non-negative answer (0x00421aa0 masks
+/// what 0x0043d590 returns), and runs for a seat outside 1..16 too.
+TEST(get_strat_masks_to_sixteen_bits_and_runs_for_any_seat) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, GAIKA gaika, int idPlayer\nreturn 65536 * 3 + idPlayer;\n",
+                "DATA/AI/GETGAIKASTRAT.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(1)->root;
+  f.ai.seed_gaika_view(1, 4);
+  CHECK(f.call(script::CallKind::member, "GetStrat",
+               {script::Value::integer(2), script::Value::integer(2)}, root)
+            .value.as_integer() == 2);
+  CHECK(f.call(script::CallKind::member, "GetStrat",
+               {script::Value::integer(2), script::Value::integer(30)}, root)
+            .value.as_integer() == 30);
 }
 
 /// The `AreaAI*` writers: **a named map area, and one write per node whose
@@ -2475,15 +2643,13 @@ TEST(stop_ai_helper_kills_the_named_one_and_ignores_the_rest) {
   CHECK(f.ai.helpers()[0].name == "B");
 }
 
-/// A helper that ends on its own leaves the table only when the reap runs.
+/// A helper that ends on its own leaves the table only when the reap runs, and
+/// `IsAIHelperRunning` answers false for it at once.
 ///
-/// This is the half that cannot be folded into `IsAIHelperRunning`: the
-/// original erases from a completion hook (0x004d2160), so between a helper's
-/// last statement and the next erase there is no window in which the predicate
-/// answers true for a dead one. Polling reproduces that as long as the poll is
-/// once a turn -- and this is the case that would pass just as well if
-/// `IsAIHelperRunning` asked the scheduler instead, which is why it asserts the
-/// table directly.
+/// The original erases from the completion hook (0x004d2160), which the thread
+/// manager calls the moment a thread finishes (0x0069f7a0), so there is no
+/// window in which the predicate answers true for a dead helper. This engine
+/// erases by a once-a-turn poll, so the predicate asks the scheduler too.
 TEST(the_helper_table_is_reaped_when_a_helper_ends) {
   Fixture f;
   FakeLibrary library;
@@ -2512,17 +2678,11 @@ TEST(the_helper_table_is_reaped_when_a_helper_ends) {
   };
 
   (void)f.scheduler.advance(100);
-  // Still there: the reap has not run. A `reap_helpers` folded into the
-  // predicate would already have dropped it.
+  // Still there: the reap has not run.
   CHECK(f.ai.helpers().size() == 2);
-  // **And the predicate still says true**, which is the whole of why it must
-  // read the table rather than ask the scheduler. `brief` has ended; its entry
-  // has not been erased yet; 0x004d1cd0 is a `find` and a comparison against
-  // `end()` and nothing else, so between the last statement of a helper and
-  // the erase that follows it the original answers true. Asking
-  // `Scheduler::alive` here would agree with the table on every other case in
-  // this file and disagree on exactly this one.
-  CHECK(running("brief"));
+  // **But the predicate already says false**: in the original the entry left
+  // the table when the thread ended, before anything else could ask.
+  CHECK(!running("brief"));
   CHECK(running("forever"));
 
   f.ai.reap_helpers(f.scheduler);
@@ -2560,6 +2720,67 @@ TEST(a_helper_is_handed_the_arguments_after_its_name_and_file) {
   // would leave both of them returning.
   CHECK(f.scheduler.alive(f.ai.helper("wanted")));
   CHECK(!f.scheduler.alive(f.ai.helper("other")));
+}
+
+/// `Invalid parms for %s AI helper` (0x004d2ff8 onward): a helper must be
+/// `void`, declare exactly as many parameters as were supplied, and take every
+/// one as a by-value `str`. Anything else starts nothing and records nothing.
+TEST(a_helper_whose_signature_does_not_fit_starts_nothing) {
+  Fixture f;
+  FakeLibrary library;
+  library.scheduler = &f.scheduler;
+  library.registry = &f.registry;
+  library.sources.emplace_back("DATA\\AI HELPERS\\RETURNS.VS",
+                               std::string("// int, str GroupName, str Target\nreturn 1;\n"));
+  library.sources.emplace_back("DATA\\AI HELPERS\\ONEPARM.VS",
+                               std::string("// void, str GroupName\nSleep(100000);\n"));
+  library.sources.emplace_back("DATA\\AI HELPERS\\INTPARM.VS",
+                               std::string("// void, str GroupName, int Target\nSleep(100000);\n"));
+  library.sources.emplace_back("DATA\\AI HELPERS\\OUTPARM.VS",
+                               std::string("// void, str GroupName, str *Target\nSleep(100000);\n"));
+  library.sources.emplace_back("DATA\\AI HELPERS\\GOOD.VS",
+                               std::string("// void, str GroupName, str Target\nSleep(100000);\n"));
+  f.context.library = &library;
+  const auto run = [&](const char* file) {
+    return f.call(script::CallKind::free_function, "RunAIHelper",
+                  {script::Value::string(file), script::Value::string(file),
+                   script::Value::string("a"), script::Value::string("b")},
+                  script::kNoScript);
+  };
+  for (const char* file : {"returns", "oneparm", "intparm", "outparm"}) {
+    CHECK(run(file).status == script::HostStatus::ok);
+  }
+  CHECK(f.ai.helpers().empty());
+  CHECK(f.scheduler.live_count() == 0);
+  // The one that fits does start, so the four above are refusals.
+  CHECK(run("good").status == script::HostStatus::ok);
+  CHECK(f.ai.helpers().size() == 1);
+  CHECK(f.scheduler.live_count() == 1);
+}
+
+/// **A helper belongs to no player.** It runs in the one global helper
+/// manager (`[0x996888]`), which tags nothing, so a helper an AI script starts
+/// is not that AI's: `AIGetPlayer` inside it answers 0.
+TEST(a_helper_started_by_an_ai_script_belongs_to_no_player) {
+  Fixture f;
+  FakeLibrary library;
+  library.scheduler = &f.scheduler;
+  library.registry = &f.registry;
+  library.sources.emplace_back("DATA\\AI HELPERS\\GUARD.VS", std::string(kForeverHelper));
+  f.context.library = &library;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  CHECK(f.ai.start(2, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(2)->root;
+  CHECK(f.call(script::CallKind::free_function, "RunAIHelper",
+               {script::Value::string("G"), script::Value::string("guard"),
+                script::Value::string("a"), script::Value::string("b")},
+               root)
+            .status == script::HostStatus::ok);
+  const script::ScriptId helper = f.ai.helper("G");
+  REQUIRE(helper != script::kNoScript);
+  CHECK(f.call(script::CallKind::free_function, "AIGetPlayer", {}, helper).value.as_integer() ==
+        0);
 }
 
 /// A missing helper file is silent: nothing spawns, nothing is recorded, and
@@ -2645,8 +2866,11 @@ TEST(ai_registration_overwrites_nothing) {
   // `AIGetSkillToDevelop/2`, the fifth trampoline, the two spell-siting
   // searches `BestMDPos/5` and `BestProtPos/4`, `ControlledNeighbors/1`,
   // `CanExplore/1` and `Recruit/4`, `GetDestPoint/1` and
-  // `PrepareAiTransportShip/5`.
-  CHECK(solo == 77);
+  // `PrepareAiTransportShip/5`, + the seven `RunAIHelper` arities beside the
+  // shipped 4 (2, 3, 5..9), which `gbr.exe` registers and the tenth round
+  // binds as `AIRun` and `Run` bind theirs, + `LSA/1`, `LSA/2` and
+  // `GetGAIKA/2`, the point forms no shipped script calls.
+  CHECK(solo == 87);
   CHECK(with_ai == solo);
   CHECK(everyone > 0);
 
@@ -2706,8 +2930,7 @@ TEST(ai_start_host_entry_starts_the_named_player) {
   CHECK(f.ai.player_ai(5) == nullptr || !f.ai.player_ai(5)->active);
   CHECK(f.ai.player_ai(0) == nullptr || !f.ai.player_ai(0)->active);
 
-  // The name is folded on the way in, so any casing of a registered profile
-  // reaches it -- and an unregistered one starts nothing and does not trap.
+  // An unregistered name starts nothing and does not trap.
   const script::HostOutcome miss =
       f.call(script::CallKind::free_function, "AIStart",
              {script::Value::integer(6), script::Value::string("CHAOTIC"),
@@ -2715,6 +2938,30 @@ TEST(ai_start_host_entry_starts_the_named_player) {
              script::kNoScript);
   CHECK(miss.status == script::HostStatus::ok);
   CHECK(f.ai.active_count() == 1);
+}
+
+/// **The profile match is exact.** The wrapper's upper-casing loop
+/// (0x00435030) writes a buffer the lookup never reads: the key pushed at
+/// 0x0043506d is the caller's own string, and 0x00426ea0 compares bytes. A
+/// lower-case spelling of a listed profile is `AIStart: invalid AI profile`.
+TEST(ai_start_host_entry_matches_the_profile_name_case_sensitively) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);
+  f.ai.add_profile("DEFENSIVE", &f.profile);
+  const auto start = [&](std::int32_t player, const char* profile) {
+    return f.call(script::CallKind::free_function, "AIStart",
+                  {script::Value::integer(player), script::Value::string(profile),
+                   script::Value::integer(1)},
+                  script::kNoScript);
+  };
+  CHECK(start(2, "defensive").status == script::HostStatus::ok);
+  CHECK(start(3, "Defensive").status == script::HostStatus::ok);
+  CHECK(f.ai.active_count() == 0);
+  // The exact spelling starts, so the two above are refusals.
+  CHECK(start(4, "DEFENSIVE").status == script::HostStatus::ok);
+  CHECK(f.ai.active_count() == 1);
+  REQUIRE(f.ai.player_ai(3) != nullptr);
+  CHECK(f.ai.player_ai(3)->active);
 }
 
 /// Every refusal the original makes is a **return**, not a trap: a mission that
@@ -2793,16 +3040,18 @@ TEST(ai_start_host_entry_restarts_a_seats_ai_and_a_refusal_keeps_it) {
   REQUIRE(first != script::kNoScript);
   CHECK(ai->difficulty == AiDifficulty::easy);
 
-  // Refused three ways: the first AI is untouched, root and all.
+  // Refused four ways: the first AI is untouched, root and all. A lower-case
+  // spelling is one of them: the lookup is exact (0x00426ea0).
   CHECK(start("CHAOTIC", 2).status == script::HostStatus::ok);
   CHECK(start("", 2).status == script::HostStatus::ok);
   CHECK(start("DEFAULT", 3).status == script::HostStatus::ok);
+  CHECK(start("default", 2).status == script::HostStatus::ok);
   CHECK(f.ai.player_ai(3)->root == first);
   CHECK(f.ai.player_ai(3)->difficulty == AiDifficulty::easy);
   CHECK(f.scheduler.alive(first));
 
   // Accepted: a new root, the old one gone, one AI still.
-  CHECK(start("default", 2).status == script::HostStatus::ok);
+  CHECK(start("DEFAULT", 2).status == script::HostStatus::ok);
   const AiPlayer* again = f.ai.player_ai(3);
   REQUIRE(again != nullptr);
   CHECK(again->active);
@@ -3054,6 +3303,70 @@ TEST(send_to_posts_an_order_and_the_drain_runs_aio_send_squad_with_the_squad_and
   CHECK(!bench.f.scheduler.alive(runner));
   CHECK(squad.order_dest == bench.dest);
   CHECK(squad.dest_gaika == kNoGaika);
+}
+
+/// 0x0044eb80, which `GetSquads/4` runs over an enemy squad when the asker has
+/// an AI: a coming enemy is seen only within its level's radius of the node's
+/// centre (6,000 at level 1, 32,000 at 2), and a leaving one whose taken
+/// order -- or its `DestGAIKA` -- is this node reads as staying.
+TEST(get_squads_sees_an_enemy_coming_only_within_the_ai_levels_radius) {
+  SendToBench b;  // player 1 (script 2) runs an AI
+  World& world = b.f.world;
+  REQUIRE(world.players().is_enemy(1, 2));
+  REQUIRE(b.f.ai.start(1, "", AiDifficulty::easy, b.f.scheduler) == AiStartStatus::ok);
+
+  const auto enemy_at = [&](std::int32_t dx) -> SquadKey {
+    const SquadKey key = b.f.heroes.squads().create(2);
+    const ObjectId id = world.spawn(imperivm::core::NativeClass::unit, nullptr);
+    world.set_owner(id, 2);
+    world.set_health(id, 100);
+    CHECK(world.set_position(id, Point{b.centre.x + dx, b.centre.y}));
+    CHECK(b.f.heroes.squads().join(key, id));
+    Squad* squad = b.f.heroes.squads().find(key);
+    squad->eval = 10;
+    squad->gaika_in = b.home;
+    squad->dest_gaika = b.dest;
+    return key;
+  };
+  const SquadKey near = enemy_at(5000);
+  const SquadKey far = enemy_at(7000);
+
+  const SquadListId list = squadlist_pool_of(world).acquire(7, 0);
+  const auto fill = [&](std::int32_t presence) {
+    const script::HostOutcome out = b.f.call(
+        script::CallKind::member, "GetSquads",
+        {gaika_value(b.dest), make_squadlist_value(list), script::Value::integer(presence),
+         script::Value::integer(2), script::Value::integer(4 /*AI_ENEMY*/)},
+        script::kNoScript);
+    CHECK(out.status == script::HostStatus::ok);
+    const std::span<const SquadKey> items = squadlist_pool_of(world).items(list);
+    return std::vector<SquadKey>(items.begin(), items.end());
+  };
+  CHECK(fill(1 /*AI_COMING*/) == std::vector<SquadKey>({near}));
+  REQUIRE(b.f.ai.start(1, "", AiDifficulty::normal, b.f.scheduler) == AiStartStatus::ok);
+  CHECK(fill(1) == std::vector<SquadKey>({near, far}));
+
+  // Standing here and bound elsewhere: leaving, and seen leaving.
+  Squad* squad = b.f.heroes.squads().find(far);
+  squad->gaika_in = b.dest;
+  squad->dest_gaika = b.home;
+  CHECK(fill(4 /*AI_STAYING*/).empty());
+  CHECK(fill(2 /*AI_LEAVING*/) == std::vector<SquadKey>({far}));
+  // Bound here, but with an order elsewhere the drain has not taken yet
+  // (priority above 0): the order makes it leaving, and the enemy does not see
+  // the order -- it sees `DestGAIKA`, here, so staying.
+  squad->dest_gaika = b.dest;
+  REQUIRE(b.f.heroes.squads().post_order(far, b.home, 3));
+  CHECK(fill(4) == std::vector<SquadKey>({far}));
+  // Once the drain has taken it (priority 0) the order is what is seen -- but
+  // only when the enemy squad's own owner has an AI record (`[owner+0x88]`,
+  // read at 0x0044ec03 before the order table): without one, `DestGAIKA`
+  // decides still, and that is here.
+  REQUIRE(b.f.heroes.squads().post_order(far, b.home, 0));
+  CHECK(fill(4) == std::vector<SquadKey>({far}));
+  REQUIRE(b.f.ai.start(2, "", AiDifficulty::normal, b.f.scheduler) == AiStartStatus::ok);
+  CHECK(fill(4).empty());
+  CHECK(fill(2) == std::vector<SquadKey>({far}));
 }
 
 /// **A squad sent to the node it already stands in moves nobody**: the script's
@@ -3411,8 +3724,10 @@ TEST(min_need_and_max_need_run_get_army_need_and_scale_by_optimism) {
   // Optimism of zero leaves the raw number rather than dividing by it.
   record->optimism = 0;
   CHECK(need("MinNeed", 3, 1) == raw);
+  // A negative one is divided by **unsigned** (0x0042c548): past two billion,
+  // so the share rounds to 0 and the floor makes it 1.
   record->optimism = -5;
-  CHECK(need("MinNeed", 3, 1) == raw);
+  CHECK(need("MinNeed", 3, 1) == 1);
 
   // A player outside 1..16 has no view to divide by, and the script still runs.
   CHECK(need("MinNeed", 3, 0) == 1000000 + 3 * 10000 + kThree);
@@ -4086,6 +4401,16 @@ TEST(ai_eval_buckets_the_units_in_range_by_relation) {
   CHECK(out[5].as_integer() == 2);   // foe, and edge at exactly 200
   (void)mine; (void)friendly; (void)foe; (void)edge;
 
+  // A negative range inverts 0x00423850's square: nothing is visited, though
+  // the same circle of 200 is full.
+  out = call_with_outs(f, "Eval",
+                       {script::Value::integer(1), pack_point(Point{100, 100}),
+                        script::Value::integer(-200), script::Value::integer(7),
+                        script::Value::integer(7), script::Value::integer(7)});
+  CHECK(out[3].as_integer() == 0);
+  CHECK(out[4].as_integer() == 0);
+  CHECK(out[5].as_integer() == 0);
+
   // A player outside the table leaves every bucket at zero.
   out = call_with_outs(f, "Eval",
                        {script::Value::integer(40), pack_point(Point{100, 100}),
@@ -4094,6 +4419,234 @@ TEST(ai_eval_buckets_the_units_in_range_by_relation) {
   CHECK(out[3].as_integer() == 0);
   CHECK(out[4].as_integer() == 0);
   CHECK(out[5].as_integer() == 0);
+}
+
+/// **`GAIKA::Eval`, read whole** (0x0042f3d0, 0x0042f670, 0x0042fc40): the four
+/// rules the shared census walk did not have.
+///
+///   * the node's settlement offers its sentry strength (0x00420c00,
+///     `[settlement+0xf8]`) as `AI_STAYING`, under its owner's relation;
+///   * the six-argument form passes over a squad of messengers and fills
+///     `enemy_hidden` from an enemy squad whose front member is hidden
+///     (0x00427e90), while the short forms add every squad straight;
+///   * an enemy squad's presence is the asking AI's view of it (0x0044eb80):
+///     one marching on the node is seen only within the difficulty's range of
+///     its centre, and one whose order elsewhere is still pending has not left.
+TEST(gaika_eval_adds_the_settlement_skips_messengers_and_sees_as_the_ai_sees) {
+  Fixture f;
+  imperivm::core::ClassGraph graph;
+  const auto add = [&](std::string_view xml, const char* source) {
+    CHECK(graph.add(bytes_of(xml), source).ok());
+  };
+  add(R"(<class id="Building" cpp_class="CVXBuilding" parent=""/>)", "b.sc.xml");
+  add(R"(<class id="RTownhall" cpp_class="CVXTownHall" parent="Building">
+      <properties race="RepublicanRome"/>
+    </class>)",
+      "rth.sc.xml");
+  // perSentry = (20 + 10) * 13 * (100 * 5 / 4) / 1000 + 1 = 49.
+  add(R"(<class id="RSentry" cpp_class="CVXUnit" parent="">
+      <properties maxhealth="100" damage="20" armor_slash="10"/>
+    </class>)",
+      "rs.sc.xml");
+  graph.link();
+  f.world.set_class_graph(&graph);
+  // Player 0 asks; 2 is its enemy (a fresh table is a free-for-all).
+  const ObjectId hall =
+      f.world.spawn(imperivm::core::NativeClass::town_hall, nullptr, graph.find("RTownhall"));
+  f.world.set_owner(hall, 2);
+  f.world.set_position(hall, Point{1000, 1000});
+  SettlementInit init;
+  init.settlement_object = hall;
+  init.anchor = hall;
+  init.owner = 2;
+  init.kind = SettlementKind::stronghold;
+  const SettlementId town = f.economy.settlements().create(init);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  constexpr GaikaId kHere = 1;
+  constexpr GaikaId kElsewhere = 7;
+  const GaikaNode* node = f.world.gaika().find(kHere);
+  REQUIRE(node != nullptr);
+  REQUIRE(node->settlement == hall);
+  const Point centre = node->center;
+
+  const auto squad = [&](PlayerId owner, std::int32_t eval, GaikaId in, GaikaId dest,
+                         std::size_t members, Point at) {
+    const SquadKey key = f.heroes.squads().create(owner);
+    for (std::size_t i = 0; i < members; ++i) {
+      const ObjectId id = f.world.spawn(imperivm::core::NativeClass::unit, nullptr);
+      f.world.set_owner(id, owner);
+      f.world.set_health(id, 100);
+      f.world.set_position(id, at);
+      (void)f.heroes.squads().join(key, id);
+    }
+    Squad* sq = f.heroes.squads().find(key);
+    CHECK(sq != nullptr);
+    if (sq != nullptr) {
+      sq->eval = eval;
+      sq->gaika_in = in;
+      sq->dest_gaika = dest;
+    }
+    return key;
+  };
+  const auto front = [&](SquadKey key) -> WorldObject& {
+    return *f.world.find(f.heroes.squads().find(key)->members.front());
+  };
+  const auto eval6 = [&](std::int32_t presence) {
+    std::vector<script::Value> args{gaika_value(kHere), script::Value::integer(presence),
+                                    script::Value::integer(1), script::Value::integer(-1),
+                                    script::Value::integer(-1), script::Value::integer(-1),
+                                    script::Value::integer(-1)};
+    const std::uint32_t index = f.registry.find(script::CallKind::member, "Eval", 6);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return std::array<std::int32_t, 4>{};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &f.context;
+    CHECK(f.registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+    return std::array<std::int32_t, 4>{args[3].as_integer(), args[4].as_integer(),
+                                       args[5].as_integer(), args[6].as_integer()};
+  };
+  const auto eval3 = [&](std::int32_t presence, std::int32_t sides) {
+    return f.call(script::CallKind::member, "Eval",
+                  {gaika_value(kHere), script::Value::integer(presence),
+                   script::Value::integer(1), script::Value::integer(sides)},
+                  1)
+        .value.as_integer();
+  };
+
+  squad(0, 100, kHere, kHere, 2, centre);                  // own, staying
+  const SquadKey errand = squad(0, 30, kHere, kHere, 1, centre);
+  front(errand).state.flags.messenger = true;              // a lone messenger
+  const SquadKey lurking = squad(2, 50, kHere, kHere, 2, centre);
+  front(lurking).state.flags.hidden = true;                // an enemy unseen
+
+  // No sentries in the wall: no settlement strength.
+  {
+    const auto t = eval6(4 /*AI_STAYING*/);
+    CHECK(t[0] == 100);   // the lone messenger is nobody's army...
+    CHECK(t[2] == 50);
+    CHECK(t[3] == 50);    // ...and the hidden enemy is counted twice over
+  }
+  CHECK(eval3(4, 1 /*AI_OWN*/) == 130);  // the short forms add the messenger
+  // A messenger squad with one ordinary member counts after all.
+  {
+    Squad* sq = f.heroes.squads().find(errand);
+    const ObjectId porter = f.world.spawn(imperivm::core::NativeClass::unit, nullptr);
+    f.world.set_owner(porter, 0);
+    f.world.set_health(porter, 100);
+    (void)f.heroes.squads().join(errand, porter);
+    sq = f.heroes.squads().find(errand);
+    REQUIRE(sq != nullptr);
+    sq->eval = 30;
+    CHECK(eval6(4)[0] == 130);
+    f.world.find(porter)->state.flags.messenger = true;
+    CHECK(eval6(4)[0] == 100);
+  }
+  // The wall: three sentries standing, 49 apiece.
+  {
+    f.economy.settlements().find(town)->sentries_ready = 3;
+    const auto t = eval6(4);
+    CHECK(t[2] == 50 + 3 * 49);  // the settlement's wall, under its owner
+    CHECK(t[3] == 50);
+    CHECK(eval6(1 /*AI_COMING*/)[2] == 0);  // the wall only ever stays
+    CHECK(eval3(4, 4 /*AI_ENEMY*/) == 50 + 3 * 49);
+    CHECK(eval3(4, 1) == 130);
+    // Only a town hall offers its wall (0x00420c00 asks 0x0043ffc0 first): the
+    // same settlement as a village, sentries and all, adds nothing.
+    f.economy.settlements().find(town)->kind = SettlementKind::village;
+    CHECK(eval6(4)[2] == 50);
+    f.economy.settlements().find(town)->kind = SettlementKind::stronghold;
+  }
+
+  // A front member inside a holder is not hidden from anybody (`[obj+0x154]`).
+  {
+    const ObjectId lurker = f.heroes.squads().find(lurking)->members.front();
+    const World::SettlementIds keep = f.world.spawn_settlement(2);
+    REQUIRE(f.world.put_in_holder(lurker, keep.holder));
+    CHECK(eval6(4)[3] == 0);
+    CHECK(eval6(4)[2] == 50 + 3 * 49);
+  }
+
+  // The AI's sight. One enemy squad marching on the node from 7000 away, one
+  // from 5000 away, and one standing in it whose order elsewhere has not been
+  // drained (the squad's heading reads `DestGAIKA` then, which is here).
+  squad(2, 7, kElsewhere, kHere, 1, Point{centre.x + 7000, centre.y});
+  squad(2, 11, kElsewhere, kHere, 1, Point{centre.x + 5000, centre.y});
+  const SquadKey lingering = squad(2, 13, kHere, kHere, 1, centre);
+  f.heroes.squads().find(lingering)->ai_dest = kElsewhere;
+  // Without an AI record the presence is the plain one.
+  CHECK(eval6(1 /*AI_COMING*/)[2] == 18);
+  CHECK(eval6(2 /*AI_LEAVING*/)[2] == 13);
+  // An Easy AI sees 6000: the far column is not coming, the lingering squad is
+  // staying.
+  const std::uint32_t main_chunk =
+      build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS");
+  REQUIRE(main_chunk != script::kNoChunk);
+  REQUIRE(f.ai.start(0, "", AiDifficulty::easy, f.scheduler) == AiStartStatus::ok);
+  CHECK(eval6(1)[2] == 11);
+  CHECK(eval6(2)[2] == 0);
+  CHECK(eval6(4)[2] == 50 + 3 * 49 + 13);
+  CHECK(eval3(1, 4) == 11);
+  // A Normal one sees 32000.
+  REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(eval6(1)[2] == 18);
+}
+
+/// **`MilitaryPresence` asks the node's settlement when no squad answers**
+/// (0x004313e0 -> 0x00420c00): a town hall whose wall is manned is a presence
+/// for its owner, and for "anybody" (a viewer of 0), but not for an ally.
+TEST(military_presence_counts_the_viewers_own_manned_wall) {
+  Fixture f;
+  imperivm::core::ClassGraph graph;
+  const auto add = [&](std::string_view xml, const char* source) {
+    CHECK(graph.add(bytes_of(xml), source).ok());
+  };
+  add(R"(<class id="Building" cpp_class="CVXBuilding" parent=""/>)", "b.sc.xml");
+  add(R"(<class id="RTownhall" cpp_class="CVXTownHall" parent="Building">
+      <properties race="RepublicanRome"/>
+    </class>)",
+      "rth.sc.xml");
+  add(R"(<class id="RSentry" cpp_class="CVXUnit" parent="">
+      <properties maxhealth="100" damage="20" armor_slash="10"/>
+    </class>)",
+      "rs.sc.xml");
+  graph.link();
+  f.world.set_class_graph(&graph);
+  const ObjectId hall =
+      f.world.spawn(imperivm::core::NativeClass::town_hall, nullptr, graph.find("RTownhall"));
+  f.world.set_owner(hall, 2);
+  f.world.set_position(hall, Point{1000, 1000});
+  SettlementInit init;
+  init.settlement_object = hall;
+  init.anchor = hall;
+  init.owner = 2;
+  init.kind = SettlementKind::stronghold;
+  const SettlementId town = f.economy.settlements().create(init);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  constexpr GaikaId kHere = 1;
+  REQUIRE(f.world.gaika().find(kHere) != nullptr);
+  REQUIRE(f.world.gaika().find(kHere)->settlement == hall);
+  f.world.players().set_relation_word(1, 2, 1);  // player 1 counts 2 a friend
+  f.world.players().set_relation_word(2, 1, 1);
+
+  const auto presence = [&](std::int32_t player) {
+    const script::HostOutcome out =
+        f.call(script::CallKind::member, "MilitaryPresence",
+               {gaika_value(kHere), script::Value::integer(player)}, 1);
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.truthy_scalar();
+  };
+  // An empty wall is no presence.
+  CHECK(!presence(3));
+  CHECK(!presence(0));
+  f.economy.settlements().find(town)->sentries_ready = 2;
+  CHECK(presence(3));    // script 3 is player 2, the owner
+  CHECK(presence(0));    // anybody
+  CHECK(!presence(2));   // an ally's wall is category 2
+  CHECK(!presence(17));  // past the table: category 0
+  // A village's wall is not asked: 0x0043ffc0 wants a town hall.
+  f.economy.settlements().find(town)->kind = SettlementKind::village;
+  CHECK(!presence(3));
 }
 
 /// `EnemyPlayersEval`: per enemy, the sum of its squads' `eval` less the

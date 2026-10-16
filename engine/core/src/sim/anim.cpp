@@ -46,27 +46,47 @@ using script::Value;
 }
 
 /// The animation an object is playing, or null.
+///
+/// What the original calls playing is its slot `[obj+0x50]`, which
+/// `StartAnimation` (0x0053e6c0) sets and three things clear to -1: the
+/// animation's own end (0x0053f6a0), `StopAnimation` (0x0053d730), and
+/// entering a state (`CObj::SetState`, 0x0053e860). So **a state's own loop is
+/// not playing**: it is the pose the object rests in, drawn by the sprite with
+/// no animation behind it. This engine runs that loop through the same cursor
+/// as a started animation (`World::enter_state`), and tells the two apart
+/// here: a looping cursor on the slot its state names is the pose. A strip
+/// that has finished is not playing either.
 [[nodiscard]] const EntityAnim* playing(const WorldObject& slot) noexcept {
   if (slot.object == nullptr || slot.object->entity == nullptr) return nullptr;
-  if (slot.object->anim.anim_slot == kNoAnim) return nullptr;
-  return slot.object->entity->anim(slot.object->anim.anim_slot);
+  const AnimCursor& cursor = slot.object->anim;
+  if (cursor.anim_slot == kNoAnim || !slot.animating) return nullptr;
+  if (slot.repeat == AnimRepeat::loop) {
+    const EntityState* state = slot.object->entity->state(cursor.state_idx);
+    if (state != nullptr && state->anim_idx == cursor.anim_slot) return nullptr;
+  }
+  return slot.object->entity->anim(cursor.anim_slot);
 }
 
-/// How long one full cycle of `slot`'s animation lasts, or 0.
+/// How long the animation at `anim_slot` lasts as far as a script can tell:
+/// the entity document's `duration` attribute, or 0.
 ///
-/// **The timeline's number, not the document's `duration` attribute.** The
-/// original reads a single nominal field; this engine has two -- the `duration`
-/// attribute and the sum of the frame holds -- and they disagree in 127 of the
-/// 1,168 shipped animations, with no evidence for which the original honours
-/// (`docs/formats/ent-xml.md`). The timeline's is the one `TimeToAnimFinish`
-/// counts down against, so answering with the other would be two numbers for
-/// one question, which is the shape of defect this tree keeps finding.
-[[nodiscard]] std::int32_t cycle_of(const WorldObject& slot, std::int32_t anim_slot) {
+/// **The declared `duration`, not the frame strip's sum.** The loader
+/// (0x006004d0) stores the `<anim duration>` attribute at `[anim+0x4c]`, and
+/// that one field is every script-visible length in this family:
+/// `StartAnimation` (0x0053e6c0) takes it as the playback length `[obj+0x64]`
+/// unless a caller overrides it, the end time `TimeToAnimFinish` counts down to
+/// is the start plus it (0x0053cef0, filled by 0x0053cf30), the animation's own
+/// timer ends it there (0x0053f6a0), and `GetAnimTime` (0x005a9c50),
+/// `Unit::GetAnimDuration` (0x0051c180) and `Flying::PlayAnim`'s suspension
+/// (0x0051bcba, written into the VM's wait cell) read it verbatim. The two
+/// disagree in 127 of the 1,168 shipped animations -- the barrack horses' idle
+/// declares 1000 over a 1200 strip, the hero grave's crumble 6486 over 12100.
+/// The strip still drives which sprite row is drawn (`AnimTimeline`); this is
+/// the clock the scripts see.
+[[nodiscard]] std::int32_t length_of(const WorldObject& slot, std::int32_t anim_slot) {
   if (slot.object == nullptr || slot.object->entity == nullptr) return 0;
   const EntityAnim* anim = slot.object->entity->anim(anim_slot);
-  if (anim == nullptr) return 0;
-  const AnimTimeline timeline = slot.object->entity->timeline(*anim);
-  return timeline.valid() ? timeline.cycle() : 0;
+  return anim == nullptr ? 0 : anim->duration;
 }
 
 /// Turn to face `point`, unless it is the object's own position.
@@ -118,10 +138,21 @@ void face_unless_self(CallContext& ctx, World& world, const WorldObject& slot, s
 /// script that waits out its animation wakes while the cursor is still short
 /// of the end -- a bird's next leg began before the last one was drawn to its
 /// end, a jump of the rest of the leg.
+///
+/// **An object off the map plays nothing.** `StartAnimation` (0x0053e6c0)
+/// opens by testing the object's own position against the invalid point and,
+/// when it is one -- a unit inside a building or a ship, or one `Disappear`
+/// took away -- cancels its animation timer and returns without starting
+/// anything. That test comes after the facing, which the entry points set
+/// first.
 bool start(CallContext& ctx, World& world, const WorldObject& slot, std::int32_t anim_slot,
            std::size_t at) {
   face_unless_self(ctx, world, slot, at);
   const ObjectId id = slot.id;
+  if (const ObjectState* state = world.state(id);
+      state != nullptr && state->position == kHeldPosition) {
+    return false;
+  }
   if (!world.play_anim(id, anim_slot, AnimRepeat::hold)) return false;
   const GameTime lag = script_lag(ctx, world);
   WorldObject* object = world.find(id);
@@ -178,8 +209,9 @@ HostOutcome m_start_delayed_anim(CallContext& ctx) {
 
 /// `PlayAnim(int slot, point face)` -- **suspending**. 13 sites.
 ///
-/// Start it, then hold the script for the animation's length. See the header
-/// for the mechanism the original uses and why this engine cannot use it.
+/// Start it, then hold the script for the animation's declared length. See the
+/// header for the mechanism the original uses and why this engine cannot use
+/// it.
 ///
 /// A slot the entity does not declare plays nothing and suspends for zero,
 /// which still yields: the scheduler runs a zero-length suspension again at
@@ -198,7 +230,7 @@ HostOutcome m_play_anim(CallContext& ctx) {
 
   HostOutcome out;
   out.status = script::HostStatus::suspend;
-  out.suspend_for = playing_now ? cycle_of(*slot, anim_slot) : 0;
+  out.suspend_for = playing_now ? length_of(*slot, anim_slot) : 0;
   if (out.suspend_for < 0) out.suspend_for = 0;
   return out;
 }
@@ -206,16 +238,18 @@ HostOutcome m_play_anim(CallContext& ctx) {
 /// `Flying::PlayAnim(int slot, point at, int z)` -- **suspending**. 13 sites,
 /// all crows and eagles.
 ///
-/// Three differences from the `Obj` form, and two of them are transcribed:
+/// Four differences from the `Obj` form:
 ///
 ///   * **the slot is one less**, because this body passes its argument raw into
 ///     the array `Obj::PlayAnim` decrements into. See the header.
 ///   * **the Z is range-checked**: `-1 .. 1024`, and out of range is a refusal
 ///     that starts nothing (0x0051bb6f). `-1` means *use the terrain height and
 ///     land*.
+///   * the slot is checked before anything is written, and a bad one returns
+///     without suspending;
 ///   * the point is the animation's *origin* as well as the facing target, and
-///     is clamped into the map rather than ignored. This engine has no
-///     animation origin, so it is only a facing target here.
+///     is clamped into the map. This engine has no animation origin, so it is
+///     the facing target and the place the bird arrives (below).
 ///
 /// **The Z is the whole flight model**, and used to be read and discarded here.
 /// `sim/flying.hpp` owns what it means; this call site owns the order. The
@@ -236,19 +270,34 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
   // that is a bare `ret`, and then nothing happens.
   if (z < -1 || z > 1024) return HostOutcome::ok_void();
 
+  // Then the slot, before anything is written (0x0051bb7d..0x0051bbb5): a
+  // negative argument, one past the entity's last, or one naming no animation
+  // prints *"Invalid animation specified"* and returns without suspending --
+  // no flight state, no move, no wait.
+  const std::int32_t raw_slot = int_arg(ctx, 1);
+  const std::int32_t anim_slot = raw_slot + 1;
+  if (raw_slot < 0 || slot->object == nullptr || slot->object->entity == nullptr ||
+      slot->object->entity->anim(anim_slot) == nullptr) {
+    return HostOutcome::ok_void();
+  }
+
   // The point is the animation's *origin* in the original and its facing target
   // here; either way it is where the descent's terrain height is read from, so
   // an absent or malformed one falls back to the object's own position rather
-  // than to the origin of the map.
-  const Point destination = ctx.count() > 2 && is_point(ctx.arg(2))
-                                ? unpack_point(ctx.arg(2))
-                                : world->resolve_position(slot->id);
+  // than to the origin of the map. **Clamped into the map rectangle** first
+  // (0x004092b0, then 0x00422b70 against `[map+0xb4..0xc0]`), in place, so
+  // the bird lands on the edge rather than off it.
+  Point destination = ctx.count() > 2 && is_point(ctx.arg(2))
+                          ? unpack_point(ctx.arg(2))
+                          : world->resolve_position(slot->id);
+  if (const MovementSystem* movement = movement_system(*world); movement != nullptr) {
+    destination = movement->grid().clamp_to_map(destination);
+  }
   const ObjectId id = slot->id;
   begin_flight_anim(*world, id, destination, z);
   slot = world->find(id);
   if (slot == nullptr) return HostOutcome::ok_void();
 
-  const std::int32_t anim_slot = int_arg(ctx, 1) + 1;
   const bool playing_now = start(ctx, *world, *slot, anim_slot, 2);
 
   // **And the object arrives.** 0x0053e6c0 starts the animation with `at` as
@@ -280,7 +329,7 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
 
   HostOutcome out;
   out.status = script::HostStatus::suspend;
-  out.suspend_for = playing_now ? cycle_of(*slot, anim_slot) : 0;
+  out.suspend_for = playing_now ? length_of(*slot, anim_slot) : 0;
   if (out.suspend_for < 0) out.suspend_for = 0;
   return out;
 }
@@ -301,6 +350,14 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
 /// cycle, so `total - elapsed` cannot go negative and a fault injected into the
 /// clamp survives every test in the suite. It is written the way the original
 /// writes it, because the guarantee belongs to the timeline and not to here.
+///
+/// The end is the start plus the declared `duration` (`length_of`), and
+/// nothing playing (`playing`) answers 0. **Approximated:** an animation
+/// whose strip runs out before its declared length stops playing here at the
+/// strip's end and answers 0 from then on, where the original keeps counting
+/// to the declared end. No shipped site reaches it -- every one calls this
+/// right after its own `StartAnim`, and none of their animations declares a
+/// length past its strip.
 HostOutcome m_time_to_anim_finish(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
@@ -308,10 +365,11 @@ HostOutcome m_time_to_anim_finish(CallContext& ctx) {
   if (slot == nullptr) return integer(0);
   const EntityAnim* anim = playing(*slot);
   if (anim == nullptr) return integer(0);
-  const std::int32_t total = cycle_of(*slot, slot->object->anim.anim_slot);
+  const std::int32_t total = anim->duration;
+  const std::int32_t elapsed = slot->object->anim.elapsed_ms;
   // At the script's millisecond, which the world's clock may be ahead of.
-  const std::int32_t left = total - slot->object->anim.elapsed_ms +
-                            static_cast<std::int32_t>(script_lag(ctx, *world));
+  const std::int32_t left =
+      total - elapsed + static_cast<std::int32_t>(script_lag(ctx, *world));
   return integer(left > 0 ? left : 0);
 }
 
@@ -341,16 +399,16 @@ HostOutcome m_time_to_action_moment(CallContext& ctx) {
 /// `GetAnim()` -- the slot playing now, or **0** for nothing.
 ///
 /// `0x005a9fd0` is `push (slot < 0) ? 0 : slot + 1`, so zero is the sentinel
-/// and every real answer is a document number. Zero shipped call sites; bound
+/// and every real answer is a document number. A state's loop and a finished
+/// animation are slot -1 there (`playing`), so 0 here. Zero shipped call sites; bound
 /// because it costs one field read and because the corpus comments show the
 /// guard the family expects to write against it.
 HostOutcome m_get_anim(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("GetAnim: no world");
-  if (slot == nullptr || slot->object == nullptr) return integer(0);
-  const std::int32_t playing_slot = slot->object->anim.anim_slot;
-  return integer(playing_slot == kNoAnim ? 0 : playing_slot);
+  if (slot == nullptr || playing(*slot) == nullptr) return integer(0);
+  return integer(slot->object->anim.anim_slot);
 }
 
 /// `GetAnimTime(int slot)` -- how long that animation lasts, whether or not it
@@ -360,7 +418,7 @@ HostOutcome m_get_anim_time(CallContext& ctx) {
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("GetAnimTime: no world");
   if (slot == nullptr) return integer(0);
-  return integer(cycle_of(*slot, int_arg(ctx, 1)));
+  return integer(length_of(*slot, int_arg(ctx, 1)));
 }
 
 /// `Unit::GetAnimDuration(int slot)` -- the same number, **one slot lower**.
@@ -378,7 +436,7 @@ HostOutcome m_get_anim_duration(CallContext& ctx) {
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("GetAnimDuration: no world");
   if (slot == nullptr) return integer(0);
-  return integer(cycle_of(*slot, int_arg(ctx, 1) + 1));
+  return integer(length_of(*slot, int_arg(ctx, 1) + 1));
 }
 
 /// `SetState(int)` -- **two entry points wearing one name**.
@@ -389,17 +447,30 @@ HostOutcome m_get_anim_duration(CallContext& ctx) {
 /// receivers and this registry keys on (kind, name, arity), so the handle type
 /// picks the half.
 ///
-/// **The object half hard-resets the cursor.** `CObj::SetState` (0x0053e860)
-/// returns immediately when the state is already current, and otherwise sets
-/// the playing slot to `-1` and recomputes -- so entering a state stops
-/// whatever was playing. It is called with `useTransition = 0` from the host,
-/// so the transition animation the engine-side caller would play is skipped;
+/// **The object half hard-resets the cursor.** 0x005aa040 checks the handle
+/// (a dead one reports and pushes an int, see the header) and calls
+/// `CObj::SetState` (0x0053e860) with the script's number less one -- the
+/// state array is the document's `idx - 1`, as the animation array is -- and
+/// no transition. That returns at once when the object already rests in the
+/// state (`[obj+0x44]` is the state plus 0x1c, which it is only while no
+/// animation plays), and otherwise sets the playing slot to -1 and the state
+/// word -- so entering a state stops whatever was playing.
 /// `World::enter_state` matches, and loops the state's own `anim_idx` when it
-/// names one.
+/// names one; resting already, the loop's cursor is left where it is.
 ///
 /// **The squad half writes the time too.** `Squad::StateTime` is persisted as
 /// `StateSetTime` and its three corpus sites all compare it against `GetTime()`,
 /// so it is when the state was last set and not how long it has been held.
+/// 0x004211c0 splits the handle word (low four bits the player, the rest the
+/// index), looks the record up (0x00443e30) and writes the state as a 16-bit
+/// word at `+0x28` and the time at `+0x2c`, with no null check and no `SF_NOAI`
+/// refusal; a handle naming no squad faults there and is a no-op here. The
+/// state is kept 32 bits wide here, as every other writer keeps it; no shipped
+/// state needs more than 16.
+///
+/// `Squad::SetState(nState, nSetFlags, nClrFlags)` (0x00421380) is registered
+/// too, and is not bound: it is the same with `flags = (flags | set) & ~clr`,
+/// and both of its corpus sites (`SQUADMONITOR.VS`) are inside a comment.
 HostOutcome m_set_state(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetState: no world");
@@ -415,14 +486,23 @@ HostOutcome m_set_state(CallContext& ctx) {
     // restarts `StateTime`. This used to write only on a change, which is the
     // object half's rule and not the squad's; `SQUADMONITOR.VS` times its
     // idling from the stamp.
+    //
+    // The stamp is the game's running time (`[game+0x1258]`), which is the
+    // millisecond the script woke on -- the scheduler's `now`, as `GetTime`
+    // answers it -- not the turn's end the world already stands at. The three
+    // sites that read it subtract it from `GetTime()`.
     squad->state = state;
-    squad->state_time = world->time();
+    squad->state_time = ctx.scheduler != nullptr ? ctx.scheduler->now() : world->time();
     return HostOutcome::ok_void();
   }
 
   World* ignored = nullptr;
   const WorldObject* slot = receiver_object(ctx, ignored);
   if (slot == nullptr) return HostOutcome::ok_void();
+  if (slot->object != nullptr && slot->object->anim.state_idx == state &&
+      playing(*slot) == nullptr) {
+    return HostOutcome::ok_void();
+  }
   (void)world->enter_state(slot->id, state);
   return HostOutcome::ok_void();
 }
@@ -430,42 +510,35 @@ HostOutcome m_set_state(CallContext& ctx) {
 /// `Obj::IsInState()` -- whether the object is holding a state rather than
 /// playing an animation. 2 sites, and one internal caller.
 ///
-/// **What the executable says, and what it does not.** `0x005ad860` is
-/// `0x0053cfc0 != 0`, and `0x0053cfc0` asks the object whether its component
-/// list at `[obj+0xc]` holds an entry keyed 27 -- answering *true when it does
-/// not*. What component 27 is has not been recovered: nothing in the executable
-/// names it, and the only other constant that list is searched for is 23, from
-/// an unrelated caller. So the reading here comes from the two places the
-/// answer is used rather than from the field.
+/// **What it reads.** `0x005ad860` is `0x0053cfc0 != 0`, and `0x0053cfc0` asks
+/// whether the object's pending-message list (`[obj+0xc]`, searched by
+/// 0x00687820) holds **no** message with id 27 -- the animation timer.
+/// `StartAnimation` (0x0053e6c0) arms it (0x00688240) for every animation it
+/// starts, the timer's handler (0x0053f6a0) re-arms it through the
+/// animation's phases and lets it lapse at the end, and `StopAnimation`
+/// (0x0053d730) and an off-map start cancel it (0x00687ce0). So an object is
+/// *in a state* exactly when no animation is playing on it.
 ///
-/// Both point the same way. `CROW_MOVE.VS` and `EAGLE_MOVE.VS` open with
+/// `CROW_MOVE.VS` and `EAGLE_MOVE.VS` open with
 ///
 ///     while (! .IsInState) Sleep(50);
 ///
-/// before their first `PlayAnim`, which is a bird waiting for whatever
-/// `CROW_IDLE.VS` last started to run out; and `Flying::PickFlyingPoint`
-/// (0x0051c530) takes the first flock-mate that is **not** in a state and *is*
-/// in the air, which is a bird whose heading is live because it is mid-flight.
-/// An entry that an action installs and its completion removes satisfies both,
-/// and the name is then literal: an object *in* a state is one that has settled
-/// into a pose.
+/// before their first `PlayAnim`: a bird waiting for whatever `CROW_IDLE.VS`
+/// last started to run out. `Flying::PickFlyingPoint` (0x0051c530) reads the
+/// same test.
 ///
-/// This engine already has that bit, hashed and saved: `WorldObject::animating`
-/// is set by `play_anim` and cleared by the turn loop when the sample finishes
-/// (`world.cpp`). So `IsInState` is its negation, and the wait above terminates
-/// for every animation this engine can start -- which the reading has to, or
-/// two shipped scripts would sleep for the rest of the match.
+/// This engine's bit for it is `WorldObject::animating`, set by `play_anim`
+/// and cleared by the turn loop when the strip finishes (`world.cpp`); so
+/// `IsInState` is its negation. **Approximated** in when the animation ends:
+/// the original's timer lapses at the declared `duration`, the strip's end
+/// here (`length_of`). An object with no entity at all is in a state in both.
 ///
-/// **What is still unknown**: whether an object with no entity at all -- 579 of
-/// the 889 declare no animation -- is in a state in the original. Here it is,
-/// because `animating` is false for it, and that is the answer that keeps the
-/// wait loop terminating.
+/// The receiver is not checked: a handle naming nothing hands a null object to
+/// the list search, which faults. This answers false.
 HostOutcome m_is_in_state(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("IsInState: no world");
-  // An unresolvable receiver reports and answers false, which is `setne` on the
-  // zero the diagnostic path leaves behind.
   return HostOutcome::ok_with(Value::boolean(slot != nullptr && !slot->animating));
 }
 

@@ -802,10 +802,12 @@ Result<std::unique_ptr<GameSession>> GameSession::create(const script::HostRegis
 ///     level, indexed from 1), and `level_for_experience` (0x005d28c0) of
 ///     that is `L + 1`. So the map's `Level` is **0-based** and the unit's
 ///     level is one more: the 16,171 shipped units read 0..59, and a
-///     `Level="9"` legionary is level 10. Here that is `set_level(L + 1)`,
-///     the earned level, with the progress counter at zero -- the
-///     threshold exactly.
-///   * `hs<Skill>="n"` -- `load_skill`; the balance derives from the level.
+///     `Level="9"` legionary is level 10. Here that is the same write, through
+///     `HeroSystem::set_experience` with the world, so the Nobility rule the
+///     virtual applies applies here too.
+///   * `hs<Skill>="n"` -- `load_skill`, the skill writer 0x0052def0 with the
+///     value as a signed byte: -1 withdraws the skill, and Scout moves the
+///     hero's sight; the balance derives from the level.
 ///   * `slot<n>="<item id>"` -- 0x005af5d0 takes every attribute whose name
 ///     starts `slot`, in document order, mints the item by id (0x00535640
 ///     tries the catalogue by one key and then the other) and hands it to
@@ -824,14 +826,14 @@ void GameSession::Impl::apply_authored_attributes(const MapObjectList& map,
     std::int32_t level = 0;
     if (slot->state.flags.is_unit && parse_authored_int(placed.attribute("Level"), level) &&
         level >= 0) {
-      (void)hero.set_level(id, level + 1);
+      (void)hero.set_experience(world, id, hero.experience_for_level(level + 1));
     }
     for (const auto& [name, value] : placed.attributes) {
       if (name.size() > 2 && name[0] == 'h' && name[1] == 's' && slot->state.flags.is_hero) {
         const std::int32_t which = hero_skill_id(name);
         std::int32_t points = 0;
         if (which >= 0 && parse_authored_int(value, points)) {
-          (void)hero.load_skill(id, static_cast<HeroSkill>(which), points);
+          (void)hero.load_skill(world, id, static_cast<HeroSkill>(which), points);
         }
       } else if (name.size() > 4 && name.compare(0, 4, "slot") == 0 && !value.empty()) {
         (void)hero.items().add(world, id, value);
@@ -1055,7 +1057,7 @@ MatchStatus GameSession::match_status(PlayerId viewer) const {
 }
 
 void GameSession::declare_match(PlayerId player, bool lost) {
-  if (MatchSystem* match = match_system_of(impl_->world)) match->end_game(player, lost);
+  if (MatchSystem* match = match_system_of(impl_->world)) match->end_game(impl_->world, player, lost);
 }
 
 const MaterialiseReport& GameSession::materialised() const noexcept { return impl_->materialised; }

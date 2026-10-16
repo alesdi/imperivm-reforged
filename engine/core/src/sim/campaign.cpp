@@ -63,33 +63,46 @@ void mix_string(std::uint64_t& accumulator, std::string_view text) noexcept {
 /// against the seven territory bonus names. So it returns a `str` and the empty
 /// string is a legal answer: the first mission of a conquest has conquered
 /// nothing, and none of the seven `if`s in `seq0.vs` matches.
+///
+/// 0x00501440: with no conquest object (`[0x00996ab0]` null) it pushes the
+/// empty string (0x007ab85a); otherwise it reads the **last** element of the
+/// int vector at `[conquest+0x4c..+0x50]` -- with no emptiness test -- and, when
+/// that index is inside the territory table (stride 0xe8), pushes that
+/// territory's bonus string (`+0x80`). **Partial:** this answers
+/// `CampaignProgress::active_bonus`, which the host sets from the last
+/// *conquered* territory; whether that vector is `ConqueredOrder` (whose
+/// serialiser sits at 0x00502040) or the territory now being fought for was
+/// not established. Its missing emptiness test argues it is never empty during
+/// a mission, which a conquered list on the first mission would be.
 HostOutcome fn_conquest_bonus(CallContext& ctx) {
   const CampaignSystem* campaign = host_campaign(ctx);
-  if (campaign == nullptr) return HostOutcome::failed("ConquestBonus: no campaign");
+  if (campaign == nullptr) return HostOutcome::ok_with(Value::string(std::string()));
   return HostOutcome::ok_with(Value::string(std::string(campaign->active_bonus())));
 }
 
 /// `SetTerritoryState(str id, int state)`.
 ///
 /// All seven call sites in the retail conquest pass a literal territory `id`
-/// and the bare constant `tsOwned`. An unknown id is reported as a trap rather
-/// than ignored: the seven ids are literals in the map scripts, so a miss means
-/// the container's `territories.xml` and its map scripts disagree, and silently
-/// dropping the write would lose the mission's only lasting effect.
+/// and the bare constant `tsOwned`.
+///
+/// **Every miss is silent** (0x005036e0): with no conquest object
+/// (`[0x00996ab0]` null), a state outside 0..2, or an id the table lookup
+/// (0x00500f00, a byte compare over the territories in table order) does not
+/// find, the body returns having written nothing. This engine trapped on all
+/// three, which killed a mission script the original lets run on. A hit
+/// writes the state word at `[territory+0x20]` and nothing else; the append to
+/// the conquered order `set_state` makes is this engine's carry design, and
+/// where the original appends was not traced.
 HostOutcome fn_set_territory_state(CallContext& ctx) {
   CampaignSystem* campaign = host_campaign(ctx);
-  if (campaign == nullptr) return HostOutcome::failed("SetTerritoryState: no campaign");
+  if (campaign == nullptr) return HostOutcome::ok_void();
   if (!ctx.arg(0).is_string()) return HostOutcome::failed("SetTerritoryState: id is not a string");
   if (!ctx.arg(1).is_integer()) {
     return HostOutcome::failed("SetTerritoryState: state is not an integer");
   }
-  // The three values are proven, so a fourth is a script this build does not
-  // understand rather than a state to store and hope about.
   const auto state = territory_state(ctx.arg(1).as_integer());
-  if (!state) return HostOutcome::failed("SetTerritoryState: state is not one of ts*");
-  if (!campaign->set_state(ctx.arg(0).as_string(), *state)) {
-    return HostOutcome::failed("SetTerritoryState: no such territory");
-  }
+  if (!state) return HostOutcome::ok_void();
+  (void)campaign->set_state(ctx.arg(0).as_string(), *state);
   return HostOutcome::ok_void();
 }
 
@@ -609,6 +622,25 @@ void set_sequence_running(World& world, std::string_view name) {
 
 namespace {
 
+/// **A sequence is `"Finished"` from the instant its thread ends**, not from
+/// the end of the turn. The original marks it from the thread-completion
+/// callback (0x005b9f50, which matches the ended thread against each
+/// sequence's `+0x58` and writes the status), so a script that polls
+/// `IsRunning` 100 ms later already sees it finished. `reap_sequences` runs
+/// once after the turn's whole pass, so every reader below first settles the
+/// one sequence it names: a recorded thread the scheduler no longer holds has
+/// ended, and its status is written now. The end-of-turn reap then finds
+/// nothing owed, and the state at the turn's end is the same either way.
+void settle(CallContext& ctx, World& world, std::string_view name) {
+  CampaignSystem* campaign = campaign_system_of(world);
+  if (campaign == nullptr || ctx.scheduler == nullptr) return;
+  CampaignSystem::SequenceEntry* entry = campaign->find_sequence(name);
+  if (entry == nullptr || entry->running == script::kNoScript) return;
+  if (ctx.scheduler->alive(entry->running)) return;
+  entry->running = script::kNoScript;
+  write_status(world, entry->name, kStatusFinished);
+}
+
 /// `RunSequence(str)` -- 34 sites, all inside campaign containers, every
 /// argument a string literal and every literal resolving to a `<sequence
 /// name>` declared in its own container. 28 resolve inside a map's manifest
@@ -641,6 +673,24 @@ namespace {
 /// badly: unknown name, already running, and never compiled.
 ///
 /// Nothing is pushed. Return type 0 in the registration at 0x005bcb98.
+///
+/// **Two things the original does that are not reproduced, both unobservable
+/// on shipped data:**
+///
+///   * after a `Start` that spawned, `RunSequence` runs the manager's cascade
+///     (0x005b9df0, which the completion callback runs too): every `"Waiting"`
+///     sequence with a non-empty prerequisite list (`+0x48`, count `+0x50`)
+///     all of whose prerequisites are `"Finished"` is started, repeated until
+///     nothing changes. None of the 308 shipped `<sequence>` elements has a
+///     child, so every list is empty and the cascade starts nothing;
+///   * the status key is `"/SequenceStatus/" + [game+0x60] + "/" + name`
+///     (0x005b9a90, and the three predicates build the same), with a middle
+///     component whose writer was not traced; this keeps
+///     `"/SequenceStatus/" + name`. No shipped script reads the key directly.
+///
+/// `Start` also passes the config value `GamePlay/SequenceExecutionInterval`
+/// as the thread's default interval, which only matters to the interpreter's
+/// 15,000-instruction yield (`script/scheduler.cpp` records that gap).
 HostOutcome fn_run_sequence(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RunSequence: no world");
@@ -651,6 +701,7 @@ HostOutcome fn_run_sequence(CallContext& ctx) {
   const std::string_view name = ctx.arg(0).as_string();
   CampaignSystem::SequenceEntry* entry = campaign->find_sequence(name);
   if (entry == nullptr) return HostOutcome::ok_void();
+  settle(ctx, *world, name);
   if (read_status(*world, name) == kStatusRunning) return HostOutcome::ok_void();
 
   script::Scheduler* scheduler = ctx.scheduler;
@@ -684,6 +735,7 @@ HostOutcome fn_sequence_is(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsRunning: no world");
   if (!ctx.arg(0).is_string()) return HostOutcome::ok_with(Value::boolean(false));
+  settle(ctx, *world, ctx.arg(0).as_string());
   return HostOutcome::ok_with(
       Value::boolean(read_status(*world, ctx.arg(0).as_string()) == kStatus));
 }
@@ -699,6 +751,18 @@ HostOutcome fn_sequence_is(CallContext& ctx) {
 /// Nothing is pushed and nothing traps: the return type is 0 in the
 /// registration at 0x00558c40, and an id that is not declared, is already
 /// given, or is not a string at all leaves the board exactly as it was.
+///
+/// **Not reproduced: the pin's reveal.** A newly given note whose declaration
+/// carries a location (`+0x5c`, `+0x60` both not -1), names the current map
+/// (`+0x68` against the game's `+0x198`, 0x0041ff40) and shows on the minimap
+/// (`+0x64`) explores a 300-unit circle at that location for the **local
+/// player only** -- the stamp 0x00517ad0 with the mask `1 << local index`
+/// (0x00420b40) -- and may add a minimap marker (0x005582c0, presentation).
+/// The game's `+0x198` map string has no traced writer (`MapName` records the
+/// same gap), and a write keyed on the local player is one this engine keeps
+/// out of the simulation (`HostContext::local_player`). What it changes is the
+/// local player's explored map around the pin. The rest -- the interface
+/// message (0x0055da00) and the display list at `+0x18` -- is presentation.
 HostOutcome fn_give_note(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GiveNote: no world");

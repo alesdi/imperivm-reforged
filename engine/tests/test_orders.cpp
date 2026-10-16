@@ -54,6 +54,7 @@
 #include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/orders.hpp"
+#include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "test.hpp"
@@ -1650,10 +1651,13 @@ struct Screen {
   Scheduler scheduler;
   HostContext context;
 
+  HeroSystem heroes;
+
   explicit Screen(PlayerId local = 1) {
     world.seed(5);
     world.set_class_graph(&graph);
     world.add_system(&env);
+    world.add_system(&heroes);
     register_all_hosts(registry);
     scheduler.set_registry(&registry);
     scheduler.set_host(&host);
@@ -1695,6 +1699,25 @@ struct Screen {
   [[nodiscard]] std::int32_t out(std::string_view key) const {
     return env.env().read_int(EnvScope::root(), key);
   }
+
+  /// One entry point called directly, as the VM would, for a receiver no
+  /// script can name (a spawn template, a squad list built here).
+  HostOutcome call(CallKind kind, std::string_view name, std::vector<Value> args) {
+    const std::uint32_t index =
+        registry.find(kind, name, static_cast<std::uint16_t>(args.size() - (kind == CallKind::member)));
+    if (index == kUnresolvedHost || registry.entry(index).fn == nullptr) {
+      return HostOutcome::failed("not bound");
+    }
+    CallContext ctx;
+    ctx.arguments = args;
+    ctx.host = &host;
+    ctx.scheduler = &scheduler;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = kind;
+    ctx.now = 50;
+    return registry.entry(index).fn(ctx);
+  }
 };
 
 }  // namespace
@@ -1735,15 +1758,11 @@ TEST(select_drops_the_dead_and_the_unselectable_without_a_word) {
   Screen screen(/*local=*/1);
   const ObjectId dead = screen.spawn(1, "NO_Dead");
   screen.world.set_health(dead, 0);
-  const ObjectId flagged = screen.spawn(1, "NO_Flagged");
-  screen.world.mutable_state(flagged)->flags.noselect = true;
   const ObjectId ordinary = screen.spawn(1, "NO_Ordinary");
 
-  // All three are an ordinary return: the original prints into the discard
-  // sink for the first two and says nothing at all for the third, and a trap
-  // here would stop `CREATE_GOLD_MULE_BIG.VS` dead.
+  // Both are an ordinary return: the original prints into the discard sink,
+  // and a trap here would stop `CREATE_GOLD_MULE_BIG.VS` dead.
   REQUIRE(screen.run("// void\nGetNamedObj(\"NO_Dead\").obj.Select(2);\n"));
-  REQUIRE(screen.run("// void\nGetNamedObj(\"NO_Flagged\").obj.Select(2);\n"));
   CHECK(screen.selections.player(1).empty());
 
   REQUIRE(screen.run("// void\nGetNamedObj(\"NO_Ordinary\").obj.Select(2);\n"));
@@ -1752,6 +1771,126 @@ TEST(select_drops_the_dead_and_the_unselectable_without_a_word) {
   // An unresolvable receiver is the third silent case.
   REQUIRE(screen.run("// void\nObj u;\nu.Select(2);\n"));
   CHECK(screen.selections.player(1).size() == 1);
+}
+
+TEST(select_refuses_a_template_and_takes_a_noselect_unit_and_a_broken_building) {
+  // The insert helper (0x005e7d80) tests `[obj+0x2c] & 0x08000000`, the spawn
+  // template bit, and not `SetNoselectFlag`'s, which is `[obj+0x194] &
+  // 0x800000` (0x005d8750) and which only the drag box reads. And the entry
+  // point's dead test is `vtbl+0x50`, which answers "not dead" for a building
+  // at no health.
+  Screen screen(/*local=*/1);
+  const ObjectId hen = screen.spawn(1);
+  screen.world.mutable_state(hen)->flags.noselect = true;
+  const ObjectId mould = screen.spawn(1);
+  screen.world.mutable_state(mould)->flags.unspawned = true;
+  const ObjectId ruin = screen.world.spawn(NativeClass::building, nullptr);
+  screen.world.set_owner(ruin, 1);
+  screen.world.set_health(ruin, 0);
+
+  CHECK(screen.call(CallKind::member, "Select",
+                    {Value::object(ObjectRef{kTypeObj, mould}), Value::integer(2)})
+            .status == HostStatus::ok);
+  CHECK(screen.selections.player(1).empty());
+  CHECK(screen.call(CallKind::member, "Select",
+                    {Value::object(ObjectRef{kTypeObj, hen}), Value::integer(2)})
+            .status == HostStatus::ok);
+  CHECK(screen.call(CallKind::member, "Select",
+                    {Value::object(ObjectRef{kTypeObj, ruin}), Value::integer(2)})
+            .status == HostStatus::ok);
+  REQUIRE(screen.selections.player(1).size() == 2);
+  CHECK(screen.selections.player(1).at(0) == hen);
+  CHECK(screen.selections.player(1).at(1) == ruin);
+
+  // `SwapSelectedObj`'s second half is the same insert: a template stays out,
+  // and the removal stands.
+  CHECK(screen.call(CallKind::free_function, "SwapSelectedObj",
+                    {Value::object(ObjectRef{kTypeObj, hen}),
+                     Value::object(ObjectRef{kTypeObj, mould})})
+            .status == HostStatus::ok);
+  REQUIRE(screen.selections.player(1).size() == 1);
+  CHECK(screen.selections.player(1).at(0) == ruin);
+}
+
+TEST(squadlist_select_empties_the_selection_and_takes_every_member_from_the_start) {
+  // 0x0042bee0: the local-player comparison, the selection emptied, and --
+  // unless the list's cursor is at its end -- every member of every squad
+  // from the list's beginning, through the insert helper only.
+  Screen screen(/*local=*/1);
+  const ObjectId a = screen.spawn(1);
+  const ObjectId b = screen.spawn(1);
+  const ObjectId c = screen.spawn(1);
+  const ObjectId mould = screen.spawn(1);
+  screen.world.mutable_state(mould)->flags.unspawned = true;
+  const ObjectId fallen = screen.spawn(1);
+  screen.world.set_health(fallen, 0);
+  const ObjectId earlier = screen.spawn(1);
+  const SquadKey first = screen.heroes.squads().create(1, a);
+  REQUIRE(screen.heroes.squads().join(first, mould));
+  REQUIRE(screen.heroes.squads().join(first, b));
+  const SquadKey second = screen.heroes.squads().create(1, c);
+  REQUIRE(screen.heroes.squads().join(second, fallen));
+  SquadListPool& pool = squadlist_pool_of(screen.world);
+  const SquadListId list = pool.acquire(3, 1);
+  pool.mutable_items(list)->assign({first, second});
+  pool.set_cursor(list, 1);  // part-walked: the walk still starts at the front
+  const Value receiver = make_squadlist_value(list);
+
+  // Not this screen: nothing at all, not even the clear.
+  screen.selections.select(1, earlier);
+  CHECK(screen.call(CallKind::member, "Select", {receiver, Value::integer(3)}).status ==
+        HostStatus::ok);
+  REQUIRE(screen.selections.player(1).size() == 1);
+
+  CHECK(screen.call(CallKind::member, "Select", {receiver, Value::integer(2)}).status ==
+        HostStatus::ok);
+  const std::vector<ObjectId> want{a, b, c, fallen};
+  const std::span<const ObjectId> got = screen.selections.player(1).ids();
+  CHECK((std::vector<ObjectId>(got.begin(), got.end()) == want));
+  CHECK(screen.selections.last_selected(c) == 50);
+
+  // A list walked to its end selects nothing -- but the clear has happened.
+  pool.set_cursor(list, 2);
+  CHECK(screen.call(CallKind::member, "Select", {receiver, Value::integer(2)}).status ==
+        HostStatus::ok);
+  CHECK(screen.selections.player(1).empty());
+}
+
+TEST(the_uncalled_deselect_and_selection_assigned_forms_follow_their_bodies) {
+  Screen screen(/*local=*/1);
+  const ObjectId subject = screen.spawn(1, "NO_Subject");
+  // `Deselect(player)` (0x005ac060): guarded on the local player.
+  screen.selections.select(1, subject);
+  REQUIRE(screen.run("// void\nGetNamedObj(\"NO_Subject\").obj.Deselect(3);\n"));
+  CHECK(screen.selections.player(1).size() == 1);
+  REQUIRE(screen.run("// void\nGetNamedObj(\"NO_Subject\").obj.Deselect(2);\n"));
+  CHECK(screen.selections.player(1).empty());
+
+  // `IsSelectionAssigned(player, slot)` (0x004c6a30): one group, slot 0..9.
+  const std::vector<ObjectId> group{subject};
+  screen.shortcuts.assign(1, 3, group);
+  REQUIRE(screen.run(
+      "// void\n"
+      "EnvWriteInt(\"/three\", IsSelectionAssigned(2, 3));\n"
+      "EnvWriteInt(\"/four\", IsSelectionAssigned(2, 4));\n"
+      "EnvWriteInt(\"/ten\", IsSelectionAssigned(2, 10));\n"
+      "EnvWriteInt(\"/other\", IsSelectionAssigned(3, 3));\n"));
+  CHECK(screen.out("/three") == 1);
+  CHECK(screen.out("/four") == 0);
+  CHECK(screen.out("/ten") == 0);
+  CHECK(screen.out("/other") == 0);
+
+  // `WasSelectionAssigned(player, n)` (0x004c69b0): the bit `1 << n`, or any
+  // bit for a negative `n`.
+  screen.env.env().write_int(EnvScope::root(), "/Player2/SelectionAssigned", 1 << 3);
+  REQUIRE(screen.run(
+      "// void\n"
+      "EnvWriteInt(\"/w3\", WasSelectionAssigned(2, 3));\n"
+      "EnvWriteInt(\"/w4\", WasSelectionAssigned(2, 4));\n"
+      "EnvWriteInt(\"/wall\", WasSelectionAssigned(2, -1));\n"));
+  CHECK(screen.out("/w3") == 1);
+  CHECK(screen.out("/w4") == 0);
+  CHECK(screen.out("/wall") == 1);
 }
 
 TEST(deselect_has_no_player_guard_and_select_does) {
@@ -2123,6 +2262,35 @@ TEST(exec_default_cmd_on_an_object_receiver_runs_the_verifier_on_the_callers_sch
   CHECK(d.exec(Value::object(ObjectRef{kTypeObj, other}), Point{200, 200}, enemy, true, false)
             .status == HostStatus::ok);
   CHECK((d.verbs(other) == std::vector<std::string>{"attack"}));
+}
+
+TEST(exec_default_cmd_on_an_object_is_issued_as_its_owner_and_refuses_the_dead) {
+  // 0x005b52b0 pushes the receiver's own owner index where the list form
+  // pushes -1, so the command is a player's: marked `user`, and control is
+  // asked -- and `vtbl+0x50` refuses a dead receiver before anything.
+  Dispatch d;
+  const ObjectId unit = d.spawn(1, Point{100, 100});
+  CHECK(d.exec(Value::object(ObjectRef{kTypeObj, unit}), Point{400, 400}, kNoObject, true, false)
+            .status == HostStatus::ok);
+  REQUIRE((d.verbs(unit) == std::vector<std::string>{"move"}));
+  CHECK(d.running(unit)->user);
+
+  // An owner that has withdrawn its own control (the relation is data) is
+  // refused, which the script form would not be.
+  const ObjectId stray = d.spawn(3, Point{100, 140});
+  d.world.players().set(3, 3, Relation::share_control, false);
+  CHECK(d.exec(Value::object(ObjectRef{kTypeObj, stray}), Point{400, 400}, kNoObject, true, false)
+            .status == HostStatus::ok);
+  CHECK(d.verbs(stray).empty());
+  CHECK(d.exec(d.list_of({stray}), Point{400, 400}, kNoObject, true, false).status ==
+        HostStatus::ok);
+  CHECK((d.verbs(stray) == std::vector<std::string>{"move"}));
+
+  const ObjectId dead = d.spawn(1, Point{100, 180});
+  d.world.set_health(dead, 0);
+  CHECK(d.exec(Value::object(ObjectRef{kTypeObj, dead}), Point{400, 400}, kNoObject, true, false)
+            .status == HostStatus::ok);
+  CHECK(d.verbs(dead).empty());
 }
 
 TEST(exec_default_cmd_without_a_scheduler_blocks_on_the_first_conditional_candidate) {

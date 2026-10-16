@@ -209,7 +209,10 @@ std::int32_t EconomySystem::interval(SettlementTimer which) const noexcept {
     case SettlementTimer::loyalty_gain: return rules_.loyalty_interval;
     case SettlementTimer::loyalty: return rules_.loyalty_cap_interval;
     case SettlementTimer::outpost_trade: return rules_.outpost_refresh;
-    case SettlementTimer::loan: return rules_.loan_interest_interval;
+    // Never armed: nothing in `gbr.exe` accrues a loan over time (see `SetLoan`
+    // at the registrations). The slot stays so the saved timer array keeps its
+    // shape; a period of 0 is the "never fires" `advance` already honours.
+    case SettlementTimer::loan: return 0;
     case SettlementTimer::count: break;
   }
   return 0;
@@ -285,7 +288,7 @@ void EconomySystem::fire(World& world, Settlement& s, SettlementTimer which) {
     case SettlementTimer::loyalty_gain: tick_loyalty_gain(world, s); break;
     case SettlementTimer::loyalty: tick_loyalty(s); break;
     case SettlementTimer::outpost_trade: tick_outpost_trade(world, s); break;
-    case SettlementTimer::loan: tick_loan(s); break;
+    case SettlementTimer::loan: break;
     case SettlementTimer::count: break;
   }
 }
@@ -302,15 +305,36 @@ void EconomySystem::fire(World& world, Settlement& s, SettlementTimer which) {
 ///
 /// As gbr.exe's production tick does (0x005c1122): a settlement owned by
 /// player 14 or 15 produces nothing, and food is made only by a population at
-/// `MinPopulation` or above. Gold has no such floor.
+/// `MinPopulation` or above. Gold has no such floor here.
+///
+/// **That last sentence is this engine's and not the original's**, found by
+/// the economy-2 audit and left for a round of its own because it moves the
+/// AI's economy: the gold arm of 0x005c1080 makes the same `cmp [set+0x50],
+/// [0x824ae8]` / `jl` test (0x005c109d) before it produces anything.
+///
+/// The gold produced **pays the tavern loan first** (0x005c1010, called with
+/// the gross amount): a debt smaller than the gold is cleared and only the
+/// rest reaches the warehouse; otherwise the debt shrinks by all of it and
+/// nothing does. See `SetLoan` at the registrations.
 void EconomySystem::produce(World& world, Settlement& s) {
   if (s.efficiency <= 0 || s.population <= 0) return;
   if (s.owner == kNeutralWildlife || s.owner == kNeutralPassive) return;
   if (s.gold_rate > 0) {
-    const std::int32_t got = s.warehouse.store(Resource::gold, percent_of(s.population * s.efficiency, s.gold_rate));
+    const std::int32_t gross = percent_of(s.population * s.efficiency, s.gold_rate);
+    std::int32_t net = 0;
+    if (s.loan < gross) {
+      net = gross - s.loan;
+      s.loan = 0;
+    } else {
+      s.loan -= gross;
+    }
+    const std::int32_t got = s.warehouse.store(Resource::gold, net);
     // The owner's *From taxes* on the end-of-match report; see
-    // `PlayerScoreCounters::gold_townhall` for the reading this is.
-    if (MatchSystem* match = match_system_of(world); match != nullptr) match->record_gold_produced(s.owner, got);
+    // `PlayerScoreCounters::gold_townhall` for the reading this is. The gold
+    // the loan took was produced all the same (0x005c1080 credits the gross).
+    if (MatchSystem* match = match_system_of(world); match != nullptr) {
+      match->record_gold_produced(s.owner, got + (gross - net));
+    }
   }
   if (s.food_rate > 0 && s.population >= rules_.min_population) {
     s.warehouse.store(Resource::food, percent_of(s.population * s.efficiency, s.food_rate));
@@ -484,14 +508,6 @@ void EconomySystem::tick_outpost_trade(World& world, Settlement& s) {
   }
 }
 
-/// INFERRED. `TimeProductionForLoan = 180000 ;msec` and
-/// `LoanInterestPercent = 10` are the only two loan constants no script reads,
-/// and a debt with an interest percent and an interval is a debt that accrues.
-/// The dumps cannot check it: `loan` is 0 in all 328 settlement blocks.
-void EconomySystem::tick_loan(Settlement& s) {
-  if (s.loan <= 0) return;
-  s.loan += percent_of(s.loan, rules_.loan_interest_percent);
-}
 
 // --------------------------------------------------------------------------
 // transport
@@ -574,7 +590,9 @@ bool EconomySystem::lose_wagon(std::uint32_t wagon) {
 bool EconomySystem::set_supplied(SettlementId id, SettlementId target) {
   Settlement* s = store_.find(id);
   if (s == nullptr) return false;
-  s->supplied = (target == id) ? kNoSettlement : target;
+  // No self test: `StartSupplyFood` (0x005ef380) stores whatever it is handed,
+  // the receiver itself included.
+  s->supplied = target;
   return true;
 }
 
@@ -649,14 +667,14 @@ bool EconomySystem::set_population(SettlementId id, std::int32_t value) {
 bool EconomySystem::add_max_population(SettlementId id, std::int32_t delta) {
   Settlement* s = store_.find(id);
   if (s == nullptr) return false;
-  s->max_population = std::max(0, s->max_population + delta);
+  s->max_population += delta;  // 0x005c2290: one `add`, no clamp
   return true;
 }
 
 bool EconomySystem::add_population(SettlementId id, std::int32_t delta) {
   Settlement* s = store_.find(id);
   if (s == nullptr) return false;
-  s->population = std::max(0, s->population + delta);
+  s->population += delta;  // 0x005c2250: one `add`, no clamp
   return true;
 }
 
@@ -844,7 +862,7 @@ Point unit_pos_rh(World& world, ObjectId unit) {
 bool EconomySystem::add_max_sentries(SettlementId id, std::int32_t count) {
   Settlement* s = store_.find(id);
   if (s == nullptr) return false;
-  s->max_sentries = std::max(0, s->max_sentries + count);
+  s->max_sentries += count;  // 0x005c2b30: no clamp
   return true;
 }
 
@@ -852,9 +870,10 @@ bool EconomySystem::add_sentries(SettlementId id, std::int32_t count) {
   Settlement* s = store_.find(id);
   if (s == nullptr) return false;
   // 0x005c4ac0 raises the roster **and** the wall pool by the same amount, so
-  // sentries that arrive arrive ready. A negative count takes from both.
-  s->sentries = std::max(0, s->sentries + count);
-  s->sentries_ready = std::max(0, s->sentries_ready + count);
+  // sentries that arrive arrive ready. A negative count takes from both, and
+  // below zero if it is larger than either: see the header.
+  s->sentries += count;
+  s->sentries_ready += count;
   return true;
 }
 
@@ -1003,6 +1022,19 @@ using script::Value;
 /// works across the seam without either side knowing about the other. An
 /// ordinary object handle resolves through the world's back-link, and falls
 /// back to the store's own scan for an object the loader has not linked.
+///
+/// **A unit never resolves as a settlement.** Every `Settlement::` body takes
+/// its receiver from a variable the compiler typed `Settlement`, and the
+/// names this registry shares with `Unit`, `Wagon` and `Ship` -- `food`,
+/// `SetFood`, `SetGold`, `loyalty`, `SetLoyalty`, `UnitsCount` -- are
+/// separate bodies the original picks by that static type (`Unit::food` is
+/// 0x005d8c50, `Settlement::food` 0x005c2080). Dispatch here is on
+/// `(kind, name, arity)`, so the handle is all there is to pick by, and a
+/// unit's settlement back-link -- which this engine's map loader writes on a
+/// garrison it declares, `World::units_in_settlement`'s note -- made
+/// `u.SetFood(u.food + give)` in `VILLAGE_BEHAVIOR_GIVEFOOD.VS` read and
+/// write the *town's* larder for every such unit. The back-link is for
+/// buildings, whose own handles reach these bodies as `b.settlement` would.
 [[nodiscard]] Settlement* settlement_at(CallContext& ctx, std::size_t index) noexcept {
   EconomySystem* economy = host_economy(ctx);
   if (economy == nullptr || ctx.count() <= index) return nullptr;
@@ -1014,6 +1046,7 @@ using script::Value;
   World* world = world_of(ctx);
   if (world != nullptr) {
     const WorldObject* slot = world->find(ref.id);
+    if (slot != nullptr && slot->state.flags.is_unit) return nullptr;
     if (slot != nullptr && slot->settlement != kNoObject) {
       Settlement* s = economy->settlements().for_object(slot->settlement);
       if (s != nullptr) return s;
@@ -1049,6 +1082,29 @@ using script::Value;
   return value.is_integer() ? value.as_integer() : 0;
 }
 
+/// Argument 0 as a `CVXWagon` -- a mule, a trader, a camel, a `ShipS` -- or
+/// null. `Wagon::SetGold`/`SetFood` share their names with `Settlement`'s, and
+/// a wagon's handle is how the body is told apart (see `settlement_at`).
+[[nodiscard]] WorldObject* wagon_receiver(CallContext& ctx, World& world) noexcept {
+  if (ctx.count() == 0 || !ctx.arg(0).is_object()) return nullptr;
+  const ObjectRef ref = ctx.arg(0).as_object();
+  if (ref.type != kTypeObj) return nullptr;
+  WorldObject* slot = world.find(ref.id);
+  if (slot == nullptr || slot->object == nullptr || !slot->object->is_a(NativeClass::wagon)) {
+    return nullptr;
+  }
+  return slot;
+}
+
+/// `Wagon::SetGold`/`SetFood`: the kind word first, then the cargo, as
+/// 0x005ebec0/0x005ebe70 and the setter 0x005eb0a0 write them -- unclamped,
+/// neither against the class's `max_load` nor at zero. The death of an emptied
+/// wagon is not reproduced; see the note at `SetFood`.
+void set_wagon_cargo(WorldObject& wagon, Resource kind, std::int32_t value) noexcept {
+  wagon.state.cargo_resource = static_cast<std::int32_t>(kind);
+  wagon.state.cargo = value;
+}
+
 /// `LoadGold`/`LoadFood`. See the note at the registrations for the order the
 /// original applies its four steps in.
 template <Resource kKind>
@@ -1060,10 +1116,26 @@ HostOutcome load_cargo(CallContext& ctx) {
   WorldObject* mule = world->find(ctx.arg(0).as_object().id);
   if (mule == nullptr) return HostOutcome::ok_void();
 
-  // 1. The settlement the mule is inside, by `GetHolderSett`'s own two hops.
+  // 1. The settlement the mule is inside, by `GetHolderSett`'s own two hops,
+  //    whose central building is a `CVXTownHall` that the mule's owner
+  //    grants share-support (0x005ebc90's held arm, 0x005eb070).
   if (mule->state.holder == kNoObject) return HostOutcome::ok_void();
   Settlement* here = economy->settlements().for_object(mule->state.holder);
   if (here == nullptr) return HostOutcome::ok_void();
+  // `CVXTownHall` by the binary's own type query, in which an outpost is not
+  // one: `CVXOutpost`'s query (0x00563aa0) answers its own name and passes
+  // everything else to `CVXBuilding`'s (0x004db2a0). `game/registry.hpp`
+  // files `CVXOutpost` under `CVXTownHall` from the class data, so the outpost
+  // is excluded here by name.
+  const WorldObject* hall = world->find(here->anchor);
+  if (hall == nullptr || hall->object == nullptr || !hall->object->is_a(NativeClass::town_hall) ||
+      hall->object->is_a(NativeClass::outpost)) {
+    return HostOutcome::ok_void();
+  }
+  if (!PlayerTable::is_valid(mule->state.owner) || !PlayerTable::is_valid(hall->state.owner) ||
+      !world->players().has(mule->state.owner, hall->state.owner, Relation::share_support)) {
+    return HostOutcome::ok_void();
+  }
 
   // 2. Empty, or already carrying this kind.
   const std::int32_t kind = static_cast<std::int32_t>(kKind);
@@ -1101,13 +1173,16 @@ HostOutcome load_cargo(CallContext& ctx) {
 /// function 'settlement::<name>' called for an uninitialized or invalid
 /// object.` (0x007cdc50, 0x007cdd58, one string per member) and push the
 /// zero of the return type: `Settlement::health` (0x005c1e63) pushes 0,
-/// `Settlement::IsFull` (0x005c1d43) pushes false, `Settlement::IsStronghold`
+/// `Settlement::IsStronghold`
 /// (0x0042508b) pushes false without even the print. This used to refuse,
 /// on the argument that a silent zero was a divergence no test could see --
 /// and the trap sweep saw it the first time the AI ran: `g.settlement.
 /// IsStronghold` on a node with no settlement is the second line of
 /// `GetArmyNeed.vs`, `CalcGAIKAPriority.vs` and `GS_KillEnemies.vs`, and
 /// every one of them stopped there. 0 reads as `false`, as 0 and as nothing.
+///
+/// Not every member: `Settlement::IsFull` pushes **true** (0x005c1d4f writes
+/// 1 after the print), so its registration answers that itself.
 [[nodiscard]] HostOutcome no_settlement(CallContext& ctx) {
   // No world behind the call at all is still a refusal: that is a script
   // running outside an embedder, and every domain refuses it rather than
@@ -1203,6 +1278,23 @@ void enter_settlement(CallContext& ctx, const Settlement& s, ObjectId unit) {
   World* world = world_of(ctx);
   if (world == nullptr || s.object == kNoObject) return;
   (void)fire_class_hook(*world, ClassHook::on_enter, unit, s.object);
+}
+
+/// The settlement a script names, by the scan `GetSettlement` (0x005c3ad0),
+/// `ObjList::InHolder` (0x0055eba0) and `Query::InHolder` (0x00579ef0) share:
+/// the settlement vector `[mgr+0x4c, mgr+0x50)` in order, skipping a null
+/// slot, comparing the `std::string` at `settlement+0xcc` with the argument
+/// through 0x00409350 over the stored length and the argument's `strlen` --
+/// equal only when both match exactly, case and length. **An empty argument
+/// is not refused**: it equals the first settlement whose name is empty, which
+/// on a retail map is a real one. `SettlementStore::find_by_name` refuses it
+/// for its other callers, so this does not go through it.
+[[nodiscard]] const Settlement* settlement_named(const EconomySystem& economy,
+                                                 std::string_view name) {
+  for (const Settlement& s : economy.settlements().all()) {
+    if (s.name == name) return &s;
+  }
+  return nullptr;
 }
 
 /// An invalid handle: `type == kNoType`, which is what `.IsValid` reports on.
@@ -1423,10 +1515,19 @@ HostOutcome m_water_lsa(CallContext& ctx) {
 /// the reference point on a strict comparison, which sends a tie to the earlier
 /// building and then the earlier slot. No RNG.
 ///
+/// The comparison is on the **integer square root** of the squared distance
+/// (0x0067c3d0), signed and strict, so two gates whose distances truncate to
+/// the same whole number tie and the earlier keeps it -- even when the later
+/// is nearer by a fraction. This compared exact squared distances, which sent
+/// such a pair to the nearer one.
+///
 /// Its "nothing found" answer is `(-1, -1)`, reached by seeding the best
-/// distance with ten million and never beating it. That seed is transcribed as
-/// a flag rather than a number: a genuine point ten million units away would
-/// read as "none" in the original, and no map is a fortieth that wide.
+/// distance with ten million (`0x00989680`) and never beating it; a point that
+/// projects off the map (`0x005c11a0` answering -1) is skipped, which
+/// `class_points_of_type` already does. The seed is transcribed as the number
+/// it is: a gate ten million units away would read as none in the original,
+/// and here too. A receiver that does not resolve dereferences null in the
+/// original; here it answers `(-1, -1)`.
 HostOutcome m_find_near_enter_exit(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("FindNearEnterExit: no world");
@@ -1435,18 +1536,18 @@ HostOutcome m_find_near_enter_exit(CallContext& ctx) {
                               ? unpack_point(ctx.arg(1))
                               : Point{};
   Point best = kNoClassPoint;
-  std::int64_t nearest = -1;
+  std::int64_t nearest = 10000000;
   if (s != nullptr) {
     std::vector<Point> gates;
     for (const SettlementBuilding& b : s->buildings) {
       gates.clear();
       class_points_of_type(*world, b.object, kEnterExitPointType, gates);
       for (const Point& gate : gates) {
-        const std::int64_t dx = gate.x - reference.x;
-        const std::int64_t dy = gate.y - reference.y;
-        const std::int64_t d2 = dx * dx + dy * dy;
-        if (nearest < 0 || d2 < nearest) {
-          nearest = d2;
+        const std::int64_t dx = reference.x - gate.x;
+        const std::int64_t dy = reference.y - gate.y;
+        const std::int64_t distance = isqrt(dx * dx + dy * dy);
+        if (distance < nearest) {
+          nearest = distance;
           best = gate;
         }
       }
@@ -1705,8 +1806,9 @@ constexpr std::int32_t kOutpostUnresolved = -15000000;
 /// sentry class, answers **0**. The original would dereference the null the
 /// registry hands back and crash there; refusing is the same departure this
 /// file makes everywhere a class lookup can fail.
-[[nodiscard]] std::int32_t eval_sentries(World& world, const Settlement& set) {
-  if (set.sentries <= 0) return 0;
+/// `perSentry` alone, 0x005c4830: the figure both tallies multiply. Zero for a
+/// settlement with no sentry class, where the original would crash.
+[[nodiscard]] std::int32_t per_sentry_eval(World& world, const Settlement& set) {
   const ClassGraph* graph = world.class_graph();
   const ClassIndex sentry = sentry_class_of(world, set);
   if (graph == nullptr || sentry == kNoClass) return 0;
@@ -1721,8 +1823,12 @@ constexpr std::int32_t kOutpostUnresolved = -15000000;
   if (const EnvSystem* env = env_of(world); env != nullptr) {
     level = env->env().read_int(EnvScope::for_settlement(set.id), "SentriesLevel");
   }
-  const std::int32_t per = (power * (level + 13) * quarter) / 1000 + 1;
-  return per * set.sentries;
+  return (power * (level + 13) * quarter) / 1000 + 1;
+}
+
+[[nodiscard]] std::int32_t eval_sentries(World& world, const Settlement& set) {
+  if (set.sentries <= 0) return 0;
+  return per_sentry_eval(world, set) * set.sentries;
 }
 
 /// The string half. Same gate, same slot dispatch, `""` for every miss.
@@ -1884,6 +1990,36 @@ ObjectId settlement_lab_for(World& world, const Settlement& s, const CommandDef&
   return kNoObject;
 }
 
+/// The relation code `NearestStronghold`'s filter matches against.
+///
+/// `gbr.exe` 0x0044e250 answers **one** of three values and never a mask:
+/// `AI_OWN` (1) when the two players are the same, `AI_ALLY` (2) when `a`'s own
+/// row grants `b` bit 0, and `AI_ENEMY` (4) otherwise. Either index outside
+/// 0..15 gives 0, which no filter can intersect.
+///
+/// **One-directional**, like `Obj::IsEnemy` and unlike `are_allied`: it reads
+/// `a`'s row for `b` and never the transpose, so a one-sided truce makes `a`
+/// see an ally where `b` sees an enemy. The three constants are the same
+/// `AI_OWN`/`AI_ALLY`/`AI_ENEMY` `sim/squad.cpp`'s census selects on.
+std::int32_t ai_relation(const PlayerTable& players, std::int32_t a, PlayerId b) noexcept {
+  if (a < 0 || a >= static_cast<std::int32_t>(kPlayerCount)) return 0;
+  if (!PlayerTable::is_valid(b)) return 0;
+  const auto viewer = static_cast<PlayerId>(a);
+  if (viewer == b) return 1;                                     // AI_OWN
+  return players.has(viewer, b, Relation::allied) ? 2 : 4;       // AI_ALLY : AI_ENEMY
+}
+
+/// `[settlement+0xf8]`, the sentry strength 0x005c4930 caches on every write
+/// of the wall count `[+0xf4]`: `perSentry` times that count, 0 when it is 0
+/// or less. **Computed on read here rather than cached**, so the one way the
+/// two can differ is a `SentriesLevel` written between a wall change and the
+/// read -- the original keeps the old level's figure until the next write. No
+/// shipped script writes `SentriesLevel` (see `eval_sentries`).
+std::int32_t sentry_strength(World& world, const Settlement& set) {
+  if (set.sentries_ready <= 0) return 0;
+  return per_sentry_eval(world, set) * set.sentries_ready;
+}
+
 namespace {
 
 struct EconomyHostDef {
@@ -1896,26 +2032,6 @@ struct EconomyHostDef {
 // --------------------------------------------------------------------------
 // the AI's own bookkeeping, and the barracks walk
 // --------------------------------------------------------------------------
-
-/// The relation code `NearestStronghold`'s filter matches against.
-///
-/// `gbr.exe` 0x0044e250 answers **one** of three values and never a mask:
-/// `AI_OWN` (1) when the two players are the same, `AI_ALLY` (2) when `a`'s own
-/// row grants `b` bit 0, and `AI_ENEMY` (4) otherwise. Either index outside
-/// 0..15 gives 0, which no filter can intersect.
-///
-/// **One-directional**, like `Obj::IsEnemy` and unlike `are_allied`: it reads
-/// `a`'s row for `b` and never the transpose, so a one-sided truce makes `a`
-/// see an ally where `b` sees an enemy. The three constants are the same
-/// `AI_OWN`/`AI_ALLY`/`AI_ENEMY` `sim/squad.cpp`'s census selects on.
-[[nodiscard]] std::int32_t ai_relation(const PlayerTable& players, std::int32_t a,
-                                       PlayerId b) noexcept {
-  if (a < 0 || a >= static_cast<std::int32_t>(kPlayerCount)) return 0;
-  if (!PlayerTable::is_valid(b)) return 0;
-  const auto viewer = static_cast<PlayerId>(a);
-  if (viewer == b) return 1;                                     // AI_OWN
-  return players.has(viewer, b, Relation::allied) ? 2 : 4;       // AI_ALLY : AI_ENEMY
-}
 
 /// `NearestStronghold(pt, idPlayer[, filter])` -- 7 sites across two arities.
 ///
@@ -1997,14 +2113,33 @@ HostOutcome nearest_stronghold_impl(CallContext& ctx) {
   return since * percent / 100;
 }
 
+/// The whole of `reserved_gold`, with no exemption: what `CanAfford(gold,
+/// food)` (0x00425b1c) and `Settlement::Research` (the flag 1 pushed at
+/// 0x0042d26b) subtract.
+[[nodiscard]] std::int32_t reserved_gold_of(CallContext& ctx, const Settlement& s) {
+  World* world = world_of(ctx);
+  const EnvSystem* env = world == nullptr ? nullptr : env_of(*world);
+  return env == nullptr ? 0 : reserved_gold(env->env(), s);
+}
+
 /// The reserve a command-shaped affordability question subtracts: the whole
 /// of `reserved_gold`, unless the reserve is held for this very command
 /// (0x00428c67..0x00428c8d, and the same nine instructions in `MaxAffordCount`
 /// and `CanAfford/2`'s command form), in which case nothing is held back from
-/// it. The stored name is compared through the command table rather than
-/// character by character, which is the original's case-insensitive compare
-/// (0x00426df0 is 0x00409350, the one `CommandTable::find` models) without a
-/// second copy of it.
+/// it.
+///
+/// "This very command" is **exact string equality** between the stored
+/// `ReserveFor<owner>` and `command`: 0x00426df0 is `std::string::compare`
+/// (0x00409350 -- a byte compare over the shorter length, then the lengths,
+/// no case folding) and answers equal on zero. This used to compare the two
+/// command rows the names resolve to, which agrees only while both are spelt
+/// alike. The original compares the stored string with **the argument the
+/// script passed** (`[arg+4]`, the string's characters), so that is what a
+/// caller should hand in rather than the row's own spelling.
+///
+/// The original asks `Reserve<owner> != 0` before it compares and subtracts
+/// 0x00425890 only when the compare fails; `reserved_gold` is 0 for any
+/// percentage below 1, so the two orders give the same number.
 [[nodiscard]] std::int32_t reserved_gold_for(CallContext& ctx, const Settlement& s,
                                              std::string_view command) {
   World* world = world_of(ctx);
@@ -2014,9 +2149,7 @@ HostOutcome nearest_stronghold_impl(CallContext& ctx) {
   if (held <= 0) return 0;
   const std::string_view held_for =
       env->env().read_string(EnvScope::for_settlement(s.id), reserve_key("ReserveFor", s));
-  // An empty or unknown stored name is no row, so it exempts nothing.
-  const CommandDef* row = command_row(ctx, held_for);
-  return row != nullptr && row == command_row(ctx, command) ? 0 : held;
+  return held_for == command ? 0 : held;
 }
 
 /// The weight and threshold `DATA\COUNTERUNITS.XML`'s parser gives a row.
@@ -2184,7 +2317,7 @@ HostOutcome get_counter_units_impl(CallContext& ctx) {
 /// `0x0042cba0` walks the world's settlement vector and keeps the **last**
 /// settlement -- there is no ranking -- that passes six tests in this order:
 /// its position is within `dist` of the point (`isqrt` of the squares,
-/// strictly less); its central building is an heir of `BaseRuins`
+/// strictly less, **unsigned** -- a negative `dist` admits everything); its central building is an heir of `BaseRuins`
 /// (0x007ae0b0); the env int `/<root>/Settlement<id>/Bld<bld>/minlevel`
 /// (0x007ae090) -- the building scope's `minlevel`, which `RUIN_BEHAVIOR.VS`
 /// writes from the class's `minlevel` and raises by `levelperitem` after each
@@ -2224,7 +2357,9 @@ HostOutcome find_ruins_impl(CallContext& ctx) {
     const Point at = world->resolve_position(s.anchor);
     const std::int64_t dx = at.x - around.x;
     const std::int64_t dy = at.y - around.y;
-    if (isqrt(dx * dx + dy * dy) >= dist) continue;
+    // Unsigned, `jae` on the root against the argument as a `uint`: a
+    // negative `dist` is above every distance and admits every settlement.
+    if (dist >= 0 && isqrt(dx * dx + dy * dy) >= dist) continue;
     if (!world->matches_filter(*centre, ruins)) continue;
     if (env->env().read_int(EnvScope::for_building(s.anchor), "minlevel") > level) continue;
     if (heroes->items().count_for(s.anchor) <= 0) continue;
@@ -2270,7 +2405,8 @@ namespace {
 ///
 /// `0x004397d0` walks the settlement roll **from the last to the first** and
 /// keeps the best independents' outpost in the area. Per settlement: owned by
-/// player fourteen; within `radius` of `center` (`isqrt`, inclusive); its
+/// player fourteen; within `radius` of `center` (`isqrt`, inclusive, unsigned
+/// -- a negative radius admits everything); its
 /// central building an heir of one of four classes, each with a rank and a
 /// defender class -- `COutpost` 10 and `CMaceman`; `IOutpost` 9 and
 /// `ISlinger`, with the *exclusive* engage; `TTent` 8 and both
@@ -2338,7 +2474,8 @@ HostOutcome attack_set_for_training_impl(CallContext& ctx) {
     {
       const std::int64_t dx = there.x - centre.x;
       const std::int64_t dy = there.y - centre.y;
-      if (isqrt(dx * dx + dy * dy) > radius) continue;
+      // Unsigned (0x004397d0 `local_64 < root`): a negative radius admits all.
+      if (radius >= 0 && isqrt(dx * dx + dy * dy) > radius) continue;
     }
     const WorldObject* building = world->find(s.anchor);
     if (building == nullptr) continue;
@@ -2413,15 +2550,29 @@ HostOutcome attack_set_for_training_impl(CallContext& ctx) {
 /// `set.ReserveFor(tech, percent)` -- one site, `ESH_NEEDTECH.VS`, and the
 /// write half of the reserve.
 ///
-/// `gbr.exe` 0x0042cd60 looks the name up (an unknown row prints and answers
-/// false), then, if a reserve is already running: answers **false** when it is
-/// held for this same research, and **true without writing** when the
-/// percentage asked for is the one already stored. Otherwise it stores the
-/// three slots -- `Reserve<owner>` = percent, `ReserveFor<owner>` = the name,
-/// `ReservedAt<owner>` = the current `GoldSpentOnArmy<owner>` -- and answers
-/// true. So a second call for the same tech is the script's signal that the
-/// reserve is still running, and a call with a different tech restarts the
-/// measure from the current army spending.
+/// `gbr.exe` 0x0042cd60: a receiver that does not resolve prints and answers
+/// false; the name is looked up in the command table (an unknown row prints
+/// "No such command" and answers false). Then, when a reserve is already
+/// running (`Reserve<owner>` above zero, 0x0042ce50 `jle`):
+///
+///   * held for a **different** research -- the stored `ReserveFor<owner>`
+///     is not byte-for-byte the argument (0x00429c60 is the compare's
+///     *differs*: `neg; sbb; neg`) -- it answers **false** and writes
+///     nothing. One research reserves at a time;
+///   * held for this research at the **same** percentage, it answers true and
+///     writes nothing;
+///   * held for this research at another percentage, it rewrites `Reserve`
+///     and `ReserveFor` and **keeps `ReservedAt`** (the flag at `[esp+0x14]`
+///     is cleared on that path), so the measure is not restarted.
+///
+/// With no reserve running it writes all three -- `Reserve<owner>` = percent,
+/// `ReserveFor<owner>` = the name as passed, `ReservedAt<owner>` = the current
+/// `GoldSpentOnArmy<owner>` -- and answers true.
+///
+/// This had the first arm inverted (false for the *same* research) and
+/// restarted `ReservedAt` on every write. `ESH_NEEDTECH.VS` calls this only
+/// when `Reserve` is not above zero, so neither difference reaches shipped
+/// play; both are the binary's.
 HostOutcome reserve_for_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return no_settlement(ctx);
@@ -2436,19 +2587,23 @@ HostOutcome reserve_for_impl(CallContext& ctx) {
   EnvStore& store = env->env();
   const EnvScope scope = EnvScope::for_settlement(s->id);
   const std::int32_t running = store.read_int(scope, reserve_key("Reserve", *s));
+  bool restart = true;
   if (running > 0) {
-    if (command_row(ctx, store.read_string(scope, reserve_key("ReserveFor", *s))) == row) {
+    if (store.read_string(scope, reserve_key("ReserveFor", *s)) != ctx.arg(1).as_string()) {
       return boolean(false);
     }
     if (percent == running) return boolean(true);
+    restart = false;
   }
   store.write_int(scope, reserve_key("Reserve", *s), percent);
   // The name as the script spelt it, which is what the script reads back
   // through `EnvReadString` and compares with its own; the row's spelling only
   // decides that it exists.
   store.write_string(scope, reserve_key("ReserveFor", *s), ctx.arg(1).as_string());
-  store.write_int(scope, reserve_key("ReservedAt", *s),
-                  store.read_int(scope, reserve_key("GoldSpentOnArmy", *s)));
+  if (restart) {
+    store.write_int(scope, reserve_key("ReservedAt", *s),
+                    store.read_int(scope, reserve_key("GoldSpentOnArmy", *s)));
+  }
   return boolean(true);
 }
 
@@ -2459,7 +2614,7 @@ HostOutcome reserve_for_impl(CallContext& ctx) {
 /// within `percent` of everything the settlement has spent or could spend:
 ///
 ///     cost = row.costgold
-///     if (Reserve > 0 && ReserveFor == tech) {
+///     if (Reserve != 0 && ReserveFor == tech) {
 ///       if (cost <= reserved) return true;   // already paid for
 ///       cost -= reserved;
 ///     }
@@ -2468,8 +2623,18 @@ HostOutcome reserve_for_impl(CallContext& ctx) {
 ///     return tech <= total * percent / 100
 ///
 /// The reserve is subtracted from the store in every case and credited against
-/// the cost only when it is held for this research. An unknown row is false.
-/// `reserved` is 0x00425890, the same figure `MaxAffordCount` subtracts.
+/// the cost only when it is held for this research. An unknown row prints
+/// "No such command" and is false; a receiver that does not resolve prints
+/// and is false. `reserved` is 0x00425890, the same figure `MaxAffordCount`
+/// subtracts.
+///
+/// The credit's condition is the percentage being **non-zero**
+/// (0x004257d0's result tested with `test/je`), not the reserved gold being
+/// positive, and `ReserveFor == tech` is the exact compare of 0x00426df0
+/// against the argument as passed -- see `reserved_gold_for`. They differ
+/// from what this used to test (`reserved > 0` and the command rows' identity)
+/// on a reserve that has held back nothing yet: a research costing nothing is
+/// then true at once, as in the original.
 HostOutcome check_tech_budget_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return no_settlement(ctx);
@@ -2484,8 +2649,8 @@ HostOutcome check_tech_budget_impl(CallContext& ctx) {
   const EnvScope scope = EnvScope::for_settlement(s->id);
   const std::int32_t reserved = reserved_gold(store, *s);
   std::int32_t cost = row->cost_gold;
-  if (reserved > 0 &&
-      command_row(ctx, store.read_string(scope, reserve_key("ReserveFor", *s))) == row) {
+  if (store.read_int(scope, reserve_key("Reserve", *s)) != 0 &&
+      store.read_string(scope, reserve_key("ReserveFor", *s)) == ctx.arg(1).as_string()) {
     if (cost <= reserved) return boolean(true);
     cost -= reserved;
   }
@@ -3050,8 +3215,13 @@ HostOutcome ts_get_all_barracks_impl(CallContext& ctx) {
 /// Both the guard *and* the loyalty reset are written in the script, on the
 /// lines either side of the call.
 ///
-/// What moves: the owner, the loan, and every building in the settlement's own
-/// list. What does not: loyalty, gold, food, population, sentries, the timers,
+/// What moves (0x005c4eb0, read in full for the economy-1 audit): the owner,
+/// every building in the settlement's own list, the gold on the report, and
+/// the wall -- the sentry roster, the bank and the in-wall count all go to
+/// zero -- and the warehouse's shipping target. **Not the loan**: this used to
+/// wipe it, from a misreading of the stores at `[+0xfc]`/`[+0x100]`, which are
+/// the sentries; the loan is `[+0xec]` and nothing here touches it. What does
+/// not move: loyalty, gold, food, population, the timers,
 /// and **the garrison** -- `AddUnit` files units in the holder, which the
 /// buildings sweep never reaches, so garrisoned units keep their old owner and
 /// the captor inherits somebody else's soldiers standing inside.
@@ -3079,9 +3249,13 @@ HostOutcome ts_get_all_barracks_impl(CallContext& ctx) {
 void give_settlement_to(CallContext& ctx, EconomySystem& economy, World& world, Settlement& s,
                         PlayerId owner) {
   // 0x005c4ec1: setting the owner a settlement already has does nothing at
-  // all -- not even the loan wipe, which is the only way to observe it.
+  // all -- not even the wall's reset, which is the way to observe it.
   if (s.owner == owner) return;
-  s.loan = 0;
+  // The wall is emptied: roster `[+0xfc]`, bank `[+0x100]` and, through the
+  // upkeep-keeping setter 0x005c4930, the in-wall count `[+0xf4]`.
+  s.sentries = 0;
+  s.sentries_put_back = 0;
+  s.sentries_ready = 0;
   // The warehouse's gold changes hands on the report: 0x005c4f03 takes it
   // from the old owner's *captured* count and 0x005c4f24 gives it to the new.
   if (MatchSystem* match = match_system_of(world); match != nullptr) {
@@ -3089,6 +3263,14 @@ void give_settlement_to(CallContext& ctx, EconomySystem& economy, World& world, 
     match->record_gold_captured(s.owner, -gold);
     match->record_gold_captured(owner, gold);
   }
+  // The warehouse forgets where it was shipping (0x005efa10 on the warehouse,
+  // when it resolves): among the resets there, the handle `Settlement::supplied`
+  // reads, `[warehouse+0x38]`, goes to 0xffff. The same routine also clears
+  // the warehouse's supply lists at `+0x24` and, for every settlement with a
+  // warehouse, takes this one out of theirs (0x005ef970) -- bookkeeping of the
+  // original's mule routing, which `EconomySystem`'s wagon table has no
+  // counterpart for.
+  s.supplied = kNoSettlement;
   (void)economy.set_owner(s.id, owner);
   // And the settlement's own owner as its members read it. 0x005c4f78 writes
   // the player record at `[settlement+0x90]`, and that one field is what
@@ -3314,16 +3496,30 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        }
        return HostOutcome::ok_void();
      }},
+    // `GetCentralBuilding` (0x005c2490): the handle word at `[settlement+0x8c]`,
+    // pushed with a zero offset; an invalid receiver prints and pushes 0xffff.
+    // No test that the building is alive -- the word is handed back as it is.
     {CallKind::member, "GetCentralBuilding", 0,
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        return HostOutcome::ok_with(s == nullptr ? invalid_handle() : object_handle(s->anchor));
      }},
+    // `gold` (0x005c1fc0): the warehouse through the handle at
+    // `[settlement+0x5c]`, then its `+0x18`. `food` is the same read at `+0x1c`
+    // (0x005c2080). An invalid receiver prints and pushes 0.
     {CallKind::member, "gold", 0,  // 125 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        return s == nullptr ? no_settlement(ctx) : integer(s->warehouse.gold);
      }},
+    // `food` -- three bodies on one name. `Settlement::food` above; `Unit::food`
+    // (0x005d8c50) is the plain field `[unit+0x16c]`, 0 with a print for an
+    // invalid receiver; `Squad::food` (0x004278c0) sums that field over the
+    // squad's member deque, skipping a handle that does not resolve, and does
+    // not check the squad handle at all (0x00443e30). The unit field is the
+    // feeder's `FeedingUnit::food` here, which a unit not in the chain does
+    // not have: such a unit answers 0, where the original answers whatever its
+    // field holds -- the feeder's enrolment is the design that decides it.
     {CallKind::member, "food", 0,  // 109 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -3356,28 +3552,81 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        const FeedingUnit* link = feeding_unit(ctx);
        return link == nullptr ? no_settlement(ctx) : integer(link->food);
      }},
+    // `population` (0x005c2b70): `[settlement+0x50]`, 0 with a print for an
+    // invalid receiver.
     {CallKind::member, "population", 0,  // 50 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        return s == nullptr ? no_settlement(ctx) : integer(s->population);
      }},
+    // `SetFood` -- four bodies on one name.
+    //
+    // `Settlement::SetFood` (0x005c2140) stores `min(value, cap)` into the
+    // warehouse's `+0x1c`, the cap being the warehouse's `+0x14`. **Only the
+    // upper clamp**: a negative value is stored as it is, and so is anything
+    // under the cap. `SetGold` (0x005c21a0) is the same at `+0x18` against
+    // `+0x10`. `Warehouse::set` clamps at zero too, which is the right rule for
+    // the loader that uses it and not this one's. No shipped site passes a
+    // negative -- every subtracting caller tests the store first -- so this is
+    // the rule, not a behaviour anything is known to lean on.
+    //
+    // `Unit::SetFood` (0x005d7cd0) writes `[unit+0x16c]` **unclamped**, then
+    // sets the unit's flag `0x20000000` through `vtbl+0x44` when the value is
+    // at least 1 and clears it through `vtbl+0x48` otherwise. So
+    // `OUTPOST_BEHAVIOR.VS`'s `u1.SetFood(20)` and the Danube sequences'
+    // `SetFood(40)` give a unit more than its `maxfood` and the unit keeps it.
+    // The flag is the feeder's hungry mark here, set and cleared on the same
+    // threshold.
+    //
+    // `Wagon::SetFood` / `Wagon::SetGold` (0x005ebe70 / 0x005ebec0) write the
+    // kind word `[wagon+0x1d4]` (1 food, 0 gold) and hand the value to the
+    // cargo setter 0x005eb0a0: `[wagon+0x1cc] = value`, the carrying flag set
+    // for a positive food load and cleared otherwise, and -- **outside the
+    // editor (`[0x00a8734c]`), an emptied wagon that is not already dead runs
+    // its death virtual (`vtbl+0xb0`)**. That last step is why
+    // `WAGON_UNLOAD.VS` ends `.SetFood(0); .SetGold(0); .Erase();`. A wagon
+    // here is reached through `ObjectState::cargo`, and the receiver below
+    // takes this path for a wagon object; its death is not reproduced (the
+    // mule journey is `EconomySystem`'s table, see `CreateMuleGold`).
     {CallKind::member, "SetFood", 1,  // 32 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        if (s != nullptr) {
-         s->warehouse.set(Resource::food, int_arg(ctx, 1));
+         s->warehouse.food = std::min(int_arg(ctx, 1), s->warehouse.max_food);
+         return HostOutcome::ok_void();
+       }
+       World* world = world_of(ctx);
+       if (world == nullptr) return no_settlement(ctx);
+       if (WorldObject* wagon = wagon_receiver(ctx, *world); wagon != nullptr) {
+         set_wagon_cargo(*wagon, Resource::food, int_arg(ctx, 1));
+         return HostOutcome::ok_void();
+       }
+       // `ObjList::SetFood` (0x0055e890) and `Query::SetFood` (0x005798b0, the
+       // query refreshed first): a negative value prints "the parameter
+       // should be positive!" and writes nothing; otherwise every member that
+       // casts to `CVXUnit` gets `[u+0x16c]` -- the field alone, **no flag**,
+       // so the hungry mark stays as it was. No shipped site calls either.
+       if (const Value& r = ctx.arg(0);
+           is_objlist(r) || (r.is_object() && r.as_object().type == kTypeQuery)) {
+         const std::int32_t value = int_arg(ctx, 1);
+         if (value < 0) return HostOutcome::ok_void();
+         FeederSystem* feeder = feeder_of(*world);
+         for (const ObjectId id : receiver_objects(*world, r)) {
+           const WorldObject* slot = world->find(id);
+           if (slot == nullptr || !slot->state.flags.is_unit || feeder == nullptr) continue;
+           if (FeedingUnit* link = feeder->find(id); link != nullptr) link->food = value;
+         }
          return HostOutcome::ok_void();
        }
        // 14 of the 32 sites are `Unit`, and they are the ordinary refill path:
        // `u.SetFood(u.food + give)` in `VILLAGE_BEHAVIOR_GIVEFOOD.VS`,
        // `u.SetFood(u.maxfood)` in `TTENT_BEHAVIOR.VS` and
        // `OUTPOST_BEHAVIOR.VS`. Same widening, same reason as `food` above.
-       World* world = world_of(ctx);
-       FeederSystem* feeder = world == nullptr ? nullptr : feeder_of(*world);
+       FeederSystem* feeder = feeder_of(*world);
        if (feeder == nullptr) return no_settlement(ctx);
        const FeedingUnit* link = feeding_unit(ctx);
        if (link == nullptr) return no_settlement(ctx);
-       feeder->set_food(link->unit, int_arg(ctx, 1));
+       feeder->write_food(link->unit, int_arg(ctx, 1));
        return HostOutcome::ok_void();
      }},
     // `name/0` -- 61 sites, and **two entry points sharing one name**, which
@@ -3411,11 +3660,17 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // Recorded rather than guessed at.
     //
     // `Item::name` (0x00535260) is the third registration and has one call
-    // site, `UNIT_ON_ENTER.VS:32`'s `item.name == "Gold"`. It is unreachable:
-    // its receiver comes from `Obj::GetItem/1`, which has no body, so the
-    // branch would be dead code either way. It falls through to the object
-    // path below, which answers the empty string for a handle it cannot
-    // resolve -- the same thing the original answers for an invalid item.
+    // site, `UNIT_ON_ENTER.VS:32`'s `item.name == "Gold"` -- the *Mercenary
+    // pact* turning a unit's carried gold into its settlement's. It resolves
+    // the item, follows the handle word at `[item+8]` (the item's own), reads
+    // the definition pointer at `+0x24`, and answers the `std::string` at the
+    // definition's start -- which the item reader (0x005361f0) fills from the
+    // `<item id=…>` attribute at 0x0053638d, the display `name=` landing
+    // further in. So it is `ItemDefinition::id`; an item that does not resolve
+    // prints and answers the empty string. The item branch used to be missing
+    // -- `GetItem` hands out an object handle, which fell through to the
+    // named-object lookup below and answered `""` for every item -- so the pact
+    // never paid out.
     //
     // A miss is the empty string, never a refusal: both bodies print through
     // 0x00686eb0, which is a bare `ret` in retail, and push the literal at
@@ -3441,6 +3696,14 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        ObjectId id = kNoObject;
        if (ref.type == kTypeObj) {
          id = ref.id;
+         if (const HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
+           if (const ItemInstance* item = heroes->items().find(id); item != nullptr) {
+             const ItemCatalog* catalog = heroes->items().catalog();
+             const ItemDefinition* def = catalog == nullptr ? nullptr : catalog->at(item->type);
+             return HostOutcome::ok_with(
+                 script::Value::string(def == nullptr ? std::string() : def->id));
+           }
+         }
        } else if (ref.type == kTypeNamedObj) {
          id = world->named_objects().object(static_cast<std::int32_t>(ref.id));
        }
@@ -3544,12 +3807,26 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // research it is held for.** 0x00425890 computes it as
     // `Reserve > 0 ? ((GoldSpentOnArmy - ReservedAt) * Reserve) / 100 : 0` from
     // three environment-store values under `/<player>/Settlement<n>/…`, which
-    // `ReserveFor` writes and `StopReserving` clears. The `(gold, food)` form
-    // passes the flag `0` and never subtracts it; the two command forms, like
-    // `MaxAffordCount`, pass `1` unless `Reserve > 0` and the stored
+    // `ReserveFor` writes and `StopReserving` clears. The two command forms,
+    // like `MaxAffordCount`, subtract it unless `Reserve > 0` and the stored
     // `ReserveFor` names this very command (0x00428c67..0x00428c8d), in which
     // case the reserved gold is exactly what the command is allowed to spend.
     // `reserved_gold_for` is that rule in one place.
+    //
+    // **The `(gold, food)` form subtracts the whole reserve, with no
+    // exemption.** 0x00425a90 does not call the core: it inlines it without
+    // the population term, food first (`food > 0`: `warehouse.food / food`,
+    // and a quotient of zero or less answers false before gold is looked at),
+    // then gold -- and at 0x00425b1c it calls 0x00425890 unconditionally and
+    // divides `gold store - reserve` by the cost. It used to be read as
+    // passing a flag of 0 and skipping the reserve, which made a settlement
+    // holding gold back for a research look able to afford the very gold it
+    // was holding. Its argument order is `(gold, food)`: the food divisor is
+    // the value popped first, which is the one the script pushed last.
+    //
+    // An invalid receiver prints "Parameter #1 in function 'CanAfford' is
+    // uninitialized or invalid object." and answers false (all three); a
+    // command name no row carries prints "No such command" and answers false.
     {CallKind::member, "CanAfford", 2,  // 24 sites, with /1
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -3560,12 +3837,19 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        if (ctx.arg(1).is_string()) {
          const CommandDef* row = command_row(ctx, ctx.arg(1).as_string());
          if (row == nullptr) return boolean(false);
+         // `count <= affordable` (0x00428eb0), with no floor on the count: a
+         // count of zero or less is affordable whatever the store holds. Every
+         // shipped site passes 1 or more.
+         // The reserve's exemption compares `ReserveFor` with the string the
+         // script passed (0x00428d40 hands 0x00426df0 the argument's own
+         // characters, the pointer it looked the command up by).
          const std::int32_t wanted = int_arg(ctx, 2);
          return boolean(affordable_count(*s, row->cost_gold, row->cost_food, row->cost_pop,
-                                         reserved_gold_for(ctx, *s, row->name)) >=
-                        (wanted > 0 ? wanted : 1));
+                                         reserved_gold_for(ctx, *s, ctx.arg(1).as_string())) >=
+                        wanted);
        }
-       return boolean(affordable_count(*s, int_arg(ctx, 1), int_arg(ctx, 2), 0) > 0);
+       return boolean(affordable_count(*s, int_arg(ctx, 1), int_arg(ctx, 2), 0,
+                                       reserved_gold_of(ctx, *s)) > 0);
      }},
     {CallKind::member, "CanAfford", 1,
      +[](CallContext& ctx) -> HostOutcome {
@@ -3574,8 +3858,10 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        const CommandDef* row =
            ctx.arg(1).is_string() ? command_row(ctx, ctx.arg(1).as_string()) : nullptr;
        if (row == nullptr) return boolean(false);
+       // As `CanAfford/2`'s command form: 0x00426df0 is handed the argument
+       // (0x00428ba0's lookup pointer), not the row's spelling.
        return boolean(affordable_count(*s, row->cost_gold, row->cost_food, row->cost_pop,
-                                       reserved_gold_for(ctx, *s, row->name)) > 0);
+                                       reserved_gold_for(ctx, *s, ctx.arg(1).as_string())) > 0);
      }},
     // `set.MaxAffordCount(cmd)` -- 0x00428a10, the count `CanAfford` compares,
     // handed to the script. 32 sites, and 10 of them are `ES_STRONGHOLD.VS`
@@ -3591,8 +3877,13 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        const CommandDef* row =
            ctx.arg(1).is_string() ? command_row(ctx, ctx.arg(1).as_string()) : nullptr;
        if (row == nullptr) return integer(0);
+       // The reserve is exempted when the stored `ReserveFor` is the argument
+       // as passed (0x00428a10 hands 0x00426df0 the argument's characters),
+       // not the row's spelling -- see `reserved_gold_for`. The count itself
+       // is 0x00425a10 with the row's gold (`+0x1e8`), food (`+0x1ec`) and
+       // population (`+0x1f0`) costs in registers.
        return integer(affordable_count(*s, row->cost_gold, row->cost_food, row->cost_pop,
-                                       reserved_gold_for(ctx, *s, row->name)));
+                                       reserved_gold_for(ctx, *s, ctx.arg(1).as_string())));
      }},
     // `set.FindResearchLab(tech)` -- 17 sites, and the class-to-command edge
     // runs from the command's side. See `CommandDef::sources`.
@@ -3616,8 +3907,25 @@ constexpr EconomyHostDef kEconomyHosts[] = {
      }},
     // `set.Research(tech)` -- 41 sites in 27 scripts, and the sole blocker of
     // nine. It is a *behaviour*, not an accessor: 0x0042d1b0 finds the row,
-    // asks the affordability core for at least one, finds an idle lab that
-    // offers it, and issues the command there.
+    // asks the affordability core for at least one **with the reserve
+    // subtracted and no exemption for the command it is held for** (the flag 1
+    // pushed at 0x0042d26b, where `CanAfford(cmd)` pushes 0 for that command),
+    // finds an idle lab that offers it, and issues the command there.
+    //
+    // `Building::Research` (0x004dfcd0) is the other registration on this
+    // name and arity, and it is a different thing: it looks the row up, and
+    // runs the building's `research` method **synchronously** (0x0059af00)
+    // with the row's name, `costgold`, `costfood`, `+0x1f4` and `costpop` in
+    // the four globals the `cmdcost_*` names read, restoring them after --
+    // no affordability test, no lab search, no queue, no payment. **Known
+    // gap:** 22 campaign sites call it (`NO_AI.obj.AsBuilding().Research(...)`
+    // and its kin, granting an AI its researches), and here a building
+    // handle resolves to its settlement and takes the settlement's path --
+    // paid for, refused when unaffordable, run on whichever idle lab offers
+    // the row. Closing it needs a method run outside the command queue, which
+    // `CommandSystem` does not offer; `set_command` on the building would
+    // charge the row (`charge`) and replace its running command, neither of
+    // which the original does.
     //
     // Every refusal on the way is a **return**, printed into the sink that is a
     // bare `ret` in retail: an unknown upgrade name prints *"No such upgrade
@@ -3644,7 +3952,11 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        }
        const CommandDef* row = command_row(ctx, ctx.arg(1).as_string());
        if (row == nullptr) return HostOutcome::ok_void();
-       if (affordable_count(*s, row->cost_gold, row->cost_food, row->cost_pop) < 1) {
+       // The core with the reserve flag set and no exemption (0x0042d26b):
+       // the gold held back for a research is held back from that research
+       // too, which `CanAfford(cmd)` -- exempting it -- does not say.
+       if (affordable_count(*s, row->cost_gold, row->cost_food, row->cost_pop,
+                            reserved_gold_of(ctx, *s)) < 1) {
          return HostOutcome::ok_void();
        }
        const ObjectId lab = find_lab(ctx, *world, *s, *row, /*must_be_idle=*/true);
@@ -3691,11 +4003,14 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     //      reads. Aliasing would mean keeping a parallel `vector<ObjectId>`
     //      beside it, which puts one fact in two places: exactly the drift the
     //      alias exists to prevent.
-    //   3. The membership here is the **back-link**, not the roll, for the
-    //      reason `World::buildings_in_settlement` records: on a retail map
-    //      `Settlement::buildings` is empty at load and `WorldObject::settlement`
-    //      is where the answer lives. A handle onto the empty roll would answer
-    //      every shipped site with nothing.
+    //   3. The membership here is the **back-link**, not the roll. That was
+    //      chosen while `Settlement::buildings` was empty at load; the loader
+    //      now files every member building into the roll (sim/session.cpp, in
+    //      document order), so the two agree on a loaded map and differ only
+    //      for a building that gained a back-link without `add_building`.
+    //      (The economy-1 audit read 0x005c3d40: the list it aliases is the
+    //      ObjList embedded at `+0x60`, whose deque is the `+0x6c..+0x78` one
+    //      `BestBarrack` walks -- the roll.)
     //
     // The filter is match-all: the registration is `[23, 1, 27]`, one argument
     // and it is the receiver, so there is no class to filter on.
@@ -3719,6 +4034,8 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // already has**.
     //
     // `Settlement::ObjectsAround` (0x005c5b90) allocates a fresh 0x2c-byte list,
+    // and -- when the receiver resolves and the string is not null; otherwise
+    // the list goes back empty, unprinted --
     // resolves the class name through the class registry at 0x009bdb00, and
     // calls `Settlement::CollectUnits` (0x005c58f0) with **both** of its flags
     // set. That is the same helper the three `UnitsInSettlement` names reach
@@ -3748,13 +4065,18 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        const ObjListId id = pool.acquire_temporary(ctx.script);
        const Settlement* s = receiver(ctx);
        if (s != nullptr) {
-         // A class name the graph does not know yields a filter that names
-         // classes and resolved none, which matches nothing -- the same
-         // reading `fn_units_in_settlement` records, and the same divergence
-         // from the original, which refuses the whole query instead.
-         const ClassFilter filter =
-             ctx.arg(1).is_string() ? ClassFilter::parse(ctx.arg(1).as_string(), world->class_graph())
-                                    : ClassFilter{};
+         // **One class name, whole** (0x00409e40, the registry's exact-key
+         // lookup): not a comma list, and a name the registry does not hold --
+         // the empty one included -- resolves to null, which the heir test in
+         // `CollectUnits` matches against nothing. A filter that names a class
+         // and resolved none is exactly that here.
+         ClassFilter filter;
+         filter.match_all = false;
+         if (const ClassGraph* graph = world->class_graph();
+             graph != nullptr && ctx.arg(1).is_string()) {
+           const ClassIndex index = graph->lookup(ctx.arg(1).as_string());
+           if (index != kNoClass) filter = ClassFilter::of(index);
+         }
          if (std::vector<ObjectId>* out = pool.mutable_items(id)) {
            world->units_in_settlement(s->object, filter, *out, SettlementScope::both);
          }
@@ -3806,23 +4128,47 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        }
        return integer(static_cast<std::int32_t>(units_on_board(*world, slot->id)));
      }},
+    // `IsIndependent` (0x00425320): the owner's index `[[settlement+0x90]+8]`
+    // is 14 or 15 -- the two engine-reserved neutrals. An invalid receiver
+    // answers false, unprinted.
     {CallKind::member, "IsIndependent", 0,  // 26 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        return s == nullptr ? no_settlement(ctx) : boolean(s->independent());
      }},
+    // `max_population` (0x005c2bc0): `[settlement+0x4c]`, 0 with a print.
     {CallKind::member, "max_population", 0,  // 24 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        return s == nullptr ? no_settlement(ctx) : integer(s->max_population);
      }},
+    // `SetGold`: `Settlement::SetGold` (0x005c21a0) and `Wagon::SetGold`
+    // (0x005ebec0); see `SetFood` for both rules.
     {CallKind::member, "SetGold", 1,  // 22 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
-       if (s == nullptr) return no_settlement(ctx);
-       s->warehouse.set(Resource::gold, int_arg(ctx, 1));
+       if (s == nullptr) {
+         World* world = world_of(ctx);
+         if (world == nullptr) return no_settlement(ctx);
+         if (WorldObject* wagon = wagon_receiver(ctx, *world); wagon != nullptr) {
+           set_wagon_cargo(*wagon, Resource::gold, int_arg(ctx, 1));
+           return HostOutcome::ok_void();
+         }
+         return no_settlement(ctx);
+       }
+       s->warehouse.gold = std::min(int_arg(ctx, 1), s->warehouse.max_gold);
        return HostOutcome::ok_void();
      }},
+    // `IsOutpost` (0x004250f0 -> 0x00440060), `IsVillage` (0x004250a0 ->
+    // 0x00440010) and `IsStronghold` (0x00425050 -> 0x0043ffc0) are one shape:
+    // the central building's class (`[[settlement+0x8c]+0x3c]`) walked up its
+    // parent links (`+0xe4`, 0x0059a220, itself included) looking for the
+    // class registered as `Outpost`, `BaseVillage` or `BaseTownhall`, each
+    // looked up once and cached. False for an invalid receiver, unprinted.
+    // `SettlementKind` is that ancestry taken once at creation, first match
+    // nearest the leaf; the two agree because no shipped class descends from
+    // two of these bases (checked over the installation's class graph) and an
+    // anchor's class does not change.
     {CallKind::member, "IsOutpost", 0,  // 19 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -3980,6 +4326,11 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        Settlement* s = receiver(ctx);
        return s == nullptr ? no_settlement(ctx) : boolean(s->is_stronghold());
      }},
+    // `GoldConverted` (0x005c2980): the settlement's owner's score block
+    // (0x0051cce0 on `[[settlement+0x90]+8]`) gains the argument at `+0xb4`,
+    // `PlayerScoreCounters::gold_outpost`, unchecked for sign. That is all;
+    // `EconomySystem::record_gold_converted`'s per-settlement counter below is
+    // this engine's own and nothing reads it back.
     {CallKind::member, "GoldConverted", 1,  // 16 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -3995,6 +4346,16 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        }
        return HostOutcome::ok_void();
      }},
+    // `loyalty`: `Settlement::loyalty` (0x005c2c10) is `[settlement+0x54] / 10`,
+    // 0 with a print for an invalid receiver. `Wagon::loyalty` (0x005ec090) is
+    // the same on the wagon, `[wagon+0x1d8] / 10`, and `Wagon::SetLoyalty`
+    // (0x005ec100) its setter (0..100, stored times ten, outside that range
+    // printed and refused). **Known gap, a design:** a wagon carries no
+    // loyalty here -- neither the value, nor the pending change
+    // `Wagon::DecreaseLoyalty` (0x005ec160) adds to `[+0x1dc]`, nor the tick
+    // that applies it -- so a wagon receiver answers 0, and `UNIT_CAPTURE.VS`
+    // and `HERO_CAPTURE.VS`'s `if (w.loyalty == 0) w.SetPlayer(...)` take a
+    // map's caravan at the first step.
     {CallKind::member, "loyalty", 0,  // 12 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4008,15 +4369,27 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // wholesale, and `UNIT_ON_ENTER.VS` converts the unit's Spoils of War into
     // settlement gold, which must happen once per entry and never again on a
     // reload. So the fire sits at the event and not at the mutation.
+    //
+    // `AddUnit` (0x005c1b20) and `ForceAddUnit` (0x005c1bc0) resolve the unit
+    // first, then the settlement, and hand the unit to the holder entry
+    // 0x005d3e10 with the force flag 0 or 1 -- the routine `garrison_enter`
+    // models: out of the holder it was in, then admitted by 0x00532160
+    // (refused only when not forced and the count `[holder+0x14]` has reached
+    // `[holder+0x10]`; a unit already on the list is not added twice), its
+    // timers and path cleared, the holder word written, and the class's
+    // `onenter` run (0x0059b330). **`AddUnit` answers true when either handle
+    // does not resolve** -- each miss prints and pushes 1 -- and otherwise
+    // whether the holder took it. `ForceAddUnit` is void.
     {CallKind::member, "AddUnit", 1,  // 13 sites
      +[](CallContext& ctx) -> HostOutcome {
-       Settlement* s = receiver(ctx);
-       EconomySystem* economy = host_economy(ctx);
-       if (s == nullptr || economy == nullptr) return no_settlement(ctx);
-       const Value& unit = ctx.arg(1);
-       if (!unit.is_object()) return boolean(false);
        World* world = world_of(ctx);
-       if (world == nullptr) return boolean(false);
+       if (world == nullptr) return no_settlement(ctx);
+       const Value& unit = ctx.arg(1);
+       if (!unit.is_object() || world->find(unit.as_object().id) == nullptr) {
+         return boolean(true);
+       }
+       Settlement* s = receiver(ctx);
+       if (s == nullptr) return boolean(true);
        if (!garrison_enter(*world, s->id, unit.as_object().id, /*force=*/false)) {
          return boolean(false);
        }
@@ -4115,18 +4488,32 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        if (garrison_enter(*world, s->id, ship, /*force=*/false)) enter_settlement(ctx, *s, ship);
        return HostOutcome::ok_with(Value::object(kTypeObj, ship));
      }},
+    // `IsTeutonTent` (0x00420650): the central building's class descriptor
+    // (`[[settlement+0x8c]+0x3c]`), and two exact `std::string` comparisons
+    // against `"TTent"` -- the class `id` at descriptor `+4`, then the `altid`
+    // at `+0x20` (0x0042074f). Not ancestry. `TTentWinter`, the one class
+    // descended from `TTent`, answers **false**, where `IsTTent` and
+    // `SettlementKind::teuton_tent` (both by ancestry) say yes. An invalid
+    // receiver answers false without a print.
     {CallKind::member, "IsTeutonTent", 0,  // 11 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
-       return s == nullptr ? no_settlement(ctx) : boolean(s->is_teuton_tent());
+       if (s == nullptr) return no_settlement(ctx);
+       World* world = world_of(ctx);
+       const ClassGraph* graph = world == nullptr ? nullptr : world->class_graph();
+       const WorldObject* centre = world == nullptr ? nullptr : world->find(s->anchor);
+       if (graph == nullptr || centre == nullptr || centre->class_index == kNoClass) {
+         return boolean(false);
+       }
+       const auto& def = graph->at(centre->class_index);
+       return boolean(def.id == "TTent" || def.altid == "TTent");
      }},
     // `IsTTent` and `IsTeutonTent` are two shipped entry points, not one name
     // spelled twice, and `gbr.exe` implements them differently: `IsTeutonTent`
-    // (`0x00420650`) compares the central building's class *id* to the literal
-    // `"TTent"` with `repe cmpsb`, while `IsTTent` (`0x00440100`) resolves the
-    // class once and asks `IsHeirOf`. No shipped class declares `parent="TTent"`
-    // so the two agree on every retail map, and `SettlementKind::teuton_tent`
-    // -- which sim/session.cpp assigns by ancestry -- is the `IsTTent` reading.
+    // (above) compares names, while `IsTTent` (`0x00440100`) resolves the
+    // class once and asks `IsHeirOf`. They part on `TTentWinter`, the winter
+    // tent, whose parent is `TTent`; `SettlementKind::teuton_tent` -- which
+    // sim/session.cpp assigns by ancestry -- is the `IsTTent` reading.
     //
     // One condition of the original is deliberately not reproduced. Before the
     // class test, `IsTTent` fetches the settlement's unit holder (the same
@@ -4175,11 +4562,28 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        return boolean(!graph->property(central->class_index, "defender_cls_1").empty() ||
                       !graph->property(central->class_index, "defender_cls_2").empty());
      }},
+    // `CreateMuleGold` / `CreateMuleFood` (0x005ef140 / 0x005ef040) hand the
+    // warehouse to 0x005eed90 with the resource (0 gold, 1 food) and the
+    // per-race flag 0: the class is the race's mule (0x005eed10 switches on
+    // the race 0x005a75f0 answers), the amount is clamped to the class's
+    // `max_load` (`+0xa10`) and to the store, the store is drawn down by it,
+    // and a nonzero load becomes a wagon object -- kind, cargo through
+    // 0x005eb0a0, the settlement's owner through `vtbl+0xa0` -- forced into
+    // the settlement's holder (0x005d3e10 with 1). The answer is its handle,
+    // or 0xffff for nothing loaded or an invalid receiver (printed).
+    //
+    // **Known gap, a design.** `EconomySystem::create_mule` is a table entry
+    // whose journey is abstracted: it draws the store and delivers to
+    // `supplied` after `wagon_build_time`, with no object to hand back, so the
+    // answer is the invalid handle and the shipped `if (wagon.IsValid)
+    // wagon.SetCommand(...)` never runs. The amount is not clamped to
+    // `max_load`, and the race's class is not chosen.
     {CallKind::member, "CreateMuleGold", 1,  // 10 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        EconomySystem* economy = host_economy(ctx);
-       if (s == nullptr || economy == nullptr) return no_settlement(ctx);
+       if (world_of(ctx) == nullptr) return no_settlement(ctx);
+       if (s == nullptr || economy == nullptr) return HostOutcome::ok_with(invalid_handle());
        const std::uint32_t wagon =
            economy->create_mule(s->id, s->supplied, Resource::gold, int_arg(ctx, 1));
        const Wagon* w = economy->find_wagon(wagon);
@@ -4192,12 +4596,39 @@ constexpr EconomyHostDef kEconomyHosts[] = {
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        EconomySystem* economy = host_economy(ctx);
-       if (s == nullptr || economy == nullptr) return no_settlement(ctx);
+       if (world_of(ctx) == nullptr) return no_settlement(ctx);
+       if (s == nullptr || economy == nullptr) return HostOutcome::ok_with(invalid_handle());
        const std::uint32_t wagon =
            economy->create_mule(s->id, s->supplied, Resource::food, int_arg(ctx, 1));
        const Wagon* w = economy->find_wagon(wagon);
        return HostOutcome::ok_with(w == nullptr ? invalid_handle() : object_handle(w->object));
      }},
+    // The supply link, `StopSupply` / `StartSupplyFood` / `supplied`.
+    //
+    // A settlement's object at `[set+0x5c]` carries the link: the handle of the
+    // supplied settlement's own such object at `+0x38` (0xffff for none) and
+    // the resource kind at `+0x3c`, the index into the warehouse pair that
+    // `SendMule`/`SendBoat` (0x005eef00, 0x005eefa0) ship from. `supplied`
+    // (0x005ef530) reads `+0x38` back through that object's `+0xc`, its
+    // settlement.
+    //
+    // `set.StopSupply()` -- 0x005ef430. A receiver that does not resolve prints
+    // and does nothing; otherwise `+0x38` becomes 0xffff and the selection
+    // panel is refreshed (0x005e7710, a walk over the interface's own lists --
+    // presentation). The kind at `+0x3c` is left as it was. Void.
+    //
+    // `set.StartSupplyFood(target)` -- 0x005ef380. The argument is resolved
+    // first and the receiver second. A receiver that does not resolve prints
+    // and does nothing; **neither does a target that does not resolve**
+    // ("Parameter #1 ... is uninitialized or invalid object."): the link is
+    // left exactly as it was, not cleared. Otherwise `+0x38` takes the
+    // target's object handle and `+0x3c` takes 1, food, and the panel is
+    // refreshed. There is **no other test**: not the owner, not distance, and
+    // not the receiver itself -- a settlement told to supply itself names
+    // itself. Void, whatever this registration hands back being discarded.
+    //
+    // The kind is not stored here: food is the only kind a shipped script
+    // starts, and nothing bound reads it.
     {CallKind::member, "StopSupply", 0,  // 7 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4211,14 +4642,20 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        EconomySystem* economy = host_economy(ctx);
        if (s == nullptr || economy == nullptr) return no_settlement(ctx);
        Settlement* target = settlement_at(ctx, 1);
-       return boolean(
-           economy->set_supplied(s->id, target == nullptr ? kNoSettlement : target->id));
+       if (target == nullptr) return HostOutcome::ok_void();  // printed, link kept
+       (void)economy->set_supplied(s->id, target->id);
+       return HostOutcome::ok_void();
      }},
+    // `supplied` (0x005ef530): the warehouse's handle `[warehouse+0x38]`, and
+    // through that warehouse's back-reference `[+0xc]` the settlement it
+    // belongs to; a target that does not resolve is 0xffff, and so is an
+    // invalid receiver -- an invalid *handle*, never the integer 0.
     {CallKind::member, "supplied", 0,
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        EconomySystem* economy = host_economy(ctx);
-       if (s == nullptr || economy == nullptr) return no_settlement(ctx);
+       if (world_of(ctx) == nullptr) return no_settlement(ctx);
+       if (s == nullptr || economy == nullptr) return HostOutcome::ok_with(invalid_handle());
        Settlement* target = economy->find(s->supplied);
        return HostOutcome::ok_with(target == nullptr ? invalid_handle()
                                                      : settlement_handle(*target));
@@ -4233,23 +4670,64 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        Settlement* s = receiver(ctx);
        return s == nullptr ? no_settlement(ctx) : integer(s->holder.max_units);
      }},
+    // `set.IsFull` -- 4 sites. 0x005c1d20 compares the holder's occupancy
+    // `[holder+0x14]` with its `max_units` `[holder+0x10]` for **equality**,
+    // not `>=`: a holder force-filled past its ceiling (an outpost's
+    // garrison, `ForceAddUnit`ed into a class that declares `max_units` 0)
+    // answers *not full*, and `GETGAIKASTRAT.VS`'s `if (!Set.IsFull)` reads
+    // it as a settlement the AI can still enter. A receiver that does not
+    // resolve prints and answers **true** (0x005c1d4f writes 1) -- the one
+    // settlement member whose failure is not the type's zero.
+    // `Holder::full()` stays `>=`: it is `AddUnit`'s refusal, a different
+    // body.
     {CallKind::member, "IsFull", 0,  // 4 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
-       return s == nullptr ? no_settlement(ctx) : boolean(s->holder.full());
+       if (s == nullptr) {
+         return world_of(ctx) == nullptr ? no_settlement(ctx) : boolean(true);
+       }
+       return boolean(s->holder.count() == s->holder.max_units);
      }},
+    // The tavern loan, `SetLoan` and `loan`.
+    //
+    // `[set+0xec]` holds the debt **with its interest already in it**.
+    // `set.SetLoan(n)` (0x005c2410) stores `n + n * LoanInterestPercent / 100`
+    // (`[0x009bf794]`, read from `[GamePlay]` by 0x005c0bb0), truncating, with
+    // no clamp of any kind -- a negative `n` is a negative debt -- and
+    // refreshes the panel. `set.loan` (0x005c23a0) answers the stored debt
+    // `* 100 / (LoanInterestPercent + 100)`, truncating, so the principal comes
+    // back -- or one less, when the two truncations do not cancel:
+    // `SetLoan(15)` at 10% stores 16 and reads back 14. Both print and do
+    // nothing (`loan`: answer 0) for a receiver that does not resolve; the
+    // setter's message names `RepayLoan`, a copy-paste in the original.
+    //
+    // **Interest is charged once, here, and never again.** `TimeProductionForLoan`
+    // is read into a global by the same 0x005c0bb0 and that global has no
+    // other reader, so nothing accrues over time. What brings the debt down is
+    // production: 0x005c1010, called from the production tick, pays the gold
+    // produced into the debt first (`EconomySystem::produce`).
+    // `TAVERN_REPAYLOAN.VS` then reads `.loan` and pays `SetGold(.gold -
+    // .loan)` -- the principal, not the stored debt.
     {CallKind::member, "SetLoan", 1,  // 3 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
-       if (s == nullptr) return no_settlement(ctx);
-       s->loan = std::max(0, int_arg(ctx, 1));
+       EconomySystem* economy = host_economy(ctx);
+       if (s == nullptr || economy == nullptr) return no_settlement(ctx);
+       const std::int32_t n = int_arg(ctx, 1);
+       s->loan = n + n * economy->rules().loan_interest_percent / 100;
        return HostOutcome::ok_void();
      }},
     {CallKind::member, "loan", 0,  // 3 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
-       return s == nullptr ? no_settlement(ctx) : integer(s->loan);
+       EconomySystem* economy = host_economy(ctx);
+       if (s == nullptr || economy == nullptr) return no_settlement(ctx);
+       const std::int32_t divisor = economy->rules().loan_interest_percent + 100;
+       return integer(divisor == 0 ? 0 : s->loan * 100 / divisor);
      }},
+    // `Settlement::SetLoyalty` (0x005c27d0): a value from 0 to 100 is stored
+    // as tenths at `[settlement+0x54]`; anything else prints "Loyalty must be
+    // between 0 and 100" and writes nothing. Not the pending change.
     {CallKind::member, "SetLoyalty", 1,
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4258,6 +4736,27 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        economy->set_loyalty(s->id, int_arg(ctx, 1));
        return HostOutcome::ok_void();
      }},
+    // `set.DecreaseLoyalty(n)` -- 0x005c2830. A receiver that does not resolve
+    // prints and does nothing; a negative `n` prints "Decrease amount must be
+    // positive" and does nothing; otherwise the pending change `[set+0x58]`
+    // drops by `10 * n`, with no clamp and nothing else -- the cap tick applies
+    // it. Void. See `decrease_loyalty`.
+    //
+    // **`Wagon::DecreaseLoyalty` (0x005ec160) shares the name and not the
+    // body**, and this registration cannot serve it: on a wagon the receiver
+    // resolves to no settlement and the call does nothing. The original has a
+    // whole wagon loyalty of its own -- `[wagon+0x1d8]` in tenths
+    // (`Wagon::loyalty` reads it over ten, `Wagon::SetLoyalty` writes it),
+    // the pending change at `[wagon+0x1dc]` that this lowers by `10 * n`, and
+    // a capture flag at `[wagon+0x1d0]` that the first decrease raises while
+    // arming the wagon's timers 9 and 10 at `WagonLoyaltyInterval` and
+    // `WagonLoyaltyCapInterval` (0x005eaef0 reads those, `WagonLoyaltyChangeCap`,
+    // `WagonLoyaltyIncreasePerUnit` and `LoyaltyWagonsInitial`).
+    // `UNIT_CAPTURE.VS` and `HERO_CAPTURE.VS` wear a mule down with it and
+    // take it when `w.loyalty == 0` -- which here is at once, since a wagon's
+    // `loyalty` answers 0. That model is a design of its own (per-object
+    // loyalty state and its two timers, shared with `Wagon::loyalty` and
+    // `Wagon::SetLoyalty`) and is left for one.
     {CallKind::member, "DecreaseLoyalty", 1,
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4267,10 +4766,25 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        (void)economy->decrease_loyalty(s->id, int_arg(ctx, 1));
        return HostOutcome::ok_void();
      }},
+    // `set.CanBeCaptured` -- 2 sites, `GETGAIKASTRAT.VS` and `SQUADMONITOR.VS`,
+    // both deciding whether the AI should go for a settlement. 0x00424ff0
+    // reads the flag `AllowCapture` writes (`[set+0x3c]`) **and then
+    // overrides it**: a settlement that `IsOutpost` (0x00440060) and is owned
+    // by zero-based player 14 (`cmp [record+8], 0xe` at 0x00425030 -- 14 only,
+    // not 15) answers false. So the independents' outposts are never capture
+    // targets to the AI's strategy, whatever their class declares. There is no
+    // receiver check; this answers the zero for one that does not resolve.
+    //
+    // `gbr.exe` also registers a one-argument `CanBeCaptured(obj)`
+    // (0x005c1c40, answering true for an invalid argument or receiver and
+    // otherwise `IsValidCaptureTarget`'s helper 0x005c19d0). No shipped site
+    // passes an argument, so it is not bound here.
     {CallKind::member, "CanBeCaptured", 0,  // 2 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
-       return s == nullptr ? no_settlement(ctx) : boolean(s->can_be_captured);
+       if (s == nullptr) return no_settlement(ctx);
+       if (s->is_outpost() && s->owner == kNeutralWildlife) return boolean(false);
+       return boolean(s->can_be_captured);
      }},
     // `AllowCapture(bool)` -- 7 sites, and **it writes the field `CanBeCaptured`
     // reads**, which is why it needs no state of its own. `0x005c1ce0` stores
@@ -4313,16 +4827,17 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // `[+0xf4]` by one **and** `[+0x100]`, and it does not check the roster or
     // the ceiling: a wall can end up holding more than it started with.
     //
-    // `set.DelSentry()` -- 11 sites, and **it is dropped**. 0x005c2a60 is the
-    // whole body: if `[+0x100] > 0`, lower it by one. That field is written in
-    // three places -- here, `PutSentry`, and three constructor-shaped stores of
-    // zero -- and a sweep of `.text` for a read of `[reg+0x100]` inside the
-    // settlement code finds no other. Nothing in `gbr.exe` and nothing in 885
-    // scripts asks what it holds. It is the shape `Squad::IsEnemyInSquadSight`
-    // documents from the other side, and storing it would be state with no
-    // consumer. The call sites are a sentry dying (`Damage(sent, 10000)` then
-    // `DelSentry`) and a wall changing hands, so what it *meant* is legible
-    // even though what reads it is not there.
+    // `set.DelSentry()` -- 11 sites, a sentry dying (`sent.Damage(10000)` then
+    // `DelSentry` in `GATE_PATROL.VS` and `WALL_PATROL.VS`). 0x005c2a60: if
+    // the bank `[+0x100]` is above zero, lower it by one; **otherwise lower the
+    // roster `[+0xfc]` by one, floored at zero**. This used to be read as the
+    // first branch alone and dropped as state nothing reads, and the else arm
+    // is what makes it matter: the roster is what `GetNumSentries` answers and
+    // `TOWNHALL_SENTRIES_CONTROL.VS` tops back up to `GetMaxSentries`, so a
+    // town whose sentries died never replaced one. The receiver is resolved
+    // without a check in the original (a null one is dereferenced); here it
+    // answers nothing. `PutSentry` fills the bank, and a change of owner
+    // empties it (0x005c4eb0).
     {CallKind::member, "GetSentry", 0,  // 4 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4335,13 +4850,21 @@ constexpr EconomyHostDef kEconomyHosts[] = {
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        if (s == nullptr) return no_settlement(ctx);
-       // No ceiling: the original raises the count and asks nothing.
+       // No ceiling: the original raises the count and asks nothing. And the
+       // bank `DelSentry` spends, `[+0x100]`.
        s->sentries_ready += 1;
+       s->sentries_put_back += 1;
        return HostOutcome::ok_void();
      }},
-    {CallKind::member, "DelSentry", 0,  // 11 sites, and nothing reads what it writes
+    {CallKind::member, "DelSentry", 0,  // 11 sites
      +[](CallContext& ctx) -> HostOutcome {
-       (void)receiver(ctx);
+       Settlement* s = receiver(ctx);
+       if (s == nullptr) return no_settlement(ctx);
+       if (s->sentries_put_back > 0) {
+         s->sentries_put_back -= 1;
+       } else {
+         s->sentries = std::max(0, s->sentries - 1);
+       }
        return HostOutcome::ok_void();
      }},
     {CallKind::member, "GetNumSentries", 0,  // 2 sites
@@ -4385,12 +4908,15 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        economy->add_population(s->id, int_arg(ctx, 1));
        return HostOutcome::ok_void();
      }},
+    // `SetPopulation` (0x005c2200): `[settlement+0x50] = min(value,
+    // [settlement+0x4c])` -- clamped to `max_population` above and **not at
+    // zero below**, which `EconomySystem::set_population` does for its own
+    // callers. An invalid receiver prints and writes nothing.
     {CallKind::member, "SetPopulation", 1,
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
-       EconomySystem* economy = host_economy(ctx);
-       if (s == nullptr || economy == nullptr) return no_settlement(ctx);
-       economy->set_population(s->id, int_arg(ctx, 1));
+       if (s == nullptr) return no_settlement(ctx);
+       s->population = std::min(int_arg(ctx, 1), s->max_population);
        return HostOutcome::ok_void();
      }},
     // 4 sites, three of them campaign sequences, and the sole blocker of
@@ -4435,9 +4961,11 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // `<settlement name>` byte for byte, which is what `gbr.exe` 0x005c3ad0
     // does: 0x005c3b17 walks `[mgr+0x4c, mgr+0x50)`, 0x005c3b41 takes the
     // `std::string` at `settlement+0xcc`, and 0x005c3b63 compares it against
-    // the argument with its exact length. Case-sensitive, and `find_by_name`
-    // refuses the empty name so the 496 unnamed settlements stay unreachable
-    // rather than all matching each other.
+    // the argument with its exact length. Case-sensitive -- and the empty
+    // name is a name like any other: it answers the first unnamed settlement
+    // (`settlement_named`). `SIEGE.VS` and `GUARD.VS` take `Target` from the
+    // helper's parameters and the Numantia sequence 18 an `EnvReadString`
+    // that may never have been written, so an empty one is reachable.
     //
     // **A miss is not a refusal.** 0x005c3bad prints "Could not find settlement
     // named '%s' in function 'GetSettlement'. Check the spelling." and pushes
@@ -4452,7 +4980,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        if (ctx.count() != 1 || !ctx.arg(0).is_string()) {
          return HostOutcome::failed("GetSettlement expects a settlement name");
        }
-       const Settlement* s = economy->settlements().find_by_name(ctx.arg(0).as_string());
+       const Settlement* s = settlement_named(*economy, ctx.arg(0).as_string());
        return HostOutcome::ok_with(s == nullptr ? invalid_handle() : settlement_handle(*s));
      }},
     // `unit.GetHolderSett` -- 34 sites. The settlement of whatever is holding
@@ -4513,9 +5041,13 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // 0x005ebfd0 and 0x005ebf10 are the same body with the resource swapped.
     // In order:
     //
-    //   1. **the settlement the mule is standing in**, walked from the mule's
-    //      holder the way `GetHolderSett` above walks it (0x005ebc90). No
-    //      holder, or a holder with no settlement, and nothing happens.
+    //   1. **the town hall the mule is standing in** (0x005ebc90): its holder,
+    //      the holder's settlement, that settlement's central building -- which
+    //      must cast to `CVXTownHall` (towns, villages and shipyards; not an
+    //      outpost, which is a `CVXOutpost`) -- and the mule's owner must grant
+    //      the hall's owner **share-support**, bit 2 of its relations word
+    //      (0x005eb070), which a player's own word always carries. Any of that
+    //      failing, and nothing happens.
     //   2. **the mule must be empty or already carrying this kind.** The test
     //      is `[+0x1cc] == 0 || [+0x1d4] == <this resource>`, so a half-loaded
     //      gold mule refuses food and a *spent* one takes either -- the kind
@@ -4529,6 +5061,19 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     //
     // The kind is written **before** the warehouse is asked, so a mule that
     // asked for food and got none still reports `restype == food`. Reproduced.
+    //
+    // **Two things are not reproduced, and they are the reason both rows are
+    // `partial`.** (a) 0x005ebc90 has a second arm, for a mule that is *not*
+    // in a holder: a cell sweep (0x005eb4b0) of the mule's sight
+    // (`[mule+0xd0]`) for the first `CVXTownHall` it can see (0x005a7870) whose
+    // owner it grants share-support -- so a mule standing beside a friendly
+    // town loads from it without entering. The sweep's cell order decides
+    // which hall when there are two, and this engine sweeps by id. (b) The new
+    // cargo is set through 0x005eb0a0, which **kills a mule whose cargo comes
+    // out at zero** (`vtbl+0xb0`, unless it is already dead or the global at
+    // 0x00a8734c is set) -- so an empty mule asking an empty warehouse dies.
+    // That setter is shared with `Wagon::SetGold`/`SetFood` and wants one
+    // model of a wagon's death, which belongs with those rows.
     // `set.CreateBoatGold(n)` / `CreateBoatFood(n)` -- 3 sites each, and
     // between them the whole of four scripts: `CREATE_GOLD_BOAT_BIG.VS` and its
     // three siblings differ only in `1000` against `250` and which of the two
@@ -4677,8 +5222,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        EconomySystem* economy = host_economy(ctx);
        if (world == nullptr) return HostOutcome::failed("InHolder: no world");
        if (economy == nullptr || !ctx.arg(1).is_string()) return integer(0);
-       const Settlement* target =
-           economy->settlements().find_by_name(ctx.arg(1).as_string());
+       const Settlement* target = settlement_named(*economy, ctx.arg(1).as_string());
        if (target == nullptr) return integer(0);
        const ObjectId holder = target->holder.object;
        if (holder == kNoObject) return integer(0);
@@ -4783,14 +5327,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // buildings joined -- observable only through `BestGate`'s tie, which
     // keeps the earlier of two equal scores.
     //
-    // `Gate::Inside(squad)` (0x00429310) is **deliberately absent**. For every
-    // member of the squad it runs a path search (0x005295d0, a pathfinder built
-    // with flag 0x100) from the member to the settlement's central building
-    // and answers true only when each search records nothing -- the reading
-    // being that the flag makes the search record the gates it crosses, so a
-    // unit is inside when no gate stands between it and the centre. This
-    // engine's pathfinder has no notion of a gate crossing; the condition that
-    // lifts this is one that does.
+    // `Gate::Inside(squad)` (0x00429310) is below, beside `NumGates`.
     // -- damage taken --------------------------------------------------------
     {CallKind::member, "ClearDamageTaken", 0,  // 2 sites, two receivers
      // `Building::ClearDamageTaken` (0x004ddbb0) zeroes the receiver's own
@@ -4847,7 +5384,10 @@ constexpr EconomyHostDef kEconomyHosts[] = {
      // 0x0042ca90: `SettlementCount(around, dist, class)` -- how many
      // settlements stand strictly within `dist` of the point, measured to the
      // central building, whose central building is a `class`. Store order,
-     // every settlement, no owner test.
+     // every settlement, no owner test. The distance test is unsigned (the
+     // root against the argument as a `uint`), so a negative `dist` counts
+     // every settlement of the class; a class name nothing declares counts
+     // none (0x0059c020 answers false on an unresolved name).
      +[](CallContext& ctx) -> HostOutcome {
        World* world = world_of(ctx);
        EconomySystem* economy = world == nullptr ? nullptr : economy_of(*world);
@@ -4867,7 +5407,9 @@ constexpr EconomyHostDef kEconomyHosts[] = {
          const Point at = world->resolve_position(anchor->id);
          const std::int64_t dx = static_cast<std::int64_t>(at.x) - around.x;
          const std::int64_t dy = static_cast<std::int64_t>(at.y) - around.y;
-         if (isqrt(dx * dx + dy * dy) >= within) continue;
+         // Unsigned, `jae` on the root against the argument as a `uint`: a
+         // negative `dist` is above every distance and counts them all.
+         if (within >= 0 && isqrt(dx * dx + dy * dy) >= within) continue;
          bool heir = false;
          for (const ClassIndex ancestor : graph->ancestry(anchor->class_index)) {
            if (ancestor == wanted) heir = true;
@@ -4885,6 +5427,14 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // `Gate::Inside(squad)` -- 1 site, and the receiver is the gate rather than
     // the settlement, which is why it sits with the gate members and not with
     // the settlement's. See `inside_walls` in `sim/gate.hpp`.
+    //
+    // 0x00429310 checks only that the *gate* resolves (the message calls it
+    // "Parameter #1"; false when it does not) and never passes the gate on
+    // except as `this` to 0x005295d0, which reads the gate's settlement
+    // (`[gate+0x148]`) and that settlement's central building. It then walks
+    // the squad's members (0x00443e30 on the handle's player nibble and
+    // index) and answers false at the first that is not inside; every member
+    // inside, or none, is true.
     {CallKind::member, "Inside", 1,  // 1 site
      +[](CallContext& ctx) -> HostOutcome {
        World* world = world_of(ctx);
@@ -4937,11 +5487,16 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        return HostOutcome::ok_with(best == kNoObject ? invalid_handle() : object_handle(best));
      }},
     {CallKind::member, "OpenAllGates", 0,  // 1 site
-     // 0x00428710: every gate that is not already open has its command
-     // replaced by `opengate`. "Already open" is 0x00529070's pair of tests --
-     // the target state is open *and* the animation stands at its last frame
-     // -- and this engine carries the state alone, so a gate mid-swing counts
-     // as open here and is not re-ordered.
+     // 0x00428710: every gate of the settlement's building deque whose
+     // target state (`[gate+0x208]`) is not 1, open, has what it is doing
+     // ended (`vtbl+0xc0(1)`) and `opengate` issued through 0x004efc00 with
+     // the replace flag, as the settlement's owner. The body asks two
+     // things -- 0x00529070 (state 1 *and* the frame at `[gate+0x20c]` at its
+     // last, 0x46) is false, *and* the state is not 1 -- and the second
+     // decides alone: a gate already swinging open is not re-ordered, which is
+     // exactly the target-state flag this engine carries. A command table with
+     // no `opengate` row prints and stops the walk; the shipped one has it.
+     // A receiver that does not resolve dereferences null in the original.
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        if (s == nullptr) return HostOutcome::ok_void();

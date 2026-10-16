@@ -34,10 +34,12 @@
 #include "imperivm/core/script/compiler.hpp"
 #include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/objlist.hpp"
+#include "imperivm/core/sim/player_host.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "test.hpp"
@@ -73,6 +75,11 @@ ClassGraph fixture_graph() {
             "sentry.sc.xml");
   graph.add(bytes(R"(<class id="RamUnit" cpp_class="CVXUnit" parent="Warrior"/>)"),
             "ramunit.sc.xml");
+  // The class the Nobility research reads (`Unit::SetExperience`'s virtual).
+  graph.add(bytes(R"(<class id="Military" cpp_class="CVXUnit" parent="Warrior"/>)"),
+            "military.sc.xml");
+  graph.add(bytes(R"(<class id="Legionary" cpp_class="CVXUnit" parent="Military"/>)"),
+            "legionary.sc.xml");
   graph.add(bytes(R"(<class id="BCatapultUnit" cpp_class="CVXUnit" parent="RamUnit"/>)"),
             "bcatapultunit.sc.xml");
   graph.add(bytes(R"(<class id="Keen" cpp_class="CVXUnit" parent="Warrior">
@@ -421,23 +428,93 @@ TEST(administration_lets_more_warriors_in_than_the_bare_cap) {
   CHECK(!f.heroes.attach(f.world, f.spawn_warrior(), hero));
 }
 
-TEST(attachment_refuses_what_the_verify_script_refuses) {
+TEST(the_attach_join_leaves_the_scripts_refusals_to_the_scripts) {
+  // 0x005ddf50 refuses only the hero itself and a full army; the enemy and
+  // `HasFreedom` tests are `UNIT_ATTACH.VS`'s, made before it calls.
   Fixture f;
   const ObjectId hero = f.spawn_hero(1);
   const ObjectId mine = f.spawn_warrior(1);
   const ObjectId theirs = f.spawn_warrior(2);
 
-  CHECK(!f.heroes.attach(f.world, hero, hero));           // `if (me == h) return`
-  CHECK(!f.heroes.attach(f.world, mine, sim::kNoObject));      // `!hero.IsValid()`
-  CHECK(!f.heroes.attach(f.world, theirs, hero));         // `.IsEnemy(hero)`
-
+  CHECK(!f.heroes.attach(f.world, hero, hero));
+  CHECK(!f.heroes.attach(f.world, mine, sim::kNoObject));
+  CHECK(f.heroes.attach(f.world, theirs, hero));
   f.heroes.unit(mine)->has_freedom = true;
-  CHECK(!f.heroes.attach(f.world, mine, hero));           // `if (.HasFreedom) return`
-  f.heroes.unit(mine)->has_freedom = false;
   CHECK(f.heroes.attach(f.world, mine, hero));
-  // `if (.hero == hero) return false` -- already there, nothing to do.
+  // Already there: a success that changes nothing.
   CHECK(f.heroes.attach(f.world, mine, hero));
-  CHECK(f.heroes.army_size(hero) == 1);
+  CHECK(f.heroes.army_size(hero) == 2);
+
+  // The cap test is `==` (0x005ddfab): filled to 52 under Administration 1,
+  // then the point withdrawn (cap 50), the army is past its cap and still
+  // takes one more.
+  f.grant(hero, 5);
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::administration, 1));
+  while (f.heroes.army_size(hero) < 52) REQUIRE(f.heroes.attach(f.world, f.spawn_warrior(1), hero));
+  CHECK(!f.heroes.attach(f.world, f.spawn_warrior(1), hero));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::administration, 0));
+  CHECK(f.heroes.attach(f.world, f.spawn_warrior(1), hero));
+  CHECK(f.heroes.army_size(hero) == 53);
+}
+
+TEST(attach_to_refuses_the_dead_and_a_unit_the_hero_cannot_see) {
+  // 0x005de090: invalid or dead receiver, invalid or dead hero -> false.
+  // 0x005a7870 inside 0x005ddf50: a hero of no sight sees nothing, and the
+  // edge distance (centre distance less both radii) must not pass its sight.
+  Fixture f;
+  const ObjectId hero = f.spawn_hero(1);
+  const ObjectId near = f.spawn_warrior(1);
+  const ObjectId far = f.spawn_warrior(1);
+  const ObjectId dead = f.spawn_warrior(1);
+  f.world.set_position(hero, Point{1000, 1000});
+  f.world.set_position(near, Point{1600, 1000});
+  f.world.set_position(far, Point{1601, 1000});
+  f.world.set_position(dead, Point{1000, 1000});
+  f.world.set_health(dead, 0);
+  WorldObject* seer = f.world.find(hero);
+  REQUIRE(seer != nullptr);
+
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  sim::HostContext context;
+  context.world = &f.world;
+  const auto call = [&](std::string_view name, ObjectId self,
+                        ObjectId other) -> script::HostOutcome {
+    const std::uint32_t index = registry.find(script::CallKind::member, name, 1);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    std::vector<script::Value> args{script::Value::object(7, self), script::Value::object(7, other)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    return registry.entry(index).fn(ctx);
+  };
+  const auto attach = [&](ObjectId self, ObjectId other) {
+    return call("AttachTo", self, other).value.as_integer() == 1;
+  };
+
+  seer->sight = 0;
+  CHECK(!attach(near, hero));  // no sight, no reach
+  seer->sight = 600;
+  CHECK(!attach(far, hero));   // 601 away
+  CHECK(attach(near, hero));   // 600 away
+  CHECK(!attach(dead, hero));
+  CHECK(!attach(hero, hero));
+  f.world.set_health(hero, 0);
+  CHECK(!attach(far, hero));
+  f.world.set_health(hero, 1000);
+
+  // `DetachFrom` (0x005db3b0) is void, and refuses the wrong hero.
+  const ObjectId other = f.spawn_hero(1);
+  const script::HostOutcome wrong = call("DetachFrom", near, other);
+  CHECK(wrong.status == script::HostStatus::ok);
+  CHECK(wrong.value.is_nil());
+  CHECK(f.heroes.hero_of(near) == hero);
+  (void)call("DetachFrom", near, hero);
+  CHECK(f.heroes.hero_of(near) == sim::kNoObject);
 }
 
 /// `Unit::HasFreedom` (0x005d7d30) is the specials word's `freedom` bit --
@@ -463,8 +540,8 @@ TEST(a_unit_whose_class_lists_freedom_or_descends_from_ramunit_is_free) {
   CHECK(!sim::unit_has_freedom(f.world, keen));
   CHECK(!sim::unit_has_freedom(f.world, plain));
   CHECK(!sim::unit_has_freedom(f.world, sim::kNoObject));
-  CHECK(!f.heroes.attach(f.world, sentry, hero));
-  CHECK(!f.heroes.attach(f.world, catapult, hero));
+  // The freedom test is `UNIT_ATTACH.VS`'s `if (.HasFreedom) return`, made
+  // before `AttachTo` is called; the join itself takes anyone.
   CHECK(f.heroes.attach(f.world, keen, hero));
   CHECK(f.heroes.attach(f.world, plain, hero));
   CHECK(f.heroes.army_size(hero) == 2);
@@ -518,18 +595,57 @@ TEST(attaching_to_a_second_hero_leaves_the_first) {
   CHECK(f.heroes.squad_of(warrior) == f.heroes.squad_of(second));
 }
 
-TEST(armies_full_percent_is_over_a_players_heroes) {
+TEST(armies_full_percent_is_over_a_players_hero_led_squads) {
+  // 0x00443f50: the player's squads, skipping empty ones and those flagged
+  // SF_NOAI, SF_PEACEFUL or SF_SENTRIES (0x25), whose front member is a hero.
   Fixture f;
   const ObjectId a = f.spawn_hero(3);
   const ObjectId b = f.spawn_hero(3);
-  CHECK(f.heroes.armies_full_percent(3) == 0);
-  CHECK(f.heroes.armies_full_percent(4) == 0);  // no hero at all
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 0);
+  CHECK(f.heroes.armies_full_percent(f.world, 4) == 0);  // no hero at all
 
   for (int i = 0; i < 25; ++i) CHECK(f.heroes.attach(f.world, f.spawn_warrior(3), a));
-  // 25 of a combined 100.
-  CHECK(f.heroes.armies_full_percent(3) == 25);
   for (int i = 0; i < 25; ++i) CHECK(f.heroes.attach(f.world, f.spawn_warrior(3), b));
-  CHECK(f.heroes.armies_full_percent(3) == 50);
+  // 25 + 25 of a combined 100 -- once both lead a squad.
+  REQUIRE(f.heroes.squad_of(a).valid());
+  REQUIRE(f.heroes.squad_of(b).valid());
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 50);
+  // A flagged squad drops out, cap and all: 25 of 50.
+  Squad* flagged = f.heroes.squads().find(f.heroes.squad_of(b));
+  REQUIRE(flagged != nullptr);
+  flagged->flags = 0x20;  // SF_SENTRIES
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 50);
+  for (int i = 0; i < 5; ++i) CHECK(f.heroes.detach(f.world, f.heroes.hero(a)->army.front()));
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 40);  // 20 of 50
+  flagged->flags = 0x02;  // SF_ADVCHOOSER is not one of the three
+  CHECK(f.heroes.armies_full_percent(f.world, 3) == 45);  // 45 of 100
+}
+
+TEST(hero_armies_full_perc_takes_a_script_player) {
+  // 0x00421f30 decrements its argument, as every per-player entry point does.
+  Fixture f;
+  const ObjectId a = f.spawn_hero(3);
+  for (int i = 0; i < 10; ++i) CHECK(f.heroes.attach(f.world, f.spawn_warrior(3), a));
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  sim::HostContext context;
+  context.world = &f.world;
+  const auto perc = [&](std::int32_t player) -> std::int32_t {
+    const std::uint32_t index =
+        registry.find(script::CallKind::free_function, "HeroArmiesFullPerc", 1);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return -999;
+    script::CallContext ctx;
+    std::vector<script::Value> args{script::Value::integer(player)};
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.kind = script::CallKind::free_function;
+    return registry.entry(index).fn(ctx).value.as_integer();
+  };
+  CHECK(perc(player_to_script(3)) == 20);  // 10 of 50
+  CHECK(perc(player_to_script(3) + 1) == 0);
+  CHECK(perc(17) == 0);
 }
 
 // --------------------------------------------------------------------------
@@ -663,36 +779,100 @@ TEST(the_chance_skills_report_percentages_and_never_roll_here) {
   CHECK(f.world.rng().state() == before);
 }
 
-TEST(a_skill_cannot_be_bought_without_points_and_stops_at_ten) {
+TEST(set_skill_writes_without_looking_at_the_balance_and_stops_at_ten) {
+  // `Hero::SetSkill` (0x0052f4f0) refuses only an id past 24 and points
+  // outside [-1, 10]; the skill writer (0x0052def0) stores the rest with no
+  // look at the balance, and `AvailableSkillPoints` (0x0052da80) is
+  // `min(level, 10 per offered skill) - spent`, which nothing floors.
   Fixture f;
   const ObjectId hero = f.spawn_hero();
-  // One point per level (0x0052da80): a fresh hero is level 1 and has one.
+  // One point per level: a fresh hero is level 1 and has one.
   CHECK(f.heroes.available_skill_points(hero) == 1);
-  CHECK(!f.heroes.set_skill(hero, HeroSkill::team_attack, 2));
-  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 0);
+  CHECK(f.heroes.set_skill(hero, HeroSkill::team_attack, 2));
+  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 2);
+  CHECK(f.heroes.available_skill_points(hero) == -1);
   // A level-up is a point without anyone granting it.
-  const std::int32_t next = f.heroes.experience_to_next_level(1);
+  const std::int32_t next = f.heroes.experience_for_level(2) - f.heroes.experience(hero);
   REQUIRE(next > 0);
   (void)f.heroes.add_experience(hero, next);
   CHECK(f.heroes.inherent_level(hero) == 2);
-  CHECK(f.heroes.available_skill_points(hero) == 2);
+  CHECK(f.heroes.available_skill_points(hero) == 0);
 
   f.grant(hero, 4);
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 4));
   CHECK(f.heroes.available_skill_points(hero) == 0);
-  // Selling back returns the points, which is what makes `SetSkill` safe for
-  // the AI's `SetSkill(id, skillpoints + available)` idiom.
+  // Selling back returns the points.
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 1));
   CHECK(f.heroes.available_skill_points(hero) == 3);
 
+  // Past 10, or below -1, the entry point does nothing at all.
   f.grant(hero, 100);
-  REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 99));
+  CHECK(!f.heroes.set_skill(hero, HeroSkill::team_attack, 11));
+  CHECK(!f.heroes.set_skill(hero, HeroSkill::team_attack, -2));
+  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 1);
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 10));
   CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 10);
+
+  // -1 withdraws the skill: `GetSkill` reads -1, and it leaves the balance's
+  // ten-per-skill cap and its spending both.
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, -1));
+  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == -1);
+  CHECK(!f.heroes.offers_skill(hero, HeroSkill::team_attack));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::team_attack, 0));
+  CHECK(f.heroes.offers_skill(hero, HeroSkill::team_attack));
+  CHECK(f.heroes.skill(hero, HeroSkill::team_attack) == 0);
 
   // `HERO_SKILL_BEHAVIOUR.VS` tests `skillpoints < 0` explicitly.
   CHECK(f.heroes.skill(sim::kNoObject, HeroSkill::team_attack) == -1);
   CHECK(f.heroes.skill(hero, -1) == -1);
   CHECK(f.heroes.skill(hero, 25) == -1);
+}
+
+TEST(scout_moves_the_heros_own_sight_by_the_difference_and_clamps_it) {
+  // 0x0052def0, case 19: sight += SightPerScoutLevel * (new - old), with old
+  // and new floored at 0, clamped to [100, 2048], stored either way.
+  Fixture f;
+  const ObjectId hero = f.spawn_hero();
+  WorldObject* slot = f.world.find(hero);
+  REQUIRE(slot != nullptr);
+  slot->sight = 400;
+  f.grant(hero, 30);
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, 2));
+  CHECK(slot->sight == 500);
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, 0));
+  CHECK(slot->sight == 400);
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, -1));  // floored at 0: no change
+  CHECK(slot->sight == 400);
+  slot->sight = 2000;
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, 10));
+  CHECK(slot->sight == 2048);
+  slot->sight = 120;
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::scout, 9));
+  CHECK(slot->sight == 100);
+}
+
+TEST(a_skill_the_hero_is_not_offered_reads_minus_one) {
+  // The class's `HeroSkills` list is the offer; a skill outside it is the
+  // byte -1 (0x0052f550 answers it as is) and counts for nothing in the
+  // balance (0x0052da80 skips it).
+  ClassGraph graph;
+  graph.add(bytes(R"(<class id="Hero" cpp_class="CVXHero" parent="">
+      <properties maxhealth="1000" HeroSkills="Administration, Team attack"/>
+    </class>)"),
+            "hero.sc.xml");
+  graph.link();
+  World world;
+  world.set_class_graph(&graph);
+  HeroSystem heroes;
+  world.add_system(&heroes);
+  const ObjectId hero = world.spawn(NativeClass::hero, nullptr, graph.find("Hero"));
+  world.set_owner(hero, 1);
+  world.set_health(hero, 1000);
+  heroes.register_hero(world, hero);
+  CHECK(heroes.skill(hero, HeroSkill::administration) == 0);
+  CHECK(heroes.skill(hero, HeroSkill::healing) == -1);
+  CHECK(heroes.set_level(hero, 30));
+  CHECK(heroes.available_skill_points(hero) == 20);  // min(30, 2 * 10) - 0
 }
 
 TEST(a_hero_class_offers_the_five_skills_its_heroskills_property_names) {
@@ -771,11 +951,14 @@ TEST(discipline_sets_a_level_floor_of_two_plus_points) {
   CHECK(f.heroes.attach(f.world, rookie, hero));
   f.grant(hero, 10);
 
-  CHECK(f.heroes.level(rookie) == 1);
+  // A level-10 hero's army addend is 40 * Exp[10] / 100 + 1 = 12, level 6:
+  // the floor only shows once it passes that.
+  const std::int32_t base = f.heroes.level(rookie);
+  CHECK(base == 6);
   for (std::int32_t points = 1; points <= 10; ++points) {
     REQUIRE(f.heroes.set_skill(hero, HeroSkill::discipline, points));
     CHECK(f.heroes.modifiers_for(rookie).level_floor == 2 + points);
-    CHECK(f.heroes.level(rookie) == 2 + points);
+    CHECK(f.heroes.level(rookie) == std::max(base, 2 + points));
     // It is a floor, not a write: the earned level is untouched.
     CHECK(f.heroes.inherent_level(rookie) == 1);
   }
@@ -788,11 +971,13 @@ TEST(discipline_never_lowers_a_veteran) {
   CHECK(f.heroes.attach(f.world, veteran, hero));
   CHECK(f.heroes.set_level(veteran, 12));
   f.grant(hero, 10);
+  // Exp[12] = 41 plus the level-10 hero's addend 12: 53, level 13.
+  CHECK(f.heroes.level(veteran) == 13);
 
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::discipline, 3));  // floor 5
-  CHECK(f.heroes.level(veteran) == 12);
+  CHECK(f.heroes.level(veteran) == 13);
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::discipline, 10));  // floor 12
-  CHECK(f.heroes.level(veteran) == 12);
+  CHECK(f.heroes.level(veteran) == 13);
 }
 
 TEST(a_detached_warrior_loses_the_floor) {
@@ -829,14 +1014,18 @@ TEST(battle_cry_lifts_levels_for_five_seconds_and_then_stops) {
   CHECK(f.heroes.modifiers_for(warrior, 4999).level_add == 4);
   CHECK(f.heroes.modifiers_for(warrior, 5000).level_add == 0);
 
-  // `VERIFY_HERO_SKILL.VS`: "Skill already in effect".
-  CHECK(!f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
+  // "Skill already in effect" is `VERIFY_HERO_SKILL.VS`'s refusal, not the
+  // body's: 0x0052f140 restarts a running cry from now.
+  f.world.advance(1000);
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
+  CHECK(f.heroes.modifiers_for(warrior, 5999).level_add == 4);
+  CHECK(f.heroes.modifiers_for(warrior, f.world.time() + 5000).level_add == 0);
 
   // Run past the end and the effect is cleared, whatever the turn length.
   f.world.advance(800);
   f.world.advance(800);
-  f.world.advance_turns(6);
-  CHECK(f.world.time() >= 5000);
+  f.world.advance_turns(10);
+  CHECK(f.world.time() >= 6000);
   CHECK(!f.heroes.skill_in_effect(hero, HeroSkill::battle_cry, f.world.time()));
   CHECK(f.heroes.modifiers_for(warrior).level_add == 0);
   CHECK(f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
@@ -926,32 +1115,77 @@ TEST(healing_charge_and_rush_are_instantaneous) {
   CHECK(f.world.state(warrior)->health == before - 12);
 }
 
-TEST(a_passive_skill_cannot_be_used_and_an_unlearned_one_cannot_either) {
+TEST(a_passive_skill_uses_to_no_effect_and_an_unlearned_one_does_not_use) {
+  // 0x0052f140: points above 0 answer true whatever the skill -- the switch's
+  // default -- and no points, or the -1 of "not offered", answer false.
   Fixture f;
   const ObjectId hero = f.spawn_hero();
   f.grant(hero, 10);
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::administration, 5));
-  CHECK(!f.heroes.use_skill(f.world, hero, HeroSkill::administration));
-  // "You need to have at least 1 point to can use this skill" -- verify script.
+  CHECK(f.heroes.use_skill(f.world, hero, HeroSkill::administration));
   CHECK(!f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::battle_cry, -1));
+  CHECK(!f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
+}
+
+TEST(the_party_walk_heals_the_hero_and_spares_it_the_rest) {
+  // 0x005f5520 walks the hero's party, the hero with its army. Healing
+  // (0x0052dc20) takes anyone below its cap; Charge, Rush and Frenzy
+  // (0x0052dcf0, 0x0052dd50, 0x0052ef30) pass a hero by.
+  Fixture f;
+  const ObjectId hero = f.spawn_hero(1, 900);
+  const ObjectId warrior = f.spawn_warrior(1, 101);
+  CHECK(f.heroes.attach(f.world, warrior, hero));
+  f.grant(hero, 40);
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::healing, 2));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::frenzy, 1));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::rush, 4));
+
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::healing));
+  CHECK(f.world.state(hero)->health == 920);
+  CHECK(f.world.state(warrior)->health == 121);
+
+  // Frenzy keeps the larger half: 121 loses 60.
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::frenzy));
+  CHECK(f.world.state(warrior)->health == 61);
+  CHECK(f.world.state(hero)->health == 920);
+
+  // Rush damages per point of stamina actually gained: 5 -> 9 is 4 points,
+  // 24; from 9 only 1 more fits under the cap of 10, so 6; at the cap, none.
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::rush));
+  CHECK(f.world.state(warrior)->stamina == 9);
+  CHECK(f.world.state(warrior)->health == 37);
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::rush));
+  CHECK(f.world.state(warrior)->stamina == 10);
+  CHECK(f.world.state(warrior)->health == 31);
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::rush));
+  CHECK(f.world.state(warrior)->health == 31);
+  CHECK(f.world.state(hero)->stamina == 10);
 }
 
 // --------------------------------------------------------------------------
 // experience
 // --------------------------------------------------------------------------
 
-TEST(the_experience_curve_is_the_one_const_ini_writes_out) {
+TEST(the_experience_table_sums_the_const_ini_recurrence_in_hundredths) {
   // ```ini
   // LevelExpDivider = 8 ; exp_gain = target_level / LevelExpDivider + 1;
   // ExpA=50  ExpB=125  ExpT=1
   // ; Exp[level] = Exp[Level-1] + Pos(level - T) * ExpA + ExpB
   // ```
+  // 0x005d26d0 sums the increments 125, 175, 225, ... into a running total
+  // from 0 at level 1 and divides each entry from level 2 on by 100 -- the
+  // total, not the increment, so the remainders carry.
   Fixture f;
   const HeroSystem& h = f.heroes;
-  CHECK(h.experience_to_next_level(1) == 125);   // Pos(0)*50 + 125
-  CHECK(h.experience_to_next_level(2) == 175);   // Pos(1)*50 + 125
-  CHECK(h.experience_to_next_level(5) == 325);   // Pos(4)*50 + 125
-  CHECK(h.experience_to_next_level(12) == 675);
+  CHECK(h.experience_for_level(0) == 0);
+  CHECK(h.experience_for_level(1) == 0);
+  CHECK(h.experience_for_level(2) == 1);     // 125 / 100
+  CHECK(h.experience_for_level(3) == 3);     // 300 / 100
+  CHECK(h.experience_for_level(4) == 5);     // 525 / 100
+  CHECK(h.experience_for_level(5) == 8);     // 800 / 100
+  CHECK(h.experience_for_level(12) == 41);   // 4125 / 100
+  CHECK(h.experience_for_level(24) == 155);  // 15525 / 100
 
   CHECK(h.experience_for_kill(0) == 1);
   CHECK(h.experience_for_kill(7) == 1);
@@ -959,81 +1193,290 @@ TEST(the_experience_curve_is_the_one_const_ini_writes_out) {
   CHECK(h.experience_for_kill(24) == 4);
 }
 
-TEST(experience_accumulates_within_a_level_and_resets_on_level_up) {
-  // The dumps carry `level = 24` beside `experience = 74`, and the very first
-  // increment is 125, so the dumped counter is progress within a level rather
-  // than a running total.
+TEST(the_level_is_read_off_the_running_total) {
+  // 0x005d28c0: level L while the total is in [Exp[L], Exp[L+1]); 0 for a
+  // negative total; never past 1000.
+  Fixture f;
+  const HeroSystem& h = f.heroes;
+  CHECK(h.level_for_experience(-1) == 0);
+  CHECK(h.level_for_experience(0) == 1);
+  CHECK(h.level_for_experience(1) == 2);
+  CHECK(h.level_for_experience(2) == 2);
+  CHECK(h.level_for_experience(3) == 3);
+  CHECK(h.level_for_experience(40) == 11);
+  CHECK(h.level_for_experience(41) == 12);
+  CHECK(h.level_for_experience(155) == 24);
+  CHECK(h.level_for_experience(0x7fffffff) == HeroSystem::kMaxLevel);
+  CHECK(h.level_for_experience(h.experience_for_level(HeroSystem::kMaxLevel)) ==
+        HeroSystem::kMaxLevel);
+  CHECK(h.level_for_experience(h.experience_for_level(HeroSystem::kMaxLevel) - 1) ==
+        HeroSystem::kMaxLevel - 1);
+}
+
+TEST(experience_is_a_running_total_and_the_level_follows_it) {
+  // `MILITARY_ONDIE.VS`'s Warrior Tales and `PLAYER_WARRIORS_WISDOM.VS` both
+  // write `u.SetExperience(u.experience + 1)`: a total, which levels the unit
+  // up once it passes a threshold. Progress within a level, as this used to
+  // keep, made those writes raise a counter that no level ever came from.
   Fixture f;
   const ObjectId loner = f.spawn_warrior();
   CHECK(f.heroes.inherent_level(loner) == 1);
 
-  CHECK(f.heroes.add_experience(loner, 100) == 0);
-  CHECK(f.heroes.experience(loner) == 100);
-  CHECK(f.heroes.inherent_level(loner) == 1);
-
-  CHECK(f.heroes.add_experience(loner, 25) == 1);
+  CHECK(f.heroes.set_experience(loner, 1));
   CHECK(f.heroes.inherent_level(loner) == 2);
-  CHECK(f.heroes.experience(loner) == 0);
-
-  // 175 to leave level 2, 225 to leave level 3: 400 buys both at once.
-  CHECK(f.heroes.add_experience(loner, 400) == 2);
-  CHECK(f.heroes.inherent_level(loner) == 4);
-  CHECK(f.heroes.experience(loner) == 0);
+  CHECK(f.heroes.add_experience(loner, 2) == 1);
+  CHECK(f.heroes.experience(loner) == 3);
+  CHECK(f.heroes.inherent_level(loner) == 3);
+  // Two thresholds at once: 5 and 8.
+  CHECK(f.heroes.add_experience(loner, 5) == 2);
+  CHECK(f.heroes.inherent_level(loner) == 5);
+  // Unclamped: a negative total is level 0.
+  CHECK(f.heroes.set_experience(loner, -4));
+  CHECK(f.heroes.experience(loner) == -4);
+  CHECK(f.heroes.inherent_level(loner) == 0);
 }
 
-TEST(a_heros_warriors_earn_a_premium_and_the_hero_takes_a_share) {
-  // `HERO.SC.XML` `heroarmyexpgain="40"`, and CONST.INI
-  // `ArmyBonusExperiencePercent = 40`, `ExpFromArmyDivider = 3`,
-  // `ExpPercentPerLeadershipLevel = 2`.
+TEST(a_heros_army_stands_on_part_of_its_heros_experience) {
+  // `RecalcBonuses` (0x005d9df0) reads a warrior's level off its total plus
+  // the hero's army addend `[hero+0x2c0]`, which 0x0052fc50 sets to
+  // `(percent * Exp[hero level]) / 100 + 1` with percent
+  // `ArmyBonusExperiencePercent` 40 + `ExpPercentPerLeadershipLevel` 2 per
+  // Leadership point (0x0052d7a0). The award itself is not raised.
   Fixture f;
   const ObjectId hero = f.spawn_hero();
   const ObjectId warrior = f.spawn_warrior();
   CHECK(f.heroes.attach(f.world, warrior, hero));
-
-  CHECK(f.heroes.modifiers_for(warrior).experience_percent == 40);
-  // Level 12 both sides, so the awards land well below the 675 the next level
-  // costs and the counters can be read directly.
-  CHECK(f.heroes.set_level(warrior, 12));
-  CHECK(f.heroes.set_level(hero, 12));
-
-  f.heroes.add_experience(warrior, 100);
-  CHECK(f.heroes.experience(warrior) == 140);  // 100 + 40%
-  CHECK(f.heroes.experience(hero) == 46);      // 140 / 3, truncated
-
-  // "Increases the experience the hero provides to his attached warriors by 2%
-  // per skill point."
+  // The points first: `grant` is a `SetLevel`.
   f.grant(hero, 10);
-  REQUIRE(f.heroes.set_skill(hero, HeroSkill::leadership, 10));
-  CHECK(f.heroes.modifiers_for(warrior).experience_percent == 60);
-  CHECK(f.heroes.set_experience(warrior, 0));
-  CHECK(f.heroes.set_experience(hero, 0));
-  f.heroes.add_experience(warrior, 100);
-  CHECK(f.heroes.experience(warrior) == 160);
-  CHECK(f.heroes.experience(hero) == 53);
+  CHECK(f.heroes.set_level(hero, 12));  // Exp[12] = 41
+  CHECK(f.heroes.level(hero) == 12);
 
-  // A hero of its own has no premium and no one to pass a share to.
-  CHECK(f.heroes.modifiers_for(hero).experience_percent == 0);
+  // 40 * 41 / 100 + 1 = 17, which is level 7 (Exp[7] = 15, Exp[8] = 19).
+  CHECK(f.heroes.inherent_level(warrior) == 1);
+  CHECK(f.heroes.level(warrior) == 7);
+  CHECK(f.heroes.add_experience(warrior, 1) == 1);
+  CHECK(f.heroes.experience(warrior) == 1);  // no premium on the award
+  CHECK(f.heroes.experience(hero) == 41);    // and no share passed on here
+
+  // Leadership 10: 60 * 41 / 100 + 1 = 25, plus the warrior's 1: level 9.
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::leadership, 10));
+  CHECK(f.heroes.level(warrior) == 9);
+
+  // A hero of its own stands on nothing.
+  CHECK(f.heroes.inherent_level(hero) == 12);
+  CHECK(f.heroes.level(hero) == 12);
 }
 
-TEST(set_level_writes_the_inherent_level_the_way_the_mushroom_does) {
-  // `MUSHROOM.VS`: `.SetLevel(.inherentlevel + 1)`. Effective level then moves
-  // with the modifiers on top; the earned level does not.
+TEST(the_progression_entry_points_refuse_the_dead_and_answer_one_on_a_miss) {
+  // `Unit::SetLevel` (0x005d7690), `SetExperience` (0x005d7610): an
+  // unresolvable receiver and a dead one both print and write nothing.
+  // `Unit::level` (0x005d7740) and `inherentlevel` (0x005d77a0) answer 1 for
+  // an unresolvable receiver, `experience` (0x005d75b0) 0.
   Fixture f;
-  const ObjectId hero = f.spawn_hero();
+  EnvSystem env;
+  f.world.add_system(&env);
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  sim::HostContext context;
+  context.world = &f.world;
+  const auto call = [&](std::string_view name,
+                        std::vector<script::Value> args) -> script::HostOutcome {
+    const std::uint32_t index = registry.find(script::CallKind::member, name,
+                                              static_cast<std::uint16_t>(args.size() - 1));
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    return registry.entry(index).fn(ctx);
+  };
+  constexpr script::TypeId kUnit = 7;
+  const auto ref = [&](ObjectId id) { return script::Value::object(kUnit, id); };
+
+  const ObjectId alive = f.spawn_warrior();
+  const ObjectId dead = f.spawn_warrior();
+  CHECK(call("SetLevel", {ref(alive), script::Value::integer(5)}).status ==
+        script::HostStatus::ok);
+  CHECK(f.heroes.experience(alive) == 8);
+  CHECK(call("level", {ref(alive)}).value.as_integer() == 5);
+  CHECK(call("inherentlevel", {ref(alive)}).value.as_integer() == 5);
+  CHECK(call("experience", {ref(alive)}).value.as_integer() == 8);
+
+  f.world.set_health(dead, 0);
+  (void)call("SetLevel", {ref(dead), script::Value::integer(5)});
+  (void)call("SetExperience", {ref(dead), script::Value::integer(30)});
+  CHECK(f.heroes.experience(dead) == 0);
+
+  const script::Value nobody = ref(static_cast<ObjectId>(9999));
+  CHECK(call("AvailableSkillPoints", {nobody}).value.as_integer() == -1);
+  CHECK(call("GetSkill", {nobody, script::Value::integer(0)}).value.as_integer() == -1);
+  CHECK(call("level", {nobody}).value.as_integer() == 1);
+  CHECK(call("inherentlevel", {nobody}).value.as_integer() == 1);
+  CHECK(call("experience", {nobody}).value.as_integer() == 0);
+
+  // Nobility (0x005dbf70): once the owner's `Nobility` reads `researched`, a
+  // military unit whose new total lands in [Exp[8], Exp[12]) gets Exp[12].
+  const ObjectId legionary = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Legionary"));
+  f.world.set_owner(legionary, 1);
+  f.world.set_health(legionary, 200);
+  f.heroes.register_unit(f.world, legionary);
+  const std::int32_t low = f.heroes.experience_for_level(8);    // 19
+  const std::int32_t high = f.heroes.experience_for_level(12);  // 41
+  (void)call("SetExperience", {ref(legionary), script::Value::integer(low)});
+  CHECK(f.heroes.experience(legionary) == low);  // not researched yet
+  env.env().write_string(EnvScope::for_player(player_to_script(1)), "Nobility", "researched");
+  (void)call("SetExperience", {ref(legionary), script::Value::integer(low + 1)});
+  CHECK(f.heroes.experience(legionary) == high);
+  (void)call("SetLevel", {ref(legionary), script::Value::integer(9)});
+  CHECK(call("inherentlevel", {ref(legionary)}).value.as_integer() == 12);
+  // The band's top is outside it, and so is everything under its bottom.
+  (void)call("SetExperience", {ref(legionary), script::Value::integer(low - 1)});
+  CHECK(f.heroes.experience(legionary) == low - 1);
+  // And a unit outside `Military` is never lifted.
+  (void)call("SetExperience", {ref(alive), script::Value::integer(low)});
+  CHECK(f.heroes.experience(alive) == low);
+}
+
+TEST(hero_skill_id_matches_the_section_names_exactly) {
+  // 0x005c8d10: strcmp over the SKILLS.INI names; the hs* constants and other
+  // spellings are not names.
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  const auto id = [&](std::string_view name) -> std::int32_t {
+    const std::uint32_t index = registry.find(script::CallKind::free_function, "HeroSkillId", 1);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return -999;
+    std::vector<script::Value> args{script::Value::string(std::string(name))};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.kind = script::CallKind::free_function;
+    return registry.entry(index).fn(ctx).value.as_integer();
+  };
+  CHECK(id("Battle cry") == static_cast<std::int32_t>(HeroSkill::battle_cry));
+  CHECK(id("Euphoria") == static_cast<std::int32_t>(HeroSkill::euphoria));
+  CHECK(id("battle cry") == -1);
+  CHECK(id("hsBattleCry") == -1);
+  CHECK(id("Divine grace") == -1);
+}
+
+TEST(the_item_transfers_check_their_receiver_as_the_bodies_do) {
+  // GiveItem 0x005aca10: the receiver must hold the item. DropItem 0x005acdf0
+  // answers false on every path and drops at the point. RemoveItem(name)
+  // 0x005ad190 is void and takes the first of the name only; RemoveItem(i)
+  // 0x005ad230 is 1-based. ExchangeItem 0x005ac800 wants the receiver to hold
+  // the item.
+  Fixture f;
+  ItemCatalog catalog;
+  REQUIRE(catalog.load(bytes(kItemsXml)).ok());
+  f.heroes.items().set_catalog(&catalog);
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  sim::HostContext context;
+  context.world = &f.world;
+  const auto call = [&](std::string_view name,
+                        std::vector<script::Value> args) -> script::HostOutcome {
+    const std::uint32_t index = registry.find(script::CallKind::member, name,
+                                              static_cast<std::uint16_t>(args.size() - 1));
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    return registry.entry(index).fn(ctx);
+  };
+  const auto ref = [](ObjectId id) { return script::Value::object(7, id); };
+  ItemStore& items = f.heroes.items();
+
+  const ObjectId a = f.spawn_warrior();
+  const ObjectId b = f.spawn_warrior();
+  const ObjectId c = f.spawn_warrior();
+  const ObjectId belt = items.add(f.world, a, "King's Belt");
+  REQUIRE(belt != kNoObject);
+
+  // Not the holder: refused, and the belt stays with `a`.
+  CHECK(call("GiveItem", {ref(b), ref(belt), ref(c)}).value.as_integer() == 0);
+  CHECK(items.find(belt)->owner == a);
+  f.world.set_health(c, 0);
+  CHECK(call("GiveItem", {ref(a), ref(belt), ref(c)}).value.as_integer() == 0);
+  f.world.set_health(c, 200);
+  CHECK(call("GiveItem", {ref(a), ref(belt), ref(c)}).value.as_integer() == 1);
+  CHECK(items.find(belt)->owner == c);
+
+  // DropItem: false whatever happens, the item put down at the point.
+  CHECK(call("DropItem", {ref(c), ref(belt), pack_point(Point{700, 900})}).value.as_integer() ==
+        0);
+  CHECK(items.find(belt)->owner == kNoObject);
+
+  // RemoveItem by name: void, the first only.
+  const ObjectId t1 = items.add(f.world, b, "Boar teeth");
+  const ObjectId t2 = items.add(f.world, b, "Boar teeth");
+  const script::HostOutcome removed = call("RemoveItem", {ref(b), script::Value::string("Boar teeth")});
+  CHECK(removed.value.is_nil());
+  CHECK(items.find(t1) == nullptr);
+  CHECK(items.find(t2) != nullptr);
+  // By index, 1-based; 0 and past the end do nothing.
+  (void)call("RemoveItem", {ref(b), script::Value::integer(0)});
+  (void)call("RemoveItem", {ref(b), script::Value::integer(2)});
+  CHECK(items.find(t2) != nullptr);
+  (void)call("RemoveItem", {ref(b), script::Value::integer(1)});
+  CHECK(items.find(t2) == nullptr);
+
+  // ExchangeItem: only an item the receiver holds.
+  const ObjectId guild = items.add(f.world, a, "Bear teeth amulet");
+  CHECK(call("ExchangeItem", {ref(b), ref(guild), script::Value::string("Boar teeth")})
+            .value.as_integer() == 0);
+  CHECK(call("ExchangeItem", {ref(a), ref(guild), script::Value::string("Boar teeth")})
+            .value.as_integer() == 1);
+}
+
+TEST(set_level_writes_the_levels_threshold_the_way_the_mushroom_does) {
+  // `MUSHROOM.VS`: `.SetLevel(.inherentlevel + 1)`. 0x005d7690 clamps to
+  // [1, 1000] and, when that is not the level already, writes the level's
+  // threshold as the total.
+  Fixture f;
   const ObjectId warrior = f.spawn_warrior();
-  CHECK(f.heroes.attach(f.world, warrior, hero));
   CHECK(f.heroes.set_level(warrior, f.heroes.inherent_level(warrior) + 1));
   CHECK(f.heroes.inherent_level(warrior) == 2);
+  CHECK(f.heroes.experience(warrior) == 1);
   CHECK(f.heroes.level(warrior) == 2);
 
+  // At the level already: the progress within it stays.
+  CHECK(f.heroes.set_experience(warrior, 2));
+  CHECK(f.heroes.set_level(warrior, 2));
+  CHECK(f.heroes.experience(warrior) == 2);
+  // Down is a write too: `UNIT_ON_KILL.VS`'s `SetLevel(4)` on a level-6 unit.
+  CHECK(f.heroes.set_level(warrior, 6));
+  CHECK(f.heroes.set_level(warrior, 4));
+  CHECK(f.heroes.experience(warrior) == 5);
+  // The clamp: 0 is level 1, and past 1000 is 1000.
+  CHECK(f.heroes.set_level(warrior, 0));
+  CHECK(f.heroes.experience(warrior) == 0);
+  CHECK(f.heroes.set_level(warrior, 5000));
+  CHECK(f.heroes.inherent_level(warrior) == HeroSystem::kMaxLevel);
+}
+
+TEST(discipline_is_a_floor_under_the_armys_level) {
+  Fixture f;
+  const ObjectId hero = f.spawn_hero();
+  const ObjectId warrior = f.spawn_warrior();
+  CHECK(f.heroes.attach(f.world, warrior, hero));
+  // A level-1 hero's addend is 40 * 0 / 100 + 1 = 1: a fresh warrior stands
+  // at level 2 the moment it is attached.
+  CHECK(f.heroes.level(warrior) == 2);
   f.grant(hero, 10);
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::discipline, 6));
-  CHECK(f.heroes.level(warrior) == 8);
-  CHECK(f.heroes.inherent_level(warrior) == 2);
-  // `BONUSSCRIPTS\003 HERO.VS` places a hero with `SetLevel(12)`.
-  CHECK(f.heroes.set_level(hero, 12));
-  CHECK(f.heroes.inherent_level(hero) == 12);
-  CHECK(f.heroes.experience(hero) == 0);
+  CHECK(f.heroes.level(warrior) == 8);  // DisciplineBonusBase 2 + 6
+  CHECK(f.heroes.inherent_level(warrior) == 1);
+  // A floor: a veteran above it keeps its own.
+  CHECK(f.heroes.set_level(warrior, 20));
+  CHECK(f.heroes.level(warrior) > 20);
 }
 
 // --------------------------------------------------------------------------
@@ -1068,7 +1511,11 @@ TEST(the_item_catalogue_reads_items_xml) {
   CHECK(catalog.find("Not an item") == kNoItemType);
   // `BONUSSCRIPTS\103 BOAR TOOTH.VS` asks for "Boar tooth", which no item is.
   CHECK(catalog.find("Boar tooth") == kNoItemType);
-  CHECK(catalog.find("bear teeth AMULET") != kNoItemType);  // tolerant lookup
+  // **Exact, not tolerant**: the catalogue search (0x00534f50) compares with a
+  // byte-for-byte strcmp (0x00649bd0), so a different case names no item.
+  CHECK(catalog.find("bear teeth AMULET") == kNoItemType);
+  CHECK(catalog.find("king's belt") == kNoItemType);
+  CHECK(catalog.find("King's Belt") == belt);
 }
 
 TEST(an_item_is_held_by_its_owner_and_has_no_position_of_its_own) {
@@ -1119,7 +1566,8 @@ TEST(item_bonuses_reach_the_owners_modifiers) {
   CHECK(mods.armor_slash_add == 10);
   CHECK(mods.armor_pierce_add == 10);
   CHECK(mods.level_add == 5);  // `Boar teeth` is `<bonus level="5">`
-  CHECK(f.heroes.level(warrior) == 6);
+  // Level 2 off the level-1 hero's addend of 1, and the teeth's 5 on top.
+  CHECK(f.heroes.level(warrior) == 7);
   // `UNIT.SC.XML` `maxhealth` is 200 in this fixture; the belt adds 600.
   CHECK(f.heroes.max_health_of(f.world, warrior) == 800);
 }
@@ -2087,6 +2535,8 @@ TEST(a_host_call_reaches_the_system_through_the_call_context) {
   const script::Value hero_ref = script::Value::object(kUnit, hero);
   const script::Value warrior_ref = script::Value::object(kUnit, warrior);
 
+  // Both at the origin; the hero needs a sight to reach the warrior.
+  f.world.find(hero)->sight = 400;
   CHECK(call(script::CallKind::member, "AttachTo", {warrior_ref, hero_ref})
             .value.as_integer() == 1);
   CHECK(call(script::CallKind::member, "hero", {warrior_ref}).value.as_object().id == hero);
@@ -2116,8 +2566,7 @@ TEST(a_host_call_reaches_the_system_through_the_call_context) {
             .value.as_integer() == 1);
   CHECK(call(script::CallKind::member, "item_count", {warrior_ref}).value.as_integer() == 1);
 
-  CHECK(call(script::CallKind::member, "DetachFrom", {warrior_ref, hero_ref})
-            .value.as_integer() == 1);
+  (void)call(script::CallKind::member, "DetachFrom", {warrior_ref, hero_ref});
   CHECK(f.heroes.hero_of(warrior) == sim::kNoObject);
 }
 
@@ -2380,38 +2829,41 @@ TEST(hero_can_see_is_a_stealth_test_and_the_argument_is_the_one_looked_at) {
 /// 256, and parks the ones the spell would overshoot at a flat 1000.
 ///
 /// The score is `max(0, edgeDistance - range) + 256`, so distance is the only
-/// thing that separates two candidates the spell fits -- health does not enter
-/// it at all, which is the sharpest difference from `FindUnitToHeal`. A
-/// candidate whose `health + RevitalizeAmount` would pass its own `maxhealth`
+/// thing that separates two candidates the spell fits -- stamina does not
+/// enter it at all, which is the sharpest difference from `FindUnitToHeal`. A
+/// candidate whose `stamina + RevitalizeAmount` would pass its own `maxstamina`
 /// scores 1000 instead, and 1000 is above every reachable real score by
 /// construction: that is what the `+256` floor is for.
 TEST(hero_find_unit_to_revitalize_minimises_reach_and_parks_the_overtopped) {
   CasterBench b;
+  // It is stamina (`[obj+0xc4]` against `[obj+0xcc]`), and the shipped
+  // `RevitalizeAmount` is 4 against the class's `maxstamina` of 10.
+  b.env.set_constant("RevitalizeAmount", 4);
   const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
   CHECK(b.found("FindUnitToRevitalize", druid) == kNoObject);
 
-  // At full health: not wounded, not a candidate.
-  (void)b.spawn(b.plain_class, Point{100, 0}, 1, 200);
+  // At full stamina: not a candidate.
+  (void)b.spawn(b.plain_class, Point{100, 0}, 1, 200, 10);
   CHECK(b.found("FindUnitToRevitalize", druid) == kNoObject);
 
-  // 160 + 60 overshoots 200: parked at 1000, and still the answer alone.
-  const ObjectId topped = b.spawn(b.plain_class, Point{100, 0}, 1, 160);
+  // 7 + 4 overshoots 10: parked at 1000, and still the answer alone.
+  const ObjectId topped = b.spawn(b.plain_class, Point{100, 0}, 1, 200, 7);
   CHECK(b.found("FindUnitToRevitalize", druid) == topped);
 
-  // 140 + 60 lands exactly on 200, so it is *not* an overshoot -- the test is
+  // 6 + 4 lands exactly on 10, so it is *not* an overshoot -- the test is
   // strictly greater. 380 units of edge less 50 of range, plus the floor: 586.
-  const ObjectId far_fit = b.spawn(b.plain_class, Point{400, 0}, 1, 140);
+  const ObjectId far_fit = b.spawn(b.plain_class, Point{400, 0}, 1, 200, 6);
   CHECK(b.found("FindUnitToRevitalize", druid) == far_fit);
 
   // Inside the caster's own reach the distance term clamps to zero, so this
   // scores the bare floor of 256 and wins.
-  const ObjectId near_fit = b.spawn(b.plain_class, Point{60, 0}, 1, 140);
+  const ObjectId near_fit = b.spawn(b.plain_class, Point{60, 0}, 1, 200, 6);
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
 
-  // **Health does not order two candidates that both fit.** A far one at 60
-  // health is far more wounded than the near one at 140 and still loses, which
-  // is the whole difference from heal's health fraction.
-  const ObjectId far_worse = b.spawn(b.plain_class, Point{400, 0}, 1, 60);
+  // **Stamina does not order two candidates that both fit.** A far one at 1 is
+  // far more tired than the near one at 6 and still loses, which is the whole
+  // difference from heal's health fraction.
+  const ObjectId far_worse = b.spawn(b.plain_class, Point{400, 0}, 1, 200, 1);
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
   (void)far_worse;
 
@@ -2438,7 +2890,7 @@ TEST(hero_find_unit_to_revitalize_minimises_reach_and_parks_the_overtopped) {
   // distance term clamps at zero and the floor is a constant. So a nearer
   // in-range candidate does not displace an earlier one: the tie goes to the
   // lower object id, which is the deterministic answer and not an accident.
-  const ObjectId closer = b.spawn(b.plain_class, Point{30, 0}, 1, 140);
+  const ObjectId closer = b.spawn(b.plain_class, Point{30, 0}, 1, 200, 6);
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
   (void)closer;
 
@@ -2448,7 +2900,7 @@ TEST(hero_find_unit_to_revitalize_minimises_reach_and_parks_the_overtopped) {
   // tie the earlier object already wins, and the assertion would pass whether
   // the exclusion existed or not. The fault sweep found all three that way.
   const auto blocker = [&](ClassIndex which, NativeClass native, PlayerId owner) {
-    const ObjectId id = b.spawn(which, Point{30, 0}, owner, 140, 0, native);
+    const ObjectId id = b.spawn(which, Point{30, 0}, owner, 200, 6, native);
     b.world.mutable_state(id)->flags.is_hero = true;
     return id;
   };
@@ -2464,6 +2916,89 @@ TEST(hero_find_unit_to_revitalize_minimises_reach_and_parks_the_overtopped) {
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
   (void)blocker(b.mage_class, NativeClass::druid, 1);
   CHECK(b.found("FindUnitToRevitalize", druid) == near_fit);
+}
+
+/// `FindUnitToHeal`'s threshold is the caster's **level** (0x00511e90 reads
+/// `vtbl+0x114`, what `Unit::level` answers) plus `HealAmount` -- not a class
+/// property, which is what the bench's `level="3"` used to feed.
+TEST(hero_find_unit_to_heal_parks_by_the_casters_own_level) {
+  CasterBench b;
+  const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
+  REQUIRE(b.heroes.set_level(druid, 30));  // threshold 30 + 40 = 70
+  // 50 down at point-blank: 225 under the old threshold of 43, parked at 1000
+  // under 70. 100 down and 380 out: 150 + 330 = 480 either way.
+  const ObjectId grazed = b.spawn(b.plain_class, Point{30, 0}, 1, 150);
+  const ObjectId hurt = b.spawn(b.plain_class, Point{400, 0}, 1, 100);
+  CHECK(b.found("FindUnitToHeal", druid) == hurt);
+  REQUIRE(b.heroes.set_level(druid, 1));  // threshold 41
+  CHECK(b.found("FindUnitToHeal", druid) == grazed);
+}
+
+/// `FindUnitToLearn`'s scan takes allies only: its mask is the friendly word
+/// heal's is (0x00514080 with `[record+0x10] ^ 0xffff`).
+TEST(hero_find_unit_to_learn_takes_an_ally_only) {
+  CasterBench b;
+  const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
+  b.world.players().set(1, 2, Relation::allied, false);
+  const ObjectId foe = b.spawn(b.plain_class, Point{30, 0}, 2);
+  REQUIRE(b.heroes.set_experience(foe, 50));
+  CHECK(b.found("FindUnitToLearn", druid) == kNoObject);
+  const ObjectId friend_ = b.spawn(b.plain_class, Point{60, 0}, 1);
+  REQUIRE(b.heroes.set_experience(friend_, 50));
+  CHECK(b.found("FindUnitToLearn", druid) == friend_);
+}
+
+/// A spawn template is not in play, so no scan reaches it -- and its authored
+/// `Level` gives it a real running total. Danube map 7's priest found one, a
+/// waiting `RScout`, and `RPRIEST_IDLE.VS` looped between a `GotoAttack` that
+/// arrived and an `InRange` that knows no template until its budget ran out.
+TEST(hero_find_unit_to_learn_never_takes_a_spawn_template) {
+  CasterBench b;
+  const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
+  const ObjectId waiting = b.spawn(b.plain_class, Point{30, 0}, 1);
+  REQUIRE(b.heroes.set_experience(waiting, 50));
+  b.world.mutable_state(waiting)->flags.unspawned = true;
+  CHECK(b.found("FindUnitToLearn", druid) == kNoObject);
+  b.world.mutable_state(waiting)->flags.unspawned = false;
+  CHECK(b.found("FindUnitToLearn", druid) == waiting);
+}
+
+/// When the sight circle finds nobody, the caster's own squad is searched
+/// (0x00444190, then 0x00513840 / 0x00513620 / 0x00513700) -- if the caster
+/// is not held, or its squad carries `SF_ADVCHOOSER`. Learn keeps the **last**
+/// member that passes; heal and revitalize the least score.
+TEST(hero_casters_fall_back_on_their_own_squad) {
+  CasterBench b;
+  // A `CVXDruid` proper: revitalize's predicate refuses one, the caster too.
+  const ObjectId druid =
+      b.spawn(b.caster_class, Point{0, 0}, 1, 100, 0, NativeClass::druid);
+  // Far beyond the 900 of sight.
+  const ObjectId first = b.spawn(b.plain_class, Point{5000, 0}, 1, 100, 2);
+  const ObjectId second = b.spawn(b.plain_class, Point{6000, 0}, 1, 120, 3);
+  REQUIRE(b.heroes.set_experience(first, 10));
+  REQUIRE(b.heroes.set_experience(second, 10));
+  CHECK(b.found("FindUnitToLearn", druid) == kNoObject);
+  CHECK(b.found("FindUnitToHeal", druid) == kNoObject);
+  CHECK(b.found("FindUnitToRevitalize", druid) == kNoObject);
+
+  const SquadKey key = b.heroes.squads().create(1, druid);
+  for (const ObjectId id : {druid, first, second}) {
+    REQUIRE(b.heroes.squads().join(key, id));
+    b.heroes.unit(id)->squad = key;
+  }
+  CHECK(b.found("FindUnitToLearn", druid) == second);  // the last that passes
+  // Heal: 300 * 100 / 200 + reach against 300 * 120 / 200 + more reach.
+  CHECK(b.found("FindUnitToHeal", druid) == first);
+  // Revitalize: nearer wins, both fit (2 + 60 and 3 + 60 overshoot 10, so
+  // both park at 1000 and the first is kept).
+  CHECK(b.found("FindUnitToRevitalize", druid) == first);
+
+  // Held, in a squad without SF_ADVCHOOSER: no squad pass.
+  const ObjectId bag = b.spawn(b.plain_class, Point{0, 0}, 1);
+  REQUIRE(b.world.put_in_holder(druid, bag));
+  CHECK(b.found("FindUnitToLearn", druid) == kNoObject);
+  b.heroes.squads().find(key)->flags = 0x02;
+  CHECK(b.found("FindUnitToLearn", druid) == second);
 }
 
 /// `FindUnitToHide` answers nothing, for everybody, and that is the finding
@@ -2509,12 +3044,13 @@ TEST(hero_find_unit_to_hide_answers_nothing_for_ally_enemy_and_self) {
 /// preferred -- which is a much stronger preference than a tie-break.
 TEST(hero_find_unit_to_revitalize_halves_a_heros_score) {
   CasterBench b;
+  b.env.set_constant("RevitalizeAmount", 4);
   const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
   // 380 - 50 + 256 = 586.
-  const ObjectId plain = b.spawn(b.plain_class, Point{400, 0}, 1, 140);
+  const ObjectId plain = b.spawn(b.plain_class, Point{400, 0}, 1, 200, 6);
   // 580 - 50 + 256 = 786, and half of that is 393. Half as good a position and
   // a better answer.
-  const ObjectId champion = b.spawn(b.plain_class, Point{600, 0}, 1, 140);
+  const ObjectId champion = b.spawn(b.plain_class, Point{600, 0}, 1, 200, 6);
   b.world.mutable_state(champion)->flags.is_hero = true;
   CHECK(b.found("FindUnitToRevitalize", druid) == champion);
 
@@ -2531,9 +3067,10 @@ TEST(hero_find_unit_to_revitalize_halves_a_heros_score) {
   // the floor the hero scores 428 against 456 and wins, and without it 300
   // against 200 and loses.
   CasterBench c;
+  c.env.set_constant("RevitalizeAmount", 4);
   const ObjectId caster = c.spawn(c.caster_class, Point{0, 0}, 1, 100);
-  const ObjectId ordinary = c.spawn(c.plain_class, Point{270, 0}, 1, 140);
-  const ObjectId marginal = c.spawn(c.plain_class, Point{670, 0}, 1, 140);
+  const ObjectId ordinary = c.spawn(c.plain_class, Point{270, 0}, 1, 200, 6);
+  const ObjectId marginal = c.spawn(c.plain_class, Point{670, 0}, 1, 200, 6);
   c.world.mutable_state(marginal)->flags.is_hero = true;
   CHECK(c.found("FindUnitToRevitalize", caster) == marginal);
   (void)ordinary;
@@ -3136,6 +3673,47 @@ TEST(get_item_indexes_the_inventory_from_one) {
       call("GetItem", {stranger, script::Value::integer(1)});
   CHECK(missed.status == script::HostStatus::ok);
   CHECK(!missed.value.as_object().valid());
+}
+
+/// `item.name` -- `Item::name` (0x00535260) -- is the item definition's `id`:
+/// the string the item reader fills from `<item id=…>`, not the display
+/// `name=`. `UNIT_ON_ENTER.VS` asks `item.name == "Gold"` to pay the
+/// *Mercenary pact*; through the named-object lookup it answered `""`.
+TEST(item_name_answers_the_definitions_id) {
+  Fixture f;
+  ItemCatalog catalog;
+  REQUIRE(catalog.load(bytes(kItemsXml)).ok());
+  f.heroes.items().set_catalog(&catalog);
+  const ObjectId hero = f.spawn_hero();
+
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  define_hero_host(registry);
+  (void)register_economy_hosts(registry);
+  HostContext context;
+  context.world = &f.world;
+  const auto call = [&](const char* name, std::vector<script::Value> args) {
+    const std::uint32_t index = registry.find(script::CallKind::member, name,
+                                              static_cast<std::uint16_t>(args.size() - 1));
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    return registry.entry(index).fn(ctx);
+  };
+  // `King's Belt` is the item whose `id` and `name` differ in case.
+  const ObjectId belt = f.heroes.items().add(f.world, hero, "King's Belt");
+  REQUIRE(belt != sim::kNoObject);
+  const script::HostOutcome named = call("name", {script::Value::object(kTypeObj, belt)});
+  REQUIRE(named.status == script::HostStatus::ok);
+  CHECK(named.value.as_string() == "King's Belt");
+  // An item that does not resolve answers the empty string.
+  const script::HostOutcome none = call("name", {script::Value::object(kTypeObj, 9999)});
+  REQUIRE(none.status == script::HostStatus::ok);
+  CHECK(none.value.as_string().empty());
 }
 
 // ==========================================================================

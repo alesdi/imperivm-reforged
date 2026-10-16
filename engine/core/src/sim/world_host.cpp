@@ -2241,6 +2241,13 @@ HostOutcome m_radius(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(class_int(*world, *slot, "radius")));
 }
 
+/// `InHolder` with no argument, two bodies on one name. `Unit::InHolder`
+/// (0x005d6ff0) is `[unit+0x154] != 0xffff`, false with a print for an invalid
+/// receiver. `Squad::InHolder` (0x00427670) walks the squad's member deque and
+/// answers false at the first member that resolves and is not held; a member
+/// that does not resolve is stepped over, so an empty squad is in its holder.
+/// The squad handle itself is not checked (0x00443e30). The arity-1 form, a
+/// count against a settlement name, is `sim/economy.cpp`'s.
 HostOutcome m_in_holder(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("InHolder: no world");
@@ -6315,6 +6322,10 @@ HostOutcome m_rect_height(CallContext& ctx) { return m_rect_edge(ctx, 5); }
 /// toward zero. The same idiom `AreaCenter` uses at 0x004d8ce9, derived
 /// independently of it.
 ///
+/// **Served by `m_gaika_center` (`sim/ai.cpp`) since the tenth round**, which
+/// answers this rule for a `rect` receiver now that the GAIKA half exists; this
+/// body stays as the record of how it was left unbound until then.
+///
 /// **Deliberately not registered.** `rect::Center` has *zero* call sites in the
 /// installation, and every shipped `.Center` is on a GAIKA (`g.Center`,
 /// `sq.AIDest.Center`). Binding this body to the name would answer all of them
@@ -6519,6 +6530,8 @@ constexpr Cardinal kCardinals[] = {
 }
 
 }  // namespace
+
+void erase_object(CallContext& ctx, World& world, ObjectId id) { erase_one(ctx, world, id); }
 
 std::int32_t object_max_health(World& world, const WorldObject& slot) {
   return max_health_of_object(world, slot);

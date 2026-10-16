@@ -175,8 +175,25 @@ TEST(fog_explore_circle_is_the_stamp_full_inside_a_rim_around_and_nothing_beyond
                               std::pair{1, 1}, std::pair{3, 3}, std::pair{1, 3}, std::pair{3, 1}}) {
     CHECK(map.state(cx, cy, 1) == State::partial);
     CHECK(map.fine(cx, cy, 1) != nullptr);
+  }
+  // **A partial cell is explored where its record says so, not everywhere.**
+  // 0x00515950 reads the 32-unit sub-cell's value (0x00514a60): an orthogonal
+  // neighbour's centre is 1024 from the stamp's, on the ramp (`(1072 - 1024)
+  // * 15 / 96 = 7`), so explored; a diagonal neighbour's centre is 1448 away,
+  // beyond `R = 1072`, so its value is 0 and it is not -- although the cell
+  // is partial.
+  for (const auto [cx, cy] : {std::pair{1, 2}, std::pair{3, 2}, std::pair{2, 1}, std::pair{2, 3}}) {
     CHECK(map.explored(pt(cx * 1024 + 512, cy * 1024 + 512), 1));
   }
+  for (const auto [cx, cy] : {std::pair{1, 1}, std::pair{3, 3}, std::pair{1, 3}, std::pair{3, 1}}) {
+    CHECK(!map.explored(pt(cx * 1024 + 512, cy * 1024 + 512), 1));
+  }
+  // And the point reads the sub-cell it falls in, `(dx >> 5, dy >> 5)` from
+  // the record's origin: in the left neighbour, row 16, column 31 is 15 and
+  // column 14 (x = 1472..1503) is 0 -- see the values checked below.
+  CHECK(map.explored(pt(2047, 2570), 1));
+  CHECK(!map.explored(pt(1480, 2570), 1));
+  CHECK(!map.explored(pt(1503, 2575), 1));
   // Two cells out is beyond `R` on every side.
   CHECK(map.state(0, 2, 1) == State::never);
   CHECK(map.state(4, 2, 1) == State::never);
@@ -244,13 +261,17 @@ TEST(fog_explore_circle_is_the_stamp_full_inside_a_rim_around_and_nothing_beyond
   // Nobody else's slot moved.
   CHECK(!map.explored(pt(2560, 2560), 0));
   CHECK(!map.explored(pt(2560, 2560), 2));
-  // A negative radius stamps nothing; zero stamps a 48-unit rim around the
-  // point, which makes the cell it stands in partial.
+  // A negative radius stamps nothing, and so does **zero**: 0x00516450's
+  // first test is `radius != 0 && mask != 0`, so `ExploreCircle(p, pt, 0)`
+  // leaves even the cell under the point unseen.
   ExplorationMap none;
   none.resize(4096);
   none.explore_circle(pt(2000, 2000), -1, 0);
   CHECK(none.state(1, 1, 0) == State::never);
   none.explore_circle(pt(2000, 2000), 0, 0);
+  CHECK(none.state(1, 1, 0) == State::never);
+  CHECK(!none.explored(pt(2000, 2000), 0));
+  none.explore_circle(pt(2000, 2000), 1, 0);
   CHECK(none.state(1, 1, 0) == State::partial);
   CHECK(none.explored(pt(2000, 2000), 0));
   // ...and `explore` of a point is the full state outright.
@@ -315,9 +336,12 @@ TEST(fog_is_explored_takes_a_one_based_player) {
   // `IsExplored` decrements: script player 1 is slot 0.
   CHECK(b.is_explored(pt(3000, 3000), 1));
   CHECK(!b.is_explored(pt(3000, 3000), 2));
-  // And out of range answers false rather than reading a slot it should not.
-  CHECK(!b.is_explored(pt(3000, 3000), 0));
-  CHECK(!b.is_explored(pt(3000, 3000), 17));
+  // 0x004c6820 decrements without a check and 0x00515950 compares the slot
+  // **unsigned** with 7: player 0 is slot 0xffffffff, explored everywhere,
+  // and so is every player past the eighth.
+  CHECK(b.is_explored(pt(3000, 3000), 0));
+  CHECK(b.is_explored(pt(3000, 3000), -4));
+  CHECK(b.is_explored(pt(3000, 3000), 17));
   // Player 9 has no fog: true everywhere, on a sized map.
   CHECK(b.is_explored(pt(7000, 7000), 9));
   CHECK(!b.is_explored(pt(7000, 7000), 1));
@@ -446,7 +470,7 @@ TEST(fog_the_sweep_reveals_what_an_object_can_see_and_only_for_its_owner) {
   CHECK(!b.is_explored(pt(6100, 100), 4));
 }
 
-TEST(fog_get_unexplored_point_clamps_its_argument_and_answers_minus_one) {
+TEST(fog_get_unexplored_point_samples_a_300_unit_grid_and_draws_one_candidate) {
   imperivm::core::ClassGraph graph;
   const auto bytes = [](std::string_view text) {
     return std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()),
@@ -457,6 +481,9 @@ TEST(fog_get_unexplored_point_clamps_its_argument_and_answers_minus_one) {
   graph.add(bytes(R"(<class id="Scout" parent="Object" cpp_class="CVXUnit">
            <properties sight="300" maxhealth="80"/></class>)"),
             "scout.sc.xml");
+  graph.add(bytes(R"(<class id="Boat" parent="Object" cpp_class="CVXUnit">
+           <properties sight="300" maxhealth="80" water_unit="1"/></class>)"),
+            "boat.sc.xml");
   graph.link();
 
   Bench b(4096);
@@ -465,38 +492,139 @@ TEST(fog_get_unexplored_point_clamps_its_argument_and_answers_minus_one) {
   b.world.set_position(scout, pt(512, 512));
   b.world.set_owner(scout, 0);
 
-  const auto ask = [&](std::int32_t argument) {
+  const auto ask = [&](ObjectId who, std::int32_t argument) {
     const script::HostOutcome out =
         b.call(script::CallKind::member, "GetUnexploredPoint", 1,
-               {script::Value::object(kTypeObj, scout), script::Value::integer(argument)});
+               {script::Value::object(kTypeObj, who), script::Value::integer(argument)});
     CHECK(out.status == script::HostStatus::ok);
     CHECK(is_point(out.value));
     return unpack_point(out.value);
   };
+  // The grid 0x005d99e0 samples: offsets from -r/2 below r/2 in steps of 300,
+  // added to the unit's position and clamped into the map, x outer, y inner.
+  const auto grid = [](Point from, std::int32_t r) {
+    std::vector<Point> out;
+    for (std::int32_t ox = -(r / 2); ox < r / 2; ox += 300) {
+      for (std::int32_t oy = -(r / 2); oy < r / 2; oy += 300) {
+        out.push_back(pt(std::clamp(from.x + ox, 0, 4095), std::clamp(from.y + oy, 0, 4095)));
+      }
+    }
+    return out;
+  };
 
-  // `-1` is below the unit's own sight, so the radius becomes
-  // `max(sight * 4, 512)` = 1200. The nearest unexplored cell centre is its
-  // own, at (512, 512).
-  CHECK((ask(-1) == pt(512, 512)));
+  // `-1` is below the unit's own sight, so the radius is `max(sight * 4,
+  // 512)` = 1200: offsets -600, -300, 0, 300 on each axis, sixteen samples,
+  // every one unexplored. **One draw**, `Range(0, 15)`, picks the answer.
+  {
+    const std::vector<Point> samples = grid(pt(512, 512), 1200);
+    REQUIRE(samples.size() == 16);
+    Rng expect = b.world.rng();
+    const std::int32_t pick = expect.between(0, 15);
+    CHECK((ask(scout, -1) == samples[static_cast<std::size_t>(pick)]));
+    CHECK(b.world.rng().state() == expect.state());
+  }
 
-  // Reveal that cell and the answer moves to the next nearest inside 1200 --
-  // (1536, 512) and (512, 1536) are both 1024 away, and the tie goes to the
-  // lower cell index, which is row-major: (1536, 512).
+  // An argument at or above the sight stands (up to 3,000). With cell (0, 0)
+  // explored, the samples inside it are not candidates: from (512, 512) with
+  // r = 2000 the grid runs over x, y in {0, 0, 112, 412, 712, 1012, 1312}, so
+  // the candidates are the samples with a 1312 -- six with y = 1312 first,
+  // then the seven of x = 1312 -- in that order.
   b.fog.map().explore(pt(512, 512), 0);
-  CHECK((ask(-1) == pt(1536, 512)));
+  {
+    std::vector<Point> candidates;
+    for (const Point p : grid(pt(512, 512), 2000)) {
+      if (p.x >= 1024 || p.y >= 1024) candidates.push_back(p);
+    }
+    REQUIRE(candidates.size() == 13);
+    Rng expect = b.world.rng();
+    const std::int32_t pick = expect.between(0, 12);
+    CHECK((ask(scout, 2000) == candidates[static_cast<std::size_t>(pick)]));
+    CHECK(b.world.rng().state() == expect.state());
+  }
+
+  // A water unit wants the water types 12 and 13; with no terrain layer every
+  // sample reads type 0, so it has no candidate, answers the sentinel and
+  // draws nothing.
+  const ObjectId boat = b.world.spawn(NativeClass::unit, nullptr, graph.find("Boat"));
+  b.world.set_position(boat, pt(3000, 3000));
+  b.world.set_owner(boat, 0);
+  {
+    const std::uint32_t before = b.world.rng().state();
+    CHECK((ask(boat, -1) == pt(-1, -1)));
+    CHECK(b.world.rng().state() == before);
+  }
 
   // With everything explored there is nowhere to go, and the answer is the
   // sentinel `UNIT_EXPLORE.VS` tests: `if (pt.x == -1) break;`.
   b.fog.map().explore_all();
-  CHECK((ask(-1) == pt(-1, -1)));
+  CHECK((ask(scout, -1) == pt(-1, -1)));
 
-  // A receiver that is not an object, and one with no owner, answer the same
-  // sentinel rather than refusing.
+  // A receiver that is not an object answers the same sentinel rather than
+  // refusing.
   const script::HostOutcome bad =
       b.call(script::CallKind::member, "GetUnexploredPoint", 1,
              {script::Value::integer(3), script::Value::integer(-1)});
   CHECK(bad.status == script::HostStatus::ok);
   CHECK((unpack_point(bad.value) == pt(-1, -1)));
+}
+
+TEST(fog_a_players_stamps_reach_every_slot_it_shares_its_view_with) {
+  // `SetRelation(A, B, word)` (0x005652f0) sets B's bit in A's `viewflags`
+  // when the word carries share-view (0x10), and every stamp -- the object's
+  // own and `ExploreCircle`'s -- writes the slots of its player's `viewflags`.
+  Bench b;
+  b.world.players().set(0, 1, Relation::share_view, true);  // 1 shares with 2
+
+  b.call(script::CallKind::free_function, "ExploreCircle", 3,
+         {script::Value::integer(1), pack_point(pt(1500, 1500)), script::Value::integer(600)});
+  CHECK(b.is_explored(pt(1500, 1500), 1));
+  CHECK(b.is_explored(pt(1500, 1500), 2));
+  CHECK(!b.is_explored(pt(1500, 1500), 3));
+
+  // One-directional: player 2 does not share back, so its stamps are its own.
+  b.call(script::CallKind::free_function, "ExploreCircle", 3,
+         {script::Value::integer(2), pack_point(pt(6000, 6000)), script::Value::integer(600)});
+  CHECK(b.is_explored(pt(6000, 6000), 2));
+  CHECK(!b.is_explored(pt(6000, 6000), 1));
+
+  // A radius of zero stamps nothing at all.
+  b.call(script::CallKind::free_function, "ExploreCircle", 3,
+         {script::Value::integer(1), pack_point(pt(4000, 1500)), script::Value::integer(0)});
+  CHECK(!b.is_explored(pt(4000, 1500), 1));
+
+  // The sweep stamps the same way: a unit of player 1's explores for 2 too.
+  imperivm::core::ClassGraph graph;
+  const std::string_view scout_xml =
+      R"(<class id="Scout" cpp_class="CVXUnit"><properties sight="800"/></class>)";
+  graph.add(std::span<const std::byte>{reinterpret_cast<const std::byte*>(scout_xml.data()),
+                                       scout_xml.size()},
+            "scout.sc.xml");
+  graph.link();
+  b.world.set_class_graph(&graph);
+  const ObjectId scout = b.world.spawn(NativeClass::unit, nullptr, graph.find("Scout"));
+  b.world.set_position(scout, pt(6000, 1500));
+  b.world.set_owner(scout, 0);
+  b.world.advance(400);
+  CHECK(b.is_explored(pt(6000, 1500), 1));
+  CHECK(b.is_explored(pt(6000, 1500), 2));
+  CHECK(!b.is_explored(pt(6000, 1500), 3));
+}
+
+TEST(fog_explore_area_stamps_a_rectangles_half_height_not_a_covering_circle) {
+  // 0x004c95c1: the radius is the bounding box's bottom less the centre's y.
+  // A rectangle 4000 wide and 200 tall is stamped with radius 100 from its
+  // centre, so its far ends stay unexplored.
+  Bench b;
+  const ObjectId marker = b.world.spawn(NativeClass::area, nullptr);
+  b.world.set_position(marker, pt(4000, 4000));
+  CHECK(b.world.named_objects().bind("A_Strip", marker));
+  CHECK(b.areas.areas().bind(marker, AreaShape::of_rectangle(2000, 3900, 6000, 4100)));
+
+  b.call(script::CallKind::free_function, "ExploreArea", 2,
+         {script::Value::integer(1), script::Value::string("A_Strip")});
+  CHECK(b.is_explored(pt(4000, 4000), 1));
+  CHECK(!b.is_explored(pt(2100, 4000), 1));
+  CHECK(!b.is_explored(pt(5900, 4000), 1));
 }
 
 TEST(fog_the_map_survives_a_save_and_is_not_in_the_hash) {

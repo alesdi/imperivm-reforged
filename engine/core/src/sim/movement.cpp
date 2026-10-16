@@ -17,9 +17,12 @@
 #include "imperivm/core/game/localization.hpp"
 #include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/entrance.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
+#include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "imperivm/core/xml.hpp"
 
@@ -1935,13 +1938,30 @@ constexpr const char* kNoReceiver = "movement: receiver is not an object";
 constexpr const char* kNoPoint = "movement: argument is not a point or an object";
 
 /// What every entry point below needs: the world, the system, and the receiver.
+///
+/// **A receiver that names nothing is answered, not trapped.** Every body in
+/// this slice opens with the handle check -- the table slot at
+/// `0x00a2a610[handle & 0xffff]` plus the offset, non-null -- and on a miss
+/// formats `The function '<name>' called for an uninitialized or invalid
+/// object.` into 0x00686eb0, a bare `ret` in retail, and pushes its default:
+/// `false` for `Stop`, `HasPath`, `DoCarryNothing` and the object `Goto`,
+/// **`true`** for the point `Goto` (0x005d61b0), `-1` for `PathTo`, `0` for
+/// `TimeWithoutWalking`, `speed` and `FormRadius`, `(-1, -1)` for `dest`,
+/// `(0, 1)` for `GetDir`, the empty string for `formation`, and nothing at
+/// all for the setters. So the script goes on. Such a handle is `departed`
+/// here (`receiver_departed`: object-shaped and naming nothing the world
+/// holds); a value of another shape -- an integer, a point -- stays a trap,
+/// since the compiler cannot produce one as a `Unit` receiver.
 struct Self {
   World* world = nullptr;
   MovementSystem* movement = nullptr;
   ObjectId id = kNoObject;
   const char* error = nullptr;
+  bool departed = false;
 
-  [[nodiscard]] bool ok() const noexcept { return error == nullptr; }
+  [[nodiscard]] bool ok() const noexcept { return error == nullptr && !departed; }
+  /// A missing world or system: this engine's wiring, never the script's.
+  [[nodiscard]] bool broken() const noexcept { return error != nullptr; }
 };
 
 [[nodiscard]] Self resolve(CallContext& ctx) {
@@ -1956,10 +1976,25 @@ struct Self {
     self.error = kNoSystem;
     return self;
   }
-  if (ctx.count() == 0 || (self.id = object_of(ctx.arg(0))) == kNoObject) {
+  if (ctx.count() == 0) {
+    self.error = kNoReceiver;
+    return self;
+  }
+  self.id = object_of(ctx.arg(0));
+  if (self.id != kNoObject && self.world->find(self.id) != nullptr) return self;
+  if (self.id != kNoObject || receiver_departed(*self.world, ctx.arg(0))) {
+    self.departed = true;
+  } else {
     self.error = kNoReceiver;
   }
   return self;
+}
+
+/// The answer an entry point gives when `resolve` did not produce a receiver:
+/// a trap for this engine's own missing wiring, `fallback` for a departed one.
+[[nodiscard]] HostOutcome unresolved(const Self& self, HostOutcome fallback) {
+  if (self.broken()) return HostOutcome::failed(self.error);
+  return fallback;
 }
 
 /// Game time now. The scheduler owns the clock when there is one; a bare `Vm`
@@ -2031,40 +2066,169 @@ struct Self {
 /// One call here is one first entry and its resumes in the original (the
 /// walking path answers the caller's loop rather than resuming), so both
 /// forms drop the target on every call that gets as far as their write.
+///
+/// **What each body checks before it walks**, in its order:
+///
+///   * the receiver. The point form (0x005d61b0) answers **true** for a
+///     handle naming nothing -- the script's loop `while (!.Goto(...))` ends
+///     -- and the object form (0x005d6b90) answers false (`resolve`);
+///   * **the point form clamps its destination to the map rectangle**
+///     (`[map+0xb4]`..`[map+0xc0]`, which is `(0, 0, w-1, h-1)`), writing the
+///     clamped point back into its own argument so every re-entry walks to
+///     the same place; `ClipDestToMap` is the same clamp. A point off the map
+///     used to be handed to the pathfinder as it was;
+///   * the holder step-out, the `(-1, -1)` poll and the re-entry test, which
+///     `run_goto` carries;
+///   * **the object form routes only to a target it may approach**
+///     (0x005d40c0 at 0x005d4291..0x005d42d7). A target that is the mover
+///     itself answers true at once. A target that is a unit (bit 0x400000 of
+///     `[obj+0x2c]`) is routed to only when it is in no holder and either not
+///     hidden (bit 21) or hidden from nobody on the mover's side (its one-hot
+///     owner bits against the side mask `[record+0x18]` of the mover's
+///     owner). Anything else -- a handle naming nothing, a garrisoned or a
+///     concealed enemy unit -- lays no route and does not stamp a failure:
+///     the call clears its walking state (`[state] = 0`), waits the slice and
+///     answers false at its re-entry. Here that is the slice's suspension with
+///     `false`. **Approximated:** the side mask is not modelled, so a hidden
+///     unit is approached only by its own player's units;
+///   * for a target that is not a unit, the route is the point form's to the
+///     target's position with both class radii added to the band
+///     (0x005d42a6, `SetDest` 0x0041a4c0); for a unit, the object mode
+///     (0x0041a5c0), whose arrival test subtracts the same radii
+///     (`object_goto_reach`). Both measure the gap between the edges.
+///
+/// **Not reproduced:** with no route laid the original plays the "look
+/// around" animation when the call's fourth argument is set (0x0053e6c0
+/// with index 0x13, the script's slot 20) and waits the longer of the slice
+/// and that animation; here the wait is the slice. And the answer after a walking wait is the shared
+/// `Goto` design's (`run_goto`; `sim/command.hpp`'s GotoEnter notes): the
+/// original suspends `max(slice, animation)` and answers the arrival test at
+/// the re-entry, this engine suspends `min(slice, time to arrival)` and lets
+/// the caller's loop ask again.
 HostOutcome goto_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  const bool object_form = ctx.count() > 1 && !is_point(ctx.arg(1));
+  if (!self.ok()) {
+    return unresolved(self, HostOutcome::ok_with(Value::boolean(!object_form)));
+  }
 
   GotoOrder order;
-  if (!destination_of(*self.world, ctx.arg(1), order.dest, order.target)) {
-    return HostOutcome::failed(kNoPoint);
-  }
   order.range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
-  order.range += object_goto_reach(*self.world, self.id, order.target);
   order.slice = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
   order.give_up = ctx.count() > 5 && ctx.arg(5).is_integer() ? ctx.arg(5).as_integer() : -1;
   order.lock_destination = true;
-  if (order.target != kNoObject) {
-    if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
-      (void)combat->drop_target(self.id);
-    }
-  } else {
+
+  if (!object_form) {
+    if (ctx.count() < 2) return HostOutcome::failed(kNoPoint);
+    order.dest = self.movement->grid().clamp_to_map(unpack_point(ctx.arg(1)));
     order.drop_target = true;
+    return run_goto(ctx, *self.world, *self.movement, self.id, order);
   }
+
+  // The object form drops the target on every entry, before anything else
+  // (0x005d6c2f).
+  if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
+    (void)combat->drop_target(self.id);
+  }
+  const Value& argument = ctx.arg(1);
+  const ObjectId target = object_of(argument);
+  if (target == kNoObject && !receiver_departed(*self.world, argument)) {
+    return HostOutcome::failed(kNoPoint);
+  }
+  if (target == self.id) return HostOutcome::ok_with(Value::boolean(true));
+  const WorldObject* other = target == kNoObject ? nullptr : self.world->find(target);
+  const WorldObject* mover = self.world->find(self.id);
+  const bool approachable =
+      other != nullptr &&
+      (!other->state.flags.is_unit ||
+       (!other->state.is_held() &&
+        (!other->state.flags.hidden ||
+         (mover != nullptr && other->state.owner == mover->state.owner))));
+  if (!approachable) {
+    HostOutcome out;
+    out.status = script::HostStatus::suspend;
+    out.value = Value::boolean(false);
+    out.suspend_for = order.slice > 0 ? order.slice : 0;
+    return out;
+  }
+  order.target = target;
+  order.dest = self.world->resolve_position(target);
+  order.range += object_goto_reach(*self.world, self.id, order.target);
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
 }
 
 // -- the rest --------------------------------------------------------------
 
+/// Whether the script making this call is `id`'s own command script -- the
+/// runner at the head of its queue -- which is the test `Face` and `SetPos`
+/// make before they end the object's commands: the thread in the object's
+/// command slot (0x0069f950 with 0) against the running thread
+/// (`[0xa77ea8]`, compared with the thread's `+4`).
+[[nodiscard]] bool runs_own_command(const CallContext& ctx, World& world, ObjectId id) {
+  if (ctx.script == script::kNoScript) return false;
+  const CommandSystem* commands = command_system(world);
+  const CommandQueue* queue = commands == nullptr ? nullptr : commands->find(id);
+  return queue != nullptr && !queue->entries.empty() && queue->entries.front().script == ctx.script;
+}
+
+/// `vtbl+0xc0` with 1 (0x005b1120): every command from the last down to the
+/// running one ended through 0x005b07d0, so the queue refills with the
+/// class's default verb. `Settlement::IdleAllGates` makes the same call.
+void end_commands(World& world, ObjectId id) {
+  CommandSystem* commands = command_system(world);
+  if (commands == nullptr) return;
+  (void)commands->clear_commands(world, id);
+  (void)commands->kill_command(world, id);
+}
+
+/// `Face(pt)` -- 16 sites, three bodies, one per receiver shape.
+///
+/// **`Obj::Face` (0x005ac4a0)**: a receiver that names nothing is answered
+/// with nothing. Otherwise the object's animation is reset (0x0053d730), it
+/// faces the point (0x0053f660: the point less its position, `(0, 1)` when
+/// that is zero, written to `[obj+0x48]`), and **unless the call comes from
+/// the object's own command script its commands are ended** (`vtbl+0xc0`
+/// with 1, `end_commands`): a unit faced from a sequence or from another
+/// object's script stops what it was doing. Every shipped site but one faces
+/// the script's own unit from inside its command; `CATAPULT_IDLE.VS` faces
+/// the crew it has just placed.
+///
+/// **`ObjList::Face` (0x0055e5d0) and `Query::Face` (0x005797a0)** do the
+/// same to every live member and end every member's commands, with no
+/// own-script test at all. No shipped site calls either. A query handle that
+/// names nothing prints and does nothing; an empty list does nothing.
+///
+/// **Not reproduced:** the animation reset, as `Disappear` leaves it out --
+/// the object model does not drive a unit's sprite from here; and the
+/// facing's length. The original keeps the raw difference, this engine a
+/// vector of `kFacingLength` in the same direction (`MoveState::facing`),
+/// which `GetDir` hands back.
 HostOutcome face_impl(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr) return HostOutcome::failed(kNoWorld);
+  MovementSystem* movement = movement_system(*world);
+  if (movement == nullptr) return HostOutcome::failed(kNoSystem);
+  if (ctx.count() < 2) return HostOutcome::failed(kNoPoint);
+  const Value& receiver = ctx.arg(0);
+  const bool list_form = is_objlist(receiver) ||
+                         (receiver.is_object() && receiver.as_object().type == kTypeQuery);
+  if (list_form) {
+    if (!is_point(ctx.arg(1))) return HostOutcome::failed(kNoPoint);
+    for (const ObjectId id : receiver_objects(*world, receiver)) {
+      movement->face(*world, id, unpack_point(ctx.arg(1)));
+      end_commands(*world, id);
+    }
+    return HostOutcome::ok_void();
+  }
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_void());
   Point towards{};
   ObjectId ignored = kNoObject;
   if (!destination_of(*self.world, ctx.arg(1), towards, ignored)) {
     return HostOutcome::failed(kNoPoint);
   }
   self.movement->face(*self.world, self.id, towards);
+  if (!runs_own_command(ctx, *self.world, self.id)) end_commands(*self.world, self.id);
   return HostOutcome::ok_void();
 }
 
@@ -2075,26 +2239,31 @@ HostOutcome face_impl(CallContext& ctx) {
 /// and `UNIT_GRAB_GOODS.VS`, which put a villager's bucket or bundle on its
 /// back before the walk home.
 ///
-/// All three are the walk-animation slot. `0x005d8670` (`DoCarryNothing`,
-/// `[7, 1, 21]`) answers whether the word at `[unit+0x1bc]` is zero; that word
-/// is what `Unit::SetWalkAnim` writes -- 0 from the no-argument form
-/// (0x005d8300) and the argument from the other (0x005d8350) -- and it is
-/// `MoveState::walk_anim` here, where the no-argument form writes the entity's
-/// locomotion slot, 1, rather than 0. So *carrying nothing* is a walk slot at
-/// or below the default: 0 or 1 both read as nothing carried, and a deer on
-/// its grazing slot 13 is, by the original's own rule, carrying something.
+/// All three are the walk-animation slot, the 16-bit index at `[unit+0x1bc]`
+/// into the entity's animation table (`[entity+0x146c]`, 0x005d2920). **That
+/// index is the script's slot less one**: `SetWalkAnim(n)` (0x005d8350) writes
+/// `n - 1`, the no-argument form (0x005d8300) writes 0, and `StartAnim(n)`
+/// hands 0x0053e6c0 `n - 1` the same way. `MoveState::walk_anim` keeps the
+/// script's numbering, so the stored index `i` is slot `i + 1` here:
 ///
-/// The two setters (0x005d83b0, 0x005d84b0, both `[0, 1, 21]`) compare the
-/// unit's class **id** -- exact, terminator included -- against the eight
-/// `?WVillagerAmbient` classes, one per race letter. A water carrier of one of
-/// those gets slot **16**; a goods carrier gets **17**, and a goods carrier of
-/// one of the eight plain `?VillagerAmbient` classes gets 16 instead. Any
-/// other class leaves the slot alone, which is why a peasant grabbing goods
-/// walks home empty-handed: the animation only exists on the ambient
-/// villagers. Every one of the sixteen names ships.
+///   * `DoCarryNothing` (0x005d8670, `[7, 1, 21]`) answers whether the index
+///     is **zero** -- slot 1 here, exactly. A deer on its grazing slot 13 is
+///     carrying something by this rule, and so is a unit given
+///     `SetWalkAnim(0)`, whose index is -1. This used to answer "at or below
+///     1", which took the second for nothing carried;
+///   * the two setters (0x005d83b0, 0x005d84b0, both `[0, 1, 21]`) compare the
+///     unit's class **id** -- exact, terminator included -- against the eight
+///     `?WVillagerAmbient` classes, one per race letter. A water carrier of
+///     one of those gets index 16 (slot **17**); a goods carrier gets 17
+///     (slot **18**), and a goods carrier of one of the eight plain
+///     `?VillagerAmbient` classes gets 16 (slot 17). These used to be written
+///     as slots 16 and 17, one below the animation the original plays. Any
+///     other class leaves the slot alone, which is why a peasant grabbing
+///     goods walks home empty-handed: the animation only exists on the
+///     ambient villagers. Every one of the sixteen names ships.
 ///
-/// An invalid receiver prints its own message and does nothing; `DoCarryNothing`
-/// answers false for one, which is the byte the original leaves at 0.
+/// A receiver that names nothing prints its own message and does nothing;
+/// `DoCarryNothing` answers false for one, the byte the original pushes.
 [[nodiscard]] bool class_id_is(const World& world, ObjectId id, std::string_view name) {
   const WorldObject* slot = world.find(id);
   const ClassGraph* graph = world.class_graph();
@@ -2112,50 +2281,50 @@ HostOutcome face_impl(CallContext& ctx) {
   return false;
 }
 
+/// The walk slot an index the original stores names here: one more.
+constexpr std::int32_t walk_slot_of_index(std::int32_t index) noexcept { return index + 1; }
+
 HostOutcome do_carry_nothing_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) {
-    if (self.error == kNoWorld || self.error == kNoSystem) return HostOutcome::failed(self.error);
-    return HostOutcome::ok_with(Value::boolean(false));
-  }
-  if (self.world->find(self.id) == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::boolean(false)));
   const MoveState* move = self.movement->find(self.id);
-  const std::int32_t slot = move == nullptr ? 1 : move->walk_anim;
-  return HostOutcome::ok_with(Value::boolean(slot <= 1));
+  const std::int32_t slot = move == nullptr ? walk_slot_of_index(0) : move->walk_anim;
+  return HostOutcome::ok_with(Value::boolean(slot == walk_slot_of_index(0)));
 }
 
 template <bool kGoods>
 HostOutcome set_carry_anim_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) {
-    if (self.error == kNoWorld || self.error == kNoSystem) return HostOutcome::failed(self.error);
-    return HostOutcome::ok_void();
-  }
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_void());
   if (is_ambient_villager(*self.world, self.id, /*water_carrier=*/true)) {
-    self.movement->state(self.id).walk_anim = kGoods ? 17 : 16;
+    self.movement->state(self.id).walk_anim = walk_slot_of_index(kGoods ? 0x11 : 0x10);
   } else if (kGoods && is_ambient_villager(*self.world, self.id, /*water_carrier=*/false)) {
-    self.movement->state(self.id).walk_anim = 16;
+    self.movement->state(self.id).walk_anim = walk_slot_of_index(0x10);
   }
   return HostOutcome::ok_void();
 }
 
+/// `SetSpeedFactor(n)` (0x005d7c30): the handle check, then `n` written whole
+/// to `[unit+0x15c]`; nothing for a receiver that names nothing. **Engine
+/// guard:** a negative factor is stored as 0 here, where the original would
+/// walk the unit backwards along its route. The shipped values are 7, 150
+/// and 170.
 HostOutcome set_speed_factor_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_void());
   const std::int32_t factor = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  // Negative would walk a unit backwards along its route, which nothing in the
-  // corpus asks for; clamped rather than trusted.
   self.movement->state(self.id).speed_factor = factor < 0 ? 0 : factor;
   return HostOutcome::ok_void();
 }
 
+/// `SetWalkAnim()` and `SetWalkAnim(n)`: the walk index to 0, or to `n - 1`
+/// -- slot 1, or slot `n`, in this engine's numbering (see `DoCarryNothing`
+/// above). Nothing for a receiver that names nothing.
 HostOutcome set_walk_anim_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
-  // `SetWalkAnim()` with no argument restores the default locomotion slot,
-  // which is 1 in every entity that declares one.
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_void());
   const std::int32_t slot = ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer()
-                                                                      : 1;
+                                                                      : walk_slot_of_index(0);
   self.movement->state(self.id).walk_anim = slot;
   return HostOutcome::ok_void();
 }
@@ -2209,7 +2378,8 @@ HostOutcome set_walk_anim_impl(CallContext& ctx) {
 /// re-entry does not.
 HostOutcome stop_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  // A receiver that names nothing: false, at once (0x005d6cd0).
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::boolean(false)));
   const std::int64_t hold = ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer()
                                                                       : 0;
   if (!ctx.first_call) {
@@ -2241,57 +2411,145 @@ HostOutcome stop_impl(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(true));
 }
 
+/// `HasPath()` (0x005d6e50): false for a receiver that names nothing and for a
+/// unit in a holder (`[unit+0x154]`); for a hero (bit 0x1000000 of
+/// `[obj+0x2c]`) 0x0052fe40 -- its own route record, or **any member of its
+/// army whose route follows the formation** (record mode `[rec+0x28] == 2`,
+/// the route `SetFormation` 0x00417790 aims at the formation object); for any
+/// other unit whether it has a route record at all (`[unit+0x148]`).
+///
+/// A member following the march is one whose route belongs to the hero's
+/// party here (`MoveState::party`, which `place_army` sets). So a hero who has
+/// reached the march's end goes on answering true while his column is still
+/// walking to its stations -- `HERO_TELEPORT.VS` and the hero scripts loop
+/// `while (.HasPath)` around `FormKeepMoving`. This used to read the hero's
+/// own route alone.
 HostOutcome has_path_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::boolean(false)));
+  const auto answer = [](bool has) { return HostOutcome::ok_with(Value::boolean(has)); };
+  const ObjectState* state = self.world->state(self.id);
+  if (state != nullptr && state->is_held()) return answer(false);
   const MoveState* move = self.movement->find(self.id);
-  return HostOutcome::ok_with(Value::boolean(move != nullptr && move->has_path));
+  if (move != nullptr && move->has_path) return answer(true);
+  if (state == nullptr || !state->flags.is_hero) return answer(false);
+  const HeroSystem* heroes = hero_system_of(*self.world);
+  const HeroRecord* record = heroes == nullptr ? nullptr : heroes->hero(self.id);
+  if (record == nullptr) return answer(false);
+  for (const ObjectId member : record->army) {
+    const MoveState* marching = self.movement->find(member);
+    if (marching != nullptr && marching->has_path && marching->party == self.id) {
+      return answer(true);
+    }
+  }
+  return answer(false);
 }
 
 /// `PathTo(dest, range, ?)` -> the route's length in world units, or -1 when
-/// there is no route. **The return value's meaning is inferred**: the inventory
-/// records `int`, and a length is the only integer a path query obviously has
-/// to give. The third argument is unread; nothing distinguishes a reading of it.
+/// there is no route. Two bodies, one per destination type:
+///
+///   * **the receiver**: one that names nothing answers -1 (0x005de360);
+///   * **the object form** (0x005de390) answers -1 for a target that names
+///     nothing (`Parameter #1 ... is uninitialized or invalid object`), and
+///     otherwise goes to where the target stands for the questions that ask
+///     where it is -- its `vtbl+0xc8`, `posRH`, so a garrisoned target is its
+///     settlement's centre -- with **both class radii added to the range**
+///     (`[class+0x2dc]` of each, as they stand: no clamp). Every shipped
+///     object `PathTo` is a hero's `PathTo(x, .FormRadius, 0)`. This used to
+///     search to the target's raw position with the range as given;
+///   * **a unit aboard a ship answers 1,000,000** (0x005de1e1): its holder
+///     belongs to an object (0x005319a0), and the search is not made;
+///   * the third argument is popped and never read.
+///
+/// **Not reproduced:** the search itself. The original asks the pathfinder
+/// (`[0x8c528c]`, `vtbl+8`) with the unit's class radius and its class's
+/// `+0x31c`, from the unit's position -- or, for a unit at `(-1, -1)`, from
+/// an exit point found by 0x004db6c0 -- and answers the result's `+0x18`
+/// shifted down sixteen bits. That it is the route's length is **inferred**:
+/// the scripts compare it with `.sight` and `.FormRadius`, both distances.
+/// Here it is this engine's pathfinder from where the unit resolves.
 HostOutcome path_to_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::integer(-1)));
+  const auto none = HostOutcome::ok_with(Value::integer(-1));
+  std::int32_t range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
   Point dest{};
-  ObjectId ignored = kNoObject;
-  if (!destination_of(*self.world, ctx.arg(1), dest, ignored)) {
-    return HostOutcome::failed(kNoPoint);
+  if (is_point(ctx.arg(1))) {
+    dest = unpack_point(ctx.arg(1));
+  } else {
+    const ObjectId target = object_of(ctx.arg(1));
+    const WorldObject* other = target == kNoObject ? nullptr : self.world->find(target);
+    if (other == nullptr) {
+      if (target != kNoObject || receiver_departed(*self.world, ctx.arg(1))) return none;
+      return HostOutcome::failed(kNoPoint);
+    }
+    dest = other->state.flags.is_unit ? unit_pos_rh(*self.world, target) : other->state.position;
+    const WorldObject* mover = self.world->find(self.id);
+    range += class_int(*self.world, *other, "radius") +
+             (mover == nullptr ? 0 : class_int(*self.world, *mover, "radius"));
   }
+  if (held_by_carrier(*self.world, self.id)) return HostOutcome::ok_with(Value::integer(1000000));
   PathRequest request;
   request.start = self.world->resolve_position(self.id);
   request.goal = dest;
-  request.arrival_range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
+  request.arrival_range = range;
   request.ignore_passability = self.movement->ignores_passability(*self.world, self.id);
   const Path path = self.movement->pathfinder().find(self.movement->grid(), request);
   if (path.status == PathStatus::arrived) return HostOutcome::ok_with(Value::integer(0));
-  if (path.status != PathStatus::found) return HostOutcome::ok_with(Value::integer(-1));
+  if (path.status != PathStatus::found) return none;
   return HostOutcome::ok_with(
       Value::integer(static_cast<std::int32_t>(std::min<std::int64_t>(path.length, 0x7FFFFFFF))));
 }
 
-/// `PathDestFound` -> the point the current route actually ends at, which is
-/// not the ordered destination when the route is partial.
+/// `PathDestFound` (0x005d8830) -> **the point the unit's route ends at, or
+/// `(-1, -1)` when it has none.** The route record (`[unit+0x148]`) is asked
+/// whether its media found a path (`vtbl+0x24`, which the route's sampled
+/// path answers with itself) and, if so, for the media's last point
+/// (`vtbl+0x10`, the end of the path's point vector, 0x0040bb80); no record,
+/// or none found, is `(-1, -1)`. `SHIP_BOARD.VS`, the one caller, tests
+/// `pos.x != -1` on it before it measures anything. This used to answer the
+/// unit's own position with no route.
+///
+/// **The body makes no handle check**: a receiver that names nothing reads
+/// the route field of a null object and faults. Refused by name here.
 HostOutcome path_dest_found_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) {
+    return unresolved(self, HostOutcome::failed(
+                                "PathDestFound on a handle that names nothing faults in gbr.exe; "
+                                "see sim/movement.cpp"));
+  }
   const MoveState* move = self.movement->find(self.id);
-  if (move == nullptr || move->waypoints.empty()) {
-    return HostOutcome::ok_with(pack_point(self.world->resolve_position(self.id)));
+  if (move == nullptr || !move->has_path || move->waypoints.empty()) {
+    return HostOutcome::ok_with(pack_point(kHeldPosition));
   }
   return HostOutcome::ok_with(pack_point(move->waypoints.back()));
 }
 
+/// `dest` (0x005d6f50): `(-1, -1)` for a receiver that names nothing. A unit
+/// with a route record answers the record's `vtbl+0x10` (0x00418560): the
+/// end of the route its media found, or -- with no media -- where the unit
+/// stands. A unit without one answers its own `vtbl+0xc8`, which is `posRH`:
+/// its position, or for a unit in a holder its settlement's centre or the
+/// ship it is aboard (`unit_pos_rh`).
+///
+/// So `dest` is **where the route goes, not where the order pointed**: a
+/// partial route's end, short of the goal. This used to answer the ordered
+/// destination with a route, and the holder walk without one. The priests'
+/// and druids' `.hero.dest` is the reader: they keep to where their hero's
+/// route will leave him.
 HostOutcome dest_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(pack_point(kHeldPosition)));
   const MoveState* move = self.movement->find(self.id);
-  const Point target = move != nullptr && move->has_path
-                           ? move->target
-                           : self.world->resolve_position(self.id);
-  return HostOutcome::ok_with(pack_point(target));
+  if (move != nullptr && move->has_path && !move->waypoints.empty()) {
+    return HostOutcome::ok_with(pack_point(move->waypoints.back()));
+  }
+  const WorldObject* slot = self.world->find(self.id);
+  const Point here = slot != nullptr && slot->state.flags.is_unit
+                         ? unit_pos_rh(*self.world, self.id)
+                         : self.world->resolve_position(self.id);
+  return HostOutcome::ok_with(pack_point(here));
 }
 
 /// `Unit::speed` -- **the class's `speed`, whether or not the unit has ever
@@ -2300,7 +2558,8 @@ HostOutcome dest_impl(CallContext& ctx) {
 /// `0x005d8ad0` reads the receiver's class descriptor at `[obj+0x3c]` and
 /// returns its `+0x2c8`, which is where the class reader stores the `speed`
 /// property (`0x005a1b25`..`0x005a1b6e`). No movement record is consulted and
-/// no `SetSpeedFactor` is applied: the answer is the declared number.
+/// no `SetSpeedFactor` is applied: the answer is the declared number. A
+/// receiver that names nothing answers 0.
 ///
 /// This used to answer from the `MoveState`, and 0 when there was none. A unit
 /// gets one the first time it is ordered to walk, and **an eagle never is**: it
@@ -2314,7 +2573,7 @@ HostOutcome dest_impl(CallContext& ctx) {
 /// record's `speed`, which is that same property copied in, or set directly.
 HostOutcome speed_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::integer(0)));
   const WorldObject* slot = self.world->find(self.id);
   if (slot == nullptr) return HostOutcome::ok_with(Value::integer(0));
   const ClassGraph* classes = self.movement->class_graph();
@@ -2328,8 +2587,9 @@ HostOutcome speed_impl(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(move != nullptr ? move->speed : 0));
 }
 
-/// `ClipDestToMap` is a member in the inventory; the point argument is the one
-/// after the receiver.
+/// `ClipDestToMap(pt)` (0x005ad900): the point clamped into the map rectangle
+/// `[map+0xb4]..[map+0xc0]`, which is `(0, 0, w - 1, h - 1)`. The body never
+/// looks at its receiver: a handle that names nothing clips all the same.
 HostOutcome clip_dest_to_map_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
@@ -2339,6 +2599,8 @@ HostOutcome clip_dest_to_map_impl(CallContext& ctx) {
   return HostOutcome::ok_with(pack_point(movement->grid().clamp_to_map(unpack_point(ctx.arg(1)))));
 }
 
+/// `IsPassable3x3(pt)` (0x004c67d0): 0x0053eb60 on the point, true or false.
+/// `ObstructionGrid::passable_3x3` carries the footprint.
 HostOutcome is_passable_3x3_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
@@ -2349,56 +2611,113 @@ HostOutcome is_passable_3x3_impl(CallContext& ctx) {
       Value::boolean(movement->grid().passable_3x3(unpack_point(ctx.arg(0)))));
 }
 
-/// `TimeWithoutWalking` -- against the **world's** clock, not the scripts'.
-/// The stamp it subtracts is movement's (`last_moved`, set as a turn plays
-/// out) and the world the script sees stands at the turn's end, so "how long
-/// has it stood" is asked of that instant. The scripts' clock can be up to a
-/// turn behind it (`Scheduler`'s "A script wakes on its own millisecond") and
-/// would answer a negative for a unit that moved later in the turn.
+/// `TimeWithoutWalking` (0x005d6ee0) -- **how long the `Goto` family has been
+/// failing to lay this unit a route**, and 0 while it is not: the clock
+/// (`[[unit+0x18]]`) less the failure stamp `[unit+0x150]`, 0 when the stamp
+/// is clear (-1). That stamp is `MoveState::goto_failed_at`, which the `Goto`
+/// family sets at its first search that lays no route and clears when one is
+/// laid or the unit arrives, and the end of the unit's command clears
+/// (`GotoOrder::give_up`). A receiver that names nothing answers 0.
+///
+/// It used to answer how long the unit had stood still, which is a different
+/// question with a different answer exactly where the scripts ask it.
+/// `UNIT_PATROL.VS` walks `if (.Goto(pt, 0, 2000, true, -1)) ...; if
+/// (.TimeWithoutWalking() > 0) break;` -- a patrol leaves its leg when the
+/// route cannot be laid, not when a slice ends with the unit between steps;
+/// the priests' and druids' `> 2500` give up on a walk that has found no
+/// route for two and a half seconds, not on one held up in a crowd; and
+/// `SHIP_IDLE.VS` leaves its `FindPointToStay` walk on the first failure.
+///
+/// Read on the scripts' clock, which is the one the stamp is taken on.
 HostOutcome time_without_walking_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::integer(0)));
   const MoveState* move = self.movement->find(self.id);
-  const GameTime now = self.world->time();
-  const GameTime since = move == nullptr ? now : now - move->last_moved;
-  return HostOutcome::ok_with(
-      Value::integer(static_cast<std::int32_t>(std::min<GameTime>(since, 0x7FFFFFFF))));
+  if (move == nullptr || move->goto_failed_at == kNoGotoFailure) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
+  const GameTime since = now_of(ctx, *self.world) - move->goto_failed_at;
+  return HostOutcome::ok_with(Value::integer(
+      static_cast<std::int32_t>(std::clamp<GameTime>(since, 0, 0x7FFFFFFF))));
 }
 
+/// `GetDir` (0x005ac5e0): the facing at `[obj+0x48]`, `(0, 1)` for a receiver
+/// that names nothing. The facing's length is this engine's
+/// (`kFacingLength`, see `Face`).
 HostOutcome get_dir_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(pack_point(Point{0, 1})));
   return HostOutcome::ok_with(pack_point(self.movement->state(self.id).facing));
 }
 
+/// `SetPos(pt)` (0x005ac130) -- 32 sites: nothing for a receiver that names
+/// nothing; otherwise, in order:
+///
+///   * the animation reset (0x0053d730), not reproduced, as in `Face`;
+///   * the unit's own `SetPos` (`vtbl+0x38`, 0x005d39e0): **a unit in a holder
+///     is taken out of it first** when the point is not `(-1, -1)` -- the
+///     holder removal 0x00531a80, the routine `ExitHolder` ends in, off the
+///     settlement's roster too (`garrison_forget`) -- and then placed. This
+///     used to leave a held unit where it was, because the world refuses a
+///     position under a holder: `UNIT_TELEPORT.VS` and `HERO_TELEPORT.VS`
+///     enter the teleport's settlement and then `SetPos` to the far exit;
+///   * the activity cleared and, for a unit, its route dropped (0x005d3830
+///     with null);
+///   * **unless the call comes from the object's own command script, its
+///     commands are ended** (`vtbl+0xc0` with 1), as `Face` does: the
+///     campaign sequences that move their actors about stop what those actors
+///     were doing, and the teleport scripts, which move their own unit, do
+///     not.
+///
+/// **Not reproduced:** the point is first clamped into the camera's map
+/// rectangle (`[0x9edd18]+0x628..0x634`, 32 units in from each side) in
+/// screen space -- `y` scaled by 181/256 less the terrain's height at the
+/// point (0x006245b0, 0x00422b70, 0x006243b0) -- and brought back to the map
+/// when it was outside. Every shipped site passes a point on the map: an area
+/// centre, an exit point, the unit's own position.
 HostOutcome set_pos_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_void());
   if (!is_point(ctx.arg(1))) return HostOutcome::failed(kNoPoint);
+  const Point to = unpack_point(ctx.arg(1));
   // Teleporting invalidates any route: it was laid from somewhere else.
   self.movement->stop(*self.world, self.id);
-  self.world->set_position(self.id, unpack_point(ctx.arg(1)));
+  const ObjectState* state = self.world->state(self.id);
+  if (state != nullptr && state->is_held()) {
+    if (to != kHeldPosition) {
+      (void)self.world->remove_from_holder(self.id, to);
+      (void)garrison_forget(*self.world, self.id);
+    }
+  } else {
+    (void)self.world->set_position(self.id, to);
+  }
+  if (!runs_own_command(ctx, *self.world, self.id)) end_commands(*self.world, self.id);
   return HostOutcome::ok_void();
 }
 
+/// `Hero::SetFormation(name)` (0x0052eca0): nothing for a receiver that names
+/// nothing; **a name `FORMATIONS.XML` does not declare is printed and
+/// ignored** ("unknown formation name, check the spelling", into the dead
+/// printer) -- the hero keeps the formation it had and the script goes on.
+/// Otherwise the hero's formation object (`[hero+0x2b0]`) takes the shape
+/// (0x005f2200: `[form+0x18]`, and the layout marked for a rerun). This used
+/// to trap on an unknown name.
 HostOutcome set_formation_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_void());
   if (!ctx.arg(1).is_string()) return HostOutcome::failed("SetFormation: not a formation name");
   const std::string& name = ctx.arg(1).as_string();
-  if (self.movement->formations().find(name) == nullptr) {
-    // A name no `<FormationClass>` declares. Refused loudly rather than stored:
-    // a silently ignored formation order is a bug that surfaces as bad tactics
-    // three systems away.
-    return HostOutcome::failed("SetFormation: no such formation");
-  }
+  if (self.movement->formations().find(name) == nullptr) return HostOutcome::ok_void();
   self.movement->state(self.id).formation = name;
   return HostOutcome::ok_void();
 }
 
+/// `Hero::formation` (0x0052ed60): the name of the hero's formation shape
+/// (`[[hero+0x2b0]+0x18]`'s name), the empty string for a receiver that names
+/// nothing. A hero never given one has the file's default.
 HostOutcome formation_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::string(std::string())));
   const MoveState* move = self.movement->find(self.id);
   const std::string_view name = move != nullptr && !move->formation.empty()
                                     ? std::string_view(move->formation)
@@ -2406,10 +2725,35 @@ HostOutcome formation_impl(CallContext& ctx) {
   return HostOutcome::ok_with(Value::string(std::string(name)));
 }
 
+/// `Hero::FormRadius` (0x0052ec40) -- 15 sites, every one a hero sizing its
+/// army: `PathTo(x, .FormRadius, 0)`, `GotoAttack`'s reach. 0 for a receiver
+/// that names nothing; otherwise 0x005f2350 on the hero's formation object:
+/// **the formation's radius** (`[form+0x34]`, the farthest station from the
+/// centre the layout last laid) when the formation has members
+/// (`[form+0x14]`) and that radius is not 0, and **the hero's class `radius`**
+/// (`[class+0x2dc]`) otherwise. Here the formation's radius is
+/// `MoveState::form_extent` and its members the hero's army.
+///
+/// This used to answer the class property `formation_radius`, the spacing a
+/// formation's ranks are laid at -- 26 for every unit -- which is neither.
+///
+/// **Approximated:** the original lays the formation out again whenever it is
+/// marked (0x005f4390 -> 0x005f1f60: an army changed, a shape set), and this
+/// engine only when the hero marches (`place_army`). A hero whose army has
+/// grown since its last march answers the old radius here, and one that has
+/// never marched its class radius.
 HostOutcome form_radius_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
-  if (!self.ok()) return HostOutcome::failed(self.error);
-  return HostOutcome::ok_with(Value::integer(self.movement->state(self.id).formation_radius));
+  if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::integer(0)));
+  const HeroSystem* heroes = hero_system_of(*self.world);
+  const HeroRecord* record = heroes == nullptr ? nullptr : heroes->hero(self.id);
+  const MoveState* move = self.movement->find(self.id);
+  if (record != nullptr && !record->army.empty() && move != nullptr && move->form_extent != 0) {
+    return HostOutcome::ok_with(Value::integer(move->form_extent));
+  }
+  const WorldObject* slot = self.world->find(self.id);
+  return HostOutcome::ok_with(
+      Value::integer(slot == nullptr ? 0 : class_int(*self.world, *slot, "radius")));
 }
 
 // --------------------------------------------------------------------------
@@ -2502,6 +2846,8 @@ namespace {
 /// What a ship's passenger waits before it asks again whether it may step
 /// off: the 100 the `Goto` family writes to the wait cell (0x005d62c8).
 constexpr std::int32_t kGotoCarrierPoll = 100;
+/// What a unit standing nowhere waits before it asks again (0x005d6312).
+constexpr std::int32_t kGotoOffMapPoll = 500;
 }  // namespace
 
 HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, ObjectId id,
@@ -2528,11 +2874,15 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   // nothing for a holder that is not a settlement's, and the unit was routed
   // from inside the ship.
   //
-  // **Not reproduced:** a unit still at `(-1, -1)` after both, which the
-  // original polls every 500 ms (0x005d6312). Its exit routine takes a unit
-  // out of any holder; `garrison_exit` only out of a settlement's, so a
-  // unit this engine fails to take out is one the original would have, and
-  // a 500 ms poll here would hold it for ever.
+  // **A unit at `(-1, -1)` that no holder holds waits 500 ms and asks
+  // again** (0x005d6312; 0x005d4150 in the worker the object `Goto` and
+  // `GotoAttack` share, 0x005d6729 area in `GotoEnter`): what `Disappear`
+  // leaves (`m_disappear`), until something puts it back on the map.
+  // **Not reproduced** for a unit still held after the step-out: the
+  // original's exit routine takes a unit out of any holder, `garrison_exit`
+  // only out of a settlement's, so a unit this engine fails to take out is
+  // one the original would have, and a 500 ms poll here would hold it for
+  // ever.
   if (const ObjectState* state = world.state(id); state != nullptr && state->is_held()) {
     const std::int32_t wait = held_by_carrier(world, id)
                                   ? kGotoCarrierPoll
@@ -2543,6 +2893,11 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
       out.suspend_for = wait;
       return out;
     }
+  } else if (state != nullptr && state->position == kHeldPosition) {
+    HostOutcome out;
+    out.status = script::HostStatus::retry;
+    out.suspend_for = kGotoOffMapPoll;
+    return out;
   }
   if (order.drop_target) {
     if (CombatSystem* combat = combat_system_of(world); combat != nullptr) {

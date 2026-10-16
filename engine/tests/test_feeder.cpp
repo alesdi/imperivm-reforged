@@ -19,6 +19,7 @@
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/feeder.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
@@ -620,19 +621,45 @@ TEST(feeder_host_reads_and_writes_a_units_food) {
             .status == script::HostStatus::ok);
   CHECK(feeder.food(soldier) == 20);
 
-  // Clamped to `max_food`: `TTENT_BEHAVIOR.VS` writes `u.SetFood(u.maxfood)`
-  // and nothing may exceed it, which is why the dumps' `food` domain is 0..20.
+  // **Not clamped.** `Unit::SetFood` (0x005d7cd0) stores `[unit+0x16c]` as
+  // given: `OUTPOST_BEHAVIOR.VS`'s `u1.SetFood(20)` and the Danube sequences'
+  // `SetFood(40)` leave a unit over its `maxfood`.
   CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
-                  {handle, script::Value::integer(9999)})
+                  {handle, script::Value::integer(40)})
             .status == script::HostStatus::ok);
-  CHECK(feeder.food(soldier) == 20);
+  CHECK(feeder.food(soldier) == 40);
 
-  // `u.SetFood(0)` -- `ITAVERN_CALLTOARMS.VS` and
-  // `SETTLEMENT_BEHAVIOR_AMBIENT.VS`.
+  // Nor floored, and anything under 1 marks the unit hungry -- the flag
+  // `0x20000000` the body clears below 1. `u.SetFood(0)` is
+  // `ITAVERN_CALLTOARMS.VS` and `SETTLEMENT_BEHAVIOR_AMBIENT.VS`.
   CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
                   {handle, script::Value::integer(-5)})
             .status == script::HostStatus::ok);
+  CHECK(feeder.food(soldier) == -5);
+  CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                  {handle, script::Value::integer(0)})
+            .status == script::HostStatus::ok);
   CHECK(feeder.food(soldier) == 0);
+
+  // `ObjList::SetFood` (0x0055e890): each unit member's field, and a negative
+  // value is refused with a print -- nothing written.
+  {
+    ObjListPool& pool = objlist_pool_of(world);
+    const ObjListId list = pool.acquire_temporary(script::ScriptId{});
+    pool.mutable_items(list)->push_back(soldier);
+    const script::Value ol = make_objlist_value(list);
+    CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                    {ol, script::Value::integer(33)})
+              .status == script::HostStatus::ok);
+    CHECK(feeder.food(soldier) == 33);
+    CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                    {ol, script::Value::integer(-1)})
+              .status == script::HostStatus::ok);
+    CHECK(feeder.food(soldier) == 33);
+    CHECK(call_host(registry, world, script::CallKind::member, "SetFood", 1,
+                    {handle, script::Value::integer(0)})
+              .status == script::HostStatus::ok);
+  }
 
   // `u1.SetFeeding(false)` -- five shipped behaviours, every call a literal
   // boolean, and `Value::boolean` is `Value::integer(v ? 1 : 0)`.
@@ -704,13 +731,66 @@ TEST(feeder_host_refuses_a_null_context) {
               .status == script::HostStatus::error);
   }
 
-  // A receiver that is neither a settlement nor a unit in the chain is an
-  // error, not a zero.
-  CHECK(call_host(registry, world, script::CallKind::member, "maxfood", 0,
-                  {script::Value::object(kTypeObj, 4242)})
-            .status == script::HostStatus::error);
-  // And with no feeder on the world at all.
+  // With no feeder on the world at all.
   World bare;
   CHECK(call_host(registry, bare, script::CallKind::member, "maxfood", 0, {handle})
             .status == script::HostStatus::error);
+}
+
+/// The feeder's two entry points answer what `gbr.exe`'s do for a receiver the
+/// chain does not hold, and `SetFeeding` takes a query.
+///
+/// `scUnitMaxFood` (0x005d8cb0) answers 0 for a handle naming nothing and the
+/// class's `max_food` otherwise; `Unit::SetFeeding` (0x005d7ef0) does nothing
+/// for a dead handle; `Query::SetFeeding` (0x00579db0) writes every living
+/// unit of the query; and the argument is a byte. Each of these trapped.
+TEST(feeder_host_answers_an_unknown_receiver_and_takes_a_query) {
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  register_world_host(registry);
+  register_economy_hosts(registry);
+  register_feeder_hosts(registry);
+
+  World world;
+  FeederSystem feeder;
+  feeder.set_world_bound(false);
+  REQUIRE(world.add_system(&feeder));
+  const ObjectId a = world.spawn(NativeClass::unit, nullptr);
+  const ObjectId b = world.spawn(NativeClass::unit, nullptr);
+  world.set_health(a, 100);
+  world.set_health(b, 100);
+  (void)world.set_position(a, Point{100, 100});
+  (void)world.set_position(b, Point{140, 100});
+  feeder.enrol(unit(a));
+  feeder.enrol(unit(b));
+  feeder.start(world);
+
+  const script::HostOutcome nothing = call_host(
+      registry, world, script::CallKind::member, "maxfood", 0, {script::Value::object(kTypeObj, 4242)});
+  REQUIRE(nothing.status == script::HostStatus::ok);
+  CHECK(nothing.value.as_integer() == 0);
+  CHECK(call_host(registry, world, script::CallKind::member, "SetFeeding", 1,
+                  {script::Value::object(kTypeObj, 4242), script::Value::boolean(false)})
+            .status == script::HostStatus::ok);
+
+  QuerySpec spec;
+  spec.kind = QueryKind::map_area_circle;
+  spec.center = Point{100, 100};
+  spec.radius = 500;
+  const ObjectId query = world.create_query(spec);
+  CHECK(call_host(registry, world, script::CallKind::member, "SetFeeding", 1,
+                  {script::Value::object(kTypeQuery, query), script::Value::boolean(false)})
+            .status == script::HostStatus::ok);
+  CHECK(!feeder.feeding(a));
+  CHECK(!feeder.feeding(b));
+
+  // 256 is a zero byte.
+  CHECK(call_host(registry, world, script::CallKind::member, "SetFeeding", 1,
+                  {script::Value::object(kTypeObj, a), script::Value::integer(1)})
+            .status == script::HostStatus::ok);
+  CHECK(feeder.feeding(a));
+  CHECK(call_host(registry, world, script::CallKind::member, "SetFeeding", 1,
+                  {script::Value::object(kTypeObj, a), script::Value::integer(256)})
+            .status == script::HostStatus::ok);
+  CHECK(!feeder.feeding(a));
 }

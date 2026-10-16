@@ -64,6 +64,20 @@ constexpr std::int32_t kEnoughCrews = 10;
   return !filter.match_all && world.matches_filter(slot, filter);
 }
 
+/// `[obj+0xdc]`, the object's own damage (0x00438664 sums it): the
+/// combatant's `attack_of` -- class `damage` plus what `Unit::AddBonus` and
+/// the level put on it -- when the combat system holds the object, the class's
+/// `damage` otherwise. The reading `sim/world_host.cpp`'s gate census makes of
+/// the same field.
+[[nodiscard]] std::int64_t object_damage(World& world, const WorldObject& slot) {
+  if (const CombatSystem* combat = combat_system_of(world); combat != nullptr) {
+    if (const Combatant* unit = combat->find(slot.id); unit != nullptr) {
+      return combat->attack_of(*unit);
+    }
+  }
+  return class_int(world, slot, "damage");
+}
+
 /// `Unit::HasSpecial(30)`: the `freedom` token of the class's `unit_specials`,
 /// matched the way `sim/world_host.cpp`'s `class_has_special` matches --
 /// lowercased, spaces to underscores -- so the two readers cannot drift on a
@@ -432,7 +446,9 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
   if (graph == nullptr || commands == nullptr || heroes == nullptr) return report;
 
   const PlayerId player = first->state.owner;
-  const Point centre = world.resolve_position(first->id);
+  // The first unit's `posRH` (`vtbl+0xc8` at 0x00438960): a garrisoned unit
+  // asks from its town's central building, not from its holder record.
+  const Point centre = unit_pos_rh(world, first->id);
 
   // 1. Whether catapults are wanted.
   Settlement* set = target_slot->state.flags.is_building ? settlement_of(world, economy, target)
@@ -464,7 +480,7 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
       plan.push_back(CrewEntry{slot->id, kNoObject, 0, i});
     } else {
       attackers.push_back(slot->id);
-      if (hurts) damage_sum += class_int(world, *slot, "damage");
+      if (hurts) damage_sum += object_damage(world, *slot);
     }
   }
 
@@ -495,7 +511,8 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
       }
       if (garrison < damage_sum * 5) {
         std::int64_t building = target_slot->state.health;
-        const std::int64_t maximum = class_int(world, *target_slot, "maxhealth");
+        // `[target+0xc8]`, the building's own maximum (0x00438798).
+        const std::int64_t maximum = object_max_health(world, *target_slot);
         for (int round = 0; round < 5; ++round) {
           const std::int64_t at_building = maximum == 0 ? 0 : building * damage_sum / maximum;
           const std::int64_t at_garrison = damage_sum - at_building;
@@ -639,8 +656,9 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
     (void)commands->clear_commands(world, id);
     Point at = rally;
     if (!have_rally) {
-      at = find_site(world, settlement_of(world, economy, target), world.resolve_position(id),
-                     target, catapult_class);
+      // Each attacker's own `posRH` (0x00438be5).
+      at = find_site(world, settlement_of(world, economy, target), unit_pos_rh(world, id), target,
+                     catapult_class);
       if (at.x == -1 && at.y == -1) continue;
     }
     const Point stand = push_out(push_out(at, 200), 400);
@@ -694,7 +712,10 @@ HostOutcome objlist_siege_impl(CallContext& ctx) {
 /// 0x00438e60 resolves the squad, refuses one carrying `SF_NOAI`, writes
 /// `nAttackState` into its state with the time, and hands its member deque
 /// to the planner. An unresolved target prints and stops there, after the
-/// state was written.
+/// state was written. The state is stored as a 16-bit word (`[squad+0x28]`)
+/// and the time is the scripts' clock (`+0x1258`); the shipped states are
+/// small constants, so the truncation is not reproduced. The target is tested
+/// for a live handle only, not for being alive.
 HostOutcome squad_siege_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Siege: no World behind CallContext::user");

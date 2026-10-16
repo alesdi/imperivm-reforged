@@ -14,6 +14,7 @@
 #include "imperivm/core/game/localization.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/host_context.hpp"
+#include "imperivm/core/sim/feedback.hpp"
 #include "imperivm/core/sim/text.hpp"
 #include "test.hpp"
 
@@ -161,7 +162,7 @@ TEST(localization_splits_one_comma_separated_token) {
   std::string tail;
   game::split_token("numbertotrain, maxnumber, class", token, tail);
   CHECK(token == "numbertotrain");
-  CHECK(tail == "maxnumber, class");
+  CHECK(tail == " maxnumber, class");
 
   game::split_token("only", token, tail);
   CHECK(token == "only");
@@ -183,6 +184,30 @@ TEST(localization_trims_each_token) {
   CHECK(tokens[0] == "0");
   CHECK(tokens[1] == "10");
   CHECK(tokens[3] == "30");
+}
+
+/// `ParseStr`'s own rule, 0x00697580: spaces, and only spaces, are cut from
+/// the token's two ends; the tail after the comma is kept verbatim.
+TEST(localization_split_trims_spaces_only_and_keeps_the_tail_verbatim) {
+  std::string token;
+  std::string tail;
+  game::split_token("  a b  ,  rest , more  ", token, tail);
+  CHECK(token == "a b");
+  CHECK(tail == "  rest , more  ");
+
+  // A tab is not a space to it.
+  game::split_token("\tx\t, y", token, tail);
+  CHECK(token == "\tx\t");
+  CHECK(tail == " y");
+
+  // A tail of nothing but spaces stays a non-empty string, so a script's
+  // `while (dest != "")` runs once more and parses an empty token.
+  game::split_token("a, ", token, tail);
+  CHECK(token == "a");
+  CHECK(tail == " ");
+  game::split_token(tail, token, tail);
+  CHECK(token.empty());
+  CHECK(tail.empty());
 }
 
 TEST(localization_splits_safely_when_the_token_and_tail_alias_the_source) {
@@ -223,6 +248,95 @@ TEST(text_host_translates_then_substitutes) {
   CHECK(out.value.as_string() == "Serve 500");
 }
 
+/// A table shaped to tell the original's lookup (0x00689130 over the maps
+/// 0x00689f40 fills) from a plain `text` search. Invented words throughout.
+constexpr std::string_view kLookupTable =
+    "<translationtable>"
+    "<translationtableentry text=\"Quill\" justtext=\"Quill\" result=\"Penna\"/>"
+    "<translationtableentry text=\"Quill@inkwell\" justtext=\"Quill\" result=\"Piuma\"/>"
+    "<translationtableentry text=\"Lantern\" justtext=\"Lantern\" result=\"Lanterna\"/>"
+    "<translationtableentry text=\"Hollow\" justtext=\"Hollow\" result=\"\"/>"
+    "<translationtableentry text=\"Owes %s1 to %s2\" justtext=\"Owes %s1 to %s2\" "
+    "result=\"Deve %s1 a %s2\"/>"
+    "<translationtableentry text=\"Gives %s2 then %s1\" justtext=\"Gives %s2 then %s1\" "
+    "result=\"%s2, poi %s1\"/>"
+    "<translationtableentry text=\"Odd %s1\" justtext=\"Odd %s1\" result=\"Strano %d1\"/>"
+    "<translationtableentry text=\"Half %s1\" justtext=\"Half %s1\" result=\"%s1 al 50%%\"/>"
+    "<translationtableentry text=\"Broken %s1\" justtext=\"Broken %s1\" result=\"50% di %s1\"/>"
+    "<translationtableentry text=\"Bare %s1\" justtext=\"Bare %s1\" result=\"Nudo %s\"/>"
+    "<translationtableentry text=\"Echo\" justtext=\"Echo\" result=\"Eco\"/>"
+    "<translationtableentry text=\"Say %s1\" justtext=\"Say %s1\" result=\"%s1\"/>"
+    "</translationtable>";
+
+TEST(localization_lookup_follows_the_originals_maps) {
+  const auto parsed = game::TranslationTable::parse(bytes_of(kLookupTable));
+  REQUIRE(parsed.ok());
+  const game::TranslationTable& table = parsed.value();
+
+  // `justtext` is a name too, and a later row overwrites an earlier one under
+  // the same name: `Quill@inkwell`'s `justtext` comes after `Quill`.
+  CHECK(table.lookup("Quill") == "Piuma");
+  CHECK(table.translate("Quill") == "Penna");  // the interface's search is unchanged
+  CHECK(table.lookup("Quill@inkwell") == "Piuma");
+
+  // Case-blind when the exact name misses.
+  CHECK(table.lookup("LANTERN") == "Lanterna");
+  CHECK(table.lookup("lantern") == "Lanterna");
+
+  // Empty answers empty; digits answer themselves; a miss and an empty result
+  // answer the key.
+  CHECK(table.lookup("").empty());
+  CHECK(table.lookup("0420") == "0420");
+  CHECK(table.lookup("nowhere") == "nowhere");
+  CHECK(table.lookup("Hollow") == "Hollow");
+  CHECK(table.lookup("HOLLOW") == "HOLLOW");
+
+  // A context is tried first and dropped when it misses.
+  CHECK(table.lookup("Quill", "inkwell") == "Piuma");
+  CHECK(table.lookup("Lantern", "inkwell") == "Lanterna");
+}
+
+TEST(localization_format_translates_its_arguments) {
+  const auto parsed = game::TranslationTable::parse(bytes_of(kLookupTable));
+  REQUIRE(parsed.ok());
+  const game::TranslationTable& table = parsed.value();
+  const auto fmt = [&](std::string_view key, std::vector<std::string> args) {
+    return table.format(key, args);
+  };
+
+  // `%s` arguments go through the lookup themselves (0x00689a82); a number
+  // passes through on the digit rule.
+  CHECK(fmt("Owes %s1 to %s2", {"12", "lantern"}) == "Deve 12 a Lanterna");
+  CHECK(fmt("Gives %s2 then %s1", {"Quill", "Echo"}) == "Eco, poi Piuma");
+  // `%d` writes the argument as it came.
+  CHECK(fmt("Odd %s1", {"Echo"}) == "Strano Echo");
+  // `%%` is one percent sign.
+  CHECK(fmt("Half %s1", {"7"}) == "7 al 50%");
+  // Any other `%`, or a placeholder without a number, abandons the text.
+  CHECK(fmt("Broken %s1", {"7"}) == "Bad parameter at pos 4");
+  CHECK(fmt("Bare %s1", {"7"}) == "Bad parameter at pos 7");
+  // A finished text that is itself a name is translated once more.
+  CHECK(fmt("Say %s1", {"Echo"}) == "Eco");
+  CHECK(fmt("Say %s1", {"Lantern"}) == "Lanterna");
+}
+
+TEST(text_host_translatef_has_three_argument_forms) {
+  const auto parsed = game::TranslationTable::parse(bytes_of(kLookupTable));
+  REQUIRE(parsed.ok());
+  const script::HostRegistry registry = text_registry();
+  // 0x004ca470 takes the key and three strings.
+  HostCall call{script::Value::string("Owes %s1 to %s2"), script::Value::string("Echo"),
+                script::Value::string("Quill"), script::Value::string("unused")};
+  call.state.translations = &parsed.value();
+  const auto out = invoke(registry, "Translatef", 4, call);
+  REQUIRE(out.status == script::HostStatus::ok);
+  CHECK(out.value.as_string() == "Deve Eco a Piuma");
+
+  HostCall single{script::Value::string("LANTERN")};
+  single.state.translations = &parsed.value();
+  CHECK(invoke(registry, "Translate", 1, single).value.as_string() == "Lanterna");
+}
+
 TEST(text_host_parse_str_writes_the_tail_back_through_its_second_argument) {
   const script::HostRegistry registry = text_registry();
   HostCall call{script::Value::string("3, elephant, 5"), script::Value::string("")};
@@ -230,7 +344,8 @@ TEST(text_host_parse_str_writes_the_tail_back_through_its_second_argument) {
   CHECK(out.status == script::HostStatus::ok);
   CHECK(out.value.as_string() == "3");
   // Argument 1 is an out-parameter; the VM copies assignable arguments back.
-  CHECK(call.context.arg(1).as_string() == "elephant, 5");
+  // The tail keeps the space after the comma (0x00697629).
+  CHECK(call.context.arg(1).as_string() == " elephant, 5");
 }
 
 TEST(text_host_converts_and_measures_strings) {
@@ -251,10 +366,15 @@ TEST(text_host_converts_and_measures_strings) {
   HostCall trailing{script::Value::string("12abc")};
   CHECK(invoke(registry, "Str2Int", 1, trailing).value.as_integer() == 12);
 
-  // Saturates rather than wrapping: a wrapped value is a number the simulation
-  // would go on to use.
+  // `atol` (0x00763919): leading white space is skipped, tab included, and
+  // the 32-bit total wraps rather than saturating. 99,999,999,999 is
+  // 0x174876E7FF; its low 32 bits are 0x4876E7FF.
+  HostCall spaced{script::Value::string(" \t 30")};
+  CHECK(invoke(registry, "Str2Int", 1, spaced).value.as_integer() == 30);
   HostCall huge{script::Value::string("99999999999")};
-  CHECK(invoke(registry, "Str2Int", 1, huge).value.as_integer() == 2147483647);
+  CHECK(invoke(registry, "Str2Int", 1, huge).value.as_integer() == 0x4876E7FF);
+  HostCall signed_space{script::Value::string("- 5")};
+  CHECK(invoke(registry, "Str2Int", 1, signed_space).value.as_integer() == 0);
 
   HostCall length{script::Value::string("abcde")};
   CHECK(invoke(registry, "StrLen", 1, length).value.as_integer() == 5);
@@ -315,9 +435,28 @@ TEST(text_host_sends_pr_to_the_sink_and_survives_without_one) {
   REQUIRE(sink.lines.size() == 2);
   CHECK(sink.lines[1] == "7");
 
+  // `ClearDebug` (0x005a7fd0) moves the per-object debug era and leaves the
+  // console alone; clearing the console is `cls`'s.
   HostCall clear{};
   clear.state.debug = &sink;
   CHECK(invoke(registry, "ClearDebug", 0, clear).status == script::HostStatus::ok);
+  CHECK(sink.lines.size() == 2);
+}
+
+/// `cls` (0x006a3fe0 -> 0x00618a10) blanks the console `pr` writes to.
+TEST(cls_clears_the_console_pr_writes_to) {
+  script::HostRegistry registry = text_registry();
+  (void)sim::register_feedback_host(registry);
+  RecordingSink sink;
+
+  HostCall line{script::Value::string("kept until cls")};
+  line.state.debug = &sink;
+  (void)invoke(registry, "pr", 1, line);
+  REQUIRE(sink.lines.size() == 1);
+
+  HostCall clear{};
+  clear.state.debug = &sink;
+  CHECK(invoke(registry, "cls", 0, clear).status == script::HostStatus::ok);
   CHECK(sink.lines.empty());
 }
 

@@ -8,9 +8,9 @@ its implementation, never here (`docs/legal.md` rule 2).
 ```
 bodies    1474 registered by gbr.exe (1498 registrations)
 called    983 reached by a shipped script (33,965 call sites in all)
-cited     688 of those 983 have their address cited under engine/core
-status    verified 280, partial 139, inferred 1, unread 563, unused 491
-called    verified 280, partial 139, inferred 1, unread 563
+cited     837 of those 983 have their address cited under engine/core
+status    verified 642, partial 337, inferred 4, unread 0, unused 491
+called    verified 642, partial 337, inferred 4, unread 0
 ```
 
 Entry points no shipped script calls are counted above and not listed.
@@ -20,237 +20,237 @@ Batches are by the file that implements them, most-called file first.
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Obj::player` | `0x005ab290` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:7317` | yes | verified | handle check, owner record index [[obj+0x70]+8] + 1; miss -1; NamedObj conversion now hides a dead named unit |
-| `Settlement::player` | `0x005c2340` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:7317` | yes | verified | settlement owner record at +0x90, index + 1; miss -1 |
-| `Squad::Player` | `0x004210c0` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:7317` | yes | verified | handle low nibble + 1, no lookup |
-| `NamedObj::obj` | `0x005530a0` | 1,174 | member/0 | `engine/core/src/sim/world_host.cpp:7482` | yes | verified | purges dead (vtbl+0x50) then front object; empty -> invalid; also the NamedObj->Obj conversion (object_of) |
-| `Obj::pos` | `0x005add20` | 1,057 | member/0 | `engine/core/src/sim/world_host.cpp:7318` | yes | verified | raw [obj+0x24/0x28]; miss (0,0), not the held marker |
-| `Squad::pos` | `0x00422cf0` | 1,057 | member/0 | `engine/core/src/sim/world_host.cpp:7318` | yes | verified | front member's posRH, (-1,-1) for none; a handle naming no squad faults in the original, (-1,-1) here |
-| `NamedObj::IsValid` / `Query::IsValid` | `0x00577af0` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:7316` | yes | partial | handle check then vtbl+0x2c "registered": named map (name exists), group map, sight queries 1; other query subclasses not enumerated, deregistration not read |
-| `Item::IsValid` / `Obj::IsValid` / `Settlement::IsValid` | `0x005ab1d0` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:7316` | yes | verified | handle check only (table slot + offset non-null), no print; a corpse is valid |
-| `SquadList::IsValid` | `0x00421a70` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:7316` | yes | partial | index within the squad-list pool (0x0043ed70); engine asks for a live entry, which differs only for a released one (0 sites) |
-| `Query::IsEmpty` | `0x00579320` | 805 | member/0 | `engine/core/src/sim/world_host.cpp:7502` | yes | partial | miss -> true (was a trap); refresh+count==0 evaluated on the spot -- the original's 1-2 s query cache is the query-model design gap |
-| `Sacrifice::IsEmpty` | `0x00594eb0` | 805 | member/0 | `engine/core/src/sim/world_host.cpp:7502` | yes | partial | miss -> true; stop flag [+0x15c] never set here (no sacrifice machinery), so a sacrifice answers false |
-| `Obj::AsUnit` | `0x005aa580` | 717 | member/0 | `engine/core/src/sim/world_host.cpp:7521` | yes | verified | sync bit 0x400000 (CVXUnit ctor 0x005d3170); miss or failed cast -> invalid handle; matches NativeObject::is_a |
-| `Building::settlement` | `0x004dcdd0` | 671 | member/0 | `engine/core/src/sim/world_host.cpp:7321` | yes | verified | 16-bit settlement slot [bld+0x148] as a handle; miss -> invalid; no 0xffff guard (faults) -> invalid here |
-| `GAIKA::settlement` | `0x004219a0` | 671 | member/0 | `engine/core/src/sim/world_host.cpp:7321` | yes | verified | node at index*0x24 of 0x008c8e54, settlement pointer +0x14 or invalid; no print |
-| `Intersect` | `0x005733f0` | 556 | free/2 | `engine/core/src/sim/world_host.cpp:7252` | yes | partial | op 1 (fixed: was 0), walks the smaller operand in its own order (fixed); query-model gap |
-| `rand` | `0x004c63a0` | 428 | free/1 | `engine/core/src/sim/world_host.cpp:7251` | yes | verified | Range(0, n-1) on the game LCG (0x0063ff00): no draw when low == high, swapped arm draws, high dword of (span+1)*state, no scramble; sim/rng.hpp |
-| `point::IntoRect` | `0x00697cb0` | 398 | member/1 | `engine/core/src/sim/world_host.cpp:7486` | yes | verified | in place, low edge then high per axis, unnormalised |
-| `point::Rot` | `0x00697d90` | 385 | member/1 | `engine/core/src/sim/world_host.cpp:7484` | yes | partial | x87 trunc(x cos + y sin), trunc(y cos - x sin) with K = 3.1415926535/180; cardinals and the eight +/-1/2 entries keep the residue's sign (fixed for the halves); other angles a Q30 table, at most one unit off where a product falls within ~3e-5 of an integer; 53-bit precision control assumed |
-| `Obj::AsHero` | `0x005aa640` | 379 | member/0 | `engine/core/src/sim/world_host.cpp:7524` | yes | verified | sync bit 0x1000000; miss/failed -> invalid |
-| `Obj::IsAlive` | `0x005aae00` | 378 | member/0 | `engine/core/src/sim/world_host.cpp:7322` | yes | verified | valid and not vtbl+0x50 dead: object_is_dead |
-| `Obj::AsBuilding` / `Obj::AsTower` | `0x005aa5e0` | 322 | member/0 | `engine/core/src/sim/world_host.cpp:7522` | yes | verified | sync bit 0x800000 (CVXBuilding ctor 0x004e00d0), AsTower the same body; miss/failed -> invalid |
-| `SetNoAIFlag` | `0x00435470` | 230 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:7264` | yes | partial | bit 0x40000 of [+0x194] on live units only, then the whole list to the Squadize worker 0x00447330 at state 0 (fixed: the regroup was missing); non-units left out of the regroup (labelled; 0 shipped) |
-| `Unit::SetNoAIFlag` | `0x005de600` | 230 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:7264` | yes | verified | handle check, bit 0x40000 with no unit/death test, then a one-element list to 0x00447330 at state 0 (fixed) |
-| `Group` | `0x005765a0` | 216 | free/1 | `engine/core/src/sim/world_host.cpp:7259` | yes | partial | interns the name in [0x009bdac8], creates on a miss, answers the group's own handle (live, no cache); engine mints a fresh query per call (query-model gap) |
-| `Union` | `0x00573260` | 191 | free/2 | `engine/core/src/sim/world_host.cpp:7256` | yes | partial | op 0 (fixed: was 1), sort-by-handle merge (0x004ffbe0); query interning, 2000 ms cache and refcount are the query-model design gap (fn_set_op) |
-| `Obj::AddToGroup` | `0x005b6730` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:7285` | yes | partial | handle check before any group lookup (fixed: created the group anyway), then CVXGroup::Add; template-deque routing on [0x00a8734c] not read |
-| `ObjList::AddToGroup` | `0x00561970` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:7285` | yes | partial | no receiver check, group always made, members that resolve and are not dead (fixed); template routing not read |
-| `Query::AddToGroup` | `0x0057a550` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:7285` | yes | partial | handle check, then the query's cached list, every resolving member; query-model gap |
-| `SpawnGroup` | `0x00576790` | 181 | free/1 | `engine/core/src/sim/world_host.cpp:7268` | yes | partial | group map lookup, miss -> empty list; clones templates in order, non-unit copies skipped (fixed); the 0x0041f310 hand-off and next-turn behaviour start are labelled |
-| `GetNamedObj` | `0x00553230` | 177 | free/1 | `engine/core/src/sim/world_host.cpp:7293` | yes | verified | miss mints an empty named query under the name (0x005722a0): valid, dead, .obj invalid, filled by a later SetName |
-| `Obj::health` | `0x005ada80` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:7337` | yes | verified | [obj+0xc0]; miss 0 |
-| `Settlement::health` | `0x005c1e40` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:7337` | yes | partial | garrison holder [settlement+0x5e] +0x1c; no writer found (ctor 0x00531de0 zeroes it); engine answers the settlement's own health, 0; 0 sites |
-| `Squad::health` | `0x00427740` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:7337` | yes | verified | sum of [+0xc0] over members with a live slot; no bounds check; empty 0 |
-| `ClassPlayerObjs` | `0x005754b0` | 159 | free/2 | `engine/core/src/sim/world_host.cpp:7254` | yes | partial | player 1..16 else invalid; whole-string class else invalid (fixed); whole-map grid sweep: no held, no dead (fixed); query-model gap, grid order |
-| `Obj::IsHeirOf` | `0x005ad450` | 154 | member/1 | `engine/core/src/sim/world_host.cpp:7342` | yes | partial | whole string as one exact case-sensitive key (0x00409e40/0x00409350), then walk [class+0xe4]; fixed (was a comma list); altid keying of the map 0x009bdb00 not traced |
-| `Obj::stamina` | `0x005adae0` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:7335` | yes | verified | [obj+0xc4]; miss 0; ctor seeds from class maxstamina, engine for combatants only (no other class declares one) |
-| `ObjsInRange` | `0x00576130` | 151 | free/3 | `engine/core/src/sim/world_host.cpp:7258` | yes | partial | a sight query with the given radius (negative: sight-100), no comma bypass (fixed: was an anchored circle listing its anchor); query-model gap |
-| `Settlement::stamina` | `0x005c1f00` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:7335` | yes | partial | garrison holder +0x24; same as Settlement::health |
-| `Unit::stamina` | `0x005d8b90` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:7335` | yes | verified | [obj+0xc4], same field as Obj::stamina |
-| `point::x` / `rect::left` | `0x006950e0` | 143 | member/0 | `engine/core/src/sim/world_host.cpp:7490` | yes | verified | by-reference x / rect::left (offset 0) for assignment; the engine answers the read, 0 shipped sites assign |
-| `point::x` | `0x006952b0` | 142 | member/0 | `engine/core/src/sim/world_host.cpp:7336` | yes | verified | by-value first dword |
-| `Obj::posRH` | `0x005ad8a0` | 141 | member/0 | `engine/core/src/sim/world_host.cpp:7319` | yes | verified | vtbl+0xc8 (unit: unit_pos_rh, else raw); miss (0,0) silently |
-| `Obj::RemoveFromGroup` | `0x005b4630` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:7286` | yes | partial | handle check; group miss does nothing; CVXGroup::Remove (0x00572210) on the live deque; template deque not read |
-| `ObjList::RemoveFromGroup` | `0x0055f720` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:7286` | yes | partial | members that resolve and are not dead (fixed); as above |
-| `Query::RemoveFromGroup` | `0x0057a970` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:7286` | yes | partial | handle check, the query's cached list; query-model gap |
-| `Obj::DistTo` | `0x005aa350` | 134 | member/1 | `engine/core/src/sim/world_host.cpp:7341` | yes | verified | floor isqrt of the stored-position distance to the point, less own radius; miss -1 (was 0, and measured from the holder) |
-| `Obj::DistTo` | `0x005aa3e0` | 134 | member/1 | `engine/core/src/sim/world_host.cpp:7341` | yes | verified | argument then receiver checked (-1 each); 0x005a77b0: stored positions, less both radii |
-| `Place` | `0x005a8710` | 131 | free/3 | `engine/core/src/sim/world_host.cpp:7276` | yes | partial | player 1..16, inclusive map rect unless (-1,-1), class, CVXScriptObj cast then SetPlayer/SetPos; the cast subtree is inferred (labelled), 0x0041f310 hand-off not modelled |
-| `SpawnGroupInHolder` | `0x005769b0` | 127 | free/2 | `engine/core/src/sim/world_host.cpp:7269` | yes | partial | group, then exact settlement name scan; copies enter the garrison forced (0x005d3e10) with the onenter hook (fixed: only the holder link was set); hook order vs. name/group filing differs (labelled) |
-| `SpawnGroupInHolder` | `0x00576e00` | 127 | free/2 | `engine/core/src/sim/world_host.cpp:7269` | yes | partial | group, then the object's holder (vtbl+0xe4): ship -> ship+1, building -> its settlement's garrison; none -> empty list, no spawn (fixed: spawned into the object itself); a holder passed directly is inferred |
-| `Obj::sight` | `0x005adcc0` | 118 | member/0 | `engine/core/src/sim/world_host.cpp:7338` | yes | verified | [obj+0xd0] (WorldObject::sight); miss 0 |
-| `Obj::maxhealth` | `0x005adb40` | 117 | member/0 | `engine/core/src/sim/world_host.cpp:7339` | yes | verified | [obj+0xc8], class max plus bonuses (CombatSystem) or class maxhealth; miss 0 |
-| `Squad::maxhealth` | `0x00427800` | 117 | member/0 | `engine/core/src/sim/world_host.cpp:7339` | yes | verified | sum of [+0xc8] over live members |
-| `point::y` / `rect::top` | `0x00695290` | 112 | member/0 | `engine/core/src/sim/world_host.cpp:7491` | yes | verified | by-reference y / rect::top (offset +4); read only here, 0 shipped sites assign |
-| `point::y` | `0x006952e0` | 111 | member/0 | `engine/core/src/sim/world_host.cpp:7340` | yes | verified | by-value second dword |
-| `point::Set` | `0x00697c50` | 103 | member/2 | `engine/core/src/sim/world_host.cpp:7483` | yes | verified | stores y then x in place and returns the point (fixed: returned nothing) |
-| `rect::Set` | `0x00697aa0` | 103 | member/2 | `engine/core/src/sim/world_host.cpp:7483` | yes | partial | rect::Set(left, top, right, bottom), arity 4 -- not this engine's Set/2; unbound, 0 shipped sites |
-| `UnitsInSettlement` | `0x00574160` | 93 | free/2 | `engine/core/src/sim/world_host.cpp:7310` |  | partial | (str, str): exact name scan, miss invalid; whole-string class else invalid (fixed); query-model gap; garrison back-link gap labelled |
-| `UnitsInSettlement` | `0x00574b80` | 93 | free/2 | `engine/core/src/sim/world_host.cpp:7310` |  | partial | (Settlement, str): receiver check, then as above |
-| `_PlaceEx` | `0x005a8980` | 89 | free/4 | `engine/core/src/sim/world_host.cpp:7277` | yes | partial | class first, clamp inset 48 low then high, no player check; same labelled gaps as Place |
-| `NamedObj::IsDead` | `0x00553000` | 81 | member/0 | `engine/core/src/sim/world_host.cpp:7388` | yes | verified | invalid -> dead; else purge then deque empty; a named building at no health is not dead |
-| `Obj::IsDead` | `0x005aae50` | 81 | member/0 | `engine/core/src/sim/world_host.cpp:7388` | yes | verified | invalid or vtbl+0x50 (health==0, never for the 7 non-catapult building vtables): object_is_dead |
-| `point::SetLen` | `0x00697d10` | 73 | member/1 | `engine/core/src/sim/world_host.cpp:7485` | yes | verified | 32-bit imul/add, floor root of the unsigned sum; 0 -> (0, L); x*L wrapped then idiv (fixed: was 64-bit) |
-| `Obj::AsShip` | `0x005aa9b0` | 64 | member/0 | `engine/core/src/sim/world_host.cpp:7526` | yes | verified | virtual cast to CVXShip (chain via unit 0x005d27d0); miss/failed -> invalid |
-| `Obj::CanSee` | `0x005ab9d0` | 57 | member/1 | `engine/core/src/sim/world_host.cpp:7454` | yes | partial | argument first; visible -> true without the receiver; hidden -> target owner grants observer share_view (record+0x18, 0x005652f0); own bit inferred (initialiser not found) |
-| `Obj::IsVisible` | `0x005ab970` | 56 | member/0 | `engine/core/src/sim/world_host.cpp:7323` | yes | verified | not bit 21 of [obj+0x2c]; miss false |
-| `Obj::SetVisible` | `0x005ab920` | 56 | member/1 | `engine/core/src/sim/world_host.cpp:7324` | yes | verified | bit 21 via vtbl+0x44/0x48; effect and refresh are presentation; miss is a no-op (was a trap) |
-| `ObjList::SetVisible` | `0x0055ea60` | 56 | member/1 | `engine/core/src/sim/world_host.cpp:7324` | yes | partial | every hero member's army, then every live member (0x005a7600); list arm tested, hero-army arm implemented but not tested; 0 sites |
-| `Point` | `0x00696e50` | 53 | free/2 | `engine/core/src/sim/world_host.cpp:7499` | yes | verified | (x, y) as given, no clamp or fixup |
-| `Obj::AsDruid` | `0x005aa6a0` | 49 | member/0 | `engine/core/src/sim/world_host.cpp:7525` | yes | verified | virtual cast to CVXDruid (a druid is not a hero); miss/failed -> invalid |
-| `Obj::Erase` | `0x005ab250` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:7392` | yes | partial | handle check then vtbl+0x94 destroy; miss no-op; holder-eviction gap already labelled at perform_erase |
-| `Query::Erase` | `0x00578c40` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:7392` | yes | partial | walks the query's list skipping bit 23 (buildings), reads before refresh; query cache is the query-model gap |
-| `StrMap::erase` | `0x006981d0` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:7392` |  | inferred | StrMap key erase; no StrMap type in the engine and 0 shipped sites -- the 47 are Obj/Query::Erase counted by folded name |
-| `Unit::SetLastAttackTime` | `0x005d7fc0` | 40 | member/0 | `engine/core/src/sim/world_host.cpp:7439` | yes | verified | game clock into [unit+0x1a4], read back by TimeWithoutAttack (0x005d7f50); stored on the combatant (was dropped on a census that missed the reader) |
-| `Substract` / `Subtract` | `0x00573580` | 38 | free/2 | `engine/core/src/sim/world_host.cpp:7297` | yes | partial | op 2, left operand's order kept (fixed: was sorted); query-model gap |
-| `ObjsInSight` | `0x00575cb0` | 37 | free/2 | `engine/core/src/sim/world_host.cpp:7255` | yes | partial | sight-100 frozen at construction, empty for a gone or dead observer, observer and dead excluded, inclusive (fixed); hidden-mask path is VisibleObjsInSight's; query-model gap |
-| `Dist` / `point::Dist` | `0x00695310` | 37 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:7497` | yes | verified | member and free, one body: 32-bit difference then the wrapped length (fixed: was 64-bit) |
-| `Obj::radius` | `0x005aa520` | 36 | member/0 | `engine/core/src/sim/world_host.cpp:7500` | yes | verified | class +0x2dc from `radius`, inherited; miss 0 |
-| `Unit::HasSpecial` | `0x005d8d70` | 33 | member/1 | `engine/core/src/sim/world_host.cpp:7457` | yes | partial | bit n<36 of [obj+0x198]; hero ctor 0x0052ffd0 sets bit 30 freedom on every hero (fixed); the class reader's 36-name table (0x00426df0) taken from the engine's existing reading, not re-read |
-| `Building::GetPoint` | `0x004dd150` | 32 | member/2 | `engine/core/src/sim/world_host.cpp:7398` | yes | verified | n-th class point slot of the type as (x, y*1448/1024), raw offsets; miss (-32768,-32768) silently; no life test |
-| `ObjsInCircle` | `0x005775e0` | 32 | free/3 | `engine/core/src/sim/world_host.cpp:7257` | yes | partial | (x,y,r,class) circle, dist²<=r²: r=0 the spot, r<0 nothing, dead excluded, comma list allowed (fixed); query-model gap |
-| `Unit::SetParryMode` | `0x005d8f80` | 31 | member/1 | `engine/core/src/sim/world_host.cpp:7427` | yes | partial | acts only with the Parry special and a changed mode [+0x1a0]; the effect object at [+0x1c8] (0x00518650 entry 4) is not modelled |
-| `Obj::SetMessengerStatus` | `0x005ab8d0` | 26 | member/1 | `engine/core/src/sim/world_host.cpp:7455` | yes | verified | bit 26 set/clear via vtbl+0x44/0x48, no life test; miss no-op |
-| `Query::SetMessengerStatus` | `0x00579c70` | 26 | member/1 | `engine/core/src/sim/world_host.cpp:7455` | yes | verified | every member that resolves and is not dead (vtbl+0x50); empty query does nothing |
-| `Obj::RemoveFromAllGroups` | `0x005b69b0` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:7287` | yes | partial | every group in the dictionary (0x004909f0), Remove on each; as the Obj form above |
-| `ObjList::RemoveFromAllGroups` | `0x00563250` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:7287` | yes | partial | members that resolve and are not dead (fixed); as above |
-| `Query::RemoveFromAllGroups` | `0x0057ab80` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:7287` | yes | partial | handle check, the query's cached list; query-model gap |
-| `GetMapRect` | `0x004c6650` | 21 | free/0 | `engine/core/src/sim/world_host.cpp:7487` | yes | verified | (0, 0, w-1, h-1) copied from [world+0xb4] |
-| `Unit::SetEntering` | `0x005d8240` | 21 | member/1 | `engine/core/src/sim/world_host.cpp:7426` | yes | verified | bit 0x100000 of [obj+0x194]; miss no-op |
-| `Obj::AsCatapult` | `0x005aa780` | 20 | member/0 | `engine/core/src/sim/world_host.cpp:7527` | yes | verified | virtual cast to CVXCatapult (a building heir); miss/failed -> invalid |
-| `Teleport::destination` | `0x005cdbc0` | 20 | member/0 | `engine/core/src/sim/world_host.cpp:7405` | yes | verified | stored handle [tp+0x208]; miss invalid |
-| `Building::GetEnterPoint` | `0x004dce60` | 18 | member/1 | `engine/core/src/sim/world_host.cpp:7399` | yes | verified | unit then receiver checked; nearest door (0x0056fba0) of the land/water list by the unit class's water_unit (+0xb30) from the unit's stored position; fallbacks unit pos / building pos / (0,0); no life test (fixed: health test, ship-class flag, holder walk) |
-| `Obj::AsWagon` | `0x005aa7f0` | 17 | member/0 | `engine/core/src/sim/world_host.cpp:7528` | yes | verified | virtual cast to CVXWagon (unit heir); miss/failed -> invalid |
-| `point::InRect` | `0x00696f80` | 14 | member/1 | `engine/core/src/sim/world_host.cpp:7488` | yes | verified | inclusive on all four edges |
-| `Building::IsVeryBroken` | `0x00424f90` | 13 | member/0 | `engine/core/src/sim/world_host.cpp:7430` | yes | verified | no handle check; health < maxhealth / 20 (sar 3 confirmed), truncating |
-| `Unit::SetUser` | `0x005d7c80` | 13 | member/1 | `engine/core/src/sim/world_host.cpp:7416` | yes | verified | the int at [+0x164]; miss no-op |
-| `Obj::AsGate` | `0x00529980` | 12 | member/0 | `engine/core/src/sim/world_host.cpp:7529` | yes | verified | virtual cast to CVXGate (building heir); miss/failed -> invalid |
-| `Obj::class` | `0x005abda0` | 12 | member/0 | `engine/core/src/sim/world_host.cpp:7419` | yes | verified | class id string (+4 of [obj+0x3c]); miss "" |
-| `Building::IsBroken` | `0x004dd200` | 11 | member/0 | `engine/core/src/sim/world_host.cpp:7429` | yes | verified | damage tier [b+0x204] == 3; miss true |
-| `point::Len` | `0x00695360` | 11 | member/0 | `engine/core/src/sim/world_host.cpp:7496` | yes | verified | 32-bit squares and sum, floor root of the unsigned sum (fixed: was 64-bit) |
-| `Building::GlobalSpellStart` | `0x004dd440` | 9 | member/2 | `engine/core/src/sim/world_host.cpp:7420` | yes | partial | town hall and spell 0..5, then the spell manager record (0x0052d3e0), message 0x184 and UI; dropped here (no reader); 0x0052c5a0 not read |
-| `Building::GlobalSpellStart` | `0x004dd4f0` | 9 | member/2 | `engine/core/src/sim/world_host.cpp:7420` | yes | partial | the same with a data argument; dropped likewise |
-| `Obj::AsFlying` | `0x005aaa20` | 9 | member/0 | `engine/core/src/sim/world_host.cpp:7530` | yes | verified | virtual cast to CVXFlyingUnit (unit heir); miss/failed -> invalid |
-| `Unit::InShip` | `0x005d70f0` | 9 | member/0 | `engine/core/src/sim/world_host.cpp:7397` | yes | verified | no receiver check; holder [+0x154] resolves and its ship handle [holder+0x0e] resolves (0x005319a0) |
-| `Obj::AsItemHolder` | `0x005aa860` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:7533` | yes | verified | virtual cast to CVXItemHolder (script-object heir); miss/failed -> invalid |
-| `Unit::user` | `0x005d8bf0` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:7418` | yes | verified | the int at [+0x164]; miss 0 |
-| `point::ClampToMap` | `0x005bd3e0` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:7489` | yes | verified | no world -> unchanged; x to [0, w-2], y to [0, h-2] (high corner from [world+0xbc/0xc0] - 1) |
-| `Building::GetExitPoint` | `0x004dcfa0` | 7 | member/2 | `engine/core/src/sim/world_host.cpp:7400` | yes | partial | (Unit, point): miss -> the point; water from the unit class's water_unit (fixed, was ship class); one rand(0,10000) draw over 1/(d^4+1e-7) weights in double, fixed point here |
-| `Building::GetExitPoint` | `0x004dd080` | 7 | member/2 | `engine/core/src/sim/world_host.cpp:7400` | yes | partial | (point, bool): same worker 0x004db6c0; double-precision weights approximated in fixed point (core has no floats) |
-| `Flying::IsInAir` | `0x0051bd20` | 7 | member/0 | `engine/core/src/sim/world_host.cpp:7395` | yes | verified | bit 22 of [+0x194] |
-| `Unit::GetSacrifice` | `0x005d7bc0` | 7 | member/0 | `engine/core/src/sim/world_host.cpp:7431` | yes | partial | base answers invalid; only the druid override reads [+0x1cc]; no sacrifice machinery here (design) |
-| `Obj::IsValidCaptureTarget` | `0x005aaea0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7347` | yes | verified | argument then receiver (false each); Military receiver; target a Building heir with a live settlement, not Tower/Wall/Gate/Catapult |
-| `Teleport::Traverse` | `0x005cdcb0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7406` | yes | verified | ORs the traveller's record word +0x18 (share-view side, self included) into [tp+0x214] (fixed: was the one bit); 1..16 only |
-| `Teleport::exit_vector` | `0x005cdc40` | 6 | member/0 | `engine/core/src/sim/world_host.cpp:7404` | yes | partial | instance fields [tp+0x20c/0x210] copied from the class by the loader 0x005cd950; miss pushes (0xffff|garbage, 0), (-1,-1) here; agree on every shipped class |
-| `Unit::SetMinimapFlag` | `0x005d87d0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7456` | yes | verified | bit 0x4000000 of the unit flag word; miss no-op |
-| `Unit::SetNoselectFlag` | `0x005d8750` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7414` | yes | partial | fixed: the call before the write is the AI unregister 0x0041eee0 (not a deselect), and AddToSquad/the placement hook refuse the bit; the owner AI running tallies 0x004448a0 decrements are not kept here |
-| `Building::GetExitVector` | `0x004dd330` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7402` | yes | verified | class record pair [cls+0xacc/0xad0], absent marker answers (-1,-1); pair inheritance 0x0059c310; the original invalid-receiver arm pushes one byte where a point belongs and is not reproducible, (-1,-1) stands in |
-| `Building::IsStonehengeControlable` | `0x004ddd70` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7453` | yes | partial | fixed: the circle is the class sight [cls+0x2d0], not the instance radius SetSight moves; reference pinned to the local player so the walk order does not matter here, but the shared scan is in spawn order rather than grid order (design) |
-| `IsPointInWater` | `0x005c6d40` | 5 | free/1 | `engine/core/src/sim/world_host.cpp:7445` | yes | verified | terrain layer type 13 at ((x+32)>>6, (y+32)>>6), out of the inclusive world rect false; equal bounds on every shipped map size |
-| `Obj::AsTeleport` | `0x005cdb50` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7531` | yes | verified | kind test on CVXTeleport (leaf under CVXBuilding in the chain read from the image), handle or 0xffff |
-| `Obj::IsMilitary` | `0x005ad680` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7411` | yes | verified | heir test of [obj+0x3c] up [cls+0xe4], self included, against Military (0x00540130/0x0059a220); invalid receiver false |
-| `Obj::IsSentry` | `0x005ad500` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7412` | yes | verified | the same shape as IsMilitary with Sentry (0x005400c0) |
-| `Squad::GetFlags` | `0x004216d0` | 5 | member/1 | `engine/core/src/sim/world_host.cpp:7413` | yes | verified | body read: arity 0, answers [squad+0x30]; every shipped GetFlags site passes a mask (Unit::GetFlags/1), so this form has no caller and is left unbound |
-| `Unit::GetFlags` | `0x005d7e30` | 5 | member/1 | `engine/core/src/sim/world_host.cpp:7413` | yes | verified | [obj+0x194] & mask as bool, any resolving object, invalid false; only UNITFLAG_NOAI is passed by shipped sites, the three unmodelled bits are labelled |
-| `Gate::CloseNow` | `0x00529cd0` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:7464` | yes | partial | fixed: a call that repeats the current target writes nothing and leaves the move running (it used to restart it from a truncated position); building mode 3 is read as health <= 0, an inference (no building mode here) |
-| `Obj::AsSacrifice` | `0x005aa940` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:7532` | yes | verified | kind test on CVXSacrifice (leaf under CVXScriptObj in the image), handle or 0xffff |
-| `Obj::SetSight` | `0x005ab360` | 4 | member/1 | `engine/core/src/sim/world_host.cpp:7370` | yes | verified | refuses n<100 and n>2048 without storing; a widening explores the new circle for the owner unless held; stores [obj+0xd0] either way |
-| `Sacrifice::IsInvisibility` | `0x00594f10` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:7432` | yes | verified | case-insensitive compare of the class name ([obj+0x3c] string) with Hide; false for every shipped class |
-| `VisibleObjsInSight` | `0x00575ef0` | 4 | free/2 | `engine/core/src/sim/world_host.cpp:7295` | yes | partial | body read; the shared sight worker 0x004fee10 fixes the radius at the observer sight minus 100, a dead observer sees nothing, refresh is once a second; World::objects_in_sight (shared with ObjsInSight, the other batch) uses the whole current sight, sees when dead, and visibility is not applied |
-| `Building::GetUITarget` | `0x004ddc50` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7407` | yes | verified | [obj+0x1fc] handle with zero offset, invalid with no message on an unresolvable receiver |
-| `Building::IsCentralBuliding` | `0x004dd2d0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7348` | yes | verified | class slot [cls+0xa74] (atol of is_central_building) non-zero; invalid receiver answers true; shipped values are 0 and 1 |
-| `Building::RRepair` | `0x004dd250` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7371` | yes | verified | only at tier 3; auto_repair=yes classes only when the settlement central building [set+0x8c] is heir of BaseVillage (0x00440010); heals to (T2+H+1)% of [obj+0xc8] (0x004db520), the class figure for a building |
-| `CLAMP` | `0x00696070` | 3 | free/3 | `engine/core/src/sim/world_host.cpp:7442` | yes | verified | v < lo answers lo before hi is compared, then v > hi answers hi |
-| `CLAMP` | `0x00696bc0` | 3 | free/3 | `engine/core/src/sim/world_host.cpp:7442` | yes | verified | the double overload, same two branches; every shipped site passes integers, and the core has no floating point, so it is not bound |
-| `Catapult::AttackWait` | `0x004e32b0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7477` | yes | partial | 600000/(base+(crew-1)*add) less the attack animation, no crew or negative answers 0 (0x004e2030); the time left on a shot in progress (action state 4..7) is not added, there being no catapult action state here |
-| `Catapult::IsBuilt` | `0x004e2dc0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7469` | yes | verified | [obj+0x208] != 0, invalid receiver false |
-| `Catapult::RotateTo` | `0x004e2c50` | 3 | member/1 | `engine/core/src/sim/world_host.cpp:7479` | yes | partial | the point and the no-turn-in-progress gate are read; the original stores the point, sets action state 7 and suspends until the turn ends, this engine faces at once (no catapult turn rate) |
-| `Druid::SetSummoningDeath` | `0x005135a0` | 3 | member/1 | `engine/core/src/sim/world_host.cpp:7409` | yes | verified | stores the bool byte at [obj+0x1d4], silent on an unresolvable receiver |
-| `Gate::OpenNow` | `0x00529c50` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7463` | yes | partial | fixed: the same as CloseNow -- only a change of target writes it and clears the latch [gate+0x228]; mode 3 read as health <= 0 |
-| `GetCatapultAttackPoint` | `0x004e23d0` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7403` | yes | verified | CatapultVariationRadius from CONST.INI; no loop and offset (r, r) when isqrt(2r^2) <= r, else x then y drawn from [-r, r] until isqrt of the length <= r; clamped into the inclusive map rect |
-| `GetInnState` | `0x00533170` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7260` | yes | verified | (map, inn) string form: map list lookup, then the same clamped read; unknown map or inn answers 3; no shipped site passes strings, so it is not bound |
-| `GetInnState` | `0x00533ae0` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7260` | yes | verified | fixed: the read clamps to 1..3 (0x00533050), not only up to 1; not an Inn or unresolvable answers 2; keyed by object id where the original mints an index into [inn+0x208], which no script reads back |
-| `MIN` | `0x00694a60` | 3 | free/2 | `engine/core/src/sim/world_host.cpp:7443` | yes | verified | a < b ? a : b over ints |
-| `MIN` | `0x00695020` | 3 | free/2 | `engine/core/src/sim/world_host.cpp:7443` | yes | verified | the double overload of MIN; unreachable from the corpus, not bound |
-| `Ship::HasAiTransport` | `0x005c7190` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7447` | yes | verified | the transport order string [ship+0x210] is non-empty; invalid receiver false |
-| `Ship::UnitsMax` | `0x005c6e40` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7386` | yes | verified | holder [ship+0x1dc] capacity +0x10, seeded once from max_units_to_board; invalid receiver 0 |
-| `SpawnNamed` | `0x00573c70` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7272` | yes | verified | named-object lookup, the shared template spawn 0x00571d40 (clone, clear the template bit, refile in group and name tables); unknown or gone name prints and answers 0xffff, a non-template answers the null handle |
-| `Unit::Curse` | `0x005d90c0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7440` | yes | verified | fixed: 0x005d4880(0) sets bit 27 only when clear (curing a blessing first) and arms the object timer 0x19ec6e2 for CurseTimeout ms, whose handler is the cure 0x005d4800; the curse now lifts after CurseTimeout (ObjectState::curse_until, world version 35); the feedback object is presentation |
-| `Unit::IsCursed` | `0x005d8940` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7441` | yes | verified | fixed with Curse: bit 27 as it stands now (set and the cure not yet run); invalid receiver false |
-| `Building::GetSentryClassName` | `0x004ddce0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7355` | yes | verified | class string +0x2f8 (sentry_class_name), root default ""; no receiver test in the original (a null read), "" stands in |
-| `Building::PopTransportationUI` | `0x004dd3b0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7365` | yes | verified | refuses a non-heir of Inn with a complaint, otherwise opens the transport window (0x006ffd20) -- presentation, dropped after resolving the receiver |
-| `Building::itemtypes` | `0x004dda10` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7354` | yes | verified | fixed: the class string at +0x6a0 is a list -- the reader (0x005a1d58) appends each repeated itemtype after ", ", so BaseRuins offers all twelve items, not the last (ClassGraph and gamedata.py); undeclared answers **Invalid** (inferred from the record constructor); invalid receiver "" under the name Building::Starvation |
-| `Catapult::SetBuildFrame` | `0x004e2ed0` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:7366` | yes | verified | (frames-2)*(max-n-1)/(max-1)+1 into [obj+0x20c] and the sprite holds that frame; presentation, the object's maximum as maxhealth answers it |
-| `Druid::IsSummoningDeath` | `0x005135e0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7410` |  | verified | [obj+0x1d4] != 0, false and silent on an unresolvable receiver |
-| `Gate::AreEnemiesAround` | `0x00529af0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7461` |  | verified | [gate+0x210] != 0, as LookAround last left it; invalid false |
-| `InvalidateRegenConsts` | `0x005d30b0` | 2 | free/0 | `engine/core/src/sim/world_host.cpp:7362` | yes | verified | zeroes the regeneration-table scan cursor [0x009c0828]; there is no such cache here, a no-op is the same behaviour |
-| `IsProtected` | `0x00435250` | 2 | free/3 | `engine/core/src/sim/world_host.cpp:7279` | yes | verified | fixed: the sweep 0x00423ef0 counts objects of exactly the class (descriptor equality), with no life test and nothing held; player outside 1..16 or an unknown class answers true; point clamped to the map; radius twice [cls+0x2dc]; owner in the complement of the enemy word |
-| `MAX` | `0x00694a90` | 2 | free/2 | `engine/core/src/sim/world_host.cpp:7444` | yes | verified | b <= a ? a : b over ints |
-| `MAX` | `0x00695060` | 2 | free/2 | `engine/core/src/sim/world_host.cpp:7444` | yes | verified | the double overload of MAX; unreachable from the corpus, not bound |
-| `Obj::GetStaminaDecTime` | `0x005ab580` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7475` | yes | verified | the instance field [obj+0xec] (persisted as stamina_dec_time, seeded from the class; no map authors it), negative answers 0; no receiver test in the original |
-| `Obj::IsRanged` | `0x005ad620` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7350` | yes | verified | 0x0053f5b0: the class string [cls+0x960] non-empty and not **Invalid**; the projectile_class arm stores it (0x005a4254), settling the old inference |
-| `Obj::IsWaterUnit` | `0x005ac6b0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7349` | yes | verified | class slot [cls+0xb30] (water_unit) non-zero; invalid false |
-| `SetGlobalBloodlust` | `0x004c6610` | 2 | free/1 | `engine/core/src/sim/world_host.cpp:7361` | yes | partial | stores the byte in [0x00996ae4]; its only reader is the blow's special-stamina charge 0x0050ff30 (skips special 0x1000's cost), which this engine's combat does not model, so the flag is dropped |
-| `Ship::IsBuilding` | `0x005c6fc0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7396` | yes | verified | [ship+0x230] > 0, a construction counter, not a class test; invalid false |
-| `Unit::BestTrainingTarget` | `0x005d5bf0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7473` | yes | partial | fixed: the sweep visits units only (mask 0x400000 seeded at 0x005d3c50), so an armed enemy building no longer ends a lesson; the threat term and the +1 threat on the chosen unit (0x005d2850) are not modelled, and the sweep is in spawn order rather than grid order (design) |
-| `Unit::GetParryMode` | `0x005d9050` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7428` | yes | verified | fixed: without the Parry special (bit 0 of [obj+0x198]) the answer is -1, not 0, so ENTER_PARRY_MODE_VERIFY does not offer parry to units that cannot; else [obj+0x1a0]; an unresolvable receiver pushes nothing in the original, 0 stands in |
-| `Unit::GetStaminaDecTime` | `0x005d8080` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7475` | yes | verified | the unit's [unit+0x17c], the same value at the unit offset; negative answers 0 |
-| `Unit::Mutate` | `0x005df420` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:7417` | yes | partial | class lookup by id then altid, a message for an unknown name or receiver; mutates at once where the original defers to the vtbl+0x24 hook when the running script owns the object (unobservable: Mutate ends both shipped branches); the squad is left and, the AI manager flag being cleared during the rebuild, not re-filed; the AI tallies moved by 0x004448a0/0x00447200 are not kept here |
-| `Unit::SameHolderAs` | `0x005d8120` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:7334` | yes | verified | [unit+0x154] == [other+0x154] raw, so two units outside any holder answer true; an unresolvable handle reads through a null in the original, false stands in |
-| `abs` | `0x00694be0` | 2 | free/1 | `engine/core/src/sim/world_host.cpp:7438` | yes | verified | negate when negative; abs(INT32_MIN) is INT32_MIN |
-| `rect::height` | `0x00696c90` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7495` | yes | verified | bottom - top + 1 over the by-value rect |
-| `Building::GetNumSentrySlots` | `0x004ddca0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7358` | yes | verified | class int +0x2f4 (num_sentry_slots), root default 0; no receiver test in the original, 0 stands in |
-| `Building::GlobalSpellStop` | `0x004dd5b0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7421` | yes | verified | a CVXTownHall receiver has its record removed from the global spell manager (0x0052c4b0), anything else a complaint; nothing reads the record (GetGlobalSpell has no site), so it is dropped |
-| `Building::SetUITarget` | `0x004ddbf0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7408` | yes | verified | stores the argument handle at [obj+0x1fc], 0xffff when it does not resolve; silent on an unresolvable receiver |
-| `Building::StonehengeNumControllingMages` | `0x004dde80` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7452` | yes | partial | fixed with IsStonehengeControlable (class sight); the counter adopts the first qualifying owner, and the shared spatial query answers in spawn order where 0x004dc6f0 walks grid cells (design) |
-| `Building::levelperitem` | `0x004ddb50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7357` | yes | verified | class int +0x6c0 (levelperitem); undeclared keeps the -15000000 marker; invalid receiver 0 |
-| `Building::minlevel` | `0x004ddaf0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7356` | yes | verified | class int +0x6bc (minlevel); undeclared keeps the -15000000 marker; invalid receiver 0 |
-| `Catapult::CalcEscapeDirection` | `0x004e3380` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7280` | yes | verified | fixed: a threat at zero distance falls through to the random direction (two draws), and a random direction on the origin answers (1000, 0) (0x004e26c0); nearest enemy Tower/Outpost building in sight by squared distance, first met keeps a tie (spawn order here, grid order there, labelled); invalid receiver pushes 4 bytes in the original, (0,0) stands in |
-| `Catapult::ClearTowerTarget` | `0x004e37f0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7478` | yes | partial | writes 0xffff to [bld+0x1fc] on every CatapultTower heir of the catapult settlement [cat+0x148]; the original does so only while [cat+0x22c] is set, a slot not modelled, and the clear here is unconditional; an invalid receiver pushes a stray 0 there |
-| `Catapult::SetBuilt` | `0x004e2e20` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7476` | yes | verified | [cat+0x208] = 1 and the build frame to -1; the frozen-frame sprite bit 0x2000000 cleared and the idle animation restored (presentation) |
-| `Druid::GetJupiterAngerTarget` | `0x005134b0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7373` | yes | verified | the handle at [self+0x1d0] when it resolves to a unit (kSyncUnit), else 0xffff; no receiver test in the original |
-| `Druid::SetJupiterAngerTarget` | `0x00513540` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7372` | yes | verified | stores the argument handle at [self+0x1d0], silent on an unresolvable receiver; the argument is not validated |
-| `EnemyInRange` | `0x004dcb20` | 1 | free/3 | `engine/core/src/sim/world_host.cpp:7374` | yes | verified | fixed: the square only bounds the grid sweep; found is an enemy-owned, unhidden unit the asker can attack (vtbl+0xb4, unit_can_attack), of target_factor >= 0, whose distance from the point less its class radius (0x005a7900) is within range -- this answered any enemy-owned object in the square |
-| `Flying::FindNearBird` | `0x0051c0a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7458` | yes | partial | the first object of the same class pointer, not the receiver, within 2048 (r^2 0x400000) in the grid sweep 0x0051b840 with mask 0xffffffff, else 0xffff; first in cell order there, spawn order here (design: the spatial queries answer in id order) |
-| `Gate::AreFriendsAround` | `0x00529b50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7462` |  | verified | [gate+0x214] != 0, as LookAround last left it; invalid false |
-| `Gate::LookAround` | `0x00529bb0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7460` | yes | verified | fixed: zeroes both fields, walks kSyncUnit objects in the circle (0x005296d0) through the visitor 0x00529510, which never stops the walk; an Animal is skipped only when its damage [obj+0xdc] (persist name, 0x005b5df0) is zero, so a wolf counts -- every Animal used to be skipped |
-| `GetResearchHack` | `0x004db630` | 1 | free/0 | `engine/core/src/sim/world_host.cpp:7363` | yes | verified | [0x009969a8] != 0, whose only writer sets and clears it within one debug function: false |
-| `HasStarvingArmy` | `0x0055a7c0` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:7261` | yes | verified | the zero-argument form: whether the registry holds the "army starving" key; no shipped site calls it, not bound |
-| `HasStarvingArmy` | `0x00559c20` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:7261` | yes | partial | whether a record under "army starving" in the session notification registry is at least ms old; the registry is not kept here, the feeder's hungry_since over the local player's units stands in (labelled) |
-| `Obj::AddToStoreBin` | `0x005b5890` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7332` |  | verified | inserts the handle into the global store-bin set (0x005b5750), read only by a by-name search no entry point reaches; dropped |
-| `Obj::AsBarrack` | `0x005aa8d0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7534` | yes | verified | kind test on CVXBarrack (leaf under CVXBuilding in the image), handle or 0xffff |
-| `Obj::CoverOfMercyAction` | `0x005ca6a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7436` | yes | partial | fixed: only a CVXAreaEffect receiver acts, and an unowned unit (owner half zero) is not sheltered; lowers the bit on last time's list, raises it on the units within the class radius whose owner bit is in the complement of the owner's war mask; a hidden unit needs the side mask [player+0x18], not modelled |
-| `Obj::IsPeaceful` | `0x005ad740` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7377` | yes | verified | 0x005402f0: heir of Peaceful or of Animal (0x00540280); invalid false |
-| `Obj::IsPeasantAmbient` | `0x005ad7a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7369` |  | verified | heir of PeasantAmbient (0x005403f0); invalid false |
-| `Obj::IsRam` | `0x005ad5c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7359` |  | verified | heir of RamUnit (0x00540460); invalid false |
-| `Obj::MagicActionEnd` | `0x005c9f40` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7437` | yes | verified | the receiver handle to 0x005d5aa0, a whole-map grid sweep clearing [unit+0x14c] wherever it names the receiver; invalid does nothing |
-| `Obj::MistAction` | `0x005ca050` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7435` | yes | verified | fixed: the collection's filter 0x005c9f20 takes living units only, so a corpse in the mist is neither tagged nor counted; units in [obj+0xd4] whose tag is free or this mist are tagged, damaged through vtbl+0xa8 and the argument booked to both damage counters |
-| `Obj::RemoveFromStoreBin` | `0x005b0f10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7333` |  | verified | erases it from the same set (0x005b0e30); dropped |
-| `Obj::SetCmdEnable` | `0x005ac710` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7470` | yes | verified | a dead receiver complains and keeps its state; otherwise [obj+0x9c] = the bool (commands enabled) |
-| `Obj::SetDebug` | `0x005abcb0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7368` | yes | verified | vtbl+0xd4 with the bool, the debug overlay: presentation, dropped after resolving the receiver |
-| `Obj::SetName` | `0x005b6920` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7328` | yes | verified | fixed: an empty name removes the object's name (0x005b6120 deletes its record [obj+0x84]), which the one shipped site, 2_Great_loses_Spain seq12, relies on; otherwise rebind; the rename arm for an object already named differently (0x00572a30) is not reproduced and no shipped site reaches it |
-| `PlaceCatapult` | `0x004e3dc0` | 1 | free/4 | `engine/core/src/sim/world_host.cpp:7278` | yes | verified | fixed: the env write of 1 under /<map>/Player<n>/CatapultBuilt that ends 0x004e3be0, which BUILDINGSADVICE5.VS polls; race table 0x004e3b30, owner n-1, the site revealed to CatapultBuildSight (here through FogSystem), its own settlement, health 1, unbuilt |
-| `Sacrifice::AddDruid` | `0x00595af0` | 1 | member/2 | `engine/core/src/sim/world_host.cpp:7433` | yes | partial | one call into 0x00595a30 with the druid and now+time (a lease on the sacrifice's druid list, [druid+0x1cc] written); no sacrifice exists in this engine (the ritual machinery is not here), so the valid branch stores nothing (design) |
-| `Sacrifice::Consume` | `0x00596440` | 1 | member/3 | `engine/core/src/sim/world_host.cpp:7434` | yes | partial | suspending: a first call with the bool set sleeps period, then 0x00596050 spreads price over the listed druids' health; the wait is reproduced, the answer is an empty ritual's 0, there being no sacrifice machinery (design) |
-| `Sacrifice::MistAction` | `0x00595360` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7435` | yes | verified | the same body over a Sacrifice receiver, with a resolve test first; shared implementation |
-| `SetInnState` | `0x00533640` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7263` | yes | verified | (map, inn) string form of the setter, the same clamped write (0x005330e0) after the map and inn lookup; no caller, not bound |
-| `SetInnState` | `0x00533c00` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7263` | yes | verified | clamped 1..3 write under /Inns/<n>/state for an Inn, silent otherwise beyond the discarded complaint |
-| `Ship::ApplyAiTransport` | `0x005c8710` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7450` | yes | verified | snapshot the holder's passengers, unboard them all (0x005c84b0), each distinct squad once (0x00442880) ordered on through 0x0043ec00 with its own state, SF_ADVCHOOSER cleared, the stored verb and point; then the order cleared |
-| `Ship::ClearAiTransport` | `0x005c7e10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7448` | yes | verified | the order string to "" and the point to (-1,-1); silent on an unresolvable receiver |
-| `Ship::GetTransPt` | `0x005c6f20` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7449` |  | verified | the point at [ship+0x228/0x22c], (-1,-1) for no order; no receiver test in the original |
-| `Ship::ShowBuildAnimation` | `0x005c6a60` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7367` | yes | partial | not presentation: a suspending routine that unboards the new ship at the shipyard exit, raises the build counter [ship+0x230] (IsBuilding), slides it along the exit vector over ShipBuildAnimTime with a float cosine easing, then zeroes the counter and hands the ship to the AI (0x0041f310); dropped here, the ship stays held until ordered out (design: a suspending entry with state and a fixed-point easing) |
-| `StarvingArmyPos` | `0x00559d50` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:7262` | yes | partial | the same walk; on a hit it consumes the record (0x00559430) and answers the nearest of its objects to a point it holds; here the first hungry unit of the local player, the registry not being kept |
-| `Unit::Disappear` | `0x005d86d0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7329` | yes | verified | fixed: the command queue is not touched -- activity [obj+0x130] to 0, path dropped, animation reset, stood at (-1,-1) -- so the ambient villagers' queued errand behind disappear survives |
-| `Unit::Disease` | `0x005d9140` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7331` | yes | verified | sets bit 1 and spawns the disease feedback into [obj+0x1c4] when none; no timer |
-| `Unit::EnterHolder` | `0x005d7210` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7326` | yes | verified | a held receiver is refused; the holder is a building's settlement holder ([bld+0x148] -> [set+0x5e]), else the one the object carries (vtbl+0xe4, a ship here), else the one it is in; then the enter routine 0x005d3e10 |
-| `Unit::ExitHolder` | `0x005d71c0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7327` | yes | partial | runs the unboarding routine 0x005d3f20 when the receiver is held; the three clauses of it sim/boarding.hpp labels as not reproduced stay so |
-| `Unit::GetParty` | `0x005d7b10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7387` | yes | verified | SyncFlags bit 19 (party); invalid false |
-| `Unit::IsDiseased` | `0x005d89a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7330` | yes | verified | bit 1 of [obj+0x194]; invalid receiver false |
-| `Unit::RamBestTarget` | `0x005d91c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7281` | yes | verified | buildings in sight+512 (0x005d56b0), best seeded at 1,000,000 squared; the predicate 0x005d4980: owner row names the ram an enemy, not broken (tier 3), heir of Gate/Outpost/BaseShipyard, strictly nearer; a tie keeps the first met (spawn order here, labelled) |
-| `Unit::StartTraining` | `0x005d5de0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7471` | yes | verified | vtbl+0x44 sets SyncFlags bit 28 (training); invalid prints and returns |
-| `Unit::StopTraining` | `0x005d5e30` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7472` | yes | verified | vtbl+0x48 clears SyncFlags bit 28; invalid prints and returns |
-| `Unit::TrainAttack` | `0x005d5d10` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7474` | yes | partial | the three refusals (held receiver silently, unresolvable partner with a message, health <= 1) then action state 2 and suspend until it clears; the wait here is one attack-animation cycle, the length of state 2 with no animation not read |
-| `UnitsAroundSettlement` | `0x005744c0` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7312` |  | verified | settlement by name ([set+0xcc] string), class string checked when it has no comma, then the settlement-units query 0x004fe080 in mode 1: CollectUnits (0x005c58f0) ring pass only -- each building's own sight swept (0x005c5120), living, heir, not a template -- sorted and deduplicated; an unknown class answers the invalid query in the original, an empty one here, unreachable (the one site passes Unit) |
-| `UnitsAroundSettlement` | `0x00574d90` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7312` |  | verified | the same over a settlement object receiver argument; an unresolvable one prints and answers the invalid query |
-| `rect::bottom` | `0x00695200` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7493` | yes | verified | the rect's fourth int, bottom |
-| `rect::bottom` | `0x00695120` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7493` | yes | verified | the reference form of bottom (field +0xc, an lvalue); no shipped site assigns it, and a read is the same number |
-| `rect::left` | `0x00695140` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7490` | yes | verified | the rect's first int, left |
-| `rect::right` | `0x006951c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7492` | yes | verified | the rect's third int, right |
-| `rect::right` | `0x00695100` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7492` | yes | verified | the reference form of right (field +8, an lvalue); no shipped site assigns it, and a read is the same number |
-| `rect::top` | `0x00695180` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7491` | yes | verified | the rect's second int, top |
-| `rect::width` | `0x00696c50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7494` | yes | verified | right - left + 1 over the by-value rect |
+| `Obj::player` | `0x005ab290` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:7330` | yes | verified | handle check, owner record index [[obj+0x70]+8] + 1; miss -1; NamedObj conversion now hides a dead named unit |
+| `Settlement::player` | `0x005c2340` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:7330` | yes | verified | settlement owner record at +0x90, index + 1; miss -1 |
+| `Squad::Player` | `0x004210c0` | 1,607 | member/0 | `engine/core/src/sim/world_host.cpp:7330` | yes | verified | handle low nibble + 1, no lookup |
+| `NamedObj::obj` | `0x005530a0` | 1,174 | member/0 | `engine/core/src/sim/world_host.cpp:7495` | yes | verified | purges dead (vtbl+0x50) then front object; empty -> invalid; also the NamedObj->Obj conversion (object_of) |
+| `Obj::pos` | `0x005add20` | 1,057 | member/0 | `engine/core/src/sim/world_host.cpp:7331` | yes | verified | raw [obj+0x24/0x28]; miss (0,0), not the held marker |
+| `Squad::pos` | `0x00422cf0` | 1,057 | member/0 | `engine/core/src/sim/world_host.cpp:7331` | yes | verified | front member's posRH, (-1,-1) for none; a handle naming no squad faults in the original, (-1,-1) here |
+| `NamedObj::IsValid` / `Query::IsValid` | `0x00577af0` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:7329` | yes | partial | handle check then vtbl+0x2c "registered": named map (name exists), group map, sight queries 1; other query subclasses not enumerated, deregistration not read |
+| `Item::IsValid` / `Obj::IsValid` / `Settlement::IsValid` | `0x005ab1d0` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:7329` | yes | verified | handle check only (table slot + offset non-null), no print; a corpse is valid |
+| `SquadList::IsValid` | `0x00421a70` | 907 | member/0 | `engine/core/src/sim/world_host.cpp:7329` | yes | partial | index within the squad-list pool (0x0043ed70); engine asks for a live entry, which differs only for a released one (0 sites) |
+| `Query::IsEmpty` | `0x00579320` | 805 | member/0 | `engine/core/src/sim/world_host.cpp:7515` | yes | partial | miss -> true (was a trap); refresh+count==0 evaluated on the spot -- the original's 1-2 s query cache is the query-model design gap |
+| `Sacrifice::IsEmpty` | `0x00594eb0` | 805 | member/0 | `engine/core/src/sim/world_host.cpp:7515` | yes | partial | miss -> true; stop flag [+0x15c] never set here (no sacrifice machinery), so a sacrifice answers false |
+| `Obj::AsUnit` | `0x005aa580` | 717 | member/0 | `engine/core/src/sim/world_host.cpp:7534` | yes | verified | sync bit 0x400000 (CVXUnit ctor 0x005d3170); miss or failed cast -> invalid handle; matches NativeObject::is_a |
+| `Building::settlement` | `0x004dcdd0` | 671 | member/0 | `engine/core/src/sim/world_host.cpp:7334` | yes | verified | 16-bit settlement slot [bld+0x148] as a handle; miss -> invalid; no 0xffff guard (faults) -> invalid here |
+| `GAIKA::settlement` | `0x004219a0` | 671 | member/0 | `engine/core/src/sim/world_host.cpp:7334` | yes | verified | node at index*0x24 of 0x008c8e54, settlement pointer +0x14 or invalid; no print |
+| `Intersect` | `0x005733f0` | 556 | free/2 | `engine/core/src/sim/world_host.cpp:7265` | yes | partial | op 1 (fixed: was 0), walks the smaller operand in its own order (fixed); query-model gap |
+| `rand` | `0x004c63a0` | 428 | free/1 | `engine/core/src/sim/world_host.cpp:7264` | yes | verified | Range(0, n-1) on the game LCG (0x0063ff00): no draw when low == high, swapped arm draws, high dword of (span+1)*state, no scramble; sim/rng.hpp |
+| `point::IntoRect` | `0x00697cb0` | 398 | member/1 | `engine/core/src/sim/world_host.cpp:7499` | yes | verified | in place, low edge then high per axis, unnormalised |
+| `point::Rot` | `0x00697d90` | 385 | member/1 | `engine/core/src/sim/world_host.cpp:7497` | yes | partial | x87 trunc(x cos + y sin), trunc(y cos - x sin) with K = 3.1415926535/180; cardinals and the eight +/-1/2 entries keep the residue's sign (fixed for the halves); other angles a Q30 table, at most one unit off where a product falls within ~3e-5 of an integer; 53-bit precision control assumed |
+| `Obj::AsHero` | `0x005aa640` | 379 | member/0 | `engine/core/src/sim/world_host.cpp:7537` | yes | verified | sync bit 0x1000000; miss/failed -> invalid |
+| `Obj::IsAlive` | `0x005aae00` | 378 | member/0 | `engine/core/src/sim/world_host.cpp:7335` | yes | verified | valid and not vtbl+0x50 dead: object_is_dead |
+| `Obj::AsBuilding` / `Obj::AsTower` | `0x005aa5e0` | 322 | member/0 | `engine/core/src/sim/world_host.cpp:7535` | yes | verified | sync bit 0x800000 (CVXBuilding ctor 0x004e00d0), AsTower the same body; miss/failed -> invalid |
+| `SetNoAIFlag` | `0x00435470` | 230 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:7277` | yes | partial | bit 0x40000 of [+0x194] on live units only, then the whole list to the Squadize worker 0x00447330 at state 0 (fixed: the regroup was missing); non-units left out of the regroup (labelled; 0 shipped) |
+| `Unit::SetNoAIFlag` | `0x005de600` | 230 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:7277` | yes | verified | handle check, bit 0x40000 with no unit/death test, then a one-element list to 0x00447330 at state 0 (fixed) |
+| `Group` | `0x005765a0` | 216 | free/1 | `engine/core/src/sim/world_host.cpp:7272` | yes | partial | interns the name in [0x009bdac8], creates on a miss, answers the group's own handle (live, no cache); engine mints a fresh query per call (query-model gap) |
+| `Union` | `0x00573260` | 191 | free/2 | `engine/core/src/sim/world_host.cpp:7269` | yes | partial | op 0 (fixed: was 1), sort-by-handle merge (0x004ffbe0); query interning, 2000 ms cache and refcount are the query-model design gap (fn_set_op) |
+| `Obj::AddToGroup` | `0x005b6730` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:7298` | yes | partial | handle check before any group lookup (fixed: created the group anyway), then CVXGroup::Add; template-deque routing on [0x00a8734c] not read |
+| `ObjList::AddToGroup` | `0x00561970` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:7298` | yes | partial | no receiver check, group always made, members that resolve and are not dead (fixed); template routing not read |
+| `Query::AddToGroup` | `0x0057a550` | 182 | member/1 | `engine/core/src/sim/world_host.cpp:7298` | yes | partial | handle check, then the query's cached list, every resolving member; query-model gap |
+| `SpawnGroup` | `0x00576790` | 181 | free/1 | `engine/core/src/sim/world_host.cpp:7281` | yes | partial | group map lookup, miss -> empty list; clones templates in order, non-unit copies skipped (fixed); the 0x0041f310 hand-off and next-turn behaviour start are labelled |
+| `GetNamedObj` | `0x00553230` | 177 | free/1 | `engine/core/src/sim/world_host.cpp:7306` | yes | verified | miss mints an empty named query under the name (0x005722a0): valid, dead, .obj invalid, filled by a later SetName |
+| `Obj::health` | `0x005ada80` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:7350` | yes | verified | [obj+0xc0]; miss 0 |
+| `Settlement::health` | `0x005c1e40` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:7350` | yes | partial | garrison holder [settlement+0x5e] +0x1c; no writer found (ctor 0x00531de0 zeroes it); engine answers the settlement's own health, 0; 0 sites |
+| `Squad::health` | `0x00427740` | 170 | member/0 | `engine/core/src/sim/world_host.cpp:7350` | yes | verified | sum of [+0xc0] over members with a live slot; no bounds check; empty 0 |
+| `ClassPlayerObjs` | `0x005754b0` | 159 | free/2 | `engine/core/src/sim/world_host.cpp:7267` | yes | partial | player 1..16 else invalid; whole-string class else invalid (fixed); whole-map grid sweep: no held, no dead (fixed); query-model gap, grid order |
+| `Obj::IsHeirOf` | `0x005ad450` | 154 | member/1 | `engine/core/src/sim/world_host.cpp:7355` | yes | partial | whole string as one exact case-sensitive key (0x00409e40/0x00409350), then walk [class+0xe4]; fixed (was a comma list); altid keying of the map 0x009bdb00 not traced |
+| `Obj::stamina` | `0x005adae0` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:7348` | yes | verified | [obj+0xc4]; miss 0; ctor seeds from class maxstamina, engine for combatants only (no other class declares one) |
+| `ObjsInRange` | `0x00576130` | 151 | free/3 | `engine/core/src/sim/world_host.cpp:7271` | yes | partial | a sight query with the given radius (negative: sight-100), no comma bypass (fixed: was an anchored circle listing its anchor); query-model gap |
+| `Settlement::stamina` | `0x005c1f00` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:7348` | yes | partial | garrison holder +0x24; same as Settlement::health |
+| `Unit::stamina` | `0x005d8b90` | 151 | member/0 | `engine/core/src/sim/world_host.cpp:7348` | yes | verified | [obj+0xc4], same field as Obj::stamina |
+| `point::x` / `rect::left` | `0x006950e0` | 143 | member/0 | `engine/core/src/sim/world_host.cpp:7503` | yes | verified | by-reference x / rect::left (offset 0) for assignment; the engine answers the read, 0 shipped sites assign |
+| `point::x` | `0x006952b0` | 142 | member/0 | `engine/core/src/sim/world_host.cpp:7349` | yes | verified | by-value first dword |
+| `Obj::posRH` | `0x005ad8a0` | 141 | member/0 | `engine/core/src/sim/world_host.cpp:7332` | yes | verified | vtbl+0xc8 (unit: unit_pos_rh, else raw); miss (0,0) silently |
+| `Obj::RemoveFromGroup` | `0x005b4630` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:7299` | yes | partial | handle check; group miss does nothing; CVXGroup::Remove (0x00572210) on the live deque; template deque not read |
+| `ObjList::RemoveFromGroup` | `0x0055f720` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:7299` | yes | partial | members that resolve and are not dead (fixed); as above |
+| `Query::RemoveFromGroup` | `0x0057a970` | 137 | member/1 | `engine/core/src/sim/world_host.cpp:7299` | yes | partial | handle check, the query's cached list; query-model gap |
+| `Obj::DistTo` | `0x005aa350` | 134 | member/1 | `engine/core/src/sim/world_host.cpp:7354` | yes | verified | floor isqrt of the stored-position distance to the point, less own radius; miss -1 (was 0, and measured from the holder) |
+| `Obj::DistTo` | `0x005aa3e0` | 134 | member/1 | `engine/core/src/sim/world_host.cpp:7354` | yes | verified | argument then receiver checked (-1 each); 0x005a77b0: stored positions, less both radii |
+| `Place` | `0x005a8710` | 131 | free/3 | `engine/core/src/sim/world_host.cpp:7289` | yes | partial | player 1..16, inclusive map rect unless (-1,-1), class, CVXScriptObj cast then SetPlayer/SetPos; the cast subtree is inferred (labelled), 0x0041f310 hand-off not modelled |
+| `SpawnGroupInHolder` | `0x005769b0` | 127 | free/2 | `engine/core/src/sim/world_host.cpp:7282` | yes | partial | group, then exact settlement name scan; copies enter the garrison forced (0x005d3e10) with the onenter hook (fixed: only the holder link was set); hook order vs. name/group filing differs (labelled) |
+| `SpawnGroupInHolder` | `0x00576e00` | 127 | free/2 | `engine/core/src/sim/world_host.cpp:7282` | yes | partial | group, then the object's holder (vtbl+0xe4): ship -> ship+1, building -> its settlement's garrison; none -> empty list, no spawn (fixed: spawned into the object itself); a holder passed directly is inferred |
+| `Obj::sight` | `0x005adcc0` | 118 | member/0 | `engine/core/src/sim/world_host.cpp:7351` | yes | verified | [obj+0xd0] (WorldObject::sight); miss 0 |
+| `Obj::maxhealth` | `0x005adb40` | 117 | member/0 | `engine/core/src/sim/world_host.cpp:7352` | yes | verified | [obj+0xc8], class max plus bonuses (CombatSystem) or class maxhealth; miss 0 |
+| `Squad::maxhealth` | `0x00427800` | 117 | member/0 | `engine/core/src/sim/world_host.cpp:7352` | yes | verified | sum of [+0xc8] over live members |
+| `point::y` / `rect::top` | `0x00695290` | 112 | member/0 | `engine/core/src/sim/world_host.cpp:7504` | yes | verified | by-reference y / rect::top (offset +4); read only here, 0 shipped sites assign |
+| `point::y` | `0x006952e0` | 111 | member/0 | `engine/core/src/sim/world_host.cpp:7353` | yes | verified | by-value second dword |
+| `point::Set` | `0x00697c50` | 103 | member/2 | `engine/core/src/sim/world_host.cpp:7496` | yes | verified | stores y then x in place and returns the point (fixed: returned nothing) |
+| `rect::Set` | `0x00697aa0` | 103 | member/2 | `engine/core/src/sim/world_host.cpp:7496` | yes | partial | rect::Set(left, top, right, bottom), arity 4 -- not this engine's Set/2; unbound, 0 shipped sites |
+| `UnitsInSettlement` | `0x00574160` | 93 | free/2 | `engine/core/src/sim/world_host.cpp:7323` |  | partial | (str, str): exact name scan, miss invalid; whole-string class else invalid (fixed); query-model gap; garrison back-link gap labelled |
+| `UnitsInSettlement` | `0x00574b80` | 93 | free/2 | `engine/core/src/sim/world_host.cpp:7323` |  | partial | (Settlement, str): receiver check, then as above |
+| `_PlaceEx` | `0x005a8980` | 89 | free/4 | `engine/core/src/sim/world_host.cpp:7290` | yes | partial | class first, clamp inset 48 low then high, no player check; same labelled gaps as Place |
+| `NamedObj::IsDead` | `0x00553000` | 81 | member/0 | `engine/core/src/sim/world_host.cpp:7401` | yes | verified | invalid -> dead; else purge then deque empty; a named building at no health is not dead |
+| `Obj::IsDead` | `0x005aae50` | 81 | member/0 | `engine/core/src/sim/world_host.cpp:7401` | yes | verified | invalid or vtbl+0x50 (health==0, never for the 7 non-catapult building vtables): object_is_dead |
+| `point::SetLen` | `0x00697d10` | 73 | member/1 | `engine/core/src/sim/world_host.cpp:7498` | yes | verified | 32-bit imul/add, floor root of the unsigned sum; 0 -> (0, L); x*L wrapped then idiv (fixed: was 64-bit) |
+| `Obj::AsShip` | `0x005aa9b0` | 64 | member/0 | `engine/core/src/sim/world_host.cpp:7539` | yes | verified | virtual cast to CVXShip (chain via unit 0x005d27d0); miss/failed -> invalid |
+| `Obj::CanSee` | `0x005ab9d0` | 57 | member/1 | `engine/core/src/sim/world_host.cpp:7467` | yes | partial | argument first; visible -> true without the receiver; hidden -> target owner grants observer share_view (record+0x18, 0x005652f0); own bit inferred (initialiser not found) |
+| `Obj::IsVisible` | `0x005ab970` | 56 | member/0 | `engine/core/src/sim/world_host.cpp:7336` | yes | verified | not bit 21 of [obj+0x2c]; miss false |
+| `Obj::SetVisible` | `0x005ab920` | 56 | member/1 | `engine/core/src/sim/world_host.cpp:7337` | yes | verified | bit 21 via vtbl+0x44/0x48; effect and refresh are presentation; miss is a no-op (was a trap) |
+| `ObjList::SetVisible` | `0x0055ea60` | 56 | member/1 | `engine/core/src/sim/world_host.cpp:7337` | yes | partial | every hero member's army, then every live member (0x005a7600); list arm tested, hero-army arm implemented but not tested; 0 sites |
+| `Point` | `0x00696e50` | 53 | free/2 | `engine/core/src/sim/world_host.cpp:7512` | yes | verified | (x, y) as given, no clamp or fixup |
+| `Obj::AsDruid` | `0x005aa6a0` | 49 | member/0 | `engine/core/src/sim/world_host.cpp:7538` | yes | verified | virtual cast to CVXDruid (a druid is not a hero); miss/failed -> invalid |
+| `Obj::Erase` | `0x005ab250` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:7405` | yes | partial | handle check then vtbl+0x94 destroy; miss no-op; holder-eviction gap already labelled at perform_erase |
+| `Query::Erase` | `0x00578c40` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:7405` | yes | partial | walks the query's list skipping bit 23 (buildings), reads before refresh; query cache is the query-model gap |
+| `StrMap::erase` | `0x006981d0` | 47 | member/0 | `engine/core/src/sim/world_host.cpp:7405` |  | inferred | StrMap key erase; no StrMap type in the engine and 0 shipped sites -- the 47 are Obj/Query::Erase counted by folded name |
+| `Unit::SetLastAttackTime` | `0x005d7fc0` | 40 | member/0 | `engine/core/src/sim/world_host.cpp:7452` | yes | verified | game clock into [unit+0x1a4], read back by TimeWithoutAttack (0x005d7f50); stored on the combatant (was dropped on a census that missed the reader) |
+| `Substract` / `Subtract` | `0x00573580` | 38 | free/2 | `engine/core/src/sim/world_host.cpp:7310` | yes | partial | op 2, left operand's order kept (fixed: was sorted); query-model gap |
+| `ObjsInSight` | `0x00575cb0` | 37 | free/2 | `engine/core/src/sim/world_host.cpp:7268` | yes | partial | sight-100 frozen at construction, empty for a gone or dead observer, observer and dead excluded, inclusive (fixed); hidden-mask path is VisibleObjsInSight's; query-model gap |
+| `Dist` / `point::Dist` | `0x00695310` | 37 | free/2, member/1 | `engine/core/src/sim/world_host.cpp:7510` | yes | verified | member and free, one body: 32-bit difference then the wrapped length (fixed: was 64-bit) |
+| `Obj::radius` | `0x005aa520` | 36 | member/0 | `engine/core/src/sim/world_host.cpp:7513` | yes | verified | class +0x2dc from `radius`, inherited; miss 0 |
+| `Unit::HasSpecial` | `0x005d8d70` | 33 | member/1 | `engine/core/src/sim/world_host.cpp:7470` | yes | partial | bit n<36 of [obj+0x198]; hero ctor 0x0052ffd0 sets bit 30 freedom on every hero (fixed); the class reader's 36-name table (0x00426df0) taken from the engine's existing reading, not re-read |
+| `Building::GetPoint` | `0x004dd150` | 32 | member/2 | `engine/core/src/sim/world_host.cpp:7411` | yes | verified | n-th class point slot of the type as (x, y*1448/1024), raw offsets; miss (-32768,-32768) silently; no life test |
+| `ObjsInCircle` | `0x005775e0` | 32 | free/3 | `engine/core/src/sim/world_host.cpp:7270` | yes | partial | (x,y,r,class) circle, dist²<=r²: r=0 the spot, r<0 nothing, dead excluded, comma list allowed (fixed); query-model gap |
+| `Unit::SetParryMode` | `0x005d8f80` | 31 | member/1 | `engine/core/src/sim/world_host.cpp:7440` | yes | partial | acts only with the Parry special and a changed mode [+0x1a0]; the effect object at [+0x1c8] (0x00518650 entry 4) is not modelled |
+| `Obj::SetMessengerStatus` | `0x005ab8d0` | 26 | member/1 | `engine/core/src/sim/world_host.cpp:7468` | yes | verified | bit 26 set/clear via vtbl+0x44/0x48, no life test; miss no-op |
+| `Query::SetMessengerStatus` | `0x00579c70` | 26 | member/1 | `engine/core/src/sim/world_host.cpp:7468` | yes | verified | every member that resolves and is not dead (vtbl+0x50); empty query does nothing |
+| `Obj::RemoveFromAllGroups` | `0x005b69b0` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:7300` | yes | partial | every group in the dictionary (0x004909f0), Remove on each; as the Obj form above |
+| `ObjList::RemoveFromAllGroups` | `0x00563250` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:7300` | yes | partial | members that resolve and are not dead (fixed); as above |
+| `Query::RemoveFromAllGroups` | `0x0057ab80` | 22 | member/0 | `engine/core/src/sim/world_host.cpp:7300` | yes | partial | handle check, the query's cached list; query-model gap |
+| `GetMapRect` | `0x004c6650` | 21 | free/0 | `engine/core/src/sim/world_host.cpp:7500` | yes | verified | (0, 0, w-1, h-1) copied from [world+0xb4] |
+| `Unit::SetEntering` | `0x005d8240` | 21 | member/1 | `engine/core/src/sim/world_host.cpp:7439` | yes | verified | bit 0x100000 of [obj+0x194]; miss no-op |
+| `Obj::AsCatapult` | `0x005aa780` | 20 | member/0 | `engine/core/src/sim/world_host.cpp:7540` | yes | verified | virtual cast to CVXCatapult (a building heir); miss/failed -> invalid |
+| `Teleport::destination` | `0x005cdbc0` | 20 | member/0 | `engine/core/src/sim/world_host.cpp:7418` | yes | verified | stored handle [tp+0x208]; miss invalid |
+| `Building::GetEnterPoint` | `0x004dce60` | 18 | member/1 | `engine/core/src/sim/world_host.cpp:7412` | yes | verified | unit then receiver checked; nearest door (0x0056fba0) of the land/water list by the unit class's water_unit (+0xb30) from the unit's stored position; fallbacks unit pos / building pos / (0,0); no life test (fixed: health test, ship-class flag, holder walk) |
+| `Obj::AsWagon` | `0x005aa7f0` | 17 | member/0 | `engine/core/src/sim/world_host.cpp:7541` | yes | verified | virtual cast to CVXWagon (unit heir); miss/failed -> invalid |
+| `point::InRect` | `0x00696f80` | 14 | member/1 | `engine/core/src/sim/world_host.cpp:7501` | yes | verified | inclusive on all four edges |
+| `Building::IsVeryBroken` | `0x00424f90` | 13 | member/0 | `engine/core/src/sim/world_host.cpp:7443` | yes | verified | no handle check; health < maxhealth / 20 (sar 3 confirmed), truncating |
+| `Unit::SetUser` | `0x005d7c80` | 13 | member/1 | `engine/core/src/sim/world_host.cpp:7429` | yes | verified | the int at [+0x164]; miss no-op |
+| `Obj::AsGate` | `0x00529980` | 12 | member/0 | `engine/core/src/sim/world_host.cpp:7542` | yes | verified | virtual cast to CVXGate (building heir); miss/failed -> invalid |
+| `Obj::class` | `0x005abda0` | 12 | member/0 | `engine/core/src/sim/world_host.cpp:7432` | yes | verified | class id string (+4 of [obj+0x3c]); miss "" |
+| `Building::IsBroken` | `0x004dd200` | 11 | member/0 | `engine/core/src/sim/world_host.cpp:7442` | yes | verified | damage tier [b+0x204] == 3; miss true |
+| `point::Len` | `0x00695360` | 11 | member/0 | `engine/core/src/sim/world_host.cpp:7509` | yes | verified | 32-bit squares and sum, floor root of the unsigned sum (fixed: was 64-bit) |
+| `Building::GlobalSpellStart` | `0x004dd440` | 9 | member/2 | `engine/core/src/sim/world_host.cpp:7433` | yes | partial | town hall and spell 0..5, then the spell manager record (0x0052d3e0), message 0x184 and UI; dropped here (no reader); 0x0052c5a0 not read |
+| `Building::GlobalSpellStart` | `0x004dd4f0` | 9 | member/2 | `engine/core/src/sim/world_host.cpp:7433` | yes | partial | the same with a data argument; dropped likewise |
+| `Obj::AsFlying` | `0x005aaa20` | 9 | member/0 | `engine/core/src/sim/world_host.cpp:7543` | yes | verified | virtual cast to CVXFlyingUnit (unit heir); miss/failed -> invalid |
+| `Unit::InShip` | `0x005d70f0` | 9 | member/0 | `engine/core/src/sim/world_host.cpp:7410` | yes | verified | no receiver check; holder [+0x154] resolves and its ship handle [holder+0x0e] resolves (0x005319a0) |
+| `Obj::AsItemHolder` | `0x005aa860` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:7546` | yes | verified | virtual cast to CVXItemHolder (script-object heir); miss/failed -> invalid |
+| `Unit::user` | `0x005d8bf0` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:7431` | yes | verified | the int at [+0x164]; miss 0 |
+| `point::ClampToMap` | `0x005bd3e0` | 8 | member/0 | `engine/core/src/sim/world_host.cpp:7502` | yes | verified | no world -> unchanged; x to [0, w-2], y to [0, h-2] (high corner from [world+0xbc/0xc0] - 1) |
+| `Building::GetExitPoint` | `0x004dcfa0` | 7 | member/2 | `engine/core/src/sim/world_host.cpp:7413` | yes | partial | (Unit, point): miss -> the point; water from the unit class's water_unit (fixed, was ship class); one rand(0,10000) draw over 1/(d^4+1e-7) weights in double, fixed point here |
+| `Building::GetExitPoint` | `0x004dd080` | 7 | member/2 | `engine/core/src/sim/world_host.cpp:7413` | yes | partial | (point, bool): same worker 0x004db6c0; double-precision weights approximated in fixed point (core has no floats) |
+| `Flying::IsInAir` | `0x0051bd20` | 7 | member/0 | `engine/core/src/sim/world_host.cpp:7408` | yes | verified | bit 22 of [+0x194] |
+| `Unit::GetSacrifice` | `0x005d7bc0` | 7 | member/0 | `engine/core/src/sim/world_host.cpp:7444` | yes | partial | base answers invalid; only the druid override reads [+0x1cc]; no sacrifice machinery here (design) |
+| `Obj::IsValidCaptureTarget` | `0x005aaea0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7360` | yes | verified | argument then receiver (false each); Military receiver; target a Building heir with a live settlement, not Tower/Wall/Gate/Catapult |
+| `Teleport::Traverse` | `0x005cdcb0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7419` | yes | verified | ORs the traveller's record word +0x18 (share-view side, self included) into [tp+0x214] (fixed: was the one bit); 1..16 only |
+| `Teleport::exit_vector` | `0x005cdc40` | 6 | member/0 | `engine/core/src/sim/world_host.cpp:7417` | yes | partial | instance fields [tp+0x20c/0x210] copied from the class by the loader 0x005cd950; miss pushes (0xffff|garbage, 0), (-1,-1) here; agree on every shipped class |
+| `Unit::SetMinimapFlag` | `0x005d87d0` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7469` | yes | verified | bit 0x4000000 of the unit flag word; miss no-op |
+| `Unit::SetNoselectFlag` | `0x005d8750` | 6 | member/1 | `engine/core/src/sim/world_host.cpp:7427` | yes | partial | fixed: the call before the write is the AI unregister 0x0041eee0 (not a deselect), and AddToSquad/the placement hook refuse the bit; the owner AI running tallies 0x004448a0 decrements are not kept here |
+| `Building::GetExitVector` | `0x004dd330` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7415` | yes | verified | class record pair [cls+0xacc/0xad0], absent marker answers (-1,-1); pair inheritance 0x0059c310; the original invalid-receiver arm pushes one byte where a point belongs and is not reproducible, (-1,-1) stands in |
+| `Building::IsStonehengeControlable` | `0x004ddd70` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7466` | yes | partial | fixed: the circle is the class sight [cls+0x2d0], not the instance radius SetSight moves; reference pinned to the local player so the walk order does not matter here, but the shared scan is in spawn order rather than grid order (design) |
+| `IsPointInWater` | `0x005c6d40` | 5 | free/1 | `engine/core/src/sim/world_host.cpp:7458` | yes | verified | terrain layer type 13 at ((x+32)>>6, (y+32)>>6), out of the inclusive world rect false; equal bounds on every shipped map size |
+| `Obj::AsTeleport` | `0x005cdb50` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7544` | yes | verified | kind test on CVXTeleport (leaf under CVXBuilding in the chain read from the image), handle or 0xffff |
+| `Obj::IsMilitary` | `0x005ad680` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7424` | yes | verified | heir test of [obj+0x3c] up [cls+0xe4], self included, against Military (0x00540130/0x0059a220); invalid receiver false |
+| `Obj::IsSentry` | `0x005ad500` | 5 | member/0 | `engine/core/src/sim/world_host.cpp:7425` | yes | verified | the same shape as IsMilitary with Sentry (0x005400c0) |
+| `Squad::GetFlags` | `0x004216d0` | 5 | member/1 | `engine/core/src/sim/world_host.cpp:7426` | yes | verified | body read: arity 0, answers [squad+0x30]; every shipped GetFlags site passes a mask (Unit::GetFlags/1), so this form has no caller and is left unbound |
+| `Unit::GetFlags` | `0x005d7e30` | 5 | member/1 | `engine/core/src/sim/world_host.cpp:7426` | yes | verified | [obj+0x194] & mask as bool, any resolving object, invalid false; only UNITFLAG_NOAI is passed by shipped sites, the three unmodelled bits are labelled |
+| `Gate::CloseNow` | `0x00529cd0` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:7477` | yes | partial | fixed: a call that repeats the current target writes nothing and leaves the move running (it used to restart it from a truncated position); building mode 3 is read as health <= 0, an inference (no building mode here) |
+| `Obj::AsSacrifice` | `0x005aa940` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:7545` | yes | verified | kind test on CVXSacrifice (leaf under CVXScriptObj in the image), handle or 0xffff |
+| `Obj::SetSight` | `0x005ab360` | 4 | member/1 | `engine/core/src/sim/world_host.cpp:7383` | yes | verified | refuses n<100 and n>2048 without storing; a widening explores the new circle for the owner unless held; stores [obj+0xd0] either way |
+| `Sacrifice::IsInvisibility` | `0x00594f10` | 4 | member/0 | `engine/core/src/sim/world_host.cpp:7445` | yes | verified | case-insensitive compare of the class name ([obj+0x3c] string) with Hide; false for every shipped class |
+| `VisibleObjsInSight` | `0x00575ef0` | 4 | free/2 | `engine/core/src/sim/world_host.cpp:7308` | yes | partial | body read; the shared sight worker 0x004fee10 fixes the radius at the observer sight minus 100, a dead observer sees nothing, refresh is once a second; World::objects_in_sight (shared with ObjsInSight, the other batch) uses the whole current sight, sees when dead, and visibility is not applied |
+| `Building::GetUITarget` | `0x004ddc50` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7420` | yes | verified | [obj+0x1fc] handle with zero offset, invalid with no message on an unresolvable receiver |
+| `Building::IsCentralBuliding` | `0x004dd2d0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7361` | yes | verified | class slot [cls+0xa74] (atol of is_central_building) non-zero; invalid receiver answers true; shipped values are 0 and 1 |
+| `Building::RRepair` | `0x004dd250` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7384` | yes | verified | only at tier 3; auto_repair=yes classes only when the settlement central building [set+0x8c] is heir of BaseVillage (0x00440010); heals to (T2+H+1)% of [obj+0xc8] (0x004db520), the class figure for a building |
+| `CLAMP` | `0x00696070` | 3 | free/3 | `engine/core/src/sim/world_host.cpp:7455` | yes | verified | v < lo answers lo before hi is compared, then v > hi answers hi |
+| `CLAMP` | `0x00696bc0` | 3 | free/3 | `engine/core/src/sim/world_host.cpp:7455` | yes | verified | the double overload, same two branches; every shipped site passes integers, and the core has no floating point, so it is not bound |
+| `Catapult::AttackWait` | `0x004e32b0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7490` | yes | partial | 600000/(base+(crew-1)*add) less the attack animation, no crew or negative answers 0 (0x004e2030); the time left on a shot in progress (action state 4..7) is not added, there being no catapult action state here |
+| `Catapult::IsBuilt` | `0x004e2dc0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7482` | yes | verified | [obj+0x208] != 0, invalid receiver false |
+| `Catapult::RotateTo` | `0x004e2c50` | 3 | member/1 | `engine/core/src/sim/world_host.cpp:7492` | yes | partial | the point and the no-turn-in-progress gate are read; the original stores the point, sets action state 7 and suspends until the turn ends, this engine faces at once (no catapult turn rate) |
+| `Druid::SetSummoningDeath` | `0x005135a0` | 3 | member/1 | `engine/core/src/sim/world_host.cpp:7422` | yes | verified | stores the bool byte at [obj+0x1d4], silent on an unresolvable receiver |
+| `Gate::OpenNow` | `0x00529c50` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7476` | yes | partial | fixed: the same as CloseNow -- only a change of target writes it and clears the latch [gate+0x228]; mode 3 read as health <= 0 |
+| `GetCatapultAttackPoint` | `0x004e23d0` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7416` | yes | verified | CatapultVariationRadius from CONST.INI; no loop and offset (r, r) when isqrt(2r^2) <= r, else x then y drawn from [-r, r] until isqrt of the length <= r; clamped into the inclusive map rect |
+| `GetInnState` | `0x00533170` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7273` | yes | verified | (map, inn) string form: map list lookup, then the same clamped read; unknown map or inn answers 3; no shipped site passes strings, so it is not bound |
+| `GetInnState` | `0x00533ae0` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7273` | yes | verified | fixed: the read clamps to 1..3 (0x00533050), not only up to 1; not an Inn or unresolvable answers 2; keyed by object id where the original mints an index into [inn+0x208], which no script reads back |
+| `MIN` | `0x00694a60` | 3 | free/2 | `engine/core/src/sim/world_host.cpp:7456` | yes | verified | a < b ? a : b over ints |
+| `MIN` | `0x00695020` | 3 | free/2 | `engine/core/src/sim/world_host.cpp:7456` | yes | verified | the double overload of MIN; unreachable from the corpus, not bound |
+| `Ship::HasAiTransport` | `0x005c7190` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7460` | yes | verified | the transport order string [ship+0x210] is non-empty; invalid receiver false |
+| `Ship::UnitsMax` | `0x005c6e40` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7399` | yes | verified | holder [ship+0x1dc] capacity +0x10, seeded once from max_units_to_board; invalid receiver 0 |
+| `SpawnNamed` | `0x00573c70` | 3 | free/1 | `engine/core/src/sim/world_host.cpp:7285` | yes | verified | named-object lookup, the shared template spawn 0x00571d40 (clone, clear the template bit, refile in group and name tables); unknown or gone name prints and answers 0xffff, a non-template answers the null handle |
+| `Unit::Curse` | `0x005d90c0` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7453` | yes | verified | fixed: 0x005d4880(0) sets bit 27 only when clear (curing a blessing first) and arms the object timer 0x19ec6e2 for CurseTimeout ms, whose handler is the cure 0x005d4800; the curse now lifts after CurseTimeout (ObjectState::curse_until, world version 35); the feedback object is presentation |
+| `Unit::IsCursed` | `0x005d8940` | 3 | member/0 | `engine/core/src/sim/world_host.cpp:7454` | yes | verified | fixed with Curse: bit 27 as it stands now (set and the cure not yet run); invalid receiver false |
+| `Building::GetSentryClassName` | `0x004ddce0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7368` | yes | verified | class string +0x2f8 (sentry_class_name), root default ""; no receiver test in the original (a null read), "" stands in |
+| `Building::PopTransportationUI` | `0x004dd3b0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7378` | yes | verified | refuses a non-heir of Inn with a complaint, otherwise opens the transport window (0x006ffd20) -- presentation, dropped after resolving the receiver |
+| `Building::itemtypes` | `0x004dda10` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7367` | yes | verified | fixed: the class string at +0x6a0 is a list -- the reader (0x005a1d58) appends each repeated itemtype after ", ", so BaseRuins offers all twelve items, not the last (ClassGraph and gamedata.py); undeclared answers **Invalid** (inferred from the record constructor); invalid receiver "" under the name Building::Starvation |
+| `Catapult::SetBuildFrame` | `0x004e2ed0` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:7379` | yes | verified | (frames-2)*(max-n-1)/(max-1)+1 into [obj+0x20c] and the sprite holds that frame; presentation, the object's maximum as maxhealth answers it |
+| `Druid::IsSummoningDeath` | `0x005135e0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7423` |  | verified | [obj+0x1d4] != 0, false and silent on an unresolvable receiver |
+| `Gate::AreEnemiesAround` | `0x00529af0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7474` |  | verified | [gate+0x210] != 0, as LookAround last left it; invalid false |
+| `InvalidateRegenConsts` | `0x005d30b0` | 2 | free/0 | `engine/core/src/sim/world_host.cpp:7375` | yes | verified | zeroes the regeneration-table scan cursor [0x009c0828]; there is no such cache here, a no-op is the same behaviour |
+| `IsProtected` | `0x00435250` | 2 | free/3 | `engine/core/src/sim/world_host.cpp:7292` | yes | verified | fixed: the sweep 0x00423ef0 counts objects of exactly the class (descriptor equality), with no life test and nothing held; player outside 1..16 or an unknown class answers true; point clamped to the map; radius twice [cls+0x2dc]; owner in the complement of the enemy word |
+| `MAX` | `0x00694a90` | 2 | free/2 | `engine/core/src/sim/world_host.cpp:7457` | yes | verified | b <= a ? a : b over ints |
+| `MAX` | `0x00695060` | 2 | free/2 | `engine/core/src/sim/world_host.cpp:7457` | yes | verified | the double overload of MAX; unreachable from the corpus, not bound |
+| `Obj::GetStaminaDecTime` | `0x005ab580` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7488` | yes | verified | the instance field [obj+0xec] (persisted as stamina_dec_time, seeded from the class; no map authors it), negative answers 0; no receiver test in the original |
+| `Obj::IsRanged` | `0x005ad620` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7363` | yes | verified | 0x0053f5b0: the class string [cls+0x960] non-empty and not **Invalid**; the projectile_class arm stores it (0x005a4254), settling the old inference |
+| `Obj::IsWaterUnit` | `0x005ac6b0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7362` | yes | verified | class slot [cls+0xb30] (water_unit) non-zero; invalid false |
+| `SetGlobalBloodlust` | `0x004c6610` | 2 | free/1 | `engine/core/src/sim/world_host.cpp:7374` | yes | partial | stores the byte in [0x00996ae4]; its only reader is the blow's special-stamina charge 0x0050ff30 (skips special 0x1000's cost), which this engine's combat does not model, so the flag is dropped |
+| `Ship::IsBuilding` | `0x005c6fc0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7409` | yes | verified | [ship+0x230] > 0, a construction counter, not a class test; invalid false |
+| `Unit::BestTrainingTarget` | `0x005d5bf0` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7486` | yes | partial | fixed: the sweep visits units only (mask 0x400000 seeded at 0x005d3c50), so an armed enemy building no longer ends a lesson; the threat term and the +1 threat on the chosen unit (0x005d2850) are not modelled, and the sweep is in spawn order rather than grid order (design) |
+| `Unit::GetParryMode` | `0x005d9050` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7441` | yes | verified | fixed: without the Parry special (bit 0 of [obj+0x198]) the answer is -1, not 0, so ENTER_PARRY_MODE_VERIFY does not offer parry to units that cannot; else [obj+0x1a0]; an unresolvable receiver pushes nothing in the original, 0 stands in |
+| `Unit::GetStaminaDecTime` | `0x005d8080` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7488` | yes | verified | the unit's [unit+0x17c], the same value at the unit offset; negative answers 0 |
+| `Unit::Mutate` | `0x005df420` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:7430` | yes | partial | class lookup by id then altid, a message for an unknown name or receiver; mutates at once where the original defers to the vtbl+0x24 hook when the running script owns the object (unobservable: Mutate ends both shipped branches); the squad is left and, the AI manager flag being cleared during the rebuild, not re-filed; the AI tallies moved by 0x004448a0/0x00447200 are not kept here |
+| `Unit::SameHolderAs` | `0x005d8120` | 2 | member/1 | `engine/core/src/sim/world_host.cpp:7347` | yes | verified | [unit+0x154] == [other+0x154] raw, so two units outside any holder answer true; an unresolvable handle reads through a null in the original, false stands in |
+| `abs` | `0x00694be0` | 2 | free/1 | `engine/core/src/sim/world_host.cpp:7451` | yes | verified | negate when negative; abs(INT32_MIN) is INT32_MIN |
+| `rect::height` | `0x00696c90` | 2 | member/0 | `engine/core/src/sim/world_host.cpp:7508` | yes | verified | bottom - top + 1 over the by-value rect |
+| `Building::GetNumSentrySlots` | `0x004ddca0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7371` | yes | verified | class int +0x2f4 (num_sentry_slots), root default 0; no receiver test in the original, 0 stands in |
+| `Building::GlobalSpellStop` | `0x004dd5b0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7434` | yes | verified | a CVXTownHall receiver has its record removed from the global spell manager (0x0052c4b0), anything else a complaint; nothing reads the record (GetGlobalSpell has no site), so it is dropped |
+| `Building::SetUITarget` | `0x004ddbf0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7421` | yes | verified | stores the argument handle at [obj+0x1fc], 0xffff when it does not resolve; silent on an unresolvable receiver |
+| `Building::StonehengeNumControllingMages` | `0x004dde80` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7465` | yes | partial | fixed with IsStonehengeControlable (class sight); the counter adopts the first qualifying owner, and the shared spatial query answers in spawn order where 0x004dc6f0 walks grid cells (design) |
+| `Building::levelperitem` | `0x004ddb50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7370` | yes | verified | class int +0x6c0 (levelperitem); undeclared keeps the -15000000 marker; invalid receiver 0 |
+| `Building::minlevel` | `0x004ddaf0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7369` | yes | verified | class int +0x6bc (minlevel); undeclared keeps the -15000000 marker; invalid receiver 0 |
+| `Catapult::CalcEscapeDirection` | `0x004e3380` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7293` | yes | verified | fixed: a threat at zero distance falls through to the random direction (two draws), and a random direction on the origin answers (1000, 0) (0x004e26c0); nearest enemy Tower/Outpost building in sight by squared distance, first met keeps a tie (spawn order here, grid order there, labelled); invalid receiver pushes 4 bytes in the original, (0,0) stands in |
+| `Catapult::ClearTowerTarget` | `0x004e37f0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7491` | yes | partial | writes 0xffff to [bld+0x1fc] on every CatapultTower heir of the catapult settlement [cat+0x148]; the original does so only while [cat+0x22c] is set, a slot not modelled, and the clear here is unconditional; an invalid receiver pushes a stray 0 there |
+| `Catapult::SetBuilt` | `0x004e2e20` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7489` | yes | verified | [cat+0x208] = 1 and the build frame to -1; the frozen-frame sprite bit 0x2000000 cleared and the idle animation restored (presentation) |
+| `Druid::GetJupiterAngerTarget` | `0x005134b0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7386` | yes | verified | the handle at [self+0x1d0] when it resolves to a unit (kSyncUnit), else 0xffff; no receiver test in the original |
+| `Druid::SetJupiterAngerTarget` | `0x00513540` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7385` | yes | verified | stores the argument handle at [self+0x1d0], silent on an unresolvable receiver; the argument is not validated |
+| `EnemyInRange` | `0x004dcb20` | 1 | free/3 | `engine/core/src/sim/world_host.cpp:7387` | yes | verified | fixed: the square only bounds the grid sweep; found is an enemy-owned, unhidden unit the asker can attack (vtbl+0xb4, unit_can_attack), of target_factor >= 0, whose distance from the point less its class radius (0x005a7900) is within range -- this answered any enemy-owned object in the square |
+| `Flying::FindNearBird` | `0x0051c0a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7471` | yes | partial | the first object of the same class pointer, not the receiver, within 2048 (r^2 0x400000) in the grid sweep 0x0051b840 with mask 0xffffffff, else 0xffff; first in cell order there, spawn order here (design: the spatial queries answer in id order) |
+| `Gate::AreFriendsAround` | `0x00529b50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7475` |  | verified | [gate+0x214] != 0, as LookAround last left it; invalid false |
+| `Gate::LookAround` | `0x00529bb0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7473` | yes | verified | fixed: zeroes both fields, walks kSyncUnit objects in the circle (0x005296d0) through the visitor 0x00529510, which never stops the walk; an Animal is skipped only when its damage [obj+0xdc] (persist name, 0x005b5df0) is zero, so a wolf counts -- every Animal used to be skipped |
+| `GetResearchHack` | `0x004db630` | 1 | free/0 | `engine/core/src/sim/world_host.cpp:7376` | yes | verified | [0x009969a8] != 0, whose only writer sets and clears it within one debug function: false |
+| `HasStarvingArmy` | `0x0055a7c0` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:7274` | yes | verified | the zero-argument form: whether the registry holds the "army starving" key; no shipped site calls it, not bound |
+| `HasStarvingArmy` | `0x00559c20` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:7274` | yes | partial | whether a record under "army starving" in the session notification registry is at least ms old; the registry is not kept here, the feeder's hungry_since over the local player's units stands in (labelled) |
+| `Obj::AddToStoreBin` | `0x005b5890` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7345` |  | verified | inserts the handle into the global store-bin set (0x005b5750), read only by a by-name search no entry point reaches; dropped |
+| `Obj::AsBarrack` | `0x005aa8d0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7547` | yes | verified | kind test on CVXBarrack (leaf under CVXBuilding in the image), handle or 0xffff |
+| `Obj::CoverOfMercyAction` | `0x005ca6a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7449` | yes | partial | fixed: only a CVXAreaEffect receiver acts, and an unowned unit (owner half zero) is not sheltered; lowers the bit on last time's list, raises it on the units within the class radius whose owner bit is in the complement of the owner's war mask; a hidden unit needs the side mask [player+0x18], not modelled |
+| `Obj::IsPeaceful` | `0x005ad740` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7390` | yes | verified | 0x005402f0: heir of Peaceful or of Animal (0x00540280); invalid false |
+| `Obj::IsPeasantAmbient` | `0x005ad7a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7382` |  | verified | heir of PeasantAmbient (0x005403f0); invalid false |
+| `Obj::IsRam` | `0x005ad5c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7372` |  | verified | heir of RamUnit (0x00540460); invalid false |
+| `Obj::MagicActionEnd` | `0x005c9f40` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7450` | yes | verified | the receiver handle to 0x005d5aa0, a whole-map grid sweep clearing [unit+0x14c] wherever it names the receiver; invalid does nothing |
+| `Obj::MistAction` | `0x005ca050` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7448` | yes | verified | fixed: the collection's filter 0x005c9f20 takes living units only, so a corpse in the mist is neither tagged nor counted; units in [obj+0xd4] whose tag is free or this mist are tagged, damaged through vtbl+0xa8 and the argument booked to both damage counters |
+| `Obj::RemoveFromStoreBin` | `0x005b0f10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7346` |  | verified | erases it from the same set (0x005b0e30); dropped |
+| `Obj::SetCmdEnable` | `0x005ac710` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7483` | yes | verified | a dead receiver complains and keeps its state; otherwise [obj+0x9c] = the bool (commands enabled) |
+| `Obj::SetDebug` | `0x005abcb0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7381` | yes | verified | vtbl+0xd4 with the bool, the debug overlay: presentation, dropped after resolving the receiver |
+| `Obj::SetName` | `0x005b6920` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7341` | yes | verified | fixed: an empty name removes the object's name (0x005b6120 deletes its record [obj+0x84]), which the one shipped site, 2_Great_loses_Spain seq12, relies on; otherwise rebind; the rename arm for an object already named differently (0x00572a30) is not reproduced and no shipped site reaches it |
+| `PlaceCatapult` | `0x004e3dc0` | 1 | free/4 | `engine/core/src/sim/world_host.cpp:7291` | yes | verified | fixed: the env write of 1 under /<map>/Player<n>/CatapultBuilt that ends 0x004e3be0, which BUILDINGSADVICE5.VS polls; race table 0x004e3b30, owner n-1, the site revealed to CatapultBuildSight (here through FogSystem), its own settlement, health 1, unbuilt |
+| `Sacrifice::AddDruid` | `0x00595af0` | 1 | member/2 | `engine/core/src/sim/world_host.cpp:7446` | yes | partial | one call into 0x00595a30 with the druid and now+time (a lease on the sacrifice's druid list, [druid+0x1cc] written); no sacrifice exists in this engine (the ritual machinery is not here), so the valid branch stores nothing (design) |
+| `Sacrifice::Consume` | `0x00596440` | 1 | member/3 | `engine/core/src/sim/world_host.cpp:7447` | yes | partial | suspending: a first call with the bool set sleeps period, then 0x00596050 spreads price over the listed druids' health; the wait is reproduced, the answer is an empty ritual's 0, there being no sacrifice machinery (design) |
+| `Sacrifice::MistAction` | `0x00595360` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7448` | yes | verified | the same body over a Sacrifice receiver, with a resolve test first; shared implementation |
+| `SetInnState` | `0x00533640` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7276` | yes | verified | (map, inn) string form of the setter, the same clamped write (0x005330e0) after the map and inn lookup; no caller, not bound |
+| `SetInnState` | `0x00533c00` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7276` | yes | verified | clamped 1..3 write under /Inns/<n>/state for an Inn, silent otherwise beyond the discarded complaint |
+| `Ship::ApplyAiTransport` | `0x005c8710` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7463` | yes | verified | snapshot the holder's passengers, unboard them all (0x005c84b0), each distinct squad once (0x00442880) ordered on through 0x0043ec00 with its own state, SF_ADVCHOOSER cleared, the stored verb and point; then the order cleared |
+| `Ship::ClearAiTransport` | `0x005c7e10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7461` | yes | verified | the order string to "" and the point to (-1,-1); silent on an unresolvable receiver |
+| `Ship::GetTransPt` | `0x005c6f20` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7462` |  | verified | the point at [ship+0x228/0x22c], (-1,-1) for no order; no receiver test in the original |
+| `Ship::ShowBuildAnimation` | `0x005c6a60` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7380` | yes | partial | not presentation: a suspending routine that unboards the new ship at the shipyard exit, raises the build counter [ship+0x230] (IsBuilding), slides it along the exit vector over ShipBuildAnimTime with a float cosine easing, then zeroes the counter and hands the ship to the AI (0x0041f310); dropped here, the ship stays held until ordered out (design: a suspending entry with state and a fixed-point easing) |
+| `StarvingArmyPos` | `0x00559d50` | 1 | free/1 | `engine/core/src/sim/world_host.cpp:7275` | yes | partial | the same walk; on a hit it consumes the record (0x00559430) and answers the nearest of its objects to a point it holds; here the first hungry unit of the local player, the registry not being kept |
+| `Unit::Disappear` | `0x005d86d0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7342` | yes | verified | fixed: the command queue is not touched -- activity [obj+0x130] to 0, path dropped, animation reset, stood at (-1,-1) -- so the ambient villagers' queued errand behind disappear survives |
+| `Unit::Disease` | `0x005d9140` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7344` | yes | verified | sets bit 1 and spawns the disease feedback into [obj+0x1c4] when none; no timer |
+| `Unit::EnterHolder` | `0x005d7210` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7339` | yes | verified | a held receiver is refused; the holder is a building's settlement holder ([bld+0x148] -> [set+0x5e]), else the one the object carries (vtbl+0xe4, a ship here), else the one it is in; then the enter routine 0x005d3e10 |
+| `Unit::ExitHolder` | `0x005d71c0` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7340` | yes | partial | runs the unboarding routine 0x005d3f20 when the receiver is held; the three clauses of it sim/boarding.hpp labels as not reproduced stay so |
+| `Unit::GetParty` | `0x005d7b10` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7400` | yes | verified | SyncFlags bit 19 (party); invalid false |
+| `Unit::IsDiseased` | `0x005d89a0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7343` | yes | verified | bit 1 of [obj+0x194]; invalid receiver false |
+| `Unit::RamBestTarget` | `0x005d91c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7294` | yes | verified | buildings in sight+512 (0x005d56b0), best seeded at 1,000,000 squared; the predicate 0x005d4980: owner row names the ram an enemy, not broken (tier 3), heir of Gate/Outpost/BaseShipyard, strictly nearer; a tie keeps the first met (spawn order here, labelled) |
+| `Unit::StartTraining` | `0x005d5de0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7484` | yes | verified | vtbl+0x44 sets SyncFlags bit 28 (training); invalid prints and returns |
+| `Unit::StopTraining` | `0x005d5e30` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7485` | yes | verified | vtbl+0x48 clears SyncFlags bit 28; invalid prints and returns |
+| `Unit::TrainAttack` | `0x005d5d10` | 1 | member/1 | `engine/core/src/sim/world_host.cpp:7487` | yes | partial | the three refusals (held receiver silently, unresolvable partner with a message, health <= 1) then action state 2 and suspend until it clears; the wait here is one attack-animation cycle, the length of state 2 with no animation not read |
+| `UnitsAroundSettlement` | `0x005744c0` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7325` |  | verified | settlement by name ([set+0xcc] string), class string checked when it has no comma, then the settlement-units query 0x004fe080 in mode 1: CollectUnits (0x005c58f0) ring pass only -- each building's own sight swept (0x005c5120), living, heir, not a template -- sorted and deduplicated; an unknown class answers the invalid query in the original, an empty one here, unreachable (the one site passes Unit) |
+| `UnitsAroundSettlement` | `0x00574d90` | 1 | free/2 | `engine/core/src/sim/world_host.cpp:7325` |  | verified | the same over a settlement object receiver argument; an unresolvable one prints and answers the invalid query |
+| `rect::bottom` | `0x00695200` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7506` | yes | verified | the rect's fourth int, bottom |
+| `rect::bottom` | `0x00695120` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7506` | yes | verified | the reference form of bottom (field +0xc, an lvalue); no shipped site assigns it, and a read is the same number |
+| `rect::left` | `0x00695140` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7503` | yes | verified | the rect's first int, left |
+| `rect::right` | `0x006951c0` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7505` | yes | verified | the rect's third int, right |
+| `rect::right` | `0x00695100` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7505` | yes | verified | the reference form of right (field +8, an lvalue); no shipped site assigns it, and a read is the same number |
+| `rect::top` | `0x00695180` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7504` | yes | verified | the rect's second int, top |
+| `rect::width` | `0x00696c50` | 1 | member/0 | `engine/core/src/sim/world_host.cpp:7507` | yes | verified | right - left + 1 over the by-value rect |
 
 ## command -- 30 of 56 verified, 14,299 call sites
 
@@ -318,7 +318,7 @@ Batches are by the file that implements them, most-called file first.
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
 | `Count` | `0x00422300` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | partial | free Count(player, class): reads a per-player class-name counter map (0x004441e0/0x00444030) whose maintenance was not traced; engine counts live is-a objects |
-| `GAIKA::Count` | `0x00430a30` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` |  | partial | GAIKA::Count/6: walk matches census_of<true>; gaps named in squad.cpp: GAIKA node table approximated (design), 0x0044eb80 fog-memory rewrite absent, settlement sentry tail (0x00420c00) left out |
+| `GAIKA::Count` | `0x00430a30` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | partial | GAIKA::Count/6: walk matches census_of<true>; gaps named in squad.cpp: GAIKA node table approximated (design), 0x0044eb80 fog-memory rewrite absent, settlement sentry tail (0x00420c00) left out |
 | `GAIKA::Count` | `0x004330b0` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | partial | GAIKA::Count/3: walk matches count_class_in_node; same node-table and 0x0044eb80 gaps; sentry tail gated on ready count only, not BaseTownhall (0x0043ffc0) plus strength > 0 |
 | `ItemHolder::count` | `0x0053c660` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | partial | ItemHolder::count: vtbl+0x104 of the holder, not resolved; no shipped site reaches it, and m_count refuses an ItemHolder receiver |
 | `ObjList::count` | `0x0055e0c0` | 1,281 | free/2, member/0, member/1, member/3, member/6 | `engine/core/src/sim/objlist.cpp:1313` | yes | verified | ObjList::count: the deque's size word, members counted not resolved; prose at m_count |
@@ -396,248 +396,248 @@ Batches are by the file that implements them, most-called file first.
 | `TempleUTrain` | `0x00420ff0` | 1 | free/1 | `engine/core/src/sim/env.cpp:1786` | yes | partial | TempleUTrain: seven strings for eight races, Britain trainEPriest, Egypt trainTEnchantress (fixed); Germany's slot is a null pointer the original faults on, answered "" |
 | `TempleUType` | `0x00420f80` | 1 | free/1 | `engine/core/src/sim/env.cpp:1785` | yes | verified | TempleUType: race 0..7 else "" |
 
-## economy -- 0 of 135 verified, 4,184 call sites
+## economy -- 106 of 135 verified, 4,184 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Settlement::GetCentralBuilding` | `0x005c2490` | 182 | member/0 | `engine/core/src/sim/economy.cpp:3317` |  | unread |  |
-| `ObjList::InHolder` | `0x0055eba0` | 163 | member/0, member/1 | `engine/core/src/sim/economy.cpp:4674` | yes | unread |  |
-| `Query::InHolder` | `0x00579ef0` | 163 | member/0, member/1 | `engine/core/src/sim/economy.cpp:4674` | yes | unread |  |
-| `Squad::InHolder` | `0x00427670` | 163 | member/0, member/1 | `engine/core/src/sim/economy.cpp:4674` | yes | unread |  |
-| `Unit::InHolder` | `0x005d6ff0` | 163 | member/0, member/1 | `engine/core/src/sim/economy.cpp:4674` | yes | unread |  |
-| `Settlement::gold` | `0x005c1fc0` | 158 | member/0 | `engine/core/src/sim/economy.cpp:3322` |  | unread |  |
-| `GetSettlement` | `0x005c3ad0` | 118 | free/1 | `engine/core/src/sim/economy.cpp:4448` | yes | unread |  |
-| `Obj::SetPlayer` | `0x005ab2f0` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3276` | yes | unread |  |
-| `ObjList::SetPlayer` | `0x0055e710` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3276` | yes | unread |  |
-| `Query::SetPlayer` | `0x00578de0` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3276` | yes | unread |  |
-| `SetPlayer` | `0x006a4240` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3276` |  | unread |  |
-| `Settlement::SetPlayer` | `0x005c4ff0` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3276` | yes | unread |  |
-| `Settlement::Units` | `0x005c3c70` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3498` | yes | unread |  |
-| `Settlement::food` | `0x005c2080` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3327` | yes | unread |  |
-| `Squad::Units` | `0x0043ae40` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3498` | yes | unread |  |
-| `Squad::food` | `0x004278c0` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3327` | yes | unread |  |
-| `Unit::food` | `0x005d8c50` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3327` |  | unread |  |
-| `ObjList::SetFood` | `0x0055e890` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3364` |  | unread |  |
-| `Query::SetFood` | `0x005798b0` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3364` |  | unread |  |
-| `Settlement::SetFood` | `0x005c2140` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3364` |  | unread |  |
-| `Settlement::UnitsCount` | `0x005c1d80` | 90 | member/0 | `engine/core/src/sim/economy.cpp:3795` | yes | unread |  |
-| `Ship::UnitsCount` | `0x005c6de0` | 90 | member/0 | `engine/core/src/sim/economy.cpp:3795` | yes | unread |  |
-| `Unit::SetFood` | `0x005d7cd0` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3364` | yes | unread |  |
-| `Wagon::SetFood` | `0x005ebe70` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3364` |  | unread |  |
-| `Settlement::ForceAddUnit` | `0x005c1bc0` | 71 | member/1 | `engine/core/src/sim/economy.cpp:4026` | yes | unread |  |
-| `Settlement::SetGold` | `0x005c21a0` | 65 | member/1 | `engine/core/src/sim/economy.cpp:3819` |  | unread |  |
-| `Wagon::SetGold` | `0x005ebec0` | 65 | member/1 | `engine/core/src/sim/economy.cpp:3819` |  | unread |  |
-| `Item::name` | `0x00535260` | 61 | member/0 | `engine/core/src/sim/economy.cpp:3423` | yes | unread |  |
-| `Obj::name` | `0x005aea60` | 61 | member/0 | `engine/core/src/sim/economy.cpp:3423` | yes | unread |  |
-| `Settlement::name` | `0x005c2700` | 61 | member/0 | `engine/core/src/sim/economy.cpp:3423` | yes | unread |  |
-| `Settlement::population` | `0x005c2b70` | 50 | member/0 | `engine/core/src/sim/economy.cpp:3359` |  | unread |  |
-| `Building::Research` | `0x004dfcd0` | 41 | member/1 | `engine/core/src/sim/economy.cpp:3638` |  | unread |  |
-| `Settlement::Research` | `0x0042d1b0` | 41 | member/1 | `engine/core/src/sim/economy.cpp:3638` | yes | unread |  |
-| `Building::GetDefendersMax` | `0x00563cd0` | 38 | member/1 | `engine/core/src/sim/economy.cpp:4626` |  | unread |  |
-| `Settlement::supplied` | `0x005ef530` | 34 | member/0 | `engine/core/src/sim/economy.cpp:4217` |  | unread |  |
-| `Unit::GetHolderSett` | `0x005d7050` | 34 | member/0 | `engine/core/src/sim/economy.cpp:4566` | yes | unread |  |
-| `Settlement::IsStronghold` | `0x00425050` | 33 | member/0 | `engine/core/src/sim/economy.cpp:3978` |  | unread |  |
-| `Settlement::CanAfford` | `0x00425a90` | 29 | member/1, member/2 | `engine/core/src/sim/economy.cpp:3553` | yes | unread |  |
-| `Settlement::CanAfford` | `0x00428ba0` | 29 | member/1, member/2 | `engine/core/src/sim/economy.cpp:3553` |  | unread |  |
-| `Settlement::CanAfford` | `0x00428d40` | 29 | member/1, member/2 | `engine/core/src/sim/economy.cpp:3553` | yes | unread |  |
-| `Settlement::SetLoyalty` | `0x005c27d0` | 28 | member/1 | `engine/core/src/sim/economy.cpp:4253` | yes | unread |  |
-| `Wagon::SetLoyalty` | `0x005ec100` | 28 | member/1 | `engine/core/src/sim/economy.cpp:4253` |  | unread |  |
-| `Settlement::IsIndependent` | `0x00425320` | 26 | member/0 | `engine/core/src/sim/economy.cpp:3809` | yes | unread |  |
-| `Settlement::max_population` | `0x005c2bc0` | 24 | member/0 | `engine/core/src/sim/economy.cpp:3814` |  | unread |  |
-| `Building::GetOutpostFood` | `0x00563f10` | 19 | member/0 | `engine/core/src/sim/economy.cpp:4645` |  | unread |  |
-| `Settlement::IsOutpost` | `0x004250f0` | 19 | member/0 | `engine/core/src/sim/economy.cpp:3826` |  | unread |  |
-| `Settlement::FindResearchLab` | `0x0042d0d0` | 17 | member/1 | `engine/core/src/sim/economy.cpp:3605` |  | unread |  |
-| `Settlement::IsVillage` | `0x004250a0` | 17 | member/0 | `engine/core/src/sim/economy.cpp:3831` |  | unread |  |
-| `Settlement::GoldConverted` | `0x005c2980` | 16 | member/1 | `engine/core/src/sim/economy.cpp:3983` |  | unread |  |
-| `Settlement::SpentGoldOnArmy` | `0x00425bb0` | 15 | member/1 | `engine/core/src/sim/economy.cpp:4696` | yes | unread |  |
-| `Building::GetEnterExit` | `0x005c54d0` | 14 | member/0 | `engine/core/src/sim/economy.cpp:4729` | yes | unread |  |
-| `Settlement::GetEnterExit` | `0x005c3570` | 14 | member/0 | `engine/core/src/sim/economy.cpp:4729` | yes | unread |  |
-| `Settlement::AddUnit` | `0x005c1b20` | 13 | member/1 | `engine/core/src/sim/economy.cpp:4011` | yes | unread |  |
-| `Settlement::ObjectsAround` | `0x005c5b90` | 13 | member/1 | `engine/core/src/sim/economy.cpp:3743` | yes | unread |  |
-| `Settlement::loyalty` | `0x005c2c10` | 13 | member/0 | `engine/core/src/sim/economy.cpp:3998` | yes | unread |  |
-| `Wagon::loyalty` | `0x005ec090` | 13 | member/0 | `engine/core/src/sim/economy.cpp:3998` |  | unread |  |
-| `Settlement::SetPopulation` | `0x005c2200` | 12 | member/1 | `engine/core/src/sim/economy.cpp:4388` | yes | unread |  |
-| `Settlement::DelSentry` | `0x005c2a60` | 11 | member/0 | `engine/core/src/sim/economy.cpp:4342` | yes | unread |  |
-| `Settlement::IsTeutonTent` | `0x00420650` | 11 | member/0 | `engine/core/src/sim/economy.cpp:4118` | yes | unread |  |
-| `Settlement::CreateMuleGold` | `0x005ef140` | 10 | member/1 | `engine/core/src/sim/economy.cpp:4178` |  | unread |  |
-| `Settlement::BestBarrack` | `0x004281a0` | 9 | member/1 | `engine/core/src/sim/economy.cpp:4721` | yes | unread |  |
-| `Settlement::Buildings` | `0x005c3d40` | 9 | member/0 | `engine/core/src/sim/economy.cpp:3702` | yes | unread |  |
-| `Settlement::CreateMuleFood` | `0x005ef040` | 8 | member/1 | `engine/core/src/sim/economy.cpp:4191` |  | unread |  |
-| `NearestStronghold` | `0x0042db30` | 7 | free/2, free/3 | `engine/core/src/sim/economy.cpp:4719` |  | unread |  |
-| `NearestStronghold` | `0x0042db90` | 7 | free/2, free/3 | `engine/core/src/sim/economy.cpp:4719` |  | unread |  |
-| `NearestStronghold` | `0x0042dbf0` | 7 | free/2, free/3 | `engine/core/src/sim/economy.cpp:4719` |  | unread |  |
-| `Settlement::AllowCapture` | `0x005c1ce0` | 7 | member/1 | `engine/core/src/sim/economy.cpp:4289` | yes | unread |  |
-| `Settlement::StopReserving` | `0x00425980` | 7 | member/0 | `engine/core/src/sim/economy.cpp:4698` | yes | unread |  |
-| `Settlement::StopSupply` | `0x005ef430` | 7 | member/0 | `engine/core/src/sim/economy.cpp:4201` |  | unread |  |
-| `Settlement::WaterLsa` | `0x00426010` | 7 | member/0 | `engine/core/src/sim/economy.cpp:4730` | yes | unread |  |
-| `Settlement::AddToPopulation` | `0x005c2250` | 6 | member/1 | `engine/core/src/sim/economy.cpp:4380` | yes | unread |  |
-| `Settlement::IsShipyard` | `0x00425190` | 6 | member/0 | `engine/core/src/sim/economy.cpp:4226` |  | unread |  |
-| `Settlement::StartSupplyFood` | `0x005ef380` | 6 | member/1 | `engine/core/src/sim/economy.cpp:4208` |  | unread |  |
-| `Settlement::max_units` | `0x005c1de0` | 5 | member/0 | `engine/core/src/sim/economy.cpp:4231` | yes | unread |  |
-| `Settlement::AddToMaxPopulation` | `0x005c2290` | 4 | member/1 | `engine/core/src/sim/economy.cpp:4400` | yes | unread |  |
-| `Settlement::DecreaseLoyalty` | `0x005c2830` | 4 | member/1 | `engine/core/src/sim/economy.cpp:4261` | yes | unread |  |
-| `Settlement::GetSentry` | `0x005c49b0` | 4 | member/0 | `engine/core/src/sim/economy.cpp:4326` | yes | unread |  |
-| `Settlement::IsFull` | `0x005c1d20` | 4 | member/0 | `engine/core/src/sim/economy.cpp:4236` | yes | unread |  |
-| `Settlement::IsIndependentGuarded` | `0x00425380` | 4 | member/0 | `engine/core/src/sim/economy.cpp:4163` |  | unread |  |
-| `Wagon::DecreaseLoyalty` | `0x005ec160` | 4 | member/1 | `engine/core/src/sim/economy.cpp:4261` |  | unread |  |
-| `Wagon::amount` | `0x005ebdb0` | 4 | member/0 | `engine/core/src/sim/economy.cpp:4481` | yes | unread |  |
-| `Settlement::AddMaxSentries` | `0x005c2b30` | 3 | member/1 | `engine/core/src/sim/economy.cpp:4372` |  | unread |  |
-| `Settlement::AddSentries` | `0x005c4ac0` | 3 | member/1 | `engine/core/src/sim/economy.cpp:4364` | yes | unread |  |
-| `Settlement::CreateBoatFood` | `0x005ef0c0` | 3 | member/1 | `engine/core/src/sim/economy.cpp:4563` | yes | unread |  |
-| `Settlement::CreateBoatGold` | `0x005ef1c0` | 3 | member/1 | `engine/core/src/sim/economy.cpp:4562` | yes | unread |  |
-| `Settlement::IsTTent` | `0x00425140` | 3 | member/0 | `engine/core/src/sim/economy.cpp:4138` |  | unread |  |
-| `Settlement::SetLoan` | `0x005c2410` | 3 | member/1 | `engine/core/src/sim/economy.cpp:4241` |  | unread |  |
-| `Settlement::loan` | `0x005c23a0` | 3 | member/0 | `engine/core/src/sim/economy.cpp:4248` |  | unread |  |
-| `Building::ClearDamageTaken` | `0x004ddbb0` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4795` | yes | unread |  |
-| `Building::GetDefenderCls` | `0x00564400` | 2 | member/1 | `engine/core/src/sim/economy.cpp:4624` |  | unread |  |
-| `Building::GetDefendersOut` | `0x00563d60` | 2 | member/1 | `engine/core/src/sim/economy.cpp:4630` |  | unread |  |
-| `Building::GetEndLevel` | `0x00563e80` | 2 | member/1 | `engine/core/src/sim/economy.cpp:4638` |  | unread |  |
-| `Building::GetStartLevel` | `0x00563df0` | 2 | member/1 | `engine/core/src/sim/economy.cpp:4634` |  | unread |  |
-| `FindRuins` | `0x0042cba0` | 2 | free/3 | `engine/core/src/sim/economy.cpp:4707` | yes | unread |  |
-| `Settlement::BestGate` | `0x004284e0` | 2 | member/1 | `engine/core/src/sim/economy.cpp:4908` | yes | unread |  |
-| `Settlement::BestToSupply` | `0x0042ca20` | 2 | member/0 | `engine/core/src/sim/economy.cpp:3839` |  | unread |  |
-| `Settlement::CanBeCaptured` | `0x00424ff0` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4270` | yes | unread |  |
-| `Settlement::CanBeCaptured` | `0x005c1c40` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4270` |  | unread |  |
-| `Settlement::ClearDamageTaken` | `0x005c3a00` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4795` | yes | unread |  |
-| `Settlement::GetNumSentries` | `0x005c2ab0` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4347` |  | unread |  |
-| `Settlement::IdleAllGates` | `0x00428640` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4967` | yes | unread |  |
-| `Settlement::NumGates` | `0x00428360` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4879` | yes | unread |  |
-| `Settlement::SpentGoldOnTech` | `0x00425cb0` | 2 | member/1 | `engine/core/src/sim/economy.cpp:4697` | yes | unread |  |
-| `Settlement::TSGetAllBarracks` | `0x00437430` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4723` | yes | unread |  |
-| `Settlement::UpgradeBestBarrack` | `0x00437030` | 2 | member/1 | `engine/core/src/sim/economy.cpp:4722` | yes | unread |  |
-| `Wagon::LoadFood` | `0x005ebf10` | 2 | member/1 | `engine/core/src/sim/economy.cpp:4565` | yes | unread |  |
-| `Wagon::LoadGold` | `0x005ebfd0` | 2 | member/1 | `engine/core/src/sim/economy.cpp:4564` | yes | unread |  |
-| `Wagon::restype` | `0x005ebe10` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4501` | yes | unread |  |
-| `AttackSetForTraining` | `0x004397d0` | 1 | free/3 | `engine/core/src/sim/economy.cpp:4708` | yes | unread |  |
-| `Gate::Inside` | `0x00429310` | 1 | member/1 | `engine/core/src/sim/economy.cpp:4888` | yes | unread |  |
-| `GetCounterUnits` | `0x0042eef0` | 1 | free/2 | `engine/core/src/sim/economy.cpp:4712` | yes | unread |  |
-| `GetTrainGold` | `0x004229f0` | 1 | free/1 | `engine/core/src/sim/economy.cpp:4713` | yes | unread |  |
-| `Settlement::BestArena` | `0x004355f0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4732` | yes | unread |  |
-| `Settlement::BestTemple` | `0x00435750` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4738` | yes | unread |  |
-| `Settlement::CheckTechBudget` | `0x00428ef0` | 1 | member/2 | `engine/core/src/sim/economy.cpp:4700` | yes | unread |  |
-| `Settlement::CreateShip` | `0x005ef240` | 1 | member/1 | `engine/core/src/sim/economy.cpp:4073` | yes | unread |  |
-| `Settlement::EvalSentries` | `0x005c4a60` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4352` | yes | unread |  |
-| `Settlement::FindNearEnterExit` | `0x005c3730` | 1 | member/1 | `engine/core/src/sim/economy.cpp:4731` | yes | unread |  |
-| `Settlement::GetMaxSentries` | `0x005c2af0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4359` |  | unread |  |
-| `Settlement::GoldSpent` | `0x005c29f0` | 1 | member/1 | `engine/core/src/sim/economy.cpp:3913` | yes | unread |  |
-| `Settlement::IsCity` | `0x005c2890` | 1 | member/0 | `engine/core/src/sim/economy.cpp:3923` | yes | unread |  |
-| `Settlement::MaxAffordCount` | `0x00428a10` | 1 | member/1 | `engine/core/src/sim/economy.cpp:3587` | yes | unread |  |
-| `Settlement::MostDamagedBuilding` | `0x005c38d0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4822` | yes | unread |  |
-| `Settlement::OpenAllGates` | `0x00428710` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4939` | yes | unread |  |
-| `Settlement::PopulationDied` | `0x005c2930` | 1 | member/0 | `engine/core/src/sim/economy.cpp:3952` | yes | unread |  |
-| `Settlement::PutSentry` | `0x005c4a10` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4334` | yes | unread |  |
-| `Settlement::RepairAll` | `0x0042dec0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4701` | yes | unread |  |
-| `Settlement::ReserveFor` | `0x0042cd60` | 1 | member/2 | `engine/core/src/sim/economy.cpp:4699` | yes | unread |  |
-| `Settlement::SetFoodProduction` | `0x005c25b0` | 1 | member/1 | `engine/core/src/sim/economy.cpp:3971` | yes | unread |  |
-| `Settlement::SupplyCount` | `0x0042c910` | 1 | member/1 | `engine/core/src/sim/economy.cpp:3865` | yes | unread |  |
-| `Settlement::TSGetAllArenae` | `0x00437580` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4746` |  | unread |  |
-| `Settlement::TSGetAllTemples` | `0x004376f0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4752` | yes | unread |  |
-| `Settlement::UnitsInHolderEval` | `0x004246a0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:3779` | yes | unread |  |
-| `SettlementCount` | `0x0042ca90` | 1 | free/3 | `engine/core/src/sim/economy.cpp:4846` | yes | unread |  |
-| `SettlementCount` | `0x006a7550` | 1 | free/3 | `engine/core/src/sim/economy.cpp:4846` |  | unread |  |
+| `Settlement::GetCentralBuilding` | `0x005c2490` | 182 | member/0 | `engine/core/src/sim/economy.cpp:3502` | yes | verified | Settlement::GetCentralBuilding: handle word [s+0x8c], offset 0; invalid receiver prints, 0xffff |
+| `ObjList::InHolder` | `0x0055eba0` | 163 | member/0, member/1 | `engine/core/src/sim/economy.cpp:5219` | yes | verified | ObjList::InHolder: FIXED -- settlement scan matches the empty name to the first unnamed settlement (0x00409350); members cast to CVXUnit, counted when [u+0x154] == holder word [s+0x5e]; miss is 0; tests a_settlement_is_found_by_its_map_name_exactly_or_not_at_all (shared scan) |
+| `Query::InHolder` | `0x00579ef0` | 163 | member/0, member/1 | `engine/core/src/sim/economy.cpp:5219` | yes | verified | Query::InHolder: invalid query prints and answers 0, then Refresh (vtbl+0x20) and the same scan and count as ObjList::InHolder |
+| `Squad::InHolder` | `0x00427670` | 163 | member/0, member/1 | `engine/core/src/sim/economy.cpp:5219` | yes | verified | Squad::InHolder: false at the first resolving member not held; unresolved members stepped over; empty squad true; prose at world_host.cpp m_in_holder |
+| `Unit::InHolder` | `0x005d6ff0` | 163 | member/0, member/1 | `engine/core/src/sim/economy.cpp:5219` | yes | verified | Unit::InHolder: [u+0x154] != 0xffff; invalid receiver prints, false; prose at m_in_holder |
+| `Settlement::gold` | `0x005c1fc0` | 158 | member/0 | `engine/core/src/sim/economy.cpp:3510` | yes | verified | Settlement::gold: warehouse via [s+0x5c], +0x18; invalid receiver prints, 0 |
+| `GetSettlement` | `0x005c3ad0` | 118 | free/1 | `engine/core/src/sim/economy.cpp:4976` | yes | verified | GetSettlement: FIXED -- exact length+bytes compare over the settlement vector, empty name answers the first unnamed settlement; miss prints and pushes 0xffff; test a_settlement_is_found_by_its_map_name_exactly_or_not_at_all |
+| `Obj::SetPlayer` | `0x005ab2f0` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3458` | yes | verified | Obj::SetPlayer: invalid receiver prints; player 1..16 else printed refusal; vtbl+0xa0(p-1) -- building override redirects to the settlement worker (give_object_to) |
+| `ObjList::SetPlayer` | `0x0055e710` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3458` | yes | verified | ObjList::SetPlayer: range 1..16 checked once, then vtbl+0xa0 on every resolving member |
+| `Query::SetPlayer` | `0x00578de0` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3458` | yes | verified | Query::SetPlayer: Refresh, list, vtbl+0xa0 on each resolving member; no range check |
+| `SetPlayer` | `0x006a4240` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3458` |  | inferred | free SetPlayer: debug command switching the human's player; zero shipped call sites, not bound (the 116 sites are the member forms); body not read |
+| `Settlement::SetPlayer` | `0x005c4ff0` | 116 | member/1 | `engine/core/src/sim/economy.cpp:3458` | yes | partial | Settlement::SetPlayer -> 0x005c4eb0: FIXED -- owner change zeroes roster/bank/in-wall sentries and clears supplied ([wh+0x38]), and no longer wipes the loan; test economy_capture_empties_the_wall_and_setting_the_current_owner_does_not. Gap: 0x005efa10's routing-list resets (0x005ef970) and the AI notification 0x0041e970 not modelled; per-player sentry upkeep (0x005c4930) not modelled |
+| `Settlement::Units` | `0x005c3c70` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3761` | yes | verified | Settlement::Units: aliases the holder's list [holder+0x28]; miss prints and answers a fresh empty list |
+| `Settlement::food` | `0x005c2080` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3523` | yes | verified | Settlement::food: warehouse +0x1c; invalid receiver prints, 0 |
+| `Squad::Units` | `0x0043ae40` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3761` | yes | verified | Squad::Units: fresh copy of the member deque in order; squad handle unchecked in the original (engine refuses by name) |
+| `Squad::food` | `0x004278c0` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3523` | yes | partial | Squad::food: sum of [u+0x16c] over resolving members; engine sums FeedingUnit::food, so a member not in the feeder chain counts 0 (feeder enrolment design) |
+| `Unit::food` | `0x005d8c50` | 115 | member/0 | `engine/core/src/sim/economy.cpp:3523` | yes | partial | Unit::food: [u+0x16c], 0 with print when invalid; FIXED routing -- a unit with a settlement back-link no longer reads its town's food (settlement_at); test economy_a_unit_with_a_settlement_link_is_not_its_settlement. Gap: a unit outside the feeder chain answers 0 where the original reads its field |
+| `ObjList::SetFood` | `0x0055e890` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3591` | yes | verified | ObjList::SetFood: FIXED (was unimplemented) -- negative prints and writes nothing, else [u+0x16c] on every member that casts to CVXUnit, no flag; no shipped site; test feeder_host_reads_and_writes_a_units_food |
+| `Query::SetFood` | `0x005798b0` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3591` | yes | verified | Query::SetFood: invalid receiver prints; Refresh, then as ObjList::SetFood |
+| `Settlement::SetFood` | `0x005c2140` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3591` | yes | verified | Settlement::SetFood: FIXED -- min(value, cap [wh+0x14]) with no floor; test economy_settlement_setters_clamp_only_from_above |
+| `Settlement::UnitsCount` | `0x005c1d80` | 90 | member/0 | `engine/core/src/sim/economy.cpp:4117` | yes | verified | Settlement::UnitsCount: [holder+0x40], the holder list's size; invalid prints, 0 |
+| `Ship::UnitsCount` | `0x005c6de0` | 90 | member/0 | `engine/core/src/sim/economy.cpp:4117` | yes | verified | Ship::UnitsCount: [[ship+0x1dc] holder +0x14] occupancy; invalid prints, 0; engine counts units_on_board |
+| `Unit::SetFood` | `0x005d7cd0` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3591` | yes | verified | Unit::SetFood: FIXED -- [u+0x16c] written unclamped (above maxfood and below 0), flag 0x20000000 set at >= 1 (feeder hungry mark); FeederSystem::write_food; test feeder_host_reads_and_writes_a_units_food |
+| `Wagon::SetFood` | `0x005ebe70` | 90 | member/1 | `engine/core/src/sim/economy.cpp:3591` | yes | partial | Wagon::SetFood: FIXED -- kind [+0x1d4]=1 then cargo [+0x1cc] via 0x005eb0a0, unclamped; test economy_wagon_set_food_and_set_gold_write_kind_and_cargo. Gap: 0x005eb0a0 kills an emptied wagon (vtbl+0xb0) outside the editor -- not reproduced |
+| `Settlement::ForceAddUnit` | `0x005c1bc0` | 71 | member/1 | `engine/core/src/sim/economy.cpp:4399` | yes | verified | Settlement::ForceAddUnit: unit then settlement resolved (each miss prints, void); holder entry 0x005d3e10 with force 1 = garrison_enter(force) + onenter hook |
+| `Settlement::SetGold` | `0x005c21a0` | 65 | member/1 | `engine/core/src/sim/economy.cpp:4147` | yes | verified | Settlement::SetGold: FIXED -- min(value, cap [wh+0x10]) with no floor; test economy_settlement_setters_clamp_only_from_above |
+| `Wagon::SetGold` | `0x005ebec0` | 65 | member/1 | `engine/core/src/sim/economy.cpp:4147` | yes | partial | Wagon::SetGold: FIXED -- kind 0 then cargo via 0x005eb0a0; test economy_wagon_set_food_and_set_gold_write_kind_and_cargo. Gap: emptied-wagon death not reproduced (as Wagon::SetFood) |
+| `Item::name` | `0x00535260` | 61 | member/0 | `engine/core/src/sim/economy.cpp:3678` | yes | verified | Item::name: FIXED -- [item+8] handle -> [+0x24] definition -> its first string, the <item id> (reader 0x005361f0 at 0x0053638d); invalid prints, ""; test item_name_answers_the_definitions_id |
+| `Obj::name` | `0x005aea60` | 61 | member/0 | `engine/core/src/sim/economy.cpp:3678` | yes | partial | Obj::name: reverse lookup of the NamedObj at [obj+0x84] in the named-object manager (0x0054b3a0), "" when absent; engine looks up the object itself -- the +0x84 indirection is not modelled (agrees for every top-level object) |
+| `Settlement::name` | `0x005c2700` | 61 | member/0 | `engine/core/src/sim/economy.cpp:3678` | yes | verified | Settlement::name: std::string at [s+0xcc]; invalid prints, "" |
+| `Settlement::population` | `0x005c2b70` | 50 | member/0 | `engine/core/src/sim/economy.cpp:3557` | yes | verified | Settlement::population: [s+0x50]; invalid prints, 0 |
+| `Building::Research` | `0x004dfcd0` | 41 | member/1 | `engine/core/src/sim/economy.cpp:3946` | yes | partial | Building::Research: runs the building's research method synchronously with the row's costs in the cmdcost globals, no affordability, no lab search, no queue, no payment. Gap (design): engine routes a building receiver to Settlement::Research; an out-of-queue method run is not available in CommandSystem. 22 campaign sites |
+| `Settlement::Research` | `0x0042d1b0` | 41 | member/1 | `engine/core/src/sim/economy.cpp:3946` | yes | partial | Settlement::Research: FIXED -- core with reserve flag 1, no exemption (0x0042d26b); test economy_research_holds_back_the_whole_reserve. Row lookup, idle lab (0x0042d010, running name "idle"), replace-issue 0x004efc00 match. Gap: the class reverse index [class+0x1f8] is taken as the cmdbar's tree reading without its builder traced, nsrc not applied (no lab row has one) |
+| `Building::GetDefendersMax` | `0x00563cd0` | 38 | member/1 | `engine/core/src/sim/economy.cpp:5171` |  | verified | Building::GetDefendersMax: gate 0x00440060 on the building's settlement; slot 1 [+0x240], 2 [+0x244], else 0; receiver unchecked in the original |
+| `Settlement::supplied` | `0x005ef530` | 34 | member/0 | `engine/core/src/sim/economy.cpp:4653` | yes | verified | Settlement::supplied: FIXED -- [wh+0x38] -> that warehouse's settlement; invalid receiver answers an invalid handle, not 0; test economy_handle_members_answer_an_invalid_handle_for_a_dead_settlement |
+| `Unit::GetHolderSett` | `0x005d7050` | 34 | member/0 | `engine/core/src/sim/economy.cpp:5111` | yes | verified | Unit::GetHolderSett: [u+0x154] holder -> [holder+0xc] settlement -> handle; any miss 0xffff |
+| `Settlement::IsStronghold` | `0x00425050` | 33 | member/0 | `engine/core/src/sim/economy.cpp:4324` | yes | verified | Settlement::IsStronghold: central class heir of BaseTownhall (0x0043ffc0/0x0059a220); false unprinted; equals SettlementKind (no shipped class descends from two bases) |
+| `Settlement::CanAfford` | `0x00425a90` | 29 | member/1, member/2 | `engine/core/src/sim/economy.cpp:3830` | yes | verified | Settlement::CanAfford(gold, food): FIXED -- inlined core without population, food then gold, reserve 0x00425890 always subtracted (0x00425b1c); test max_afford_count_and_can_afford_hold_the_reserve_back_from_gold |
+| `Settlement::CanAfford` | `0x00428ba0` | 29 | member/1, member/2 | `engine/core/src/sim/economy.cpp:3830` | yes | verified | Settlement::CanAfford(cmd): core with gold/food/pop costs, reserve unless ReserveFor names this command (0x00426df0); invalid prints, false; unknown command prints, false |
+| `Settlement::CanAfford` | `0x00428d40` | 29 | member/1, member/2 | `engine/core/src/sim/economy.cpp:3830` | yes | verified | Settlement::CanAfford(cmd, count): FIXED -- count <= affordable with no floor on count (0x00428eb0); same reserve rule as CanAfford(cmd) |
+| `Settlement::SetLoyalty` | `0x005c27d0` | 28 | member/1 | `engine/core/src/sim/economy.cpp:4731` | yes | verified | Settlement::SetLoyalty: 0..100 stored x10 at [s+0x54], else printed refusal |
+| `Wagon::SetLoyalty` | `0x005ec100` | 28 | member/1 | `engine/core/src/sim/economy.cpp:4731` | yes | partial | Wagon::SetLoyalty: [w+0x1d8] = v*10 for 0..100. Gap (design): wagons carry no loyalty here (value, pending [+0x1dc], tick) |
+| `Settlement::IsIndependent` | `0x00425320` | 26 | member/0 | `engine/core/src/sim/economy.cpp:4134` | yes | verified | Settlement::IsIndependent: owner index 14 or 15; invalid false, unprinted |
+| `Settlement::max_population` | `0x005c2bc0` | 24 | member/0 | `engine/core/src/sim/economy.cpp:4140` | yes | verified | Settlement::max_population: [s+0x4c]; invalid prints, 0 |
+| `Building::GetOutpostFood` | `0x00563f10` | 19 | member/0 | `engine/core/src/sim/economy.cpp:5190` |  | verified | Building::GetOutpostFood: outpost gate, then [+0x260]; else 0 |
+| `Settlement::IsOutpost` | `0x004250f0` | 19 | member/0 | `engine/core/src/sim/economy.cpp:4172` | yes | verified | Settlement::IsOutpost: central class heir of Outpost (0x00440060); equals SettlementKind::outpost |
+| `Settlement::FindResearchLab` | `0x0042d0d0` | 17 | member/1 | `engine/core/src/sim/economy.cpp:3896` |  | partial | Settlement::FindResearchLab: row lookup ("No such upgrade"), lab walk 0x0042d010 with the idle flag clear, 0xffff for none; receiver unchecked in the original. Gap: as Research, the [class+0x1f8] index read as the class tree |
+| `Settlement::IsVillage` | `0x004250a0` | 17 | member/0 | `engine/core/src/sim/economy.cpp:4177` | yes | verified | Settlement::IsVillage: central class heir of BaseVillage (0x00440010); equals SettlementKind::village |
+| `Settlement::GoldConverted` | `0x005c2980` | 16 | member/1 | `engine/core/src/sim/economy.cpp:4334` | yes | verified | Settlement::GoldConverted: owner's score block +0xb4 (gold_outpost) += argument; engine's extra per-settlement counter is read by nothing |
+| `Settlement::SpentGoldOnArmy` | `0x00425bb0` | 15 | member/1 | `engine/core/src/sim/economy.cpp:5240` | yes | verified | Settlement::SpentGoldOnArmy: Env int /<root>/Settlement<id>/GoldSpentOnArmy<owner index> += argument |
+| `Building::GetEnterExit` | `0x005c54d0` | 14 | member/0 | `engine/core/src/sim/economy.cpp:5273` | yes | verified | Building::GetEnterExit: every type-12 point that projects (0x005c5390), one world RNG draw (0, n-1); (-1,-1) for none |
+| `Settlement::GetEnterExit` | `0x005c3570` | 14 | member/0 | `engine/core/src/sim/economy.cpp:5273` | yes | verified | Settlement::GetEnterExit: count buildings whose class has a type-12 point, one draw, walk to it (0x005c3460); 0xffff for none |
+| `Settlement::AddUnit` | `0x005c1b20` | 13 | member/1 | `engine/core/src/sim/economy.cpp:4383` | yes | verified | Settlement::AddUnit: FIXED -- answers true when the unit or the settlement misses (each prints, pushes 1); else holder entry 0x005d3e10 force 0 and its answer; test economy_add_unit_answers_true_for_a_handle_that_does_not_resolve |
+| `Settlement::ObjectsAround` | `0x005c5b90` | 13 | member/1 | `engine/core/src/sim/economy.cpp:4060` | yes | verified | Settlement::ObjectsAround: FIXED -- class name resolved whole (0x00409e40), unknown or empty matches nothing; CollectUnits both flags; invalid receiver empty list; test economy_objects_around_filters_on_the_class_tree |
+| `Settlement::loyalty` | `0x005c2c10` | 13 | member/0 | `engine/core/src/sim/economy.cpp:4359` | yes | verified | Settlement::loyalty: [s+0x54] / 10; invalid prints, 0 |
+| `Wagon::loyalty` | `0x005ec090` | 13 | member/0 | `engine/core/src/sim/economy.cpp:4359` | yes | partial | Wagon::loyalty: [w+0x1d8] / 10. Gap (design): wagons carry no loyalty here, a wagon answers 0, so UNIT_CAPTURE/HERO_CAPTURE take a caravan at once |
+| `Settlement::SetPopulation` | `0x005c2200` | 12 | member/1 | `engine/core/src/sim/economy.cpp:4915` | yes | verified | Settlement::SetPopulation: FIXED -- min(value, max_population) with no floor; test economy_settlement_setters_clamp_only_from_above |
+| `Settlement::DelSentry` | `0x005c2a60` | 11 | member/0 | `engine/core/src/sim/economy.cpp:4859` | yes | verified | Settlement::DelSentry: FIXED -- bank [+0x100] spent first, else roster [+0xfc] - 1 floored at 0 (was dropped); new Settlement::sentries_put_back, PutSentry fills it; test get_sentry_takes_one_out_of_the_wall_and_put_sentry_puts_one_back |
+| `Settlement::IsTeutonTent` | `0x00420650` | 11 | member/0 | `engine/core/src/sim/economy.cpp:4498` | yes | verified | Settlement::IsTeutonTent: FIXED -- central class id or altid == "TTent" exactly, not ancestry (TTentWinter false); test economy_is_teuton_tent_compares_the_class_name_and_is_ttent_its_ancestry |
+| `Settlement::CreateMuleGold` | `0x005ef140` | 10 | member/1 | `engine/core/src/sim/economy.cpp:4581` | yes | partial | Settlement::CreateMuleGold: FIXED -- invalid receiver answers an invalid handle; test economy_handle_members_answer_an_invalid_handle_for_a_dead_settlement. Gap (design): 0x005eed90 makes a race mule object in the holder with cargo clamped to max_load; EconomySystem's wagon table abstracts the journey and hands back no object |
+| `Settlement::BestBarrack` | `0x004281a0` | 9 | member/1 | `engine/core/src/sim/economy.cpp:5265` | yes | verified | Settlement::BestBarrack: member deque, eight-name test, CVXBarrack cast, damage tier != 3, unsigned queue < seed from argument; 0xffff when none |
+| `Settlement::Buildings` | `0x005c3d40` | 9 | member/0 | `engine/core/src/sim/economy.cpp:4017` | yes | partial | Settlement::Buildings: original aliases the ObjList at [s+0x60] (the member deque); engine snapshots by back-link (design: the roll is vector<SettlementBuilding>); agrees on loaded maps |
+| `Settlement::CreateMuleFood` | `0x005ef040` | 8 | member/1 | `engine/core/src/sim/economy.cpp:4595` | yes | partial | Settlement::CreateMuleFood: as CreateMuleGold with resource 1 |
+| `NearestStronghold` | `0x0042db30` | 7 | free/2, free/3 | `engine/core/src/sim/economy.cpp:5263` |  | verified | NearestStronghold(pt, id, flt): search 0x0042da70 with id-1 and the filter; BaseTownhall heirs, relation 0x0044e250, isqrt distance, strict less |
+| `NearestStronghold` | `0x0042db90` | 7 | free/2, free/3 | `engine/core/src/sim/economy.cpp:5263` |  | verified | NearestStronghold(pt, id): filter AI_OWN (1) |
+| `NearestStronghold` | `0x0042dbf0` | 7 | free/2, free/3 | `engine/core/src/sim/economy.cpp:5263` |  | verified | NearestStronghold(pt): the search with -1 (no filter); not bound -- no shipped site uses one argument |
+| `Settlement::AllowCapture` | `0x005c1ce0` | 7 | member/1 | `engine/core/src/sim/economy.cpp:4803` | yes | verified | Settlement::AllowCapture: byte argument stored at [s+0x3c] (CanBeCaptured's field); invalid prints |
+| `Settlement::StopReserving` | `0x00425980` | 7 | member/0 | `engine/core/src/sim/economy.cpp:5242` | yes | verified | Settlement::StopReserving: Env int /<root>/Settlement<id>/Reserve<owner index> = 0; invalid prints |
+| `Settlement::StopSupply` | `0x005ef430` | 7 | member/0 | `engine/core/src/sim/economy.cpp:4632` | yes | verified | link object [set+0x5c]+0x38 := 0xffff, kind +0x3c kept, panel refresh (0x005e7710, presentation); invalid receiver prints, nothing |
+| `Settlement::WaterLsa` | `0x00426010` | 7 | member/0 | `engine/core/src/sim/economy.cpp:5274` | yes | partial | no receiver check; central heir of BaseShipyard else 0; cached water LSA [central+0x1f6] computed on demand from the first exit-water door; the original's 128-step spiral for a door off any water area is not reproduced (order not recovered; no shipped map reaches it) |
+| `Settlement::AddToPopulation` | `0x005c2250` | 6 | member/1 | `engine/core/src/sim/economy.cpp:4903` | yes | verified | one add to [set+0x50], no clamp (fixed: clamped at 0; test economy_the_three_population_writers_disagree_about_the_ceiling) |
+| `Settlement::IsShipyard` | `0x00425190` | 6 | member/0 | `engine/core/src/sim/economy.cpp:4663` |  | verified | invalid receiver false; central class heir of BaseShipyard (0x004400b0, cached); SettlementKind::shipyard is the same ancestry test and no shipped class mixes bases |
+| `Settlement::StartSupplyFood` | `0x005ef380` | 6 | member/1 | `engine/core/src/sim/economy.cpp:4639` | yes | verified | argument then receiver resolved; invalid target prints and keeps the link; no self/owner test; link := target, kind := 1 food; void (fixed: invalid target cleared the link, self cleared it; test economy_settlement_members_answer_as_their_bodies) |
+| `Settlement::max_units` | `0x005c1de0` | 5 | member/0 | `engine/core/src/sim/economy.cpp:4668` | yes | verified | holder [set+0x5e] max at +0x10; invalid prints, 0 |
+| `Settlement::AddToMaxPopulation` | `0x005c2290` | 4 | member/1 | `engine/core/src/sim/economy.cpp:4926` | yes | verified | one add to [set+0x4c], no clamp (fixed: clamped at 0; same test as AddToPopulation) |
+| `Settlement::DecreaseLoyalty` | `0x005c2830` | 4 | member/1 | `engine/core/src/sim/economy.cpp:4760` | yes | verified | negative n prints and returns; pending [set+0x58] -= 10*n; no clamp; void |
+| `Settlement::GetSentry` | `0x005c49b0` | 4 | member/0 | `engine/core/src/sim/economy.cpp:4841` | yes | verified | no receiver check; wall pool [set+0xf4] > 0 -> setter 0x005c4930(n-1) and 1, else 0 |
+| `Settlement::IsFull` | `0x005c1d20` | 4 | member/0 | `engine/core/src/sim/economy.cpp:4683` | yes | verified | occupancy [holder+0x14] == max [holder+0x10], equality not >=; invalid receiver prints and answers TRUE (0x005c1d4f) (fixed both; test economy_settlement_members_answer_as_their_bodies) |
+| `Settlement::IsIndependentGuarded` | `0x00425380` | 4 | member/0 | `engine/core/src/sim/economy.cpp:4550` |  | verified | no receiver check; 0x004401c0: IsOutpost, owner 14/15, central class defender_cls_1/2 non-empty |
+| `Wagon::DecreaseLoyalty` | `0x005ec160` | 4 | member/1 | `engine/core/src/sim/economy.cpp:4760` | yes | partial | Wagon::DecreaseLoyalty: wagon loyalty [+0x1d8]/pending [+0x1dc]/capture flag [+0x1d0] and timers 9/10 (WagonLoyalty* keys, 0x005eaef0) are not modelled; on a wagon the shared registration resolves no settlement and does nothing. Design: per-wagon loyalty state + timers, shared with Wagon::loyalty/SetLoyalty |
+| `Wagon::amount` | `0x005ebdb0` | 4 | member/0 | `engine/core/src/sim/economy.cpp:5009` | yes | verified | [obj+0x1cc] cargo; invalid prints, 0 |
+| `Settlement::AddMaxSentries` | `0x005c2b30` | 3 | member/1 | `engine/core/src/sim/economy.cpp:4895` | yes | verified | one add to [set+0x104], no clamp, no print on invalid (fixed: clamped at 0; test economy_settlement_members_answer_as_their_bodies) |
+| `Settlement::AddSentries` | `0x005c4ac0` | 3 | member/1 | `engine/core/src/sim/economy.cpp:4887` | yes | verified | roster [set+0xfc] += n and pool via 0x005c4930(+n), no clamp -- Numantia's AddSentries(-12) goes into debt (fixed: clamped at 0; same test) |
+| `Settlement::CreateBoatFood` | `0x005ef0c0` | 3 | member/1 | `engine/core/src/sim/economy.cpp:5108` | yes | partial | 0x005eed90(n, food, ShipS): max_load then store clamp, store drawn, zero -> invalid, ShipS owned by the settlement's player into its holder; negative request (store grows, boat carries a negative load) and the AI ship filing 0x0041f310 not reproduced |
+| `Settlement::CreateBoatGold` | `0x005ef1c0` | 3 | member/1 | `engine/core/src/sim/economy.cpp:5107` | yes | partial | as CreateBoatFood with gold; same two gaps |
+| `Settlement::IsTTent` | `0x00425140` | 3 | member/0 | `engine/core/src/sim/economy.cpp:4525` |  | verified | invalid false; 0x00440100: TTent cached, holder-is-a-ship test unrepresentable here, IsHeirOf TTent |
+| `Settlement::SetLoan` | `0x005c2410` | 3 | member/1 | `engine/core/src/sim/economy.cpp:4711` | yes | verified | [set+0xec] := n + n*LoanInterestPercent/100, no clamp, panel refresh (fixed: stored n clamped at 0; and the inferred periodic interest is gone, production repays the debt first per 0x005c1010; tests economy_settlement_members_answer_as_their_bodies, economy_production_pays_the_loan_and_nothing_accrues) |
+| `Settlement::loan` | `0x005c23a0` | 3 | member/0 | `engine/core/src/sim/economy.cpp:4720` | yes | verified | [set+0xec]*100/(LoanInterestPercent+100); invalid prints, 0 (fixed: answered the stored debt; same tests) |
+| `Building::ClearDamageTaken` | `0x004ddbb0` | 2 | member/0 | `engine/core/src/sim/economy.cpp:5332` | yes | verified | Building::ClearDamageTaken: [obj+0x1f8] := 0, no receiver check |
+| `Building::GetDefenderCls` | `0x00564400` | 2 | member/1 | `engine/core/src/sim/economy.cpp:5169` |  | verified | gate 0x00440060 on [bld+0x148]'s central; slot 1 +0x208, slot 2 +0x224, else ""; non-central building of an outpost reads unconstructed memory in the original, own class here |
+| `Building::GetDefendersOut` | `0x00563d60` | 2 | member/1 | `engine/core/src/sim/economy.cpp:5175` |  | verified | gate as GetDefenderCls; slot 1 +0x258 (defenders_out_1), slot 2 +0x25c, else 0; loader 0x0059f540 order max,start,end,out |
+| `Building::GetEndLevel` | `0x00563e80` | 2 | member/1 | `engine/core/src/sim/economy.cpp:5183` |  | verified | slot 1 +0x250 (end_level_1), slot 2 +0x254, else 0 |
+| `Building::GetStartLevel` | `0x00563df0` | 2 | member/1 | `engine/core/src/sim/economy.cpp:5179` |  | verified | slot 1 +0x248 (start_level_1), slot 2 +0x24c, else 0 |
+| `FindRuins` | `0x0042cba0` | 2 | free/3 | `engine/core/src/sim/economy.cpp:5251` | yes | verified | last settlement passing: unsigned isqrt < dist, central heir BaseRuins, Bld minlevel <= level, items, same LSA, rand(0,1)==1 (one draw per candidate reaching it) (fixed: signed distance compare; test find_ruins_walks_the_settlements_and_flips_a_coin_per_candidate) |
+| `Settlement::BestGate` | `0x004284e0` | 2 | member/1 | `engine/core/src/sim/economy.cpp:5458` | yes | partial | gates of the deque, isqrt + health/5 strictly least from 0x7fffffff; invalid receiver/point invalid handle. Walk is ascending id (World::buildings_in_settlement), the deque is join order: they differ only for a building re-filed into a settlement after creation (ids are monotonic) |
+| `Settlement::BestToSupply` | `0x0042ca20` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4185` |  | verified | 0x0042c800 (shared with SupplyCount, described at supply_target): GAIKA node LSA nonzero, same owner record, BaseTownhall heir (0x0043ffc0), same LSA, least centre distance strictly; invalid receiver prints and pushes nothing in the original (stack fault), invalid handle here |
+| `Settlement::CanBeCaptured` | `0x00424ff0` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4782` | yes | verified | [set+0x3c], overridden to false for an outpost of zero-based player 14 (0x00425030, 14 only); no receiver check (fixed: the override was missing; test economy_settlement_members_answer_as_their_bodies) |
+| `Settlement::CanBeCaptured` | `0x005c1c40` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4782` | yes | partial | CanBeCaptured(obj): invalid argument or receiver true, else 0x005c19d0 (IsValidCaptureTarget's helper). Not bound: no shipped site passes an argument |
+| `Settlement::ClearDamageTaken` | `0x005c3a00` | 2 | member/0 | `engine/core/src/sim/economy.cpp:5332` | yes | verified | every deque building's [+0x1f8] := 0; no receiver check |
+| `Settlement::GetNumSentries` | `0x005c2ab0` | 2 | member/0 | `engine/core/src/sim/economy.cpp:4870` |  | verified | roster [set+0xfc]; invalid 0, no print |
+| `Settlement::IdleAllGates` | `0x00428640` | 2 | member/0 | `engine/core/src/sim/economy.cpp:5522` | yes | verified | every CVXGate in the deque whose current command string is not exactly "idle" (0x00409350) gets vtbl+0xc0(1); no receiver check |
+| `Settlement::NumGates` | `0x00428360` | 2 | member/0 | `engine/core/src/sim/economy.cpp:5421` | yes | verified | count of deque members casting to CVXGate; order irrelevant |
+| `Settlement::SpentGoldOnTech` | `0x00425cb0` | 2 | member/1 | `engine/core/src/sim/economy.cpp:5241` | yes | verified | Env /root/Settlement<id>/GoldSpentOnTech<owner0> += n; invalid prints |
+| `Settlement::TSGetAllBarracks` | `0x00437430` | 2 | member/0 | `engine/core/src/sim/economy.cpp:5267` | yes | verified | fresh list of deque members with the building bit and the eight-name barrack descent (0x004403a0); no downcast, no ruin test; invalid receiver prints and answers an empty list |
+| `Settlement::UpgradeBestBarrack` | `0x00437030` | 2 | member/1 | `engine/core/src/sim/economy.cpp:5266` | yes | partial | gates (min 1, 5, 10 minutes), level 1 outright / 2-3 busiest strictly above the unsigned seed, race-spelt level 3, issue via 0x004efc00 (0,0) all match; the row verifier 0x00440f80 is modelled from VERIFY_RESEARCH.VS's text, not run (0x004eaa40) |
+| `Wagon::LoadFood` | `0x005ebf10` | 2 | member/1 | `engine/core/src/sim/economy.cpp:5110` | yes | partial | held arm: holder -> settlement -> central cast to CVXTownHall (an outpost is not one: its type query 0x00563aa0 falls to CVXBuilding) + share-support bit 2 (0x005eb070); empty-or-same-kind, clamp to max_load, kind written, store drawn (fixed: any settlement loaded; test a_mule_loads_only_from_a_town_hall_whose_owner_it_supports). Not reproduced: the not-held arm (sweep of the mule's sight for a supported CVXTownHall, 0x005eb4b0, cell order) and 0x005eb0a0 killing a mule whose cargo comes out 0 (shared with Wagon::SetGold/SetFood) |
+| `Wagon::LoadGold` | `0x005ebfd0` | 2 | member/1 | `engine/core/src/sim/economy.cpp:5109` | yes | partial | as LoadFood with gold; same fix, same two gaps |
+| `Wagon::restype` | `0x005ebe10` | 2 | member/0 | `engine/core/src/sim/economy.cpp:5029` | yes | verified | [obj+0x1d4] restype; invalid prints, 0 |
+| `AttackSetForTraining` | `0x004397d0` | 1 | free/3 | `engine/core/src/sim/economy.cpp:5252` | yes | partial | roll last-to-first, owner 14, unsigned isqrt <= radius, four ranked classes with level bars, rank/nearest-to-unit ties, two defenders from holder then range sweep, approach (vtbl+0xb8,1) + engage/exclusive (fixed: signed radius compare; test attack_set_for_training_picks_the_best_defended_outpost_and_engages). Gap: the range sweep is ascending id, the original's 0x004233b0 is cell order, which can change the exclusive engage's named defender |
+| `Gate::Inside` | `0x00429310` | 1 | member/1 | `engine/core/src/sim/economy.cpp:5438` | yes | verified | invalid gate false; members via 0x00443e30; 0x005295d0 per member with this = gate: held -> false, route to [gate+0x148]'s central with flag 0x100, inside when no gate crossed (inside_walls); stale "deliberately absent" note removed |
+| `GetCounterUnits` | `0x0042eef0` | 1 | free/2 | `engine/core/src/sim/economy.cpp:5256` | yes | partial | invalid settlement prints, W untouched; the AI's ten seen-army rows ([ai+0x30], 0x0041c420) are not kept, only the census fallback 0x0041c400 is modelled |
+| `GetTrainGold` | `0x004229f0` | 1 | free/1 | `engine/core/src/sim/economy.cpp:5257` | yes | verified | command row by name (vtbl+0x14), costgold +0x1e8, else 0 |
+| `Settlement::BestArena` | `0x004355f0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:5276` | yes | verified | deque buildings with the building bit, tier != 3, heir of BaseArena; queue length one less when the running command is exactly "idle"; unsigned least from UINT_MAX; invalid receiver prints, invalid handle |
+| `Settlement::BestTemple` | `0x00435750` | 1 | member/0 | `engine/core/src/sim/economy.cpp:5282` | yes | verified | as BestArena with the temple of the central building's race (+0xb48 into 0x0081a668) |
+| `Settlement::CheckTechBudget` | `0x00428ef0` | 1 | member/2 | `engine/core/src/sim/economy.cpp:5244` | yes | verified | cost credit when Reserve != 0 and ReserveFor equals the argument exactly (0x00426df0, byte compare); tech <= total*percent/100 (fixed: switch was reserved>0 and compare was row identity; test check_tech_budget_is_a_share_of_army_store_and_technology) |
+| `Settlement::CreateShip` | `0x005ef240` | 1 | member/1 | `engine/core/src/sim/economy.cpp:4446` | yes | partial | invalid receiver invalid handle; class created, owner via vtbl+0xa0, first enter-water door nearest (-1,-1), into the holder (0x005d3e10); a class that is not a ship answers invalid here where the original creates it |
+| `Settlement::EvalSentries` | `0x005c4a60` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4875` | yes | verified | roster > 0 ? 0x005c4830 * roster : 0; 0x005c4830 = race-prefixed Sentry class, (damage+armor_slash)*(SentriesLevel+13)*(maxhealth*5/4)/1000+1 |
+| `Settlement::FindNearEnterExit` | `0x005c3730` | 1 | member/1 | `engine/core/src/sim/economy.cpp:5275` | yes | verified | every type-12 point of every deque building (off-map skipped), signed isqrt strictly less from 10,000,000, else (-1,-1) (fixed: compared exact squared distances; test find_near_enter_exit_keeps_the_nearest_gate_of_any_building) |
+| `Settlement::GetMaxSentries` | `0x005c2af0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4882` |  | verified | ceiling [set+0x104]; invalid 0, no print |
+| `Settlement::GoldSpent` | `0x005c29f0` | 1 | member/1 | `engine/core/src/sim/economy.cpp:4259` | yes | verified | owner's score block +0x38 += n, no sign check; invalid prints |
+| `Settlement::IsCity` | `0x005c2890` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4269` | yes | verified | central class name exactly GTownhall or RTownhall (10-byte repe cmpsb) |
+| `Settlement::MaxAffordCount` | `0x00428a10` | 1 | member/1 | `engine/core/src/sim/economy.cpp:3873` | yes | verified | unknown row prints, 0; 0x00425a10 with the row's gold/food/pop and the reserve exempted when ReserveFor equals the argument exactly (fixed: compared row identity with the row's spelling; shared helper reserved_gold_for; test max_afford_count_and_can_afford_hold_the_reserve_back_from_gold) |
+| `Settlement::MostDamagedBuilding` | `0x005c38d0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:5359` | yes | partial | strictly most [+0x1f8] from 0 among deque buildings whose entity has bit 12 (type-12 point); invalid receiver prints, invalid handle. Walk is ascending id, the deque join order (as BestGate) |
+| `Settlement::OpenAllGates` | `0x00428710` | 1 | member/0 | `engine/core/src/sim/economy.cpp:5489` | yes | verified | gates whose target state [+0x208] != 1 get vtbl+0xc0(1) and opengate via 0x004efc00 with replace, as the settlement's owner; missing opengate row prints and stops; prose corrected (no mid-swing divergence) |
+| `Settlement::PopulationDied` | `0x005c2930` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4298` | yes | verified | reads [set+0xf0], which nothing writes: always 0 |
+| `Settlement::PutSentry` | `0x005c4a10` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4849` | yes | verified | no receiver check; pool +1 via 0x005c4930 and [set+0x100] += 1, no ceiling |
+| `Settlement::RepairAll` | `0x0042dec0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:5245` | yes | verified | deque buildings at tier 3 whose class command list has a row named exactly "repair", 0x00425a10 count with the reserve, issue via 0x004efc00 (1,0) as owner |
+| `Settlement::ReserveFor` | `0x0042cd60` | 1 | member/2 | `engine/core/src/sim/economy.cpp:5243` | yes | verified | running reserve: different tech (0x00429c60 differs) false, same tech same percent true no write, same tech new percent rewrites Reserve/ReserveFor and keeps ReservedAt; none running writes all three (fixed: first arm inverted and ReservedAt always restarted; test reserve_for_writes_three_slots_and_refuses_another_research_while_one_runs) |
+| `Settlement::SetFoodProduction` | `0x005c25b0` | 1 | member/1 | `engine/core/src/sim/economy.cpp:4317` | yes | verified | [set+0x48] food rate := n; invalid prints |
+| `Settlement::SupplyCount` | `0x0042c910` | 1 | member/1 | `engine/core/src/sim/economy.cpp:4211` | yes | verified | receiver must be a BaseTownhall heir; count same-record settlements whose central is heir of the class and whose 0x0042c800 is the receiver |
+| `Settlement::TSGetAllArenae` | `0x00437580` | 1 | member/0 | `engine/core/src/sim/economy.cpp:5290` |  | verified | fresh list: deque members with the building bit, heir of BaseArena, no ruin test; invalid prints, empty list |
+| `Settlement::TSGetAllTemples` | `0x004376f0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:5296` | yes | verified | as TSGetAllArenae with each building's own race temple class (+0xb48, 0..7 else none) |
+| `Settlement::UnitsInHolderEval` | `0x004246a0` | 1 | member/0 | `engine/core/src/sim/economy.cpp:4101` | yes | verified | sum over the holder's members of 0x004439d0 & 0xffff (object_power); invalid prints, 0 |
+| `SettlementCount` | `0x0042ca90` | 1 | free/3 | `engine/core/src/sim/economy.cpp:5383` | yes | verified | store order, non-null settlements, unsigned isqrt(central) < dist, central heir of the class (fixed: signed compare; test economy_settlement_count_is_strictly_within_and_by_descent) |
+| `SettlementCount` | `0x006a7550` | 1 | free/3 | `engine/core/src/sim/economy.cpp:5383` |  | partial | SettlementCount/0: debug-log dump of the settlement vector's sizes; no game effect. Not bound: no shipped site |
 
-## ai -- 0 of 98 verified, 3,795 call sites
+## ai -- 51 of 98 verified, 3,795 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `RunAIHelper` | `0x004d3400` | 285 | free/4 | `engine/core/src/sim/ai.cpp:4452` |  | unread |  |
-| `RunAIHelper` | `0x004d34c0` | 285 | free/4 | `engine/core/src/sim/ai.cpp:4452` |  | unread |  |
-| `RunAIHelper` | `0x004d35b0` | 285 | free/4 | `engine/core/src/sim/ai.cpp:4452` |  | unread |  |
-| `RunAIHelper` | `0x004d36d0` | 285 | free/4 | `engine/core/src/sim/ai.cpp:4452` |  | unread |  |
-| `RunAIHelper` | `0x004d3850` | 285 | free/4 | `engine/core/src/sim/ai.cpp:4452` |  | unread |  |
-| `RunAIHelper` | `0x004d3a10` | 285 | free/4 | `engine/core/src/sim/ai.cpp:4452` |  | unread |  |
-| `RunAIHelper` | `0x004d3c20` | 285 | free/4 | `engine/core/src/sim/ai.cpp:4452` |  | unread |  |
-| `RunAIHelper` | `0x004d3e70` | 285 | free/4 | `engine/core/src/sim/ai.cpp:4452` |  | unread |  |
-| `IsAIHelperRunning` | `0x004d1d80` | 236 | free/1 | `engine/core/src/sim/ai.cpp:4526` |  | unread |  |
-| `StopAIHelper` | `0x004d4100` | 179 | free/1 | `engine/core/src/sim/ai.cpp:4527` |  | unread |  |
-| `Hero::TSAdvHeroSkills` | `0x00426c00` | 68 | member/2 | `engine/core/src/sim/ai.cpp:4536` | yes | unread |  |
-| `GetGAIKA` | `0x00424660` | 43 | free/1, member/0 | `engine/core/src/sim/ai.cpp:4455` | yes | unread |  |
-| `GetGAIKA` / `point::GetGAIKA` | `0x005bd090` | 43 | free/1, member/0 | `engine/core/src/sim/ai.cpp:4455` | yes | unread |  |
-| `GetGAIKA` | `0x00421910` | 43 | free/1, member/0 | `engine/core/src/sim/ai.cpp:4455` |  | unread |  |
-| `Settlement::GetGaika` | `0x004262f0` | 43 | free/1, member/0 | `engine/core/src/sim/ai.cpp:4455` |  | unread |  |
-| `GAIKA::LSA` | `0x004225d0` | 42 | member/0 | `engine/core/src/sim/ai.cpp:4454` |  | unread |  |
-| `LSA` | `0x00422600` | 42 | member/0 | `engine/core/src/sim/ai.cpp:4454` |  | unread |  |
-| `LSA` | `0x00422630` | 42 | member/0 | `engine/core/src/sim/ai.cpp:4454` | yes | unread |  |
-| `LSA` | `0x006a8720` | 42 | member/0 | `engine/core/src/sim/ai.cpp:4454` |  | unread |  |
-| `Obj::LSA` | `0x00425fd0` | 42 | member/0 | `engine/core/src/sim/ai.cpp:4454` |  | unread |  |
-| `Eval` | `0x00426580` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4494` | yes | unread |  |
-| `GAIKA::Eval` | `0x0042f1a0` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4494` |  | unread |  |
-| `GAIKA::Eval` | `0x0042f3d0` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4494` |  | unread |  |
-| `GAIKA::Eval` | `0x0042f670` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4494` |  | unread |  |
-| `GAIKA::Eval` | `0x0042fc40` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4494` |  | unread |  |
-| `Squad::Eval` | `0x00421120` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4494` | yes | unread |  |
-| `SquadList::Eval` | `0x0042bc90` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4494` |  | unread |  |
-| `Settlement::TSRecruitArmy` | `0x00431b30` | 33 | member/2 | `engine/core/src/sim/ai.cpp:4539` | yes | unread |  |
-| `Unit::AI` | `0x004254b0` | 25 | member/0 | `engine/core/src/sim/ai.cpp:4529` | yes | unread |  |
-| `GAIKA::Center` | `0x00422e20` | 23 | member/0 | `engine/core/src/sim/ai.cpp:4456` |  | unread |  |
-| `IsWaterLsa` | `0x0042da30` | 23 | free/1 | `engine/core/src/sim/ai.cpp:4475` |  | unread |  |
-| `rect::Center` | `0x00697ba0` | 23 | member/0 | `engine/core/src/sim/ai.cpp:4456` | yes | unread |  |
-| `AIStart` | `0x00434e20` | 20 | free/3 | `engine/core/src/sim/ai.cpp:4436` | yes | unread |  |
-| `AIStart` | `0x00434e60` | 20 | free/3 | `engine/core/src/sim/ai.cpp:4436` | yes | unread |  |
-| `AIStart` | `0x00434f90` | 20 | free/3 | `engine/core/src/sim/ai.cpp:4436` | yes | unread |  |
-| `Settlement::TSRecruitHero` | `0x004269a0` | 15 | member/0 | `engine/core/src/sim/ai.cpp:4540` | yes | unread |  |
-| `GAIKA::MinNeed` | `0x0042c4a0` | 12 | member/4 | `engine/core/src/sim/ai.cpp:4462` | yes | unread |  |
-| `GAIKA::GetStrat` | `0x00421aa0` | 11 | member/1 | `engine/core/src/sim/ai.cpp:4511` | yes | unread |  |
-| `GAIKA::Explored` | `0x0042ae70` | 10 | member/1 | `engine/core/src/sim/ai.cpp:4498` |  | unread |  |
-| `AIGetPlayer` | `0x00421cb0` | 9 | free/0 | `engine/core/src/sim/ai.cpp:4435` | yes | unread |  |
-| `AreaAINoRecruit` | `0x00432790` | 8 | free/3 | `engine/core/src/sim/ai.cpp:4517` |  | unread |  |
-| `Settlement::TSTempleRecruit` | `0x00431dd0` | 8 | member/1 | `engine/core/src/sim/ai.cpp:4541` | yes | unread |  |
-| `GAIKA::GetPriority` | `0x0042abe0` | 7 | member/1 | `engine/core/src/sim/ai.cpp:4500` |  | unread |  |
-| `GAIKACount` | `0x00422d70` | 6 | free/0 | `engine/core/src/sim/ai.cpp:4496` |  | unread |  |
-| `FindTeleport` | `0x0042e820` | 5 | free/3 | `engine/core/src/sim/ai.cpp:4476` | yes | unread |  |
-| `GAIKA::StratRunning` | `0x00421ae0` | 5 | member/1 | `engine/core/src/sim/ai.cpp:4512` | yes | unread |  |
-| `LAIKA` | `0x0042ab40` | 5 | free/2 | `engine/core/src/sim/ai.cpp:4501` |  | unread |  |
-| `CheckLsaPath` | `0x00423120` | 3 | free/3 | `engine/core/src/sim/ai.cpp:4481` | yes | unread |  |
-| `GAIKA::ApproachingSquads` | `0x0042c060` | 3 | member/2 | `engine/core/src/sim/ai.cpp:4493` | yes | unread |  |
-| `GAIKA::GetDistToPlayers` | `0x0042c1c0` | 3 | member/4 | `engine/core/src/sim/ai.cpp:4466` | yes | unread |  |
-| `GAIKA::MaxNeed` | `0x0042c580` | 3 | member/4 | `engine/core/src/sim/ai.cpp:4463` | yes | unread |  |
-| `GAIKA::Prioritized` | `0x0042adc0` | 3 | member/1 | `engine/core/src/sim/ai.cpp:4503` |  | unread |  |
-| `GAIKA::SetControlFlag` | `0x0042eda0` | 3 | member/2 | `engine/core/src/sim/ai.cpp:4502` |  | unread |  |
-| `SS_STR` | `0x0041f870` | 3 | free/1 | `engine/core/src/sim/ai.cpp:4464` | yes | unread |  |
-| `SetMAIKA` | `0x00421b70` | 3 | free/3 | `engine/core/src/sim/ai.cpp:4465` | yes | unread |  |
-| `Settlement::TSArenaRecruit` | `0x00431ca0` | 3 | member/1 | `engine/core/src/sim/ai.cpp:4542` | yes | unread |  |
-| `AreaAIMaxPriority` | `0x00432c30` | 2 | free/3 | `engine/core/src/sim/ai.cpp:4518` |  | unread |  |
-| `AreaAISetAttackOptimism` | `0x00432e70` | 2 | free/3 | `engine/core/src/sim/ai.cpp:4519` |  | unread |  |
-| `GAIKA::MilitaryPresence` | `0x004313e0` | 2 | member/1 | `engine/core/src/sim/ai.cpp:4459` | yes | unread |  |
-| `GAIKA::NoAttack` | `0x0042b3d0` | 2 | member/1 | `engine/core/src/sim/ai.cpp:4505` |  | unread |  |
-| `GAIKA::Recruit` | `0x00437b80` | 2 | member/4 | `engine/core/src/sim/ai.cpp:4461` | yes | unread |  |
-| `GAIKA::RunStrat` | `0x00421b30` | 2 | member/2 | `engine/core/src/sim/ai.cpp:4513` |  | unread |  |
-| `GAIKA::SetPriority` | `0x0042ad30` | 2 | member/2 | `engine/core/src/sim/ai.cpp:4504` |  | unread |  |
-| `IncShipNeeds` | `0x0042d9f0` | 2 | free/2 | `engine/core/src/sim/ai.cpp:4478` | yes | unread |  |
-| `Settlement::RunEconomyScript` | `0x00426140` | 2 | member/1 | `engine/core/src/sim/ai.cpp:4532` |  | unread |  |
-| `Settlement::TacticScript` | `0x00426290` | 2 | member/0 | `engine/core/src/sim/ai.cpp:4533` |  | unread |  |
-| `Ships` | `0x00422660` | 2 | free/2 | `engine/core/src/sim/ai.cpp:4480` |  | unread |  |
-| `Unit::BestMDPos` | `0x00439de0` | 2 | member/5 | `engine/core/src/sim/ai.cpp:4473` | yes | unread |  |
-| `Unit::BestTargetInGAIKA` | `0x00431650` | 2 | member/0 | `engine/core/src/sim/ai.cpp:4472` |  | unread |  |
-| `AIStop` | `0x00422720` | 1 | free/1 | `engine/core/src/sim/ai.cpp:4437` | yes | unread |  |
-| `ClrShipNeeds` | `0x0042d9b0` | 1 | free/2 | `engine/core/src/sim/ai.cpp:4479` | yes | unread |  |
-| `EnemyPlayersEval` | `0x00425e20` | 1 | free/4 | `engine/core/src/sim/ai.cpp:4495` | yes | unread |  |
-| `GAIKA::CalcPriority` | `0x00421a00` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4514` |  | unread |  |
-| `GAIKA::CanExplore` | `0x0042afc0` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4499` | yes | unread |  |
-| `GAIKA::ControlledNeighbors` | `0x00422950` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4460` | yes | unread |  |
-| `GAIKA::Empty` | `0x00422dc0` | 1 | member/0 | `engine/core/src/sim/ai.cpp:4458` | yes | unread |  |
-| `GAIKA::GetControlFlag` | `0x0042ee40` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4509` |  | unread |  |
-| `GAIKA::GetDestPoint` | `0x00427b80` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4457` | yes | unread |  |
-| `GAIKA::LastSeen` | `0x0042b320` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4508` |  | unread |  |
-| `GAIKA::NoRecruit` | `0x0042b520` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4507` |  | unread |  |
-| `GAIKA::Revealed` | `0x0042b270` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4506` |  | unread |  |
-| `Hero::AIGetSkillToDevelop` | `0x00426680` | 1 | member/2 | `engine/core/src/sim/ai.cpp:4537` | yes | unread |  |
-| `PrepareAiTransportShip` | `0x0042e180` | 1 | free/5 | `engine/core/src/sim/ai.cpp:4482` | yes | unread |  |
-| `SPFCalcConnectHighRes_Quant` | `0x00415a40` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4485` | yes | unread |  |
-| `SPFDone` | `0x0040f8c0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4492` | yes | unread |  |
-| `SPFFindAreas_Quant` | `0x004129a0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4484` | yes | unread |  |
-| `SPFIncreaseConnect` | `0x004161d0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4491` | yes | unread |  |
-| `SPFIncreaseConnect_Quant` | `0x00415a90` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4486` | yes | unread |  |
-| `SPFInitConnectData` | `0x0040d1d0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4490` | yes | unread |  |
-| `SPFInitData` | `0x004166b0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4487` | yes | unread |  |
-| `SPFInitDirectionData` | `0x0040dd10` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4488` | yes | unread |  |
-| `SPFInitPointToAreaData` | `0x00412980` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4489` | yes | unread |  |
-| `Settlement::EconomyScript` | `0x00426190` | 1 | member/0 | `engine/core/src/sim/ai.cpp:4530` | yes | unread |  |
-| `Settlement::GetEconomyScript` | `0x004260f0` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4531` | yes | unread |  |
-| `Settlement::GetTacticScript` | `0x004261f0` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4534` |  | unread |  |
-| `Settlement::RunTacticScript` | `0x00426240` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4535` |  | unread |  |
-| `ShipNeeds` | `0x004226f0` | 1 | free/2 | `engine/core/src/sim/ai.cpp:4477` |  | unread |  |
-| `Unit::BestProtPos` | `0x0043a330` | 1 | member/4 | `engine/core/src/sim/ai.cpp:4474` | yes | unread |  |
+| `RunAIHelper` | `0x004d3400` | 285 | free/2, free/3, free/4, free/5, free/6, free/7, free/8, free/9 | `engine/core/src/sim/ai.cpp:4822` | yes | verified | RunAIHelper/2: thunk, count 0, then the /4 core rules; bound (fixed: was unregistered), no shipped site |
+| `RunAIHelper` | `0x004d34c0` | 285 | free/2, free/3, free/4, free/5, free/6, free/7, free/8, free/9 | `engine/core/src/sim/ai.cpp:4822` | yes | verified | RunAIHelper/3: thunk, count 1; bound (fixed), no shipped site |
+| `RunAIHelper` | `0x004d35b0` | 285 | free/2, free/3, free/4, free/5, free/6, free/7, free/8, free/9 | `engine/core/src/sim/ai.cpp:4822` | yes | verified | RunAIHelper/4: thunk -> core 0x004d2ee0 on the global helper manager [0x996888]: file data/ai helpers/<f>.vs, signature check void + count equal + every parameter by-value str (fixed; test a_helper_whose_signature_does_not_fit_starts_nothing), spawn untagged with no parent (fixed; test a_helper_started_by_an_ai_script_belongs_to_no_player), idmap[name]=id overwriting; missing file silent; the 0..127 thread-id pool cap (0x0069f910) not modelled |
+| `RunAIHelper` | `0x004d36d0` | 285 | free/2, free/3, free/4, free/5, free/6, free/7, free/8, free/9 | `engine/core/src/sim/ai.cpp:4822` | yes | verified | RunAIHelper/5: thunk, count 3; bound (fixed), no shipped site |
+| `RunAIHelper` | `0x004d3850` | 285 | free/2, free/3, free/4, free/5, free/6, free/7, free/8, free/9 | `engine/core/src/sim/ai.cpp:4822` | yes | verified | RunAIHelper/6: thunk, count 4; bound (fixed), no shipped site |
+| `RunAIHelper` | `0x004d3a10` | 285 | free/2, free/3, free/4, free/5, free/6, free/7, free/8, free/9 | `engine/core/src/sim/ai.cpp:4822` | yes | verified | RunAIHelper/7: thunk, count 5; bound (fixed), no shipped site |
+| `RunAIHelper` | `0x004d3c20` | 285 | free/2, free/3, free/4, free/5, free/6, free/7, free/8, free/9 | `engine/core/src/sim/ai.cpp:4822` | yes | verified | RunAIHelper/8: thunk, count 6; bound (fixed), no shipped site |
+| `RunAIHelper` | `0x004d3e70` | 285 | free/2, free/3, free/4, free/5, free/6, free/7, free/8, free/9 | `engine/core/src/sim/ai.cpp:4822` | yes | verified | RunAIHelper/9: thunk, count 7; bound (fixed), no shipped site |
+| `IsAIHelperRunning` | `0x004d1d80` | 236 | free/1 | `engine/core/src/sim/ai.cpp:4900` | yes | verified | IsAIHelperRunning: map find (0x004d1cd0); the entry leaves when the thread ends (0x0069f7a0 -> hook 0x004d2160), so a finished helper answers false at once: table AND alive here (fixed; test the_helper_table_is_reaped_when_a_helper_ends); a self-stopped helper's step remainder not reproduced |
+| `StopAIHelper` | `0x004d4100` | 179 | free/1 | `engine/core/src/sim/ai.cpp:4901` | yes | verified | StopAIHelper: 0x004d32e0 find; miss does nothing; hit stops with notify (0x0069fee0,1) and the hook erases; units' commands untouched; self-stop is a deferred flag in retail, immediate here (labelled, no shipped site) |
+| `Hero::TSAdvHeroSkills` | `0x00426c00` | 68 | member/2 | `engine/core/src/sim/ai.cpp:4910` | yes | partial | Hero::TSAdvHeroSkills: only the hero handle is tested (arrays passed as resolved); TSH_HeroSkills.vs on the hero's player ([[hero+0x70]+8] into 0x0043d030), run synchronously with (hero, arrays); a failed run prints and returns where run_script_now traps (labelled) |
+| `GetGAIKA` | `0x00424660` | 43 | free/1, free/2, member/0 | `engine/core/src/sim/ai.cpp:4828` | yes | partial | GetGAIKA(Obj): 0x0044e650, null handle -> 0, raw position, posRH when x<0, negative -> 0; node from the slot grid approximated by GaikaTable::at (design) |
+| `GetGAIKA` / `point::GetGAIKA` | `0x005bd090` | 43 | free/1, free/2, member/0 | `engine/core/src/sim/ai.cpp:4828` | yes | partial | GetGAIKA(point) / point::GetGAIKA: 0x0044e3f0, 0 with no node vector, &0xffff; slot grid approximated (design) |
+| `GetGAIKA` | `0x00421910` | 43 | free/1, free/2, member/0 | `engine/core/src/sim/ai.cpp:4828` | yes | partial | GetGAIKA(x, y): the point body with two ints; bound (fixed; test gaika_entry_points_read_the_table_the_way_the_scripts_do), no shipped site; slot grid approximated |
+| `Settlement::GetGaika` | `0x004262f0` | 43 | free/1, free/2, member/0 | `engine/core/src/sim/ai.cpp:4828` |  | verified | Settlement::GetGaika: invalid handle -> 0, else the per-settlement node table by the settlement index (0x0044e9e0) |
+| `GAIKA::LSA` | `0x004225d0` | 42 | free/1, free/2, member/0 | `engine/core/src/sim/ai.cpp:4825` | yes | verified | GAIKA::LSA: 0x0043cb00, node 0 -> 0, else the node record's 16-bit area (+0x10) by bare index; an id past the table answers 0 here (the areas are this engine's partition, sim/lsa.hpp) |
+| `LSA` | `0x00422600` | 42 | free/1, free/2, member/0 | `engine/core/src/sim/ai.cpp:4825` | yes | partial | LSA(x, y): 0x0043cb30, the area of the node at the point (0x0044e3f0); bound (fixed: was unregistered), no shipped site; point-to-node is GaikaTable::at, the slot-grid approximation (design) |
+| `LSA` | `0x00422630` | 42 | free/1, free/2, member/0 | `engine/core/src/sim/ai.cpp:4825` | yes | partial | LSA(pt): as LSA(x, y); bound (fixed), no shipped site; same slot-grid approximation |
+| `LSA` | `0x006a8720` | 42 | free/1, free/2, member/0 | `engine/core/src/sim/ai.cpp:4825` | yes | partial | LSA(): a no-argument debugging command calling builders 0x0044e050 and 0x00450a50, answering nothing; not bound, no shipped site |
+| `Obj::LSA` | `0x00425fd0` | 42 | free/1, free/2, member/0 | `engine/core/src/sim/ai.cpp:4825` | yes | partial | Obj::LSA: 0x0043cb70, node at the object's raw position (vtbl+0x3c; a held unit is no node, area 0), no handle test; served by the member LSA/0 by receiver type (fixed), no shipped site; same approximation |
+| `Eval` | `0x00426580` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4867` | yes | verified | Eval: viewer player-1, flag mask -1, sweep 0x00423850 (map-clamped square, cells whole or cut by squared range inclusive; negative range visits nothing: fixed, test ai_eval_buckets_the_units_in_range_by_relation), visitor 0x004231f0 keeps units only, 0x004439d0 16-bit worth into 0x0044e250's bucket; outs always written; player <=0 reads a record before the table in retail, zeros here (labelled, no shipped site) |
+| `GAIKA::Eval` | `0x0042f1a0` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4867` | yes | partial | GAIKA::Eval/1: read; presence only, viewer -1 so every squad is category 1; not bound, no shipped site |
+| `GAIKA::Eval` | `0x0042f3d0` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4867` | yes | partial | GAIKA::Eval/2: as /3 with gate category 1, the own total (fixed alike); no memory tail; squad_presence gap |
+| `GAIKA::Eval` | `0x0042f670` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4867` | yes | partial | GAIKA::Eval/3: as /6 with gate sides & category and a plain add (fixed alike); same two gaps |
+| `GAIKA::Eval` | `0x0042fc40` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4867` | yes | partial | GAIKA::Eval/6: viewer = player-1, negative -> every squad category 1 (fixed); category 0x0044e250 from the viewer's row (one-sided truce = ally, fixed); presence 0x0044e1f0 refined for enemies by 0x0044eb80 (difficulty sight table 0x0081a794, undrained order leaving->staying; fixed); accumulator 0x00427e90 skips messenger squads and fills enemy_hidden from hidden unheld front members (fixed); node settlement sentry strength [+0xf8] as staying (fixed); tests gaika_eval_adds_the_settlement_skips_messengers_and_sees_as_the_ai_sees and the census test; gaps: the remembered-enemy tail ([ai+0x40]/[ai+0x30], AI-record design) and squad_presence for a squad with no order and no DestGAIKA (roster design) |
+| `Squad::Eval` | `0x00421120` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4867` | yes | verified | Squad::Eval: [squad+0x1c] through 0x00443e30 with no squad test (a handle naming none answers 0 here where retail reads through null); the field is written by revalue_squads (sim/squad.hpp) |
+| `SquadList::Eval` | `0x0042bc90` | 40 | free/6, member/0, member/2, member/3, member/6 | `engine/core/src/sim/ai.cpp:4867` | yes | verified | SquadList::Eval: 0 for a list not in the pool (0x0043ed70) or at EOL (0x00420170); else 0x0042a450 counts every entry but reads the cursor entry each time: size x strength of SL.Cur (fixed: was the squad form's answer; test squad_list_eval_is_the_size_times_the_cursor_squads_strength) |
+| `Settlement::TSRecruitArmy` | `0x00431b30` | 33 | member/2 | `engine/core/src/sim/ai.cpp:4913` | yes | partial | Settlement::TSRecruitArmy: invalid receiver prints and still answers the minted empty list; TSH_RecruitArmy.vs on the settlement owner's player ([[set+0x90]+8]) with (set, class, num, list); a failed run prints and answers the list where run_script_now traps (labelled) |
+| `Unit::AI` | `0x004254b0` | 25 | member/0 | `engine/core/src/sim/ai.cpp:4903` | yes | verified | Unit::AI: handle resolves, [obj+0x70] player and its AI [player+0x88] non-null, then NOT bit 0 of the squad flags (0x00443e30 by [obj+0x174] player/index); false otherwise |
+| `GAIKA::Center` | `0x00422e20` | 23 | member/0 | `engine/core/src/sim/ai.cpp:4829` | yes | verified | GAIKA::Center: node record +8/+0xc by bare index, (0,0) only without a node vector; node 0 and unknown ids answer (0,0) here |
+| `IsWaterLsa` | `0x0042da30` | 23 | free/1 | `engine/core/src/sim/ai.cpp:4848` | yes | verified | IsWaterLsa: area record type word == 1; id unchecked there, an id past the table answers false here as record 0 does |
+| `rect::Center` | `0x00697ba0` | 23 | member/0 | `engine/core/src/sim/ai.cpp:4829` | yes | verified | rect::Center: ((l+r)/2, (t+b)/2) truncating; shares Center/0 and is now answered for a rect receiver (fixed: was unbound; test gaika_entry_points_read_the_table_the_way_the_scripts_do), no shipped site |
+| `AIStart` | `0x00434e20` | 20 | free/3 | `engine/core/src/sim/ai.cpp:4800` | yes | partial | AIStart(player): read; 1..16 then core with no name and difficulty 0, so the constructor 0x0041e100 seeds the seat's playerdata profile and difficulty (outside 1..3 -> 3); not bound, no shipped site and no surface entry |
+| `AIStart` | `0x00434e60` | 20 | free/3 | `engine/core/src/sim/ai.cpp:4800` | yes | partial | AIStart(player, profile): read; the 3-argument rules with difficulty 0 (constructor's seat default kept); not bound, no shipped site and no surface entry |
+| `AIStart` | `0x00434f90` | 20 | free/3 | `engine/core/src/sim/ai.cpp:4800` | yes | verified | AIStart(player, profile, difficulty): 1..16, exact case-sensitive profile match (the 0x00435030 fold writes a buffer the 0x00426ea0 lookup never reads; fixed, test ai_start_host_entry_matches_the_profile_name_case_sensitively), difficulty+1 in 1..3, then the core 0x00434ca0 (old AI destroyed first); refusals print and return |
+| `Settlement::TSRecruitHero` | `0x004269a0` | 15 | member/0 | `engine/core/src/sim/ai.cpp:4914` | yes | partial | Settlement::TSRecruitHero: answer starts as the invalid handle (0xffff,0); invalid receiver answers it; TSH_HeroRecruit.vs on the owner's player with (set, &hero), the by-ref slot read back; a failed run answers whatever the slot holds where run_script_now traps (labelled) |
+| `GAIKA::MinNeed` | `0x0042c4a0` | 12 | member/4 | `engine/core/src/sim/ai.cpp:4835` | yes | verified | GAIKA::MinNeed: GetArmyNeed.vs through 0x0043d120 (profile path 0x0043d030 = find_script; a failed run answers 0 -- run_script_now, shared gap) with bMin 1 and the player still 1-based; divisor [laika+0x14] when node low word != 0, player-1 < 16, an AI record and a view entry; need = max(1, need*100/optimism) in UNSIGNED arithmetic when need > 0 and optimism != 0 (fixed: a negative optimism left the raw need, retail floors it at 1; test min_need_and_max_need_run_get_army_need_and_scale_by_optimism) |
+| `GAIKA::GetStrat` | `0x00421aa0` | 11 | member/1 | `engine/core/src/sim/ai.cpp:4884` | yes | partial | GAIKA::GetStrat: GetGAIKAStrat.vs on seat idPlayer-1 via 0x0043d030 (a seat >=16 still runs the plain file; fixed), (g, idPlayer), negative or failed -> 0, else &0xffff (fixed; test get_strat_masks_to_sixteen_bits_and_runs_for_any_seat); a callee trap traps the caller (run_script_now, labelled) |
+| `GAIKA::Explored` | `0x0042ae70` | 10 | member/1 | `engine/core/src/sim/ai.cpp:4871` | yes | partial | GAIKA::Explored: laika_of then 0x0041cb80: two session overrides (exploration setting in single player, reveal-all) answer true, else byte +2 bit 0x02; overrides not modelled and the bit is set from the exploration map (labelled reading of the unrecovered sweep) |
+| `AIGetPlayer` | `0x00421cb0` | 9 | free/0 | `engine/core/src/sim/ai.cpp:4799` | yes | verified | AIGetPlayer: atol of the running script's owner tag (0x0043caa0, -1 when untagged) plus one; a script no AI owns answers 0, not -1 (fixed; test ai_get_player_answers_zero_outside_any_ai) |
+| `AreaAINoRecruit` | `0x00432790` | 8 | free/3 | `engine/core/src/sim/ai.cpp:4890` |  | verified | AreaAINoRecruit: area by name (0x004d9050; miss prints and does nothing), every node record whose centre is inside (rect inclusive, circle d2 <= r2), 0x0042b8d0 with {player-1, bits bool?8:0, mask bool?0:8}: sets or clears NoRecruit; node 0 skipped; the walk's early exit never fires (writer low half 0) |
+| `Settlement::TSTempleRecruit` | `0x00431dd0` | 8 | member/1 | `engine/core/src/sim/ai.cpp:4915` | yes | partial | Settlement::TSTempleRecruit: as TSArenaRecruit with TSH_TempleRecruit.vs; same callee-trap gap |
+| `GAIKA::GetPriority` | `0x0042abe0` | 7 | member/1 | `engine/core/src/sim/ai.cpp:4873` |  | verified | GAIKA::GetPriority: player-1 <16 with an AI ([rec+0x88]), (short)g != 0, g&0xffff inside the slot map, slot != 0 -> record +0x10; every miss 0 (laika_of; a player <=1 below the table is read as no AI) |
+| `GAIKACount` | `0x00422d70` | 6 | free/0 | `engine/core/src/sim/ai.cpp:4869` |  | verified | GAIKACount: the node vector's size including reserved node 0 (count+1 here), 0 without a vector |
+| `FindTeleport` | `0x0042e820` | 5 | free/3 | `engine/core/src/sim/ai.cpp:4849` | yes | partial | FindTeleport: whole body read; computer player skips a teleport whose node it has not explored (0x0041cb80, fixed: gate was absent); node of the teleport's position (0x0044e650); only gap is 0x0041cb80's two session overrides, unreproduced as at GAIKA::Explored |
+| `GAIKA::StratRunning` | `0x00421ae0` | 5 | member/1 | `engine/core/src/sim/ai.cpp:4885` | yes | verified | GAIKA::StratRunning: the player's AI [p*800+0x1034] (none -> 0), then 0x0041d150: g==0 -> 0, slot = map[g] (0 past the map), the record's strat (+4) zeroed when thread 0x34+g no longer runs; per-record script here |
+| `LAIKA` | `0x0042ab40` | 5 | free/2 | `engine/core/src/sim/ai.cpp:4874` |  | verified | LAIKA(player, i): player-1 <16 with an AI, i&0xffff below the record count -> that rank slot's node id (+0), else 0 |
+| `CheckLsaPath` | `0x00423120` | 3 | free/3 | `engine/core/src/sim/ai.cpp:4854` | yes | partial | CheckLsaPath -> 0x00441fe0 -> 0x00441b70 read whole (BFS, type test, shipless-sea bump, walk-back count); boardunit ship counts only with the empty order and (-1,-1) (0x00441730, fixed: any boarding ship counted); gaps: advance clause's enemy census (slot grid, sim/gaika.hpp) and the shipless test reads the census, not the kept +0x54 count |
+| `GAIKA::ApproachingSquads` | `0x0042c060` | 3 | member/2 | `engine/core/src/sim/ai.cpp:4866` | yes | verified | GAIKA::ApproachingSquads: centre is the settlement's central building (0x005c1060) or [node+8], the same point here; walks the player's squads, skips GAIKAIn == node, heading 0x00444140 then DestGAIKA (squad_ai_dest); measures the FRONT member (0x00443df0) by its STORED position (vtbl+0x3c), strict < dist (fixed: read the leader, which AI squads lack, through the holder chain; test approaching_squads_sums_the_strength_on_its_way_to_the_node) |
+| `GAIKA::GetDistToPlayers` | `0x0042c1c0` | 3 | member/4 | `engine/core/src/sim/ai.cpp:4839` | yes | verified | GAIKA::GetDistToPlayers: outs -1; every settlement whose central building is a BaseTownhall heir (0x0043ffc0, stronghold here), distance from its centre (0x005c1060) to [node+8] doubled when its node (0x0044e9e0) is missing or another LSA, into the 0x0044e250 bucket by strict <; player <=0 labelled |
+| `GAIKA::MaxNeed` | `0x0042c580` | 3 | member/4 | `engine/core/src/sim/ai.cpp:4836` | yes | verified | GAIKA::MaxNeed: the MinNeed body with bMin 0 (same fix, same test) |
+| `GAIKA::Prioritized` | `0x0042adc0` | 3 | member/1 | `engine/core/src/sim/ai.cpp:4876` |  | verified | GAIKA::Prioritized: laika_of then byte +2 bit 0x01 |
+| `GAIKA::SetControlFlag` | `0x0042eda0` | 3 | member/2 | `engine/core/src/sim/ai.cpp:4875` |  | verified | GAIKA::SetControlFlag: laika_of then set or clear 0x20 by the bool argument |
+| `SS_STR` | `0x0041f870` | 3 | free/1 | `engine/core/src/sim/ai.cpp:4837` | yes | verified | SS_STR: state <1 -> "SS_IDLE", else the constant table name (0x0043f1b0; "" past its end); names from the root profile's per-family table (sim/ai_profile.hpp numbering) |
+| `SetMAIKA` | `0x00421b70` | 3 | free/3 | `engine/core/src/sim/ai.cpp:4838` | yes | partial | SetMAIKA: all three ids non-zero and distinct, then 0x0044fc60 records (src, dst, way-point) in a 512-capped list at the node manager +0x38 (also fed natively by 0x0041e6c0); the list is not kept here (no reader found but its own search), so the call is accepted and dropped |
+| `Settlement::TSArenaRecruit` | `0x00431ca0` | 3 | member/1 | `engine/core/src/sim/ai.cpp:4916` | yes | partial | Settlement::TSArenaRecruit: as TSRecruitArmy with TSH_ArenaRecruit.vs and (set, num, list); same callee-trap gap |
+| `AreaAIMaxPriority` | `0x00432c30` | 2 | free/3 | `engine/core/src/sim/ai.cpp:4891` |  | verified | AreaAIMaxPriority: as NoRecruit with {player-1, bool?100:-1} into 0x0042b960: SetPriority 100, or 50 for a value below 1, through the re-sort (0x0041cf00) |
+| `AreaAISetAttackOptimism` | `0x00432e70` | 2 | free/3 | `engine/core/src/sim/ai.cpp:4892` |  | verified | AreaAISetAttackOptimism: as NoRecruit with {player-1, value} into 0x0042ba60 -> 0x0041d130: record +0x14 = value (Laika::optimism) |
+| `GAIKA::MilitaryPresence` | `0x004313e0` | 2 | member/1 | `engine/core/src/sim/ai.cpp:4832` | yes | verified | GAIKA::MilitaryPresence: squads with strength, category & 1 (own only: an ally is 2 -- fixed, was own+allies), negative viewer = everybody, viewer past 16 = nobody (fixed, was everybody), presence & 6 (in the node), not peaceful; then the node settlement 0x00420c00: a BaseTownhall with sentry strength [+0xf8] > 0 is a presence under category & 1 (fixed, was not asked); tests military_presence_wants_an_armed_squad_of_the_viewers_own_standing_in_this_node, military_presence_counts_the_viewers_own_manned_wall |
+| `GAIKA::NoAttack` | `0x0042b3d0` | 2 | member/1 | `engine/core/src/sim/ai.cpp:4878` |  | verified | GAIKA::NoAttack: laika_of then byte +2 bit 0x10 |
+| `GAIKA::Recruit` | `0x00437b80` | 2 | member/4 | `engine/core/src/sim/ai.cpp:4834` | yes | partial | GAIKA::Recruit: AssUnderFireGaika read first ("/%s/Player%d/..."); gates avail < nMin, player-1 > 15, AI record, squad vector < 2; squads 1..n-1: flags 0x25 skip, 0x0043d1f0 (Eval 0 -> 0 without the script; EvalRecruit.vs; gDepend >= node count -> 0), budgets per depend via 0x0043d470 (CalcMaxTake.vs, take floored at 0 -- unobservable, labelled), take < worth refused, overflow and total as written; total-overflow < nMin gives up; sort 0x004326c0 descending by score (insertion sort below 33 entries, stable, = the index tie-break); re-run only if overflow, clearing depend within overneed; two send passes via 0x0043d380 (SendSquad.vs) with -4 marks and nMax/nMin stops; avail -= sent floored. Partial: the routing filter (0x0043eda0, gated on the MAIKA deque) is skipped because SetMAIKA keeps no table -- in retail SQUADMONITOR.VS calls SetMAIKA 3 times, so the filter is live there (note corrected: it was called faithful); routing-table design |
+| `GAIKA::RunStrat` | `0x00421b30` | 2 | member/2 | `engine/core/src/sim/ai.cpp:4886` |  | verified | GAIKA::RunStrat: 0x0041d1d0 on the player's AI (no null test in retail, nothing here): stop thread 0x34+g when strat != 0, write strat unconditionally, spawn <name>.vs (void, GAIKA gaika) tagged with the seat for non-zero; missing file starts nothing |
+| `GAIKA::SetPriority` | `0x0042ad30` | 2 | member/2 | `engine/core/src/sim/ai.cpp:4877` |  | verified | GAIKA::SetPriority: the player's AI, slot = map[g] (0 past the map) into 0x0041cf00: slot 0 or unchanged value does nothing; else write, set Prioritized, stable adjacent swaps up to slot 1 or down, map repaired (GaikaView::set_priority) |
+| `IncShipNeeds` | `0x0042d9f0` | 2 | free/2 | `engine/core/src/sim/ai.cpp:4851` | yes | verified | IncShipNeeds: +1 on the word at +0x10+4p, raw player, the same word ShipNeeds reads; players outside 1..16 refused |
+| `Settlement::RunEconomyScript` | `0x00426140` | 2 | member/1 | `engine/core/src/sim/ai.cpp:4906` | yes | partial | Settlement::RunEconomyScript: on the owner's AI (0x0042616b): stop the live slot script, write the id even 0, spawn <name>.vs with the settlement only for non-zero; missing name or file starts nothing, no trap (all fixed; tests run_economy_script_replaces_the_running_script_and_zero_stops_it, run_economy_script_of_an_id_that_names_nothing_starts_nothing_quietly); owner without an AI is a null this in retail, nothing here; per-AI slot approximated |
+| `Settlement::TacticScript` | `0x00426290` | 2 | member/0 | `engine/core/src/sim/ai.cpp:4907` | yes | partial | Settlement::TacticScript: as EconomyScript with [ai+0x80] and fixed id +0x35 (0x0041d410); same per-AI approximation |
+| `Ships` | `0x00422660` | 2 | free/2 | `engine/core/src/sim/ai.cpp:4853` | yes | partial | Ships: reads the kept count at +0x54+4(p-1) (raised 0x0041f310, lowered 0x0041eee0 under asymmetric gates, holder-chain area for a held ship, two unnamed exclusion flags); engine answers a census of living ships by position (design, sim/ai.hpp) |
+| `Unit::BestMDPos` | `0x00439de0` | 2 | member/5 | `engine/core/src/sim/ai.cpp:4846` | yes | verified | Unit::BestMDPos: caster squad (0x00444190) GAIKAIn, (-1,-1) for every refusal; first loop collects squads with strength, category & 4, presence 0x0044e1f0(,,0) & 6 -- which refuses a PEACEFUL squad (fixed: wildlife was a candidate); second loop: front member exists, distance between caster and front posRH (vtbl+0xc8; fixed: was resolve_position, the holder record for a garrisoned unit) in [MinRange, MaxRange]; score from 0x00423a70, which COUNTS HEADS (inc) where Eval's 0x00423850 adds worth (fixed: summed object_power -- shipped MinEval 500 now means 500 units); protect subtracts own+ally; ranked = score + MaxRange - dist, strict > from MinEval-1, answered at >= 4; 0x00420c00 between the loops is overwritten before read; tests best_md_pos_bands_the_distance_and_floors_the_score, best_md_pos_measures_from_pos_rh_and_never_offers_a_peaceful_squad |
+| `Unit::BestTargetInGAIKA` | `0x00431650` | 2 | member/0 | `engine/core/src/sim/ai.cpp:4845` |  | partial | Unit::BestTargetInGAIKA: wrapper -> 0x00431090; node 0x0044e650 (posRH); squads with strength, category & 4 off the receiver row (negative player = 1 = nothing), presence 0x0044e1f0(,,0) & 6 (0x0044eb80 cannot cross it); members offered by 0x004282c0, which STOPS the squad at the first missing/dead/held member (fixed: skipped and went on; test best_target_in_gaika_applies_the_squad_tests_one_at_a_time) and always returns 0; 0x00420c00 after the walk writes locals nothing reads; fallback: first settlement whose central building is a Catapult heir, enemy by the transposed bit, on the receiver node by stored position. Partial: the filter is CombatSystem::best_target_among, whose score is not the executable's, so 0x005db650's stop at a score under 50 and its 200-point nudges are not reproduced (combat design, shared with the family); the node is this engine's partition |
+| `AIStop` | `0x00422720` | 1 | free/1 | `engine/core/src/sim/ai.cpp:4801` | yes | verified | AIStop: 1..16 message, then [p*800+0x1034] with p 1-based (= the core's 0-based slot), virtual destroy and null; no AI is a no-op; out-of-range carries on off the table in the original, refused here (labelled) |
+| `ClrShipNeeds` | `0x0042d9b0` | 1 | free/2 | `engine/core/src/sim/ai.cpp:4852` | yes | verified | ClrShipNeeds: zeroes the same word; players outside 1..16 refused |
+| `EnemyPlayersEval` | `0x00425e20` | 1 | free/4 | `engine/core/src/sim/ai.cpp:4868` | yes | verified | EnemyPlayersEval: outs zeroed; player-1 < 16 gate; per table player with category 4 (0x0044e250), 0x00443e70 on [record+0x8c] sums [squad+0x1c] over squads without flags 0x25; min/max written only when >0, mean total/count when count>0; returns total; player <=0 labelled as for Eval |
+| `GAIKA::CalcPriority` | `0x00421a00` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4887` | yes | partial | GAIKA::CalcPriority: CalcGAIKAPriority.vs on seat idPlayer-1, (idPlayer, g), negative or failed -> 0, full 32 bits; out-of-range seat runs the plain file (fixed; test calc_priority_marshals_the_player_first); callee-trap gap |
+| `GAIKA::CanExplore` | `0x0042afc0` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4872` | yes | partial | GAIKA::CanExplore: false without the node; a neighbour explored for player-1, else a teleport in the world settlement vector whose position is in this node and whose far end's node is explored; Explored's session overrides (0x0041cb80) not modelled, and a teleport is always its own node here (partition) |
+| `GAIKA::ControlledNeighbors` | `0x00422950` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4833` | yes | verified | GAIKA::ControlledNeighbors: count of the node's neighbours (+0x1e/+0x20) whose settlement (+0x14) owner [[set+0x90]+8] equals player-1; region neighbours skipped (neighbour list from this engine's partition) |
+| `GAIKA::Empty` | `0x00422dc0` | 1 | member/0 | `engine/core/src/sim/ai.cpp:4831` | yes | verified | GAIKA::Empty: true without a node vector or node; else [node+0x18] (the squad container) empty -- modelled as no squad whose GAIKAIn is the node |
+| `GAIKA::GetControlFlag` | `0x0042ee40` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4882` |  | verified | GAIKA::GetControlFlag: laika_of then byte +2 bit 0x20 |
+| `GAIKA::GetDestPoint` | `0x00427b80` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4830` | yes | partial | GAIKA::GetDestPoint: (0,0) for no node, centre for a region node, else the settlement's position; BaseTownhall: nearest gate to the unit (initial best 200000), then 450 beyond it from the centre, bounds-tested inclusively, a refusal answering the gate (fixed: was the centre; test gaika_dest_point_aims_a_squad_at_the_ground_outside_the_nearest_gate); Outpost arm (0x00440060: 1300-unit offset tried at +-90 degrees against 0x004092b0) not reproduced, answers the settlement position |
+| `GAIKA::LastSeen` | `0x0042b320` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4881` |  | partial | GAIKA::LastSeen: laika_of then record +0xc; read matches, but the field is stamped by AiSystem::advance from exploration (labelled reading) where the original stamps it when sight is lost (per-player visibility sweep not modelled, design) |
+| `GAIKA::NoRecruit` | `0x0042b520` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4880` |  | verified | GAIKA::NoRecruit: laika_of then byte +2 bit 0x08 |
+| `GAIKA::Revealed` | `0x0042b270` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4879` |  | partial | GAIKA::Revealed: laika_of then 0x0041cbd0: with fog of war on, bit 0x04, else Explored; the bit needs current per-player sight, which is not kept, so it reads false (design) |
+| `Hero::AIGetSkillToDevelop` | `0x00426680` | 1 | member/2 | `engine/core/src/sim/ai.cpp:4911` | yes | verified | Hero::AIGetSkillToDevelop: both outs -1 before the receiver test; skills with byte 0..9 only, HeroSkill <name>.vs else HEROSKILL DEFAULT.VS on the hero's player, (hero, i, &points=cur, &weight=100); counted when run ok, weight>0 and goal>cur; rand(1,total) at [0x996ff4]+0x12a0 slot 0x14 only when total>0; first skill taking the draw below 1, goal capped 10 |
+| `PrepareAiTransportShip` | `0x0042e180` | 1 | free/5 | `engine/core/src/sim/ai.cpp:4855` | yes | partial | PrepareAiTransportShip: route search now passes the caller's order and point (0x00442010, fixed: it used the empty order), element 1 of a length-3 route, 0x00441730, 0x005c7dd0 writes order/point; same gaps as CheckLsaPath plus ship scan order (world by id, not the area list) |
+| `SPFCalcConnectHighRes_Quant` | `0x00415a40` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4858` | yes | partial | SPFCalcConnectHighRes_Quant: one connect row (0x00415880), answers counter <= last; engine false, same design |
+| `SPFDone` | `0x0040f8c0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4865` | yes | partial | SPFDone: destroys the live structure, installs the built one, frees the builder; engine no-op, same design |
+| `SPFFindAreas_Quant` | `0x004129a0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4857` | yes | partial | SPFFindAreas_Quant: 0x00411af0 slice of the smart-pathfinder build; engine answers false (no builder: movement pathfinder is this engine's own design, script never started here) |
+| `SPFIncreaseConnect` | `0x004161d0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4864` | yes | partial | SPFIncreaseConnect: 0x00415e30 then [builder+0x2c]=0; engine no-op, same design |
+| `SPFIncreaseConnect_Quant` | `0x00415a90` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4859` | yes | partial | SPFIncreaseConnect_Quant: 0x004159b0 slice; engine false, same design |
+| `SPFInitConnectData` | `0x0040d1d0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4863` | yes | partial | SPFInitConnectData: sets the connect pass's range on the builder; engine no-op, same design |
+| `SPFInitData` | `0x004166b0` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4860` | yes | partial | SPFInitData: 0x00416520 stage; engine no-op, same design |
+| `SPFInitDirectionData` | `0x0040dd10` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4861` | yes | partial | SPFInitDirectionData: 0x0040db30 stage; engine no-op, same design |
+| `SPFInitPointToAreaData` | `0x00412980` | 1 | free/0 | `engine/core/src/sim/ai.cpp:4862` | yes | partial | SPFInitPointToAreaData: 0x00411c00 stage; engine no-op, same design |
+| `Settlement::EconomyScript` | `0x00426190` | 1 | member/0 | `engine/core/src/sim/ai.cpp:4904` | yes | partial | Settlement::EconomyScript: 0 unless the owner ([set+0x90]) has an AI (fixed), then 0x0041d2a0: the AI's own array at [ai+0x70][set index], zeroed when its fixed thread id no longer runs; the per-AI array is approximated by the slot script's owner (fixed; test economy_script_slots_belong_to_the_settlements_current_owner); a recapture while a third seat overwrote the slot is not reproduced |
+| `Settlement::GetEconomyScript` | `0x004260f0` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4905` | yes | partial | Settlement::GetEconomyScript: GetEconomyScript.vs resolved on seat idPlayer-1 (0x0043d030), not the caller's; result <0 or failed run -> 0, else &0xffff (fixed; test get_economy_script_searches_the_arguments_seat_and_masks_the_answer); a callee that traps traps the caller (shared run_script_now, labelled) |
+| `Settlement::GetTacticScript` | `0x004261f0` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4908` | yes | partial | Settlement::GetTacticScript: as GetEconomyScript with GetTacticScript.vs (0x0043d820; fixed alike); same callee-trap gap |
+| `Settlement::RunTacticScript` | `0x00426240` | 1 | member/1 | `engine/core/src/sim/ai.cpp:4909` | yes | partial | Settlement::RunTacticScript: 0x0041d480, as RunEconomyScript (fixed alike); per-AI slot approximated |
+| `ShipNeeds` | `0x004226f0` | 1 | free/2 | `engine/core/src/sim/ai.cpp:4850` | yes | verified | ShipNeeds: 0x0043ef00(player-1, lsa), the need word at +0x14+4(p-1); players outside 1..16 answer 0 (original reads a neighbouring word; no shipped caller passes one) |
+| `Unit::BestProtPos` | `0x0043a330` | 1 | member/4 | `engine/core/src/sim/ai.cpp:4847` | yes | verified | Unit::BestProtPos: the BestMDPos first loop and distance (same two fixes, shared crowds_in_casters_node); after 0x00420c00 both winners reset to 0 and both bests to MinEval-1 (0x0043a63f..653); census 0x004228d0 (mask -1, the caster player) over 0x00423cd0 with visitor 0x00423280 = protect_census (own/ally/enemy heads, unshielded = bit 28 of [+0x194] assigned for own and added for allies, first own Sacrifice); a negative range visits nothing (fixed; test best_prot_pos_scores_the_size_of_the_engagement); refuse 2A < 3U, A or E under a tenth, E*A < MinEval; crowd preferred over sacrifice, each answered at >= 4 |
 
 ## scheduler -- 10 of 16 verified, 2,169 call sites
 
@@ -660,26 +660,26 @@ Batches are by the file that implements them, most-called file first.
 | `KillScript` | `0x0061e730` | 13 | free/0 | `engine/core/src/script/scheduler.cpp:787` | yes | verified | KillScript: answers status 2, the interpreter stops the calling thread; Scheduler::kill on the caller |
 | `StartPlayerScript` | `0x0056f970` | 2 | free/2 | `engine/core/src/script/scheduler.cpp:788` | yes | verified | StartPlayerScript: FIXED -- eight name slots per player (0x0056f720), a second start of a name refused, slots saved; test vs_start_player_script_starts_a_name_once_per_player |
 
-## text -- 0 of 16 verified, 1,601 call sites
+## text -- 7 of 16 verified, 1,601 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Translate` | `0x004c9b70` | 227 | free/1 | `engine/core/src/sim/text.cpp:193` |  | unread |  |
-| `Obj::pr` | `0x005abb20` | 157 | free/1 | `engine/core/src/sim/text.cpp:191` |  | unread |  |
-| `Obj::pr` | `0x005abbd0` | 157 | free/1 | `engine/core/src/sim/text.cpp:191` |  | unread |  |
-| `Obj::pr` | `0x005abc40` | 157 | free/1 | `engine/core/src/sim/text.cpp:191` |  | unread |  |
-| `pr` | `0x006a3f00` | 157 | free/1 | `engine/core/src/sim/text.cpp:191` |  | unread |  |
-| `pr` | `0x006a3f70` | 157 | free/1 | `engine/core/src/sim/text.cpp:191` |  | unread |  |
-| `pr` | `0x006a3fa0` | 157 | free/1 | `engine/core/src/sim/text.cpp:191` |  | unread |  |
-| `Translatef` | `0x004c9ea0` | 85 | free/2, free/3 | `engine/core/src/sim/text.cpp:194` |  | unread |  |
-| `Translatef` | `0x004ca150` | 85 | free/2, free/3 | `engine/core/src/sim/text.cpp:194` |  | unread |  |
-| `Translatef` | `0x004ca470` | 85 | free/2, free/3 | `engine/core/src/sim/text.cpp:194` |  | unread |  |
-| `Breakpoint` / `GAIKA::ID` / `GenTransTables` / `GetGAIKA` / `IngameDebugSelected` / `PerlinTest` / `_itools` | `0x00746ea0` | 77 | free/0, free/1, member/0 | `engine/core/src/sim/text.cpp:200` | yes | unread |  |
-| `ParseStr` | `0x00697580` | 71 | free/2 | `engine/core/src/sim/text.cpp:196` |  | unread |  |
-| `Str2Int` | `0x00696a40` | 24 | free/1 | `engine/core/src/sim/text.cpp:197` |  | unread |  |
-| `StrLen` | `0x00696b40` | 3 | free/1 | `engine/core/src/sim/text.cpp:198` |  | unread |  |
-| `ClearDebug` | `0x005a7fd0` | 1 | free/0 | `engine/core/src/sim/text.cpp:192` |  | unread |  |
-| `StrMid` | `0x00697740` | 1 | free/3 | `engine/core/src/sim/text.cpp:199` | yes | unread |  |
+| `Translate` | `0x004c9b70` | 227 | free/1 | `engine/core/src/sim/text.cpp:230` | yes | partial | Translate: lookup 0x00689130 read and fixed (empty->"", all-digit key->itself, exact then tolower-folded, text and justtext both names with the later row winning 0x00689f40, empty result->key); gaps: the running script's file name as context (0x006a3a60) not passed (no shipped key carries one), map table (0xa77e90) merged into the pack's rather than asked second (differs only where the pack answers a name with itself) |
+| `Obj::pr` | `0x005abb20` | 157 | free/1 | `engine/core/src/sim/text.cpp:228` |  | partial | Obj::pr(str): prints only when [obj+0x74] equals the debug era 0x00821354 (Obj::GetDebug's test); invalid receiver logs and answers nothing; not registered: every shipped site is commented out and the per-object debug flag is unmodelled |
+| `Obj::pr` | `0x005abbd0` | 157 | free/1 | `engine/core/src/sim/text.cpp:228` |  | partial | Obj::pr(int): as 0x005abb20 with "%d" |
+| `Obj::pr` | `0x005abc40` | 157 | free/1 | `engine/core/src/sim/text.cpp:228` |  | partial | Obj::pr(handle): as 0x005abb20, printing "(h:%d,o:%d)" |
+| `pr` | `0x006a3f00` | 157 | free/1 | `engine/core/src/sim/text.cpp:228` | yes | verified | pr(str): "%s" to the debug console (0x00619060), no check, no state |
+| `pr` | `0x006a3f70` | 157 | free/1 | `engine/core/src/sim/text.cpp:228` | yes | verified | pr(int): "%d" to the debug console |
+| `pr` | `0x006a3fa0` | 157 | free/1 | `engine/core/src/sim/text.cpp:228` | yes | partial | pr(bool): prints true/false; a VS bool reaches the host as an integer here, so it prints 1/0 (debug output only) |
+| `Translatef` | `0x004c9ea0` | 85 | free/2, free/3, free/4 | `engine/core/src/sim/text.cpp:231` | yes | partial | Translatef(key,a1): formatter 0x006897a0 read and fixed (each %s argument translated 0x00689a82, %% -> %, multi-digit N, bad placeholder -> "Bad parameter at pos P", finished text that is a name translated again 0x00689650); gaps: %d prints a pointer in the original (argument text written instead), N past the arguments left as written, same merged map table as Translate |
+| `Translatef` | `0x004ca150` | 85 | free/2, free/3, free/4 | `engine/core/src/sim/text.cpp:231` | yes | partial | Translatef(key,a1,a2): as 0x004c9ea0 |
+| `Translatef` | `0x004ca470` | 85 | free/2, free/3, free/4 | `engine/core/src/sim/text.cpp:231` | yes | partial | Translatef(key,a1,a2,a3): as 0x004c9ea0; this arity was not registered and now is |
+| `Breakpoint` / `GAIKA::ID` / `GenTransTables` / `GetGAIKA` / `IngameDebugSelected` / `PerlinTest` / `_itools` | `0x00746ea0` | 77 | free/0, free/1, free/2, member/0 | `engine/core/src/sim/text.cpp:238` | yes | verified | Breakpoint and the other names on this body: answers 0, touches nothing; for GetGAIKA(int) and GAIKA::ID the untouched VM stack makes the argument the answer (sim/ai.cpp, sim/squad.cpp identity functions) |
+| `ParseStr` | `0x00697580` | 71 | free/2 | `engine/core/src/sim/text.cpp:234` | yes | verified | ParseStr: skips leading spaces only (0x20), token to the first comma with trailing spaces cut, tail after the comma verbatim (fixed: tabs were trimmed and the tail was trimmed) |
+| `Str2Int` | `0x00696a40` | 24 | free/1 | `engine/core/src/sim/text.cpp:235` | yes | verified | Str2Int: CRT atol 0x00763919 -- isspace skip, one sign, digits with 32-bit wrap (fixed: no white-space skip, saturated) |
+| `StrLen` | `0x00696b40` | 3 | free/1 | `engine/core/src/sim/text.cpp:236` | yes | verified | StrLen: bytes before NUL (0x00649b40); null string 0 |
+| `ClearDebug` | `0x005a7fd0` | 1 | free/0 | `engine/core/src/sim/text.cpp:229` | yes | partial | ClearDebug: adds one to the debug era 0x00821354 and nothing else (fixed: it cleared the debug console, which is cls's); the era and per-object flag ([obj+0x74], Obj::GetDebug) are unmodelled |
+| `StrMid` | `0x00697740` | 1 | free/3 | `engine/core/src/sim/text.cpp:237` | yes | verified | StrMid: len capped at strlen-start when that is not more, floored at 0; negative start reads before the string in the original, answered as start 0 |
 
 ## player_host -- 25 of 37 verified, 1,278 call sites
 
@@ -723,118 +723,118 @@ Batches are by the file that implements them, most-called file first.
 | `Obj::raceStr` | `0x005aaa90` | 1 | member/0 | `engine/core/src/sim/player_host.cpp:1034` |  | verified | Obj::raceStr: class race through 0x005a7b90; invalid receiver "" |
 | `Obj::raceStrPrefLow` | `0x005aac90` | 1 | member/0 | `engine/core/src/sim/player_host.cpp:1036` | yes | verified | Obj::raceStrPrefLow: lower-case letter table; invalid receiver "" |
 
-## combat -- 0 of 39 verified, 1,222 call sites
+## combat -- 8 of 39 verified, 1,222 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Obj::range` | `0x005adde0` | 273 | member/0 | `engine/core/src/sim/combat.cpp:2813` |  | unread |  |
-| `Obj::attack` / `Obj::damage` | `0x005add80` | 116 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2808` | yes | unread |  |
-| `Obj::IsValidTarget` | `0x005aafd0` | 81 | member/1 | `engine/core/src/sim/combat.cpp:2757` | yes | unread |  |
-| `Unit::BestTargetInSquadSight` | `0x005dcbc0` | 69 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2764` |  | unread |  |
-| `Unit::BestTargetInSquadSight` | `0x005dce00` | 69 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2764` | yes | unread |  |
-| `Obj::Damage` | `0x005ab5d0` | 60 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2765` |  | unread |  |
-| `Query::Damage` | `0x00578ec0` | 60 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2765` |  | unread |  |
-| `Building::Attack` | `0x004df650` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2808` | yes | unread |  |
-| `Catapult::Attack` | `0x004e2d10` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2808` | yes | unread |  |
-| `Obj::SetStamina` | `0x005ab440` | 56 | member/1 | `engine/core/src/sim/combat.cpp:2817` | yes | unread |  |
-| `Unit::Attack` | `0x005ddb50` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2808` | yes | unread |  |
-| `Obj::Heal` | `0x005ab690` | 45 | member/1 | `engine/core/src/sim/combat.cpp:2814` |  | unread |  |
-| `Query::Heal` | `0x00578ff0` | 45 | member/1 | `engine/core/src/sim/combat.cpp:2814` |  | unread |  |
-| `Catapult::InRange` | `0x004e3230` | 28 | member/1 | `engine/core/src/sim/combat.cpp:2819` |  | unread |  |
-| `Unit::InRange` | `0x005d72e0` | 28 | member/1 | `engine/core/src/sim/combat.cpp:2819` |  | unread |  |
-| `Obj::maxstamina` | `0x005adba0` | 19 | member/0 | `engine/core/src/sim/combat.cpp:2809` |  | unread |  |
-| `Unit::maxstamina` | `0x005d8d10` | 19 | member/0 | `engine/core/src/sim/combat.cpp:2809` |  | unread |  |
-| `Obj::HealStamina` | `0x005ab700` | 11 | member/1 | `engine/core/src/sim/combat.cpp:2815` | yes | unread |  |
-| `Query::HealStamina` | `0x00579100` | 11 | member/1 | `engine/core/src/sim/combat.cpp:2815` | yes | unread |  |
-| `Unit::BestTargetForPos` | `0x005dd280` | 7 | member/0 | `engine/core/src/sim/combat.cpp:2785` | yes | unread |  |
-| `Obj::CanAttack` | `0x005ab060` | 6 | member/1 | `engine/core/src/sim/combat.cpp:2818` | yes | unread |  |
-| `Catapult::SetTarget` | `0x004e3600` | 5 | member/1 | `engine/core/src/sim/combat.cpp:2831` |  | unread |  |
-| `InvalidateDamageFormulaParams` | `0x004c6b10` | 5 | free/0 | `engine/core/src/sim/combat.cpp:2754` | yes | unread |  |
-| `Unit::BestTargetInRange` | `0x005dd2a0` | 5 | member/2 | `engine/core/src/sim/combat.cpp:2786` | yes | unread |  |
-| `Unit::BestTargetInSquadSightMisZeroDamage` | `0x005dcb00` | 5 | member/0 | `engine/core/src/sim/combat.cpp:2780` |  | unread |  |
-| `Catapult::ClearTarget` | `0x004e3710` | 4 | member/0 | `engine/core/src/sim/combat.cpp:2830` |  | unread |  |
-| `Building::BestTarget` | `0x004dcc60` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2822` |  | unread |  |
-| `Catapult::BestTarget` | `0x004e2f60` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2822` |  | unread |  |
-| `Catapult::GetPointOnTarget` | `0x004e3080` | 3 | member/1 | `engine/core/src/sim/combat.cpp:2821` | yes | unread |  |
-| `Unit::BestTargetInSquadSightExclusive` | `0x005dcf30` | 3 | member/1 | `engine/core/src/sim/combat.cpp:2783` | yes | unread |  |
-| `Unit::BestTargetInSquadSight_PreferUndiseased` | `0x005dcd40` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2782` |  | unread |  |
-| `Unit::TimeWithoutAttack` | `0x005d7f50` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2766` | yes | unread |  |
-| `Catapult::GetCurrentTarget` | `0x004e3500` | 2 | member/0 | `engine/core/src/sim/combat.cpp:2829` |  | unread |  |
-| `Unit::EnemiesInSight` | `0x005d74d0` | 2 | member/0 | `engine/core/src/sim/combat.cpp:2820` | yes | unread |  |
-| `Obj::SetHealth` | `0x005ab4e0` | 1 | member/1 | `engine/core/src/sim/combat.cpp:2816` |  | unread |  |
-| `SetExperienceModifier` | `0x005d2fb0` | 1 | free/2 | `engine/core/src/sim/combat.cpp:2825` | yes | unread |  |
-| `Unit::AddBonus` | `0x005e0ce0` | 1 | member/5 | `engine/core/src/sim/combat.cpp:2828` | yes | unread |  |
-| `Unit::BestNoIndependentTargetInSquadSight` | `0x005dcc80` | 1 | member/0 | `engine/core/src/sim/combat.cpp:2781` |  | unread |  |
-| `Unit::RecalcBonuses` | `0x005e0380` | 1 | member/0 | `engine/core/src/sim/combat.cpp:2827` | yes | unread |  |
+| `Obj::range` | `0x005adde0` | 273 | member/0 | `engine/core/src/sim/combat.cpp:3002` |  | partial | Obj::range: [obj+0xd4], invalid -> 0; the unit rebuild (0x005d9df0) adds the stand_position formation's BonusRange (0x005da46b..) which the engine does not apply; a non-combatant answers 0 here where the original answers its class range |
+| `Obj::attack` / `Obj::damage` | `0x005add80` | 116 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2997` | yes | partial | Obj::attack/damage: [obj+0xdc], invalid -> 0; engine attack_of lacks the rebuild's item, Epic/Team skill, formation and x2 (0x005da6e0, [hero+0x248]) terms |
+| `Obj::IsValidTarget` | `0x005aafd0` | 81 | member/1 | `engine/core/src/sim/combat.cpp:2952` | yes | partial | IsValidTarget: the receiver's CanAttack virtual only (invalid target false silently, invalid receiver logs); fixed: target_factor -1 no longer refused; gap: engine's strict is_enemy vs the virtual's wider rule |
+| `Unit::BestTargetInSquadSight` | `0x005dcbc0` | 69 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2959` | yes | partial | BestTargetInSquadSight/0: invalid/dead receiver -> invalid; held -> invalid (fixed); a squad member takes the squad path, whose deque squad+0x6c..0x7c nothing pushes, and gets the invalid handle -- NOT applied: measured on Alesia it leaves armies standing out of reach (1904 vs 325), because what engages a squad member in the original is not modelled (design gap); free unit -> circle on hero/self at [+0xd0]; gap (design): score factor+40*threat+surface d with in-range <50 stop/-100, units only + catapult fallback, threat counters, grid order -- engine scores d^2*factor/priority |
+| `Unit::BestTargetInSquadSight` | `0x005dce00` | 69 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2959` | yes | partial | BestTargetInSquadSight/1(str): as /0 (held guard fixed, squad-member gap as /0); class mismatch +200 (0x005db789) taken to its limit on the engine score scale |
+| `Obj::Damage` | `0x005ab5d0` | 60 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2960` | yes | partial | Obj::Damage: answers is-dead, true for invalid receiver, n<0 logs and false (fixed: was void and a script error); clamp, store, death 0x005b16f0 -- now also on script objects such as Mist and CoverOfMercy (fixed); gap: ambient-civilian immunity [obj+0x2c]&0x4000000 not modelled |
+| `Query::Damage` | `0x00578ec0` | 60 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2960` |  | partial | Query::Damage: no refresh, skips dead, no sign check, answers the kill count; engine has no Query form (Damage/1 on a group does nothing); no shipped site damages a group |
+| `Building::Attack` | `0x004df650` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2997` | yes | partial | Building::Attack: fire rate isqrt(military+min(other,10))*BaseFireRate/100 (0x005c2fb0), 0 -> false; per-building attack_delay and per-settlement cadence waits; fires once and answers true; gap (design): tower fire is script-driven per call in the original, CombatSystem::act acquisition here, with no garrison gate |
+| `Catapult::Attack` | `0x004e2d10` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2997` | yes | partial | Catapult::Attack(point): sets the shot point, activity 2, waits for the shot; gap (design): catapult fire is CATAPULT_AUTOFIRE-driven in the original and acquisition-driven here; the point overload reads pt.x as an object id |
+| `Obj::SetStamina` | `0x005ab440` | 56 | member/1 | `engine/core/src/sim/combat.cpp:3006` | yes | verified | Obj::SetStamina: raw store through vtbl+0x9c, no clamp, no dead check, invalid receiver no-op; fixed for objects the combat system does not hold |
+| `Unit::Attack` | `0x005ddb50` | 56 | member/0, member/1 | `engine/core/src/sim/combat.cpp:2997` | yes | partial | Unit::Attack: target stored before the gate, gate = CanAttack virtual + range 0x005a7800, refused -> false without suspending, accepted -> suspends until the swing ends; gaps: range half not modelled (shared reach measure with GotoAttack), suspension is attack_interval, refused path does not store the target |
+| `Obj::Heal` | `0x005ab690` | 45 | member/1 | `engine/core/src/sim/combat.cpp:3003` | yes | partial | Obj::Heal: n<0 changes nothing (fixed), min(h+n,max) through the health store, cure at full health (fixed), script objects (fixed); gap: the original writes a dying unit's health, the engine's heal refuses it |
+| `Query::Heal` | `0x00578ff0` | 45 | member/1 | `engine/core/src/sim/combat.cpp:3003` |  | partial | Query::Heal: refresh, skip dead, min(h+n,max), no sign check; engine has no Query form for Heal; no shipped site heals a group |
+| `Catapult::InRange` | `0x004e3230` | 28 | member/1 | `engine/core/src/sim/combat.cpp:3008` |  | partial | Catapult::InRange(point): isqrt(d2)-own radius in [min_range, range], no min<1 escape; gap (design, with Catapult::Attack): the point overload is not dispatched and reads pt.x as an object id |
+| `Unit::InRange` | `0x005d72e0` | 28 | member/1 | `engine/core/src/sim/combat.cpp:3008` | yes | partial | Unit::InRange: held receiver -> false (fixed); surface band isqrt(d2)-r1-r2 in [min,range], min<1 skips the inner bound; gap: engine measures min centre to centre and max squared, kept shared with GotoAttack's arrival (Balcans EPRIEST_IDLE spin) |
+| `Obj::maxstamina` | `0x005adba0` | 19 | member/0 | `engine/core/src/sim/combat.cpp:2998` |  | partial | Obj::maxstamina: [obj+0xcc], invalid -> 0; non-combatants answer 0 here (a HeroGrave's holds the dead hero's level, and graves are not spawned); skill terms missing |
+| `Unit::maxstamina` | `0x005d8d10` | 19 | member/0 | `engine/core/src/sim/combat.cpp:2998` |  | partial | Unit::maxstamina: the class record's value (+0x298), no bonus; one engine member serves both forms and adds the AddBonus term, which every shipped AddBonus passes as 0 |
+| `Obj::HealStamina` | `0x005ab700` | 11 | member/1 | `engine/core/src/sim/combat.cpp:3004` | yes | verified | Obj::HealStamina: n<0 refused, min(s+n,maxstamina), no dead check; fixed for script objects |
+| `Query::HealStamina` | `0x00579100` | 11 | member/1 | `engine/core/src/sim/combat.cpp:3004` | yes | verified | Query::HealStamina: refreshed members, dead skipped, no sign check (fixed: dead members were healed and negatives refused) |
+| `Unit::BestTargetForPos` | `0x005dd280` | 7 | member/0 | `engine/core/src/sim/combat.cpp:2980` | yes | partial | BestTargetForPos: no squad gate, held -> invalid, surface d in [min,range]; gaps: the score design of /0, min measured centre to centre, buildings offered |
+| `Obj::CanAttack` | `0x005ab060` | 6 | member/1 | `engine/core/src/sim/combat.cpp:3007` | yes | partial | CanAttack: dead target then dead receiver -> false (fixed), CanAttack virtual, then range; gap: range half omitted so it refuses exactly what Attack refuses (RAM_ATTACK loop) |
+| `Catapult::SetTarget` | `0x004e3600` | 5 | member/1 | `engine/core/src/sim/combat.cpp:3020` |  | partial | Catapult::SetTarget: stores the handle at +0x228 unvalidated and mirrors it to the settlement's CatapultTowers' ui_target; gap (design, with Catapult::Attack): engine order_attack engages instead and mirrors nothing |
+| `InvalidateDamageFormulaParams` | `0x004c6b10` | 5 | free/0 | `engine/core/src/sim/combat.cpp:2949` | yes | verified | InvalidateDamageFormulaParams: zeroes the reload flag 0x00996ae8; the engine caches nothing, so nothing to invalidate |
+| `Unit::BestTargetInRange` | `0x005dd2a0` | 5 | member/2 | `engine/core/src/sim/combat.cpp:2981` | yes | partial | BestTargetInRange: ForPos's core centred on the point, r<1 -> [+0xd0], x==-1 -> own position (not reproduced); gaps as ForPos |
+| `Unit::BestTargetInSquadSightMisZeroDamage` | `0x005dcb00` | 5 | member/0 | `engine/core/src/sim/combat.cpp:2975` | yes | partial | BestTargetInSquadSightMisZeroDamage: the circle path shifts its flag into the exclusive slot (0x005dca31), so the answer is /0 (fixed: the engine filtered unarmed targets); held guard fixed; squad-member and score gaps as /0 |
+| `Catapult::ClearTarget` | `0x004e3710` | 4 | member/0 | `engine/core/src/sim/combat.cpp:3019` |  | partial | Catapult::ClearTarget: clears +0x228 and the settlement CatapultTowers' ui_target; gap (design): engine stop() idles the catapult and leaves the towers |
+| `Building::BestTarget` | `0x004dcc60` | 3 | member/0 | `engine/core/src/sim/combat.cpp:3011` |  | inferred | Building::BestTarget: box +-sight, units only, not hidden, first in [min,range] stops, else threat<=3 nearest; registered BestTarget/0 answers with the unit core here -- a separate handler belongs with the scripted tower-fire design |
+| `Catapult::BestTarget` | `0x004e2f60` | 3 | member/0 | `engine/core/src/sim/combat.cpp:3011` |  | inferred | Catapult::BestTarget: buildings first by max target_priority in [min,range], not Wall, nearly-destroyed spared unless a garrisoned centre; units only while [+0x22c]; answered with the unit core here, with the catapult-fire design |
+| `Catapult::GetPointOnTarget` | `0x004e3080` | 3 | member/1 | `engine/core/src/sim/combat.cpp:3010` | yes | partial | Catapult::GetPointOnTarget: receiver checked first, (0,0) on either failure (fixed), unit target -> posRH (fixed); gap: the footprint walk for a building is not modelled (no per-object cell list) |
+| `Unit::BestTargetInSquadSightExclusive` | `0x005dcf30` | 3 | member/1 | `engine/core/src/sim/combat.cpp:2978` | yes | partial | BestTargetInSquadSightExclusive: on the circle path its flag lands in the independents slot -- wildlife excluded, mismatch +200 not rejected, unknown name -> unfiltered minus wildlife (fixed); held guard fixed; squad-member and score gaps as /0 |
+| `Unit::BestTargetInSquadSight_PreferUndiseased` | `0x005dcd40` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2977` | yes | partial | BestTargetInSquadSight_PreferUndiseased: diseased candidate +200 on both paths; held guard fixed; gaps: Disease now sets a flag and the alias does not add the penalty; squad-member and score gaps as /0 |
+| `Unit::TimeWithoutAttack` | `0x005d7f50` | 3 | member/0 | `engine/core/src/sim/combat.cpp:2961` | yes | verified | TimeWithoutAttack: now - [unit+0x1a4], invalid -> 0 |
+| `Catapult::GetCurrentTarget` | `0x004e3500` | 2 | member/0 | `engine/core/src/sim/combat.cpp:3018` |  | partial | Catapult::GetCurrentTarget: pushes the handle at [cat+0x228] (0xffff -> null), invalid receiver logs and answers null; engine answers Combatant::target, which SetTarget sets only when order_attack accepts (design, with Catapult::SetTarget) |
+| `Unit::EnemiesInSight` | `0x005d74d0` | 2 | member/0 | `engine/core/src/sim/combat.cpp:3009` | yes | partial | EnemiesInSight: invalid/dead/held -> false, circle [+0xd0] rim inclusive, enemy unit not dead with damage > 1 and the looker's CanAttack (fixed); gap: a hidden unit counts when the looker's player sees it, approximated as never |
+| `Obj::SetHealth` | `0x005ab4e0` | 1 | member/1 | `engine/core/src/sim/combat.cpp:3005` | yes | verified | Obj::SetHealth: raw store, no death at 0; the unit store cures disease on reaching max (fixed); script objects (fixed) |
+| `SetExperienceModifier` | `0x005d2fb0` | 1 | free/2 | `engine/core/src/sim/combat.cpp:3014` | yes | verified | SetExperienceModifier: player-1 signed <16, [record+0x84]; <=0 is an out-of-bounds write in the original, unreachable from shipped data |
+| `Unit::AddBonus` | `0x005e0ce0` | 1 | member/5 | `engine/core/src/sim/combat.cpp:3017` | yes | verified | Unit::AddBonus: args 1-4, argument 4 into both max slots, argument 5 unread, then the rebuild; the shipped site passes zeros so the rebuild's rescale is invisible |
+| `Unit::BestNoIndependentTargetInSquadSight` | `0x005dcc80` | 1 | member/0 | `engine/core/src/sim/combat.cpp:2976` | yes | partial | BestNoIndependentTargetInSquadSight: its flag is dropped on the circle path, so the answer is /0 (fixed: engine excluded wildlife); held guard fixed; squad-member and score gaps as /0 |
+| `Unit::RecalcBonuses` | `0x005e0380` | 1 | member/0 | `engine/core/src/sim/combat.cpp:3016` | yes | partial | Unit::RecalcBonuses: the rebuild 0x005d9df0 -- class stats, AddBonus record, items, skills, Toughness and Statue of Amon-Ra maxhealth, formation, DefensiveCry, level, then health and stamina rescaled by new/old max; engine derives stats on read without Toughness, Amon-Ra, formation, items, x2 and does no rescale |
 
-## hero -- 0 of 64 verified, 1,181 call sites
+## hero -- 47 of 64 verified, 1,181 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Unit::SetLevel` | `0x005d7690` | 207 | member/1 | `engine/core/src/sim/hero.cpp:2435` |  | unread |  |
-| `Unit::hero` | `0x005d7380` | 153 | member/0 | `engine/core/src/sim/hero.cpp:2432` |  | unread |  |
-| `Unit::inherentlevel` | `0x005d77a0` | 142 | member/0 | `engine/core/src/sim/hero.cpp:2434` | yes | unread |  |
-| `Unit::experience` | `0x005d75b0` | 102 | member/0 | `engine/core/src/sim/hero.cpp:2433` |  | unread |  |
-| `ItemHolder::AddItem` | `0x0053c5a0` | 69 | member/1 | `engine/core/src/sim/hero.cpp:2436` |  | unread |  |
-| `Obj::AddItem` | `0x005ac910` | 69 | member/1 | `engine/core/src/sim/hero.cpp:2436` |  | unread |  |
-| `Unit::level` | `0x005d7740` | 45 | member/0 | `engine/core/src/sim/hero.cpp:2440` |  | unread |  |
-| `Hero::SetAutocast` | `0x0052f790` | 33 | member/1 | `engine/core/src/sim/hero.cpp:2462` | yes | unread |  |
-| `ItemHolder::HasItem` | `0x0053c910` | 29 | member/1 | `engine/core/src/sim/hero.cpp:2439` |  | unread |  |
-| `Obj::HasItem` | `0x004263e0` | 29 | member/1 | `engine/core/src/sim/hero.cpp:2439` |  | unread |  |
-| `Unit::SetExperience` | `0x005d7610` | 27 | member/1 | `engine/core/src/sim/hero.cpp:2437` |  | unread |  |
-| `GetSquad` | `0x00421090` | 18 | free/2, member/0 | `engine/core/src/sim/hero.cpp:2441` | yes | unread |  |
-| `Unit::GetSquad` | `0x00424510` | 18 | free/2, member/0 | `engine/core/src/sim/hero.cpp:2441` |  | unread |  |
-| `Druid::FindUnitToLearn` | `0x00513ce0` | 15 | member/0 | `engine/core/src/sim/hero.cpp:2464` | yes | unread |  |
-| `Hero::GetSkill` | `0x0052f550` | 12 | member/1 | `engine/core/src/sim/hero.cpp:2442` |  | unread |  |
-| `ItemUsed` | `0x00534a30` | 12 | free/1 | `engine/core/src/sim/hero.cpp:2454` | yes | unread |  |
-| `Druid::FindUnitToHeal` | `0x00513990` | 11 | member/0 | `engine/core/src/sim/hero.cpp:2466` |  | unread |  |
-| `Obj::UseItem` | `0x00426480` | 11 | member/1 | `engine/core/src/sim/hero.cpp:2443` | yes | unread |  |
-| `GetUseCount` | `0x00534aa0` | 10 | free/0 | `engine/core/src/sim/hero.cpp:2455` | yes | unread |  |
-| `Squad::HasFreedom` | `0x00427aa0` | 10 | member/0 | `engine/core/src/sim/hero.cpp:2444` | yes | unread |  |
-| `Unit::HasFreedom` | `0x005d7d30` | 10 | member/0 | `engine/core/src/sim/hero.cpp:2444` | yes | unread |  |
-| `Druid::FindUnitBelowILevel` | `0x005132f0` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2470` |  | unread |  |
-| `Druid::FindUnitBelowILevel` | `0x00513390` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2470` |  | unread |  |
-| `Unit::DetachFrom` | `0x005db3b0` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2445` |  | unread |  |
-| `Druid::GetBestCrippleTarget` | `0x00513e10` | 8 | member/0 | `engine/core/src/sim/hero.cpp:2471` |  | unread |  |
-| `Unit::GetBestCurseTarget` | `0x005d9cb0` | 8 | member/0 | `engine/core/src/sim/hero.cpp:2469` |  | unread |  |
-| `Druid::FindUnitToRevitalize` | `0x00513aa0` | 7 | member/0 | `engine/core/src/sim/hero.cpp:2467` | yes | unread |  |
-| `Hero::DetachArmy` | `0x0052fd20` | 6 | member/0 | `engine/core/src/sim/hero.cpp:2447` |  | unread |  |
-| `Hero::SkillInEffect` | `0x0052f5c0` | 6 | member/1 | `engine/core/src/sim/hero.cpp:2446` |  | unread |  |
-| `Obj::FindItem` | `0x005acf10` | 6 | member/1 | `engine/core/src/sim/hero.cpp:2457` |  | unread |  |
-| `Obj::RemoveItemsOfType` | `0x005b0450` | 5 | member/1 | `engine/core/src/sim/hero.cpp:2448` |  | unread |  |
-| `Obj::item_count` | `0x005ad390` | 5 | member/0 | `engine/core/src/sim/hero.cpp:2449` |  | unread |  |
-| `Druid::FindUnitToHide` | `0x00513bb0` | 4 | member/0 | `engine/core/src/sim/hero.cpp:2468` | yes | unread |  |
-| `Hero::HasArmy` | `0x0052e4b0` | 4 | member/0 | `engine/core/src/sim/hero.cpp:2458` |  | unread |  |
-| `Hero::SetSkill` | `0x0052f4f0` | 4 | member/2 | `engine/core/src/sim/hero.cpp:2456` |  | unread |  |
-| `Obj::GiveItem` | `0x005aca10` | 4 | member/2 | `engine/core/src/sim/hero.cpp:2460` |  | unread |  |
-| `GetRandomHeroClass` | `0x00531440` | 3 | free/2 | `engine/core/src/sim/hero.cpp:2475` | yes | unread |  |
-| `Hero::AvailableSkillPoints` | `0x0052f680` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2490` |  | unread |  |
-| `Hero::GetFinalPartyOrientation` | `0x0052f7e0` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2479` | yes | unread |  |
-| `Hero::IsArmyOutside` | `0x0052ff00` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2459` | yes | unread |  |
-| `Hero::TimePastLastAttack` | `0x0052ee40` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2477` | yes | unread |  |
-| `Item::SetUseCount` | `0x00535100` | 3 | member/1 | `engine/core/src/sim/hero.cpp:2452` | yes | unread |  |
-| `Item::use_count` | `0x00535000` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2451` | yes | unread |  |
-| `Obj::max_items` | `0x005ad3f0` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2453` | yes | unread |  |
-| `SetUseCount` | `0x00534b10` | 3 | member/1 | `engine/core/src/sim/hero.cpp:2452` |  | unread |  |
-| `Hero::IsHeroArmyFull` | `0x0052e320` | 2 | member/0 | `engine/core/src/sim/hero.cpp:2473` | yes | unread |  |
-| `HeroSkillId` | `0x0052d9a0` | 2 | free/1 | `engine/core/src/sim/hero.cpp:2498` |  | unread |  |
-| `ItemHolder::RemoveItem` | `0x0053cb20` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2494` |  | unread |  |
-| `Obj::DropItem` | `0x005acdf0` | 2 | member/2 | `engine/core/src/sim/hero.cpp:2493` |  | unread |  |
-| `Obj::OpenItemHolder` | `0x005acba0` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2461` | yes | unread |  |
-| `Obj::PutItem` | `0x005acc90` | 2 | member/2 | `engine/core/src/sim/hero.cpp:2492` |  | unread |  |
-| `Obj::RemoveItem` | `0x005ad230` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2494` |  | unread |  |
-| `Obj::RemoveItem` | `0x005ad190` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2494` |  | unread |  |
-| `Unit::AttachTo` | `0x005de090` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2472` |  | unread |  |
-| `GetItem` | `0x006a5a00` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2450` |  | unread |  |
-| `Hero::HasFinalPartyOrientationRequest` | `0x0052f850` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2481` | yes | unread |  |
-| `Hero::SetFinalPartyOrientation` | `0x0052f6e0` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2480` | yes | unread |  |
-| `Hero::UseSkill` | `0x0052f620` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2491` |  | unread |  |
-| `Hero::autocast` | `0x0052f740` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2463` | yes | unread |  |
-| `Hero::maxarmy` | `0x0052e380` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2474` | yes | unread |  |
-| `HeroArmiesFullPerc` | `0x00421f30` | 1 | free/1 | `engine/core/src/sim/hero.cpp:2499` |  | unread |  |
-| `Obj::ExchangeItem` | `0x005ac800` | 1 | member/2 | `engine/core/src/sim/hero.cpp:2495` |  | unread |  |
-| `Obj::GetItem` | `0x005ad310` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2450` | yes | unread |  |
-| `Unit::IncKills` | `0x005d7810` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2438` | yes | unread |  |
+| `Unit::SetLevel` | `0x005d7690` | 207 | member/1 | `engine/core/src/sim/hero.cpp:2840` | yes | verified | clamp [1,1000]; only when that is not the inherent level, SetExperience virtual with Exp[n] (0x009bf87c); invalid or dead receiver writes nothing (was: stored a level beside a progress counter) |
+| `Unit::hero` | `0x005d7380` | 153 | member/0 | `engine/core/src/sim/hero.cpp:2837` | yes | verified | 16-bit hero handle at +0x170, 65535 when none or on a miss; no liveness test |
+| `Unit::inherentlevel` | `0x005d77a0` | 142 | member/0 | `engine/core/src/sim/hero.cpp:2839` | yes | verified | level_for_experience (0x005d28c0) of the running total +0x180; miss -> 1 (was 0) |
+| `Unit::experience` | `0x005d75b0` | 102 | member/0 | `engine/core/src/sim/hero.cpp:2838` | yes | verified | the running total at +0x180 (was progress within the level); miss -> 0 |
+| `ItemHolder::AddItem` | `0x0053c5a0` | 69 | member/1 | `engine/core/src/sim/hero.cpp:2841` | yes | partial | ItemHolder::AddItem answers whether the name minted (true even when the full holder refused); served by Obj::AddItem's body, which answers whether it was added -- no shipped ItemHolder-typed receiver calls it |
+| `Obj::AddItem` | `0x005ac910` | 69 | member/1 | `engine/core/src/sim/hero.cpp:2841` | yes | partial | mint by exact name (0x00535640, two catalogues; the lookup fix is 9693e17), add virtual (count < inventory_size, 0x005b60a0), RecalcBonuses; the GetItem effect object (0x00518650 entry 27) and the equip_script start (flag 7, 0x0053baa0) not modelled -- no item-script runner (design) |
+| `Unit::level` | `0x005d7740` | 45 | member/0 | `engine/core/src/sim/hero.cpp:2845` | yes | partial | vtbl+0x114 = stored +0x184, rebuilt by RecalcBonuses 0x005d9df0: total + item exp + hero army addend (0x0052fc50/0x0052d7a0), its level + item levels + Battle Cry, >= 1, Discipline floor; computed on demand here; the stand_position party bonus ([hero+0x2b0]+0x6c) and the recalc timing not modelled; miss -> 1 |
+| `Hero::SetAutocast` | `0x0052f790` | 33 | member/1 | `engine/core/src/sim/hero.cpp:2867` | yes | verified | sets or clears bit 2 of [hero+0x194]; miss prints |
+| `ItemHolder::HasItem` | `0x0053c910` | 29 | member/1 | `engine/core/src/sim/hero.cpp:2844` | yes | verified | walk of held items, exact name compare; miss -> false; same answer as Obj::HasItem's |
+| `Obj::HasItem` | `0x004263e0` | 29 | member/1 | `engine/core/src/sim/hero.cpp:2844` | yes | verified | find-by-name virtual 0x005afd60 (front-to-back, exact, length-checked) >= 0; miss -> false |
+| `Unit::SetExperience` | `0x005d7610` | 27 | member/1 | `engine/core/src/sim/hero.cpp:2842` | yes | partial | invalid/dead refused; 0x005dbf70: unchanged total no-op, unclamped write, Nobility lift for Military in [Exp[8],Exp[12]); the owner's highest-military-level record (player+0x50) and its UI notice and the sprite refresh not modelled |
+| `GetSquad` | `0x00421090` | 18 | free/2, member/0 | `engine/core/src/sim/hero.cpp:2846` | yes | verified | packs ((n << 4) & 0xffff) | ((player - 1) & 0xf), no lookup; sim/squad.cpp fn_get_squad (an out-of-range player answers the no-squad handle) |
+| `Unit::GetSquad` | `0x00424510` | 18 | free/2, member/0 | `engine/core/src/sim/hero.cpp:2846` |  | verified | 16-bit squad handle at +0x174 (0 for none), miss -> 0, no print |
+| `Druid::FindUnitToLearn` | `0x00513ce0` | 15 | member/0 | `engine/core/src/sim/hero.cpp:2869` | yes | partial | friendly mask (was any player), predicate 0x00511ff0, first match; squad pass 0x00513840 keeps the last member passing (added); spawn templates excluded (Danube trap); grid cell order and team-vision stealth bits not modelled |
+| `Hero::GetSkill` | `0x0052f550` | 12 | member/1 | `engine/core/src/sim/hero.cpp:2847` | yes | verified | signed byte [hero+0x1fc+id], -1 for not offered (was 0), id unsigned < 25 else -1, miss -> -1 |
+| `ItemUsed` | `0x00534a30` | 12 | free/1 | `engine/core/src/sim/hero.cpp:2859` | yes | verified | ambient This cast to CVXItemScript, [item+0x28] -= n, destroyed at < 1; not an item -> prints, nothing |
+| `Druid::FindUnitToHeal` | `0x00513990` | 11 | member/0 | `engine/core/src/sim/hero.cpp:2871` | yes | partial | threshold = level virtual + HealAmount (was a class property), score 300*h/max + max(0, edge - range), 1000 park, least wins; squad pass 0x00513620 (added); grid order and stealth bits not modelled |
+| `Obj::UseItem` | `0x00426480` | 11 | member/1 | `engine/core/src/sim/hero.cpp:2848` | yes | partial | name, not object (was an object and one charge spent): find by name (vtbl+0xfc), item at it, use_script compiled (type flag bit 0) and the item not already running one -> starts a CVXItemScript thread, answer = it started; no item-script runner in this engine (design) -- answers false for every shipped call as before |
+| `GetUseCount` | `0x00534aa0` | 10 | free/0 | `engine/core/src/sim/hero.cpp:2860` | yes | verified | ambient item's [item+0x28]; not an item -> 0 |
+| `Squad::HasFreedom` | `0x00427aa0` | 10 | member/0 | `engine/core/src/sim/hero.cpp:2849` | yes | verified | every member's flag bit 30 at +0x198 or RamUnit (0x00540460); empty squad true; squad from the handle with no null check |
+| `Unit::HasFreedom` | `0x005d7d30` | 10 | member/0 | `engine/core/src/sim/hero.cpp:2849` | yes | verified | flag bit 30 at +0x198 or RamUnit heir; miss -> false |
+| `Druid::FindUnitBelowILevel` | `0x005132f0` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2875` |  | partial | 0x00512360: nearest-by-grid search (0x0053eaf0, predicate 0x005122f0: unit, alive, inherent level < n, not Sentry, Military or BaseMage) within sight, then not caster, not enemy, not held, not messenger; first in id order here, not the grid's |
+| `Druid::FindUnitBelowILevel` | `0x00513390` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2875` |  | partial | the radius overload of 0x005132f0; no shipped site, not bound |
+| `Unit::DetachFrom` | `0x005db3b0` | 9 | member/1 | `engine/core/src/sim/hero.cpp:2850` | yes | verified | registered void (was a bool); invalid/dead receiver or hero, or a hero not the unit's (+0x170) -> nothing; else DetachHero 0x005db190 |
+| `Druid::GetBestCrippleTarget` | `0x00513e10` | 8 | member/0 | `engine/core/src/sim/hero.cpp:2876` |  | partial | enemy mask, most stamina behind 0x00512260; a squadded caster (not held, or SF_ADVCHOOSER) walks the squad deque at [squad+0x70] instead of its circle -- that deque not modelled (design) |
+| `Unit::GetBestCurseTarget` | `0x005d9cb0` | 8 | member/0 | `engine/core/src/sim/hero.cpp:2874` |  | partial | enemy mask, most attack; squadded caster walks [squad+0x70] (0x005d94f0) instead of its circle -- not modelled; the retail caster-for-candidate clauses recorded at the section note |
+| `Druid::FindUnitToRevitalize` | `0x00513aa0` | 7 | member/0 | `engine/core/src/sim/hero.cpp:2872` | yes | partial | stamina [+0xc4]/[+0xcc] (was health); +256 floor, hero halves, 1000 park, least wins; squad pass 0x00513700 (added); grid order and stealth bits not modelled |
+| `Hero::DetachArmy` | `0x0052fd20` | 6 | member/0 | `engine/core/src/sim/hero.cpp:2852` |  | verified | 0x0052fb00: pops the army, DetachHero on each member whose hero handle is this hero; miss prints |
+| `Hero::SkillInEffect` | `0x0052f5c0` | 6 | member/1 | `engine/core/src/sim/hero.cpp:2851` |  | verified | effect slot [hero+0x218+4*id] != -1, the end time 0x0052d8f0 stamps and the hero's timer clears; no id bound in the original (out-of-range reads past the array), false here; miss -> false |
+| `Obj::FindItem` | `0x005acf10` | 6 | member/1 | `engine/core/src/sim/hero.cpp:2862` |  | verified | find-by-name then item at index, its handle; miss 0xffff |
+| `Obj::RemoveItemsOfType` | `0x005b0450` | 5 | member/1 | `engine/core/src/sim/hero.cpp:2853` |  | verified | back-to-front, every exact-name match removed and destroyed, count; miss 0 |
+| `Obj::item_count` | `0x005ad390` | 5 | member/0 | `engine/core/src/sim/hero.cpp:2854` |  | verified | vtbl+0x104 item count; miss 0 |
+| `Druid::FindUnitToHide` | `0x00513bb0` | 4 | member/0 | `engine/core/src/sim/hero.cpp:2873` | yes | verified | friendly mask then IsEnemy required: empty on any data; its squad pass (0x005137e0 -> 0x005121e0) wants an enemy squadmate, also empty |
+| `Hero::HasArmy` | `0x0052e4b0` | 4 | member/0 | `engine/core/src/sim/hero.cpp:2863` |  | verified | army count [+0x1e4] != 0; miss -> false |
+| `Hero::SetSkill` | `0x0052f4f0` | 4 | member/2 | `engine/core/src/sim/hero.cpp:2861` | yes | verified | id < 25 and points in [-1,10] else nothing; writer 0x0052def0 with no balance check (was refused), -1 withdraws the skill; Scout moves the hero's sight by SightPerScoutLevel per point difference clamped [100,2048] with the SetSight reveal |
+| `Obj::GiveItem` | `0x005aca10` | 4 | member/2 | `engine/core/src/sim/hero.cpp:2865` | yes | verified | invalid/dead giver or recipient, invalid item, item not the giver's -> false (giver checks added); refused add hands it back |
+| `GetRandomHeroClass` | `0x00531440` | 3 | free/2 | `engine/core/src/sim/hero.cpp:2880` | yes | partial | player decremented; 0x00531060: own heroes' classes dropped, icon clash only narrows; Range(0, n-1) on the narrow list, else the wide; the candidate set (subtree of the named class) inferred and the campaign availability table (0x0059a350, which can redraw) not modelled |
+| `Hero::AvailableSkillPoints` | `0x0052f680` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2895` | yes | verified | 0x0052da80: min(level, 10 per offered skill) - spent, unfloored (was floored at 0); miss -> -1 |
+| `Hero::GetFinalPartyOrientation` | `0x0052f7e0` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2884` | yes | verified | [party+0x5c/0x60] + 1024, the settled pair formation writes (not modelled, so (1024,1024)); miss -> (-1,-1) |
+| `Hero::IsArmyOutside` | `0x0052ff00` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2864` | yes | verified | any resolving army member with a holder (+0x154 != 0xffff) -> false; empty army true; miss -> false |
+| `Hero::TimePastLastAttack` | `0x0052ee40` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2882` | yes | verified | now - [hero+0x2b8] (army last struck); miss -> now |
+| `Item::SetUseCount` | `0x00535100` | 3 | member/1 | `engine/core/src/sim/hero.cpp:2857` | yes | verified | [item+0x28] = v unclamped; otherwise prints |
+| `Item::use_count` | `0x00535000` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2856` | yes | verified | [item+0x28]; unresolvable -> -1, resolves but not an item -> 0 |
+| `Obj::max_items` | `0x005ad3f0` | 3 | member/0 | `engine/core/src/sim/hero.cpp:2858` | yes | verified | vtbl+0x108, the class's +0x29c (inventory_size, atol); miss 0 |
+| `SetUseCount` | `0x00534b10` | 3 | member/1 | `engine/core/src/sim/hero.cpp:2857` |  | partial | free SetUseCount(v) on the ambient item, unclamped; not bound -- no shipped free call (the 3 sites are Item::SetUseCount) |
+| `Hero::IsHeroArmyFull` | `0x0052e320` | 2 | member/0 | `engine/core/src/sim/hero.cpp:2878` | yes | verified | army count >= cap is the answer's negation of count < cap ([+0x1f8]); miss -> true |
+| `HeroSkillId` | `0x0052d9a0` | 2 | free/1 | `engine/core/src/sim/hero.cpp:2903` | yes | verified | 0x005c8d10: exact strcmp over the 25 SKILLS.INI names, -1 for none (was case-insensitive and took the hs* constants) |
+| `ItemHolder::RemoveItem` | `0x0053cb20` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2899` | yes | partial | ItemHolder::RemoveItem(name): first match taken out without destroying, prints when none; served by Obj::RemoveItem's body -- no shipped ItemHolder-typed receiver |
+| `Obj::DropItem` | `0x005acdf0` | 2 | member/2 | `engine/core/src/sim/hero.cpp:2898` | yes | verified | answers false on every path (was the drop's success); an item the receiver holds dropped at the point argument (was at the receiver's feet) |
+| `Obj::OpenItemHolder` | `0x005acba0` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2866` | yes | verified | back-to-front transfer while room, delete_empty holder destroyed, answer = any moved; the floating caption is UI; a non-full refusal (unreachable) not reproduced |
+| `Obj::PutItem` | `0x005acc90` | 2 | member/2 | `engine/core/src/sim/hero.cpp:2897` | yes | verified | invalid/dead receiver, invalid item or holder -> false (receiver checks added); holder add or hand back |
+| `Obj::RemoveItem` | `0x005ad230` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2899` | yes | verified | void (was bool); 1-based index in [1, count] removed and destroyed |
+| `Obj::RemoveItem` | `0x005ad190` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2899` | yes | verified | void (was bool); first held item of the name removed and destroyed (was every one) |
+| `Unit::AttachTo` | `0x005de090` | 2 | member/1 | `engine/core/src/sim/hero.cpp:2877` | yes | verified | invalid/dead receiver or hero -> false; 0x005ddf50: self, count == cap, hero sight 0 or edge distance (0x005a77b0) > sight -> false; already in army -> true; no owner/freedom test (were refused here; no sight test before); the joined unit's effect objects not modelled |
+| `GetItem` | `0x006a5a00` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2855` |  | partial | free GetItem(name): mints the item into the ambient object when it is a unit; not bound -- no shipped free call (the one site is Obj::GetItem) |
+| `Hero::HasFinalPartyOrientationRequest` | `0x0052f850` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2886` | yes | verified | [party+0x54] or [+0x58] nonzero; miss -> false |
+| `Hero::SetFinalPartyOrientation` | `0x0052f6e0` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2885` | yes | verified | [party+0x54/0x58] = pt - 1024; miss does nothing |
+| `Hero::UseSkill` | `0x0052f620` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2896` | yes | verified | 0x0052f140: id < 25 and points > 0 else false; any such skill true (passive did nothing, was refused), running one restarts (was refused); party walk 0x005f5520 hero + army: Healing incl. hero, Charge/Rush/Frenzy skip heroes, Rush damage per stamina gained, Frenzy floor half via the damage virtual; per-member effect objects not modelled |
+| `Hero::autocast` | `0x0052f740` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2868` | yes | verified | bit 2 of [hero+0x194]; the retail miss path's stack bug not reproduced (answers false) |
+| `Hero::maxarmy` | `0x0052e380` | 1 | member/0 | `engine/core/src/sim/hero.cpp:2879` | yes | verified | [hero+0x1f8], the cap with Administration; miss -> 0 |
+| `HeroArmiesFullPerc` | `0x00421f30` | 1 | free/1 | `engine/core/src/sim/hero.cpp:2904` | yes | verified | player decremented (was not: answered for the next player), >= 16 -> 0; 0x00443f50 over the player's squads: non-empty, flags & 0x25 clear, front member a hero -> sum army / sum cap * 100 |
+| `Obj::ExchangeItem` | `0x005ac800` | 1 | member/2 | `engine/core/src/sim/hero.cpp:2900` | yes | partial | invalid receiver or an item it does not hold -> false (owner check added); the original mints a new item into the old slot (new handle), here retyped in place -- the store orders items by id |
+| `Obj::GetItem` | `0x005ad310` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2855` | yes | verified | vtbl+0xf4(n - 1), its handle; outside or miss 0xffff |
+| `Unit::IncKills` | `0x005d7810` | 1 | member/1 | `engine/core/src/sim/hero.cpp:2843` | yes | verified | invalid or dead receiver writes nothing; +0x188 += n unclamped |
 
 ## area -- 7 of 7 verified, 1,049 call sites
 
@@ -848,288 +848,288 @@ Batches are by the file that implements them, most-called file first.
 | `MoveToArea` | `0x0057a530` | 8 | free/2 | `engine/core/src/sim/area.cpp:564` |  | verified | MoveToArea ("move" into 0x0057a2e0): same body and fixes as AttackArea |
 | `AreaDistTo` | `0x004d8970` | 1 | free/2 | `engine/core/src/sim/area.cpp:565` | yes | verified | AreaDistTo: circle edge distance or rectangle Chebyshev, clamped at 0; -1 on a miss |
 
-## feedback -- 0 of 31 verified, 895 call sites
+## feedback -- 22 of 31 verified, 895 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `rollover` | `0x005b4370` | 85 | free/0, free/2, free/3 | `engine/core/src/sim/feedback.cpp:467` | yes | unread |  |
-| `rollover` | `0x005b3020` | 85 | free/0, free/2, free/3 | `engine/core/src/sim/feedback.cpp:467` | yes | unread |  |
-| `rollover` | `0x005b39b0` | 85 | free/0, free/2, free/3 | `engine/core/src/sim/feedback.cpp:467` | yes | unread |  |
-| `rollover` | `0x005b3da0` | 85 | free/0, free/2, free/3 | `engine/core/src/sim/feedback.cpp:467` | yes | unread |  |
-| `CreateFeedback` | `0x005186f0` | 72 | free/2 | `engine/core/src/sim/feedback.cpp:466` |  | unread |  |
-| `CreateFeedback` | `0x005187c0` | 72 | free/2 | `engine/core/src/sim/feedback.cpp:466` | yes | unread |  |
-| `CreateFeedback` | `0x005188a0` | 72 | free/2 | `engine/core/src/sim/feedback.cpp:466` | yes | unread |  |
-| `CreateFeedback` | `0x005189d0` | 72 | free/2 | `engine/core/src/sim/feedback.cpp:466` | yes | unread |  |
-| `View` | `0x004c6cb0` | 35 | free/2 | `engine/core/src/sim/feedback.cpp:473` |  | unread |  |
-| `ShowHint` | `0x006b80f0` | 26 | free/3 | `engine/core/src/sim/feedback.cpp:474` |  | unread |  |
-| `PlayMovie` | `0x004c7da0` | 24 | free/1 | `engine/core/src/sim/feedback.cpp:476` |  | unread |  |
-| `SetShortcutSel` | `0x006a6d00` | 24 | free/3 | `engine/core/src/sim/feedback.cpp:475` |  | unread |  |
-| `SetFog` | `0x006a51e0` | 18 | free/1 | `engine/core/src/sim/feedback.cpp:482` | yes | unread |  |
-| `BlockUserInput` | `0x004c63e0` | 17 | free/0 | `engine/core/src/sim/feedback.cpp:478` |  | unread |  |
-| `UnblockUserInput` | `0x004c6450` | 17 | free/0 | `engine/core/src/sim/feedback.cpp:477` |  | unread |  |
-| `UserNotification` | `0x0055dc00` | 14 | free/4 | `engine/core/src/sim/feedback.cpp:479` | yes | unread |  |
-| `ShowAnnouncement` | `0x004d5b40` | 11 | free/2 | `engine/core/src/sim/feedback.cpp:481` |  | unread |  |
-| `ShowAnnouncement` | `0x004d5cd0` | 11 | free/2 | `engine/core/src/sim/feedback.cpp:481` |  | unread |  |
-| `Obj::PlaySound` | `0x005aba90` | 9 | free/1, free/2, member/1 | `engine/core/src/sim/feedback.cpp:486` |  | unread |  |
-| `PlaySound` | `0x004c60d0` | 9 | free/1, free/2, member/1 | `engine/core/src/sim/feedback.cpp:486` |  | unread |  |
-| `PlaySound` | `0x004c6150` | 9 | free/1, free/2, member/1 | `engine/core/src/sim/feedback.cpp:486` |  | unread |  |
-| `HideZoomMap` | `0x0060e630` | 8 | free/0 | `engine/core/src/sim/feedback.cpp:483` | yes | unread |  |
-| `ShowTutorial` | `0x006b8430` | 7 | free/3 | `engine/core/src/sim/feedback.cpp:485` |  | unread |  |
-| `ViewPos` | `0x004c6b30` | 7 | free/0 | `engine/core/src/sim/feedback.cpp:484` |  | unread |  |
-| `HideAnnouncement` | `0x004d4ac0` | 6 | free/1 | `engine/core/src/sim/feedback.cpp:487` |  | unread |  |
-| `HideAnnouncement` | `0x004d4bc0` | 6 | free/1 | `engine/core/src/sim/feedback.cpp:487` |  | unread |  |
-| `cls` | `0x006a3fe0` | 3 | free/0 | `engine/core/src/sim/feedback.cpp:480` | yes | unread |  |
-| `LockView` | `0x004c6570` | 2 | free/0 | `engine/core/src/sim/feedback.cpp:489` |  | unread |  |
-| `UnlockView` | `0x004c6580` | 2 | free/0 | `engine/core/src/sim/feedback.cpp:488` |  | unread |  |
-| `_ZoomMapLastShownTime` | `0x0060e650` | 1 | free/0 | `engine/core/src/sim/feedback.cpp:502` |  | unread |  |
-| `rollover_desc` | `0x005b4080` | 1 | free/3 | `engine/core/src/sim/feedback.cpp:469` | yes | unread |  |
+| `rollover` | `0x005b4370` | 85 | free/0, free/2, free/3 | `engine/core/src/sim/feedback.cpp:518` | yes | partial | rollover(): title (yellow translated rollover, hotkey form) + newline + translated description as the command loader 0x004f2240 composes them; engine joins the raw keys; tooltip text no script compares |
+| `rollover` | `0x005b3020` | 85 | free/0, free/2, free/3 | `engine/core/src/sim/feedback.cpp:518` | yes | partial | rollover(obj,bool): title, newline + cost line (gold/food/stamina-or-Loyality/pop icons, red when unaffordable by obj), description, then bool: red Not-enough lines; engine: raw keys and a plain cost line after the description |
+| `rollover` | `0x005b39b0` | 85 | free/0, free/2, free/3 | `engine/core/src/sim/feedback.cpp:518` | yes | partial | rollover(obj,class,bool): the (obj,bool) form plus a class Stats/Specials line before the description; costs are the described command's; engine looks the class up as a command row |
+| `rollover` | `0x005b3da0` | 85 | free/0, free/2, free/3 | `engine/core/src/sim/feedback.cpp:518` | yes | partial | rollover(obj,str): title + newline + translated str + description, obj unread; engine puts the message after the description, untranslated |
+| `CreateFeedback` | `0x005186f0` | 72 | free/2 | `engine/core/src/sim/feedback.cpp:517` |  | verified | CreateFeedback(unit,class): effect object in an unsynced handle slot (0x0067b480), no answer; invalid unit or unknown class logs only |
+| `CreateFeedback` | `0x005187c0` | 72 | free/2 | `engine/core/src/sim/feedback.cpp:517` | yes | verified | CreateFeedback(unit,class,ms): as the 2-argument form with an expiry; unbound, no site |
+| `CreateFeedback` | `0x005188a0` | 72 | free/2 | `engine/core/src/sim/feedback.cpp:517` | yes | verified | CreateFeedback(point,class): effect at a point, unsynced slot, no answer |
+| `CreateFeedback` | `0x005189d0` | 72 | free/2 | `engine/core/src/sim/feedback.cpp:517` | yes | verified | CreateFeedback(point,class,ms): as the point form with an expiry; unbound, no site |
+| `View` | `0x004c6cb0` | 35 | free/2 | `engine/core/src/sim/feedback.cpp:524` | yes | verified | View: camera move and lock flag 0x00996ff8=bLock only for a point inside the map rect, inclusive (fixed: was unconditional) |
+| `ShowHint` | `0x006b80f0` | 26 | free/3 | `engine/core/src/sim/feedback.cpp:525` |  | verified | ShowHint: 0 without a hint manager, never suspends; result discarded at every site |
+| `PlayMovie` | `0x004c7da0` | 24 | free/1 | `engine/core/src/sim/feedback.cpp:527` | yes | partial | PlayMovie: synchronous with the game paused, answers whether it played, always ends with input unblocked 0x004c7f35 (fixed); engine plays nothing and answers false |
+| `SetShortcutSel` | `0x006a6d00` | 24 | free/3 | `engine/core/src/sim/feedback.cpp:526` | yes | partial | SetShortcutSel: p-1 in 0..15 and num in 0..9 else nothing, non-empty list ORs 1<<num into /Player<p>/SelectionAssigned (fixed); gap: the group is copied as given, not refilled through the selection-add rules (0x005b9170) |
+| `SetFog` | `0x006a51e0` | 18 | free/1 | `engine/core/src/sim/feedback.cpp:533` | yes | verified | SetFog: queued command to the display flag; the engine applies it at once, which no script can tell apart |
+| `BlockUserInput` | `0x004c63e0` | 17 | free/0 | `engine/core/src/sim/feedback.cpp:529` |  | verified | BlockUserInput: interface block 0x005e31e0(1,1), hints closed; no answer |
+| `UnblockUserInput` | `0x004c6450` | 17 | free/0 | `engine/core/src/sim/feedback.cpp:528` |  | verified | UnblockUserInput: 0x005e31e0(0,1); no answer |
+| `UserNotification` | `0x0055dc00` | 14 | free/4 | `engine/core/src/sim/feedback.cpp:530` | yes | verified | UserNotification: panel only when player-1 is the local player; no answer |
+| `ShowAnnouncement` | `0x004d5b40` | 11 | free/2 | `engine/core/src/sim/feedback.cpp:532` |  | verified | ShowAnnouncement(key,value): ticker table 0x00996890[0]; no getter |
+| `ShowAnnouncement` | `0x004d5cd0` | 11 | free/2 | `engine/core/src/sim/feedback.cpp:532` |  | verified | ShowAnnouncement(player,...): per-player table 1..16; unbound, no shipped site |
+| `Obj::PlaySound` | `0x005aba90` | 9 | free/1, free/2, member/1 | `engine/core/src/sim/feedback.cpp:537` |  | verified | Obj::PlaySound: invalid handle logs; positional play when on screen and visible to the local player |
+| `PlaySound` | `0x004c60d0` | 9 | free/1, free/2, member/1 | `engine/core/src/sim/feedback.cpp:537` |  | verified | PlaySound(name): global play; the variant draw is the C runtime's rand (0x006b0da0), not the simulation's |
+| `PlaySound` | `0x004c6150` | 9 | free/1, free/2, member/1 | `engine/core/src/sim/feedback.cpp:537` |  | verified | PlaySound(player,name): plays only when player-1 is the local player |
+| `HideZoomMap` | `0x0060e630` | 8 | free/0 | `engine/core/src/sim/feedback.cpp:534` | yes | verified | HideZoomMap: the panel's hide virtual only; hiding does not stamp the shown time |
+| `ShowTutorial` | `0x006b8430` | 7 | free/3 | `engine/core/src/sim/feedback.cpp:536` |  | verified | ShowTutorial: ShowHint with the tutorial icon and the 0x005bde80 gate; result discarded |
+| `ViewPos` | `0x004c6b30` | 7 | free/0 | `engine/core/src/sim/feedback.cpp:535` |  | partial | ViewPos: the screen centre converted to world (x snapped to 4, terrain height); engine returns the stored View point exactly, which the save-and-restore idiom cannot tell apart |
+| `HideAnnouncement` | `0x004d4ac0` | 6 | free/1 | `engine/core/src/sim/feedback.cpp:538` |  | verified | HideAnnouncement(key): hides the entry in table 0 |
+| `HideAnnouncement` | `0x004d4bc0` | 6 | free/1 | `engine/core/src/sim/feedback.cpp:538` |  | verified | HideAnnouncement(player,key): per-player table 1..16; unbound, no shipped site |
+| `cls` | `0x006a3fe0` | 3 | free/0 | `engine/core/src/sim/feedback.cpp:531` | yes | verified | cls: blanks every line of the console pr writes to and zeroes the count (0x00618a10 on [0x00996ff4]+0x44cc) (fixed: was a no-op) |
+| `LockView` | `0x004c6570` | 2 | free/0 | `engine/core/src/sim/feedback.cpp:540` |  | verified | LockView: 0x00996ff8 = 1 |
+| `UnlockView` | `0x004c6580` | 2 | free/0 | `engine/core/src/sim/feedback.cpp:539` |  | verified | UnlockView: 0x00996ff8 = 0 |
+| `_ZoomMapLastShownTime` | `0x0060e650` | 1 | free/0 | `engine/core/src/sim/feedback.cpp:553` |  | partial | _ZoomMapLastShownTime: settings key /Player<local+1>/ZoomMapShown minus 1 (no map prefix, -1 in multiplayer), written now+1 by the panel; engine keeps a per-session stamp and answers -1 with no interface |
+| `rollover_desc` | `0x005b4080` | 1 | free/3 | `engine/core/src/sim/feedback.cpp:520` | yes | partial | rollover_desc: title + newline + translated msg + (bool ? description : ""), no costs; engine treats bool as show-costs |
 
-## squad -- 0 of 54 verified, 873 call sites
-
-| entry point | body | sites | engine | implemented at | cited | status | note |
-|---|---|---:|---|---|---|---|---|
-| `Squad::State` | `0x00421170` | 89 | member/0 | `engine/core/src/sim/squad.cpp:4310` | yes | unread |  |
-| `SquadList::Cur` | `0x0042bbd0` | 72 | member/0 | `engine/core/src/sim/squad.cpp:4338` |  | unread |  |
-| `Squad::GAIKAIn` | `0x004212c0` | 61 | member/0 | `engine/core/src/sim/squad.cpp:4311` |  | unread |  |
-| `Squad::Leader` | `0x00421310` | 37 | member/0 | `engine/core/src/sim/squad.cpp:4312` | yes | unread |  |
-| `Squad::AIDest` | `0x004215c0` | 36 | member/0 | `engine/core/src/sim/squad.cpp:4315` | yes | unread |  |
-| `Item::id` | `0x005351a0` | 33 | member/0 | `engine/core/src/sim/squad.cpp:4321` |  | unread |  |
-| `SquadList::Next` | `0x0042bb80` | 32 | member/0 | `engine/core/src/sim/squad.cpp:4339` | yes | unread |  |
-| `Squad::SetCmd` | `0x004272d0` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4322` |  | unread |  |
-| `Squad::SetCmd` | `0x00421460` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4322` |  | unread |  |
-| `Squad::SetCmd` | `0x00427470` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4322` |  | unread |  |
-| `SquadList::EOL` | `0x0042bae0` | 27 | member/0 | `engine/core/src/sim/squad.cpp:4340` | yes | unread |  |
-| `IntArray::size` | `0x00697f20` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` | yes | unread |  |
-| `Squad::Size` | `0x00422ca0` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` | yes | unread |  |
-| `SquadList::Size` | `0x0042bc40` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` | yes | unread |  |
-| `StrArray::size` | `0x00698070` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` | yes | unread |  |
-| `StrMap::size` | `0x00698300` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4344` |  | unread |  |
-| `Squad::Lock` | `0x004217e0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4341` | yes | unread |  |
-| `Squad::Unlock` | `0x00421820` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4342` | yes | unread |  |
-| `SquadList::Lock` | `0x0042bce0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4341` | yes | unread |  |
-| `SquadList::Unlock` | `0x0042bde0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4342` | yes | unread |  |
-| `Unit::IsEnemyInSquadSight` | `0x005d7400` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4324` | yes | unread |  |
-| `GAIKA::GetSquads` | `0x00437a20` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4347` | yes | unread |  |
-| `GAIKA::GetSquads` | `0x00439000` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4347` |  | unread |  |
-| `GAIKA::GetSquads` | `0x00439230` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4347` |  | unread |  |
-| `GAIKA::GetSquads` | `0x00439500` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4347` | yes | unread |  |
-| `Squad::TestFlags` | `0x00421720` | 18 | member/1 | `engine/core/src/sim/squad.cpp:4326` |  | unread |  |
-| `Squad::ClrCmd` | `0x004271d0` | 13 | member/3 | `engine/core/src/sim/squad.cpp:4325` | yes | unread |  |
-| `Squad::SendTo` | `0x00421520` | 13 | member/2 | `engine/core/src/sim/squad.cpp:4330` | yes | unread |  |
-| `SquadList::Rewind` | `0x0042bb30` | 12 | member/0 | `engine/core/src/sim/squad.cpp:4345` | yes | unread |  |
-| `GAIKA::GetAIControlledUnits` | `0x0043a920` | 4 | member/4 | `engine/core/src/sim/squad.cpp:4353` | yes | unread |  |
-| `MilEval` | `0x00421fb0` | 4 | free/1 | `engine/core/src/sim/squad.cpp:4331` |  | unread |  |
-| `Squad::GetLastAttacker` | `0x004218b0` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4314` | yes | unread |  |
-| `Squad::LastFightTime` | `0x00421860` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4313` | yes | unread |  |
-| `Squad::SrcGAIKA` | `0x00421220` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4318` | yes | unread |  |
-| `NumSquads` | `0x00422c40` | 3 | free/1 | `engine/core/src/sim/squad.cpp:4356` |  | unread |  |
-| `Squad::DelOrder` | `0x00421670` | 3 | member/0 | `engine/core/src/sim/squad.cpp:4334` | yes | unread |  |
-| `Squad::StateTime` | `0x00421400` | 3 | member/0 | `engine/core/src/sim/squad.cpp:4328` | yes | unread |  |
-| `AllyMilEval` | `0x004220c0` | 2 | free/1 | `engine/core/src/sim/squad.cpp:4332` |  | unread |  |
-| `GAIKA::AllEnemiesInHolder` | `0x00430dc0` | 2 | member/1 | `engine/core/src/sim/squad.cpp:4368` | yes | unread |  |
-| `Squad::CalcGoAround` | `0x0042e300` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4371` | yes | unread |  |
-| `Squad::DestGAIKA` | `0x00421270` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4319` | yes | unread |  |
-| `Squad::OrderDest` | `0x00421620` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4320` | yes | unread |  |
-| `Squad::TakeNearbyItems` | `0x00429530` | 2 | member/1 | `engine/core/src/sim/squad.cpp:4327` | yes | unread |  |
-| `Squadize` | `0x00425530` | 2 | free/3 | `engine/core/src/sim/squad.cpp:4376` | yes | unread |  |
-| `EnemyMilEval` | `0x00422240` | 1 | free/1 | `engine/core/src/sim/squad.cpp:4333` |  | unread |  |
-| `GAIKA::EvalNeighbors` | `0x00430800` | 1 | member/6 | `engine/core/src/sim/squad.cpp:4364` | yes | unread |  |
-| `NearestHospital` | `0x004316b0` | 1 | free/1 | `engine/core/src/sim/squad.cpp:4377` | yes | unread |  |
-| `Squad::EvalAttach` | `0x00424550` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4372` | yes | unread |  |
-| `Squad::FoodComing` | `0x0042a5b0` | 1 | member/0 | `engine/core/src/sim/squad.cpp:4373` | yes | unread |  |
-| `Squad::InvadeThroughGate` | `0x004299e0` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4369` | yes | unread |  |
-| `Squad::No` | `0x004210f0` | 1 | member/0 | `engine/core/src/sim/squad.cpp:4329` | yes | unread |  |
-| `Squad::SendFoodWagon` | `0x0042a750` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4374` | yes | unread |  |
-| `Squad::UseTeleport` | `0x004296b0` | 1 | member/4 | `engine/core/src/sim/squad.cpp:4370` |  | unread |  |
-| `SquadList::Train` | `0x004366c0` | 1 | member/5 | `engine/core/src/sim/squad.cpp:4351` | yes | unread |  |
-
-## movement -- 0 of 28 verified, 633 call sites
+## squad -- 42 of 54 verified, 873 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Goto` | `0x005bd3b0` | 109 | member/4, member/5 | `engine/core/src/sim/movement.cpp:2658` |  | unread |  |
-| `Unit::Goto` | `0x005d61b0` | 109 | member/4, member/5 | `engine/core/src/sim/movement.cpp:2658` | yes | unread |  |
-| `Unit::Goto` | `0x005d6b90` | 109 | member/4, member/5 | `engine/core/src/sim/movement.cpp:2658` | yes | unread |  |
-| `Unit::Stop` | `0x005d6c90` | 52 | member/1 | `engine/core/src/sim/movement.cpp:2667` | yes | unread |  |
-| `Obj::SetPos` | `0x005ac130` | 32 | member/1 | `engine/core/src/sim/movement.cpp:2674` |  | unread |  |
-| `Unit::HasPath` | `0x005d6e50` | 32 | member/0 | `engine/core/src/sim/movement.cpp:2668` |  | unread |  |
-| `Obj::Face` | `0x005ac4a0` | 16 | member/1 | `engine/core/src/sim/movement.cpp:2660` |  | unread |  |
-| `ObjList::Face` | `0x0055e5d0` | 16 | member/1 | `engine/core/src/sim/movement.cpp:2660` |  | unread |  |
-| `Query::Face` | `0x005797a0` | 16 | member/1 | `engine/core/src/sim/movement.cpp:2660` |  | unread |  |
-| `Hero::FormRadius` | `0x0052ec40` | 15 | member/0 | `engine/core/src/sim/movement.cpp:2679` |  | unread |  |
-| `IsPassable3x3` | `0x004c67d0` | 15 | free/1 | `engine/core/src/sim/movement.cpp:2681` |  | unread |  |
-| `Unit::TimeWithoutWalking` | `0x005d6ee0` | 15 | member/0 | `engine/core/src/sim/movement.cpp:2672` |  | unread |  |
-| `Unit::dest` | `0x005d6f50` | 13 | member/0 | `engine/core/src/sim/movement.cpp:2676` |  | unread |  |
-| `Hero::SetFormation` | `0x0052eca0` | 11 | member/1 | `engine/core/src/sim/movement.cpp:2675` |  | unread |  |
-| `Unit::PathTo` | `0x005de190` | 11 | member/3 | `engine/core/src/sim/movement.cpp:2669` |  | unread |  |
-| `Unit::PathTo` | `0x005de390` | 11 | member/3 | `engine/core/src/sim/movement.cpp:2669` |  | unread |  |
-| `Obj::GetDir` | `0x005ac5e0` | 10 | member/0 | `engine/core/src/sim/movement.cpp:2673` |  | unread |  |
-| `Unit::speed` | `0x005d8ad0` | 7 | member/0 | `engine/core/src/sim/movement.cpp:2677` | yes | unread |  |
-| `Unit::SetWalkAnim` | `0x005d8350` | 6 | member/0, member/1 | `engine/core/src/sim/movement.cpp:2662` | yes | unread |  |
-| `Unit::SetWalkAnim` | `0x005d8300` | 6 | member/0, member/1 | `engine/core/src/sim/movement.cpp:2662` | yes | unread |  |
-| `Hero::formation` | `0x0052ed60` | 5 | member/0 | `engine/core/src/sim/movement.cpp:2678` |  | unread |  |
-| `Unit::SetSpeedFactor` | `0x005d7c30` | 5 | member/1 | `engine/core/src/sim/movement.cpp:2661` |  | unread |  |
-| `Obj::ClipDestToMap` | `0x005ad900` | 3 | member/1 | `engine/core/src/sim/movement.cpp:2671` |  | unread |  |
-| `Unit::DoCarryNothing` | `0x005d8670` | 3 | member/0 | `engine/core/src/sim/movement.cpp:2664` | yes | unread |  |
-| `FormDescription` | `0x005f6320` | 2 | free/1 | `engine/core/src/sim/movement.cpp:2682` | yes | unread |  |
-| `Unit::PathDestFound` | `0x005d8830` | 2 | member/0 | `engine/core/src/sim/movement.cpp:2670` |  | unread |  |
-| `Unit::SetCarryGoodsAnim` | `0x005d84b0` | 1 | member/0 | `engine/core/src/sim/movement.cpp:2666` | yes | unread |  |
-| `Unit::SetCarryWaterAnim` | `0x005d83b0` | 1 | member/0 | `engine/core/src/sim/movement.cpp:2665` | yes | unread |  |
+| `Squad::State` | `0x00421170` | 89 | member/0 | `engine/core/src/sim/squad.cpp:4699` | yes | verified | [squad+0x28] zero-extended word; now stored as a word by every writer (SetCmd/ClrCmd); no-squad handle 0 here (faults there) |
+| `SquadList::Cur` | `0x0042bbd0` | 72 | member/0 | `engine/core/src/sim/squad.cpp:4727` |  | verified | element under the cursor when the pool slot is in use and not at end (0x00420170), else 0 |
+| `Squad::GAIKAIn` | `0x004212c0` | 61 | member/0 | `engine/core/src/sim/squad.cpp:4700` | yes | verified | [squad+0x22] word read; no-squad 0 |
+| `Squad::Leader` | `0x00421310` | 37 | member/0 | `engine/core/src/sim/squad.cpp:4701` | yes | verified | front of the member deque (0x00443df0) as a handle, 0xffff for none |
+| `Squad::AIDest` | `0x004215c0` | 36 | member/0 | `engine/core/src/sim/squad.cpp:4704` | yes | verified | order's node (0x00444140, needs the owner's AI) else DestGAIKA [squad+0x24]; squad_ai_dest |
+| `Item::id` | `0x005351a0` | 33 | member/0 | `engine/core/src/sim/squad.cpp:4710` |  | partial | Item::id answers the item's class name string (handle check, class at [obj+0x24]); no Item handle type in this engine and all 47 shipped .ID receivers are GAIKAs, so the shared ID key answers GAIKA::ID only |
+| `SquadList::Next` | `0x0042bb80` | 32 | member/0 | `engine/core/src/sim/squad.cpp:4728` | yes | verified | 0x004201d0: false at end, else step and true unless the step landed on the end |
+| `Squad::SetCmd` | `0x004272d0` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4711` | yes | verified | no-squad/SF_NOAI silent; word state, clock, flags set-then-clear with lock held; members ordered front to back as SetCommand's step, walk stops after a hero (0x0042742d) -- fixed |
+| `Squad::SetCmd` | `0x00421460` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4711` | yes | verified | point form -> 0x0043ec00, same rules, hero stop at 0x0043ece7 -- fixed |
+| `Squad::SetCmd` | `0x00427470` | 30 | member/4, member/5 | `engine/core/src/sim/squad.cpp:4711` | yes | verified | SetCmdObj: invalid object prints and returns after state/clock/flags|lock are written (0x0042754f), nobody ordered, squad left locked; hero stop 0x00427626 -- fixed |
+| `SquadList::EOL` | `0x0042bae0` | 27 | member/0 | `engine/core/src/sim/squad.cpp:4729` | yes | verified | true for an unresolved list, a slot not in use ([entry+0xc]) or cursor at end |
+| `IntArray::size` | `0x00697f20` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4733` | yes | verified | IntArray::size: count-1 of storage whose slot 0 is a sentinel (resize n -> n+1, 0x0068c820; subscript i -> storage i+1, 0x0068c850), so the written length; the subscript also grows on a read (0x00697e70), which ArrayPool::get does not -- not this body |
+| `Squad::Size` | `0x00422ca0` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4733` | yes | verified | [squad+0x50], the member deque's size |
+| `SquadList::Size` | `0x0042bc40` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4733` | yes | verified | deque count only when not at end (0x00420170), else 0 -- fixed |
+| `StrArray::size` | `0x00698070` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4733` | yes | verified | StrArray::size: as IntArray::size over 8-byte elements |
+| `StrMap::size` | `0x00698300` | 23 | member/0 | `engine/core/src/sim/squad.cpp:4733` |  | partial | StrMap::size reads the map's count [+0x10]; this engine has no StrMap type and no shipped script declares one |
+| `Squad::Lock` | `0x004217e0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4730` | yes | verified | or byte [squad+0x30], 8; no NOAI test |
+| `Squad::Unlock` | `0x00421820` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4731` | yes | verified | and byte [squad+0x30], 0xf7 |
+| `SquadList::Lock` | `0x0042bce0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4730` | yes | verified | lock bit on every squad of the list from its first, regardless of cursor |
+| `SquadList::Unlock` | `0x0042bde0` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4731` | yes | verified | unlock bit on every squad of the list from its first |
+| `Unit::IsEnemyInSquadSight` | `0x005d7400` | 20 | member/0 | `engine/core/src/sim/squad.cpp:4713` | yes | verified | [squad+0x7c], written only zero by two constructors: false; an invalid/dead receiver pushes a wrong-sized value there, false here |
+| `GAIKA::GetSquads` | `0x00437a20` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4736` | yes | partial | GetSquads/1: every squad on the node's deque, no filter -- fixed (was own-only); which squads the deque holds, and their order, is the GAIKA node design's inference |
+| `GAIKA::GetSquads` | `0x00439000` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4736` | yes | partial | GetSquads/2: strength, 0x0044e1f0 presence, any owner -- fixed (selected nothing); node deque inferred (design) |
+| `GAIKA::GetSquads` | `0x00439230` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4736` | yes | partial | GetSquads/3: /4 with AI_OWN; strength filter and player<1 forcing own -- fixed; node deque inferred (design) |
+| `GAIKA::GetSquads` | `0x00439500` | 18 | member/1, member/2, member/3, member/4 | `engine/core/src/sim/squad.cpp:4736` | yes | partial | GetSquads/4: strength, relation, presence, 0x0044eb80 sight for enemies -- fixed; node deque and its order inferred (design) |
+| `Squad::TestFlags` | `0x00421720` | 18 | member/1 | `engine/core/src/sim/squad.cpp:4715` |  | verified | (flags & mask) == mask, word compare |
+| `Squad::ClrCmd` | `0x004271d0` | 13 | member/3 | `engine/core/src/sim/squad.cpp:4714` | yes | verified | no-squad/SF_NOAI silent; word state, clock, flags; vtbl+0xc0(1) on every member (0x005b1120: end from the back, head included), no hero stop -- fixed (silence, word) |
+| `Squad::SendTo` | `0x00421520` | 13 | member/2 | `engine/core/src/sim/squad.cpp:4719` | yes | verified | player's AI present ([+0x88]), not SF_NOAI, post verb 1 with the node and n as words (0x004494c0) |
+| `SquadList::Rewind` | `0x0042bb30` | 12 | member/0 | `engine/core/src/sim/squad.cpp:4734` | yes | verified | 0x0042a3c0: cursor to begin, true when not empty |
+| `GAIKA::GetAIControlledUnits` | `0x0043a920` | 4 | member/4 | `engine/core/src/sim/squad.cpp:4742` | yes | partial | strength, own relation (any for player < 1), 0x0044e1f0 presence gated by the peaceful flag, then per member unit, alive, IsHeirOf the one class name, not UNITFLAG_NOAI, countdown; the node's squad deque and its order are the GAIKA design's inference; ClassFilter also reads comma lists (no shipped site passes one) |
+| `MilEval` | `0x00421fb0` | 4 | free/1 | `engine/core/src/sim/squad.cpp:4720` |  | verified | sum of [squad+0x1c] over the player's squad table skipping flags & 0x25; 1-based, out of range 0 (arg <= 0 reads below the player table there) |
+| `Squad::GetLastAttacker` | `0x004218b0` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4703` | yes | verified | [squad+0xc0] 16-bit handle, 0xffff from the constructor |
+| `Squad::LastFightTime` | `0x00421860` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4702` | yes | verified | [squad+0xbc] raw; constructor 0 |
+| `Squad::SrcGAIKA` | `0x00421220` | 4 | member/0 | `engine/core/src/sim/squad.cpp:4707` | yes | verified | [squad+0x20] word |
+| `NumSquads` | `0x00422c40` | 3 | free/1 | `engine/core/src/sim/squad.cpp:4745` |  | verified | length of the player's squad table; here the highest live index + 1, which reaches the same squads (the original's emptied slots name empty squads) |
+| `Squad::DelOrder` | `0x00421670` | 3 | member/0 | `engine/core/src/sim/squad.cpp:4723` | yes | verified | player's AI present, then 0x00448a80 frees the squad's record |
+| `Squad::StateTime` | `0x00421400` | 3 | member/0 | `engine/core/src/sim/squad.cpp:4717` | yes | verified | clock [0x00996ff4+0x1258] minus [squad+0x2c]; clamped at 0 here (two clocks), never negative there |
+| `AllyMilEval` | `0x004220c0` | 2 | free/1 | `engine/core/src/sim/squad.cpp:4721` |  | verified | MilEval's sum over every player whose relation to the asker (0x0044e250) is not enemy (4) |
+| `GAIKA::AllEnemiesInHolder` | `0x00430dc0` | 2 | member/1 | `engine/core/src/sim/squad.cpp:4757` | yes | verified | settlement node, owner hostile to the asker; every enemy squad of strength present (mask 6, 0x0044eb80 cannot cross it) must have its front member held (0x00422e80 flags any [+0x154] == -1); dead tail 0x00420c00 |
+| `Squad::CalcGoAround` | `0x0042e300` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4760` | yes | verified | side test, |dot| score, CheckMAIKA, SrcGAIKA rewrite, move + rebuilt runner per member, hero stop (0x004179e0); from the front member's posRH -- fixed |
+| `Squad::DestGAIKA` | `0x00421270` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4708` | yes | verified | [squad+0x24] word |
+| `Squad::OrderDest` | `0x00421620` | 2 | member/0 | `engine/core/src/sim/squad.cpp:4709` | yes | verified | 0x00444140 only: the order's node, 0 without one |
+| `Squad::TakeNearbyItems` | `0x00429530` | 2 | member/1 | `engine/core/src/sim/squad.cpp:4716` | yes | verified | front member a hero, DestGAIKA == heading, running verb compared byte for byte, room; sweep centred on the stored position, nearest non-empty holder by floored root of posRHs, getitems sneaked -- fixed (front member, node test, case, positions); ties keep the lower id where the cell order decides |
+| `Squadize` | `0x00425530` | 2 | free/3 | `engine/core/src/sim/squad.cpp:4765` | yes | partial | frees the list, fresh slot, worker 0x00447330 (fresh squad per body at state 0xffff, assignment 0x00446a70, single-member squads listed, then state and clock on each); the hero case (0x00445a50's join) is unread and here a hero keeps his squad, which the placeholder then sticks to when he has an army; stamp is the world's clock, not the script's |
+| `EnemyMilEval` | `0x00422240` | 1 | free/1 | `engine/core/src/sim/squad.cpp:4722` |  | verified | MilEval's sum over every player the asker's relation calls enemy (4) |
+| `GAIKA::EvalNeighbors` | `0x00430800` | 1 | member/6 | `engine/core/src/sim/squad.cpp:4753` | yes | partial | census over the node's neighbours, refusing a neighbour whose settlement is a TTent, a BaseTownhall heir or an independent guarded outpost; with the flag (the one shipped site, GETARMYNEED) each neighbour is first gated on 0x0041cbd0 -- with fog on, the node's Revealed bit, which nothing here sets (current-sight design), so the original's answer is the zeros this still answers; the flag-off census is not implemented |
+| `NearestHospital` | `0x004316b0` | 1 | free/1 | `engine/core/src/sim/squad.cpp:4766` | yes | verified | own settlement, holder room, food >= 300; enemy staying strength via 0x0044e1f0(.,0) + 0x0044eb80 (no peaceful squad ever counts), 3/4 and 1/2 truncating, village x3/2, area-path factor, strict min; measured from the front member's posRH -- fixed (posRH, sight, peaceful) |
+| `Squad::EvalAttach` | `0x00424550` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4761` | yes | verified | hero, squad <= 50, same AIDest; (n-min+1 | n-min+100) * (level/5 + 1) -- fixed (was /10) |
+| `Squad::FoodComing` | `0x0042a5b0` | 1 | member/0 | `engine/core/src/sim/squad.cpp:4762` | yes | partial | sums food cargo of Wagon-class members of the player's peaceful squads (from index 1) whose running object-command targets a unit of this squad; here wagons are economy rows with a follow field (wagon design), summed by follow membership |
+| `Squad::InvadeThroughGate` | `0x004299e0` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4758` | yes | verified | building, very broken, live squad, not NOAI; word state, script clock, lock; no central building leaves the squad locked (0x00429adf); per member tail dropped, advance/capture appended where bound, head ended; hero stop -- fixed |
+| `Squad::No` | `0x004210f0` | 1 | member/0 | `engine/core/src/sim/squad.cpp:4718` | yes | verified | handle >> 4, no lookup |
+| `Squad::SendFoodWagon` | `0x0042a750` | 1 | member/2 | `engine/core/src/sim/squad.cpp:4763` | yes | partial | phase 1 (redirect an existing wagon) not reproducible on the wagon design; phase 2 own store >= 100 food within range, nearest strictly, from the leader's stored position -- fixed (stored position); load clamped, follow on the leader |
+| `Squad::UseTeleport` | `0x004296b0` | 1 | member/4 | `engine/core/src/sim/squad.cpp:4759` |  | verified | CVXTeleport, live squad with a front member; word state, clock, lock; per member tail dropped, cmd to the door (move/advance/sneak only, exact), teleport, cmd to pt, head ended; hero stop -- fixed (stopped member, word, door from posRH) |
+| `SquadList::Train` | `0x004366c0` | 1 | member/5 | `engine/core/src/sim/squad.cpp:4740` | yes | partial | walked list 0; bins A/B/C, thresholds, train/enter lists as read (0x004369c1..); enter loop sets 4 before the class test, exact verbs -- fixed; the regroup is 0x00447330, which merges a call's bodies; here each gets its own squad (regroup design, waits on 0x00445a50's hero case) |
 
-## match -- 0 of 9 verified, 403 call sites
-
-| entry point | body | sites | engine | implemented at | cited | status | note |
-|---|---|---:|---|---|---|---|---|
-| `GetDifficulty` | `0x004c6630` | 136 | free/0 | `engine/core/src/sim/match.cpp:951` | yes | unread |  |
-| `EndGame` | `0x004c9610` | 85 | free/2, free/3 | `engine/core/src/sim/match.cpp:945` | yes | unread |  |
-| `EndGame` | `0x004c9660` | 85 | free/2, free/3 | `engine/core/src/sim/match.cpp:945` | yes | unread |  |
-| `GetTime` | `0x004c64e0` | 81 | free/0 | `engine/core/src/sim/match.cpp:948` | yes | unread |  |
-| `MapSize` | `0x0051b120` | 8 | free/0 | `engine/core/src/sim/match.cpp:950` | yes | unread |  |
-| `GetTeamOverallScore` | `0x004c67a0` | 4 | free/1 | `engine/core/src/sim/match.cpp:959` | yes | unread |  |
-| `GetTeamMilitaryScore` | `0x004c6710` | 2 | free/1 | `engine/core/src/sim/match.cpp:958` | yes | unread |  |
-| `EvalGroup` | `0x004350e0` | 1 | free/1 | `engine/core/src/sim/match.cpp:960` | yes | unread |  |
-| `MapName` | `0x004c8370` | 1 | free/0 | `engine/core/src/sim/match.cpp:949` |  | unread |  |
-
-## wait -- 0 of 13 verified, 342 call sites
-
-| entry point | body | sites | engine | implemented at | cited | status | note |
-|---|---|---:|---|---|---|---|---|
-| `WaitQueryCountBetween` | `0x005ed000` | 208 | free/4 | `engine/core/src/sim/wait.cpp:595` |  | unread |  |
-| `WaitEmptyQuery` | `0x005ed730` | 50 | free/2 | `engine/core/src/sim/wait.cpp:596` | yes | unread |  |
-| `WaitEnvIntBetween` | `0x005ecb70` | 18 | free/4 | `engine/core/src/sim/wait.cpp:597` | yes | unread |  |
-| `WaitSettlementCapture` | `0x005eda80` | 14 | free/3 | `engine/core/src/sim/wait.cpp:601` | yes | unread |  |
-| `WaitIdle` | `0x005ecd80` | 13 | free/2 | `engine/core/src/sim/wait.cpp:602` | yes | unread |  |
-| `WaitUnitsInArea` | `0x005ee310` | 12 | free/3 | `engine/core/src/sim/wait.cpp:603` | yes | unread |  |
-| `WaitHealthBetween` | `0x005ed2c0` | 8 | free/4 | `engine/core/src/sim/wait.cpp:604` | yes | unread |  |
-| `WaitConvRequest` | `0x005ed480` | 7 | free/3, free/5 | `engine/core/src/sim/wait.cpp:607` | yes | unread |  |
-| `WaitConvRequest` | `0x005ed8d0` | 7 | free/3, free/5 | `engine/core/src/sim/wait.cpp:607` | yes | unread |  |
-| `WaitNonEmptyQuery` | `0x005ed800` | 2 | free/2 | `engine/core/src/sim/wait.cpp:598` | yes | unread |  |
-| `EndConvSetup` | `0x005ecc80` | 1 | free/2 | `engine/core/src/sim/wait.cpp:611` | yes | unread |  |
-| `WaitCommonObjects` | `0x005ed100` | 1 | free/3 | `engine/core/src/sim/wait.cpp:600` | yes | unread |  |
-| `WaitObjInQuery` | `0x005ecf00` | 1 | free/3 | `engine/core/src/sim/wait.cpp:599` | yes | unread |  |
-
-## campaign -- 0 of 10 verified, 271 call sites
+## movement -- 17 of 28 verified, 633 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `GiveNote` | `0x00558b40` | 115 | free/1 | `engine/core/src/sim/campaign.cpp:778` |  | unread |  |
-| `RemoveNote` | `0x005581d0` | 65 | free/1 | `engine/core/src/sim/campaign.cpp:779` | yes | unread |  |
-| `RunSequence` | `0x005bc170` | 34 | free/1 | `engine/core/src/sim/campaign.cpp:771` | yes | unread |  |
-| `IsNoteActive` | `0x00557e40` | 24 | free/1 | `engine/core/src/sim/campaign.cpp:780` | yes | unread |  |
-| `ClearNotes` | `0x00557fc0` | 16 | free/0 | `engine/core/src/sim/campaign.cpp:781` |  | unread |  |
-| `SetTerritoryState` | `0x005036e0` | 7 | free/2 | `engine/core/src/sim/campaign.cpp:767` |  | unread |  |
-| `IsRunning` | `0x005ba220` | 5 | free/1 | `engine/core/src/sim/campaign.cpp:772` | yes | unread |  |
-| `IsFinished` | `0x005ba620` | 3 | free/1 | `engine/core/src/sim/campaign.cpp:773` | yes | unread |  |
-| `ConquestBonus` | `0x00501440` | 1 | free/0 | `engine/core/src/sim/campaign.cpp:766` |  | unread |  |
-| `IsWaiting` | `0x005ba420` | 1 | free/1 | `engine/core/src/sim/campaign.cpp:774` | yes | unread |  |
+| `Goto` | `0x005bd3b0` | 109 | member/4, member/5 | `engine/core/src/sim/movement.cpp:3013` |  | verified | Goto(int x, int y): a text (console) registration, not a script member -- 0x004c6ba0 recentres the camera view on a point inside the map rect; no shipped site, deliberately unbound; the ledger row's member/4,5 binding is Unit::Goto's |
+| `Unit::Goto` | `0x005d61b0` | 109 | member/4, member/5 | `engine/core/src/sim/movement.cpp:3013` | yes | partial | Unit::Goto(point): FIXED -- a receiver naming nothing answers true; destination clamped to [map+0xb4..0xc0] and kept; a unit at (-1,-1) with no holder polls 500 ms (0x005d6312); tests a_receiver_that_names_nothing_gets_each_bodys_default, a_point_goto_walks_to_its_destination_clamped_to_the_map, a_goto_by_a_unit_standing_nowhere_asks_again_every_half_second. Design gap: answer after a walking wait (original suspends max(slice, anim) and answers the arrival at re-entry; engine min(slice, eta) and the loop asks again); look-around anim (index 0x13) with no route not played |
+| `Unit::Goto` | `0x005d6b90` | 109 | member/4, member/5 | `engine/core/src/sim/movement.cpp:3013` | yes | partial | Unit::Goto(Obj): FIXED -- false for a receiver naming nothing; via 0x005d40c0 routes only to an approachable target (unit in no holder, not hidden or hidden from nobody on the mover's side), self answers true, else waits the slice and answers false; test an_object_goto_routes_only_to_a_target_it_may_approach. Gaps: side mask [record+0x18] approximated by same owner; same answer-after-wait design gap as the point form |
+| `Unit::Stop` | `0x005d6c90` | 52 | member/1 | `engine/core/src/sim/movement.cpp:3022` | yes | verified | Unit::Stop: FIXED -- false for a receiver naming nothing (was a trap); first entry drops target, routed unit on the map asked to stop and suspended ms, otherwise stops and answers true at once; re-entry asks the route for a next step |
+| `Obj::SetPos` | `0x005ac130` | 32 | member/1 | `engine/core/src/sim/movement.cpp:3029` | yes | partial | Obj::SetPos: FIXED -- a held unit leaves its holder first unless the point is (-1,-1) (0x005d39e0 -> 0x00531a80, roster too); commands ended (vtbl+0xc0(1)) unless called from the object's own command script; route dropped; nothing for a receiver naming nothing; tests set_pos_takes_a_held_unit_out_of_its_holder, face_and_set_pos_from_another_script_end_the_objects_commands. Gap: the screen-space clamp into the camera map rect inset 32 with terrain height (0x006245b0/0x00422b70/0x006243b0) and the anim reset 0x0053d730 not reproduced; shipped sites pass map points |
+| `Unit::HasPath` | `0x005d6e50` | 32 | member/0 | `engine/core/src/sim/movement.cpp:3023` | yes | verified | Unit::HasPath: FIXED -- false for a receiver naming nothing and for a held unit; a hero (bit 0x1000000) also counts any army member whose route follows the formation (0x0052fe40, mode 2 = MoveState::party == hero); test a_hero_has_a_path_while_his_column_is_still_marching |
+| `Obj::Face` | `0x005ac4a0` | 16 | member/1 | `engine/core/src/sim/movement.cpp:3015` | yes | partial | Obj::Face: FIXED -- faces (pt - pos, (0,1) for zero) and ends the object's commands unless called from its own command script (0x0069f950(0) vs the running thread); test face_and_set_pos_from_another_script_end_the_objects_commands. Gap: anim reset 0x0053d730 not modelled; facing kept at kFacingLength not the raw difference (design) |
+| `ObjList::Face` | `0x0055e5d0` | 16 | member/1 | `engine/core/src/sim/movement.cpp:3015` | yes | partial | ObjList::Face: FIXED (was a trap for an ObjList receiver) -- every live member faced and its commands ended, no own-script test; test as Obj::Face's. No shipped site. Same anim/facing-length gap |
+| `Query::Face` | `0x005797a0` | 16 | member/1 | `engine/core/src/sim/movement.cpp:3015` | yes | partial | Query::Face: FIXED (was a trap) -- query handle naming nothing does nothing; every member faced and its commands ended; covered by the list-form path. No shipped site. Same anim/facing-length gap |
+| `Hero::FormRadius` | `0x0052ec40` | 15 | member/0 | `engine/core/src/sim/movement.cpp:3034` | yes | partial | Hero::FormRadius: FIXED -- 0x005f2350 on [hero+0x2b0]: formation radius [form+0x34] when it has members ([form+0x14]) and it is non-zero, else the hero's class radius [class+0x2dc] (was class formation_radius, the rank spacing); 0 for a receiver naming nothing; test form_radius_is_the_formations_reach_or_the_heros_own_radius. Gap: the layout (0x005f4390 -> 0x005f1f60) reruns whenever marked; form_extent here is laid only by place_army on a march |
+| `IsPassable3x3` | `0x004c67d0` | 15 | free/1 | `engine/core/src/sim/movement.cpp:3036` | yes | verified | IsPassable3x3: 0x0053eb60 -- point at least 16 inside the map rect on every side and the nine points at +/-16 free in the map's pass layer; ObstructionGrid::passable_3x3's cell and its eight neighbours are the same cells, off-map blocked |
+| `Unit::TimeWithoutWalking` | `0x005d6ee0` | 15 | member/0 | `engine/core/src/sim/movement.cpp:3027` | yes | verified | Unit::TimeWithoutWalking: FIXED -- now - [unit+0x150] (Goto's failure stamp, MoveState::goto_failed_at), 0 when clear or for a receiver naming nothing (was time since the unit last moved); test time_without_walking_is_how_long_goto_has_failed_to_lay_a_route |
+| `Unit::dest` | `0x005d6f50` | 13 | member/0 | `engine/core/src/sim/movement.cpp:3031` | yes | verified | Unit::dest: FIXED -- route record's vtbl+0x10 (0x00418560 -> coop 0x004175e0 -> SPath 0x0040bb80: last point of the path) when there is a route, else the unit's vtbl+0xc8 posRH (0x005d3db0); (-1,-1) for a receiver naming nothing (was the ordered target / holder walk); test dest_and_path_dest_found_answer_the_end_of_the_route |
+| `Hero::SetFormation` | `0x0052eca0` | 11 | member/1 | `engine/core/src/sim/movement.cpp:3030` | yes | verified | Hero::SetFormation: FIXED -- an unknown name is printed into the dead sink and ignored (was a trap); else [form+0x18] set and the layout marked (0x005f2200); nothing for a receiver naming nothing; test set_formation_ignores_a_name_the_file_does_not_declare |
+| `Unit::PathTo` | `0x005de190` | 11 | member/3 | `engine/core/src/sim/movement.cpp:3024` |  | partial | Unit::PathTo(point): FIXED -- -1 for a receiver naming nothing; 1,000,000 for a unit aboard a ship (0x005de1e1); third argument unread; test path_to_an_object_reaches_its_edge_and_a_passenger_answers_a_million. Inferred: the answer (pathfinder [0x8c528c] vtbl+8 result +0x18 >> 16) read as the route length; the held unit's start point (0x004db6c0) and the class +0x31c search flags not reproduced |
+| `Unit::PathTo` | `0x005de390` | 11 | member/3 | `engine/core/src/sim/movement.cpp:3024` | yes | partial | Unit::PathTo(Obj): FIXED -- -1 for a target naming nothing (was a trap); goal is the target's posRH (vtbl+0xc8) and both class radii are added to the range unclamped; on-ship 1,000,000; test as the point form's. Same inferred measure and start-point gap |
+| `Obj::GetDir` | `0x005ac5e0` | 10 | member/0 | `engine/core/src/sim/movement.cpp:3028` | yes | partial | Obj::GetDir: [obj+0x48],[obj+0x4c]; (0,1) for a receiver naming nothing (FIXED, was a trap); test a_receiver_that_names_nothing_gets_each_bodys_default. Gap: facing length is kFacingLength by design, the original's is Face's raw difference or the walk's; HERO_RETREAT.VS's pt + GetDir reads the length |
+| `Unit::speed` | `0x005d8ad0` | 7 | member/0 | `engine/core/src/sim/movement.cpp:3032` | yes | verified | Unit::speed: class [+0x2c8] (speed) whatever the movement record; 0 for a receiver naming nothing (FIXED, was a trap) |
+| `Unit::SetWalkAnim` | `0x005d8350` | 6 | member/0, member/1 | `engine/core/src/sim/movement.cpp:3017` | yes | verified | Unit::SetWalkAnim(n): writes n-1 to [unit+0x1bc]; engine slot n (index + 1, as StartAnim's n-1); nothing for a receiver naming nothing (FIXED, was a trap) |
+| `Unit::SetWalkAnim` | `0x005d8300` | 6 | member/0, member/1 | `engine/core/src/sim/movement.cpp:3017` | yes | verified | Unit::SetWalkAnim(): writes index 0 = slot 1; nothing for a receiver naming nothing (FIXED, was a trap) |
+| `Hero::formation` | `0x0052ed60` | 5 | member/0 | `engine/core/src/sim/movement.cpp:3033` | yes | verified | Hero::formation: the name of [[hero+0x2b0]+0x18]; file default when never set; empty string for a receiver naming nothing (FIXED, was a trap) |
+| `Unit::SetSpeedFactor` | `0x005d7c30` | 5 | member/1 | `engine/core/src/sim/movement.cpp:3016` | yes | partial | Unit::SetSpeedFactor: n written whole to [unit+0x15c]; nothing for a receiver naming nothing (FIXED, was a trap). Labelled engine guard: a negative factor is stored as 0 (shipped values 7, 150, 170) |
+| `Obj::ClipDestToMap` | `0x005ad900` | 3 | member/1 | `engine/core/src/sim/movement.cpp:3026` | yes | verified | Obj::ClipDestToMap: clamp into [map+0xb4..0xc0]; the receiver is never looked at |
+| `Unit::DoCarryNothing` | `0x005d8670` | 3 | member/0 | `engine/core/src/sim/movement.cpp:3019` | yes | verified | Unit::DoCarryNothing: FIXED -- [unit+0x1bc] == 0, i.e. slot exactly 1 (was slot <= 1, so SetWalkAnim(0) read as nothing carried); false for a receiver naming nothing; test the_carry_trio_is_the_walk_animation_slot |
+| `FormDescription` | `0x005f6320` | 2 | free/1 | `engine/core/src/sim/movement.cpp:3037` | yes | verified | FormDescription: case-sensitive lookup 0x005f6260 (empty string on a miss), translated heading, level/damage/defence(slash value)/range% groups; prose at form_description_impl from the earlier reading, head re-checked this batch; no change |
+| `Unit::PathDestFound` | `0x005d8830` | 2 | member/0 | `engine/core/src/sim/movement.cpp:3025` | yes | verified | Unit::PathDestFound: FIXED -- route record with media found (vtbl+0x24) -> media's last point (SPath 0x0040bb80), else (-1,-1) (was the unit's position; SHIP_BOARD.VS tests pos.x != -1); no handle check, faults on a receiver naming nothing -- refused by name; test dest_and_path_dest_found_answer_the_end_of_the_route |
+| `Unit::SetCarryGoodsAnim` | `0x005d84b0` | 1 | member/0 | `engine/core/src/sim/movement.cpp:3021` | yes | verified | Unit::SetCarryGoodsAnim: FIXED -- exact class id ?WVillagerAmbient -> index 0x11 (slot 18), ?VillagerAmbient -> 0x10 (slot 17); was slots 17/16, one low; test the_carry_trio_is_the_walk_animation_slot |
+| `Unit::SetCarryWaterAnim` | `0x005d83b0` | 1 | member/0 | `engine/core/src/sim/movement.cpp:3020` | yes | verified | Unit::SetCarryWaterAnim: FIXED -- exact class id ?WVillagerAmbient -> index 0x10 (slot 17); was slot 16; test the_carry_trio_is_the_walk_animation_slot |
 
-## anim -- 0 of 13 verified, 203 call sites
-
-| entry point | body | sites | engine | implemented at | cited | status | note |
-|---|---|---:|---|---|---|---|---|
-| `Obj::TimeToAnimFinish` | `0x005a9f20` | 37 | member/0 | `engine/core/src/sim/anim.cpp:481` | yes | unread |  |
-| `Obj::StartAnim` | `0x005a9ce0` | 35 | member/2 | `engine/core/src/sim/anim.cpp:480` | yes | unread |  |
-| `Obj::TimeToActionMoment` | `0x005a9e70` | 28 | member/0 | `engine/core/src/sim/anim.cpp:482` | yes | unread |  |
-| `Flying::PlayAnim` | `0x0051bb10` | 26 | member/2, member/3 | `engine/core/src/sim/anim.cpp:486` | yes | unread |  |
-| `Obj::PlayAnim` | `0x005a9ba0` | 26 | member/2, member/3 | `engine/core/src/sim/anim.cpp:486` | yes | unread |  |
-| `Obj::SetState` | `0x005aa040` | 14 | member/1 | `engine/core/src/sim/anim.cpp:483` |  | unread |  |
-| `Squad::SetState` | `0x004211c0` | 14 | member/1 | `engine/core/src/sim/anim.cpp:483` | yes | unread |  |
-| `Squad::SetState` | `0x00421380` | 14 | member/1 | `engine/core/src/sim/anim.cpp:483` |  | unread |  |
-| `Obj::GetAnim` | `0x005a9fd0` | 3 | member/0 | `engine/core/src/sim/anim.cpp:491` | yes | unread |  |
-| `Obj::IsInState` | `0x005ad860` | 2 | member/0 | `engine/core/src/sim/anim.cpp:494` | yes | unread |  |
-| `Unit::GetAnimDuration` | `0x0051c180` | 2 | member/1 | `engine/core/src/sim/anim.cpp:488` |  | unread |  |
-| `Obj::GetAnimTime` | `0x005a9c50` | 1 | member/1 | `engine/core/src/sim/anim.cpp:489` |  | unread |  |
-| `Obj::StartDelayedAnim` | `0x005a9da0` | 1 | member/3 | `engine/core/src/sim/anim.cpp:490` |  | unread |  |
-
-## conversation -- 0 of 4 verified, 196 call sites
-
-| entry point | body | sites | engine | implemented at | cited | status | note |
-|---|---|---:|---|---|---|---|---|
-| `RunConv` | `0x0050cef0` | 74 | free/1 | `engine/core/src/sim/conversation.cpp:1016` |  | unread |  |
-| `Conversation::SetActor` | `0x0050a430` | 63 | member/2 | `engine/core/src/sim/conversation.cpp:1017` |  | unread |  |
-| `Conversation::Init` | `0x0050cde0` | 54 | member/1 | `engine/core/src/sim/conversation.cpp:1019` |  | unread |  |
-| `ConvResult` | `0x0050a4e0` | 5 | free/1 | `engine/core/src/sim/conversation.cpp:1020` |  | unread |  |
-
-## feeder -- 0 of 3 verified, 109 call sites
+## match -- 8 of 9 verified, 403 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Query::SetFeeding` | `0x00579db0` | 40 | member/1 | `engine/core/src/sim/feeder.cpp:477` |  | unread |  |
-| `Unit::SetFeeding` | `0x005d7ef0` | 40 | member/1 | `engine/core/src/sim/feeder.cpp:477` |  | unread |  |
-| `Unit::maxfood` | `0x005d8cb0` | 29 | member/0 | `engine/core/src/sim/feeder.cpp:467` |  | unread |  |
+| `GetDifficulty` | `0x004c6630` | 136 | free/0 | `engine/core/src/sim/match.cpp:1029` | yes | verified | GetDifficulty: bare read of the game's +0x254, no check; prose at fn_get_difficulty |
+| `EndGame` | `0x004c9610` | 85 | free/2, free/3 | `engine/core/src/sim/match.cpp:1023` | yes | verified | EndGame/2: FIXED -- empties the end message (0x0082e7ec) for any player, then slot 0x48 (0x00524090): a win marks the team (0x00522e20) won and the rest of the first eight lost; a loss marks only slots below 8 and declares the first eight's last side won (0x005651e0, allied flag + enemy mask); test match_end_game_follows_the_game_objects_slot_0x48. End screens and teardown are display |
+| `EndGame` | `0x004c9660` | 85 | free/2, free/3 | `engine/core/src/sim/match.cpp:1023` | yes | verified | EndGame/3: message kept only for the local (human) player, before the rule; then 0x00524090 as EndGame/2 |
+| `GetTime` | `0x004c64e0` | 81 | free/0 | `engine/core/src/sim/match.cpp:1026` | yes | verified | GetTime: game +0x1258, the millisecond the scripts' wheel stands at = the scheduler's now |
+| `MapSize` | `0x0051b120` | 8 | free/0 | `engine/core/src/sim/match.cpp:1028` | yes | verified | MapSize: [map+0xbc], the inclusive right edge = extent - 1 |
+| `GetTeamOverallScore` | `0x004c67a0` | 4 | free/1 | `engine/core/src/sim/match.cpp:1037` | yes | verified | GetTeamOverallScore: FIXED -- team is 0x00522e20's (allied flag both sides, first eight, no participation test) and gold_used/500 (0x0056c9a5), signed power*rating/100; test match_team_overall_score_is_the_military_team_over_a_different_term. power_score cache (+0x290 gate) not reproduced, as before |
+| `GetTeamMilitaryScore` | `0x004c6710` | 2 | free/1 | `engine/core/src/sim/match.cpp:1036` | yes | verified | GetTeamMilitaryScore: FIXED -- team is 0x00522e20's (allied flag both sides), unsigned average 0x0056c640; test match_team_military_score_averages_over_mutual_allies_in_the_first_eight |
+| `EvalGroup` | `0x004350e0` | 1 | free/1 | `engine/core/src/sim/match.cpp:1038` | yes | verified | EvalGroup: FIXED -- group map lookup 0x004c93c0 (miss 0), the group query's live members only (templates excluded), unit bit, object_power low 16 bits summed; test match_eval_group_sums_the_power_of_the_groups_units |
+| `MapName` | `0x004c8370` | 1 | free/0 | `engine/core/src/sim/match.cpp:1027` | yes | partial | MapName: pushes the game's string at +0x198 ('Current map'); its writer not traced, engine answers map.xml's name; one display-only site |
 
-## orders -- 0 of 14 verified, 62 call sites
-
-| entry point | body | sites | engine | implemented at | cited | status | note |
-|---|---|---:|---|---|---|---|---|
-| `ClearSelection` | `0x005a8120` | 18 | free/1 | `engine/core/src/sim/orders.cpp:1356` | yes | unread |  |
-| `Obj::Select` | `0x005abfc0` | 11 | member/1 | `engine/core/src/sim/orders.cpp:1370` | yes | unread |  |
-| `SquadList::Select` | `0x0042bee0` | 11 | member/1 | `engine/core/src/sim/orders.cpp:1370` | yes | unread |  |
-| `SwapSelectedObj` | `0x004c84e0` | 7 | free/2 | `engine/core/src/sim/orders.cpp:1357` | yes | unread |  |
-| `_GetSelection` | `0x005b5690` | 4 | free/0 | `engine/core/src/sim/orders.cpp:1358` | yes | unread |  |
-| `Obj::Deselect` | `0x005ac060` | 2 | member/0 | `engine/core/src/sim/orders.cpp:1371` | yes | unread |  |
-| `Obj::Deselect` | `0x005ac0e0` | 2 | member/0 | `engine/core/src/sim/orders.cpp:1371` | yes | unread |  |
-| `IsSelectionAssigned` | `0x004c6a30` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1360` | yes | unread |  |
-| `IsSelectionAssigned` | `0x004c6aa0` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1360` | yes | unread |  |
-| `Obj::ExecDefaultCmd` | `0x005b52b0` | 1 | member/4 | `engine/core/src/sim/orders.cpp:1373` | yes | unread |  |
-| `Obj::_LastSelectionTime` | `0x005abd60` | 1 | member/0 | `engine/core/src/sim/orders.cpp:1372` | yes | unread |  |
-| `ObjList::ExecDefaultCmd` | `0x0055e140` | 1 | member/4 | `engine/core/src/sim/orders.cpp:1373` | yes | unread |  |
-| `WasSelectionAssigned` | `0x004c69b0` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1369` |  | unread |  |
-| `WasSelectionAssigned` | `0x004c6a00` | 1 | free/1 | `engine/core/src/sim/orders.cpp:1369` | yes | unread |  |
-
-## heading -- 0 of 5 verified, 44 call sites
+## wait -- 3 of 13 verified, 342 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `GetVecByDir` | `0x0051b6a0` | 17 | free/2 | `engine/core/src/sim/heading.cpp:502` |  | unread |  |
-| `GetDirByAngle` | `0x0051b7f0` | 16 | free/1 | `engine/core/src/sim/heading.cpp:504` | yes | unread |  |
-| `OnLeft` | `0x0051b140` | 6 | free/2 | `engine/core/src/sim/heading.cpp:505` |  | unread |  |
-| `GetAngleByDir` | `0x0051b720` | 4 | free/1 | `engine/core/src/sim/heading.cpp:506` | yes | unread |  |
-| `GetVec` | `0x004c7be0` | 1 | free/3 | `engine/core/src/sim/heading.cpp:503` | yes | unread |  |
+| `WaitQueryCountBetween` | `0x005ed000` | 208 | free/4 | `engine/core/src/sim/wait.cpp:663` |  | partial | WaitQueryCountBetween: handle re-checked every poll, a dead or invalid handle ends true (FIXED, was a refusal; 0x005ed05f), count>=low && (count<=high || high<0) tested before any suspension, timeout counted down per 0x005eca10 (negative never, zero tests once); test a_wait_on_a_query_handle_that_names_nothing_ends_true_in_every_query_body. Gap: the slice is max(query hint - now, 100) via the query's vtbl+0x34 (cache expiry, 1000 for an ObjQuery); engine uses the 100 floor because it keeps no query cache (query-pool design, sim/query.hpp) |
+| `WaitEmptyQuery` | `0x005ed730` | 50 | free/2 | `engine/core/src/sim/wait.cpp:664` | yes | partial | WaitEmptyQuery: dead handle ends true (FIXED), vtbl+0x28 emptiness, else 0x005eca10 slice; same query-hint cadence gap as WaitQueryCountBetween |
+| `WaitEnvIntBetween` | `0x005ecb70` | 18 | free/4 | `engine/core/src/sim/wait.cpp:665` | yes | verified | WaitEnvIntBetween: null key string answers true; value read by 0x006ac740 through MakePath -- FIXED: a relative key gets the sequence thread's '/' context (test env_int_between_puts_a_sequences_context_in_front_of_a_relative_key); atol value, the count-between bounds rule; 2000 ms slice inline (0x005ecc27), timeout counted down |
+| `WaitSettlementCapture` | `0x005eda80` | 14 | free/3 | `engine/core/src/sim/wait.cpp:669` | yes | verified | WaitSettlementCapture: name resolved once on the fresh frame by a byte-compare scan (0x005edadb), FIXED: a miss -- an empty name included unless a settlement is named '' -- ends true (0x005edc46; was a refusal), test a_settlement_name_that_resolves_nowhere_ends_the_wait_true; owner index == player-1; 1000 ms (0x005ecb30). Engine scans every poll; names never change, same answer |
+| `WaitIdle` | `0x005ecd80` | 13 | free/2 | `engine/core/src/sim/wait.cpp:670` | yes | partial | WaitIdle: dead handle ends true (FIXED); non-empty query whose every resolvable member's command string is 'idle' or 'standstill' (0x005ecd10 at [obj+0x110]); empty never satisfies; an uncommanded unit (no queue here) reads resting, a labelled reading; same query-hint cadence gap |
+| `WaitUnitsInArea` | `0x005ee310` | 12 | free/3 | `engine/core/src/sim/wait.cpp:671` | yes | verified | WaitUnitsInArea: dead query or unknown area ends true (FIXED, both were refusals; 0x005ee435, 0x005ee419->0x005ee566); FIXED: only unit-bit members asked (0x005ee45d), 0x004d7df0's hidden-ownerless member outside, held unit inside when its on-map holder is (0x004d7d70/0x0053ee20); empty query keeps waiting; 1000 ms inline; tests an_area_name_that_resolves_nowhere_ends_the_wait_true, units_in_an_area_counts_units_only_and_a_held_unit_by_its_holder. A held unit's own (-1,-1) is inside any area holding that point, as in the original |
+| `WaitHealthBetween` | `0x005ed2c0` | 8 | free/4 | `engine/core/src/sim/wait.cpp:672` | yes | partial | WaitHealthBetween: dead handle ends true (FIXED); FIXED: sums [obj+0xc0] and the object's own [obj+0xc8] (object_max_health, was the class maxhealth), test health_between_sums_each_objects_own_maximum_and_not_the_classs; pct 100 on equal sums else signed idiv; low<=pct<=high, no escape; sumMax 0 with unequal sums faults there, refused here; inline hint slice, same query-hint cadence gap |
+| `WaitConvRequest` | `0x005ed480` | 7 | free/3, free/5 | `engine/core/src/sim/wait.cpp:675` | yes | partial | WaitConvRequest/5: FIXED: either Query naming nothing ends true with outputs untouched (0x005ed5c3->0x005ed713), test the_five_argument_conversation_wait_ends_true_on_a_query_that_names_nothing; first entry files a record, never met on the first call; a met record writes the pair; timeout withdraws and writes 0xffff into both outputs; 1000 ms. Gap (conversation-manager design, sim/conversation.hpp): no record, so the input layer's selection gate is dropped and the meeting is tested as a reach predicate |
+| `WaitConvRequest` | `0x005ed8d0` | 7 | free/3, free/5 | `engine/core/src/sim/wait.cpp:675` | yes | partial | WaitConvRequest/3: either handle naming nothing files no record and burns its timeout to false (0x005ed931); otherwise as /5 without outputs; 1000 ms. Same manager-design gap |
+| `WaitNonEmptyQuery` | `0x005ed800` | 2 | free/2 | `engine/core/src/sim/wait.cpp:666` | yes | partial | WaitNonEmptyQuery: dead handle ends true (FIXED), negation of 0x005ed730's test; same query-hint cadence gap |
+| `EndConvSetup` | `0x005ecc80` | 1 | free/2 | `engine/core/src/sim/wait.cpp:679` | yes | partial | EndConvSetup: 300 written to the wait on every entry; first entry offers the exact handle pair to slot 0x1c (0x0050ec20: both alive, a pending record (This, other) by identity, no reach test) -> suspend; otherwise slot 0x18 (0x0050eb40) suspends while a met record is still filed and answers 2 (ends the script) once it is gone. Engine keeps no records and suspends 300 once within reach, else finishes; at the one site (UNIT_GO_TALK.VS) it is the last statement, so only a 300 ms later script end differs. Prose corrected |
+| `WaitCommonObjects` | `0x005ed100` | 1 | free/3 | `engine/core/src/sim/wait.cpp:668` | yes | partial | WaitCommonObjects: either handle dead ends true (FIXED); any member of the first in the second (vtbl+0x24); slice from 0x005eca70, the smaller hint floored at 100; same query-hint cadence gap |
+| `WaitObjInQuery` | `0x005ecf00` | 1 | free/3 | `engine/core/src/sim/wait.cpp:667` | yes | partial | WaitObjInQuery: dead handle ends true (FIXED); membership through vtbl+0x24; same query-hint cadence gap |
 
-## fog -- 0 of 5 verified, 38 call sites
-
-| entry point | body | sites | engine | implemented at | cited | status | note |
-|---|---|---:|---|---|---|---|---|
-| `ExploreArea` | `0x004c9430` | 20 | free/2 | `engine/core/src/sim/fog.cpp:474` |  | unread |  |
-| `ExploreAll` | `0x006a42a0` | 9 | free/0 | `engine/core/src/sim/fog.cpp:476` |  | unread |  |
-| `IsExplored` | `0x004c6820` | 5 | free/2 | `engine/core/src/sim/fog.cpp:473` | yes | unread |  |
-| `ExploreCircle` | `0x004c6470` | 3 | free/3 | `engine/core/src/sim/fog.cpp:475` |  | unread |  |
-| `Unit::GetUnexploredPoint` | `0x005d99e0` | 1 | member/1 | `engine/core/src/sim/fog.cpp:477` |  | unread |  |
-
-## flying -- 0 of 8 verified, 23 call sites
+## campaign -- 6 of 10 verified, 271 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `GetTerrainHeight` | `0x0051b4b0` | 9 | free/1 | `engine/core/src/sim/flying.cpp:764` | yes | unread |  |
-| `Flying::z` | `0x0051bdf0` | 5 | member/0 | `engine/core/src/sim/flying.cpp:765` | yes | unread |  |
-| `Flying::PickLandingPoint` | `0x0051c6a0` | 2 | member/1 | `engine/core/src/sim/flying.cpp:767` | yes | unread |  |
-| `RandomOffset` | `0x004c7c50` | 2 | free/1 | `engine/core/src/sim/flying.cpp:766` | yes | unread |  |
-| `Unit::dir` | `0x0051c1d0` | 2 | member/0 | `engine/core/src/sim/flying.cpp:768` | yes | unread |  |
-| `Flying::AdjustFlyDir` | `0x0051be50` | 1 | member/1 | `engine/core/src/sim/flying.cpp:770` | yes | unread |  |
-| `Flying::PickFlyingPoint` | `0x0051c3d0` | 1 | member/1 | `engine/core/src/sim/flying.cpp:769` | yes | unread |  |
-| `Query::GetAverageDirection` | `0x005799d0` | 1 | member/0 | `engine/core/src/sim/flying.cpp:771` | yes | unread |  |
+| `GiveNote` | `0x00558b40` | 115 | free/1 | `engine/core/src/sim/campaign.cpp:842` |  | partial | GiveNote: catalogue gate (0x00557df0, null returns at once), inserted only when absent from the active map; nothing pushed. Gap: a pinned note on the current map with show-on-minimap explores a 300-unit circle at its location for the local player only (0x00517ad0, mask 1<<local index 0x00420b40); the game's +0x198 map string has no traced writer and a local-player write is kept out of the simulation. Marker, message and display list are presentation |
+| `RemoveNote` | `0x005581d0` | 65 | free/1 | `engine/core/src/sim/campaign.cpp:843` | yes | verified | RemoveNote: no catalogue gate; erases the id's range from the active map (a miss only prints, dead in retail) and the display-list entry (presentation) |
+| `RunSequence` | `0x005bc170` | 34 | free/1 | `engine/core/src/sim/campaign.cpp:835` | yes | partial | RunSequence: lookup 0x005bb9a0 (miss prints, dead); Start 0x005b9d40: no script -> Finished; Running -> nothing; else spawn with context '/' and Running before returning. FIXED: a sequence whose thread ended is settled Finished at the read (0x005b9f50 marks it from the completion callback; engine reaped after the turn), test campaign_a_sequence_is_finished_the_moment_its_script_ends_and_not_at_the_turns_end. Gaps, unobservable on shipped data: the prerequisite cascade 0x005b9df0 after a start (none of 308 sequences declares a prerequisite); status key's middle component [game+0x60] (no script reads the key) |
+| `IsNoteActive` | `0x00557e40` | 24 | free/1 | `engine/core/src/sim/campaign.cpp:844` | yes | verified | IsNoteActive: find on the active map, bool pushed; board only, never the catalogue |
+| `ClearNotes` | `0x00557fc0` | 16 | free/0 | `engine/core/src/sim/campaign.cpp:845` |  | verified | ClearNotes: empties the active map; catalogue untouched |
+| `SetTerritoryState` | `0x005036e0` | 7 | free/2 | `engine/core/src/sim/campaign.cpp:831` | yes | partial | SetTerritoryState: FIXED: no conquest object, a state outside 0..2, or an id 0x00500f00 does not find all return silently (were traps), test campaign_a_territory_write_that_misses_is_silent_and_a_bonus_with_no_conquest_is_empty; a hit writes [territory+0x20] only. Gap: set_state also appends to the conquered order (engine carry design); where the original appends was not traced |
+| `IsRunning` | `0x005ba220` | 5 | free/1 | `engine/core/src/sim/campaign.cpp:836` | yes | verified | IsRunning: builds the status key and compares with 'Running', never the table; FIXED with RunSequence: the named sequence is settled first, so an ended thread reads Finished at once |
+| `IsFinished` | `0x005ba620` | 3 | free/1 | `engine/core/src/sim/campaign.cpp:837` | yes | verified | IsFinished: as IsRunning against 'Finished'; settled first |
+| `ConquestBonus` | `0x00501440` | 1 | free/0 | `engine/core/src/sim/campaign.cpp:830` | yes | partial | ConquestBonus: FIXED: no conquest object pushes '' (was a trap), test as SetTerritoryState's; otherwise the bonus (+0x80) of the territory at the last element of the int vector [conquest+0x4c..0x50] (no emptiness test). Gap: engine answers the host-set active_bonus (last conquered); whether that vector is ConqueredOrder or the territory being fought for is not established |
+| `IsWaiting` | `0x005ba420` | 1 | free/1 | `engine/core/src/sim/campaign.cpp:838` | yes | verified | IsWaiting: as IsRunning against 'Waiting' (no write-back here; only the getter 0x005b9a90 writes 'Waiting' for an absent key); settled first |
 
-## boarding -- 0 of 12 verified, 20 call sites
+## anim -- 5 of 13 verified, 203 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `Unit::GetShipToBoard` | `0x005d80d0` | 4 | member/0 | `engine/core/src/sim/boarding.cpp:725` | yes | unread |  |
-| `Ship::NotifyBoardUnit` | `0x005c7fa0` | 3 | member/1 | `engine/core/src/sim/boarding.cpp:726` | yes | unread |  |
-| `Ship::BestCandidateToBoard` | `0x005c7a20` | 2 | member/0 | `engine/core/src/sim/boarding.cpp:729` | yes | unread |  |
-| `Ship::NotifyBoardUnitCancel` | `0x005c7d00` | 2 | member/1 | `engine/core/src/sim/boarding.cpp:727` | yes | unread |  |
-| `Ship::NumUnitsToBoard` | `0x005c6f60` | 2 | member/0 | `engine/core/src/sim/boarding.cpp:728` | yes | unread |  |
-| `Hero::CancelArmyBoard` | `0x0052fec0` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:736` | yes | unread |  |
-| `Ship::AreUnitsToBoard` | `0x005c7920` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:730` | yes | unread |  |
-| `Ship::BoardUnit` | `0x005c7c00` | 1 | member/1 | `engine/core/src/sim/boarding.cpp:731` | yes | unread |  |
-| `Ship::FindPointToStay` | `0x005c7020` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:733` | yes | unread |  |
-| `Ship::NotifyShipBoardingCancel` | `0x005c7d70` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:732` | yes | unread |  |
-| `Ship::UnboardAllUnits` | `0x005c85c0` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:735` | yes | unread |  |
-| `Ship::UnboardUnits` | `0x005c82f0` | 1 | member/1 | `engine/core/src/sim/boarding.cpp:734` | yes | unread |  |
+| `Obj::TimeToAnimFinish` | `0x005a9f20` | 37 | member/0 | `engine/core/src/sim/anim.cpp:554` | yes | partial | TimeToAnimFinish: end = start + declared duration (FIXED: was the frame strip; [anim+0x4c] via 0x0053e6c0/0x0053cef0), 0 when nothing plays (FIXED: a state's loop and a finished animation are slot -1, 0x0053e860/0x0053f6a0); tests anim_scripts_see_the_declared_duration_not_the_frame_strip, anim_a_states_loop_and_a_finished_animation_are_not_playing. Gaps: a strip shorter than its declared length stops counting at the strip's end; no transition animation's time in front (no transitions in this engine) |
+| `Obj::StartAnim` | `0x005a9ce0` | 35 | member/2 | `engine/core/src/sim/anim.cpp:553` | yes | partial | StartAnim: handle, own position -> no turn, slot-1 into the array, 0x0053e6c0; an object off the map starts nothing (FIXED, test anim_an_object_off_the_map_plays_nothing). Gaps: [obj+0x130] script action mode reset and the action-finished handler called when idle (0x005b0f70: a dead unit's death animation first) not modelled; no transition animations |
+| `Obj::TimeToActionMoment` | `0x005a9e70` | 28 | member/0 | `engine/core/src/sim/anim.cpp:555` | yes | partial | TimeToActionMoment: start + action_time*duration/duration (= action_time), 0 when nothing plays (FIXED as TimeToAnimFinish). Gap: no transition animation's time in front |
+| `Flying::PlayAnim` | `0x0051bb10` | 26 | member/2, member/3 | `engine/core/src/sim/anim.cpp:559` | yes | partial | Flying::PlayAnim: Z -1..1024, then the slot (FIXED: checked before the flight state is written, bad slot returns without suspending), point clamped into the map (FIXED, 0x00422b70), flight state, StopAnimation, 0x0053e6c0, wait = declared duration (FIXED, 0x0051bcba); re-entry returns; test anim_flying_play_anim_refuses_a_bad_slot_before_it_moves_and_clamps_its_point. Design: no animation origin, the bird arrives at the call rather than at the next StopAnimation (documented phase) |
+| `Obj::PlayAnim` | `0x005a9ba0` | 26 | member/2, member/3 | `engine/core/src/sim/anim.cpp:559` | yes | partial | Obj::PlayAnim: handle (dead: no suspend), own position -> no turn, mode 6, arms the animation timer only when none is pending, suspends until 0x005b0f70 mode 6 runs 0x005a76c0 twice (start, then wake at the end). Engine starts now and suspends for the declared duration (FIXED: was the strip). Design gaps: an animation already playing is interrupted here, waited out there; an object off the map never wakes there, suspends 0 here |
+| `Obj::SetState` | `0x005aa040` | 14 | member/1 | `engine/core/src/sim/anim.cpp:556` | yes | verified | Obj::SetState: handle (dead: reports, pushes an int -- stack leak not reproduced), CObj::SetState(n-1, no transition) 0x0053e860: resting in the state already returns (FIXED), else slot -1 and the state word; test anim_set_state_dispatches_on_the_handle_type |
+| `Squad::SetState` | `0x004211c0` | 14 | member/1 | `engine/core/src/sim/anim.cpp:556` | yes | verified | Squad::SetState/1: handle word split (player low 4, index), 0x00443e30, state as 16 bits at +0x28 and the game's running time at +0x2c (FIXED: was the world's turn-end time); no null check, no SF_NOAI test; test anim_squad_set_state_stamps_the_scripts_millisecond. State kept 32 bits wide as every writer keeps it |
+| `Squad::SetState` | `0x00421380` | 14 | member/1 | `engine/core/src/sim/anim.cpp:556` | yes | partial | Squad::SetState/3: state, flags (flags|set)&~clr, time, null-checked; not bound -- both corpus sites (SQUADMONITOR.VS:337/339) are inside a comment |
+| `Obj::GetAnim` | `0x005a9fd0` | 3 | member/0 | `engine/core/src/sim/anim.cpp:564` | yes | verified | GetAnim: handle (dead 0), [obj+0x50] < 0 -> 0 else slot+1 (FIXED: a state's loop and a finished animation answer 0); test anim_a_states_loop_and_a_finished_animation_are_not_playing |
+| `Obj::IsInState` | `0x005ad860` | 2 | member/0 | `engine/core/src/sim/anim.cpp:567` | yes | partial | IsInState: no pending message 27 (the animation timer) on [obj+0xc] (0x0053cfc0 -> 0x00687820); here !animating. Approximated: the timer lapses at the declared duration, the strip's end here; a dead receiver faults there, false here |
+| `Unit::GetAnimDuration` | `0x0051c180` | 2 | member/1 | `engine/core/src/sim/anim.cpp:561` | yes | verified | Unit::GetAnimDuration: no receiver check (faults on a dead handle; 0 here), [anim[n]+0x4c] -- the declared duration (FIXED: was the strip); test anim_scripts_see_the_declared_duration_not_the_frame_strip |
+| `Obj::GetAnimTime` | `0x005a9c50` | 1 | member/1 | `engine/core/src/sim/anim.cpp:562` | yes | verified | GetAnimTime: handle (dead 0), entity's anim[n-1], null 0, else [anim+0x4c] the declared duration (FIXED); test as GetAnimDuration's |
+| `Obj::StartDelayedAnim` | `0x005a9da0` | 1 | member/3 | `engine/core/src/sim/anim.cpp:563` |  | partial | StartDelayedAnim: as StartAnim with the delay as StartAnimation's start offset. The one shipped delay (-1) applies at once and arms no timer, so in the original the animation never ends (IsInState stays true, TimeToAnimFinish counts to start-1+duration); here it is StartAnim. A positive delay is not deferred (no per-object timer); no shipped site |
+
+## conversation -- 2 of 4 verified, 196 call sites
+
+| entry point | body | sites | engine | implemented at | cited | status | note |
+|---|---|---:|---|---|---|---|---|
+| `RunConv` | `0x0050cef0` | 74 | free/1 | `engine/core/src/sim/conversation.cpp:1056` | yes | partial | RunConv: first entry makes a conversation (0x0050c590) and loads it by name (0x0050c710); not present -> prints, answers "" without suspending (FIXED: was the previous result; test conversation_run_conv_on_an_undeclared_name_answers_empty_not_the_old_result); else suspends 1 ms and on every re-entry steps it (0x00509260, 0x005096b0, unless 0x00996ac8) until [conv+0x198], then answers the env string /<name>/Return Value. Design (round 9, kept): the conversation plays inside the call here; and the result lives in ConversationResults, not the env key |
+| `Conversation::SetActor` | `0x0050a430` | 63 | member/2 | `engine/core/src/sim/conversation.cpp:1057` | yes | verified | Conversation::SetActor: unit handle to a pointer (dead -> null), empty variable -> uninitialized message, else 0x00509eb0 binds only a role the conversation declares, byte-for-byte (FIXED: any role was bound); test conversation_init_and_set_actor_bind_only_what_the_conversation_declares. Actors carried, unread |
+| `Conversation::Init` | `0x0050cde0` | 54 | member/1 | `engine/core/src/sim/conversation.cpp:1059` | yes | verified | Conversation::Init: by reference; old conversation deleted, fresh one loaded by name; not present -> deleted and the variable left empty (FIXED: an undeclared name was bound); test as SetActor's |
+| `ConvResult` | `0x0050a4e0` | 5 | free/1 | `engine/core/src/sim/conversation.cpp:1060` | yes | partial | ConvResult: env string /<name>/Return Value (0x0050a3b0 path, 0x006ac5c0 read), "" when unset. Design: this engine keeps results in their own table; every shipped read is ConvResult in the map that ran it and no script names the key, so the answers agree |
+
+## feeder -- 3 of 3 verified, 109 call sites
+
+| entry point | body | sites | engine | implemented at | cited | status | note |
+|---|---|---:|---|---|---|---|---|
+| `Query::SetFeeding` | `0x00579db0` | 40 | member/1 | `engine/core/src/sim/feeder.cpp:530` | yes | verified | Query::SetFeeding: handle (dead: prints, nothing), empty result prints, else every CVXUnit member not dead gets bit 0x20000 of [obj+0x194] set/cleared from a byte argument (FIXED: a Query receiver trapped); test feeder_host_answers_an_unknown_receiver_and_takes_a_query. Reads the query's last result (vtbl+0x20); evaluated now here |
+| `Unit::SetFeeding` | `0x005d7ef0` | 40 | member/1 | `engine/core/src/sim/feeder.cpp:530` | yes | verified | Unit::SetFeeding: handle (dead: prints, nothing), bit 0x20000 of [obj+0x194] from a byte (FIXED: a unit outside the chain trapped; the argument is a byte); test as Query::SetFeeding's |
+| `Unit::maxfood` | `0x005d8cb0` | 29 | member/0 | `engine/core/src/sim/feeder.cpp:493` | yes | verified | Unit::maxfood: handle (dead: 0), the class's max_food [[obj+0x3c]+0x2b4] (FIXED: a unit outside the chain trapped); test as Query::SetFeeding's |
+
+## orders -- 11 of 14 verified, 62 call sites
+
+| entry point | body | sites | engine | implemented at | cited | status | note |
+|---|---|---:|---|---|---|---|---|
+| `ClearSelection` | `0x005a8120` | 18 | free/1 | `engine/core/src/sim/orders.cpp:1442` | yes | verified | ClearSelection: player-1 record vs the local one at [globals+0x12c8] (out-of-range numbers name no record), then 0x005e7e50 empties the one selection; no complaint, no other effect |
+| `Obj::Select` | `0x005abfc0` | 11 | member/1 | `engine/core/src/sim/orders.cpp:1456` | yes | partial | Obj::Select: handle, vtbl+0x50 dead (FIXED: was health<=0, a broken building is selected), local-player guard, then the insert's gates (0x005e7d80): spawn-template bit [obj+0x2c]&0x08000000 (FIXED: was SetNoselectFlag's [obj+0x194]&0x800000; test select_refuses_a_template_and_takes_a_noselect_unit_and_a_broken_building). Gap: vtbl+0x74 visibility to the local player (0x005b1030 units, 0x004dc990 catapult) not reproduced; every shipped site selects its own object, which passes on the owner arm |
+| `SquadList::Select` | `0x0042bee0` | 11 | member/1 | `engine/core/src/sim/orders.cpp:1456` | yes | partial | SquadList::Select: FIXED (was unbound for a SquadList receiver) -- local guard, selection emptied, then unless EOL (0x00420170) every member of every squad from the list's start through the insert; test squadlist_select_empties_the_selection_and_takes_every_member_from_the_start. Same vtbl+0x74 gap; no shipped site |
+| `SwapSelectedObj` | `0x004c84e0` | 7 | free/2 | `engine/core/src/sim/orders.cpp:1443` | yes | partial | SwapSelectedObj: from by handle, membership (0x005e3930), erase+notify (0x005e7e00), to by handle through the insert (FIXED: a template is refused, test as Select's); same vtbl+0x74 gap on to |
+| `_GetSelection` | `0x005b5690` | 4 | free/0 | `engine/core/src/sim/orders.cpp:1444` | yes | verified | _GetSelection: fresh list (0x0041edd0), selection's ids copied front to back (0x0041f290), handed back as a temporary |
+| `Obj::Deselect` | `0x005ac060` | 2 | member/0, member/1 | `engine/core/src/sim/orders.cpp:1457` | yes | verified | Obj::Deselect(player): FIXED (was unbound) -- handle, local-player guard, 0x005e7e00; no dead test; test the_uncalled_deselect_and_selection_assigned_forms_follow_their_bodies. No shipped site |
+| `Obj::Deselect` | `0x005ac0e0` | 2 | member/0, member/1 | `engine/core/src/sim/orders.cpp:1457` | yes | verified | Obj::Deselect(): handle only, 0x005e7e00 erases from both lists and runs the changed handler whether or not the object was there |
+| `IsSelectionAssigned` | `0x004c6a30` | 1 | free/1, free/2 | `engine/core/src/sim/orders.cpp:1446` | yes | verified | IsSelectionAssigned(player, slot): FIXED (was unbound) -- player 1..16, slot 0..9, that group's size [group+0x1c] (0x005b8760) non-zero; test as Deselect(player)'s. No shipped site |
+| `IsSelectionAssigned` | `0x004c6aa0` | 1 | free/1, free/2 | `engine/core/src/sim/orders.cpp:1446` | yes | verified | IsSelectionAssigned(player): player 1..16, first non-empty of ten groups at record+0xac stride 0x2c |
+| `Obj::ExecDefaultCmd` | `0x005b52b0` | 1 | member/4 | `engine/core/src/sim/orders.cpp:1462` | yes | verified | Obj::ExecDefaultCmd: FIXED -- dead receiver refused (vtbl+0x50) and the order issued as the receiver's owner ([[obj+0x70]+8], not -1), so control is asked and the command is a player's; test exec_default_cmd_on_an_object_is_issued_as_its_owner_and_refuses_the_dead. No shipped site |
+| `Obj::_LastSelectionTime` | `0x005abd60` | 1 | member/0 | `engine/core/src/sim/orders.cpp:1461` | yes | verified | Obj::_LastSelectionTime: [obj+0x144], -1 for an unresolvable handle; stamped by the changed handler (0x005e7910) for every member of the new selection |
+| `ObjList::ExecDefaultCmd` | `0x0055e140` | 1 | member/4 | `engine/core/src/sim/orders.cpp:1462` | yes | verified | ObjList::ExecDefaultCmd: object argument to a handle word (0xffff for none), then 0x004f4ff0(list, pt, handle, replace, modifier, -1); temporary list released |
+| `WasSelectionAssigned` | `0x004c69b0` | 1 | free/1, free/2 | `engine/core/src/sim/orders.cpp:1455` | yes | verified | WasSelectionAssigned(player, n): FIXED (was unbound) -- 0x004e5940(player-1, 1<<(n&31) or all bits for n<0, test) on /Player<player>/SelectionAssigned; test as Deselect(player)'s. No shipped site |
+| `WasSelectionAssigned` | `0x004c6a00` | 1 | free/1, free/2 | `engine/core/src/sim/orders.cpp:1455` | yes | verified | WasSelectionAssigned(player): 0x004e5940 formats /Player%d/SelectionAssigned with the argument as given (no bounds) and tests any bit |
+
+## heading -- 5 of 5 verified, 44 call sites
+
+| entry point | body | sites | engine | implemented at | cited | status | note |
+|---|---|---:|---|---|---|---|---|
+| `GetVecByDir` | `0x0051b6a0` | 17 | free/2 | `engine/core/src/sim/heading.cpp:518` | yes | verified | GetVecByDir: FIXED -- 32-bit sum of squares (unsigned to the table root 0x0067c3d0) and 32-bit imul/idiv per component, both wrapping; zero length answers (0,0); test heading_vec_by_dir_wraps_where_the_executable_does |
+| `GetDirByAngle` | `0x0051b7f0` | 16 | free/1 | `engine/core/src/sim/heading.cpp:520` | yes | verified | GetDirByAngle: (trunc(100 cos(d*3.1415/180)), trunc(100 sin(..))) via _ftol; table spans [-360,720] (corpus -45..585), outside it reduced mod 360 where the x87 is fed the raw angle (labelled) |
+| `OnLeft` | `0x0051b140` | 6 | free/2 | `engine/core/src/sim/heading.cpp:521` |  | verified | OnLeft: b.x*a.y - b.y*a.x > 0 in wrapping 32-bit arithmetic |
+| `GetAngleByDir` | `0x0051b720` | 4 | free/1 | `engine/core/src/sim/heading.cpp:522` | yes | verified | GetAngleByDir: 32-bit sum of squares, sqrt < 0.0001 answers 0, asin(|y|/len) unfolded per quadrant with 3.1415, truncated; the double-rounding residue of a whole degree labelled |
+| `GetVec` | `0x004c7be0` | 1 | free/3 | `engine/core/src/sim/heading.cpp:519` | yes | verified | GetVec: to - from (32-bit), then GetVecByDir arithmetic; coincident points divide by zero in the original, (0,0) here |
+
+## fog -- 5 of 5 verified, 38 call sites
+
+| entry point | body | sites | engine | implemented at | cited | status | note |
+|---|---|---:|---|---|---|---|---|
+| `ExploreArea` | `0x004c9430` | 20 | free/2 | `engine/core/src/sim/fog.cpp:597` | yes | verified | ExploreArea: name, then player; group dictionary 0x004c93c0, a miss or dead front member prints and explores nothing; player outside 0..15 nothing; stamp at the area's centre (0x004d67a0) with radius box bottom - centre y (FIXED, 0x004c95c1: was a covering circle) and the player's viewflags (FIXED: share-view slots too); test fog_explore_area_stamps_a_rectangles_half_height_not_a_covering_circle. A rectangle authored bottom-up (negative radius in the original) is sorted here; no shipped area is |
+| `ExploreAll` | `0x006a42a0` | 9 | free/0 | `engine/core/src/sim/fog.cpp:599` | yes | verified | ExploreAll: 0x005157c0 fills every half-word 0xFFFF and empties the eight slots' fine records; its +0xf0 flag and the redraw rect (0x006499d0) are display, no reader among the map's own methods |
+| `IsExplored` | `0x004c6820` | 5 | free/2 | `engine/core/src/sim/fog.cpp:596` | yes | verified | IsExplored: player then point; no manager answers false; 0x00515950 with player-1 unsigned, so player 0 and slots past 7 answer true (FIXED), a partial cell answers its 32-unit fine record (0x00514a60, FIXED); tests fog_is_explored_takes_a_one_based_player, fog_explore_circle_is_the_stamp_full_inside_a_rim_around_and_nothing_beyond |
+| `ExploreCircle` | `0x004c6470` | 3 | free/3 | `engine/core/src/sim/fog.cpp:598` | yes | verified | ExploreCircle: radius, point, player; player outside 0..15 nothing; 0x00516450 returns for radius 0 or empty mask (FIXED), stamps the viewflags mask (FIXED, SetRelation 0x005652f0 share-view); test fog_a_players_stamps_reach_every_slot_it_shares_its_view_with. Player 0 reads before the record array in the original (fault), nothing here |
+| `Unit::GetUnexploredPoint` | `0x005d99e0` | 1 | member/1 | `engine/core/src/sim/fog.cpp:600` | yes | verified | Unit::GetUnexploredPoint: FIXED -- invalid receiver (-1,-1); radius < sight or > 800,000 -> max(sight*4, 512), capped 3,000; offsets -r/2..r/2 by 300, x outer, clamped to the map; unexplored for the owner slot, obstruction cell clear, terrain 12/13 iff water_unit; first 100; one Range(0, n-1) draw; test fog_get_unexplored_point_samples_a_300_unit_grid_and_draws_one_candidate |
+
+## flying -- 6 of 8 verified, 23 call sites
+
+| entry point | body | sites | engine | implemented at | cited | status | note |
+|---|---|---:|---|---|---|---|---|
+| `GetTerrainHeight` | `0x0051b4b0` | 9 | free/1 | `engine/core/src/sim/flying.cpp:810` | yes | verified | GetTerrainHeight: point clamped into the map rect [world+0xb4..0xc0], then 0x0053eaa0 (0 outside the layer's rect) -> bilinear 0x0053dc00 |
+| `Flying::z` | `0x0051bdf0` | 5 | member/0 | `engine/core/src/sim/flying.cpp:811` | yes | verified | Flying::z: handle only, invalid answers 0; 0x0051b040: ground -> terrain height at vtbl+0x40, animating in the window -> lerp over [obj+0x64], else z_from. The animation-finished virtual 0x0051b450 (z_from := z_to, or in_air cleared at a landing's end) is not modelled; the clamped clock gives the same z |
+| `Flying::PickLandingPoint` | `0x0051c6a0` | 2 | member/1 | `engine/core/src/sim/flying.cpp:813` | yes | verified | Flying::PickLandingPoint: flock (0x004fee10, sight-100, own class), ahead tally over every mate (>57%), mates on the ground or landing tried five times (Y-first +/-100 jitter, can_land on the mate 0x0051c210, heading window 0x0051b600), give-up roll between(0,5)!=0 -> (-1,-1), straight ahead with SetLen and Y-first jitter; FIXED: the straight-ahead spot meets can_land on the bird itself (0x0051cae5) and answers (-1,-1) when it fails; test flying_pick_landing_point_refuses_a_straight_ahead_spot_it_cannot_land_on |
+| `RandomOffset` | `0x004c7c50` | 2 | free/1 | `engine/core/src/sim/flying.cpp:812` | yes | verified | RandomOffset: two between(-n, n) draws, the first is y |
+| `Unit::dir` | `0x0051c1d0` | 2 | member/0 | `engine/core/src/sim/flying.cpp:814` | yes | verified | Unit::dir: [obj+0x48]/[obj+0x4c] with no null check (the original faults on an invalid receiver; zero vector here) |
+| `Flying::AdjustFlyDir` | `0x0051be50` | 1 | member/1 | `engine/core/src/sim/flying.cpp:816` | yes | verified | Flying::AdjustFlyDir: inside the 800-unit margin leaves the point alone; edge chosen x-high, x-low, y-high; quarter turns, already-away keeps the point, +/-15 degrees by the heading's x, better-of test, turned back; invalid receiver leaves the argument |
+| `Flying::PickFlyingPoint` | `0x0051c3d0` | 1 | member/1 | `engine/core/src/sim/flying.cpp:815` | yes | partial | Flying::PickFlyingPoint: body matches (flock-follow on an animating in_air mate, 30-degree scan scored by 0x0051c2f0 with the 60 cut, SetLen, Y-first +/-n/5 jitter at 0x0051c639). Gap in the state it reads: in_air is not cleared when a landing animation ends (0x0051b450 unmodelled), so the crowding count can include a landed bird |
+| `Query::GetAverageDirection` | `0x005799d0` | 1 | member/0 | `engine/core/src/sim/flying.cpp:817` | yes | partial | Query::GetAverageDirection: vtbl+0x20 without Refresh -- averages the query's last result; engine re-evaluates. Equal at the one shipped site, whose count() refreshed it on the same line; empty or invalid answers (0, 0) |
+
+## boarding -- 8 of 12 verified, 20 call sites
+
+| entry point | body | sites | engine | implemented at | cited | status | note |
+|---|---|---:|---|---|---|---|---|
+| `Unit::GetShipToBoard` | `0x005d80d0` | 4 | member/0 | `engine/core/src/sim/boarding.cpp:776` | yes | verified | GetShipToBoard: [unit+0x18c] pushed unresolved; an unresolvable receiver reads through null in the original (no check), invalid here; an id the world no longer holds answers the invalid handle, which is what .IsValid of the stale handle reports |
+| `Ship::NotifyBoardUnit` | `0x005c7fa0` | 3 | member/1 | `engine/core/src/sim/boarding.cpp:777` | yes | verified | NotifyBoardUnit: argument then receiver, diagnostic and nothing on a miss; 0x005c7e70 finds in the deque, then in the holder, pushes, starts boardunit (0x005c66e0: clear, append, end head) unless the running command is already boardunit (0x005c7f6a), stamps [unit+0x18c] |
+| `Ship::BestCandidateToBoard` | `0x005c7a20` | 2 | member/0 | `engine/core/src/sim/boarding.cpp:780` | yes | partial | BestCandidateToBoard: prune (handle or vtbl+0x50), strict nearest isqrt from 900000000, invalid handle for none; gap: 0x005c7b93 compares (unit holder == 0) against the ship's holder handle as a number, which this engine's ids cannot image (fires only for holder handle 0 or 1) |
+| `Ship::NotifyBoardUnitCancel` | `0x005c7d00` | 2 | member/1 | `engine/core/src/sim/boarding.cpp:778` | yes | verified | NotifyBoardUnitCancel: FIXED -- 0x005c75c0 acts only on a listed unit not inside the ship's holder, erases it and clears [unit+0x18c] (0x005c76ad); was erase-only and touched aboard units; test boarding_cancel_takes_a_walker_off_the_list_and_clears_its_field. Latch [ship+0x1d8] argued equivalent in the header |
+| `Ship::NumUnitsToBoard` | `0x005c6f60` | 2 | member/0 | `engine/core/src/sim/boarding.cpp:779` | yes | verified | NumUnitsToBoard: bare deque size, no prune; 0 for an unresolvable receiver |
+| `Hero::CancelArmyBoard` | `0x0052fec0` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:787` | yes | verified | CancelArmyBoard: 0x0052fd60 -- InShip (0x005319a0) of the hero vs each resolvable member, detach the differing (0x005db190), then for a hero not in a ship the cancel above, which now clears its field; test boarding_cancel_army_board_drops_the_followers_on_the_other_side |
+| `Ship::AreUnitsToBoard` | `0x005c7920` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:781` | yes | verified | AreUnitsToBoard: holder occupancy == capacity empties the deque (0x005c7989) and answers false; else prune (handle or vtbl+0x50) and answer non-empty; false for an unresolvable receiver |
+| `Ship::BoardUnit` | `0x005c7c00` | 1 | member/1 | `engine/core/src/sim/boarding.cpp:782` | yes | partial | BoardUnit: FIXED -- 0x005c7840 enters through 0x005d3e10 unforced, so 0x00532160 refuses a full holder (was: no capacity check); admitted unit stopped and placed as garrison_enter, delisted (0x005c78ef), field kept; test boarding_board_unit_needs_150_units_and_a_berth. Gaps: the entry detaches from an old holder before the room test (unreachable: a held unit's pos is (-1,-1)); the feeder timer 0x1f it cancels is not FeederSystem state |
+| `Ship::FindPointToStay` | `0x005c7020` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:784` | yes | verified | FindPointToStay: FIXED -- free-spot test is 0x0040a990 = MovementSystem::spot_free with the ship's class radius: block under the two radii summed inside a window of radius + ShipBattle's (water) or 40, route locks count (was: blocked from the window, no locks); dy then dx draws, area/passability/spot, 100 tries then pos; test find_point_to_stay_is_the_first_candidate_that_passes_three_tests. Unresolvable receiver faults in the original, (0,0) here, labelled |
+| `Ship::NotifyShipBoardingCancel` | `0x005c7d70` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:783` | yes | verified | NotifyShipBoardingCancel: 0x005c76c0 kills the running boardship/boardshiphero/boardshipcommon of each listed member, FIXED: then runs 0x0052fd60 for every hero in the ship's holder (0x005c77bf..0x005c7818), then empties the deque; test boarding_ship_cancel_splits_the_armies_of_the_heroes_aboard |
+| `Ship::UnboardAllUnits` | `0x005c85c0` | 1 | member/0 | `engine/core/src/sim/boarding.cpp:786` | yes | partial | UnboardAllUnits: 0x005c84b0 lattice 0x005c8010, front of the holder's deque each time, 0x005c81d0 ordered-erase draw, 0x005d3f20 exit, until points run out. Gaps: drop order is ascending id here, boarding order there (no per-holder list); 0x005d3f20's feeder search arm for a foodless unit (0x00518b80, a world draw) and AI clock stamp [ai+0x5f8] not reproduced; rate limit, supply refill, door re-route argued unreachable for a ship |
+| `Ship::UnboardUnits` | `0x005c82f0` | 1 | member/1 | `engine/core/src/sim/boarding.cpp:785` | yes | partial | UnboardUnits: list then receiver popped, lattice from the ship's pos, list order, points tested before each member, only members in this ship's holder dropped. Gap: 0x005d3f20's feeder search arm and AI clock stamp, as UnboardAllUnits |
 
 ## siege -- 0 of 2 verified, 12 call sites
 
 | entry point | body | sites | engine | implemented at | cited | status | note |
 |---|---|---:|---|---|---|---|---|
-| `ObjList::Siege` | `0x00438f20` | 6 | member/3, member/4 | `engine/core/src/sim/siege.cpp:724` | yes | unread |  |
-| `Squad::Siege` | `0x00438e60` | 6 | member/3, member/4 | `engine/core/src/sim/siege.cpp:724` | yes | unread |  |
+| `ObjList::Siege` | `0x00438f20` | 6 | member/3, member/4 | `engine/core/src/sim/siege.cpp:745` | yes | partial | ObjList::Siege: pops state, cap, target, the list (temporary released by 0x00424380); a target handle that resolves nothing prints and runs nothing; planner 0x004383c0 read whole -- FIXED: attackers' damage is [obj+0xdc] not class damage (0x00438664), the hall skirmish divides by its own [obj+0xc8] (0x00438798), the site is asked from the first unit's posRH (0x00438960) and a rally-less stand-back from each attacker's (0x00438be5); tests siege_weighs_the_objects_own_damage_and_maximum, siege_asks_for_a_site_from_the_first_units_pos_rh. Gaps (labelled in siege.hpp): footprint is passable_3x3 not the .pass mask plus object query; CanAttack's visibility/flag/settlement terms treated as passing; crew sort stable where the original's introsort is not; site query 0x00448660/0x00448470, crew assignment 0x00435ca0, melee count 0x0042a530 and CanAttack not re-read this round |
+| `Squad::Siege` | `0x00438e60` | 6 | member/3, member/4 | `engine/core/src/sim/siege.cpp:745` | yes | partial | Squad::Siege: squad by handle (0x00443e30), SF_NOAI refuses, state written as a 16-bit word at +0x28 and the scripts' clock at +0x2c before the target test, then the planner on the squad's deque with cap and siege state; same planner fixes, tests and gaps as ObjList::Siege; the 16-bit truncation of the state is not reproduced (shipped states are small constants) |

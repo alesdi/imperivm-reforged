@@ -74,17 +74,44 @@
 // iteration order is state. The deduplication is in the insert (0x005b9170),
 // which walks the list for a matching id before it appends.
 //
-// `Obj::Select(player)` gates on four things in this order, and three of them
+// `Obj::Select(player)` gates on five things in this order, and three of them
 // are silent: an unresolvable handle prints *"called for an uninitialized or
-// invalid object"* and a dead one prints *"called for a dead object"* -- both
-// into the discard sink, so both are an ordinary return here -- then the
-// local-player comparison, then `SetNoselectFlag`'s bit (0x08000000 at
-// `[obj+0x2c]`), which drops the object without a word.
+// invalid object"* and a dead one (`vtbl+0x50`, `object_is_dead`: a building
+// at no health is not dead) prints *"called for a dead object"* -- both into
+// the discard sink, so both are an ordinary return here -- then the
+// local-player comparison, and then the insert helper's two (0x005e7d80): the
+// object's own `vtbl+0x74` asked about the local player, and the **spawn
+// template** bit (0x08000000 at `[obj+0x2c]`, `kSyncUnspawned`), either of
+// which drops the object without a word. This header used to call that bit
+// `SetNoselectFlag`'s; it is not -- `Unit::SetNoselectFlag` (0x005d8750)
+// writes 0x800000 at `[obj+0x194]`, which the drag box tests (0x005e1ac8) and
+// a script's `Select` does not, so a scripted `Select` takes a noselect unit.
+//
+// `vtbl+0x74` is not reproduced. For every unit vtable it is 0x005b1030: an
+// object of the class `DefItemHolder` answers yes; any other answers yes when
+// its one-hot owner bits (`[obj+0x2c]` low word) meet the asking player's
+// `[record+0x18]`, no when it is held (0x200000), and otherwise whatever the
+// fog's sight test answers for its position (0x0053e970: no for the held
+// marker position, then 0x0053e910 or 0x00515950 depending on the fog mode).
+// The catapult's vtable carries 0x004dc990, the same test with a ring of ten
+// probe points around the object. Every shipped `Select` names the local
+// player's own object, which answers yes on the owner arm; a foreign unit out
+// of sight is the case this engine selects and the original would not.
 //
 // `Obj::Deselect()` -- the no-argument member, and the only form the corpus
 // uses -- has **no player comparison at all** (0x005ac0e0). It removes from the
-// one selection unconditionally. The two-argument form, which nothing calls,
-// is the guarded one.
+// one selection unconditionally. The two-argument form (0x005ac060), which
+// nothing calls, is the guarded one: handle, then the local-player comparison,
+// then the same removal; it makes no dead test.
+//
+// `SquadList::Select(player)` (0x0042bee0), which nothing calls either (one
+// commented-out line in `AIOSENDSQUAD.VS`): when `player` is the local one it
+// **empties the selection first** (0x005e7e50), whether or not the list
+// resolves; then, if the list resolves and its cursor is not at its end
+// (0x00420170, `EOL`), it walks the list **from its beginning** (0x00429c20)
+// and offers every member handle of every squad (0x00443e30), in squad then
+// join order, to the insert helper -- no dead test of its own, so the
+// helper's template and `vtbl+0x74` gates are the only ones.
 //
 // `SwapSelectedObj(from, to)` -- 7 sites, every one a summoning or a death that
 // replaces one object with another -- is **remove and append, not a
@@ -95,7 +122,9 @@
 // appends. So the summoned wolf lands at the end of the selection and the
 // druid's position is not kept. A null `to` leaves the removal standing; a null
 // `from` does nothing at all; and there is no player guard, because there is no
-// player argument and only one selection to act on.
+// player argument and only one selection to act on. `to` is resolved by handle
+// only -- no dead test -- and so meets only the insert helper's gates: a spawn
+// template stays out, as it does for `Select`.
 //
 // `IsSelectionAssigned(p)` and `WasSelectionAssigned(p)` are **not about the
 // selection**. That is the third correction, and it is the one that changes
@@ -111,9 +140,12 @@
 //     It reads the environment store key **`/Player<p>/SelectionAssigned`** and
 //     answers whether any bit is set.
 //
-// The two-argument forms of both, which no shipped script calls and which are
-// therefore not bound, name a single group -- a bit for `Was`, an index for
-// `Is`.
+// The two-argument forms of both, which no shipped script calls, name a single
+// group. `IsSelectionAssigned(p, slot)` (0x004c6a30) bounds `p` to 1..16 and
+// `slot` to 0..9 and answers whether that one group is non-empty.
+// `WasSelectionAssigned(p, n)` (0x004c69b0) tests the bit `1 << (n & 31)` of
+// the same key -- every bit when `n` is negative, which is the one-argument
+// form's question. Both are bound, read from those bodies.
 //
 // That key is the one path in the binary with no `/<map>/` prefix; every other
 // player-scoped key is `/%s/Player%d/...`. So it is a **root-scope** key and it
@@ -804,14 +836,16 @@ struct OrderReport {
 /// mixed selection of a catapult and a swordsman right-clicking one building
 /// really does produce two different verbs -- and issues in `actors` order.
 ///
-/// **`issuer == kNoPlayer` is the script form.** `ObjList::ExecDefaultCmd`
-/// (0x0055e140) and `Obj::ExecDefaultCmd` (0x005b52b0) reach the same
-/// 0x004f4ff0 a click does, with the player pushed as the literal -1
-/// (0x0055e1f1), and the per-unit issue (0x004ef3d0) forwards that plus one --
-/// player 0, nobody -- to the command it queues. So a `kNoPlayer` issuer
-/// vouches for control (the script filtered by `DiplGetShareControl` before
-/// it called), only liveness is tested, and the commands are not marked as a
-/// player action. A real player is the click, and both halves apply.
+/// **`issuer == kNoPlayer` is the list's script form.** `ObjList::ExecDefaultCmd`
+/// (0x0055e140) reaches the same 0x004f4ff0 a click does, with the player
+/// pushed as the literal -1 (0x0055e1f1), and the per-unit issue (0x004ef3d0)
+/// forwards that plus one -- player 0, nobody -- to the command it queues. So
+/// a `kNoPlayer` issuer vouches for control (the script filtered by
+/// `DiplGetShareControl` before it called), only liveness is tested, and the
+/// commands are not marked as a player action. A real player is the click,
+/// and both halves apply -- and so is `Obj::ExecDefaultCmd` (0x005b52b0),
+/// which pushes its receiver's own owner index (`[[obj+0x70]+8]`) rather than
+/// -1: the object form is issued as its owner.
 OrderReport issue_default_order(World& world, const CommandTable& commands,
                                 std::span<const ObjectId> actors, const OrderTarget& target,
                                 OrderMode mode, bool modifier, PlayerId issuer,

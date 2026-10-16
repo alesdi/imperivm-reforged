@@ -108,6 +108,68 @@ class TranslationTable {
   /// language pack's plus the container's. Returns how many were added.
   std::size_t merge(const TranslationTable& other);
 
+  /// What a script's `Translate(key)` answers: the original's table lookup,
+  /// 0x00689130, reached from `Translate` at 0x004c9b70.
+  ///
+  /// * An empty key answers the empty string (0x0068915b).
+  /// * A key made only of decimal digits answers itself, untranslated
+  ///   (0x00689183..0x00689252, `isdigit` over every byte). That is what lets
+  ///   `Translatef` pass a number through a translated `%s`.
+  /// * Otherwise up to four probes, and the first that finds its name decides:
+  ///   `key@context` exactly, then folded to lower case (0x00689030, `tolower`
+  ///   byte by byte); then `key` exactly, then folded (0x006893a2). `context`
+  ///   is empty for `Translatef`; for `Translate` it is the running script's
+  ///   file name (0x006a3a60), which no shipped key carries and which
+  ///   `sim/text.cpp` does not pass.
+  /// * A name filed with an empty result answers `key` without probing
+  ///   further (0x006892f4, 0x00689429), and so does a miss (0x006894bc),
+  ///   after noting it (0x0068adc0, the `game.loc.xml` log, not reproduced).
+  ///
+  /// The two maps the probes read are not `entries()`. The loader, 0x00689f40,
+  /// files every row under its `text` **and**, when it has one, its
+  /// `justtext`, each in the exact map and folded in the second, by plain
+  /// assignment: a later row in the file overwrites an earlier one under the
+  /// same name. So `Translate("Mend")` finds the row whose `justtext` is
+  /// `Mend` even though its key is `Mend@mend arena`, and where two rows
+  /// share a name the one further down the file answers. `entries()` keeps
+  /// only `text`, and keeps the first.
+  ///
+  /// The original keeps the map's own table apart and asks it only when the
+  /// language pack's answer was the key itself (0x004c9cfc). `merge` folds the
+  /// two together instead, adding the other table's names this one lacks;
+  /// that differs only where the language pack answers a name with the name
+  /// itself, or holds it under a different case.
+  [[nodiscard]] std::string lookup(std::string_view key, std::string_view context = {}) const;
+
+  /// What a script's `Translatef(key, a1, ...)` answers: 0x006897a0, reached
+  /// through 0x00689c90 from the three `Translatef` bodies (0x004c9ea0,
+  /// 0x004ca150, 0x004ca470).
+  ///
+  /// The pattern is `lookup(key)` with no context. It is copied byte by byte,
+  /// except:
+  ///
+  /// * `%%` writes one `%`;
+  /// * `%s`, `%S`, `%d` or `%D` followed by a decimal number `N` (any number
+  ///   of digits, 0x00688ff0) writes argument `N`, counted from 1. Under `%s`
+  ///   **the argument is itself translated**: it goes through `lookup` with
+  ///   no context before it is written (0x00689a82, then `%s` at 0x00689aa5),
+  ///   so `Translatef("Needs %s1", "Mend")` translates both. A number argument
+  ///   arrives as its digits and the digit rule passes it through.
+  ///   Under `%d` the original prints its argument with `%d` (0x006899d3), and every
+  ///   `Translatef` form passes strings, so it prints a pointer; the
+  ///   argument's own text is written untranslated here instead (inferred:
+  ///   the original's answer is not a value). An `N` beyond the arguments
+  ///   reads past them in the original; it is left as written here.
+  /// * `%` followed by anything else, or a placeholder letter with no number
+  ///   or with the number 0, abandons the formatting: the whole answer is
+  ///   `Bad parameter at pos P`, `P` being the offset in the pattern just past
+  ///   what was read (no number: 0x00689c07; another letter: 0x00689c2a).
+  ///
+  /// If the finished text is itself a name in the exact map, it is translated
+  /// once more (0x00689b8d, then 0x00689650 at 0x00689bd2).
+  [[nodiscard]] std::string format(std::string_view key,
+                                   std::span<const std::string> arguments) const;
+
   [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
   [[nodiscard]] std::span<const Translation> entries() const noexcept { return entries_; }
 
@@ -120,6 +182,15 @@ class TranslationTable {
   /// The keys folded to lower case, each with its index into `entries_`,
   /// sorted; for `translate_in_context`.
   std::vector<std::pair<std::string, std::uint32_t>> folded_;
+  /// The original's two maps, for `lookup`: every `text` and non-empty
+  /// `justtext`, later rows overwriting earlier ones; sorted by name.
+  std::vector<Translation> named_;
+  /// The same names folded to lower case, filled the same way.
+  std::vector<Translation> named_folded_;
+
+  /// The result filed under `name` in `map` (sorted), or null.
+  [[nodiscard]] static const std::string* find_in(const std::vector<Translation>& map,
+                                                  std::string_view name) noexcept;
 };
 
 /// Substitute `%s1`/`%d1`-style placeholders in `text`.
@@ -148,9 +219,15 @@ class TranslationTable {
 /// tokens straight to `Str2Int`. **Both only work if the separator is a comma
 /// and the token is trimmed**, so that is what this does.
 ///
-/// `tail` receives the remainder, with no leading separator. When there is no
-/// comma the whole of `text` is the token and `tail` is empty, which is what
-/// terminates the shipped `while (times != "")` loops.
+/// The rule is `ParseStr`'s body, 0x00697580: leading **spaces** are skipped
+/// (0x006975f2, the byte 0x20 and nothing else -- a tab is kept), the token
+/// runs to the first comma (`strchr`, 0x00697601) or the end, and trailing
+/// spaces are cut from it (0x00697634). `tail` is everything after that comma
+/// **verbatim**, its own leading and trailing spaces included (0x00697629,
+/// 0x00697703); with no comma it is empty, which is what terminates the
+/// shipped `while (times != "")` loops. The next `ParseStr` skips the spaces
+/// a tail starts with, so only a tail that is nothing but spaces ever shows:
+/// `"a, "` leaves `" "`, not `""`.
 void split_token(std::string_view text, std::string& token, std::string& tail);
 
 }  // namespace imperivm::core::game

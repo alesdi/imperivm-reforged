@@ -14,6 +14,7 @@
 #include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/player_host.hpp"
+#include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 
 namespace imperivm::core::sim {
@@ -980,6 +981,16 @@ struct Screen {
   return Screen{host->selections, host->local_player};
 }
 
+/// The insert helper's own gates (0x005e7d80), which every script path into
+/// the selection -- `Select`, `SquadList::Select`, `SwapSelectedObj`'s second
+/// half -- goes through: the object's `vtbl+0x74` about the local player, not
+/// reproduced (see the header), and the **spawn template** bit
+/// (`[obj+0x2c] & 0x08000000`, `kSyncUnspawned`). `SetNoselectFlag`'s bit is
+/// not one of them; the drag box tests that one, in its own sweep.
+[[nodiscard]] bool insert_accepts(const WorldObject& slot) noexcept {
+  return !slot.state.flags.unspawned;
+}
+
 /// `ClearSelection(player)` -- 18 sites, 9 in the packs and 9 in containers.
 ///
 /// The packs pass `wagon.player` (the eight `CREATE_*_MULE_*` and `_BOAT_`
@@ -1002,23 +1013,52 @@ HostOutcome fn_clear_selection(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
+/// `SquadList::Select(player)` (0x0042bee0) -- no shipped site; see the
+/// header. The player comparison first; when it holds the selection is
+/// emptied (0x005e7e50) whatever the list is; then, unless the list does not
+/// resolve or its cursor stands at its end (0x00420170), every member of
+/// every squad from the list's **beginning** (0x00429c20), in squad and then
+/// join order, is offered to the insert helper. No dead test: the insert's
+/// gates are the only ones.
+HostOutcome squadlist_select(CallContext& ctx, World& world, const Screen& screen) {
+  if (!screen.is_mine(ctx.arg(1))) return HostOutcome::ok_void();
+  screen.table->clear(screen.local);
+  const SquadListPool& pool = squadlist_pool_of(world);
+  const SquadListId list = squadlist_of(ctx.arg(0));
+  const std::span<const SquadKey> keys = pool.items(list);
+  const HeroSystem* heroes = hero_system_of(world);
+  if (pool.contains(list) && pool.cursor(list) < keys.size() && heroes != nullptr) {
+    for (const SquadKey& key : keys) {
+      const Squad* squad = heroes->squads().find(key);
+      if (squad == nullptr) continue;
+      for (const ObjectId member : squad->members) {
+        const WorldObject* slot = world.find(member);
+        if (slot != nullptr && insert_accepts(*slot)) screen.table->select(screen.local, member);
+      }
+    }
+  }
+  screen.table->note_selection_changed(screen.local, ctx.now);
+  return HostOutcome::ok_void();
+}
+
 /// `obj.Select(player)` -- 11 sites, and every one of them is preceded by a
 /// `ClearSelection` on the same player.
 ///
-/// Four gates, in 0x005abfc0's order: the handle, `IsAlive`, the local-player
-/// comparison, and the noselect bit. The first two print into the discard sink,
-/// so all four are an ordinary return here.
+/// Gates in 0x005abfc0's order: the handle, then `vtbl+0x50` (`object_is_dead`
+/// -- a building at no health is not dead and is selected), both printing
+/// into the discard sink and so an ordinary return here; then the
+/// local-player comparison; then the insert helper's (`insert_accepts`),
+/// which drop the object without a word. A `SquadList` receiver is the
+/// other registration, `squadlist_select`.
 HostOutcome fn_select(CallContext& ctx) {
   World* world = world_of(ctx);
   const Screen screen = screen_of(ctx);
   if (world == nullptr || !screen.ok() || ctx.count() < 2) return HostOutcome::ok_void();
+  if (is_squadlist(ctx.arg(0))) return squadlist_select(ctx, *world, screen);
   const WorldObject* slot = object_arg(*world, ctx.arg(0));
-  if (slot == nullptr || slot->state.health <= 0) return HostOutcome::ok_void();
+  if (slot == nullptr || object_is_dead(*slot)) return HostOutcome::ok_void();
   if (!screen.is_mine(ctx.arg(1))) return HostOutcome::ok_void();
-  // `SetNoselectFlag`'s bit, tested inside the insert helper (0x005e7d80) and
-  // not by the entry point, which is why a flagged object is dropped in silence
-  // rather than reported the way a dead one is.
-  if (slot->state.flags.noselect) return HostOutcome::ok_void();
+  if (!insert_accepts(*slot)) return HostOutcome::ok_void();
   screen.table->select(screen.local, slot->id);
   screen.table->note_selection_changed(screen.local, ctx.now);
   return HostOutcome::ok_void();
@@ -1030,12 +1070,16 @@ HostOutcome fn_select(CallContext& ctx) {
 /// The no-argument form (0x005ac0e0) makes **no** local-player comparison. It
 /// cannot: there is nobody to compare against. So it removes from whichever
 /// selection holds the object, which with one selection is the same statement.
+/// The one-argument form (0x005ac060, no shipped site) is the guarded one: the
+/// handle, then the local-player comparison, then the same removal; neither
+/// form tests for death.
 HostOutcome fn_deselect(CallContext& ctx) {
   World* world = world_of(ctx);
   const Screen screen = screen_of(ctx);
   if (world == nullptr || screen.table == nullptr) return HostOutcome::ok_void();
   const WorldObject* slot = object_arg(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_void();
+  if (ctx.count() >= 2 && !screen.is_mine(ctx.arg(1))) return HostOutcome::ok_void();
   // Unconditional, both halves: 0x005e7e00 erases whether or not the object was
   // there and then runs the handler either way, so deselecting something that
   // was not selected still restamps what is.
@@ -1060,7 +1104,9 @@ HostOutcome fn_swap_selected(CallContext& ctx) {
   const WorldObject* from = object_arg(*world, ctx.arg(0));
   if (from == nullptr) return HostOutcome::ok_void();
   const WorldObject* to = object_arg(*world, ctx.arg(1));
-  if (screen.table->swap_object(from->id, to == nullptr ? kNoObject : to->id) == 0) {
+  // `to` by handle only, then the insert helper's gates: a template stays out.
+  const bool takes = to != nullptr && insert_accepts(*to);
+  if (screen.table->swap_object(from->id, takes ? to->id : kNoObject) == 0) {
     return HostOutcome::ok_void();
   }
   if (screen.local != kNoPlayer) screen.table->note_selection_changed(screen.local, ctx.now);
@@ -1231,14 +1277,51 @@ HostOutcome fn_is_selection_assigned(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(false));
 }
 
+/// `IsSelectionAssigned(player, slot)` (0x004c6a30) -- no shipped site. The
+/// second argument is popped first; `player` bounded to 1..16 and `slot` to
+/// 0..9, then that one group's size (0x005b8760, `[group+0x1c]`) is non-zero.
+HostOutcome fn_is_selection_assigned_2(CallContext& ctx) {
+  HostContext* host = host_context_of(ctx);
+  if (host == nullptr || host->shortcuts == nullptr || ctx.count() < 2 ||
+      !ctx.arg(0).is_integer() || !ctx.arg(1).is_integer()) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
+  const PlayerId player = player_from_script(ctx.arg(0).as_integer());
+  const std::int32_t slot = ctx.arg(1).as_integer();
+  if (player == kNoPlayer || slot < 0 ||
+      slot >= static_cast<std::int32_t>(ShortcutTable::kSlots)) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
+  return HostOutcome::ok_with(Value::boolean(!host->shortcuts->group(player, slot).empty()));
+}
+
+/// `WasSelectionAssigned(player, n)` (0x004c69b0) -- no shipped site. The key
+/// of the one-argument form, asked about the bit `1 << (n & 31)`, or every bit
+/// when `n` is negative.
+HostOutcome fn_was_selection_assigned_2(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr || ctx.count() < 2 || !ctx.arg(0).is_integer() ||
+      !ctx.arg(1).is_integer()) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
+  const EnvSystem* env = env_of(*world);
+  if (env == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  const std::int32_t n = ctx.arg(1).as_integer();
+  const std::uint32_t mask =
+      n < 0 ? 0xFFFFFFFFu : (1u << (static_cast<std::uint32_t>(n) & 31u));
+  const auto bits = static_cast<std::uint32_t>(
+      env->env().read_int(EnvScope::root(), selection_assigned_key(ctx.arg(0).as_integer())));
+  return HostOutcome::ok_with(Value::boolean((bits & mask) != 0));
+}
+
 /// `WasSelectionAssigned(player)` -- 1 site, beside the one above.
 ///
 /// Reads `/Player<n>/SelectionAssigned` out of the environment store and asks
 /// whether any bit is set. **No bounds check**: 0x004c6a00 formats the number
 /// it was given straight into the key, so player 99 reads a key nothing has
-/// written and answers false. Nothing in this engine sets a bit -- the writers
-/// are the input layer's, and `SetShortcutSel` is not one of them -- which is
-/// exactly the distinction `GENERALADVICE6.VS` is drawing.
+/// written and answers false. The writers are the input layer's and
+/// `SetShortcutSel`'s, which ORs its slot's bit in for a non-empty list
+/// (0x006a6d00 -> 0x004e5940; `sim/feedback.cpp`).
 HostOutcome fn_was_selection_assigned(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr || ctx.count() < 1 || !ctx.arg(0).is_integer()) {
@@ -1308,16 +1391,20 @@ HostOutcome fn_exec_default_cmd(CallContext& ctx) {
     return HostOutcome::failed("ExecDefaultCmd: expected a point, an object and two flags");
   }
   std::vector<ObjectId> actors;
+  PlayerId issuer = kNoPlayer;
   if (is_objlist(ctx.arg(0))) {
     const std::span<const ObjectId> items = objlist_pool_of(*world).items(objlist_of(ctx.arg(0)));
     actors.assign(items.begin(), items.end());
   } else if (ctx.arg(0).is_object() && ctx.arg(0).as_object().id != kNoObject &&
              world->find(ctx.arg(0).as_object().id) != nullptr) {
-    // The liveness test here is the original's invalid-object path; the issue
-    // loop skips a dead id on its own, so a fault that drops it survives the
-    // suite as an equivalence.
-
-    actors.push_back(ctx.arg(0).as_object().id);
+    // The `Obj` form (0x005b52b0): an unresolvable receiver and a dead one
+    // (`vtbl+0x50`) print and return; a live one is issued **as its owner**
+    // (`[[obj+0x70]+8]` pushed where the list form pushes -1), so control is
+    // tested and the command is marked a player's, as a click's is.
+    const WorldObject* self = world->find(ctx.arg(0).as_object().id);
+    if (object_is_dead(*self)) return HostOutcome::ok_void();
+    actors.push_back(self->id);
+    issuer = self->state.owner;
   } else {
     return HostOutcome::ok_void();
   }
@@ -1335,10 +1422,9 @@ HostOutcome fn_exec_default_cmd(CallContext& ctx) {
   HostContext* host = host_context_of(ctx);
   if (ctx.scheduler != nullptr && host != nullptr) {
     ScriptOrderVerifier verifier(*ctx.scheduler, *host);
-    (void)issue_default_order(*world, *table, actors, target, mode, modifier, kNoPlayer,
-                              &verifier);
+    (void)issue_default_order(*world, *table, actors, target, mode, modifier, issuer, &verifier);
   } else {
-    (void)issue_default_order(*world, *table, actors, target, mode, modifier, kNoPlayer, nullptr);
+    (void)issue_default_order(*world, *table, actors, target, mode, modifier, issuer, nullptr);
   }
   return HostOutcome::ok_void();
 }
@@ -1369,13 +1455,17 @@ std::size_t register_orders_host(script::HostRegistry& registry) {
   registry.define(kFree, "WasSelectionAssigned", 1, &fn_was_selection_assigned);//  1
   registry.define(kMember, "Select", 1, &fn_select);                            // 11
   registry.define(kMember, "Deselect", 0, &fn_deselect);                        //  2
+  registry.define(kMember, "Deselect", 1, &fn_deselect);                        //  0
+  registry.define(kFree, "IsSelectionAssigned", 2, &fn_is_selection_assigned_2);   //  0
+  registry.define(kFree, "WasSelectionAssigned", 2, &fn_was_selection_assigned_2); //  0
   registry.define(kMember, "_LastSelectionTime", 0, &fn_last_selection_time);   //  1
   registry.define(kMember, "ExecDefaultCmd", 4, &fn_exec_default_cmd);          //  1, both receivers
   // `GetSelection/0` is declared and stays unbound: `gbr.exe` registers no such
   // name, so `DEBUG_DUMP.VS`'s one call site could never have run. The header
   // has the evidence. The two-argument `IsSelectionAssigned` and
-  // `WasSelectionAssigned` are registered in the original and reached by no
-  // shipped script, so they are not bound either.
+  // `WasSelectionAssigned` and the one-argument `Deselect` are registered in
+  // the original and reached by no shipped script; they are bound from their
+  // bodies (0x004c6a30, 0x004c69b0, 0x005ac060).
   return registry.implemented() - before;
 }
 
