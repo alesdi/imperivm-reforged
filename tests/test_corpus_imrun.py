@@ -808,6 +808,12 @@ P1_WEST_OUTSIDE = (12300, 2050)
 #: When the swordsman is sent in. By then p1's AI has trained a few and marched
 #: them out through its gates.
 ORDER_TURN = 300
+#: When the gate test's swordsman is sent in: a turn at which every one of
+#: p1's gates stands closed with nobody near, so the gate it walks through is
+#: shut when it is sent. At 300 on the tenth round's tree p1's two swordsmen
+#: stand within 350 of the south and the west gate and hold both open; at 400
+#: all four are shut and three swordsmen stand clear of them.
+GATE_ORDER_TURN = 400
 
 
 def _inside(x: int, y: int) -> bool:
@@ -846,7 +852,7 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
         pytest.skip("Crossroads.BFHP is not in this installation")
     # Which swordsman: the first of p1's that holds no gate open.
     first = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "100",
+        [str(imrun), str(game_dir), str(crossroads), str(GATE_ORDER_TURN), "100",
          "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_OBJECTS": "ESwordsman", "IMRUN_GATES": "1"},
@@ -869,22 +875,22 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
     assert any(target == "closed" and "near" not in rest for *_, target, rest in gates), gates
 
     second = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "100",
+        [str(imrun), str(game_dir), str(crossroads), str(GATE_ORDER_TURN + 300), "100",
          "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_GATES": "1", "IMRUN_WATCH": str(unit),
              "IMRUN_PLACE": f"{P1_WEST_OUTSIDE[0]},{P1_WEST_OUTSIDE[1]}",
-             "IMRUN_GOTO": f"{ORDER_TURN}:{unit}:{P1_INSIDE[0]},{P1_INSIDE[1]}"},
+             "IMRUN_GOTO": f"{GATE_ORDER_TURN}:{unit}:{P1_INSIDE[0]},{P1_INSIDE[1]}"},
     )
     assert second.returncode == 0, second.stdout + second.stderr
     out = second.stdout
-    assert re.search(rf"^\s+place turn {ORDER_TURN}: {unit} at \(-?\d+,-?\d+\)$", out, re.MULTILINE), \
+    assert re.search(rf"^\s+place turn {GATE_ORDER_TURN}: {unit} at \(-?\d+,-?\d+\)$", out, re.MULTILINE), \
         out[-3000:]
-    assert re.search(rf"^\s+goto turn {ORDER_TURN}: {unit} to .*, 1 issued$", out, re.MULTILINE), \
+    assert re.search(rf"^\s+goto turn {GATE_ORDER_TURN}: {unit} to .*, 1 issued$", out, re.MULTILINE), \
         out[-3000:]
     track = [(int(t), int(x), int(y)) for t, x, y in
              re.findall(rf"^\s+watch turn (\d+): {unit} at \((-?\d+),(-?\d+)\)$", out, re.MULTILINE)
-             if int(t) >= ORDER_TURN]
+             if int(t) >= GATE_ORDER_TURN]
     # It arrives inside, at the market.
     arrived = [t for t, x, y in track
                if (x - P1_INSIDE[0]) ** 2 + (y - P1_INSIDE[1]) ** 2 <= 60 ** 2]
@@ -898,9 +904,9 @@ def test_a_gate_stands_closed_and_opens_for_a_friend_walking_through_it(imrun, g
     events = [(int(t), what) for t, what in
               re.findall(rf"^\s+gate turn (\d+): {gate} (opens|closes)$", out, re.MULTILINE)]
     # Closed when the order was given, opened on the way, before it got there.
-    before = [what for t, what in events if t <= ORDER_TURN]
+    before = [what for t, what in events if t <= GATE_ORDER_TURN]
     assert not before or before[-1] == "closes", events
-    assert any(what == "opens" and ORDER_TURN < t < arrived[0] for t, what in events), (events, track)
+    assert any(what == "opens" and GATE_ORDER_TURN < t < arrived[0] for t, what in events), (events, track)
     assert "no traps." in out, out[out.find("distinct traps"):]
 
 
@@ -1080,13 +1086,17 @@ SIEGE_TURN = 10
 @pytest.mark.parametrize("cls, stand, hurts", [
     # 20 beyond the outpost's edge, inside a sword's 17 + 15 + 345.
     ("RHastatus", (NUMANTIA_OUTPOST[0] + 365, NUMANTIA_OUTPOST[1]), False),
-    # 300 beyond it on the west, inside a bow's reach. Not the east side:
-    # since a sequence reads Finished the moment its script ends (0x005b9f50),
-    # `seq3.vs`'s 28 `BestTarget` runs take a few turns rather than 28, so the
-    # Iberians' attackers are already advancing on their own outposts' ground
-    # there, and the archer's `unit_advance.vs` takes the first of them in
-    # squad sight for its target instead of the fort.
-    ("RArcher", (NUMANTIA_OUTPOST[0] - 645, NUMANTIA_OUTPOST[1]), True),
+    # 500 from its centre to the south-west, inside a bow's reach. Not the
+    # east side: since a sequence reads Finished the moment its script ends
+    # (0x005b9f50), `seq3.vs`'s 28 `BestTarget` runs take a few turns rather
+    # than 28, so the Iberians' attackers are already advancing on their own
+    # outposts' ground there, and the archer's `unit_advance.vs` takes the
+    # first of them in squad sight for its target instead of the fort. Not due
+    # west either, since the tenth round's tree: an Iberian archer (p3) kills
+    # it there within three turns, before its first shot. From here it lands
+    # its shots before it falls (10,000 -> 9,940 on that tree and on the one
+    # before it).
+    ("RArcher", (NUMANTIA_OUTPOST[0] - 354, NUMANTIA_OUTPOST[1] - 354), True),
 ])
 def test_the_attack_button_on_a_fort_hurts_it_from_an_archer_and_not_from_a_sword(
         imrun, game_dir, cls, stand, hurts):
