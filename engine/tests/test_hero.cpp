@@ -2851,6 +2851,21 @@ TEST(hero_find_unit_to_learn_takes_an_ally_only) {
   CHECK(b.found("FindUnitToLearn", druid) == friend_);
 }
 
+/// A spawn template is not in play, so no scan reaches it -- and its authored
+/// `Level` gives it a real running total. Danube map 7's priest found one, a
+/// waiting `RScout`, and `RPRIEST_IDLE.VS` looped between a `GotoAttack` that
+/// arrived and an `InRange` that knows no template until its budget ran out.
+TEST(hero_find_unit_to_learn_never_takes_a_spawn_template) {
+  CasterBench b;
+  const ObjectId druid = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
+  const ObjectId waiting = b.spawn(b.plain_class, Point{30, 0}, 1);
+  REQUIRE(b.heroes.set_experience(waiting, 50));
+  b.world.mutable_state(waiting)->flags.unspawned = true;
+  CHECK(b.found("FindUnitToLearn", druid) == kNoObject);
+  b.world.mutable_state(waiting)->flags.unspawned = false;
+  CHECK(b.found("FindUnitToLearn", druid) == waiting);
+}
+
 /// When the sight circle finds nobody, the caster's own squad is searched
 /// (0x00444190, then 0x00513840 / 0x00513620 / 0x00513700) -- if the caster
 /// is not held, or its squad carries `SF_ADVCHOOSER`. Learn keeps the **last**

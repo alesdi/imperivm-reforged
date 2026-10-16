@@ -1569,6 +1569,10 @@ HostOutcome fn_find_unit_to_learn(CallContext& ctx) {
     // because the original keeps it.
     if (other.id == self) return false;
     if (other.internal != InternalKind::none) return false;
+    // A spawn template is not in play: it is in no grid cell and no squad.
+    // This walk reads `World::objects()` rather than the spatial query the
+    // other searches use, so it has to say so itself.
+    if (other.state.flags.unspawned) return false;
     if (!other.state.flags.is_unit) return false;            // a unit, or null
     if (other.state.health <= 0) return false;              // `vtbl[0x50]`, IsDead
     if (other.state.holder != kNoObject) return false;      // `[obj+0x154] != 0xffff`
