@@ -1013,14 +1013,18 @@ TEST(battle_cry_lifts_levels_for_five_seconds_and_then_stops) {
   CHECK(f.heroes.modifiers_for(warrior, 4999).level_add == 4);
   CHECK(f.heroes.modifiers_for(warrior, 5000).level_add == 0);
 
-  // `VERIFY_HERO_SKILL.VS`: "Skill already in effect".
-  CHECK(!f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
+  // "Skill already in effect" is `VERIFY_HERO_SKILL.VS`'s refusal, not the
+  // body's: 0x0052f140 restarts a running cry from now.
+  f.world.advance(1000);
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
+  CHECK(f.heroes.modifiers_for(warrior, 5999).level_add == 4);
+  CHECK(f.heroes.modifiers_for(warrior, f.world.time() + 5000).level_add == 0);
 
   // Run past the end and the effect is cleared, whatever the turn length.
   f.world.advance(800);
   f.world.advance(800);
-  f.world.advance_turns(6);
-  CHECK(f.world.time() >= 5000);
+  f.world.advance_turns(10);
+  CHECK(f.world.time() >= 6000);
   CHECK(!f.heroes.skill_in_effect(hero, HeroSkill::battle_cry, f.world.time()));
   CHECK(f.heroes.modifiers_for(warrior).level_add == 0);
   CHECK(f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
@@ -1110,14 +1114,52 @@ TEST(healing_charge_and_rush_are_instantaneous) {
   CHECK(f.world.state(warrior)->health == before - 12);
 }
 
-TEST(a_passive_skill_cannot_be_used_and_an_unlearned_one_cannot_either) {
+TEST(a_passive_skill_uses_to_no_effect_and_an_unlearned_one_does_not_use) {
+  // 0x0052f140: points above 0 answer true whatever the skill -- the switch's
+  // default -- and no points, or the -1 of "not offered", answer false.
   Fixture f;
   const ObjectId hero = f.spawn_hero();
   f.grant(hero, 10);
   REQUIRE(f.heroes.set_skill(hero, HeroSkill::administration, 5));
-  CHECK(!f.heroes.use_skill(f.world, hero, HeroSkill::administration));
-  // "You need to have at least 1 point to can use this skill" -- verify script.
+  CHECK(f.heroes.use_skill(f.world, hero, HeroSkill::administration));
   CHECK(!f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::battle_cry, -1));
+  CHECK(!f.heroes.use_skill(f.world, hero, HeroSkill::battle_cry));
+}
+
+TEST(the_party_walk_heals_the_hero_and_spares_it_the_rest) {
+  // 0x005f5520 walks the hero's party, the hero with its army. Healing
+  // (0x0052dc20) takes anyone below its cap; Charge, Rush and Frenzy
+  // (0x0052dcf0, 0x0052dd50, 0x0052ef30) pass a hero by.
+  Fixture f;
+  const ObjectId hero = f.spawn_hero(1, 900);
+  const ObjectId warrior = f.spawn_warrior(1, 101);
+  CHECK(f.heroes.attach(f.world, warrior, hero));
+  f.grant(hero, 40);
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::healing, 2));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::frenzy, 1));
+  REQUIRE(f.heroes.set_skill(hero, HeroSkill::rush, 4));
+
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::healing));
+  CHECK(f.world.state(hero)->health == 920);
+  CHECK(f.world.state(warrior)->health == 121);
+
+  // Frenzy keeps the larger half: 121 loses 60.
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::frenzy));
+  CHECK(f.world.state(warrior)->health == 61);
+  CHECK(f.world.state(hero)->health == 920);
+
+  // Rush damages per point of stamina actually gained: 5 -> 9 is 4 points,
+  // 24; from 9 only 1 more fits under the cap of 10, so 6; at the cap, none.
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::rush));
+  CHECK(f.world.state(warrior)->stamina == 9);
+  CHECK(f.world.state(warrior)->health == 37);
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::rush));
+  CHECK(f.world.state(warrior)->stamina == 10);
+  CHECK(f.world.state(warrior)->health == 31);
+  REQUIRE(f.heroes.use_skill(f.world, hero, HeroSkill::rush));
+  CHECK(f.world.state(warrior)->health == 31);
+  CHECK(f.world.state(hero)->stamina == 10);
 }
 
 // --------------------------------------------------------------------------

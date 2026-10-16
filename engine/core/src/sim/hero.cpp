@@ -571,75 +571,78 @@ bool HeroSystem::skill_in_effect(ObjectId hero_id, HeroSkill which, GameTime now
 
 bool HeroSystem::use_skill(World& world, ObjectId hero_id, HeroSkill which) {
   HeroRecord* record = hero(hero_id);
-  if (record == nullptr) return false;
-  if (!hero_skill_is_active(which)) return false;
+  if (record == nullptr || idx(which) >= kHeroSkillCount) return false;
+  if (!record->offered[idx(which)]) return false;
   const std::int32_t points = record->skills[idx(which)];
-  if (points <= 0) return false;  // "You need to have at least 1 point"
+  if (points <= 0) return false;
+  if (!hero_skill_is_active(which)) return true;  // the switch's default: true, nothing done
   const GameTime now = world.time();
-  if (record->effect_until[idx(which)] > now) return false;  // "already in effect"
 
   const std::int32_t duration = skill_duration(hero_id, which);
   if (duration > 0) record->effect_until[idx(which)] = now + duration;
 
+  // The party walk, hero first: a snapshot, since a damage can kill.
+  std::vector<ObjectId> party;
+  party.push_back(hero_id);
+  party.insert(party.end(), record->army.begin(), record->army.end());
+  CombatSystem* combat = combat_system_of(world);
+  // The unit's damage virtual, as `Obj::Damage` reaches it.
+  const auto damage = [&](ObjectId id, std::int32_t amount) {
+    if (amount <= 0) return;
+    if (combat != nullptr && combat->find(id) != nullptr) {
+      (void)combat->apply_damage(world, id, amount);
+      if (combat->world_bound() && combat->find(id) != nullptr) {
+        (void)world.set_health(id, combat->health(id));
+      }
+      return;
+    }
+    if (const ObjectState* state = world.state(id); state != nullptr) {
+      (void)world.set_health(id, std::max(0, state->health - amount));
+    }
+  };
+  const ClassGraph* graph = world.class_graph();
+  const ClassIndex mage = graph != nullptr ? graph->find("BaseMage") : kNoClass;
+
   const HeroConstants& c = constants_;
-  switch (which) {
-    case HeroSkill::healing: {
-      const std::int32_t amount = c.health_per_healing_level * points;
-      for (const ObjectId member : record->army) {
-        const ObjectState* state = world.state(member);
-        if (state == nullptr) continue;
+  for (const ObjectId member : party) {
+    const ObjectState* state = world.state(member);
+    if (state == nullptr) continue;
+    const bool is_a_hero = state->flags.is_hero;
+    switch (which) {
+      case HeroSkill::healing: {
         const std::int32_t cap = max_health_of(world, member);
-        std::int32_t healed = state->health + amount;
+        if (cap > 0 && state->health >= cap) break;
+        std::int32_t healed = state->health + c.health_per_healing_level * points;
+        if (healed < 0) healed = 0;
         if (cap > 0 && healed > cap) healed = cap;
         world.set_health(member, healed);
+        break;
       }
-      break;
-    }
-    case HeroSkill::charge: {
-      const std::int32_t amount = c.stamina_per_charge_level * points;
-      for (const ObjectId member : record->army) {
-        const ObjectState* state = world.state(member);
-        if (state == nullptr) continue;
+      case HeroSkill::charge: {
+        if (is_a_hero) break;
         const std::int32_t cap = max_stamina_of(world, member);
-        std::int32_t value = state->stamina + amount;
-        if (cap > 0 && value > cap) value = cap;
-        world.set_stamina(member, value);
+        if (state->stamina >= cap) break;
+        world.set_stamina(member, std::clamp(state->stamina + points, 0, cap));
+        break;
       }
-      break;
-    }
-    case HeroSkill::rush: {
-      // "increases the stamina of all attached warriors by 1 per skill point,
-      // while decreasing their health by 5 per skill point" -- and the health
-      // cost is `RushDamage` from CONST.INI. See HeroConstants::rush_damage.
-      const std::int32_t stamina = c.stamina_per_rush_level * points;
-      const std::int32_t damage = c.rush_damage * points;
-      for (const ObjectId member : record->army) {
-        const ObjectState* state = world.state(member);
-        if (state == nullptr) continue;
+      case HeroSkill::rush: {
+        if (is_a_hero) break;
         const std::int32_t cap = max_stamina_of(world, member);
-        std::int32_t value = state->stamina + stamina;
-        if (cap > 0 && value > cap) value = cap;
-        world.set_stamina(member, value);
-        std::int32_t health = state->health - damage;
-        if (health < 1) health = 1;  // Rush is a cost, not an execution
-        world.set_health(member, health);
+        const std::int32_t before = state->stamina;
+        if (before >= cap) break;
+        const std::int32_t after = std::min(before + points, cap);
+        damage(member, (after - before) * c.rush_damage);
+        world.set_stamina(member, after);
+        break;
       }
-      break;
-    }
-    case HeroSkill::frenzy: {
-      // "halves the health ... of all attached warriors". The halving happens
-      // once, when the cry goes up; the damage doubling is a modifier that
-      // lasts as long as the effect does.
-      for (const ObjectId member : record->army) {
-        const ObjectState* state = world.state(member);
-        if (state == nullptr) continue;
-        std::int32_t health = state->health / 2;
-        if (health < 1) health = 1;
-        world.set_health(member, health);
+      case HeroSkill::frenzy: {
+        if (is_a_hero) break;
+        if (mage != kNoClass && world.class_is_a(member, mage)) break;
+        damage(member, state->health / 2);
+        break;
       }
-      break;
+      default: break;  // battle_cry, ceasefire, assault, defensive_cry: the slot is the effect
     }
-    default: break;  // battle_cry, ceasefire, assault, defensive_cry: timed only
   }
   return true;
 }

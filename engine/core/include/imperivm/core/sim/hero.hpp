@@ -688,14 +688,35 @@ class HeroSystem final : public System {
   /// answers -1 for an unresolvable receiver.
   [[nodiscard]] std::int32_t available_skill_points(ObjectId hero) const;
 
-  /// `Hero.UseSkill(id)` -- fire an active skill.
+  /// `Hero.UseSkill(id)` -- 0x0052f620 -> 0x0052f140.
   ///
-  /// Refuses a passive skill, a skill at zero points, and a skill already in
-  /// effect, which is exactly what `VERIFY_HERO_SKILL.VS` checks. **Stamina is
-  /// not checked or spent here**: `ACTIVATE_HERO_SKILL.VS` does that at the
-  /// call site (`if (.UseSkill(...)) .SetStamina(.stamina - cmdcost_stamina)`),
-  /// so the cost belongs to the command layer and `hero_skill_stamina_cost`
-  /// exposes it.
+  /// False for an id past 24 and for a skill at no points (its byte 0 or the
+  /// -1 of "not offered"); **true for everything else, a passive skill
+  /// included**, which then does nothing. Nothing refuses a skill already in
+  /// effect: using it again restarts it (`VERIFY_HERO_SKILL.VS` is what
+  /// refuses that, at the command). Stamina is the command's too:
+  /// `ACTIVATE_HERO_SKILL.VS` spends it when this answers true.
+  ///
+  /// The timed skills -- Battle Cry, Ceasefire, Frenzy, Assault, Defensive
+  /// Cry -- end their running effect objects (0x0052de30), stamp the end
+  /// time `now + duration` in the skill's slot (0x0052d8f0; `skill_in_effect`
+  /// reads it) and walk the party (0x005f5520 over `[hero+0x2b0]`: the hero
+  /// and its army) spawning one effect object per member -- not modelled,
+  /// the effects being read off the slot instead (`modifiers_for`). Frenzy's
+  /// walk also deals the damage, and the three instantaneous skills are
+  /// nothing but their walk:
+  ///
+  ///   * Healing (0x0052dc20): every member **the hero included** below its
+  ///     cap gets `HealthPerHealingLevel * points`, clamped to `[0, cap]`;
+  ///   * Charge (0x0052dcf0): every member but a hero, below its stamina
+  ///     cap, gets `points` stamina, clamped to `[0, cap]`;
+  ///   * Rush (0x0052dd50): every member but a hero, below its stamina cap,
+  ///     gets up to `points` stamina and is **damaged** `RushDamage` for each
+  ///     point it actually gained -- the unit's damage virtual, which can
+  ///     kill;
+  ///   * Frenzy (0x0052ef30): every member but a hero or a `BaseMage` is
+  ///     damaged half its health, rounded down -- so it keeps the larger
+  ///     half.
   bool use_skill(World& world, ObjectId hero, HeroSkill which);
 
   /// `Hero.SkillInEffect(id)`.
