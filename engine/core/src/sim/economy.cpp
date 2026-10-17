@@ -235,6 +235,10 @@ void EconomySystem::advance(World& world, const Turn& turn) {
     for (const Wagon& w : wagons_) {
       if (w.build_remaining > 0 && w.build_remaining < step) step = w.build_remaining;
     }
+    for (const WagonLoyalty& w : wagon_loyalty_) {
+      if (w.gain_remaining > 0 && w.gain_remaining < step) step = w.gain_remaining;
+      if (w.cap_remaining > 0 && w.cap_remaining < step) step = w.cap_remaining;
+    }
     if (step <= 0) step = left;
 
     // 2. Advance every clock by exactly that much.
@@ -245,6 +249,10 @@ void EconomySystem::advance(World& world, const Turn& turn) {
     }
     for (Wagon& w : wagons_) {
       if (w.build_remaining > 0) w.build_remaining -= step;
+    }
+    for (WagonLoyalty& w : wagon_loyalty_) {
+      if (w.gain_remaining > 0) w.gain_remaining -= step;
+      if (w.cap_remaining > 0) w.cap_remaining -= step;
     }
     left -= step;
 
@@ -274,6 +282,24 @@ void EconomySystem::advance(World& world, const Turn& turn) {
         fire(world, s, static_cast<SettlementTimer>(i));
         s.timers[i] = period;
       }
+    }
+
+    // 5. Then every wagon under capture, by handle: timer 9 before timer 10
+    //    when both fall due together. That is the wheel's order and not a
+    //    choice -- 0x005ec160 arms 9 before 10, and from then on 10 is always
+    //    re-armed into an instant 9 was armed into first, and a bucket fires
+    //    in arming order (`script/scheduler.hpp`) -- so a guard count that
+    //    ends the capture also kills the cap tick due on the same
+    //    millisecond. A row whose wagon has left the world goes with it.
+    for (std::size_t i = 0; i < wagon_loyalty_.size();) {
+      WagonLoyalty& w = wagon_loyalty_[i];
+      if (world.find(w.wagon) == nullptr) {
+        wagon_loyalty_.erase(wagon_loyalty_.begin() + static_cast<std::ptrdiff_t>(i));
+        continue;
+      }
+      if (w.capturing && w.gain_remaining == 0) tick_wagon_guard(world, w);
+      if (w.capturing && w.cap_remaining == 0) tick_wagon_cap(w);
+      ++i;
     }
   }
 }
@@ -475,6 +501,136 @@ void EconomySystem::tick_loyalty_gain(World& world, Settlement& s) {
     }
   }
   s.loyalty_pending += rules_.loyalty_increase_per_unit * soldiers + 3;
+}
+
+// --------------------------------------------------------------------------
+// a wagon's loyalty
+// --------------------------------------------------------------------------
+//
+// `docs/formats/wagon.md` sets out the model; the three entry points that
+// write it are below with the registrations, and these are its two timers.
+
+WagonLoyalty& EconomySystem::wagon_loyalty_row(ObjectId wagon) {
+  const auto at = std::lower_bound(
+      wagon_loyalty_.begin(), wagon_loyalty_.end(), wagon,
+      [](const WagonLoyalty& row, ObjectId id) { return row.wagon < id; });
+  if (at != wagon_loyalty_.end() && at->wagon == wagon) return *at;
+  // The constructed state, 0x005eae80: the initial tenths, nothing pending,
+  // no capture, no timer.
+  WagonLoyalty fresh;
+  fresh.wagon = wagon;
+  fresh.loyalty_tenths = rules_.loyalty_wagons_initial;
+  return *wagon_loyalty_.insert(at, fresh);
+}
+
+const WagonLoyalty* EconomySystem::find_wagon_loyalty(ObjectId wagon) const noexcept {
+  const auto at = std::lower_bound(
+      wagon_loyalty_.begin(), wagon_loyalty_.end(), wagon,
+      [](const WagonLoyalty& row, ObjectId id) { return row.wagon < id; });
+  return at != wagon_loyalty_.end() && at->wagon == wagon ? &*at : nullptr;
+}
+
+std::int32_t EconomySystem::wagon_loyalty_tenths(ObjectId wagon) const noexcept {
+  const WagonLoyalty* row = find_wagon_loyalty(wagon);
+  return row == nullptr ? rules_.loyalty_wagons_initial : row->loyalty_tenths;
+}
+
+bool EconomySystem::set_wagon_loyalty(ObjectId wagon, std::int32_t value) {
+  if (value < 0 || value > 100) return false;
+  wagon_loyalty_row(wagon).loyalty_tenths = value * 10;
+  return true;
+}
+
+bool EconomySystem::decrease_wagon_loyalty(ObjectId wagon, std::int32_t amount,
+                                           std::int32_t late) {
+  if (amount < 0) return false;
+  WagonLoyalty& row = wagon_loyalty_row(wagon);
+  if (!row.capturing) {
+    // Timer 9 first and timer 10 second, as 0x005ec160 arms them; due
+    // `interval` after the call, which stood `late` behind this clock.
+    if (late < 0) late = 0;
+    row.gain_remaining = std::max(rules_.wagon_loyalty_interval - late, 1);
+    row.cap_remaining = std::max(rules_.wagon_loyalty_cap_interval - late, 1);
+    row.capturing = true;
+  }
+  row.pending -= 10 * amount;
+  return true;
+}
+
+/// Timer 9, 0x005ec410: the guard count.
+///
+/// Two sweeps of one circle -- the wagon's stored position (`vtbl+0x3c`, so
+/// `(-1, -1)` for a held wagon) and a radius of `sight * 160 / 100`
+/// (`[wagon+0xd0]`, truncated) -- over live heirs of `Military`:
+///
+///   * **the guards** (0x005eb760): units of the wagon's own player -- its one
+///     bit, `[player+0xc]`, not its allies -- and not templates. Hidden ones
+///     count. No `Sentry` or `RamUnit` exclusion.
+///   * **the threat** (0x005eb9d0, the settlement's sweep): units of every
+///     player the owner is at war with (`[player+0x10]`, the owner's own row
+///     read one way, as `Obj::IsEnemy` reads it), neither hidden nor
+///     templates, and neither a `Sentry` nor a `RamUnit`.
+///
+/// No threat, and the capture is over: both timers killed, the loyalty back
+/// at `LoyaltyWagonsInitial`, the flag down -- and **the pending change left
+/// where it is**, so it carries into the next capture. Otherwise the pending
+/// change gains `WagonLoyaltyIncreasePerUnit` tenths per guard and the timer
+/// is re-armed. Nothing in the sweep draws randomness.
+void EconomySystem::tick_wagon_guard(World& world, WagonLoyalty& w) {
+  const WorldObject* wagon = world.find(w.wagon);
+  std::int32_t guards = 0;
+  std::int32_t threat = 0;
+  const ClassGraph* graph = world.class_graph();
+  const ClassIndex military = graph == nullptr ? kNoClass : graph->lookup("Military");
+  if (wagon != nullptr && military != kNoClass && PlayerTable::is_valid(wagon->state.owner)) {
+    const ClassIndex sentry = graph->lookup("Sentry");
+    const ClassIndex ram = graph->lookup("RamUnit");
+    const PlayerId owner = wagon->state.owner;
+    const std::int32_t radius = wagon->sight * 160 / 100;
+    std::vector<ObjectId> near;
+    (void)world.objects_in_radius(wagon->state.position, radius, ClassFilter::of(military), near);
+    for (const ObjectId id : near) {
+      const WorldObject* unit = world.find(id);
+      if (unit == nullptr || unit->state.health <= 0) continue;
+      const PlayerId who = unit->state.owner;
+      if (!PlayerTable::is_valid(who)) continue;
+      if (who == owner) {
+        ++guards;
+        continue;
+      }
+      if (!world.players().is_enemy(owner, who) || unit->state.flags.hidden) continue;
+      if (sentry != kNoClass && world.class_is_a(id, sentry)) continue;
+      if (ram != kNoClass && world.class_is_a(id, ram)) continue;
+      ++threat;
+    }
+  }
+  if (threat == 0) {
+    w.capturing = false;
+    w.gain_remaining = 0;
+    w.cap_remaining = 0;
+    w.loyalty_tenths = rules_.loyalty_wagons_initial;
+    return;
+  }
+  w.pending += rules_.wagon_loyalty_increase_per_unit * guards;
+  w.gain_remaining = rules_.wagon_loyalty_interval;
+}
+
+/// Timer 10, 0x005eb100: the pending change, clamped to
+/// `10 * WagonLoyaltyChangeCap` either way, is added to the loyalty, which is
+/// then held between 0 and `LoyaltyWagonsInitial` -- **not** 1,000, so a
+/// wagon `SetLoyalty` raised above its initial value comes back down to it at
+/// the first window of a capture. The pending change is cleared and the
+/// timer re-armed.
+void EconomySystem::tick_wagon_cap(WagonLoyalty& w) {
+  const std::int32_t cap = 10 * rules_.wagon_loyalty_change_cap;
+  const std::int32_t change = std::clamp(w.pending, -cap, cap);
+  // The floor first and the ceiling only for a value that passed it, which is
+  // the original's order and decides nothing unless a mod makes the initial
+  // value negative.
+  const std::int32_t next = w.loyalty_tenths + change;
+  w.loyalty_tenths = next < 0 ? 0 : std::min(next, rules_.loyalty_wagons_initial);
+  w.pending = 0;
+  w.cap_remaining = rules_.wagon_loyalty_cap_interval;
 }
 
 // --------------------------------------------------------------------------
@@ -979,6 +1135,16 @@ void EconomySystem::hash(std::uint64_t& accumulator) const {
     mix(w.follow);
   }
   mix(next_wagon_);
+  // A wagon's loyalty decides when `UNIT_CAPTURE.VS` takes it. Only rows are
+  // mixed, so a world where no script has touched a wagon hashes as before.
+  for (const WagonLoyalty& w : wagon_loyalty_) {
+    mix(w.wagon);
+    mix(static_cast<std::uint32_t>(w.loyalty_tenths));
+    mix(static_cast<std::uint32_t>(w.pending));
+    mix(w.capturing ? 1u : 0u);
+    mix(static_cast<std::uint32_t>(w.gain_remaining));
+    mix(static_cast<std::uint32_t>(w.cap_remaining));
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -1890,6 +2056,11 @@ constexpr NamedConstant kEconomyConstants[] = {
     {"LoyaltyIncreasePerUnit", &EconomyRules::loyalty_increase_per_unit},
     {"LoyaltySettlementsInitial", &EconomyRules::loyalty_settlements_initial},
     {"LoyaltyUnitsOutTreshold", &EconomyRules::loyalty_units_out_threshold},
+    {"WagonLoyaltyInterval", &EconomyRules::wagon_loyalty_interval},
+    {"WagonLoyaltyCapInterval", &EconomyRules::wagon_loyalty_cap_interval},
+    {"WagonLoyaltyChangeCap", &EconomyRules::wagon_loyalty_change_cap},
+    {"WagonLoyaltyIncreasePerUnit", &EconomyRules::wagon_loyalty_increase_per_unit},
+    {"LoyaltyWagonsInitial", &EconomyRules::loyalty_wagons_initial},
     {"OutpostRefresh", &EconomyRules::outpost_refresh},
     {"GOutpostFoodSales", &EconomyRules::outpost_food_sales},
     {"GOutpostGoldReturn", &EconomyRules::outpost_food_gold_return},
@@ -4348,18 +4519,25 @@ constexpr EconomyHostDef kEconomyHosts[] = {
      }},
     // `loyalty`: `Settlement::loyalty` (0x005c2c10) is `[settlement+0x54] / 10`,
     // 0 with a print for an invalid receiver. `Wagon::loyalty` (0x005ec090) is
-    // the same on the wagon, `[wagon+0x1d8] / 10`, and `Wagon::SetLoyalty`
-    // (0x005ec100) its setter (0..100, stored times ten, outside that range
-    // printed and refused). **Known gap, a design:** a wagon carries no
-    // loyalty here -- neither the value, nor the pending change
-    // `Wagon::DecreaseLoyalty` (0x005ec160) adds to `[+0x1dc]`, nor the tick
-    // that applies it -- so a wagon receiver answers 0, and `UNIT_CAPTURE.VS`
-    // and `HERO_CAPTURE.VS`'s `if (w.loyalty == 0) w.SetPlayer(...)` take a
-    // map's caravan at the first step.
+    // the same on the wagon, `[wagon+0x1d8] / 10` -- `EconomySystem::
+    // wagon_loyalty_tenths`, which is `LoyaltyWagonsInitial` (100 tenths, so
+    // 10) for a wagon no capture has touched -- and 0 with a print for a
+    // handle that does not resolve. So `UNIT_CAPTURE.VS` and
+    // `HERO_CAPTURE.VS`'s `if (w.loyalty == 0) w.SetPlayer(...)` take a
+    // caravan only once the taunts have worn it down past its guards; see
+    // `docs/formats/wagon.md`.
     {CallKind::member, "loyalty", 0,  // 12 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
-       return s == nullptr ? no_settlement(ctx) : integer(s->loyalty_points());
+       if (s != nullptr) return integer(s->loyalty_points());
+       World* world = world_of(ctx);
+       EconomySystem* economy = host_economy(ctx);
+       if (world != nullptr && economy != nullptr) {
+         if (const WorldObject* wagon = wagon_receiver(ctx, *world); wagon != nullptr) {
+           return integer(economy->wagon_loyalty_tenths(wagon->id) / 10);
+         }
+       }
+       return no_settlement(ctx);
      }},
     // The `onenter` hook rides on these two and **not** on `garrison_add`
     // itself, which is the distinction the original's own placement makes:
@@ -4728,10 +4906,22 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // `Settlement::SetLoyalty` (0x005c27d0): a value from 0 to 100 is stored
     // as tenths at `[settlement+0x54]`; anything else prints "Loyalty must be
     // between 0 and 100" and writes nothing. Not the pending change.
+    //
+    // `Wagon::SetLoyalty` (0x005ec100) is the same rule on the wagon's
+    // `[+0x1d8]` -- 0..100 times ten, anything else printed and refused --
+    // and touches neither its pending change nor its capture.
     {CallKind::member, "SetLoyalty", 1,
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        EconomySystem* economy = host_economy(ctx);
+       if (economy != nullptr && s == nullptr) {
+         if (World* world = world_of(ctx); world != nullptr) {
+           if (const WorldObject* wagon = wagon_receiver(ctx, *world); wagon != nullptr) {
+             (void)economy->set_wagon_loyalty(wagon->id, int_arg(ctx, 1));
+             return HostOutcome::ok_void();
+           }
+         }
+       }
        if (s == nullptr || economy == nullptr) return no_settlement(ctx);
        economy->set_loyalty(s->id, int_arg(ctx, 1));
        return HostOutcome::ok_void();
@@ -4743,24 +4933,31 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // it. Void. See `decrease_loyalty`.
     //
     // **`Wagon::DecreaseLoyalty` (0x005ec160) shares the name and not the
-    // body**, and this registration cannot serve it: on a wagon the receiver
-    // resolves to no settlement and the call does nothing. The original has a
-    // whole wagon loyalty of its own -- `[wagon+0x1d8]` in tenths
-    // (`Wagon::loyalty` reads it over ten, `Wagon::SetLoyalty` writes it),
-    // the pending change at `[wagon+0x1dc]` that this lowers by `10 * n`, and
-    // a capture flag at `[wagon+0x1d0]` that the first decrease raises while
-    // arming the wagon's timers 9 and 10 at `WagonLoyaltyInterval` and
-    // `WagonLoyaltyCapInterval` (0x005eaef0 reads those, `WagonLoyaltyChangeCap`,
-    // `WagonLoyaltyIncreasePerUnit` and `LoyaltyWagonsInitial`).
-    // `UNIT_CAPTURE.VS` and `HERO_CAPTURE.VS` wear a mule down with it and
-    // take it when `w.loyalty == 0` -- which here is at once, since a wagon's
-    // `loyalty` answers 0. That model is a design of its own (per-object
-    // loyalty state and its two timers, shared with `Wagon::loyalty` and
-    // `Wagon::SetLoyalty`) and is left for one.
+    // body.** On a wagon's handle: a negative `n` prints "Decrease amount must
+    // be positive" and writes nothing; otherwise, if the capture flag
+    // `[wagon+0x1d0]` is down, the wagon's timers 9 and 10 are armed at
+    // `WagonLoyaltyInterval` and `WagonLoyaltyCapInterval` and the flag
+    // raised; and then the pending change `[+0x1dc]` drops by `10 * n`.
+    // `UNIT_CAPTURE.VS` and `HERO_CAPTURE.VS` call it once a taunt, every two
+    // seconds; `EconomySystem::decrease_wagon_loyalty` and the two timers it
+    // arms are the rest (`docs/formats/wagon.md`). The script's instant is
+    // inside a turn the economy has already stepped past, and the timers are
+    // armed from it.
     {CallKind::member, "DecreaseLoyalty", 1,
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
        EconomySystem* economy = host_economy(ctx);
+       if (economy != nullptr && s == nullptr) {
+         if (World* world = world_of(ctx); world != nullptr) {
+           if (const WorldObject* wagon = wagon_receiver(ctx, *world); wagon != nullptr) {
+             const std::int64_t late = static_cast<std::int64_t>(world->time()) - ctx.now;
+             (void)economy->decrease_wagon_loyalty(
+                 wagon->id, int_arg(ctx, 1),
+                 static_cast<std::int32_t>(std::clamp<std::int64_t>(late, 0, 1 << 30)));
+             return HostOutcome::ok_void();
+           }
+         }
+       }
        if (s == nullptr || economy == nullptr) return no_settlement(ctx);
        // Void in the original (registered `[0, 2, 27, 1]`).
        (void)economy->decrease_loyalty(s->id, int_arg(ctx, 1));

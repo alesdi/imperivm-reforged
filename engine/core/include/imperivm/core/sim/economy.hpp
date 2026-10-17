@@ -144,6 +144,20 @@ struct EconomyRules {
   std::int32_t loyalty_after_capture = 11;
   /// `LoyaltyUnitsOutTreshold = 151`.
   std::int32_t loyalty_units_out_threshold = 151;
+  /// A wagon's own five: `WagonLoyaltyInterval = 1000`,
+  /// `WagonLoyaltyCapInterval = 500`, `WagonLoyaltyChangeCap = 5`,
+  /// `WagonLoyaltyIncreasePerUnit = 10`, `LoyaltyWagonsInitial = 100`, cached
+  /// together by 0x005eaef0 the first time a wagon is built or loaded. **The
+  /// initial value is used as tenths, unmultiplied** -- the wagon constructor
+  /// (0x005eae80) stores it straight into `[wagon+0x1d8]`, where the
+  /// settlement's stores ten times its own -- so a fresh wagon reads
+  /// `loyalty` 10, and the cap tick holds a wagon at or below it. See
+  /// `WagonLoyalty`.
+  std::int32_t wagon_loyalty_interval = 1000;
+  std::int32_t wagon_loyalty_cap_interval = 500;
+  std::int32_t wagon_loyalty_change_cap = 5;
+  std::int32_t wagon_loyalty_increase_per_unit = 10;
+  std::int32_t loyalty_wagons_initial = 100;
 
   // -- outposts ----------------------------------------------------------
   /// `OutpostRefresh = 2000`, `GOutpostFoodSales = 20`,
@@ -207,6 +221,37 @@ struct Wagon {
 
   [[nodiscard]] bool ready() const noexcept { return build_remaining <= 0; }
   [[nodiscard]] bool follows() const noexcept { return follow != kNoObject; }
+};
+
+/// A wagon object's loyalty, as `gbr.exe` keeps it on the `CVXWagon` itself.
+/// `docs/formats/wagon.md` is the whole model; this is the part of it this
+/// table holds.
+///
+/// Three fields on the object and two of its timers: the loyalty in tenths
+/// (`[wagon+0x1d8]`, which `Wagon::loyalty` answers over ten), the pending
+/// change (`[+0x1dc]`, the save's `loyalty-cap`), the capture flag
+/// (`[+0x1d0]`), and timers 9 and 10, which run exactly while the flag is up.
+/// **Kept here, keyed by the wagon's handle, rather than on every object**,
+/// because the constructor (0x005eae80) gives every wagon the same state --
+/// `LoyaltyWagonsInitial` tenths, nothing pending, no capture, no timer --
+/// and only three entry points ever move it from there: so a wagon with no
+/// row is in that state, and a row exists only for a wagon a script has
+/// touched. A row whose object is gone is dropped by `advance` (handles are
+/// never reused, so a stale row could never be read; dropping it keeps the
+/// hash honest).
+///
+/// The timers count down in the economy's own event-stepped clock, so the
+/// same instants fire whatever the turn lengths. `gain_remaining` is timer 9
+/// (`WagonLoyaltyInterval`, the guard count 0x005ec410) and `cap_remaining`
+/// timer 10 (`WagonLoyaltyCapInterval`, the cap 0x005eb100); both are zero
+/// whenever `capturing` is false, and both positive while it is true.
+struct WagonLoyalty {
+  ObjectId wagon = kNoObject;
+  std::int32_t loyalty_tenths = 0;
+  std::int32_t pending = 0;
+  bool capturing = false;
+  std::int32_t gain_remaining = 0;
+  std::int32_t cap_remaining = 0;
 };
 
 /// Why a spend was refused. `ok` is the only success.
@@ -439,6 +484,35 @@ class EconomySystem final : public System {
   /// script. `UNIT_CAPTURE.VS` takes this path for a non-enemy owner.
   bool set_owner(SettlementId id, PlayerId new_owner);
 
+  // -- a wagon's loyalty -------------------------------------------------
+  //
+  // The three `Wagon::` entry points and the two timers they arm. See
+  // `WagonLoyalty` for where the state lives and `docs/formats/wagon.md` for
+  // the model.
+
+  /// `[wagon+0x1d8]`: the row's tenths, or `LoyaltyWagonsInitial` for a wagon
+  /// with no row. `Wagon::loyalty` (0x005ec090) answers this over ten.
+  [[nodiscard]] std::int32_t wagon_loyalty_tenths(ObjectId wagon) const noexcept;
+  /// The row, or null for a wagon still in its constructed state.
+  [[nodiscard]] const WagonLoyalty* find_wagon_loyalty(ObjectId wagon) const noexcept;
+  [[nodiscard]] std::span<const WagonLoyalty> wagon_loyalties() const noexcept {
+    return wagon_loyalty_;
+  }
+  /// `Wagon::SetLoyalty(v)` (0x005ec100): `v * 10` for `v` from 0 to 100,
+  /// refused (and nothing written) outside. Neither the pending change nor
+  /// the capture is touched.
+  bool set_wagon_loyalty(ObjectId wagon, std::int32_t value);
+  /// `Wagon::DecreaseLoyalty(n)` (0x005ec160): a negative `n` is refused;
+  /// otherwise, when the capture flag is down, timers 9 and 10 are armed and
+  /// the flag raised, and then the pending change drops by `10 * n`.
+  ///
+  /// `late` is how far behind the economy's clock the caller stands -- a
+  /// script runs at an instant inside the turn the economy has already
+  /// stepped to its end -- so the timers fall due where the original's
+  /// would, `interval` after the call; one already overdue falls due on the
+  /// first millisecond of the next turn.
+  bool decrease_wagon_loyalty(ObjectId wagon, std::int32_t amount, std::int32_t late = 0);
+
   // -- sentries ----------------------------------------------------------
 
   /// `AddMaxSentries(n)`, 0x005c2b30: one `add` to the ceiling at
@@ -504,7 +578,8 @@ class EconomySystem final : public System {
   /// its own magic and version -- the shape `Scheduler::serialize` established.
   ///
   /// **Written:** the settlement store, the wagons in transit, the wagon id
-  /// counter, the per-settlement statistics and the `start`ed flag.
+  /// counter, the per-settlement statistics, the wagons' loyalty rows and the
+  /// `start`ed flag.
   void serialize(std::vector<std::byte>& out) const;
 
   /// Replace this system's state with the one in `bytes`.
@@ -540,11 +615,18 @@ class EconomySystem final : public System {
   void repair(World& world, Settlement& s);
   void tick_loyalty(Settlement& s);
   void tick_loyalty_gain(World& world, Settlement& s);
+  /// A wagon's timer 9 (0x005ec410) and timer 10 (0x005eb100).
+  void tick_wagon_guard(World& world, WagonLoyalty& w);
+  void tick_wagon_cap(WagonLoyalty& w);
+  /// The row for `wagon`, made in its constructed state if there is none.
+  WagonLoyalty& wagon_loyalty_row(ObjectId wagon);
   void tick_outpost_trade(World& world, Settlement& s);
 
   EconomyRules rules_{};
   SettlementStore store_;
   std::vector<Wagon> wagons_;
+  /// Ascending by wagon handle, which is the order `advance` ticks them in.
+  std::vector<WagonLoyalty> wagon_loyalty_;
   std::vector<Statistics> stats_;
   std::uint32_t next_wagon_ = 1;
   bool auto_deliver_ = true;

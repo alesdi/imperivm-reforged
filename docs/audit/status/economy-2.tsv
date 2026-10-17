@@ -10,7 +10,7 @@
 0x005c49b0	verified	no receiver check; wall pool [set+0xf4] > 0 -> setter 0x005c4930(n-1) and 1, else 0
 0x005c1d20	verified	occupancy [holder+0x14] == max [holder+0x10], equality not >=; invalid receiver prints and answers TRUE (0x005c1d4f) (fixed both; test economy_settlement_members_answer_as_their_bodies)
 0x00425380	verified	no receiver check; 0x004401c0: IsOutpost, owner 14/15, central class defender_cls_1/2 non-empty
-0x005ec160	partial	Wagon::DecreaseLoyalty: wagon loyalty [+0x1d8]/pending [+0x1dc]/capture flag [+0x1d0] and timers 9/10 (WagonLoyalty* keys, 0x005eaef0) are not modelled; on a wagon the shared registration resolves no settlement and does nothing. Design: per-wagon loyalty state + timers, shared with Wagon::loyalty/SetLoyalty
+0x005ec160	verified	Wagon::DecreaseLoyalty: FIXED -- negative refused; flag [+0x1d0] down -> timers 9 (WagonLoyaltyInterval) then 10 (WagonLoyaltyCapInterval) armed from the script's instant, flag up; pending [+0x1dc] -= 10n. Timer 9 (0x005ec410: own Military within sight*160/100 add IncreasePerUnit each; no at-war non-hidden non-Sentry/Ram Military -> stop, loyalty initial, pending kept) and timer 10 (0x005eb100: pending clamped +-10*ChangeCap, loyalty held 0..LoyaltyWagonsInitial, pending cleared), 9 before 10 on a shared instant. EconomySystem::wagon_loyalty_; tests in test_wagon.cpp
 0x005ebdb0	verified	[obj+0x1cc] cargo; invalid prints, 0
 0x005c2b30	verified	one add to [set+0x104], no clamp, no print on invalid (fixed: clamped at 0; test economy_settlement_members_answer_as_their_bodies)
 0x005c4ac0	verified	roster [set+0xfc] += n and pool via 0x005c4930(+n), no clamp -- Numantia's AddSentries(-12) goes into debt (fixed: clamped at 0; same test)

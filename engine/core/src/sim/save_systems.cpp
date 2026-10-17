@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 34;  // 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 35;  // 35: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -994,6 +994,20 @@ void EconomySystem::serialize(std::vector<std::byte>& out) const {
   // statistics row is small and a sparse encoding would need a second key.
   bytes::put_u32(out, static_cast<std::uint32_t>(stats_.size()));
   for (const Statistics& s : stats_) bytes::put_i32(out, s.gold_converted);
+
+  // The wagons' loyalty rows, in handle order: `[wagon+0x1d8]`, `+0x1dc` and
+  // `+0x1d0`, which the original's wagon serialiser (0x005eb3a0) writes as
+  // `loyalty`, `loyalty-cap` and `capture`, and the two timers' remaining
+  // time, which its timer wheel carries for it.
+  bytes::put_u32(out, static_cast<std::uint32_t>(wagon_loyalty_.size()));
+  for (const WagonLoyalty& w : wagon_loyalty_) {
+    bytes::put_u32(out, w.wagon);
+    bytes::put_i32(out, w.loyalty_tenths);
+    bytes::put_i32(out, w.pending);
+    put_bool(out, w.capturing);
+    bytes::put_i32(out, w.gain_remaining);
+    bytes::put_i32(out, w.cap_remaining);
+  }
 }
 
 Status EconomySystem::deserialize(std::span<const std::byte> data) {
@@ -1029,6 +1043,20 @@ Status EconomySystem::deserialize(std::span<const std::byte> data) {
     if (!bytes::get_i32(reader, s.gold_converted)) return FormatError::truncated;
     stats.push_back(s);
   }
+  std::uint32_t loyal = 0;
+  if (!reader.u32(loyal)) return FormatError::truncated;
+  std::vector<WagonLoyalty> loyalty;
+  for (std::uint32_t i = 0; i < loyal; ++i) {
+    WagonLoyalty w;
+    if (!reader.u32(w.wagon) || !bytes::get_i32(reader, w.loyalty_tenths) ||
+        !bytes::get_i32(reader, w.pending) || !get_bool(reader, w.capturing) ||
+        !bytes::get_i32(reader, w.gain_remaining) || !bytes::get_i32(reader, w.cap_remaining)) {
+      return FormatError::truncated;
+    }
+    // Ascending and unique, which every lookup's binary search assumes.
+    if (!loyalty.empty() && loyalty.back().wagon >= w.wagon) return FormatError::malformed;
+    loyalty.push_back(w);
+  }
   if (const Status status = finish(reader); !status.ok()) return status;
 
   started_ = started;
@@ -1036,6 +1064,7 @@ Status EconomySystem::deserialize(std::span<const std::byte> data) {
   store_ = std::move(store);
   wagons_ = std::move(wagons);
   stats_ = std::move(stats);
+  wagon_loyalty_ = std::move(loyalty);
   return Status();
 }
 

@@ -1149,6 +1149,9 @@ TEST(save_economy_section_round_trips) {
   // And a wagon sent after a unit rather than to a settlement.
   const std::uint32_t larder = economy.create_feeding_mule(town, 77, 30);
   CHECK(larder != 0);
+  // Two wagons' loyalty: one mid-capture, timers armed, and one only set.
+  CHECK(economy.set_wagon_loyalty(88, 4));
+  CHECK(economy.decrease_wagon_loyalty(70, 3, 100));
 
   EconomySystem fresh;
   const std::vector<std::byte> bytes = section_round_trips(economy, fresh);
@@ -1169,6 +1172,16 @@ TEST(save_economy_section_round_trips) {
   // The ten interval timers are what makes a turn splittable, and the bug that
   // found them was every settlement on every retail map starting at zero.
   CHECK(restored->timers == economy.find(town)->timers);
+  REQUIRE(fresh.wagon_loyalties().size() == 2);
+  const WagonLoyalty* taunted = fresh.find_wagon_loyalty(70);
+  REQUIRE(taunted != nullptr);
+  CHECK(taunted->capturing);
+  CHECK(taunted->pending == -30);
+  CHECK(taunted->gain_remaining == 900);
+  CHECK(taunted->cap_remaining == 400);
+  CHECK(fresh.wagon_loyalty_tenths(70) == 100);
+  CHECK(fresh.wagon_loyalty_tenths(88) == 40);
+  CHECK(!fresh.find_wagon_loyalty(88)->capturing);
 }
 
 TEST(save_feeder_section_round_trips) {

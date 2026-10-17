@@ -28,7 +28,10 @@ standard of evidence they are held to.
 | `ISAV` | [save.md](save.md) | **ours, not the original's** — the saved session we write, and the checklist `gbr.exe` gives for it |
 
 The resolved object model — class tree, native class responsibilities, faction inventory —
-is in [`../data-model.md`](../data-model.md).
+is in [`../data-model.md`](../data-model.md). [`wagon.md`](wagon.md) is one native class's
+state as the executable keeps it -- a `CVXWagon`'s cargo, loyalty and capture -- with the
+saved keys it persists under; it has no reader of its own, since no file of the
+installation holds it.
 
 ## Conventions
 

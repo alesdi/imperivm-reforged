@@ -327,7 +327,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (0x005d28c0) rather than kept beside it. A version-36 file holds progress
 /// within the level and the level as a second word; read as a total, every
 /// veteran would load at level 1.
-inline constexpr std::uint32_t kStateVectorVersion = 37;
+/// 38: the economy section grew the wagons' loyalty rows -- a wagon's
+/// loyalty, pending change, capture flag and its two capture timers
+/// (`WagonLoyalty`), which `Wagon::loyalty`, `SetLoyalty` and
+/// `DecreaseLoyalty` read and write. Hashed, so a version-37 file would load
+/// a caravan mid-capture as one nobody had touched.
+inline constexpr std::uint32_t kStateVectorVersion = 38;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

@@ -39,7 +39,7 @@
 0x00428ba0	verified	Settlement::CanAfford(cmd): core with gold/food/pop costs, reserve unless ReserveFor names this command (0x00426df0); invalid prints, false; unknown command prints, false
 0x00428d40	verified	Settlement::CanAfford(cmd, count): FIXED -- count <= affordable with no floor on count (0x00428eb0); same reserve rule as CanAfford(cmd)
 0x005c27d0	verified	Settlement::SetLoyalty: 0..100 stored x10 at [s+0x54], else printed refusal
-0x005ec100	partial	Wagon::SetLoyalty: [w+0x1d8] = v*10 for 0..100. Gap (design): wagons carry no loyalty here (value, pending [+0x1dc], tick)
+0x005ec100	verified	Wagon::SetLoyalty: FIXED -- [w+0x1d8] = v*10 for 0..100, else refused; pending and capture untouched (EconomySystem::set_wagon_loyalty); test a_wagon_starts_at_its_initial_loyalty_and_only_a_taunt_starts_a_capture
 0x00425320	verified	Settlement::IsIndependent: owner index 14 or 15; invalid false, unprinted
 0x005c2bc0	verified	Settlement::max_population: [s+0x4c]; invalid prints, 0
 0x00563f10	verified	Building::GetOutpostFood: outpost gate, then [+0x260]; else 0
@@ -53,7 +53,7 @@
 0x005c1b20	verified	Settlement::AddUnit: FIXED -- answers true when the unit or the settlement misses (each prints, pushes 1); else holder entry 0x005d3e10 force 0 and its answer; test economy_add_unit_answers_true_for_a_handle_that_does_not_resolve
 0x005c5b90	verified	Settlement::ObjectsAround: FIXED -- class name resolved whole (0x00409e40), unknown or empty matches nothing; CollectUnits both flags; invalid receiver empty list; test economy_objects_around_filters_on_the_class_tree
 0x005c2c10	verified	Settlement::loyalty: [s+0x54] / 10; invalid prints, 0
-0x005ec090	partial	Wagon::loyalty: [w+0x1d8] / 10. Gap (design): wagons carry no loyalty here, a wagon answers 0, so UNIT_CAPTURE/HERO_CAPTURE take a caravan at once
+0x005ec090	verified	Wagon::loyalty: FIXED -- [w+0x1d8] / 10, LoyaltyWagonsInitial (100 tenths, so 10) for an untouched wagon (0x005eae80), so UNIT_CAPTURE/HERO_CAPTURE wear a caravan down instead of taking it at first contact; 0 for an invalid handle; test a_wagon_starts_at_its_initial_loyalty_and_only_a_taunt_starts_a_capture
 0x005c2200	verified	Settlement::SetPopulation: FIXED -- min(value, max_population) with no floor; test economy_settlement_setters_clamp_only_from_above
 0x005c2a60	verified	Settlement::DelSentry: FIXED -- bank [+0x100] spent first, else roster [+0xfc] - 1 floored at 0 (was dropped); new Settlement::sentries_put_back, PutSentry fills it; test get_sentry_takes_one_out_of_the_wall_and_put_sentry_puts_one_back
 0x00420650	verified	Settlement::IsTeutonTent: FIXED -- central class id or altid == "TTent" exactly, not ancestry (TTentWinter false); test economy_is_teuton_tent_compares_the_class_name_and_is_ttent_its_ancestry
