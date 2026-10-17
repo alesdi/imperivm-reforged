@@ -2214,7 +2214,7 @@ HostOutcome face_impl(CallContext& ctx) {
                          (receiver.is_object() && receiver.as_object().type == kTypeQuery);
   if (list_form) {
     if (!is_point(ctx.arg(1))) return HostOutcome::failed(kNoPoint);
-    for (const ObjectId id : receiver_objects(*world, receiver)) {
+    for (const ObjectId id : receiver_objects(ctx, *world, receiver)) {
       movement->face(*world, id, unpack_point(ctx.arg(1)));
       end_commands(*world, id);
     }

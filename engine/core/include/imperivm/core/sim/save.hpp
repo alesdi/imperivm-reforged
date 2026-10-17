@@ -327,7 +327,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (0x005d28c0) rather than kept beside it. A version-36 file holds progress
 /// within the level and the level as a second word; read as a total, every
 /// veteran would load at level 1.
-inline constexpr std::uint32_t kStateVectorVersion = 37;
+/// 38: the world section carries each query's cache after the query specs
+/// (`World::QueryCache`: the list its last refresh made and when the next one
+/// falls due, `[query+0x4c]`). A version-37 file has neither, and a query
+/// is no longer evaluated on every read: docs/formats/query-model.md.
+inline constexpr std::uint32_t kStateVectorVersion = 38;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

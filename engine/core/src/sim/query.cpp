@@ -28,6 +28,41 @@ std::string_view query_type_name(QueryKind kind) noexcept {
   return "";
 }
 
+std::int32_t query_refresh_period(QueryKind kind) noexcept {
+  switch (kind) {
+    case QueryKind::player_flags: return 4000;
+    case QueryKind::units_in_settlement:
+    case QueryKind::set_op: return 2000;
+    case QueryKind::objs_in_sight:
+    case QueryKind::map_area_circle:
+    case QueryKind::map_area_rect:
+    case QueryKind::class_player_area:
+    case QueryKind::buildings_in_settlement:
+    case QueryKind::party: return 1000;
+    // The group's `vtbl + 0x30` answers 0 (0x00746ea0): its list is live.
+    case QueryKind::group:
+    case QueryKind::count: break;
+  }
+  return 0;
+}
+
+bool query_answers_live_when_stale(QueryKind kind) noexcept {
+  switch (kind) {
+    case QueryKind::objs_in_sight:
+    case QueryKind::map_area_circle:
+    case QueryKind::map_area_rect:
+    case QueryKind::player_flags:
+    case QueryKind::party: return true;
+    case QueryKind::class_player_area:
+    case QueryKind::units_in_settlement:
+    case QueryKind::buildings_in_settlement:
+    case QueryKind::set_op:
+    case QueryKind::group:
+    case QueryKind::count: break;
+  }
+  return false;
+}
+
 ClassFilter ClassFilter::of(ClassIndex index) {
   ClassFilter filter;
   if (index == kNoClass) return filter;

@@ -373,10 +373,12 @@ constexpr script::CallKind kMember = script::CallKind::member;
 ///     drops the reference the call held (`[+0x1c]`), deleting a temporary
 ///     whose count reaches zero. It does not test the receiver: a list that
 ///     does not resolve is a null dereference there and a zero here.
-///   * `Query::count` (0x00577b90) resolves the query, calls its `Refresh`
-///     (`vtbl+0x1c`) and its result accessor (`vtbl+0x20`, the embedded list at
-///     `+0x1c`, 0x005716f0) and answers that list's size, so a query is
-///     re-evaluated by every `count`. An unresolvable receiver prints
+///   * `Query::count` (0x00577b90) resolves the query, purges its cached list
+///     (`vtbl+0x1c`, 0x00572c10: the gone and the dead leave it), asks its
+///     list accessor (`vtbl+0x20`, 0x004f9490, which refreshes the list only
+///     when its due time has come) and answers that list's size -- so a
+///     `count` a second after the last refresh of a sight query answers the
+///     list that refresh made, less its dead. An unresolvable receiver prints
 ///     `The function 'Query::count' called for an uninitialized or invalid
 ///     object.` and answers **0** (0x00577be4).
 ///   * `ItemHolder::count` (0x0053c660) is a third registration of the name: an
@@ -419,9 +421,11 @@ HostOutcome m_count(CallContext& ctx) {
   if (slot->internal != InternalKind::query) {
     return HostOutcome::failed("count: receiver is neither an ObjList nor a Query");
   }
+  // The purge and the list accessor (0x00577b90): the cached list, refreshed
+  // only when due, less what has died since.
   std::vector<ObjectId> found;
-  return HostOutcome::ok_with(
-      Value::integer(static_cast<std::int32_t>(world->evaluate_query(id, found))));
+  return HostOutcome::ok_with(Value::integer(
+      static_cast<std::int32_t>(world->read_query(id, script_clock(ctx, *world), found))));
 }
 
 /// `q.GetObjList()` -- 103 sites, and the only way a script turns a live query
@@ -436,12 +440,12 @@ HostOutcome m_count(CallContext& ctx) {
 /// `DATA\AI HELPERS\GUARD.VS` re-reads `ol = qryDef.GetObjList();` at the top of
 /// every pass of its `while (1)` loop.
 ///
-/// 0x0057a7c0: resolve the query, `Refresh` it (`vtbl+0x1c`), allocate a fresh
-/// list (0x0041edd0) and copy the query's result deque into it whole and in
-/// order (0x00438230 over the accessor's `+8`), then push it as a new value
-/// with no owning handle. No member is tested, so the copy is exactly the
-/// query's own order -- `World::evaluate_query`'s, which is the query system's
-/// to answer for.
+/// 0x0057a7c0: resolve the query, purge it (`vtbl+0x1c`) and read its list
+/// (`vtbl+0x20`, refreshed when due), allocate a fresh list (0x0041edd0) and
+/// copy the query's cached deque into it whole and in order (0x00438230 over
+/// the accessor's `+8`), then push it as a new value with no owning handle. No
+/// member is tested, so the copy is exactly the query's own order --
+/// `World::read_query`'s, which is the query system's to answer for.
 HostOutcome m_get_objlist(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetObjList: no world");
@@ -465,7 +469,7 @@ HostOutcome m_get_objlist(CallContext& ctx) {
     if (slot != nullptr && slot->internal != InternalKind::query) {
       return HostOutcome::failed("GetObjList: receiver is not a Query");
     }
-    if (slot != nullptr) world->evaluate_query(id, found);
+    if (slot != nullptr) world->read_query(id, script_clock(ctx, *world), found);
   }
   ObjListPool& pool = objlist_pool_of(*world);
   const ObjListId list = pool.acquire_temporary(ctx.script);
@@ -890,9 +894,12 @@ HostOutcome m_remove(CallContext& ctx) {
 ///     argument's handle word and answers whether it met it. The argument is
 ///     not resolved, so a dead unit's handle and the invalid handle are found
 ///     when the list holds them.
-///   * `Query::Contains` (0x00578d20) resolves the query, `Refresh`es it
-///     (`vtbl+0x1c`) and asks its `vtbl+0x24`, which is 0x00571870: the same
-///     front-to-back handle scan over the freshly evaluated result. An
+///   * `Query::Contains` (0x00578d20) resolves the query, purges it
+///     (`vtbl+0x1c`) and asks its `vtbl+0x24`: for a cached kind 0x004f9550,
+///     the front-to-back handle scan of the cached list while it is fresh, and
+///     once it is due the kind's one-object slot -- a refresh and the scan
+///     (0x00571870) for most, a live test of the object that stores nothing for
+///     the area, sight, player-flags and party kinds. An
 ///     unresolvable query prints `The function 'Query::Contains' called for an
 ///     uninitialized or invalid object.` and answers **false**.
 ///
@@ -920,7 +927,14 @@ HostOutcome m_contains(CallContext& ctx) {
     if (slot->internal != InternalKind::query) {
       return HostOutcome::failed("Contains: receiver is neither an ObjList nor a Query");
     }
-    world->evaluate_query(id, members);
+    // The purge, then the query's own membership slot (`vtbl + 0x24`): the
+    // cached list when fresh; when due, a refresh or -- for the area, sight,
+    // player-flags and party kinds -- a live test of the one object, which
+    // stores nothing (`World::query_contains`).
+    world->purge_query(id);
+    if (!wanted.has_value()) return HostOutcome::ok_with(Value::boolean(false));
+    return HostOutcome::ok_with(
+        Value::boolean(world->query_contains(id, *wanted, script_clock(ctx, *world))));
   }
   if (!wanted.has_value()) return HostOutcome::ok_with(Value::boolean(false));
   return HostOutcome::ok_with(
@@ -1038,8 +1052,8 @@ HostOutcome m_obj_injured(CallContext& ctx) {
 /// argument instead -- which is what the compiler did at the call site anyway.
 ///
 /// The receiver is a **`Query`**, never an `ObjList`: both bodies begin by
-/// calling the receiver's `Refresh` (`vtbl + 0x1c`) and then its accessor
-/// (`vtbl + 0x20`), so they re-evaluate before they scan. Every one of the 19
+/// purging the receiver (`vtbl + 0x1c`) and then reading its list (`vtbl +
+/// 0x20`, refreshed when due), so they scan the cached list. Every one of the 19
 /// shipped receivers is a query variable -- `Q_HannibalArmy.NearestObj(...)`,
 /// `EnemyObjs(5, cMilitary).NearestObj(AreaCenter("A_Battle"))`.
 ///
@@ -1068,7 +1082,7 @@ HostOutcome m_obj_injured(CallContext& ctx) {
 ///     An unresolvable object argument is the same, with `Parameter #1 in
 ///     function 'Query::NearestObj' is uninitialized or invalid object.`
 ///     (0x00579620 tests the receiver first, then the argument).
-///   * the receiver is `Refresh`ed before the scan (`vtbl+0x1c`) and the
+///   * the receiver is purged before the scan (`vtbl+0x1c`) and the
 ///     reference the call held on it is dropped after (0x00571680).
 HostOutcome m_nearest_obj(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -1100,7 +1114,7 @@ HostOutcome m_nearest_obj(CallContext& ctx) {
       // Not a refusal: the original prints and pushes the invalid object.
       return HostOutcome::ok_with(invalid_object());
     }
-    world->evaluate_query(id, members);
+    world->read_query(id, script_clock(ctx, *world), members);
   }
 
   // 0x00579576. Named rather than inlined because the value is the whole of

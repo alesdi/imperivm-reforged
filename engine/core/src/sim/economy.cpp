@@ -3491,7 +3491,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        // Copied before the loop: capturing a settlement clears command queues
        // and rewrites owners, and a view into a container that moves is a
        // use-after-free waiting for a bigger list.
-       for (const ObjectId id : receiver_objects(*world, receiver)) {
+       for (const ObjectId id : receiver_objects(ctx, *world, receiver)) {
          give_object_to(ctx, economy, *world, id, owner);
        }
        return HostOutcome::ok_void();
@@ -3611,7 +3611,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
          const std::int32_t value = int_arg(ctx, 1);
          if (value < 0) return HostOutcome::ok_void();
          FeederSystem* feeder = feeder_of(*world);
-         for (const ObjectId id : receiver_objects(*world, r)) {
+         for (const ObjectId id : receiver_objects(ctx, *world, r)) {
            const WorldObject* slot = world->find(id);
            if (slot == nullptr || !slot->state.flags.is_unit || feeder == nullptr) continue;
            if (FeedingUnit* link = feeder->find(id); link != nullptr) link->food = value;
@@ -5227,7 +5227,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        const ObjectId holder = target->holder.object;
        if (holder == kNoObject) return integer(0);
        std::int32_t count = 0;
-       for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+       for (const ObjectId id : receiver_objects(ctx, *world, ctx.arg(0))) {
          const WorldObject* slot = world->find(id);
          // The original casts each element to `Unit` through the vtable before
          // it compares, so a building in the list is skipped rather than

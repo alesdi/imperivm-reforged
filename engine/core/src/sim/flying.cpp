@@ -562,7 +562,7 @@ HostOutcome m_adjust_fly_dir(CallContext& ctx) {
 HostOutcome m_get_average_direction(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetAverageDirection: no world");
-  const std::vector<ObjectId> members = receiver_objects(*world, ctx.arg(0));
+  const std::vector<ObjectId> members = receiver_objects(ctx, *world, ctx.arg(0));
   if (members.empty()) return HostOutcome::ok_with(pack_point(Point{0, 0}));
 
   std::int64_t x = 0;

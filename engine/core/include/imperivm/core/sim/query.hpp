@@ -23,9 +23,12 @@
 ///
 /// So a script asks "what enemy units are in my sight" once, is given a handle,
 /// and re-reads it; `WaitNonEmptyQuery(q, ms)` in the host API is only sensible
-/// against something that re-evaluates. Evaluation itself is not cached here --
-/// caching would need an invalidation rule the corpus does not supply -- but the
-/// *object* persists, which is the part the hash can see.
+/// against something that re-evaluates. And it re-evaluates **on a clock**, not
+/// on every read: each query keeps the list its last refresh made and refreshes
+/// when a read finds its period (`query_refresh_period`) run out -- the
+/// invalidation rule is time, read off `gbr.exe`, and `World::read_query` and
+/// docs/formats/query-model.md are the model. The cache is saved and not hashed;
+/// the *object* is the part the hash can see.
 ///
 /// ## Iteration order
 ///
@@ -104,6 +107,34 @@ enum class QueryKind : std::uint8_t {
 /// The runtime type name the original prints for a query kind, so a populated
 /// world can be diffed against a dump block for block.
 [[nodiscard]] std::string_view query_type_name(QueryKind kind) noexcept;
+
+/// How long a kind's cached list stands before a read refreshes it, in game
+/// milliseconds: the `[query+0x50]` each constructor writes, read off the
+/// constructors (docs/formats/query-model.md has the table). 0 for a group,
+/// whose list is the group itself and is never stale.
+///
+///   * 4000: `CVXPlayerFlagsQuery` (0x004fb920) -- `EnemyObjs` and its two
+///     siblings;
+///   * 2000: `CVXUnitsInSettlementQuery` (0x004fafc0) and `CVXSetOpQuery`
+///     (0x004fb1b0);
+///   * 1000: every other cached kind -- sight (0x004fb290), circle
+///     (0x004fac20), rectangle (0x004fa9d0), class-player (0x004fb6e0),
+///     buildings-in-settlement (0x004fb0b0), party (0x004fa5e0).
+[[nodiscard]] std::int32_t query_refresh_period(QueryKind kind) noexcept;
+
+/// Whether a kind answers `IsEmpty` and `Contains` **live** once its list has
+/// fallen due, rather than refreshing first.
+///
+/// The cached kinds share two accessors: fresh, both read the cached list
+/// (0x004f8ab0, 0x004f9550); due, both call a slot of the kind's own --
+/// `vtbl + 0x40` for emptiness, `vtbl + 0x3c` for one object. Four kinds
+/// leave those slots at the base's, which refresh the list and read it
+/// (0x004f8240 -> 0x00571710, 0x004f8230 -> 0x00571870): class-player, both
+/// settlement kinds and the set operation. The area, sight, player-flags and
+/// party kinds override both with a test that stores nothing and leaves the
+/// due time where it was: a sweep that only counts (the collector at 0x004fc7b0
+/// in mode 0, against mode 1 for a refresh) and a one-object test.
+[[nodiscard]] bool query_answers_live_when_stale(QueryKind kind) noexcept;
 
 /// `CVXSetOpQuery.operation`.
 ///

@@ -2,6 +2,7 @@
 
 #include "imperivm/core/sim/wait.hpp"
 
+#include <algorithm>
 #include <vector>
 
 #include "imperivm/core/sim/area.hpp"
@@ -92,17 +93,19 @@ constexpr const char* kNoMaxHealth =
   return ctx.arg(index).is_integer() ? ctx.arg(index).as_integer() : 0;
 }
 
-/// Resolve a `Query` argument and evaluate it. `ok` is false when the argument
+/// A `Query` argument, resolved but not read. `ok` is false when the argument
 /// is not a query handle at all; `alive` is false when it is one the world no
-/// longer holds.
-struct QueryResult {
+/// longer holds. `query` is the query object, or `kNoObject` for a named
+/// object, whose one member is in `named`.
+struct QueryArg {
   bool ok = false;
   bool alive = false;
-  std::vector<ObjectId> objects;
+  ObjectId query = kNoObject;
+  std::vector<ObjectId> named;
 };
 
-[[nodiscard]] QueryResult evaluate(World& world, const Value& value) {
-  QueryResult out;
+[[nodiscard]] QueryArg resolve_query(World& world, const Value& value) {
+  QueryArg out;
   if (!value.is_object()) return out;
 
   // The invalid handle -- what a set operation answers when either side names
@@ -130,7 +133,7 @@ struct QueryResult {
     out.alive = true;
     const auto index = static_cast<std::int32_t>(value.as_object().id);
     const ObjectId bound = world.named_objects().object(index);
-    if (bound != kNoObject && world.find(bound) != nullptr) out.objects.push_back(bound);
+    if (bound != kNoObject && world.find(bound) != nullptr) out.named.push_back(bound);
     return out;
   }
 
@@ -139,11 +142,46 @@ struct QueryResult {
   const auto id = static_cast<ObjectId>(value.as_object().id);
   if (id == kNoObject || world.query_spec(id) == nullptr) return out;
   out.alive = true;
-  world.evaluate_query(id, out.objects);
+  out.query = id;
   return out;
 }
 
-// -- the query family, all at the 100 ms cadence -----------------------------
+/// The list as the wait bodies read it: the accessor alone (`vtbl + 0x20`),
+/// refreshed when due and **never purged** -- none of the family calls
+/// `vtbl + 0x1c`, so a stale list keeps the dead it was refreshed with.
+[[nodiscard]] std::vector<ObjectId> list_of(World& world, const QueryArg& q, GameTime now) {
+  if (q.query == kNoObject) return q.named;
+  std::vector<ObjectId> out;
+  world.read_query(q.query, now, out, World::QueryRead::as_cached);
+  return out;
+}
+
+/// `vtbl + 0x28`.
+[[nodiscard]] bool empty_of(World& world, const QueryArg& q, GameTime now) {
+  if (q.query == kNoObject) return q.named.empty();
+  return world.query_is_empty(q.query, now);
+}
+
+/// `vtbl + 0x24`.
+[[nodiscard]] bool holds(World& world, const QueryArg& q, ObjectId member, GameTime now) {
+  if (q.query == kNoObject) {
+    return std::find(q.named.begin(), q.named.end(), member) != q.named.end();
+  }
+  return world.query_contains(q.query, member, now);
+}
+
+/// How long until the query's next refresh -- its `vtbl + 0x34` less the clock.
+/// A named object's slot is the base's, which answers the clock (0x00571700).
+[[nodiscard]] std::int64_t hint_of(const World& world, const QueryArg& q, GameTime now) {
+  if (q.query == kNoObject) return 0;
+  const GameTime due = world.query_next_refresh(q.query, now);
+  // A query never refreshed is due at the dawn of time; the difference is
+  // floored below anyway, so clamp it rather than let it overflow.
+  if (due <= now) return 0;
+  return due - now;
+}
+
+// -- the query family, at the query's own cadence ----------------------------
 
 /// `WaitQueryCountBetween(q, low, high, timeout)`. 208 sites, the family's
 /// largest by a factor of four.
@@ -155,29 +193,36 @@ struct QueryResult {
 /// identical sequence, and seven shipped sites pass `high = -1`
 /// (`WaitQueryCountBetween(RomanAtt, 1, -1, -1)`). There is no matching escape
 /// for `low`, which is why this is not written as a symmetric range test.
+///
+/// The count is the size of the list the accessor answers (`vtbl + 0x20`,
+/// 0x005ed04d), refreshed when due and not purged, and a failed test sleeps
+/// until that list's next refresh (0x005eca10): see `query_poll_slice`.
 HostOutcome fn_query_count_between(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  const QueryResult q = evaluate(*world, ctx.arg(0));
+  const QueryArg q = resolve_query(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
   if (!q.alive) return dead_query();
 
-  const auto count = static_cast<std::int32_t>(q.objects.size());
+  const GameTime now = script_clock(ctx, *world);
+  const auto count = static_cast<std::int32_t>(list_of(*world, q, now).size());
   const std::int32_t low = int_arg(ctx, 1);
   const std::int32_t high = int_arg(ctx, 2);
   if (count >= low && (count <= high || high < 0)) return answer(true);
-  return keep_waiting(ctx, timeout_arg(ctx, 3), kQueryPollInterval);
+  return keep_waiting(ctx, timeout_arg(ctx, 3), query_poll_slice(hint_of(*world, q, now)));
 }
 
-/// `WaitEmptyQuery(q, timeout)`. 50 sites. 0x005ed730.
+/// `WaitEmptyQuery(q, timeout)`. 50 sites. 0x005ed730: the query's own
+/// emptiness slot (`vtbl + 0x28`).
 HostOutcome fn_empty_query(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  const QueryResult q = evaluate(*world, ctx.arg(0));
+  const QueryArg q = resolve_query(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
   if (!q.alive) return dead_query();
-  if (q.objects.empty()) return answer(true);
-  return keep_waiting(ctx, timeout_arg(ctx, 1), kQueryPollInterval);
+  const GameTime now = script_clock(ctx, *world);
+  if (empty_of(*world, q, now)) return answer(true);
+  return keep_waiting(ctx, timeout_arg(ctx, 1), query_poll_slice(hint_of(*world, q, now)));
 }
 
 /// `WaitNonEmptyQuery(q, timeout)`. 0x005ed800, whose predicate is the negation
@@ -185,11 +230,12 @@ HostOutcome fn_empty_query(CallContext& ctx) {
 HostOutcome fn_non_empty_query(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  const QueryResult q = evaluate(*world, ctx.arg(0));
+  const QueryArg q = resolve_query(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
   if (!q.alive) return dead_query();
-  if (!q.objects.empty()) return answer(true);
-  return keep_waiting(ctx, timeout_arg(ctx, 1), kQueryPollInterval);
+  const GameTime now = script_clock(ctx, *world);
+  if (!empty_of(*world, q, now)) return answer(true);
+  return keep_waiting(ctx, timeout_arg(ctx, 1), query_poll_slice(hint_of(*world, q, now)));
 }
 
 /// `WaitObjInQuery(obj, q, timeout)`. 0x005ecf00, which asks the query itself
@@ -197,42 +243,36 @@ HostOutcome fn_non_empty_query(CallContext& ctx) {
 HostOutcome fn_obj_in_query(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  const QueryResult q = evaluate(*world, ctx.arg(1));
+  const QueryArg q = resolve_query(*world, ctx.arg(1));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
   if (!q.alive) return dead_query();
+  const GameTime now = script_clock(ctx, *world);
   if (ctx.arg(0).is_object()) {
     const auto wanted = static_cast<ObjectId>(ctx.arg(0).as_object().id);
-    for (const ObjectId id : q.objects) {
-      if (id == wanted) return answer(true);
-    }
+    if (holds(*world, q, wanted, now)) return answer(true);
   }
-  return keep_waiting(ctx, timeout_arg(ctx, 2), kQueryPollInterval);
+  return keep_waiting(ctx, timeout_arg(ctx, 2), query_poll_slice(hint_of(*world, q, now)));
 }
 
-/// `WaitCommonObjects(q1, q2, timeout)`. 0x005ed100: any object of the first
-/// query that is also in the second. Its cadence comes from the two-query
+/// `WaitCommonObjects(q1, q2, timeout)`. 0x005ed100: the first query's list
+/// (`vtbl + 0x20`) walked in its order, each member asked of the second's
+/// membership slot (`vtbl + 0x24`). Its cadence comes from the two-query
 /// helper 0x005eca70, which takes the smaller of the two hints and floors it at
 /// the same 100.
 HostOutcome fn_common_objects(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  const QueryResult a = evaluate(*world, ctx.arg(0));
-  const QueryResult b = evaluate(*world, ctx.arg(1));
+  const QueryArg a = resolve_query(*world, ctx.arg(0));
+  const QueryArg b = resolve_query(*world, ctx.arg(1));
   if (!a.ok || !b.ok) return HostOutcome::failed(kNotAQuery);
   if (!a.alive || !b.alive) return dead_query();
-  // Both sides come out in ascending id order, so this is a merge rather than a
-  // nested scan -- the same reasoning `evaluate_query`'s set ops use.
-  std::size_t i = 0;
-  std::size_t j = 0;
-  while (i < a.objects.size() && j < b.objects.size()) {
-    if (a.objects[i] == b.objects[j]) return answer(true);
-    if (a.objects[i] < b.objects[j]) {
-      ++i;
-    } else {
-      ++j;
-    }
+  const GameTime now = script_clock(ctx, *world);
+  for (const ObjectId member : list_of(*world, a, now)) {
+    if (holds(*world, b, member, now)) return answer(true);
   }
-  return keep_waiting(ctx, timeout_arg(ctx, 2), kQueryPollInterval);
+  const std::int64_t first = hint_of(*world, a, now);
+  const std::int64_t second = hint_of(*world, b, now);
+  return keep_waiting(ctx, timeout_arg(ctx, 2), query_poll_slice(std::min(first, second)));
 }
 
 // -- the environment store, at 2000 ms ---------------------------------------
@@ -308,13 +348,16 @@ HostOutcome fn_idle(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
   CommandSystem* commands = command_system(*world);
   if (commands == nullptr) return HostOutcome::failed(kNoCommandSystem);
-  const QueryResult q = evaluate(*world, ctx.arg(0));
+  const QueryArg q = resolve_query(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
   if (!q.alive) return dead_query();
 
-  if (!q.objects.empty()) {
+  // The list accessor (`vtbl + 0x20`), unpurged, as the family reads it.
+  const GameTime now = script_clock(ctx, *world);
+  const std::vector<ObjectId> members = list_of(*world, q, now);
+  if (!members.empty()) {
     bool all_resting = true;
-    for (const ObjectId id : q.objects) {
+    for (const ObjectId id : members) {
       const std::string_view verb = commands->command_name(id);
       if (verb.empty() || verb == kRestingVerb || verb == kStandstillVerb) continue;
       all_resting = false;
@@ -322,7 +365,7 @@ HostOutcome fn_idle(CallContext& ctx) {
     }
     if (all_resting) return answer(true);
   }
-  return keep_waiting(ctx, timeout_arg(ctx, 1), kQueryPollInterval);
+  return keep_waiting(ctx, timeout_arg(ctx, 1), query_poll_slice(hint_of(*world, q, now)));
 }
 
 /// `WaitHealthBetween(q, low, high, timeout)`. 8 sites, and all eight are
@@ -349,13 +392,14 @@ HostOutcome fn_idle(CallContext& ctx) {
 HostOutcome fn_health_between(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  const QueryResult q = evaluate(*world, ctx.arg(0));
+  const QueryArg q = resolve_query(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
   if (!q.alive) return dead_query();
 
+  const GameTime now = script_clock(ctx, *world);
   std::int64_t sum_health = 0;
   std::int64_t sum_max = 0;
-  for (const ObjectId id : q.objects) {
+  for (const ObjectId id : list_of(*world, q, now)) {
     const WorldObject* slot = world->find(id);
     if (slot == nullptr) continue;  // 0x005ed394 skips a null handle likewise
     sum_health += slot->state.health;
@@ -371,7 +415,9 @@ HostOutcome fn_health_between(CallContext& ctx) {
   const std::int64_t low = int_arg(ctx, 1);
   const std::int64_t high = int_arg(ctx, 2);
   if (percent >= low && percent <= high) return answer(true);
-  return keep_waiting(ctx, timeout_arg(ctx, 3), kQueryPollInterval);
+  // Its own copy of 0x005eca10's slice (0x005ed3f6..0x005ed41b): the query's
+  // `vtbl + 0x34` less the clock, floored at 100.
+  return keep_waiting(ctx, timeout_arg(ctx, 3), query_poll_slice(hint_of(*world, q, now)));
 }
 
 /// `WaitSettlementCapture(name, player, timeout)`. 14 sites, every one of them
@@ -462,12 +508,15 @@ HostOutcome fn_settlement_capture(CallContext& ctx) {
 HostOutcome fn_units_in_area(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  const QueryResult q = evaluate(*world, ctx.arg(0));
+  const QueryArg q = resolve_query(*world, ctx.arg(0));
   if (!q.ok) return HostOutcome::failed(kNotAQuery);
   if (!q.alive) return dead_query();
   if (!ctx.arg(1).is_string()) {
     return HostOutcome::failed("WaitUnitsInArea expects an area name");
   }
+  // 0x005ee310 reads the list accessor (`vtbl + 0x20`) and polls at its own
+  // fixed 1000 ms, not at the query's hint.
+  const std::vector<ObjectId> members = list_of(*world, q, script_clock(ctx, *world));
   if (area_system_of(*world) == nullptr) return HostOutcome::failed(kNoAreaSystem);
   const AreaShape* area = area_named(*world, ctx.arg(1).as_string());
   if (area == nullptr) return answer(true);
@@ -483,7 +532,7 @@ HostOutcome fn_units_in_area(CallContext& ctx) {
     return area->contains_by_query_rule(holder->state.position);
   };
   bool all_inside = true;
-  for (const ObjectId id : q.objects) {
+  for (const ObjectId id : members) {
     const WorldObject* slot = world->find(id);
     if (slot == nullptr) continue;
     if ((world->sync_flags(id) & kSyncUnit) == 0) continue;
@@ -491,7 +540,7 @@ HostOutcome fn_units_in_area(CallContext& ctx) {
     all_inside = false;
     break;
   }
-  if (all_inside && !q.objects.empty()) return answer(true);
+  if (all_inside && !members.empty()) return answer(true);
   return keep_waiting(ctx, timeout_arg(ctx, 2), kSettlementPollInterval);
 }
 
@@ -513,10 +562,10 @@ HostOutcome fn_units_in_area(CallContext& ctx) {
 /// `within_conversation_reach` looks both parties up and answers false for
 /// either that is gone, so a second test would be a second place to get the
 /// rule wrong and no observable difference.
-void conv_party(World& world, const Value& value, std::vector<ObjectId>& out) {
-  const QueryResult side = evaluate(world, value);
+void conv_party(World& world, const Value& value, GameTime now, std::vector<ObjectId>& out) {
+  const QueryArg side = resolve_query(world, value);
   if (side.ok) {
-    out = side.objects;
+    if (side.alive) out = list_of(world, side, now);
     return;
   }
   if (!value.is_object()) return;
@@ -559,15 +608,16 @@ void conv_party(World& world, const Value& value, std::vector<ObjectId>& out) {
   // The three-argument body has no such exit -- see below.
   if (with_outputs) {
     for (std::size_t i = 0; i < 2; ++i) {
-      const QueryResult side = evaluate(*world, ctx.arg(i));
+      const QueryArg side = resolve_query(*world, ctx.arg(i));
       if (side.ok && !side.alive) return answer(true);
     }
   }
 
   std::vector<ObjectId> walkers;
   std::vector<ObjectId> hosts;
-  conv_party(*world, ctx.arg(0), walkers);
-  conv_party(*world, ctx.arg(1), hosts);
+  const GameTime now = script_clock(ctx, *world);
+  conv_party(*world, ctx.arg(0), now, walkers);
+  conv_party(*world, ctx.arg(1), now, hosts);
 
   // **Never on the first call.** The original files the record on the fresh
   // frame and reads it back on a resume; the completing side is the input

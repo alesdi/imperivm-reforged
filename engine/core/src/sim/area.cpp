@@ -411,8 +411,10 @@ HostOutcome order_query_to_area(CallContext& ctx, std::string_view verb) {
   CommandSystem* commands = command_system(*world);
   if (commands == nullptr) return HostOutcome::failed(kNoCommands);
 
+  // Purged and read (0x0057a2e0's `vtbl + 0x1c`, `vtbl + 0x20`): the cached
+  // list, refreshed when due.
   std::vector<ObjectId> members;
-  world->evaluate_query(ctx.arg(0).as_object().id, members);
+  world->read_query(ctx.arg(0).as_object().id, script_clock(ctx, *world), members);
 
   const AreaShape region = *shape;
   for (const ObjectId member : members) {

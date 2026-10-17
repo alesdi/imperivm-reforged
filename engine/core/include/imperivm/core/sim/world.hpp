@@ -41,6 +41,7 @@
 // `InternalKind` is, and why `WorldObject::object` is allowed to be null.
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -1308,13 +1309,76 @@ class World {
   /// Query objects live and die like everything else; this is `despawn`.
   bool destroy_query(ObjectId id) { return despawn(id); }
 
-  /// Evaluate a query into `out`, which is cleared first. Ids come out in
-  /// ascending order, which is spawn order. Returns the count.
+  /// Evaluate a query into `out`, which is cleared first, **afresh and without
+  /// touching its cache**. Returns the count. Ids come out in ascending order,
+  /// which is spawn order, except a group's (joining order) and a set
+  /// operation's (see the set-op branch).
   ///
-  /// Evaluation is not cached: an invalidation rule is not recoverable from the
-  /// corpus, and a wrong one is worse than none. The *object* persists, which
-  /// is the part the hash can see.
+  /// This is the refresh body of each kind (the original's `vtbl + 0x38`) and
+  /// the answer a query gives the moment it is made. What a *script* reads is
+  /// not this but the query's cached list, refreshed only when it falls due:
+  /// `read_query` and its siblings below, and docs/formats/query-model.md. A
+  /// set operation evaluated here composes its operands' fresh evaluations;
+  /// refreshed through the cache, it composes their cached lists, as the
+  /// original does.
   std::size_t evaluate_query(ObjectId id, std::vector<ObjectId>& out) const;
+
+  // -- the query cache ---------------------------------------------------
+  //
+  // `gbr.exe` keeps, on every query object but a group (and a named object),
+  // the list its last refresh produced -- an `ObjList` embedded at
+  // `[query+0x1c]` -- and the game time its next refresh falls due at,
+  // `[query+0x4c]`. A refresh (`vtbl + 0x38`) sets that time to the clock plus
+  // the kind's period (`[query+0x50]`: 1000, 2000 or 4000 ms; see
+  // `query_refresh_period`) and refills the list; nothing else does either.
+  // A query is refreshed lazily, by a read that finds it due. Every read here
+  // takes the clock it reads at -- the scripts' millisecond, `script_clock` in
+  // `sim/world_host.hpp` -- and none of this is hashed: the dumps print a
+  // query's definition and never its list or its time. It is saved.
+
+  /// How a member reads the list. `purged` is the pair nearly every `Query`
+  /// member opens with: the purge (`vtbl + 0x1c`, 0x00572c10), which drops
+  /// from the cached list every member whose handle no longer resolves or
+  /// that is dead (`vtbl + 0x50`), then the list accessor (`vtbl + 0x20`,
+  /// 0x004f9490), which refreshes when due. `as_cached` is the accessor alone,
+  /// which `WaitQueryCountBetween`, `WaitIdle`, `WaitHealthBetween`,
+  /// `Query::Face` and a few more use: a stale list keeps its dead.
+  enum class QueryRead : std::uint8_t { purged, as_cached };
+
+  /// The query's list as a member reads it at `now`, copied into `out` (cleared
+  /// first). A handle that is not a live query reads as empty.
+  std::size_t read_query(ObjectId id, GameTime now, std::vector<ObjectId>& out,
+                         QueryRead read = QueryRead::purged);
+  /// `vtbl + 0x1c`: drop the gone and the dead from the cached list. On a
+  /// group the list *is* the group, so its dead leave the group (0x00572c10 is
+  /// the group's slot too).
+  void purge_query(ObjectId id);
+  /// `vtbl + 0x28`. Fresh (`now` before the due time): the cached list's
+  /// emptiness, purged or not as the caller left it. Due: a kind that answers
+  /// live (`query_answers_live_when_stale`) sweeps without storing, and the
+  /// others refresh and test (0x004f8ab0, 0x00571710). A group asks its list.
+  [[nodiscard]] bool query_is_empty(ObjectId id, GameTime now);
+  /// `vtbl + 0x24`. Fresh: a scan of the cached list for `member` (0x004f9550).
+  /// Due: the live kinds test the one object against their area or sight
+  /// (`vtbl + 0x3c`, which is **not** the refresh's test -- see
+  /// `query_matches_live`), the others refresh and scan (0x00571870).
+  [[nodiscard]] bool query_contains(ObjectId id, ObjectId member, GameTime now);
+  /// `vtbl + 0x34`: when the query's next refresh falls due. A group's is
+  /// always `now` (0x00571700); a query never refreshed answers a time in the
+  /// past, which is what its creation time is by the first read.
+  [[nodiscard]] GameTime query_next_refresh(ObjectId id, GameTime now) const noexcept;
+
+  /// A cached query's state, or null for a handle that is not a query.
+  struct QueryCache {
+    /// What the last refresh produced, less what purges have dropped since.
+    std::vector<ObjectId> members;
+    /// `[query+0x4c]`. Before the first refresh, earlier than any clock: the
+    /// original sets the creation time, and every read comes at or after it,
+    /// so the first read always refreshes either way.
+    GameTime next_refresh = kNeverRefreshed;
+    static constexpr GameTime kNeverRefreshed = std::numeric_limits<GameTime>::min();
+  };
+  [[nodiscard]] const QueryCache* query_cache(ObjectId id) const noexcept;
 
   /// How deeply set-op queries may nest before evaluation gives up and returns
   /// empty. A script can compose a query with itself, directly or round a
@@ -1725,6 +1789,18 @@ class World {
   void collect(const WorldObject& slot, const ClassFilter& filter,
                std::vector<ObjectId>& out) const;
   std::size_t evaluate_query(ObjectId id, std::vector<ObjectId>& out, std::uint32_t depth) const;
+  /// The cache behind a query handle, or null.
+  [[nodiscard]] QueryCache* mutable_query_cache(ObjectId id) noexcept;
+  /// `vtbl + 0x20`: refresh when due, at `depth` of a set-op composition.
+  void refresh_if_due(ObjectId id, GameTime now, std::uint32_t depth);
+  /// `vtbl + 0x38`, through the cache: a set operation composes its operands'
+  /// *cached* lists, each read the way 0x004ffbe0 reads it.
+  void refresh_query(ObjectId id, GameTime now, std::uint32_t depth);
+  [[nodiscard]] bool query_contains(ObjectId id, ObjectId member, GameTime now,
+                                    std::uint32_t depth);
+  /// A live kind's one-object test (`vtbl + 0x3c`), asked of a stale query.
+  [[nodiscard]] bool query_matches_live(ObjectId query, const QuerySpec& spec,
+                                        ObjectId member) const;
   ObjectId allocate(InternalKind kind, std::unique_ptr<NativeObject> object,
                     const Entity* entity, ClassIndex class_index);
   /// The shared body of every spatial query: `test(slot, at)` over every
@@ -1755,6 +1831,8 @@ class World {
   /// query leaves its slot behind rather than compacting, because compaction
   /// would renumber every live query and the numbering is hashed.
   std::vector<QuerySpec> queries_;
+  /// Each query's cache, indexed as `queries_` is. Saved, never hashed.
+  std::vector<QueryCache> query_caches_;
 
   ObjectId deferred_erase_ = kNoObject;
   const ClassGraph* classes_ = nullptr;

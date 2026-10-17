@@ -535,7 +535,7 @@ constexpr FeederHostDef kFeederHosts[] = {
        if (ctx.count() == 0 || !ctx.arg(0).is_object()) return HostOutcome::ok_void();
        const bool feeding = feeding_arg(ctx);
        if (ctx.arg(0).as_object().type == kTypeQuery) {
-         for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+         for (const ObjectId id : receiver_objects(ctx, *world, ctx.arg(0))) {
            const WorldObject* slot = world->find(id);
            if (slot == nullptr || !slot->state.flags.is_unit || slot->state.health <= 0) continue;
            if (FeedingUnit* link = link_of(*world, *feeder, id); link != nullptr) {
