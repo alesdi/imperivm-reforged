@@ -243,6 +243,11 @@ namespace imperivm::core::sim {
 
 class World;
 
+/// The context string every sequence's thread is given (`Start`, 0x005b9d40,
+/// at 0x005b9da7 .. 0x005b9db7): `/`, so a relative root `Env*` key inside a
+/// sequence is made absolute. `script::ScriptRecord::context`.
+inline constexpr std::string_view kSequenceContext = "/";
+
 // --------------------------------------------------------------------------
 // what kind of container this is
 // --------------------------------------------------------------------------

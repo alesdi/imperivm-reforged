@@ -331,8 +331,13 @@ AiStartStatus AiSystem::start(PlayerId player, std::string_view profile, AiDiffi
     return AiStartStatus::no_main_script;
   }
   ai.active = true;
+  (void)scheduler.set_context(ai.root, ai_thread_context(player));
   adopt(ai.root, player, /*root=*/true);
   return AiStartStatus::ok;
+}
+
+std::string ai_thread_context(PlayerId seat) {
+  return env_format_int(static_cast<std::int32_t>(seat));
 }
 
 void AiSystem::seed_gaika_view(PlayerId player, std::int32_t nodes) {
@@ -1372,6 +1377,7 @@ HostOutcome run_script_common(CallContext& ctx, AiEnum family, const char* what)
   const ScriptId spawned = ctx.scheduler->spawn(chunk, std::span<const Value>(&argument, 1),
                                                 script::ObjectRef{}, ctx.script);
   if (spawned == script::kNoScript) return HostOutcome::ok_void();
+  (void)ctx.scheduler->set_context(spawned, ai_thread_context(owner));
   ai->adopt(spawned, owner);
   write(spawned);
   return HostOutcome::ok_void();
@@ -3121,6 +3127,7 @@ HostOutcome m_gaika_run_strat(CallContext& ctx) {
   const script::ScriptId spawned = ctx.scheduler->spawn(
       chunk, std::span<const Value>(&argument, 1), script::ObjectRef{}, ctx.script);
   if (spawned == script::kNoScript) return HostOutcome::ok_void();
+  (void)ctx.scheduler->set_context(spawned, ai_thread_context(owner));
   ai->adopt(spawned, owner);
   record->strat_script = spawned;
   return HostOutcome::ok_void();

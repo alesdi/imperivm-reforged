@@ -327,7 +327,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (0x005d28c0) rather than kept beside it. A version-36 file holds progress
 /// within the level and the level as a second word; read as a total, every
 /// veteran would load at level 1.
-inline constexpr std::uint32_t kStateVectorVersion = 37;
+/// 38: every script thread carries its context string
+/// (`script::ScriptRecord::context`, the scheduler section's version 3): `/` on
+/// a sequence's, the seat on an AI's. A version-37 file would load every
+/// thread with none, and a relative root `Env*` key in a sequence would stop
+/// meaning the absolute one.
+inline constexpr std::uint32_t kStateVectorVersion = 38;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

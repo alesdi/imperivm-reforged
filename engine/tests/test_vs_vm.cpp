@@ -1103,6 +1103,57 @@ TEST(vs_scripts_due_together_run_in_the_order_they_were_armed) {
   }
 }
 
+/// What a host call is told about its thread's context: `[thread+0x44]`.
+HostOutcome host_context_note(CallContext& context) {
+  world_of(context).log.push_back("[" + std::string(context.context) + "]");
+  return HostOutcome::ok_void();
+}
+
+/// **A thread's context is its own, a launcher's to set, and saved.** A
+/// spawned thread has none (0x0069d090 leaves `+0x44` null); `set_context` is
+/// 0x0069d040, which the launchers call once the thread exists, and every host
+/// call the thread makes is handed it. A synchronous call runs on a fresh
+/// thread with the context its launcher gives it -- none, unless it is a
+/// conversation's phrase -- and a script it spawns starts with none. Saved as
+/// the thread's `Context` (0x0069cc58).
+TEST(vs_a_thread_carries_the_context_its_launcher_gave_it_across_a_save) {
+  const char* source = "// void\nCtx();\nSleep(10);\nCtx();\n";
+  Stage stage;
+  stage.registry.define(CallKind::free_function, "Ctx", 0, &host_context_note);
+  REQUIRE(stage.add(source, "ctx.vs"));
+  const ScriptId plain = stage.scheduler.spawn(0);
+  const ScriptId tagged = stage.scheduler.spawn(0);
+  CHECK(stage.scheduler.set_context(tagged, "3"));
+  CHECK(stage.scheduler.context(plain).empty());
+  CHECK(stage.scheduler.context(tagged) == "3");
+  stage.scheduler.run_ready();
+  REQUIRE(stage.world.log.size() == 2);
+  CHECK(stage.world.log[0] == "[]");
+  CHECK(stage.world.log[1] == "[3]");
+
+  // A call is handed what its launcher passes, and nothing otherwise.
+  (void)stage.scheduler.call(0, {}, "/T_Conv/");
+  (void)stage.scheduler.call(0);
+  REQUIRE(stage.world.log.size() == 4);
+  CHECK(stage.world.log[2] == "[/T_Conv/]");
+  CHECK(stage.world.log[3] == "[]");
+
+  std::vector<std::byte> saved;
+  stage.scheduler.serialize(saved);
+  Stage loaded;
+  loaded.registry.define(CallKind::free_function, "Ctx", 0, &host_context_note);
+  REQUIRE(loaded.add(source, "ctx.vs"));
+  REQUIRE(loaded.scheduler.deserialize(saved).ok());
+  CHECK(loaded.scheduler.context(tagged) == "3");
+  loaded.scheduler.advance(10);
+  REQUIRE(loaded.world.log.size() == 2);
+  CHECK(loaded.world.log[0] == "[]");
+  CHECK(loaded.world.log[1] == "[3]");
+  // A dead thread has no context to set or read.
+  CHECK(!loaded.scheduler.set_context(tagged, "4"));
+  CHECK(loaded.scheduler.context(tagged).empty());
+}
+
 /// `StartPlayerScript` starts a name once per player: 0x0056f720 refuses a
 /// name already in one of the player's eight slots, and binds the 1-based
 /// player as the script's one argument.

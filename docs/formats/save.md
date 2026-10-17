@@ -401,7 +401,7 @@ and fails the same way — `sequence from savegame does not compile : %s`.
 
 ```
     u32     magic          "SCHD"
-    u32     version        2
+    u32     version        3
     i64     now            the scripts' clock, milliseconds
     u32     next_id        the next script id to issue
     i64     next_arm       the next position in the arming order
@@ -416,12 +416,16 @@ and fails the same way — `sequence from savegame does not compile : %s`.
       u32   owner id
       u32   parent
       i64   armed          when it was last put on the wheel; orders scripts due together
+      str   context        the thread's context string, empty for none
       u32   length, then the coroutine (`script::serialize`)
 ```
 
 Version 2 added `next_arm`, `armed` and the player-script slots: scripts due on the same
 millisecond run in the order they were armed, as the original's timing wheel runs them, and a
-player script started once is refused a second start.
+player script started once is refused a second start. Version 3 added `context`, the string the
+original keeps on a thread and saves as `Context` (0x0069cc58): `/` for a sequence, the AI's seat
+for an AI's thread, and none for anything else (`script::ScriptRecord::context`). It decides how a
+relative root `Env*` key resolves and whose AI the thread belongs to.
 
 ### `selection`
 

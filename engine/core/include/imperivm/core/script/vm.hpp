@@ -161,6 +161,10 @@ struct VmEnv {
   Scheduler* scheduler = nullptr;
   void* user = nullptr;
   ScriptId script = kNoScript;
+  /// The running thread's context (`ScriptRecord::context`), handed to every
+  /// host call as `CallContext::context`. Borrowed: whoever runs the script
+  /// keeps the string alive for the run.
+  std::string_view context;
   CallTrace call_trace = nullptr;
   void* trace_user = nullptr;
   /// Game time now, in milliseconds. Used to compute a suspension's wake time.

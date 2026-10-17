@@ -1234,6 +1234,31 @@ TEST(campaign_a_sequence_is_finished_the_moment_its_script_ends_and_not_at_the_t
   CHECK(env->env().read_int(EnvScope::root(), "/Polled") == 2800);
 }
 
+/// **Every sequence's thread runs with the context `/`** -- the autorun one the
+/// session starts and one `RunSequence` starts alike (`Start`, 0x005b9d40, at
+/// 0x005b9da7 .. 0x005b9db7) -- so a relative root key written inside either
+/// is the absolute one (`MakePath`, 0x006ab0e0). A thread no sequence runner
+/// started has none, and its relative key means itself.
+TEST(campaign_a_sequence_thread_runs_with_the_context_slash) {
+  SequenceSession s;
+  s.scripts.add("sequences/seq5.vs", "//void\nEnvWriteInt(\"AutoRel\", 1);\nwhile (1) Sleep(1000);\n");
+  s.scripts.add("sequences/seq6.vs", "//void\nEnvWriteInt(\"StartedRel\", 1);\nwhile (1) Sleep(1000);\n");
+  const SequenceRef more[] = {SequenceRef{"AutoRel", "CurrentGame/sequences/seq5.vs", "", true},
+                              SequenceRef{"StartedRel", "CurrentGame/sequences/seq6.vs", "", false}};
+  REQUIRE(s.session->start_sequences(std::span(more), /*base=*/"") == 1);
+  CHECK(s.call("RunSequence", {script::Value::string("StartedRel")}).status ==
+        script::HostStatus::ok);
+  s.session->advance(/*turns=*/1, /*turn_length=*/800);
+  CHECK(s.ran("/AutoRel"));
+  CHECK(s.ran("/StartedRel"));
+  CHECK(!s.ran("AutoRel"));
+  CHECK(!s.ran("StartedRel"));
+  for (const script::ScriptRecord& record : s.session->scheduler().scripts()) {
+    if (record.dead) continue;
+    CHECK(record.context == "/");
+  }
+}
+
 TEST(campaign_a_sequence_with_no_compiled_script_is_finished_rather_than_pending) {
   // `Start`'s first branch, and it is what makes `IsFinished` answer true for a
   // sequence that never compiled -- a mission waiting on one is not left

@@ -195,6 +195,10 @@ struct CallContext {
   Scheduler* scheduler = nullptr;
   /// The running script, so a host call can name or address itself.
   ScriptId script = kNoScript;
+  /// The running thread's context string -- `[thread+0x44]` in `gbr.exe`,
+  /// empty for none; `ScriptRecord::context` says who writes it and who
+  /// reads it. Borrowed for the length of the call.
+  std::string_view context;
   /// Whatever the embedder passed in. Part 5's world pointer lives here.
   void* user = nullptr;
   std::string_view name;

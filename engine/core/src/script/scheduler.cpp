@@ -10,7 +10,9 @@ namespace imperivm::core::script {
 namespace {
 
 constexpr std::uint32_t kSaveMagic = 0x44484353u;  // "SCHD"
-constexpr std::uint32_t kSaveVersion = 2;  // 2: each record's arming order, and the player-script slots
+// 2: each record's arming order, and the player-script slots. 3: each record's
+// context string (`ScriptRecord::context`).
+constexpr std::uint32_t kSaveVersion = 3;
 
 char lower(char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; }
 
@@ -111,6 +113,9 @@ HostOutcome spawn_from(CallContext& context, const Value& name, std::span<const 
   if (!name.is_string()) return HostOutcome::failed("AIRun expects a script name");
   const ScriptId id = context.scheduler->spawn_by_name(name.as_string(), args, ObjectRef{},
                                                        context.script);
+  // Tagged with the caller's seat, which is what 0x0041cd00 writes: the AI it
+  // launches in is the one the caller's own context names.
+  if (id != kNoScript) (void)context.scheduler->set_context(id, context.context);
   // A missing script is survivable: four `<behavior script=...>` bindings in
   // the shipped class tree name files that are not in `data.pak` at all. The
   // original prints "Cannot run '%s' script" and answers -1; `AIBreakScript`
@@ -374,6 +379,19 @@ bool Scheduler::alive(ScriptId id) const {
   return record != nullptr && !record->dead;
 }
 
+bool Scheduler::set_context(ScriptId id, std::string_view context) {
+  ScriptRecord* record = find(id);
+  if (record == nullptr || record->dead) return false;
+  record->context.assign(context);
+  return true;
+}
+
+std::string_view Scheduler::context(ScriptId id) const {
+  const ScriptRecord* record = find(id);
+  if (record == nullptr || record->dead) return {};
+  return record->context;
+}
+
 std::size_t Scheduler::live_count() const {
   std::size_t count = 0;
   for (const ScriptRecord& record : scripts_) {
@@ -461,7 +479,11 @@ RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
     // started it.
     const std::size_t known = scripts_.size();
     const std::uint32_t chunk_index = queued->chunk_index;
-    const VmEnv env = env_for(*queued);
+    // A copy: `env.context` borrows it for the run, and the record it came
+    // from can move while the script spawns.
+    const std::string context = queued->context;
+    VmEnv env = env_for(*queued);
+    env.context = context;
 
     // Detached for the duration of the run. A host call can spawn, which
     // reallocates `scripts_`, and a reference held across that would dangle.
@@ -525,7 +547,8 @@ RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
   return report;
 }
 
-CallReport Scheduler::call(std::uint32_t chunk_index, std::span<const Value> args) {
+CallReport Scheduler::call(std::uint32_t chunk_index, std::span<const Value> args,
+                           std::string_view context) {
   CallReport report;
   if (chunk_index >= chunks_.size()) return report;
   // The same counter `spawn` draws from, so a hook consumes the id it always
@@ -540,6 +563,7 @@ CallReport Scheduler::call(std::uint32_t chunk_index, std::span<const Value> arg
   env.scheduler = this;
   env.user = user_;
   env.script = report.id;
+  env.context = context;
   env.now = now_;
   env.instruction_budget = kCallBudget;
   env.call_trace = call_trace_;
@@ -593,6 +617,7 @@ void Scheduler::serialize(std::vector<std::byte>& out) const {
     put_u32(out, record.owner.id);
     put_u32(out, record.parent);
     put_i64(out, static_cast<std::int64_t>(record.armed));
+    put_string(out, record.context);
 
     std::vector<std::byte> execution;
     script::serialize(record.execution, execution);
@@ -638,12 +663,14 @@ namespace {
 /// without having to understand a format that changes underneath it.
 [[nodiscard]] Status read_record_prefix(ByteReader& reader, ScriptId& id, std::string& source_name,
                                         ObjectRef& owner, ScriptId& parent, std::uint64_t& armed,
+                                        std::string& context,
                                         std::span<const std::byte>& payload) {
   std::uint16_t owner_type = 0;
   std::uint32_t owner_id = 0;
   std::int64_t armed_bits = 0;
   if (!reader.u32(id) || !get_string(reader, source_name) || !reader.u16(owner_type) ||
-      !reader.u32(owner_id) || !reader.u32(parent) || !get_i64(reader, armed_bits)) {
+      !reader.u32(owner_id) || !reader.u32(parent) || !get_i64(reader, armed_bits) ||
+      !get_string(reader, context)) {
     return FormatError::truncated;
   }
   armed = static_cast<std::uint64_t>(armed_bits);
@@ -676,9 +703,10 @@ Result<std::vector<std::string>> script_section_sources(std::span<const std::byt
     ObjectRef owner;
     ScriptId parent = kNoScript;
     std::uint64_t armed = 0;
+    std::string context;
     std::span<const std::byte> payload;
     if (const Status record =
-            read_record_prefix(reader, id, source_name, owner, parent, armed, payload);
+            read_record_prefix(reader, id, source_name, owner, parent, armed, context, payload);
         !record.ok()) {
       return record.error();
     }
@@ -707,7 +735,8 @@ Status Scheduler::deserialize(std::span<const std::byte> bytes) {
     std::string source_name;
     std::span<const std::byte> payload;
     if (const Status prefix = read_record_prefix(reader, record.id, source_name, record.owner,
-                                                 record.parent, record.armed, payload);
+                                                 record.parent, record.armed, record.context,
+                                                 payload);
         !prefix.ok()) {
       return prefix;
     }

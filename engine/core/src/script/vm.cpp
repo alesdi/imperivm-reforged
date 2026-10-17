@@ -303,6 +303,7 @@ void Machine::do_call(const Instruction& instruction) {
   context.host = env.host;
   context.scheduler = env.scheduler;
   context.script = env.script;
+  context.context = env.context;
   context.user = env.user;
   context.name = name;
   context.kind = site.kind;

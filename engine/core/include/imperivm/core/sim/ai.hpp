@@ -677,6 +677,12 @@ class AiSystem final : public System {
   bool manager_started_ = false;
 };
 
+/// The context string every thread an AI starts is given: its seat, 0-based
+/// (`[ai+0x24]`), formatted `%d` -- 0x0041cd00 at 0x0041cd8c .. 0x0041cdaa for
+/// `Main.vs`, `AIRun`, the economy, tactic and strategy scripts, and 0x0041ccb0
+/// for the order scripts in slot 2. `script::ScriptRecord::context`.
+[[nodiscard]] std::string ai_thread_context(PlayerId seat);
+
 /// The world's `AiSystem`, or null. Found by name, like every other domain's.
 [[nodiscard]] AiSystem* ai_system_of(World& world) noexcept;
 
