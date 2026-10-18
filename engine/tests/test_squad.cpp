@@ -87,6 +87,9 @@ ClassGraph fixture_graph() {
   graph.add(bytes(R"(<class id="GDruid" cpp_class="CVXUnit" parent="Unit"/>)"), "druid.sc.xml");
   // An animal, which a squad's look leaves off its `Enemies`.
   graph.add(bytes(R"(<class id="Animal" cpp_class="CVXUnit" parent="Unit"/>)"), "animal.sc.xml");
+  // A hero and a mage, which `GetPlayerUnits` lists by arms of their own.
+  graph.add(bytes(R"(<class id="Hero" cpp_class="CVXHero" parent="Unit"/>)"), "hero.sc.xml");
+  graph.add(bytes(R"(<class id="BaseMage" cpp_class="CVXUnit" parent="Unit"/>)"), "mage.sc.xml");
   // A sentry's specials: `Unit::HasFreedom` answers from the class's
   // `freedom` bit whatever the unit record says.
   graph.add(bytes(R"(<class id="Sentry" cpp_class="CVXUnit" parent="Unit">
@@ -1831,6 +1834,89 @@ TEST(squad_is_enemy_in_squad_sight_reads_the_squads_enemies) {
   const HostOutcome dead = invoke(registry, CallKind::member, "IsEnemyInSquadSight", 0, inside);
   CHECK(dead.status == HostStatus::ok);
   CHECK(dead.value.is_object() && dead.value.as_object().id == 0);
+}
+
+/// **`MilUnits` counts the members of a player's fielded squads** (0x00421ee0
+/// -> 0x00443eb0): squads with a strength (`Squad::Eval`) and none of
+/// no-AI, peaceful, sentries; members still in the world that are neither
+/// `Peaceful` nor `Animal` heirs, dead or alive. Units in no squad, and
+/// other players' squads, are nobody's army here.
+TEST(mil_units_counts_the_members_of_the_players_fielded_squads) {
+  Fixture f;
+  HostRegistry registry;
+  register_player_host(registry);
+  const auto mil = [&](std::int32_t player) {
+    HostCall call(f.world, {Value::integer(player)});
+    return invoke(registry, CallKind::free_function, "MilUnits", 1, call).value.as_integer();
+  };
+  const SquadKey army = f.squad_of(1, 3);
+  const SquadKey peaceful = f.squad_of(1, 2);
+  const SquadKey guards = f.squad_of(1, 2);
+  (void)f.squad_of(2, 4);
+  (void)f.spawn(Point{500, 500}, 1);  // in no squad
+  const ObjectId deer = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Animal"));
+  f.world.set_owner(deer, 1);
+  REQUIRE(f.heroes.squads().join(army, deer));
+  revalue_squads(f.world, f.heroes.squads());
+  f.heroes.squads().find(peaceful)->flags = kSquadFlagPeaceful;
+  f.heroes.squads().find(guards)->flags = kSquadFlagSentries;
+  // The plain squad's three; the deer, the flagged squads and the loner not.
+  CHECK(mil(2) == 3);
+  // A dead member still counts while it is in the squad.
+  f.world.set_health(f.heroes.squads().find(army)->members.front(), 0);
+  CHECK(mil(2) == 3);
+  // A squad with no strength is skipped whole.
+  f.heroes.squads().find(army)->eval = 0;
+  CHECK(mil(2) == 0);
+  CHECK(mil(3) == 4);
+}
+
+/// `GetPlayerUnits(player, class)` by its three arms (0x005de750): a class
+/// under `Hero` lists each squad's front member that is a hero and an heir
+/// (not its army); a class under `BaseMage` lists its heirs in the squads a
+/// mage or a hero leads; any other class every heir in every squad. A class
+/// nobody in the squads descends from lists nothing.
+TEST(get_player_units_by_class_takes_the_three_arms) {
+  Fixture f;
+  HostRegistry registry;
+  register_player_host(registry);
+  const auto listed = [&](const char* name) {
+    HostCall call(f.world, {Value::integer(2), Value::string(name)});
+    const HostOutcome out = invoke(registry, CallKind::free_function, "GetPlayerUnits", 2, call);
+    const std::span<const ObjectId> items =
+        objlist_pool_of(f.world).items(objlist_of(out.value));
+    return std::vector<ObjectId>(items.begin(), items.end());
+  };
+  const auto spawn_as = [&](const char* name) {
+    const ObjectId id = f.world.spawn(NativeClass::unit, nullptr, f.graph.find(name));
+    f.world.set_owner(id, 1);
+    f.world.set_health(id, 100);
+    return id;
+  };
+  const ObjectId hero = spawn_as("Hero");
+  f.world.find(hero)->state.flags.is_hero = true;
+  const ObjectId guard = spawn_as("Unit");
+  const ObjectId mage = spawn_as("BaseMage");
+  const ObjectId apprentice = spawn_as("BaseMage");
+  const ObjectId stray = spawn_as("BaseMage");
+  const ObjectId soldier = spawn_as("Unit");
+  const SquadKey army = f.heroes.squads().create(1);
+  REQUIRE(f.heroes.squads().join(army, hero));
+  REQUIRE(f.heroes.squads().join(army, guard));
+  REQUIRE(f.heroes.squads().join(army, apprentice));
+  const SquadKey circle = f.heroes.squads().create(1);
+  REQUIRE(f.heroes.squads().join(circle, mage));
+  const SquadKey line = f.heroes.squads().create(1);
+  REQUIRE(f.heroes.squads().join(line, soldier));
+  REQUIRE(f.heroes.squads().join(line, stray));
+
+  CHECK((listed("Hero") == std::vector<ObjectId>{hero}));
+  // The stray mage is in a squad a soldier leads.
+  CHECK((listed("BaseMage") == std::vector<ObjectId>{apprentice, mage}));
+  CHECK((listed("Unit") ==
+         std::vector<ObjectId>{hero, guard, apprentice, mage, soldier, stray}));
+  CHECK(listed("Horse").empty());
+  CHECK(listed("NoSuchClass").empty());
 }
 
 // --------------------------------------------------------------------------
