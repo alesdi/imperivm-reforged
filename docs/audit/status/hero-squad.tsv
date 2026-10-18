@@ -59,11 +59,11 @@
 0x005d7380	verified	16-bit hero handle at +0x170, 65535 when none or on a miss; no liveness test
 0x005d77a0	verified	level_for_experience (0x005d28c0) of the running total +0x180; miss -> 1 (was 0)
 0x005d75b0	verified	the running total at +0x180 (was progress within the level); miss -> 0
-0x005d7740	partial	vtbl+0x114 = stored +0x184, rebuilt by RecalcBonuses 0x005d9df0: total + item exp + hero army addend (0x0052fc50/0x0052d7a0), its level + item levels + Battle Cry, >= 1, Discipline floor; computed on demand here; the stand_position party bonus ([hero+0x2b0]+0x6c) and the recalc timing not modelled; miss -> 1
-0x005d7610	partial	invalid/dead refused; 0x005dbf70: unchanged total no-op, unclamped write, Nobility lift for Military in [Exp[8],Exp[12]); the owner's highest-military-level record (player+0x50) and its UI notice and the sprite refresh not modelled
+0x005d7740	verified	vtbl+0x114 = the stored [unit+0x184]; fixed (round 11): stored on the combatant and written only by the rebuild 0x005d9df0 -- total + items' experience + the hero's army addend [hero+0x2c0] (set by the hero tick 0x0052fc50 from the hero's stored level), its level + items + formation BonusLevel + Battle Cry, >= 1, Discipline floor -- read by the blow too; miss -> 1
+0x005d7610	partial	invalid/dead refused; 0x005dbf70: unchanged total no-op, unclamped write, Nobility lift for Military in [Exp[8],Exp[12]), then the rebuild (round 11: real, and every blow's award now arrives here; a unit with no record gets one); gap: the owner's highest-military-level record (player+0x50), its UI notice and the sprite refresh not modelled
 0x005d7810	verified	invalid or dead receiver writes nothing; +0x188 += n unclamped
 0x0053c5a0	partial	ItemHolder::AddItem answers whether the name minted (true even when the full holder refused); served by Obj::AddItem's body, which answers whether it was added -- no shipped ItemHolder-typed receiver calls it
-0x005ac910	partial	mint by exact name (0x00535640, two catalogues; the lookup fix is 9693e17), add virtual (count < inventory_size, 0x005b60a0), RecalcBonuses; the GetItem effect object (0x00518650 entry 27) and the equip_script start (flag 7, 0x0053baa0) not modelled -- no item-script runner (design)
+0x005ac910	partial	mint by exact name (0x00535640, two catalogues; the lookup fix is 9693e17), add virtual (count < inventory_size, 0x005b60a0), the rebuild (round 11: real, item bonuses once per kind); the GetItem effect object (0x00518650 entry 27) and the equip_script start (flag 7, 0x0053baa0) not modelled -- no item-script runner (design)
 0x0053c910	verified	walk of held items, exact name compare; miss -> false; same answer as Obj::HasItem's
 0x004263e0	verified	find-by-name virtual 0x005afd60 (front-to-back, exact, length-checked) >= 0; miss -> false
 0x00421090	verified	packs ((n << 4) & 0xffff) | ((player - 1) & 0xf), no lookup; sim/squad.cpp fn_get_squad (an out-of-range player answers the no-squad handle)

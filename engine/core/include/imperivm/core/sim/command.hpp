@@ -855,7 +855,15 @@ class CommandSystem final : public System {
   struct Entry {
     ObjectId id = kNoObject;
     CommandQueue queue;
+    /// Whether the started head was `stand_position` when `track_formation`
+    /// last looked. Derived from the queue, so neither saved nor hashed: a
+    /// loaded queue that is standing costs one rebuild that changes nothing.
+    bool standing = false;
   };
+  /// Rebuild the unit's stats when its running command has just become, or
+  /// stopped being, `stand_position` -- the two rebuilds of 0x005b4f20.
+  void track_formation(World& world, Entry& entry);
+  void track_formation(World& world, ObjectId id);
   struct MethodEntry {
     std::string sig;
     std::string script;

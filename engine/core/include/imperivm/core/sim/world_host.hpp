@@ -263,6 +263,12 @@ std::size_t reap_departed(script::Scheduler& scheduler, World& world);
 /// `object_is_dead` -- `vtbl + 0x50` -- is in sim/world.hpp.
 
 
+/// Whether bit `index` of object `id`'s specials word (`[obj+0x198]`) is set:
+/// `Unit::HasSpecial`'s test without its receiver check -- the class's
+/// `unit_specials`, plus `freedom` on every hero (see `m_has_special`). False
+/// for an index outside the 36-entry table and for an unknown id.
+[[nodiscard]] bool object_has_special(World& world, ObjectId id, std::int32_t index);
+
 /// `Unit::HasFreedom` (0x005d7d30): bit 30 of the unit's specials word
 /// (`[obj+0x198] & 0x40000000`, the `freedom` special, which the class's
 /// `unit_specials` fills at construction) **or** a class descended from

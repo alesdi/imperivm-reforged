@@ -260,6 +260,14 @@ struct HeroConstants {
   std::int32_t stamina_per_charge_level = 1;
   std::int32_t stamina_per_rush_level = 1;
 
+  // -- the stat rebuild's own two --------------------------------------
+  /// `ToughnessHealthIncrease` and `StatueOfAmonRaHealthIncrease`: maximum
+  /// health per level past the first, for a unit with the `Toughness` special
+  /// and for one whose owner has researched the Statue of Amon-Ra. Read by the
+  /// rebuild (0x005d9df0) and nothing else; see `sim/stats.hpp`.
+  std::int32_t toughness_health_increase = 5;
+  std::int32_t statue_of_amon_ra_health_increase = 5;
+
   /// The highest a skill goes: 10, written into the skill writer's clamp
   /// (0x0052def0) and the balance's ten per offered skill (0x0052da80) as a
   /// literal, not read from `CONST.INI`. The AI tactic scripts' goal levels
@@ -449,7 +457,18 @@ struct HeroRecord {
   /// the language has no nullable point.
   Point party_orientation_request{};
   Point party_orientation{};
+
+  /// `[hero+0x2c0]` -- the experience every warrior of this hero's army
+  /// stands on: `(ArmyBonusExperiencePercent + ExpPercentPerLeadershipLevel *
+  /// Leadership) * Exp[the hero's stored level] / 100 + 1` (0x0052d7a0),
+  /// written by the hero's tick (0x0052fc50, `HeroSystem::advance`) and read
+  /// by each member's rebuild. 0 until the first tick.
+  std::int32_t army_addend = 0;
 };
+
+/// How often a hero's tick runs: its message 0x1c reschedules itself 0x3f5
+/// milliseconds on (0x00530357). The tick is what refreshes the army addend.
+inline constexpr GameTime kHeroTickInterval = 1013;
 
 // --------------------------------------------------------------------------
 // the system
@@ -806,12 +825,13 @@ class HeroSystem final : public System {
   /// `Unit.inherentlevel` -- `level_for_experience` of the running total
   /// (0x005d77a0). 0 for a unit with no record.
   [[nodiscard]] std::int32_t inherent_level(ObjectId unit) const;
-  /// `Unit.level` -- the effective level.
-  ///
-  /// The original stores it at `[unit+0x184]` (what `Unit::level`,
-  /// 0x005d7740, reads through `vtbl+0x114`) and rebuilds it in
-  /// `RecalcBonuses` (0x005d9df0); here it is computed when asked, from what
-  /// that rebuild reads, in its order:
+  /// `Unit.level` -- the stored level, `[unit+0x184]`, which `Unit::level`
+  /// (0x005d7740) reads through `vtbl+0x114`: `Combatant::level`, written by
+  /// the rebuild (`recalc_bonuses`, 0x005d9df0). A unit no combat system
+  /// holds -- a synthetic world's -- falls back to the world-free form below.
+  [[nodiscard]] std::int32_t level(const World& world, ObjectId unit) const;
+  /// The rebuild's level computed on the spot, for a world with no combat
+  /// system to store it, from what the rebuild reads, in its order:
   ///
   ///   1. the running total, plus the items' `<bonus experience>`, plus --
   ///      for a unit with a hero -- the hero's **army addend**
@@ -827,11 +847,9 @@ class HeroSystem final : public System {
   ///   4. and, under a hero with Discipline, at least `DisciplineBonusBase +
   ///      DisciplineBonusStep * points` -- a floor, so a veteran keeps more.
   ///
-  /// **Not modelled:** the formation bonus a hero's army in
-  /// `stand_position` takes from the hero's party record (`[hero+0x2b0]`,
-  /// its level word at `+0x6c`), and the timing -- the original's value is
-  /// as of the last `RecalcBonuses` and the addend as of the hero's last
-  /// tick. 0 for a unit with no record.
+  /// Not the formation's level, and computed now rather than as of the last
+  /// rebuild, with the addend live rather than as of the hero's last tick.
+  /// 0 for a unit with no record.
   [[nodiscard]] std::int32_t level(ObjectId unit) const;
 
   // -- modifiers -------------------------------------------------------
@@ -892,7 +910,11 @@ class HeroSystem final : public System {
   [[nodiscard]] std::size_t unit_slot(ObjectId id) const noexcept;
   [[nodiscard]] std::size_t hero_slot(ObjectId id) const noexcept;
   void apply_item_bonus(UnitModifiers& out, ObjectId owner) const;
-  void expire_effects(GameTime now);
+  void expire_effects(World& world, GameTime now);
+  /// The hero ticks that fall in `(from, to]`, every `kHeroTickInterval` of
+  /// the world clock: each hero, in id order, recomputes its army addend and
+  /// rebuilds its army when the addend changed (0x0052fc50).
+  void run_hero_ticks(World& world, GameTime from, GameTime to);
   void run_egoism(World& world, GameTime from, GameTime to);
   void clear_dead(World& world);
   /// The detaches `on_death` and `on_erase` share.

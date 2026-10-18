@@ -331,7 +331,17 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// last saw, `[squad+0x64]`) and when its look next fires (`look_due`). Not
 /// hashed; a version-37 file would load every squad blind and never looking,
 /// and its members would find no target until a new member joined.
-inline constexpr std::uint32_t kStateVectorVersion = 38;
+/// 39: a combatant carries its stored stats (`Combatant::stats`: maximum
+/// health and stamina, range, attack and both armours, `[obj+0xc8..0xe8]`),
+/// which the rebuild `recalc_bonuses` (0x005d9df0) writes, in place of the
+/// three modifier words `attack_bonus`, `armour_bonus` and `level_floor`
+/// nothing wrote. A version-38 file has no stats to load, and every unit
+/// would fight with zero attack until something rebuilt it. The combatant
+/// also loses its own `experience` word: the running total is the hero
+/// section's `UnitRecord::experience` alone, and `Combatant::level` is the
+/// stored level the rebuild writes. A hero record carries its army addend
+/// (`HeroRecord::army_addend`, `[hero+0x2c0]`).
+inline constexpr std::uint32_t kStateVectorVersion = 39;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

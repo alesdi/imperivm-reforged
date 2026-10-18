@@ -339,8 +339,10 @@ struct CombatConstants {
 
   [[nodiscard]] std::int32_t difficulty_addend(Difficulty level) const noexcept;
 
-  /// `Exp[level]`, the cumulative experience the recurrence puts a level at.
-  /// `Exp[1] = 0`. Saturates rather than overflowing.
+  /// `Exp[level]` as the recurrence reads **without** the original's division
+  /// by 100 -- kept for its own tests, and read by nothing in the simulation:
+  /// a unit levels by `HeroSystem::level_for_experience` (0x005d28c0), whose
+  /// table is the executable's. Saturates rather than overflowing.
   [[nodiscard]] std::int32_t experience_for_level(std::int32_t level) const noexcept;
   /// The same, with an explicit modifier percentage in place of the global
   /// `BattleTacticsExpModifier`. `SetExperienceModifier(player, c)` makes that
@@ -650,13 +652,12 @@ struct CombatProfile {
 /// field would not.
 ///
 /// **Here it is a field on the combatant instead of a side table, and that is
-/// an equivalence rather than a shortcut.** Nothing in this engine caches a
-/// derived stat -- `attack/0` reads `profile.damage + bonuses` on the spot --
-/// so there is no rebuild for a record to survive; what the side table buys
-/// the original is that the entry dies with the object, and a field on
-/// `Combatant` gets that from `reconcile`, which drops the row of any object
-/// that has left the world. The original does it explicitly, in the object
-/// teardown at `0x005db50f`.
+/// an equivalence rather than a shortcut.** The record survives every rebuild
+/// of `Combatant::stats` here as it does there, because the rebuild reads it
+/// and never writes it; what the side table buys the original is that the
+/// entry dies with the object, and a field on `Combatant` gets that from
+/// `reconcile`, which drops the row of any object that has left the world.
+/// The original does it explicitly, in the object teardown at `0x005db50f`.
 struct StatBonus {
   /// Argument 1. Added to `[obj+0xdc]`, which `Obj::attack` and `Obj::damage`
   /// are both the same function over.
@@ -679,6 +680,22 @@ struct StatBonus {
   }
 };
 
+/// The six numbers a unit fights with, as the original stores them on the
+/// object: `[obj+0xc8]` maximum health, `[obj+0xcc]` maximum stamina,
+/// `[obj+0xd4]` range, `[obj+0xdc]` attack, `[obj+0xe4]` and `[obj+0xe8]` the
+/// armour against slash and pierce. `docs/formats/unit-stats.md` has the
+/// whole model; `CombatSystem::class_stats` is its first two steps.
+struct StatBlock {
+  std::int32_t max_health = 0;
+  std::int32_t max_stamina = 0;
+  std::int32_t range = 0;
+  std::int32_t attack = 0;
+  std::int32_t armour_slash = 0;
+  std::int32_t armour_pierce = 0;
+
+  friend bool operator==(const StatBlock&, const StatBlock&) noexcept = default;
+};
+
 /// The combat half of a unit's state vector, in the dumps' own terms.
 ///
 /// The field list is `docs/engine/state-vector.md`'s `CVXUnit` block minus the
@@ -697,8 +714,12 @@ struct Combatant {
 
   std::int32_t health = 0;
   std::int32_t stamina = 0;
-  std::int32_t experience = 0;
-  /// 1..24 in the dumps.
+  /// `[unit+0x184]`, the level the game uses: `Unit::level` (`vtbl+0x114`)
+  /// and both sides of the blow read it. 1..24 in the dumps. **Stored, and
+  /// written only by the rebuild** (`recalc_bonuses`): the level the running
+  /// experience stands at, plus the items', Battle Cry's and the formation's,
+  /// at least 1, then Discipline's floor. The running total itself is
+  /// `UnitRecord::experience` (`[unit+0x180]`), which every award goes to.
   std::int32_t level = 1;
 
   /// `last attack time`, in game-time milliseconds. 0..1,738,000 in the dumps.
@@ -724,17 +745,21 @@ struct Combatant {
   /// boundaries fall cannot change what happens: see `CombatSystem::advance`.
   GameTime next_action_time = 0;
 
+  /// The numbers the original stores on the object and every reader reads:
+  /// maximum health and stamina, range, attack and the two armours. Filled
+  /// from the class when the combatant is enrolled and rebuilt by
+  /// `recalc_bonuses` (`sim/stats.hpp`, 0x005d9df0) at the moments the
+  /// original rebuilds them -- so between two of those moments they are
+  /// stale exactly as the original's are. See `StatBlock`.
+  StatBlock stats;
+
   // -- modifiers other systems write ----------------------------------
   //
-  // The hero agent owns skills; this owns how they land. Team Attack writes
-  // `attack_bonus`, Team Defense `armour_bonus`, Discipline `level_floor`
-  // ("increases the level of every attached warrior so it is at least 2 plus
-  // the number of skill points", `DisciplineBonusBase` 2 +
-  // `DisciplineBonusStep` 1 per point). Assault writes `ignores_armour`,
-  // Ceasefire `cannot_fight`, Frenzy/Charge `damage_multiplier_percent`.
-  std::int32_t attack_bonus = 0;
-  std::int32_t armour_bonus = 0;
-  std::int32_t level_floor = 0;
+  // Assault writes `ignores_armour`, Ceasefire `cannot_fight`. Nothing writes
+  // `damage_multiplier_percent` any more: Frenzy's doubling is the rebuild's
+  // (it doubles the stored attack), and the hero skills that used to be
+  // fields here -- Team Attack, Team Defense, Discipline -- land in `stats`
+  // and in the stored level through the rebuild.
   std::int32_t damage_multiplier_percent = 100;
   bool ignores_armour = false;
   bool cannot_fight = false;
@@ -749,11 +774,9 @@ struct Combatant {
 
   bool alive = true;
 
-  /// The level the damage formula sees: `max(level, level_floor)` plus the
-  /// owner's difficulty addend, which the system supplies.
-  [[nodiscard]] std::int32_t base_effective_level() const noexcept {
-    return level > level_floor ? level : level_floor;
-  }
+  /// The level the damage formula sees, before the owner's difficulty addend
+  /// the system supplies.
+  [[nodiscard]] std::int32_t base_effective_level() const noexcept { return level; }
 };
 
 /// A projectile in flight. `CVXCatapultShot` is a native class in its own right
@@ -875,9 +898,9 @@ inline constexpr std::int32_t kProjectileSpeed = 800;
 /// is consulted.
 struct TargetFilter {
   /// `BestTargetInSquadSightMisZeroDamage`. Skip a candidate whose own attack
-  /// is not strictly positive. Measured against `Obj::attack`, so it is
-  /// `profile.damage + attack_bonus`: the number a script reading `.attack`
-  /// off the same object sees.
+  /// is not strictly positive. Measured against `Obj::attack`, the stored
+  /// `[obj+0xdc]`: the number a script reading `.attack` off the same object
+  /// sees.
   bool require_armed = false;
 
   /// `BestNoIndependentTargetInSquadSight`. Skip candidates owned by
@@ -1268,27 +1291,42 @@ class CombatSystem final : public System {
   [[nodiscard]] std::int32_t max_health(ObjectId id) const noexcept;
   [[nodiscard]] bool is_alive(ObjectId id) const noexcept;
 
-  // -- the numbers the original caches on the object ----------------------
+  // -- the numbers the original stores on the object ----------------------
   //
-  // Five reads that exist so that `Unit::AddBonus`'s record reaches every
-  // caller of the number it modifies. The original has no such problem: it
-  // writes the sum into `[obj+0xc8]`, `[obj+0xcc]`, `[obj+0xdc]`, `[obj+0xe4]`
-  // and `[obj+0xe8]` and every reader takes it from there. This engine derives
-  // each on the spot, so the addition has to live in one place per number or
-  // it will live in six and drift.
+  // `Combatant::stats`, read where the original reads the field. Every reader
+  // takes the stored number, so a bonus reaches them only once a rebuild has
+  // put it there -- `docs/formats/unit-stats.md`.
 
-  /// `[obj+0xdc]`: the class's `damage`, plus `attack_bonus`, plus the record.
-  /// `Obj::attack` and `Obj::damage` are the same function over this field.
+  /// `[obj+0xdc]`. `Obj::attack` and `Obj::damage` are the same function
+  /// over this field (0x005add80), and the blow (0x0050ff30) reads it too.
   [[nodiscard]] std::int32_t attack_of(const Combatant& unit) const;
   /// `[obj+0xe4]` for `slash` and `[obj+0xe8]` for `pierce`; `siege` and `none`
   /// meet no armour at all and get 0, which is `CombatProfile::armour_against`'s
-  /// own rule. `armour_bonus` is included for the same reason `attack_of`
-  /// includes `attack_bonus`.
+  /// own rule.
   [[nodiscard]] std::int32_t armour_of(const Combatant& unit, DamageType type) const;
   /// `[obj+0xc8]`.
   [[nodiscard]] std::int32_t max_health_of(const Combatant& unit) const;
   /// `[obj+0xcc]`.
   [[nodiscard]] std::int32_t max_stamina_of(const Combatant& unit) const;
+  /// `[obj+0xd4]`: what `Obj::range` answers and what `Unit::InRange`
+  /// (0x005a7800) measures the far edge of the reach with.
+  [[nodiscard]] std::int32_t range_of(const Combatant& unit) const;
+
+  /// The rebuild's first two steps (0x005d9f25..0x005d9fdb): the class's six
+  /// numbers, then `Unit::AddBonus`'s record on top. Everything a building
+  /// ever has, and the start of every unit's rebuild.
+  [[nodiscard]] StatBlock class_stats(const Combatant& unit) const;
+  /// The rebuild's last step: store `next` and rescale health and stamina by
+  /// the new maximum over the old, truncating (0x005da815..0x005da84a) --
+  /// stamina only when the old maximum was above 0, health only when it was
+  /// (where the original would divide by zero). The world object's health and
+  /// stamina follow at once when the system is world-bound, so a script that
+  /// reads `.health` after the call sees the rescaled number.
+  void store_stats(Combatant& unit, const StatBlock& next);
+  /// Rebuild `id`'s stored stats now: `recalc_bonuses` through the world the
+  /// system started with when it is world-bound, otherwise the class and the
+  /// record alone (a synthetic system has no hero, item or formation to add).
+  void recalc(ObjectId id);
 
   /// `Unit::AddBonus(attack, slash, pierce, maxhealth, maxstamina)` -- add
   /// five addends to whatever this object already carries. Answers false for
@@ -1388,12 +1426,13 @@ class CombatSystem final : public System {
   /// built from scratch would not. What the fresh object *does* lose is
   /// everything the destroyed one was in the middle of and every bonus an
   /// effect had put on it, because effects belong to the object that is gone:
-  /// the target, the action, the swing and the four bonus fields are reset
-  /// here, and `health`, `stamina`, `owner`, `position`, `experience` and
-  /// `level` are left alone.
+  /// the target, the action, the swing, the record and the modifier fields are
+  /// reset here, and `health`, `stamina`, `owner`, `position`, `experience`
+  /// and `level` are left alone. The stats are rebuilt for the new class, as
+  /// the fresh object's are (0x005deef0 calls the rebuild).
   ///
   /// False when no combatant answers to `id`. See `sim/world_host.cpp`.
-  bool reclass(ObjectId id, ClassIndex to) noexcept;
+  bool reclass(ObjectId id, ClassIndex to);
 
  private:
   [[nodiscard]] Combatant* mutable_find(ObjectId id) noexcept;
@@ -1452,7 +1491,7 @@ class CombatSystem final : public System {
   /// Hand a unit that has stopped swinging back to its idle pose through the
   /// entity's `toidle` transition.
   void settle_swing(World& world, const Combatant& unit, GameTime now) const;
-  void award_experience(Combatant& attacker, const Combatant& defender);
+  void award_experience(World& world, const Combatant& attacker, const Combatant& defender);
   [[nodiscard]] std::int32_t effective_level(const Combatant& unit) const noexcept;
   [[nodiscard]] DamageInputs inputs_for(const Combatant& attacker,
                                         const Combatant& defender) const;

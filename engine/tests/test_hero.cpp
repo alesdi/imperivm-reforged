@@ -3187,7 +3187,7 @@ TEST(hero_curse_takes_the_hardest_hitter_and_cripple_the_freshest) {
     c.health = 200;
     return c;
   }());
-  b.combat.find(friend_)->attack_bonus = 900;
+  b.combat.find(friend_)->stats.attack = 900;
   CHECK(b.found("GetBestCurseTarget", caster) == kNoObject);
   CHECK(b.found("GetBestCrippleTarget", caster) == kNoObject);
 

@@ -17,6 +17,7 @@
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/movement.hpp"
+#include "imperivm/core/sim/stats.hpp"
 #include "imperivm/core/sim/world.hpp"
 // `unpack_point`: `BestTargetInRange/2` takes a `point`, and the object model
 // owns how one is packed into a `Value`.
@@ -638,14 +639,18 @@ CombatProfile CombatSystem::profile(ClassIndex index) const {
 }
 
 Combatant& CombatSystem::add(const Combatant& combatant) {
+  // Built from its class, as an object is: the stored stats start as the
+  // class's numbers (and the record's, should the caller have given one).
+  Combatant built = combatant;
+  built.stats = class_stats(built);
   const auto it = std::lower_bound(
-      units_.begin(), units_.end(), combatant.id,
+      units_.begin(), units_.end(), built.id,
       [](const Combatant& c, ObjectId id) { return c.id < id; });
-  if (it != units_.end() && it->id == combatant.id) {
-    *it = combatant;
+  if (it != units_.end() && it->id == built.id) {
+    *it = built;
     return *it;
   }
-  return *units_.insert(it, combatant);
+  return *units_.insert(it, built);
 }
 
 Combatant* CombatSystem::mutable_find(ObjectId id) noexcept {
@@ -704,7 +709,7 @@ bool is_combat_object(const WorldObject& slot) noexcept {
   return slot.state.flags.is_unit || slot.state.flags.is_building;
 }
 
-bool CombatSystem::reclass(ObjectId id, ClassIndex to) noexcept {
+bool CombatSystem::reclass(ObjectId id, ClassIndex to) {
   Combatant* unit = mutable_find(id);
   if (unit == nullptr) return false;
   unit->class_index = to;
@@ -714,12 +719,14 @@ bool CombatSystem::reclass(ObjectId id, ClassIndex to) noexcept {
   unit->attacks = 0;
   unit->last_attack_time = 0;
   unit->next_action_time = 0;
-  unit->attack_bonus = 0;
-  unit->armour_bonus = 0;
-  unit->level_floor = 0;
   unit->damage_multiplier_percent = 100;
   unit->ignores_armour = false;
   unit->bonus = StatBonus{};
+  // The fresh object is built from its class and rebuilt (0x005deef0): its
+  // stats start as the new class's, with no rescale, and the rebuild then
+  // adds what the unit's hero, items and formation give it.
+  unit->stats = class_stats(*unit);
+  recalc(id);
   return true;
 }
 
@@ -727,6 +734,8 @@ std::size_t CombatSystem::reconcile(World& world) {
   // Without world ids there is nothing to reconcile against, and reconciling
   // anyway would delete every combatant a synthetic test registered.
   if (!world_bound_) return units_.size();
+  // The rebuild of what enrols below reads the rest of the world through it.
+  world_ = &world;
 
   const std::span<const WorldObject> objects = world.objects();
 
@@ -738,6 +747,7 @@ std::size_t CombatSystem::reconcile(World& world) {
   // what makes iteration order reproducible.
   std::vector<Combatant> merged;
   merged.reserve(units_.size());
+  std::vector<ObjectId> enrolled;
 
   std::size_t mine = 0;
   for (const WorldObject& slot : objects) {
@@ -774,12 +784,17 @@ std::size_t CombatSystem::reconcile(World& world) {
     // if the ranges agreed there would be no evidence for which one the
     // attribute is. `effective_level` feeds the damage formula on every strike
     // on every map, so a plausible number here would be worse than none.
-    fresh.experience = 0;
     fresh.level = 1;
+    // Built from the class, then rebuilt once it is in place (0x005d3090: the
+    // object start, then `vtbl+0xc4`), so a unit that already has a hero, an
+    // item or a skill when it joins the population starts with them.
+    fresh.stats = class_stats(fresh);
+    enrolled.push_back(fresh.id);
     merged.push_back(fresh);
   }
 
   units_ = std::move(merged);
+  for (const ObjectId id : enrolled) recalc(id);
   return units_.size();
 }
 
@@ -822,11 +837,12 @@ bool CombatSystem::in_attack_range(const Combatant& attacker, const Combatant& d
   const CombatProfile mine = profile(attacker.class_index);
   const CombatProfile theirs = profile(defender.class_index);
   const std::int64_t d2 = distance_squared(attacker.position, defender.position);
-  // Reach is measured surface to surface: the class `range` plus both radii.
-  // INFERRED -- the dumps' `Min Range`/`Range` are path arrival tolerances and
-  // cluster at exactly these class numbers, but nothing states the sum.
+  // Reach is measured surface to surface: the stored range plus both radii.
+  // The far edge is the attacker's `[obj+0xd4]` (0x005a7800), so a formation's
+  // `BonusRange` lengthens it; the minimum below is the class's `[obj+0xd8]`,
+  // which no rebuild touches.
   const std::int64_t reach =
-      static_cast<std::int64_t>(mine.range) + mine.radius + theirs.radius;
+      static_cast<std::int64_t>(range_of(attacker)) + mine.radius + theirs.radius;
   if (d2 > squared(reach)) return false;
   if (mine.min_range > 0) {
     // A catapult's `min_range` of 301 really is a dead zone. Measured centre to
@@ -1392,14 +1408,30 @@ void CombatSystem::die_as_engine(World& world, ObjectId id, GameTime now) {
   }
 }
 
-void CombatSystem::award_experience(Combatant& attacker, const Combatant& defender) {
+void CombatSystem::award_experience(World& world, const Combatant& attacker,
+                                    const Combatant& defender) {
   // CONST.INI: exp_gain = target_level / LevelExpDivider + 1, scaled by the
   // **attacker's own** `BattleTacticsExpModifier` -- the research is per player
   // and `SetExperienceModifier` writes it there.
-  attacker.experience += constants_.experience_gain(
+  //
+  // Paid where the original pays every award: into the running total
+  // `[unit+0x180]` through the unit's `SetExperience` virtual with the
+  // refresh flag (0x00511550 -> `vtbl+0x118`), so the stored level the next
+  // blow reads is rebuilt from it. That total is `HeroSystem`'s, and it is
+  // the one scripts read; a world with no hero system, or ids that are not
+  // the world's, keeps no total and the award goes nowhere.
+  //
+  // **Still this engine's:** the amount. 0x00511550 credits the blow's own
+  // award from 0x0050ff30 plus, on a kill, a gain from both units' inherent
+  // levels (0x0050fec0) that also feeds the hero's accumulator `[hero+0x2c4]`,
+  // and caps a non-hero at the owner's `max_battle_level`; here it is the
+  // CONST.INI line above on every damaging blow.
+  if (!world_bound_) return;
+  HeroSystem* heroes = hero_system_of(world);
+  if (heroes == nullptr) return;
+  const std::int32_t gain = constants_.experience_gain(
       defender.base_effective_level(), player_experience_modifier(attacker.owner));
-  const std::int32_t level = constants_.level_for_experience(attacker.experience);
-  if (level > attacker.level) attacker.level = level;
+  (void)heroes->set_experience(world, attacker.id, heroes->experience(attacker.id) + gain);
 }
 
 /// A building keeps its own running total of what it has taken --
@@ -1546,23 +1578,72 @@ std::int32_t CombatSystem::max_health(ObjectId id) const noexcept {
   return unit == nullptr ? 0 : max_health_of(*unit);
 }
 
-std::int32_t CombatSystem::attack_of(const Combatant& unit) const {
-  return profile(unit.class_index).damage + unit.attack_bonus + unit.bonus.attack;
-}
+std::int32_t CombatSystem::attack_of(const Combatant& unit) const { return unit.stats.attack; }
 
 std::int32_t CombatSystem::armour_of(const Combatant& unit, DamageType type) const {
-  const std::int32_t from_record = type == DamageType::slash    ? unit.bonus.armour_slash
-                                   : type == DamageType::pierce ? unit.bonus.armour_pierce
-                                                                : 0;
-  return profile(unit.class_index).armour_against(type) + unit.armour_bonus + from_record;
+  switch (type) {
+    case DamageType::slash: return unit.stats.armour_slash;
+    case DamageType::pierce: return unit.stats.armour_pierce;
+    case DamageType::siege:
+    case DamageType::none: return 0;
+  }
+  return 0;
 }
 
 std::int32_t CombatSystem::max_health_of(const Combatant& unit) const {
-  return profile(unit.class_index).max_health + unit.bonus.max_health;
+  return unit.stats.max_health;
 }
 
 std::int32_t CombatSystem::max_stamina_of(const Combatant& unit) const {
-  return profile(unit.class_index).max_stamina + unit.bonus.max_stamina;
+  return unit.stats.max_stamina;
+}
+
+std::int32_t CombatSystem::range_of(const Combatant& unit) const { return unit.stats.range; }
+
+StatBlock CombatSystem::class_stats(const Combatant& unit) const {
+  const CombatProfile cls = profile(unit.class_index);
+  StatBlock out;
+  out.max_health = cls.max_health + unit.bonus.max_health;
+  out.max_stamina = cls.max_stamina + unit.bonus.max_stamina;
+  out.range = cls.range;
+  out.attack = cls.damage + unit.bonus.attack;
+  out.armour_slash = cls.armor_slash + unit.bonus.armour_slash;
+  out.armour_pierce = cls.armor_pierce + unit.bonus.armour_pierce;
+  return out;
+}
+
+void CombatSystem::store_stats(Combatant& unit, const StatBlock& next) {
+  const StatBlock old = unit.stats;
+  const std::int32_t health_before = unit.health;
+  const std::int32_t stamina_before = unit.stamina;
+  unit.stats = next;
+  if (old.max_health > 0) {
+    unit.health = static_cast<std::int32_t>(static_cast<std::int64_t>(unit.health) *
+                                            next.max_health / old.max_health);
+  }
+  if (old.max_stamina > 0) {
+    unit.stamina = static_cast<std::int32_t>(static_cast<std::int64_t>(unit.stamina) *
+                                             next.max_stamina / old.max_stamina);
+  }
+  // Written through only when the rescale moved them: the end of the turn
+  // publishes the rest, as it always has.
+  if (world_bound_ && world_ != nullptr &&
+      (unit.health != health_before || unit.stamina != stamina_before)) {
+    (void)world_->set_health(unit.id, unit.health);
+    if (ObjectState* state = world_->mutable_state(unit.id); state != nullptr) {
+      state->stamina = unit.stamina;
+    }
+  }
+}
+
+void CombatSystem::recalc(ObjectId id) {
+  if (world_bound_ && world_ != nullptr) {
+    recalc_bonuses(*world_, id);
+    return;
+  }
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr || !unit->alive || unit->action == Action::dying) return;
+  store_stats(*unit, class_stats(*unit));
 }
 
 bool CombatSystem::add_bonus(ObjectId id, const StatBonus& delta) {
@@ -1573,6 +1654,8 @@ bool CombatSystem::add_bonus(ObjectId id, const StatBonus& delta) {
   unit->bonus.armour_pierce += delta.armour_pierce;
   unit->bonus.max_health += delta.max_health;
   unit->bonus.max_stamina += delta.max_stamina;
+  // 0x005e0ce0 ends in the rebuild (`vtbl+0xc4`).
+  recalc(id);
   return true;
 }
 
@@ -1588,6 +1671,8 @@ bool CombatSystem::remove_bonus(ObjectId id, const StatBonus& delta) {
   down(unit->bonus.armour_pierce, delta.armour_pierce);
   down(unit->bonus.max_health, delta.max_health);
   down(unit->bonus.max_stamina, delta.max_stamina);
+  // 0x005e07f0 ends in the rebuild too.
+  recalc(id);
   return true;
 }
 
@@ -1635,9 +1720,9 @@ void CombatSystem::strike(World& world, Combatant& attacker, Combatant& defender
   // Experience is paid per damaging attack, not per kill -- see
   // CombatConstants. Paid before the defender is reaped so a killing blow
   // still counts. Both re-found: a fatal blow ran two hooks in between.
-  Combatant* a = mutable_find(attacker_id);
+  const Combatant* a = find(attacker_id);
   const Combatant* d = find(defender_id);
-  if (a != nullptr && d != nullptr) award_experience(*a, *d);
+  if (a != nullptr && d != nullptr) award_experience(world, *a, *d);
 }
 
 void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& defender,
@@ -1969,7 +2054,6 @@ void CombatSystem::hash(std::uint64_t& accumulator) const {
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.position.y)));
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.health)));
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.stamina)));
-    fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.experience)));
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.level)));
     fold(static_cast<std::uint64_t>(unit.last_attack_time));
     fold(unit.target);
@@ -1977,6 +2061,14 @@ void CombatSystem::hash(std::uint64_t& accumulator) const {
     fold(unit.unit_flags);
     fold(static_cast<std::uint64_t>(unit.action));
     fold(static_cast<std::uint64_t>(unit.next_action_time));
+    // Not in the dumps, and state all the same: the stored stats are only as
+    // fresh as their last rebuild, so two peers that rebuilt at different
+    // moments disagree here first.
+    for (const std::int32_t stat : {unit.stats.max_health, unit.stats.max_stamina,
+                                    unit.stats.range, unit.stats.attack,
+                                    unit.stats.armour_slash, unit.stats.armour_pierce}) {
+      fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(stat)));
+    }
   }
   for (const Projectile& shot : shots_) {
     fold(shot.id);
@@ -2069,10 +2161,7 @@ std::int32_t read_armor_slash(const CombatSystem& c, ObjectId id) {
   const Combatant* u = c.find(id);
   return u == nullptr ? 0 : c.armour_of(*u, DamageType::slash);
 }
-std::int32_t read_range(const CombatSystem& c, ObjectId id) {
-  const Combatant* u = c.find(id);
-  return u == nullptr ? 0 : c.profile(u->class_index).range;
-}
+
 
 /// Publish a combatant's health and stamina onto its world object.
 ///
@@ -2301,24 +2390,6 @@ HostOutcome host_heal_stamina(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-HostOutcome host_set_level(CallContext& ctx) {
-  CombatSystem* combat = system_of(ctx);
-  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
-  if (unit == nullptr) return HostOutcome::ok_void();
-  if (ctx.arg(1).is_integer()) unit->level = ctx.arg(1).as_integer();
-  return HostOutcome::ok_void();
-}
-
-HostOutcome host_set_experience(CallContext& ctx) {
-  CombatSystem* combat = system_of(ctx);
-  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
-  if (unit == nullptr) return HostOutcome::ok_void();
-  if (ctx.arg(1).is_integer()) unit->experience = ctx.arg(1).as_integer();
-  return HostOutcome::ok_void();
-}
-
 /// `Attack(target)` -- **a coroutine, not a call**, which is what
 /// `HERO_IDLE.VS`'s `while (.Attack(u)) { ... }` needs and what this returned
 /// without for a long time.
@@ -2443,6 +2514,26 @@ HostOutcome host_is_enemy(CallContext& ctx) {
 /// told it had arrived by `GotoAttack` and that it was out of range by
 /// `InRange`, and looped between them until its instruction budget ran out.
 /// The original keeps one position per object, which both read.
+/// `range/0` -- `Obj::range` (0x005adde0): the stored `[obj+0xd4]`, 0 for a
+/// receiver that resolves nothing. A combatant answers its stored range
+/// (`range_of`, which a formation's `BonusRange` moves); any other object
+/// answers the class's `range`, which is what its constructor stored and what
+/// nothing ever rebuilds -- where this used to answer 0.
+HostOutcome host_range(CallContext& ctx) {
+  CombatSystem* combat = system_of(ctx);
+  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  const ObjectId id = id_of(ctx.arg(0));
+  if (const Combatant* unit = combat->find(id); unit != nullptr) {
+    return HostOutcome::ok_with(Value::integer(combat->range_of(*unit)));
+  }
+  World* world = world_of(ctx);
+  const WorldObject* slot = world != nullptr ? world->find(id) : nullptr;
+  if (slot == nullptr || slot->internal != InternalKind::none) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
+  return HostOutcome::ok_with(Value::integer(class_int(*world, *slot, "range")));
+}
+
 HostOutcome host_in_range(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
@@ -2491,28 +2582,18 @@ HostOutcome host_set_experience_modifier(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `u.RecalcBonuses()` -- 1 site, and **a no-op here**.
+/// `u.RecalcBonuses()` -- 1 site: `ONFINISH_RESEARCH.VS` calls it on every
+/// unit of the settlement the moment a research completes, which is how a
+/// Statue of Amon-Ra reaches the units already standing.
 ///
-/// 0x005e0380 resolves the receiver and calls its `vtbl+0xc4`, which rebuilds
-/// the unit's cached attack and armour bonuses from the sources that feed them.
-/// `ONFINISH_RESEARCH.VS` calls it on every unit in the settlement the moment a
-/// research completes, which is exactly what a cache needs and a live read does
-/// not.
-///
-/// This engine keeps no such cache: `Combatant::attack_bonus`, `armour_bonus`,
-/// `level_floor` and the rest are written by whoever owns the source at the
-/// moment it changes -- the hero agent for skills, the economy for
-/// `in_settlement` -- and read straight out of the combatant when a blow lands.
-/// So there is nothing to rebuild, and a no-op is the same observable behaviour
-/// rather than an omission. **The day a research writes a derived number that
-/// something else has already copied, this stops being a no-op.**
-///
-/// The receiver is resolved anyway, so that the drop is a decision about a
-/// named unit rather than a body that ignores its argument.
+/// 0x005e0380 resolves the receiver -- a miss prints and does nothing -- and
+/// calls its `vtbl+0xc4`: on a unit the rebuild 0x005d9df0 (`recalc_bonuses`,
+/// `docs/formats/unit-stats.md`), on a building a bare `ret` (0x00686eb0 in
+/// every building vtable), which `recalc` matches by rebuilding units only.
 HostOutcome host_recalc_bonuses(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  (void)combat->find(id_of(ctx.arg(0)));
+  combat->recalc(id_of(ctx.arg(0)));
   return HostOutcome::ok_void();
 }
 
@@ -2545,12 +2626,10 @@ HostOutcome host_recalc_bonuses(CallContext& ctx) {
 /// object` and returns, so an unknown id is a no-op rather than a trap, and
 /// `add_bonus` answering false is that same no-op.
 ///
-/// **Nothing is recalculated afterwards, because nothing here is cached.** The
-/// original ends by calling the receiver's `vtbl+0xc4`, which rebuilds the
-/// five fields from the class and adds the record back on. `CombatSystem`
-/// derives all five on the spot -- see `attack_of` and the three beside it --
-/// so the rebuild has already happened by the time anybody reads one. That is
-/// also why `RecalcBonuses` next door is a no-op and stays one.
+/// The original ends by calling the receiver's `vtbl+0xc4`, the rebuild,
+/// which copies the class over the stored fields, adds the record back on and
+/// the rest after it, and rescales health and stamina by the new maxima;
+/// `add_bonus` does the same through `recalc`.
 HostOutcome host_add_bonus(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
@@ -3063,7 +3142,7 @@ void define_combat_host(script::HostRegistry& registry) {
   member("attack", 0, &read_int<&read_attack>);              //  16
   member("damage", 0, &read_int<&read_attack>);              //  inline only
   member("armor_slash", 0, &read_int<&read_armor_slash>);    //  inline only
-  member("range", 0, &read_int<&read_range>);                //  10
+  member("range", 0, &host_range);                           //  10
   member("Heal", 1, &host_heal);
   member("HealStamina", 1, &host_heal_stamina);  // 11, eight of them on a group
   member("SetHealth", 1, &host_set_health);

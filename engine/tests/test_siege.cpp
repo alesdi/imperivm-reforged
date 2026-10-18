@@ -657,11 +657,9 @@ TEST(siege_weighs_the_objects_own_damage_and_maximum) {
         e.town("Outpost", Point{4000, 4000}, 2, false, SettlementKind::outpost);
     REQUIRE(e.economy.garrison_add(sound.id, e.unit("GSwordsman", Point{4000, 4000}, 2)));
     REQUIRE(e.economy.garrison_add(sound.id, e.unit("GSwordsman", Point{4000, 4000}, 2)));
-    if (extra != 0) {
-      StatBonus delta;
-      delta.max_health = extra;
-      REQUIRE(e.combat.add_bonus(sound.hall, delta));
-    }
+    // Written into the stored `[obj+0xc8]` directly: a building's rebuild is
+    // a bare `ret` (0x00686eb0), so no entry point can raise its maximum.
+    if (extra != 0) e.combat.find(sound.hall)->stats.max_health += extra;
     CHECK(object_max_health(e.world, *e.world.find(sound.hall)) == 3000 + extra);
     std::vector<ObjectId> again = e.army("GSwordsman", 15, Point{4700, 4000});
     again.push_back(e.unit("GLongbow", Point{4900, 4000}));
