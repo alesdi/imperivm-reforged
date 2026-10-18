@@ -1393,14 +1393,16 @@ void World::rebuild_query_pool() {
 }
 
 std::size_t World::collect_queries(std::span<const ObjectId> roots) {
-  // Mark: what the scripts hold, every query nobody may collect, and -- to a
-  // fixed point -- the operands of whatever is marked.
-  std::vector<ObjectId> marked;
+  // Mark, by query slot: what the scripts hold, every query nobody may
+  // collect, and -- to a fixed point -- the operands of whatever is marked.
+  // Indexed by slot rather than searched, because this runs once a pass.
+  std::vector<char> keep(queries_.size(), 0);
   std::vector<ObjectId> work;
   const auto mark = [&](ObjectId id) {
-    if (query_spec(id) == nullptr) return;
-    if (std::find(marked.begin(), marked.end(), id) != marked.end()) return;
-    marked.push_back(id);
+    const WorldObject* slot = find(id);
+    if (slot == nullptr || slot->internal != InternalKind::query) return;
+    if (slot->query >= keep.size() || keep[slot->query] != 0) return;
+    keep[slot->query] = 1;
     work.push_back(id);
   };
   for (const ObjectId id : roots) mark(id);
@@ -1421,15 +1423,36 @@ std::size_t World::collect_queries(std::span<const ObjectId> roots) {
     mark(spec->lhs);
     mark(spec->rhs);
   }
-  std::sort(marked.begin(), marked.end());
 
-  std::vector<ObjectId> doomed;
-  for (const WorldObject& slot : objects_) {
-    if (slot.internal != InternalKind::query) continue;
-    if (!std::binary_search(marked.begin(), marked.end(), slot.id)) doomed.push_back(slot.id);
+  // Sweep, in ascending handle order. A query holds no native object, no
+  // grid cell, no group or boarding membership, so what `despawn` does for
+  // one is the observer's notice, the pool entry and the erase -- and the
+  // erase is done once for the lot rather than once per query.
+  std::size_t doomed = 0;
+  for (WorldObject& slot : objects_) {
+    if (slot.internal != InternalKind::query || slot.query >= keep.size()) continue;
+    if (keep[slot.query] != 0) continue;
+    if (observer_ != nullptr) observer_->despawning(*this, slot);
+    if (slot.object != nullptr) slot.object->on_destroy();
+    index_.drop(slot);
+    const auto bucket = query_pool_.find(query_key(queries_[slot.query]));
+    if (bucket != query_pool_.end()) {
+      std::vector<ObjectId>& ids = bucket->second;
+      ids.erase(std::remove(ids.begin(), ids.end(), slot.id), ids.end());
+      if (ids.empty()) query_pool_.erase(bucket);
+    }
+    // The slot's cache goes with it; the slot itself stays (see `queries_`).
+    if (slot.query < query_caches_.size()) query_caches_[slot.query] = QueryCache{};
+    ++doomed;
   }
-  for (const ObjectId id : doomed) (void)destroy_query(id);
-  return doomed.size();
+  if (doomed == 0) return 0;
+  objects_.erase(std::remove_if(objects_.begin(), objects_.end(),
+                                [&keep](const WorldObject& slot) {
+                                  return slot.internal == InternalKind::query &&
+                                         slot.query < keep.size() && keep[slot.query] == 0;
+                                }),
+                 objects_.end());
+  return doomed;
 }
 
 const QuerySpec* World::query_spec(ObjectId id) const noexcept {
