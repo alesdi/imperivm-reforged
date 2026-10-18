@@ -931,6 +931,37 @@ ObjectId CombatSystem::best_target_among(ObjectId id,
   return best;
 }
 
+ObjectId CombatSystem::best_target_in_list(ObjectId id, std::span<const ObjectId> candidates,
+                                           const TargetFilter& filter) const {
+  const Combatant* self = find(id);
+  if (self == nullptr || !self->alive || self->action == Action::dying) return kNoObject;
+  if (!profile(self->class_index).can_attack()) return kNoObject;
+
+  ObjectId best = kNoObject;
+  std::int64_t best_score = 0;
+  bool best_preferred = false;
+  for (const ObjectId candidate : candidates) {
+    const Combatant* other = find(candidate);
+    if (other == nullptr || !targetable(*self, *other)) continue;
+    if (filter.only_class != kNoClass && other->class_index != filter.only_class) continue;
+    if (filter.exclude_independents && other->owner == kNeutralWildlife) continue;
+    if (filter.require_armed && attack_of(*other) <= 0) continue;
+    const std::int64_t score = target_score(*self, *other);
+    const bool preferred =
+        filter.prefer_class != kNoClass && other->class_index == filter.prefer_class;
+    // Preference first, as `best_target` ranks it; within one rank an equal
+    // score replaces the one held (0x005db7c7).
+    const bool better = best == kNoObject || (preferred && !best_preferred) ||
+                        (preferred == best_preferred && score <= best_score);
+    if (better) {
+      best = other->id;
+      best_score = score;
+      best_preferred = preferred;
+    }
+  }
+  return best;
+}
+
 bool CombatSystem::targetable(const Combatant& self, const Combatant& other) const {
   if (!other.alive || other.action == Action::dying) return false;
   // Nothing at no health is a target. For a unit that is death itself (its
@@ -2543,43 +2574,6 @@ HostOutcome host_best_target(CallContext& ctx) {
   return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)))));
 }
 
-/// Whether the `*InSquadSight` family answers the invalid handle before it
-/// looks at anything: the receiver is invalid, dead or held.
-///
-/// The wrappers (0x005dcbc0, 0x005dcb00, 0x005dcc80, 0x005dcd40, 0x005dce00,
-/// 0x005dcf30) log and answer the invalid handle for an invalid receiver and,
-/// through `vtbl+0x50`, for a dead one. The core, 0x005dc950, then has two
-/// paths. A unit with a squad (`[unit+0x174]`, `HeroSystem::squad_of`) that is
-/// not held takes the **squad path**, which offers only the squad's own
-/// candidate deque at `squad+0x6c..0x7c` (walked by 0x005dbb20) and draws no
-/// circle -- and that deque is never filled: no instruction in `.text` pushes
-/// it (its count at `+0x7c` is written only by the two squad constructors,
-/// 0x0044440b and 0x0045402f, with zero; the only `lea [reg+0x6c]` near squad
-/// code feeds its clear, 0x006a3cc0), the same fact `IsEnemyInSquadSight`
-/// rests on in `sim/squad.cpp`. So an empty sweep returns the invalid handle
-/// (0x005dc9dd -> 0x005dcae9). A held unit -- with or without a squad -- gets
-/// the invalid handle on the other path. Only a free unit in no squad reaches
-/// the circle sweep `CombatSystem::best_target` models.
-///
-/// **The squad half is not reproduced, and that is a known gap.** Answering
-/// "no target" to every squad member was tried and measured: on Alesia the
-/// melee units in a fight then stood out of reach 1,904 times against 325 in
-/// reach (`test_alesias_armies_do_not_stand_on_one_another`), where the
-/// original's armies plainly fight. Whatever engages a squad member in
-/// `gbr.exe` when its scripts are told there is no target -- the unit's own
-/// idle acquisition, the squad's AI orders -- is not modelled to that extent
-/// here, and this engine's squad members get their fights from this answer.
-/// So a squad member is answered by the circle sweep, as a free unit is, until
-/// that mechanism is; see the audit's status note on 0x005dcbc0.
-[[nodiscard]] bool squad_sight_blind(CallContext& ctx, const CombatSystem& combat, ObjectId id) {
-  const Combatant* self = combat.find(id);
-  if (self == nullptr || !combat.is_alive(id) || self->action == Action::dying) return true;
-  World* world = world_of(ctx);
-  if (world == nullptr) return false;
-  const ObjectState* state = world->state(id);
-  return state != nullptr && state->is_held();
-}
-
 /// One acquisition under one variant's filter. The filter itself is
 /// `sim/combat.hpp`'s `TargetFilter`, which carries the disassembly.
 HostOutcome best_target_with(CallContext& ctx, const TargetFilter& filter) {
@@ -2588,61 +2582,144 @@ HostOutcome best_target_with(CallContext& ctx, const TargetFilter& filter) {
   return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)), filter)));
 }
 
-/// The same, for the `*InSquadSight` family: `squad_sight_blind` first.
-HostOutcome squad_sight_target(CallContext& ctx, const TargetFilter& filter) {
+/// The six `*InSquadSight` entry points' arguments to their one core,
+/// 0x005dc950, by name. Each wrapper passes the core five words (the table
+/// above `TargetFilter` in `sim/combat.hpp`); this is them.
+struct SquadSightArgs {
+  /// The `/1` forms' class name, resolved; `kNoClass` when none was passed or
+  /// the name resolves to nothing.
+  ClassIndex cls = kNoClass;
+  /// Whether a class name was passed at all, resolved or not.
+  bool named = false;
+  bool undiseased = false;      ///< `_PreferUndiseased`
+  bool no_independent = false;  ///< `BestNoIndependentTargetInSquadSight`
+  bool exclusive = false;       ///< `Exclusive`
+  bool mis_zero = false;        ///< `MisZeroDamage`
+};
+
+/// The `*InSquadSight` family, one rule for all six.
+///
+/// The wrappers (0x005dcbc0, 0x005dcb00, 0x005dcc80, 0x005dcd40, 0x005dce00,
+/// 0x005dcf30) log and answer the invalid handle for an invalid receiver and,
+/// through `vtbl+0x50`, for a dead one. The core, 0x005dc950, then has two
+/// paths, and which one a unit takes is `squad_sight_squad`'s gate:
+///
+///   * **the squad path** -- a unit in a squad that stands outside any holder,
+///     or whose squad carries `SF_ADVCHOOSER`. It draws no circle: it offers
+///     the squad's `Enemies` (0x005dbb20), what the squad's look last saw of
+///     the players it is at war with (`squad_look` in `sim/squad.hpp`), to
+///     the predicate built with the five words **in their own slots**
+///     (0x005dc9b7: name, undiseased, no-independents, exclusive, unarmed).
+///     So here, and only here, `MisZeroDamage` skips an unarmed candidate,
+///     `BestNoIndependent...` clears wildlife's bit out of the mask, and
+///     `Exclusive` rejects a class mismatch -- a name nothing resolves
+///     rejecting everything. `CombatSystem::best_target_in_list` is the walk.
+///   * **the circle path** -- a unit in no squad, outside any holder: the grid
+///     sweep `CombatSystem::best_target` models, with the predicate built one
+///     word over (0x005dca31..0x005dca5a): the exclusive flag lands in the
+///     independents slot, the unarmed flag in the exclusive slot (where with
+///     no name it does nothing), and the unarmed slot gets 0. A held unit in
+///     no squad, or held in a squad without `SF_ADVCHOOSER`, gets the invalid
+///     handle on this path (0x005dc9a1 is not reached).
+///
+/// This replaced a reading in which the squad path walked a deque nothing
+/// fills and so answered "no target" for every squad member; applied, that
+/// left Alesia's armies standing out of reach. The deque is `Enemies`, and the
+/// squad's look fills it every second: the copy at 0x00447a17 reaches it as
+/// `[squad+0x64]+8`, which a search for pushes at `+0x6c` could not see.
+///
+/// Not reproduced, as on every path here: the score (0x005d3630, the note
+/// above `TargetFilter`), the counter a chosen unit's `0x005d2850(1)` raises,
+/// the disease penalty (no disease is modelled), and the catapult fallback of
+/// 0x005db856.
+HostOutcome squad_sight_target(CallContext& ctx, const SquadSightArgs& args) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const ObjectId id = id_of(ctx.arg(0));
-  if (squad_sight_blind(ctx, *combat, id)) return HostOutcome::ok_with(ref_to(ctx, kNoObject));
+  const auto none = HostOutcome::ok_with(ref_to(ctx, kNoObject));
+  const Combatant* self = combat->find(id);
+  if (self == nullptr || !combat->is_alive(id) || self->action == Action::dying) return none;
+  World* world = world_of(ctx);
+  if (world == nullptr) return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id)));
+
+  const HeroSystem* heroes = hero_system_of(*world);
+  if (const Squad* squad =
+          heroes != nullptr ? squad_sight_squad(*world, *heroes, id) : nullptr;
+      squad != nullptr) {
+    TargetFilter filter;
+    filter.exclude_independents = args.no_independent;
+    filter.require_armed = args.mis_zero;
+    if (args.named && args.exclusive) {
+      if (args.cls == kNoClass) return none;  // a name that matches nothing
+      filter.only_class = args.cls;
+    } else if (args.named) {
+      filter.prefer_class = args.cls;
+    }
+    return HostOutcome::ok_with(
+        ref_to(ctx, combat->best_target_in_list(id, squad->enemies, filter)));
+  }
+
+  const ObjectState* state = world->state(id);
+  if (state != nullptr && state->is_held()) return none;
+  TargetFilter filter;
+  // The circle path's slots, one word over: see above.
+  filter.exclude_independents = args.exclusive;
+  if (args.named) filter.prefer_class = args.cls;
   return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id, filter)));
+}
+
+/// The class name of a `/1` form, resolved against the class graph.
+[[nodiscard]] SquadSightArgs named_class(CallContext& ctx, const CombatSystem& combat) {
+  SquadSightArgs args;
+  if (ctx.count() > 1 && ctx.arg(1).is_string()) {
+    args.named = true;
+    if (const ClassGraph* graph = combat.class_graph(); graph != nullptr) {
+      args.cls = graph->find(ctx.arg(1).as_string());
+    }
+  }
+  return args;
 }
 
 /// `BestTargetInSquadSight/0` -- 0x005dcbc0, the core with no flag.
 HostOutcome host_best_target_in_squad_sight(CallContext& ctx) {
-  return squad_sight_target(ctx, TargetFilter{});
+  return squad_sight_target(ctx, SquadSightArgs{});
 }
 
 /// `BestTargetInSquadSightMisZeroDamage/0` -- 0x005dcb00, what
-/// `DATA\SUBAI\UNIT_IDLE.VS` runs. It passes the core's last flag, which the
-/// squad path hands to the predicate's damage slot (0x005db6a5 would skip an
-/// unarmed candidate). **The circle path builds its predicate one argument
-/// over** (0x005dca31..0x005dca5a: the constructor 0x005d45a0 gets the
-/// exclusive flag in the independents slot, this flag in the exclusive slot,
-/// and 0 for damage), and the squad path never answers (see
-/// `squad_sight_blind`). So on the only path that answers, the flag lands in
-/// the exclusive slot, where without a class string it does nothing: the
-/// answer is `BestTargetInSquadSight/0`'s. `UNIT_IDLE.VS` agrees -- it
-/// re-tests `u.attack > 0 || AsDruid || AsWagon` on what comes back.
+/// `DATA\SUBAI\UNIT_IDLE.VS` runs. Its flag is the core's last word, which
+/// the squad path hands to the predicate's damage slot (0x005db69e skips a
+/// candidate whose own attack is not positive) and the circle path hands to
+/// the exclusive slot, where with no class name it does nothing.
+/// `UNIT_IDLE.VS` re-tests `u.attack > 0 || AsDruid || AsWagon` on what comes
+/// back, which the circle path needs and the squad path makes redundant.
 HostOutcome host_best_target_mis_zero_damage(CallContext& ctx) {
-  return squad_sight_target(ctx, TargetFilter{});
+  SquadSightArgs args;
+  args.mis_zero = true;
+  return squad_sight_target(ctx, args);
 }
 
-/// `BestNoIndependentTargetInSquadSight/0` -- 0x005dcc80. Its flag is the one
-/// the circle path drops (0x005dca31), so the answer is
-/// `BestTargetInSquadSight/0`'s; `HERO_SNEAK.VS` is the one caller.
+/// `BestNoIndependentTargetInSquadSight/0` -- 0x005dcc80. Its flag clears
+/// wildlife's bit (14) out of the predicate's mask on the squad path and is
+/// dropped on the circle path (0x005dca31). `HERO_SNEAK.VS` is the one caller.
 HostOutcome host_best_target_no_independent(CallContext& ctx) {
-  return squad_sight_target(ctx, TargetFilter{});
+  SquadSightArgs args;
+  args.no_independent = true;
+  return squad_sight_target(ctx, args);
 }
 
 /// `BestTargetInSquadSight_PreferUndiseased/0` -- argument 2, which adds 200
-/// to a diseased candidate's score at `0x005db6e0`. **This engine has no
-/// disease**: nothing sets it, and `Unit::Disease` and `Unit::IsDiseased` are
-/// both unimplemented, so no candidate can carry the penalty and this returns
-/// the object the executable would. It is answered rather than left trapping
-/// on that ground alone -- see `TargetFilter` -- and the moment a disease
-/// state exists this must stop being an alias.
+/// to a diseased candidate's score at `0x005db6e0` on both paths. **This
+/// engine has no disease**: nothing sets it, and `Unit::Disease` and
+/// `Unit::IsDiseased` are both unimplemented, so no candidate can carry the
+/// penalty and this returns the object the executable would. It is answered
+/// rather than left trapping on that ground alone -- see `TargetFilter` -- and
+/// the moment a disease state exists this must gain the penalty.
 HostOutcome host_best_target_prefer_undiseased(CallContext& ctx) {
-  return squad_sight_target(ctx, TargetFilter{});
+  SquadSightArgs args;
+  args.undiseased = true;
+  return squad_sight_target(ctx, args);
 }
 
-/// `BestTargetInSquadSightExclusive/1` -- arguments 1 and 4 together, which
-/// make `0x005db774` reject every candidate whose class name is not the one
-/// passed. Exact class: the executable compares the class object's own name,
-/// so a subclass of the named class is not a match.
-///
-/// An unresolvable name, or no class graph at all, yields no candidate. That is
-/// the same answer the executable gives -- its string compare simply never
-/// matches -- and not a failure.
 /// `BestTargetInSquadSight/1(class)` -- 6 sites, and the sole blocker of
 /// `HERO_ENGAGE_UNIT_TYPE.VS` and `UNIT_ENGAGE_UNIT_TYPE.VS`.
 ///
@@ -2651,46 +2728,33 @@ HostOutcome host_best_target_prefer_undiseased(CallContext& ctx) {
 /// slot; the second passes 1 where the first passes 0, and that flag is what
 /// 0x005db774 reads to decide whether a class mismatch is a rejection or a
 /// 200-point penalty. So this one **prefers** the named class where `Exclusive`
-/// **requires** it, and reading the pair as two spellings of one filter would
-/// have been the mistake.
+/// **requires** it -- on the squad path. On the circle path the exclusive flag
+/// lands in the independents slot and both forms prefer.
 ///
 /// `TargetFilter::prefer_class` records how far the preference is reproduced
-/// and where it is not.
-///
-/// A name no class graph resolves is **not** a failure here: the original's
-/// string compare simply never matches, so every candidate takes the same
-/// penalty and the ranking is the unfiltered one. That is the opposite of
-/// `Exclusive`, where an unresolvable name matches nothing and the answer is no
-/// candidate at all -- and the difference is not a choice, it is what a
-/// rejection and a penalty each do when the test never passes.
+/// and where it is not. A name no class graph resolves is **not** a failure:
+/// the original's string compare simply never matches, so every candidate
+/// takes the same penalty and the ranking is the unfiltered one.
 HostOutcome host_best_target_prefer_class(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  const ClassGraph* graph = combat->class_graph();
-  TargetFilter filter;
-  if (graph != nullptr && ctx.arg(1).is_string()) {
-    filter.prefer_class = graph->find(ctx.arg(1).as_string());
-  }
-  return squad_sight_target(ctx, filter);
+  return squad_sight_target(ctx, named_class(ctx, *combat));
 }
 
-/// `BestTargetInSquadSightExclusive/1` -- 0x005dcf30. On the circle path its
-/// exclusive flag lands in the independents slot (0x005dca31): the enemy mask
-/// loses bit 14, so wildlife is excluded, and a class mismatch costs the
-/// +200 the plain string form charges instead of rejecting (0x005db789,
-/// with the exclusive slot holding the zero meant for the damage flag). A
-/// name nothing resolves therefore ranks every candidate the same: the
-/// unfiltered answer minus wildlife, not no answer.
+/// `BestTargetInSquadSightExclusive/1` -- 0x005dcf30. On the squad path a
+/// class mismatch is rejected (0x005db774), so a name nothing resolves
+/// answers no target. On the circle path its exclusive flag lands in the
+/// independents slot (0x005dca31): the enemy mask loses bit 14, so wildlife
+/// is excluded, and a mismatch costs the +200 the plain string form charges
+/// instead of rejecting (0x005db789, the exclusive slot holding the zero
+/// meant for the damage flag); a name nothing resolves therefore ranks every
+/// candidate the same there -- the unfiltered answer minus wildlife.
 HostOutcome host_best_target_exclusive(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  const ClassGraph* graph = combat->class_graph();
-  TargetFilter filter;
-  filter.exclude_independents = true;
-  if (graph != nullptr && ctx.arg(1).is_string()) {
-    filter.prefer_class = graph->find(ctx.arg(1).as_string());
-  }
-  return squad_sight_target(ctx, filter);
+  SquadSightArgs args = named_class(ctx, *combat);
+  args.exclusive = true;
+  return squad_sight_target(ctx, args);
 }
 
 /// `BestTargetForPos/0` -- `0x005dd280`, which is `0x005dd060` with the

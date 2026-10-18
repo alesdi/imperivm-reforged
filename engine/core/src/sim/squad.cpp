@@ -83,7 +83,11 @@ bool SquadTable::create_at(SquadKey key, ObjectId leader) {
   Squad squad;
   squad.key = key;
   squad.leader = leader;
-  if (leader != kNoObject) squad.members.push_back(leader);
+  if (leader != kNoObject) {
+    squad.members.push_back(leader);
+    // The first member's join arms the look (0x00445b4b); `squad_look`.
+    squad.look_due = 0;
+  }
   squads_.insert(squads_.begin() + static_cast<std::ptrdiff_t>(at), std::move(squad));
   return true;
 }
@@ -93,6 +97,9 @@ bool SquadTable::join(SquadKey key, ObjectId id) {
   if (squad == nullptr || id == kNoObject) return false;
   if (squad->contains(id)) return true;
   squad->members.push_back(id);
+  // 0x00445b4b: a join that leaves the squad with exactly one member arms its
+  // look, timer 0x28, with no delay -- `squad_look` has the reading.
+  if (squad->members.size() == 1) squad->look_due = 0;
   return true;
 }
 
@@ -110,6 +117,8 @@ Squad* SquadTable::remove_member(SquadKey key, ObjectId id) {
 
 void SquadTable::stand_down(Squad& squad) noexcept {
   squad.eval = 0;
+  // 0x00687c80 kills the squad's timers, and the one it arms is the look.
+  squad.look_due = kSquadLookUnarmed;
   free_order(squad);
   squad.gaika_in = kNoGaika;
   squad.dest_gaika = kNoGaika;
@@ -316,6 +325,188 @@ void revalue_squads(World& world, SquadTable& squads) {
     // the squad was ever filed under, written once and never again.
     if (squad.src_gaika == kNoGaika) squad.src_gaika = squad.gaika_in;
   }
+}
+
+// -- the look -----------------------------------------------------------------
+//
+// `squad_look` in `sim/squad.hpp` is the rule; docs/formats/squad.md the
+// reading it comes from.
+
+namespace {
+
+/// One eye of the look: a member's `posRH` and its sight.
+struct LookEye {
+  ObjectId id = kNoObject;
+  Point at{};
+  std::int32_t sight = 0;
+};
+
+/// The floored root of a squared distance, the integer square root every
+/// distance in the look goes through.
+[[nodiscard]] std::int64_t floor_root(std::int64_t value) noexcept {
+  if (value <= 0) return 0;
+  std::int64_t root = 0;
+  std::int64_t bit = std::int64_t{1} << 62;
+  while (bit > value) bit >>= 2;
+  while (bit != 0) {
+    if (value >= root + bit) {
+      value -= root + bit;
+      root = (root >> 1) + bit;
+    } else {
+      root >>= 1;
+    }
+    bit >>= 2;
+  }
+  return root;
+}
+
+/// Whether `inner`'s circle lies inside `best`'s, as the look measures it: the
+/// floored distance between the two plus the inner sight, against the best's.
+[[nodiscard]] bool circle_inside(const LookEye& inner, const LookEye& best) noexcept {
+  const std::int64_t dx = static_cast<std::int64_t>(inner.at.x) - best.at.x;
+  const std::int64_t dy = static_cast<std::int64_t>(inner.at.y) - best.at.y;
+  return floor_root(dx * dx + dy * dy) + inner.sight <= best.sight;
+}
+
+/// The eyes: the live members, less every one whose circle the member with
+/// the largest sight already covers. Two walks, as the look makes them.
+[[nodiscard]] std::vector<LookEye> look_eyes(World& world, const Squad& squad) {
+  std::vector<LookEye> eyes;
+  for (const ObjectId member : squad.members) {
+    const WorldObject* slot = world.find(member);
+    if (slot == nullptr || object_is_dead(*slot)) continue;
+    eyes.push_back(LookEye{member, unit_pos_rh(world, member), slot->sight});
+  }
+  // The first walk: a strictly larger sight takes the lead; anything else is
+  // dropped when the leader's circle holds it.
+  std::size_t best = eyes.size();
+  std::vector<LookEye> kept;
+  for (const LookEye& eye : eyes) {
+    if (best == eyes.size() || kept[best].sight < eye.sight) {
+      best = kept.size();
+      kept.push_back(eye);
+      continue;
+    }
+    if (circle_inside(eye, kept[best])) continue;
+    kept.push_back(eye);
+  }
+  if (best == eyes.size()) return kept;
+  // The second walk, from the front to the leader: the members kept before it
+  // took the lead, measured against it now.
+  const LookEye leader = kept[best];
+  std::vector<LookEye> out;
+  for (std::size_t i = 0; i < kept.size(); ++i) {
+    if (i < best && circle_inside(kept[i], leader)) continue;
+    out.push_back(kept[i]);
+  }
+  return out;
+}
+
+}  // namespace
+
+void squad_look(World& world, Squad& squad) {
+  const PlayerId player = squad.key.player;
+  const std::vector<LookEye> eyes = look_eyes(world, squad);
+  std::vector<ObjectId> found;
+  if (!eyes.empty() && PlayerTable::is_valid(player)) {
+    const PlayerTable& players = world.players();
+    // `seeflags`, `[record+0x18]`: the player itself and every player who
+    // shares its view with it (`SetRelation`, 0x005652f0, bit 4 of the other
+    // player's word for this one). `enemyflags`, `[record+0x10]`: every
+    // player this one's row is not at peace with.
+    const auto sees_with = [&](PlayerId other) {
+      return other == player || players.has(other, player, Relation::share_view);
+    };
+    const auto at_war = [&](PlayerId other) {
+      return other != player && players.is_enemy(player, other);
+    };
+    // The box the eyes' circles span, and every object of the grid in it.
+    std::int32_t left = eyes.front().at.x - eyes.front().sight;
+    std::int32_t top = eyes.front().at.y - eyes.front().sight;
+    std::int32_t right = eyes.front().at.x + eyes.front().sight;
+    std::int32_t bottom = eyes.front().at.y + eyes.front().sight;
+    for (const LookEye& eye : eyes) {
+      left = std::min(left, eye.at.x - eye.sight);
+      top = std::min(top, eye.at.y - eye.sight);
+      right = std::max(right, eye.at.x + eye.sight);
+      bottom = std::max(bottom, eye.at.y + eye.sight);
+    }
+    std::vector<ObjectId> near;
+    (void)world.objects_in_rect(left, top, right, bottom, ClassFilter{}, near);
+    const ClassGraph* graph = world.class_graph();
+    const ClassIndex animal = graph != nullptr ? graph->find("Animal") : kNoClass;
+    for (const ObjectId id : near) {
+      const WorldObject* slot = world.find(id);
+      if (slot == nullptr || slot->internal != InternalKind::none) continue;
+      const PlayerId owner = slot->state.owner;
+      // The mask: an object nobody owns has no owner bit to match.
+      if (!PlayerTable::is_valid(owner)) continue;
+      if (sees_with(owner) && !at_war(owner)) continue;
+      // 0x00445d10's stealth clause: a hidden object only from a player whose
+      // view this one shares.
+      if (slot->state.flags.hidden && !sees_with(owner)) continue;
+      // 0x00443d60: inside some eye's circle.
+      bool inside = false;
+      for (const LookEye& eye : eyes) {
+        const std::int64_t dx = static_cast<std::int64_t>(slot->state.position.x) - eye.at.x;
+        const std::int64_t dy = static_cast<std::int64_t>(slot->state.position.y) - eye.at.y;
+        const std::int64_t r = eye.sight;
+        if (dx * dx + dy * dy <= r * r) {
+          inside = true;
+          break;
+        }
+      }
+      if (!inside) continue;
+      // 0x004459c0: the accumulator.
+      if (!at_war(owner)) continue;  // the third list, not kept
+      if (slot->state.flags.is_unit) {
+        if (object_is_dead(*slot)) continue;
+        if (slot->state.flags.messenger) continue;  // the third list
+        if (animal != kNoClass && world.class_is_a(id, animal)) continue;  // the third list
+        found.push_back(id);
+      } else if (slot->state.flags.is_building) {
+        found.push_back(id);
+      }
+    }
+  }
+  squad.enemies = std::move(found);
+}
+
+std::size_t run_squad_looks(World& world, SquadTable& squads, GameTime now) {
+  const AiSystem* ai = ai_system_of(world);
+  if (ai == nullptr || !ai->manager_started()) return 0;
+  // `SquadLookIvl`, which the squad constructor reads with 0 for a missing
+  // key; a world with no constants table at all takes the shipped value.
+  GameTime interval = kSquadLookIntervalShipped;
+  if (EnvSystem* env = env_of(world); env != nullptr) {
+    std::int32_t value = 0;
+    interval = env->constant("SquadLookIvl", value) ? value : 0;
+  }
+  std::size_t looked = 0;
+  for (Squad& squad : squads.mutable_squads()) {
+    if (squad.look_due == kSquadLookUnarmed || squad.look_due > now) continue;
+    squad_look(world, squad);
+    squad.look_due = now + interval;
+    ++looked;
+  }
+  return looked;
+}
+
+const Squad* squad_containing(const HeroSystem& heroes, ObjectId unit) {
+  // The unit record's key first, as `[unit+0x174]` is read; the table is the
+  // membership's truth, so a record that disagrees with it is passed over.
+  const Squad* squad = heroes.squads().find(heroes.squad_of(unit));
+  if (squad != nullptr && squad->contains(unit)) return squad;
+  return heroes.squads().find(heroes.squads().squad_of(unit));
+}
+
+const Squad* squad_sight_squad(const World& world, const HeroSystem& heroes, ObjectId unit) {
+  const WorldObject* slot = world.find(unit);
+  if (slot == nullptr) return nullptr;
+  const Squad* squad = squad_containing(heroes, unit);
+  if (squad == nullptr) return nullptr;
+  if (slot->state.holder != kNoObject && (squad->flags & kSquadFlagAdvChooser) == 0) return nullptr;
+  return squad;
 }
 
 
@@ -1373,34 +1564,36 @@ HostOutcome gaika_id_impl(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(gaika_of(ctx.arg(0))));
 }
 
-/// `Unit::IsEnemyInSquadSight()` -- 20 sites, **132 of this engine's 197
-/// remaining trap hits**, and it is always false.
+/// `Unit::IsEnemyInSquadSight()` -- 20 sites: whether the receiver's squad's
+/// look saw anybody it is at war with.
 ///
-/// 0x005d7400 resolves the receiver's squad through 0x00444190 -- which reads
-/// the packed handle at `[unit+0x174]` and indexes the per-player squad table
-/// -- and then answers `[squad+0x7c] != 0`. **That field has no setter in
-/// `gbr.exe`.** A byte-pattern sweep of the whole `.text` for writes to
-/// `[reg+0x7c]` finds seven, of which exactly two are on a squad and both are
-/// constructors writing zero (0x0044440b, in a run of `edi = 0` stores either
-/// side of it, and 0x0045402f, which writes the literal 0 beside `[esi+0x28]`
-/// -- the state field, which is what identifies the object). The only reader is
-/// this entry point.
+/// 0x005d7400 logs and answers the invalid handle for a receiver that does not
+/// resolve, and again (through `vtbl+0x50`) for a dead one. Otherwise it
+/// resolves the squad through 0x00444190 -- the packed handle at
+/// `[unit+0x174]` indexing the player's squad vector -- and answers
+/// `[squad+0x7c] != 0`: the size of the squad's `Enemies` (`Squad::enemies`),
+/// which its look rewrites every `SquadLookIvl` (`squad_look`). A unit in no
+/// squad answers false. No holder test: a garrisoned member asks its squad
+/// like any other.
 ///
-/// So the original answers false too, on every unit, in every session -- the
-/// same shape of failure this project keeps finding in its own tree, here in
-/// the game's. The four scripts that ask (`rpriest_idle.vs` 88 hits,
-/// `shaman_idle.vs` 33, and two more) take their else branch on the original
-/// exactly as they will here.
-///
-/// **No field is added for it.** `Unit::user` is stored because a script can
-/// read it back through a registered getter; this has no getter and no writer,
-/// so storing it would be a hashed, serialised bit that nothing could ever
-/// observe. If a setter turns up that the sweep missed -- a dword-displacement
-/// encoding, or a write through a computed address -- this is where it goes.
+/// **This answered false for every unit until the look was read.** The field
+/// was taken for one nothing writes but the constructors, because its writer
+/// is a deque copy reaching it through the list object at `[squad+0x64]`
+/// (0x00447a17), and a sweep for writes at `+0x7c` cannot see that. The
+/// scripts that ask -- `rpriest_idle.vs`, `shaman_idle.vs` and two more --
+/// now take the branch the original takes when an enemy is near.
 HostOutcome is_enemy_in_squad_sight_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  return HostOutcome::ok_with(Value::boolean(false));
+  const auto invalid = HostOutcome::ok_with(Value::object(script::kNoType, 0));
+  if (ctx.count() == 0) return invalid;
+  const ObjectId id =
+      ctx.arg(0).is_object() ? static_cast<ObjectId>(ctx.arg(0).as_object().id) : kNoObject;
+  const WorldObject* slot = world->find(id);
+  if (slot == nullptr || object_is_dead(*slot)) return invalid;
+  const HeroSystem* heroes = hero_system_of(*world);
+  const Squad* squad = heroes != nullptr ? squad_containing(*heroes, id) : nullptr;
+  return HostOutcome::ok_with(Value::boolean(squad != nullptr && !squad->enemies.empty()));
 }
 
 // --------------------------------------------------------------------------

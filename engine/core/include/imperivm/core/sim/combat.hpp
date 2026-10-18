@@ -1227,6 +1227,20 @@ class CombatSystem final : public System {
   [[nodiscard]] ObjectId best_target_among(ObjectId id,
                                            std::span<const ObjectId> candidates) const;
 
+  /// The squad path of the `BestTargetInSquadSight` core (0x005dc950 ->
+  /// 0x005dbb20): every entry of the attacker's squad's `Enemies`, in order,
+  /// offered to the predicate (0x005db7f0 -> 0x005db650) with **no reach** --
+  /// the list is what the squad's look saw, and nothing measures it again --
+  /// under `filter`'s hard filters and class preference.
+  ///
+  /// **A tie goes to the later candidate.** The predicate keeps the one it
+  /// holds only when the new score is strictly worse (0x005db7c7, `jg`), so
+  /// an equal score replaces it; and the walk never stops early, because
+  /// 0x005dbb20 discards what the predicate answers. The score is still this
+  /// system's (`target_score`); see the note above `TargetFilter`.
+  [[nodiscard]] ObjectId best_target_in_list(ObjectId id, std::span<const ObjectId> candidates,
+                                             const TargetFilter& filter) const;
+
   /// Whether `attacker` can strike `defender` from where they stand: squared
   /// distance between `min_range^2` and `(range + both radii)^2`. Comparing
   /// squared distances keeps it integral — no square root, no rounding.

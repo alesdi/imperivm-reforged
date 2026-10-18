@@ -3377,6 +3377,67 @@ TEST(the_in_squad_sight_family_is_blind_for_a_held_or_dead_unit) {
   CHECK(best("BestTargetInSquadSight", other) == kNoObject);
 }
 
+/// **A squad member's `*InSquadSight` search is its squad's `Enemies`**
+/// (0x005dc950's squad path, 0x005dbb20): what the squad's look last saw,
+/// with no reach of the member's own -- so before the squad has looked it
+/// finds nothing, even with an enemy at its elbow, and after, it finds an
+/// enemy only a squadmate can see. A held member takes the same path when the
+/// squad carries `SF_ADVCHOOSER`, and the invalid handle when not. The five
+/// words reach the predicate in their own slots there: `MisZeroDamage` skips
+/// an unarmed candidate, and `Exclusive` with a name nothing resolves finds
+/// nothing.
+TEST(a_squad_members_sight_search_walks_its_squads_enemies) {
+  using imperivm::core::script::Value;
+  SightBench b;
+  HeroSystem heroes;
+  b.world.add_system(&heroes);
+  b.combat.set_class_graph(&b.graph);  // for the class names below
+  const ObjectId me = b.soldier(0, Point{0, 0});
+  const ObjectId scout = b.soldier(0, Point{2000, 0});
+  const ObjectId foe = b.soldier(1, Point{2300, 0});  // 2300 from me: out of my 500
+  const SquadKey key = heroes.squads().create(0);
+  REQUIRE(heroes.squads().join(key, me));
+  REQUIRE(heroes.squads().join(key, scout));
+  const auto best = [&](const char* name, ObjectId who) {
+    return b.call(name, 0, {Value::object(1, who)}).value.as_object().id;
+  };
+
+  // Not looked yet: nothing, with a foe at my elbow -- no circle is drawn.
+  const ObjectId close = b.soldier(1, Point{40, 0});
+  CHECK(best("BestTargetInSquadSight", me) == kNoObject);
+
+  squad_look(b.world, *heroes.squads().find(key));
+  CHECK((heroes.squads().find(key)->enemies == std::vector<ObjectId>{foe, close}));
+  CHECK(best("BestTargetInSquadSight", me) == close);
+  // The near one dies; the one only the scout sees is mine to find.
+  b.combat.apply_damage(b.world, close, b.combat.health(close));
+  CHECK(best("BestTargetInSquadSight", me) == foe);
+
+  // Held, without the flag: the invalid handle. With it: the list again.
+  const ObjectId wall = b.world.spawn(NativeClass::building, nullptr, b.wall_class);
+  b.world.set_position(wall, Point{0, 0});
+  REQUIRE(b.world.put_in_holder(me, wall));
+  CHECK(best("BestTargetInSquadSight", me) == kNoObject);
+  heroes.squads().find(key)->flags |= kSquadFlagAdvChooser;
+  CHECK(best("BestTargetInSquadSight", me) == foe);
+
+  // The flags in their own slots: an unarmed enemy on the list is skipped by
+  // `MisZeroDamage` alone.
+  b.combat.set_profile(b.villager_class, melee(0, 0, 40));
+  b.combat.apply_damage(b.world, foe, b.combat.health(foe));
+  const ObjectId peasant = b.soldier(1, Point{2100, 0}, b.villager_class);
+  squad_look(b.world, *heroes.squads().find(key));
+  CHECK(best("BestTargetInSquadSight", me) == peasant);
+  CHECK(best("BestTargetInSquadSightMisZeroDamage", me) == kNoObject);
+  CHECK(b.call("BestTargetInSquadSightExclusive", 1, {Value::object(1, me), Value::string("Nope")})
+            .value.as_object()
+            .id == kNoObject);
+  CHECK(b.call("BestTargetInSquadSightExclusive", 1,
+               {Value::object(1, me), Value::string("Villager")})
+            .value.as_object()
+            .id == peasant);
+}
+
 /// `EnemiesInSight` counts a candidate only when the looker's `CanAttack`
 /// virtual accepts it (0x005d5180).
 TEST(combat_enemies_in_sight_needs_the_lookers_can_attack) {

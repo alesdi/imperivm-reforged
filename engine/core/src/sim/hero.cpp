@@ -1000,6 +1000,9 @@ void HeroSystem::advance(World& world, const Turn& turn) {
   // The two AI fields nothing used to write. `sim/squad.hpp` carries the two
   // chains this stands in for and why once a turn is the same answer.
   revalue_squads(world, squads_);
+  // Each squad's look, timer 0x28 (`squad_look`): what its members see of the
+  // players it is at war with, the list its members' sight searches walk.
+  (void)run_squad_looks(world, squads_, now_);
 }
 
 void HeroSystem::hash(std::uint64_t& accumulator) const {
@@ -1667,11 +1670,10 @@ HostOutcome fn_find_unit_to_learn(CallContext& ctx) {
 //     the circle found nobody -- `fallback_squad`, which the first three now
 //     do; hide's predicate wants an enemy, which a squadmate never is, so its
 //     pass is left out as it cannot answer;
-//   * curse and cripple search the squad's **second** handle deque
-//     (`[squad+0x70]`..`+0x7c`, 0x005d94f0 / 0x005138c0) **instead of** the
-//     circle. This engine's `Squad` carries no such list, so a squadded
-//     caster still scans its circle there -- a known gap, and the one reason
-//     curse and cripple stay partial.
+//   * curse and cripple search the squad's **second** list, `Enemies`
+//     (`[squad+0x64]`, its deque at `+0x6c`; 0x005d94f0 / 0x005138c0)
+//     **instead of** the circle: what the squad's look last saw of the
+//     players it is at war with (`Squad::enemies`, `squad_look`).
 //
 // **The retail caster/candidate mix-up in curse is not reproduced.** Four
 // consecutive clauses of `0x005d4760` test `pred[8]` -- the caster -- where the
@@ -1691,13 +1693,15 @@ struct Candidate {
   std::int32_t radius = 0;
 };
 
+/// `stealth` false for a walk of a squad's `Enemies`, which has no stealth
+/// clause of its own (the look applied one when it wrote the list).
 [[nodiscard]] bool caster_candidate_basics(const World& world, const WorldObject& other,
-                                           ObjectId self) {
+                                           ObjectId self, bool stealth = true) {
   if (other.id == self) return false;
   if (other.internal != InternalKind::none) return false;
   if (other.state.health <= 0) return false;            // `vtbl[0x50]`
   if (other.state.holder != kNoObject) return false;    // `[obj+0x154] != 0xffff`
-  if (other.state.flags.hidden) return false;           // see the section note
+  if (stealth && other.state.flags.hidden) return false;  // see the section note
   if (other.object != nullptr && other.object->is_a(NativeClass::ship)) return false;
   return true;
 }
@@ -2017,11 +2021,37 @@ HostOutcome fn_find_unit_to_hide(CallContext& ctx) {
   return HostOutcome::ok_with(Value::object(receiver_type(ctx), best));
 }
 
+/// Where curse and cripple look: the caster's squad's `Enemies` when the
+/// caster takes the squad path (`squad_sight_squad`: in a squad, and outside
+/// any holder or in an `SF_ADVCHOOSER` squad -- 0x005d9d2a, 0x00513e8a), else
+/// the circle of its sight. `from_squad` says which, because the circle's
+/// sweep applies the enemy mask and the stealth clause and the squad's walk
+/// (0x005d94f0, 0x005138c0) applies neither: the look already did, when it
+/// wrote the list.
+[[nodiscard]] std::vector<ObjectId> enemy_sight_candidates(World& world, ObjectId self,
+                                                           bool& from_squad) {
+  std::vector<ObjectId> found;
+  from_squad = false;
+  if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+    if (const Squad* squad = squad_sight_squad(world, *heroes, self); squad != nullptr) {
+      from_squad = true;
+      return squad->enemies;
+    }
+  }
+  world.objects_in_radius(world.resolve_position(self), caster_sight(world, self), ClassFilter{},
+                          found);
+  return found;
+}
+
 /// `Unit::GetBestCurseTarget` -- the enemy with the highest `attack`.
 ///
 /// No aliveness test, no health, no distance beyond the scan's own radius. The
 /// only thing that can lose is an `attack` of zero, because the best starts
-/// there and the comparison is strictly greater.
+/// there and the comparison is strictly greater. The predicate (0x005d4760)
+/// opens on the unit bit, so a building is never a candidate.
+///
+/// A caster in a squad walks the squad's `Enemies` instead of its circle
+/// (0x005d94f0; `enemy_sight_candidates`).
 HostOutcome fn_get_best_curse_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetBestCurseTarget: no world");
@@ -2033,15 +2063,18 @@ HostOutcome fn_get_best_curse_target(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int32_t best_attack = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
+  bool from_squad = false;
+  const std::vector<ObjectId> found = enemy_sight_candidates(*world, self, from_squad);
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
     if (other == nullptr || other->id == self) continue;
     if (other->internal != InternalKind::none) continue;
-    if (other->state.flags.hidden) continue;
-    if (!world->players().is_enemy(caster->state.owner, other->state.owner)) continue;
+    if (!other->state.flags.is_unit) continue;
+    // The sweep's two clauses; the squad's list was filtered by its look.
+    if (!from_squad) {
+      if (other->state.flags.hidden) continue;
+      if (!world->players().is_enemy(caster->state.owner, other->state.owner)) continue;
+    }
     if (is_a(*world, *other, "BaseMage")) continue;
     const Combatant* stats = combat == nullptr ? nullptr : combat->find(id);
     const std::int32_t attack =
@@ -2059,7 +2092,10 @@ HostOutcome fn_get_best_curse_target(CallContext& ctx) {
 ///
 /// Curse's twin and evidently the function it was copied from or to: the same
 /// dispatch, the same failure value, a different stat, and -- unlike curse -- a
-/// predicate that tests the candidate on every clause.
+/// predicate that tests the candidate on every clause. A caster in a squad
+/// walks the squad's `Enemies` instead of its circle (0x005138c0, which hands
+/// the predicate nothing for an entry that is not a unit), where the
+/// circle's stealth clause does not apply.
 HostOutcome fn_get_best_cripple_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetBestCrippleTarget: no world");
@@ -2070,12 +2106,13 @@ HostOutcome fn_get_best_cripple_target(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int32_t best_stamina = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
+  bool from_squad = false;
+  const std::vector<ObjectId> found = enemy_sight_candidates(*world, self, from_squad);
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
-    if (other == nullptr || !caster_candidate_basics(*world, *other, self)) continue;
+    if (other == nullptr) continue;
+    if (from_squad && !other->state.flags.is_unit) continue;
+    if (!caster_candidate_basics(*world, *other, self, /*stealth=*/!from_squad)) continue;
     // **Mutually redundant with the score's own floor, knowingly.**
     // `best_stamina` starts at zero and the comparison below is strictly
     // greater, so an object with no stamina cannot be selected even without
