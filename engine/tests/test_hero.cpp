@@ -3320,7 +3320,7 @@ TEST(hero_curse_and_cripple_walk_the_casters_squads_enemies) {
 
   squad_look(b.world, *b.heroes.squads().find(key));
   CHECK(b.found("GetBestCrippleTarget", caster) == far);  // the most stamina
-  b.combat.find(near)->attack_bonus = 5;
+  b.combat.find(near)->stats.attack += 5;
   CHECK(b.found("GetBestCurseTarget", caster) == near);  // the hardest hitter
 
   // Hidden after the look: still on the list, still a candidate.
