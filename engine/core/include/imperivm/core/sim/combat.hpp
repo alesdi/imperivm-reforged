@@ -864,16 +864,15 @@ inline constexpr std::int32_t kProjectileSpeed = 800;
 /// preference.
 ///
 /// The three hard filters -- damage, independents, exclusive class -- are exact
-/// as filters, **but the circle path does not pass them where their names
-/// say.** 0x005dc950 builds the no-squad predicate one argument over
+/// as filters, and **where they apply depends on the path.** On the squad
+/// path (a unit in a squad, walking its squad's `Enemies`,
+/// `best_target_in_list`) 0x005dc950 passes them where their names say. On
+/// the circle path it builds the predicate one argument over
 /// (0x005dca31..0x005dca5a): the damage flag lands in the exclusive slot and
 /// does nothing, the independents flag is dropped, and the exclusive flag
-/// lands in the independents slot. The host entry points in `combat.cpp`
-/// therefore set `exclude_independents` for `Exclusive` (with a soft class
-/// preference) and nothing for the other two, and a held or dead unit is
-/// answered before this filter is consulted (`squad_sight_blind`, which also
-/// says why the original's "no target for a squad member" is not applied).
-/// `require_armed` and `only_class` are kept for callers inside the engine.
+/// lands in the independents slot. `squad_sight_target` in `combat.cpp`
+/// builds each path's filter, and answers a held or dead unit before either
+/// is consulted.
 struct TargetFilter {
   /// `BestTargetInSquadSightMisZeroDamage`. Skip a candidate whose own attack
   /// is not strictly positive. Measured against `Obj::attack`, so it is
