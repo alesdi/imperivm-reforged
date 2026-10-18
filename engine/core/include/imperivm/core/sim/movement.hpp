@@ -691,6 +691,11 @@ class MovementSystem : public System {
   /// Game time until arrival at the current rate, rounded up. `-1` when the
   /// unit is not moving or its rate is zero.
   [[nodiscard]] std::int64_t eta(ObjectId id) const noexcept;
+  /// `CVXPathRetry::IsArrived` (0x00417c10) on the order the unit holds: in
+  /// its band round its goal -- the target's position for an object goal --
+  /// and, for an order that owns a lock, on a free spot. False with no order
+  /// (`goto_active`). What the `Goto` family answers at its re-entry.
+  [[nodiscard]] bool is_arrived(const World& world, ObjectId id) const;
 
   /// The pathfinder. Scratch state only, never hashed, never serialised.
   [[nodiscard]] PathFinder& pathfinder() noexcept { return finder_; }
@@ -958,8 +963,8 @@ struct GotoOrder {
   /// only supplied by `GotoAttack` and `FormSetupAndMoveTo`.
   std::int32_t range = 0;
   std::int32_t min_range = 0;
-  /// How long one call may wait before returning to the caller's loop. The
-  /// call suspends for the lesser of this and the time to arrival.
+  /// How long the first run of the call waits before its re-entry answers:
+  /// the whole of it (0x005d65e8), whatever the route. See `run_goto`.
   std::int64_t slice = 0;
   /// **How long the call may go without a route before it ends the script.**
   /// `0` ends it at the first search that lays none, a negative value never
@@ -1013,7 +1018,32 @@ struct GotoOrder {
   /// original's; set by `Goto` and `GotoEnter` (0x005d6810), not by
   /// `GotoAttack`, whose entry point sets the target instead (0x005d6b20).
   bool drop_target = false;
+  /// The object forms' worker (0x005d40c0): `Goto(Obj)` and `GotoAttack`.
+  /// A target that is the mover answers true at once; one the mover may not
+  /// approach (`goto_may_approach`) lays no route and waits the slice, and so
+  /// does a target naming nothing (`target` is then `kNoObject` with this set).
+  bool object_form = false;
 };
+
+/// The range `SetDest` keeps for a point goal (0x0041a4c0): at most 999.
+[[nodiscard]] constexpr std::int32_t point_route_range(std::int32_t range) noexcept {
+  return range > 999 ? 999 : range;
+}
+
+/// The range `SetDest` keeps for an object goal (0x0041a5c0): clamped to 999
+/// and then, above 919, stored as 920 -- so 920 is the most an object
+/// route's band ever is.
+[[nodiscard]] constexpr std::int32_t object_route_range(std::int32_t range) noexcept {
+  if (range > 999) range = 999;
+  return range > 919 ? 920 : range;
+}
+
+/// Whether `mover` may route to `target` (0x005d40c0 at 0x005d4291 ..
+/// 0x005d42d7): anything that is not a unit, and a unit in no holder that is
+/// either not hidden or hidden from nobody on the mover's side. **Approximated:**
+/// the side mask `[record+0x18]` is not modelled, so a hidden unit is
+/// approached only by its own player's units.
+[[nodiscard]] bool goto_may_approach(const World& world, ObjectId mover, ObjectId target);
 
 /// The shared body of the `Goto` family. Returns the host outcome the entry
 /// point should return: `true` on arrival, `false` with a suspension while
@@ -1064,10 +1094,11 @@ struct GotoOrder {
 /// The first two are established: the shipped call sites pass `.range`,
 /// `.sight`, `other.sight/3` and `GetConst("GiveDistance")` in the second
 /// position, which are all distances, and the dumps print exactly such a
-/// tolerance as `Range`. `slice` is the game-time budget one call may wait
-/// for -- the call suspends for the lesser of it and the time to arrival, and
-/// the loop re-tests -- inferred from the loop the calls sit inside, `while
-/// (!.Goto(pt, 0, 2000, true, 0) && .HasPath)`. `give_up` is read from
+/// tolerance as `Range`. `slice` is how long the call's first run waits
+/// before its re-entry answers whether the unit has arrived -- the whole of
+/// it, whatever the route (0x005d65e8; `run_goto` has the protocol) -- and the
+/// loop it sits in, `while (!.Goto(pt, 0, 2000, true, 0) && .HasPath)`, calls
+/// again on a false. `give_up` is read from
 /// `gbr.exe` (0x005d61b0): how long the call may go without a route before the
 /// script ends, never when negative; `GotoOrder::give_up` has the addresses
 /// and what the earlier reading of it as a total timeout cost. The boolean is

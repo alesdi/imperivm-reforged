@@ -224,6 +224,14 @@ struct CallContext {
   /// yet; it is exposed because it is the same information the original gives
   /// and it costs a bool.
   bool first_call = true;
+  /// The call's own word of state, kept from its first run through every
+  /// re-entry after a `retry` and zero on a fresh call. `gbr.exe` gives every
+  /// call through its suspending registrar the same: the interpreter reserves
+  /// a word and the first-call byte below the arguments (`[frame-5]` beside
+  /// `[frame-1]`), and the `Goto` family keeps there whether its first run
+  /// laid a route (0x005d61b0 at 0x005d6421, 0x005d6620, 0x005d40c0), which
+  /// is what its re-entry answers on. Null outside a VM run.
+  std::int32_t* scratch = nullptr;
 
   [[nodiscard]] std::size_t count() const { return arguments.size(); }
   [[nodiscard]] const Value& arg(std::size_t i) const { return arguments[i]; }

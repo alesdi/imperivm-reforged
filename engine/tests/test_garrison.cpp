@@ -368,7 +368,7 @@ TEST(a_hero_and_his_army_leave_the_garrison_one_exit_slot_at_a_time) {
   REQUIRE(garrison_enter(g.world, g.town_id, second, /*force=*/true));
   g.world.advance(std::span<const std::int32_t>(slot));
   CHECK(call(registry, g.world, "FormKeepMoving", 1, {obj(hero), script::Value::integer(500)})
-            .status == script::HostStatus::suspend);
+            .status == script::HostStatus::retry);
   CHECK(g.world.find(second)->state.is_held());
 
   // Aboard a ship: a 100 ms poll, and still aboard.

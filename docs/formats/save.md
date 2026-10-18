@@ -394,7 +394,7 @@ Five of those deserve their reasons written down.
 
 ### `script`
 
-`script::Scheduler::serialize`, at its own version **2**. Scripts are stored **by source name**,
+`script::Scheduler::serialize`, at its own version **3**. Scripts are stored **by source name**,
 not by chunk index: the library is rebuilt from `data.pak` on load, and a rebuild that disagrees
 must be caught rather than silently resumed against the wrong script. The original does the same
 and fails the same way — `sequence from savegame does not compile : %s`.

@@ -1047,7 +1047,9 @@ inline constexpr std::int64_t kDefaultIdleSlice = 1000;
 /// long the call may go without a route before it ends the script** -- `0` at
 /// the first failed search, never when negative. A walk is not timed. The
 /// details and addresses are on `GotoOrder::give_up`; `GotoAttack` reads its
-/// fourth argument the same way (0x005d40c0).
+/// fourth argument the same way (0x005d40c0). And all four **answer at their
+/// re-entry**: the first run waits the whole slice, the re-entry answers
+/// whether the unit has arrived (`run_goto`).
 ///
 /// This used to read the pairing as "the end of a partial route counts as
 /// arrival", inferred for a doorway the building's own footprint might block.

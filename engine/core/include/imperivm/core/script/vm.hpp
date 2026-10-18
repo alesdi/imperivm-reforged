@@ -140,6 +140,9 @@ struct Execution {
   bool retrying = false;
   /// Game time at which that sequence began. Meaningless unless `retrying`.
   std::int64_t retry_since = 0;
+  /// The retrying call's own word of state: `CallContext::scratch`. Zero on a
+  /// fresh call, kept across its re-entries, cleared with `retrying`.
+  std::int32_t retry_scratch = 0;
   Value result;
   Trap trap;
 };

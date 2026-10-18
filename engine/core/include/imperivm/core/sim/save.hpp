@@ -331,7 +331,10 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (`script::ScriptRecord::context`, the scheduler section's version 3): `/` on
 /// a sequence's, the seat on an AI's. A version-37 file would load every
 /// thread with none, and a relative root `Env*` key in a sequence would stop
-/// meaning the absolute one.
+/// meaning the absolute one. The same round keeps each AI seat's `AIRun` ids
+/// and settlement slots on its row (system section version 35), and a
+/// retrying call's word of state (`Execution::retry_scratch`, the coroutine
+/// payload's version 5), which the `Goto` family's re-entry answers on.
 inline constexpr std::uint32_t kStateVectorVersion = 38;
 
 /// The section the world writes.

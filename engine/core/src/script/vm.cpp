@@ -8,7 +8,9 @@ namespace imperivm::core::script {
 namespace {
 
 constexpr std::uint32_t kSaveMagic = 0x584D5649u;  // "IVMX", little-endian
-constexpr std::uint32_t kSaveVersion = 4;  // 4: an object value carries `aux`
+// 4: an object value carries `aux`. 5: a retrying call's word of state
+// (`Execution::retry_scratch`).
+constexpr std::uint32_t kSaveVersion = 5;
 
 void put_u8(std::vector<std::byte>& out, std::uint32_t value) {
   out.push_back(static_cast<std::byte>(value & 0xFFu));
@@ -316,6 +318,8 @@ void Machine::do_call(const Instruction& instruction) {
   // iteration.
   context.waiting_since = execution.retrying ? execution.retry_since : env.now;
   context.first_call = !execution.retrying;
+  if (!execution.retrying) execution.retry_scratch = 0;
+  context.scratch = &execution.retry_scratch;
 
   const HostOutcome outcome = entry.fn(context);
   if (env.call_trace != nullptr) {
@@ -353,6 +357,7 @@ void Machine::do_call(const Instruction& instruction) {
   // stopwatch and gives up on its first poll.
   execution.retrying = false;
   execution.retry_since = 0;
+  execution.retry_scratch = 0;
 
   if (outcome.status == HostStatus::finish) {
     // The original's host code 2: the script stops at this call, with nothing
@@ -792,6 +797,7 @@ void serialize(const Execution& execution, std::vector<std::byte>& out) {
   // timeout at zero on load.
   put_u8(out, execution.retrying ? 1u : 0u);
   put_i64(out, execution.retry_since);
+  put_u32(out, static_cast<std::uint32_t>(execution.retry_scratch));
   write_value(out, execution.result);
 
   put_u8(out, static_cast<std::uint8_t>(execution.trap.code));
@@ -830,6 +836,9 @@ Result<Execution> deserialize(std::span<const std::byte> bytes) {
     return FormatError::truncated;
   }
   execution.retrying = retrying != 0;
+  std::uint32_t scratch = 0;
+  if (!reader.u32(scratch)) return FormatError::truncated;
+  execution.retry_scratch = static_cast<std::int32_t>(scratch);
   if (!read_value(reader, execution.result)) return FormatError::truncated;
 
   std::uint8_t trap_code = 0;

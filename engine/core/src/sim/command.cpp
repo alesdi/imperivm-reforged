@@ -2165,7 +2165,8 @@ struct Mover {
   return self;
 }
 
-/// `GotoAttack(target, slice, flag[, give_up])`.
+/// `GotoAttack(target, slice, flag[, give_up])` -- `Unit::GotoAttack`
+/// (0x005d6a90).
 ///
 /// `Goto` with the arrival annulus taken from the attacker's own weapon instead
 /// of from an argument -- which is exactly what its signature is missing next to
@@ -2174,36 +2175,67 @@ struct Mover {
 ///     while (!.GotoAttack(u, 1500, true, 15000)) { ...retarget... }
 ///     while (.Attack(u));
 ///
-/// So this returns true precisely when `Attack` would connect, and it gets
-/// there by asking combat for the same numbers `in_attack_range` uses: the
-/// attacker's `range` plus both radii for the outer bound, its `min_range` for
-/// the inner. With no combat system registered it degrades to walking onto the
-/// target, which is what a `range` of zero means.
+/// The body: a receiver naming nothing answers **false** and does nothing
+/// else. Otherwise, **on every run, first or re-entry, the unit's combat
+/// target becomes the argument** (`[unit+0x1a8]`, the count zeroed when it
+/// changes; `CombatSystem::hand_target`) -- the empty handle for an argument
+/// naming nothing -- and the call is the object worker 0x005d40c0 with the
+/// unit's own `range` and `min_range` (`[unit+0xd4]`, `[unit+0xd8]`): a target
+/// that is the attacker answers true, one it may not approach (a garrisoned or
+/// concealed enemy unit, or nothing at all) lays no route and waits the slice
+/// (`goto_may_approach`), a unit is an object goal whose band (capped at 920,
+/// `object_route_range`) is measured between the edges, and anything else is
+/// a point goal at its centre with both radii added before the cap of 999.
+/// The answer comes at the re-entry (`run_goto`).
+///
+/// **Approximated:** the range is the class profile's, where the original's
+/// is the unit's own field, which upgrades rebuild; and the inner bound is
+/// carried and not acted on, as for every `Goto`. A point argument, which no
+/// shipped site passes, walks to the point as `Goto` would.
 HostOutcome goto_attack_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
+  if (self.error == kNoReceiver && ctx.count() > 0 && self.world != nullptr &&
+      receiver_departed(*self.world, ctx.arg(0))) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
   if (!self.ok()) return HostOutcome::failed(self.error);
-  const ObjectId target = object_of(ctx.arg(1));
+  if (self.world->find(self.id) == nullptr) return HostOutcome::ok_with(Value::boolean(false));
   GotoOrder order;
-  if (target != kNoObject) {
-    order.target = target;
-    order.dest = self.world->resolve_position(target);
-  } else if (is_point(ctx.arg(1))) {
-    order.dest = unpack_point(ctx.arg(1));
-  } else {
+  const ObjectId named = object_of(ctx.arg(1));
+  const bool object_argument = !is_point(ctx.arg(1));
+  if (object_argument && named == kNoObject && !receiver_departed(*self.world, ctx.arg(1))) {
     return HostOutcome::failed(kNoPoint);
   }
+  const ObjectId target =
+      named != kNoObject && self.world->find(named) != nullptr ? named : kNoObject;
+  CombatSystem* combat = combat_system_of(*self.world);
+  if (object_argument && combat != nullptr) (void)combat->hand_target(self.id, target);
 
-  if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
-    const Combatant* attacker = combat->find(self.id);
-    if (attacker != nullptr) {
+  std::int32_t weapon = 0;
+  std::int32_t reach = 0;
+  if (combat != nullptr) {
+    if (const Combatant* attacker = combat->find(self.id); attacker != nullptr) {
       const CombatProfile profile = combat->profile(attacker->class_index);
-      order.range = profile.range + profile.radius;
+      weapon = profile.range;
+      reach = profile.radius;
       order.min_range = profile.min_range;
       const Combatant* defender = target == kNoObject ? nullptr : combat->find(target);
-      if (defender != nullptr) {
-        order.range += combat->profile(defender->class_index).radius;
-      }
+      if (defender != nullptr) reach += combat->profile(defender->class_index).radius;
     }
+  }
+  if (object_argument) {
+    order.object_form = true;
+    order.target = target;
+    if (target != kNoObject) {
+      order.dest = self.world->resolve_position(target);
+      const WorldObject* other = self.world->find(target);
+      order.range = other != nullptr && other->state.flags.is_unit
+                        ? object_route_range(weapon) + reach
+                        : point_route_range(weapon + reach);
+    }
+  } else {
+    order.dest = unpack_point(ctx.arg(1));
+    order.range = point_route_range(weapon + reach);
   }
 
   order.slice = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
@@ -2212,22 +2244,34 @@ HostOutcome goto_attack_impl(CallContext& ctx) {
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
 }
 
-/// `GotoEnter(dest, range, slice, flag, give_up)`: `Goto`'s signature exactly,
-/// and `UNIT_ENTER.VS` puts the two in the arms of one `if`. The one
-/// difference is the lock flag -- see the header and `GotoOrder::give_up`.
+/// `GotoEnter(dest, range, slice, flag, give_up)` -- `Unit::GotoEnter`
+/// (0x005d6620): `Goto`'s point form exactly, and `UNIT_ENTER.VS` puts the
+/// two in the arms of one `if`. A receiver naming nothing answers **true**;
+/// the destination is clamped to the map and written back into the call's own
+/// argument (0x005d6675 ..); the range is `SetDest`'s, at most 999; the one
+/// difference from `Goto` is the lock flag -- see the header and
+/// `GotoOrder::give_up` -- and the answer comes at the re-entry (`run_goto`).
+/// An object argument, which no shipped site passes, routes to where the
+/// object stands.
 HostOutcome goto_enter_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
+  if (self.error == kNoReceiver && ctx.count() > 0 && self.world != nullptr &&
+      receiver_departed(*self.world, ctx.arg(0))) {
+    return HostOutcome::ok_with(Value::boolean(true));
+  }
   if (!self.ok()) return HostOutcome::failed(self.error);
+  if (self.world->find(self.id) == nullptr) return HostOutcome::ok_with(Value::boolean(true));
   GotoOrder order;
   if (is_point(ctx.arg(1))) {
-    order.dest = unpack_point(ctx.arg(1));
+    order.dest = self.movement->grid().clamp_to_map(unpack_point(ctx.arg(1)));
+    ctx.out(1) = pack_point(order.dest);
   } else if (const ObjectId target = object_of(ctx.arg(1)); target != kNoObject) {
     order.target = target;
     order.dest = self.world->resolve_position(target);
   } else {
     return HostOutcome::failed(kNoPoint);
   }
-  order.range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
+  order.range = point_route_range(ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0);
   order.slice = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
   order.give_up = ctx.count() > 5 && ctx.arg(5).is_integer() ? ctx.arg(5).as_integer() : -1;
   // 0x005d6620 drops the combat target on its first pass, once the unit is
@@ -2548,7 +2592,10 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   } else {
     return HostOutcome::failed(kNoPoint);
   }
-  const std::int32_t range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
+  // The formation's route is laid by `SetDest` (0x005f2cc0 -> 0x0041a4c0),
+  // which keeps at most 999 of the range.
+  const std::int32_t range =
+      point_route_range(ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0);
   const std::int32_t min_range = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
 
   // **The hero steps out of his holder first, and waits his turn to**
@@ -2716,9 +2763,30 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
 /// declared type; this registry keys on name and arity alone, so **the
 /// receiver being a registered hero is read as the `Hero` form** -- an
 /// inference that agrees with all 29 sites.
+///
+/// **The re-entry drops an arrived route** (0x0052eb5b, 0x005d7ab5): run
+/// again after its wait, either form steps nothing and, when the unit holds a
+/// route that is arrived (`IsArrived`, 0x00417c10), deletes it (0x005d3830
+/// with 0), so the script's `while (.HasPath())` ends there rather than a
+/// slice later. A member's route is aimed at the formation, and is arrived
+/// only once the formation's own path is spent (0x00417c10's third mode,
+/// 0x005f22f0): here, only once the march is over (`MovementSystem::marching`)
+/// and the member stands in its station's band. **Approximated** like the
+/// rest of the march: the station is `place_army`'s, not the formation's
+/// sample.
 HostOutcome form_keep_moving_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!ctx.first_call) {
+    if (self.world->find(self.id) != nullptr) {
+      const MoveState* move = self.movement->find(self.id);
+      if (move != nullptr && move->goto_active && !self.movement->marching(self.id, *move) &&
+          self.movement->is_arrived(*self.world, self.id)) {
+        self.movement->stop(*self.world, self.id);
+      }
+    }
+    return HostOutcome::ok_void();
+  }
   HeroSystem* heroes = hero_system_of(*self.world);
   if (heroes == nullptr || heroes->hero(self.id) == nullptr) {
     if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
@@ -2755,22 +2823,32 @@ HostOutcome form_keep_moving_impl(CallContext& ctx) {
   // disassembly's evidence alone. What spins in `hero_idle.vs` is still open.
   const std::int64_t wait =
       ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  if (wait <= 0) return HostOutcome::ok_void();
-
   HostOutcome out;
-  out.status = script::HostStatus::suspend;
-  out.suspend_for = wait;
+  out.status = script::HostStatus::retry;
+  out.suspend_for = wait > 0 ? wait : 0;
   return out;
 }
+
+/// What 0x004185a0 adds to an incomplete path's length.
+constexpr std::int64_t kIncompletePathLeft = 32000;
 
 /// `FormPathLeft()`: world units still to walk on the hero's own route.
 ///
 /// Both sites compare it against a radius -- `if (.FormPathLeft() <
 /// .FormRadius() + s.radius) break;` -- so it is a distance and not a time.
+///
+/// 0x0052ebc0 asks the formation's route record (`[[hero+0x2b0]+0x84]`) and
+/// answers 0 without one; with one, 0x004185a0 answers what is left of its
+/// path **plus 32,000 when the path is incomplete** -- a route that stops
+/// short of its goal never reads as nearly there. Here the hero's own route
+/// stands for the formation's (approximated, as the march is).
 HostOutcome form_path_left_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
-  const std::int64_t left = self.movement->remaining(self.id);
+  const MoveState* move = self.movement->find(self.id);
+  if (move == nullptr || !move->has_path) return HostOutcome::ok_with(Value::integer(0));
+  std::int64_t left = self.movement->remaining(self.id);
+  if (!move->path_complete) left += kIncompletePathLeft;
   return HostOutcome::ok_with(
       Value::integer(static_cast<std::int32_t>(std::min<std::int64_t>(left, 0x7FFFFFFF))));
 }

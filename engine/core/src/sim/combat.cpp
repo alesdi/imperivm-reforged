@@ -1063,6 +1063,16 @@ bool CombatSystem::drop_target(ObjectId id) {
   return true;
 }
 
+bool CombatSystem::hand_target(ObjectId id, ObjectId target) {
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr) return false;
+  if (unit->target != target) {
+    unit->target = target;
+    unit->attacks = 0;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // CombatSystem: damage
 // ---------------------------------------------------------------------------
