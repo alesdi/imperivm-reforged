@@ -9,7 +9,7 @@
 0x00577af0	partial	handle check then vtbl+0x2c "registered": named map (name exists), group map, sight queries 1; other query subclasses not enumerated, deregistration not read
 0x005ab1d0	verified	handle check only (table slot + offset non-null), no print; a corpse is valid
 0x00421a70	partial	index within the squad-list pool (0x0043ed70); engine asks for a live entry, which differs only for a released one (0 sites)
-0x00579320	partial	miss -> true (was a trap); refresh+count==0 evaluated on the spot -- the original's 1-2 s query cache is the query-model design gap
+0x00579320	verified	miss -> true (was a trap); purge (vtbl+0x1c, 0x00572c10) then vtbl+0x28: the cached list while fresh, once due a refresh (class-player, settlement, set-op) or a counting sweep that stores nothing (area, sight, flags, party) -- FIXED in the query-model round (World::query_is_empty); test a_stale_area_query_answers_is_empty_by_a_sweep_that_stores_nothing
 0x00594eb0	partial	miss -> true; stop flag [+0x15c] never set here (no sacrifice machinery), so a sacrifice answers false
 0x005ad8a0	verified	vtbl+0xc8 (unit: unit_pos_rh, else raw); miss (0,0) silently
 0x00553000	verified	invalid -> dead; else purge then deque empty; a named building at no health is not dead
@@ -21,7 +21,7 @@
 0x0055ea60	partial	every hero member's army, then every live member (0x005a7600); list arm tested, hero-army arm implemented but not tested; 0 sites
 0x005ab9d0	partial	argument first; visible -> true without the receiver; hidden -> target owner grants observer share_view (record+0x18, 0x005652f0); own bit inferred (initialiser not found)
 0x005ab250	partial	handle check then vtbl+0x94 destroy; miss no-op; holder-eviction gap already labelled at perform_erase
-0x00578c40	partial	walks the query's list skipping bit 23 (buildings), reads before refresh; query cache is the query-model gap
+0x00578c40	verified	walks the list accessor (vtbl+0x20, refreshed when due, NOT purged) skipping bit 23 (buildings), then purges -- FIXED: the query cache makes the read-before-purge order observable (a stale list hands the walk its dead); query-model round
 0x006981d0	inferred	StrMap key erase; no StrMap type in the engine and 0 shipped sites -- the 47 are Obj/Query::Erase counted by folded name
 0x005aa520	verified	class +0x2dc from `radius`, inherited; miss 0
 0x005abda0	verified	class id string (+4 of [obj+0x3c]); miss ""
@@ -75,25 +75,25 @@
 0x005d87d0	verified	bit 0x4000000 of the unit flag word; miss no-op
 0x00435470	partial	bit 0x40000 of [+0x194] on live units only, then the whole list to the Squadize worker 0x00447330 at state 0 (fixed: the regroup was missing); non-units left out of the regroup (labelled; 0 shipped)
 0x005de600	verified	handle check, bit 0x40000 with no unit/death test, then a one-element list to 0x00447330 at state 0 (fixed)
-0x00573260	partial	op 0 (fixed: was 1), sort-by-handle merge (0x004ffbe0); query interning, 2000 ms cache and refcount are the query-model design gap (fn_set_op)
-0x005733f0	partial	op 1 (fixed: was 0), walks the smaller operand in its own order (fixed); query-model gap
-0x00573580	partial	op 2, left operand's order kept (fixed: was sorted); query-model gap
-0x005765a0	partial	interns the name in [0x009bdac8], creates on a miss, answers the group's own handle (live, no cache); engine mints a fresh query per call (query-model gap)
-0x005754b0	partial	player 1..16 else invalid; whole-string class else invalid (fixed); whole-map grid sweep: no held, no dead (fixed); query-model gap, grid order
-0x00576130	partial	a sight query with the given radius (negative: sight-100), no comma bypass (fixed: was an anchored circle listing its anchor); query-model gap
-0x00575cb0	partial	sight-100 frozen at construction, empty for a gone or dead observer, observer and dead excluded, inclusive (fixed); hidden-mask path is VisibleObjsInSight's; query-model gap
-0x005775e0	partial	(x,y,r,class) circle, dist²<=r²: r=0 the spot, r<0 nothing, dead excluded, comma list allowed (fixed); query-model gap
-0x00574160	partial	(str, str): exact name scan, miss invalid; whole-string class else invalid (fixed); query-model gap; garrison back-link gap labelled
+0x00573260	verified	op 0, sort-by-handle merge (0x004ffbe0) of the operands' purged cached lists (FIXED: composed fresh evaluations); interned on (op, a, b) (0x004fe490, FIXED: minted per call), 2000 ms cache, refcount as a pass-end reachability sweep with operands reached through the set op (labelled: destroyed at pass end, not at release); tests in test_query_cache.cpp
+0x005733f0	partial	op 1; walks the operand with the shorter refresh period (vtbl+0x30, tie walks the right; FIXED: walked the smaller count, test intersect_walks_the_operand_with_the_shorter_refresh_period), each member asked of the other's vtbl+0x24 (cached / live / refresh); interned, cached, swept (query-model round). Left: an area operand's own order is ascending here, grid order there
+0x00573580	partial	op 2, left operand's cached list walked in its order, right asked through vtbl+0x24 (FIXED in the query-model round: cache, interning, sweep). Left: an area operand's own order is ascending here, grid order there
+0x005765a0	verified	interns the group by name and answers its own handle: World::intern_query(group_query) (FIXED: minted a fresh query per call), shared with the group globals; live list, no cache, never collected; purge edits the membership (0x00572c10)
+0x005754b0	partial	player 1..16 else invalid; whole-string class else invalid (fixed); whole-map grid sweep: no held, no dead (fixed); interned (0x004fe730) with a 1000 ms cache and swept (FIXED, query-model round). Left: grid order
+0x00576130	partial	a sight query with the given radius (negative: sight-100), no comma bypass (fixed); interned (0x004fee10), 1000 ms cache, stale Contains by 0x005a7870 on the observer's whole sight (FIXED, query-model round). Left: grid order
+0x00575cb0	partial	sight-100 frozen at construction, empty for a gone or dead observer, observer and dead excluded, inclusive (fixed); interned, 1000 ms cache, stale IsEmpty a counting sweep and stale Contains 0x004f91a0 (FIXED, query-model round). Left: grid order; the hidden-mask path is VisibleObjsInSight's
+0x005775e0	partial	(x,y,r,class) circle, dist2<=r2: r=0 the spot, r<0 nothing, dead excluded, comma list allowed (fixed); interned on (x,y,r,class) (0x004ff860), 1000 ms cache, stale Contains bare d2<=r2 (0x004f8c60) (FIXED, query-model round). Left: grid order
+0x00574160	partial	(str, str): exact name scan, miss invalid; whole-string class else invalid (fixed); interned (0x004fe080) with a 2000 ms cache and swept (FIXED, query-model round). Left: garrison back-link gap labelled
 0x00574b80	partial	(Settlement, str): receiver check, then as above
 0x005b6730	partial	handle check before any group lookup (fixed: created the group anyway), then CVXGroup::Add; template-deque routing on [0x00a8734c] not read
 0x00561970	partial	no receiver check, group always made, members that resolve and are not dead (fixed); template routing not read
-0x0057a550	partial	handle check, then the query's cached list, every resolving member; query-model gap
+0x0057a550	verified	handle check, then purge and the cached list (vtbl+0x1c, +0x20, refreshed when due), every resolving member -- FIXED: evaluated afresh (query-model round, receiver_objects)
 0x005b4630	partial	handle check; group miss does nothing; CVXGroup::Remove (0x00572210) on the live deque; template deque not read
 0x0055f720	partial	members that resolve and are not dead (fixed); as above
-0x0057a970	partial	handle check, the query's cached list; query-model gap
+0x0057a970	verified	handle check, purge and the cached list -- FIXED: evaluated afresh (query-model round, receiver_objects)
 0x005b69b0	partial	every group in the dictionary (0x004909f0), Remove on each; as the Obj form above
 0x00563250	partial	members that resolve and are not dead (fixed); as above
-0x0057ab80	partial	handle check, the query's cached list; query-model gap
+0x0057ab80	verified	handle check, purge and the cached list -- FIXED: evaluated afresh (query-model round, receiver_objects)
 0x00697cb0	verified	in place, low edge then high per axis, unnormalised
 0x00697d90	partial	x87 trunc(x cos + y sin), trunc(y cos - x sin) with K = 3.1415926535/180; cardinals and the eight +/-1/2 entries keep the residue's sign (fixed for the halves); other angles a Q30 table, at most one unit off where a product falls within ~3e-5 of an integer; 53-bit precision control assumed
 0x006950e0	verified	by-reference x / rect::left (offset 0) for assignment; the engine answers the read, 0 shipped sites assign

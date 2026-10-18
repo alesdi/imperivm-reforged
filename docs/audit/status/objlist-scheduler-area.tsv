@@ -9,7 +9,7 @@
 0x0057a7c0	verified	GetObjList: Refresh then ordered copy (0x00438230); invalid receiver is a fresh empty list
 0x005601a0	verified	ObjList::Add: FIXED -- dedup by handle (0x0050e2a0) and no validity test; test objlist_add_appends_once_and_takes_the_handle_as_it_stands
 0x004379b0	verified	SquadList::Add: FIXED -- plain append, no dedup (0x00437870 -> 0x00435d90); test squadlist_add_goes_through_the_objlist_domain
-0x00530580	partial	Hero::army: original pushes a live reference to [hero+0x1cc]; engine snapshots. Design: the pool's single AliasResolver serves settlement holders only
+0x00530580	verified	Hero::army: a live alias of the hero's army ([hero+0x1cc], HeroRecord::army) through the pool's second alias seam, installed by HeroSystem::start -- FIXED: snapshotted (query-model round); test a_heros_army_comes_back_as_a_list_in_attach_order; an invalid receiver is a fresh empty list
 0x005ab210	verified	Obj::Clear: writes the invalid handle through a by-reference receiver; prose corrected from "writes into the object"
 0x0055f590	verified	ObjList::Clear: empties the deque (0x006a3cc0), handle kept
 0x0055ff00	verified	AddList: FIXED -- ordered union, push only when absent; test objlist_addlist_and_removelist_are_set_moves_not_copies
