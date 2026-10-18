@@ -702,7 +702,7 @@ HostOutcome objlist_siege_impl(CallContext& ctx) {
   if (!ctx.arg(1).is_object() || world->find(ctx.arg(1).as_object().id) == nullptr) {
     return HostOutcome::ok_void();
   }
-  const std::vector<ObjectId> members = receiver_objects(*world, ctx.arg(0), false);
+  const std::vector<ObjectId> members = receiver_objects(ctx, *world, ctx.arg(0), false);
   (void)run_siege_plan(*world, members, ctx.arg(1).as_object().id, int_arg(ctx, 2),
                        int_arg(ctx, 3), world->time());
   return HostOutcome::ok_void();

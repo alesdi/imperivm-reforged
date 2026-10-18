@@ -2368,7 +2368,7 @@ HostOutcome host_heal_stamina(CallContext& ctx) {
   const bool single = ctx.arg(0).is_object() && context != nullptr &&
                       ctx.arg(0).as_object().type == context->object_type;
   if (single && amount < 0) return HostOutcome::ok_void();
-  for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+  for (const ObjectId id : receiver_objects(ctx, *world, ctx.arg(0))) {
     if (single) {
       if (WorldObject* slot = script_object(ctx, *combat, id); slot != nullptr) {
         const std::int32_t cap = class_int(*world, *slot, "maxstamina");

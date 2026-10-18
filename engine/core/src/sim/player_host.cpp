@@ -280,7 +280,7 @@ HostOutcome fn_player_flags_query(CallContext& ctx) {
     return HostOutcome::ok_with(invalid_object());
   }
   const QuerySpec spec = player_flags(player, filter_arg(*world, ctx.arg(1)), kType);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 // --------------------------------------------------------------------------
@@ -440,7 +440,7 @@ HostOutcome fn_party_query(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("PartyQuery: no world");
   return HostOutcome::ok_with(
-      Value::object(script::ObjectRef{kTypeQuery, world->create_query(party_query())}));
+      Value::object(script::ObjectRef{kTypeQuery, world->intern_query(party_query())}));
 }
 
 /// `GetSettlements(class, player)` -- 3 sites, and **the name is misleading in

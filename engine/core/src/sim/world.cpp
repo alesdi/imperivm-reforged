@@ -9,6 +9,8 @@
 // share so that the two cannot drift apart. `sim/save.hpp` includes this
 // header, not the other way round, so there is no cycle.
 #include "imperivm/core/sim/save.hpp"
+// `isqrt`, for a stale sight query's one-object test.
+#include "imperivm/core/sim/path.hpp"
 
 namespace imperivm::core::sim {
 namespace {
@@ -1347,10 +1349,110 @@ std::int64_t World::distance_squared(ObjectId a, ObjectId b) const noexcept {
 ObjectId World::create_query(const QuerySpec& spec) {
   const std::uint32_t index = static_cast<std::uint32_t>(queries_.size());
   queries_.push_back(spec);
+  query_caches_.emplace_back();
   const ObjectId id = spawn_internal(InternalKind::query);
   WorldObject* slot = find(id);
   if (slot != nullptr) slot->query = index;
+  query_pool_[query_key(spec)].push_back(id);
   return id;
+}
+
+bool World::destroy_query(ObjectId id) {
+  if (const QuerySpec* spec = query_spec(id)) {
+    const auto it = query_pool_.find(query_key(*spec));
+    if (it != query_pool_.end()) {
+      std::vector<ObjectId>& ids = it->second;
+      ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
+      if (ids.empty()) query_pool_.erase(it);
+    }
+  }
+  return despawn(id);
+}
+
+ObjectId World::intern_query(const QuerySpec& spec) {
+  // The pool's bucket is kept in creation order, which is ascending handle
+  // order, so the first equal live spec is the oldest.
+  const auto it = query_pool_.find(query_key(spec));
+  if (it != query_pool_.end()) {
+    for (const ObjectId id : it->second) {
+      const QuerySpec* existing = query_spec(id);
+      if (existing != nullptr && *existing == spec) return id;
+    }
+  }
+  const ObjectId id = create_query(spec);
+  if (QueryCache* cache = mutable_query_cache(id)) cache->collectable = true;
+  return id;
+}
+
+void World::rebuild_query_pool() {
+  query_pool_.clear();
+  for (const WorldObject& slot : objects_) {  // ascending ids
+    if (slot.internal != InternalKind::query || slot.query >= queries_.size()) continue;
+    query_pool_[query_key(queries_[slot.query])].push_back(slot.id);
+  }
+}
+
+std::size_t World::collect_queries(std::span<const ObjectId> roots) {
+  // Mark, by query slot: what the scripts hold, every query nobody may
+  // collect, and -- to a fixed point -- the operands of whatever is marked.
+  // Indexed by slot rather than searched, because this runs once a pass.
+  std::vector<char> keep(queries_.size(), 0);
+  std::vector<ObjectId> work;
+  const auto mark = [&](ObjectId id) {
+    const WorldObject* slot = find(id);
+    if (slot == nullptr || slot->internal != InternalKind::query) return;
+    if (slot->query >= keep.size() || keep[slot->query] != 0) return;
+    keep[slot->query] = 1;
+    work.push_back(id);
+  };
+  for (const ObjectId id : roots) mark(id);
+  for (const WorldObject& slot : objects_) {
+    if (slot.internal != InternalKind::query || slot.query >= queries_.size()) continue;
+    const QuerySpec& spec = queries_[slot.query];
+    const bool collectable =
+        slot.query < query_caches_.size() && query_caches_[slot.query].collectable;
+    if (!collectable || spec.kind == QueryKind::group || spec.kind == QueryKind::party) {
+      mark(slot.id);
+    }
+  }
+  while (!work.empty()) {
+    const ObjectId id = work.back();
+    work.pop_back();
+    const QuerySpec* spec = query_spec(id);
+    if (spec == nullptr || spec->kind != QueryKind::set_op) continue;
+    mark(spec->lhs);
+    mark(spec->rhs);
+  }
+
+  // Sweep, in ascending handle order. A query holds no native object, no
+  // grid cell, no group or boarding membership, so what `despawn` does for
+  // one is the observer's notice, the pool entry and the erase -- and the
+  // erase is done once for the lot rather than once per query.
+  std::size_t doomed = 0;
+  for (WorldObject& slot : objects_) {
+    if (slot.internal != InternalKind::query || slot.query >= keep.size()) continue;
+    if (keep[slot.query] != 0) continue;
+    if (observer_ != nullptr) observer_->despawning(*this, slot);
+    if (slot.object != nullptr) slot.object->on_destroy();
+    index_.drop(slot);
+    const auto bucket = query_pool_.find(query_key(queries_[slot.query]));
+    if (bucket != query_pool_.end()) {
+      std::vector<ObjectId>& ids = bucket->second;
+      ids.erase(std::remove(ids.begin(), ids.end(), slot.id), ids.end());
+      if (ids.empty()) query_pool_.erase(bucket);
+    }
+    // The slot's cache goes with it; the slot itself stays (see `queries_`).
+    if (slot.query < query_caches_.size()) query_caches_[slot.query] = QueryCache{};
+    ++doomed;
+  }
+  if (doomed == 0) return 0;
+  objects_.erase(std::remove_if(objects_.begin(), objects_.end(),
+                                [&keep](const WorldObject& slot) {
+                                  return slot.internal == InternalKind::query &&
+                                         slot.query < keep.size() && keep[slot.query] == 0;
+                                }),
+                 objects_.end());
+  return doomed;
 }
 
 const QuerySpec* World::query_spec(ObjectId id) const noexcept {
@@ -1514,9 +1616,13 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
       //     (0x004f98c0), so it is ascending;
       //   * subtract walks the left operand in its own order and keeps what the
       //     right one does not contain;
-      //   * intersect walks whichever operand is **smaller** (`a.count <
-      //     b.count`, so a tie walks the right), in its own order, and keeps
-      //     what the other contains.
+      //   * intersect walks the operand whose **refresh period** is shorter,
+      //     in its own order, and keeps what the other contains. 0x004ffe93
+      //     asks each operand's `vtbl + 0x30`, which for every cached kind is
+      //     the getter of `[query+0x50]` (0x005e1360) and for a group answers
+      //     0 (0x00746ea0); `jae` makes a tie walk the right one. This read
+      //     the operands' *counts* until the query-model round, which is a
+      //     different operand whenever the shorter-lived list is the longer.
       //
       // Each operand's own order is this engine's (ascending id for the area
       // kinds, joining order for a group) rather than the original's grid
@@ -1534,7 +1640,13 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
                          std::back_inserter(out));
           break;
         case SetOp::intersect: {
-          const bool walk_left = lhs.size() < rhs.size();
+          const QuerySpec* left = query_spec(spec->lhs);
+          const QuerySpec* right = query_spec(spec->rhs);
+          const auto period = [](const QuerySpec* operand) {
+            return operand == nullptr ? 0u
+                                      : static_cast<std::uint32_t>(query_refresh_period(operand->kind));
+          };
+          const bool walk_left = period(left) < period(right);
           const std::vector<ObjectId>& walked = walk_left ? lhs : rhs;
           const std::vector<ObjectId>& other = walk_left ? rhs_sorted : lhs_sorted;
           for (const ObjectId member : walked) {
@@ -1555,6 +1667,281 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
       break;
   }
   return 0;
+}
+
+// --------------------------------------------------------------------------
+// the query cache
+// --------------------------------------------------------------------------
+//
+// The model is docs/formats/query-model.md's. In short: a cached query holds
+// the list its last refresh made and the time the next one falls due; a read
+// refreshes it only when the clock has reached that time; and the two
+// one-shot questions, emptiness and membership, either read the list (fresh),
+// or -- due -- refresh and read it, or answer live without storing anything,
+// by kind. A group has no cache: its list is the group.
+
+const World::QueryCache* World::query_cache(ObjectId id) const noexcept {
+  const WorldObject* slot = find(id);
+  if (slot == nullptr || slot->internal != InternalKind::query) return nullptr;
+  if (slot->query >= query_caches_.size()) return nullptr;
+  return &query_caches_[slot->query];
+}
+
+World::QueryCache* World::mutable_query_cache(ObjectId id) noexcept {
+  return const_cast<QueryCache*>(static_cast<const World*>(this)->query_cache(id));
+}
+
+void World::purge_query(ObjectId id) {
+  const QuerySpec* spec = query_spec(id);
+  if (spec == nullptr) return;
+  // The slot is 0x00572c10 on every query type, the group's included, and it
+  // works on the list embedded at `[query+0x1c]` -- which for a group is the
+  // membership itself (its accessor, 0x005716f0, answers that list). So the
+  // purge drops a dead member from the group, not from a copy of it: a
+  // `WaitQueryCountBetween` that follows sees it gone.
+  const auto gone_or_dead = [this](ObjectId member) {
+    const WorldObject* slot = find(member);
+    return slot == nullptr || object_is_dead(*slot);
+  };
+  if (spec->kind == QueryKind::group) {
+    const std::int32_t group = spec->group;
+    std::vector<ObjectId> doomed;
+    for (const ObjectId member : groups_.members(group)) {
+      if (gone_or_dead(member)) doomed.push_back(member);
+    }
+    for (const ObjectId member : doomed) (void)groups_.remove(group, member);
+    return;
+  }
+  QueryCache* cache = mutable_query_cache(id);
+  if (cache == nullptr) return;
+  // Stable: 0x005719d0 finds the first to drop and copies the survivors down.
+  cache->members.erase(
+      std::remove_if(cache->members.begin(), cache->members.end(), gone_or_dead),
+      cache->members.end());
+}
+
+void World::refresh_if_due(ObjectId id, GameTime now, std::uint32_t depth) {
+  const QueryCache* cache = query_cache(id);
+  if (cache == nullptr) return;
+  // 0x004f949f: `jb` past the refresh while the clock is below the due time,
+  // so a read at exactly the due millisecond refreshes.
+  if (now < cache->next_refresh) return;
+  refresh_query(id, now, depth);
+}
+
+void World::refresh_query(ObjectId id, GameTime now, std::uint32_t depth) {
+  const QuerySpec* spec = query_spec(id);
+  if (spec == nullptr || mutable_query_cache(id) == nullptr) return;
+  // The due time is written first (0x004ffbe0, and every refresh), so an
+  // operand that names this query back reads it as fresh rather than looping.
+  mutable_query_cache(id)->next_refresh = now + query_refresh_period(spec->kind);
+  if (spec->kind != QueryKind::set_op) {
+    std::vector<ObjectId> fresh;
+    evaluate_query(id, fresh);
+    mutable_query_cache(id)->members = std::move(fresh);
+    return;
+  }
+
+  // A set operation composes its operands' **cached** lists (0x004ffbe0), and
+  // reading one can refresh it in turn when it is due. Each arm reads its
+  // operands exactly as the refresh does:
+  //
+  //   * union: both operands purged and read (`vtbl + 0x1c`, `vtbl + 0x20`),
+  //     left first, copied, each copy sorted by handle (0x004fb510) and the
+  //     two merged without repeats (0x004f98c0);
+  //   * subtract: the left purged and read, walked in its order, and each
+  //     member asked of the right's `vtbl + 0x24` -- membership, which reads
+  //     the right's list when fresh and answers live or refreshes when due;
+  //   * intersect: the operand with the shorter period (`vtbl + 0x30`, a tie
+  //     walking the right) purged, read and walked, each member asked of the
+  //     other's `vtbl + 0x24`.
+  std::vector<ObjectId> result;
+  if (depth <= kMaxQueryDepth) {
+    const ObjectId lhs = spec->lhs;
+    const ObjectId rhs = spec->rhs;
+    const SetOp op = spec->op;
+    const auto read_operand = [&](ObjectId operand) {
+      std::vector<ObjectId> members;
+      const QuerySpec* operand_spec = query_spec(operand);
+      if (operand_spec == nullptr) return members;
+      purge_query(operand);
+      if (operand_spec->kind == QueryKind::group) {
+        objects_in_group(operand_spec->group, operand_spec->filter, members);
+        return members;
+      }
+      refresh_if_due(operand, now, depth + 1);
+      if (const QueryCache* cache = query_cache(operand)) members = cache->members;
+      return members;
+    };
+    switch (op) {
+      case SetOp::set_union: {
+        std::vector<ObjectId> left = read_operand(lhs);
+        std::vector<ObjectId> right = read_operand(rhs);
+        std::sort(left.begin(), left.end());
+        std::sort(right.begin(), right.end());
+        std::set_union(left.begin(), left.end(), right.begin(), right.end(),
+                       std::back_inserter(result));
+        break;
+      }
+      case SetOp::subtract:
+        for (const ObjectId member : read_operand(lhs)) {
+          if (!query_contains(rhs, member, now, depth + 1)) result.push_back(member);
+        }
+        break;
+      case SetOp::intersect: {
+        const auto period = [this](ObjectId operand) {
+          const QuerySpec* operand_spec = query_spec(operand);
+          return operand_spec == nullptr
+                     ? 0u
+                     : static_cast<std::uint32_t>(query_refresh_period(operand_spec->kind));
+        };
+        const bool walk_left = period(lhs) < period(rhs);
+        const ObjectId walked = walk_left ? lhs : rhs;
+        const ObjectId other = walk_left ? rhs : lhs;
+        for (const ObjectId member : read_operand(walked)) {
+          if (query_contains(other, member, now, depth + 1)) result.push_back(member);
+        }
+        break;
+      }
+    }
+  }
+  if (QueryCache* cache = mutable_query_cache(id)) cache->members = std::move(result);
+}
+
+std::size_t World::read_query(ObjectId id, GameTime now, std::vector<ObjectId>& out,
+                              QueryRead read) {
+  out.clear();
+  const QuerySpec* spec = query_spec(id);
+  if (spec == nullptr) return 0;
+  if (read == QueryRead::purged) purge_query(id);
+  if (spec->kind == QueryKind::group) {
+    // The group's accessor answers the membership itself (0x005716f0).
+    return objects_in_group(spec->group, spec->filter, out);
+  }
+  refresh_if_due(id, now, 0);
+  if (const QueryCache* cache = query_cache(id)) out = cache->members;
+  return out.size();
+}
+
+bool World::query_is_empty(ObjectId id, GameTime now) {
+  const QuerySpec* spec = query_spec(id);
+  if (spec == nullptr) return true;
+  if (spec->kind == QueryKind::group) {
+    std::vector<ObjectId> members;
+    return objects_in_group(spec->group, spec->filter, members) == 0;
+  }
+  const QueryCache* cache = query_cache(id);
+  if (cache == nullptr) return true;
+  // Fresh: the cached list (0x004f8abe..0x004f8aca).
+  if (now < cache->next_refresh) return cache->members.empty();
+  // Due: the kind's `vtbl + 0x40`.
+  if (query_answers_live_when_stale(spec->kind)) {
+    std::vector<ObjectId> scratch;
+    return evaluate_query(id, scratch) == 0;
+  }
+  refresh_query(id, now, 0);
+  cache = query_cache(id);
+  return cache == nullptr || cache->members.empty();
+}
+
+bool World::query_contains(ObjectId id, ObjectId member, GameTime now) {
+  return query_contains(id, member, now, 0);
+}
+
+bool World::query_contains(ObjectId id, ObjectId member, GameTime now, std::uint32_t depth) {
+  const QuerySpec* spec = query_spec(id);
+  if (spec == nullptr) return false;
+  const auto holds = [member](const std::vector<ObjectId>& members) {
+    return std::find(members.begin(), members.end(), member) != members.end();
+  };
+  if (spec->kind == QueryKind::group) {
+    std::vector<ObjectId> members;
+    objects_in_group(spec->group, spec->filter, members);
+    return holds(members);
+  }
+  const QueryCache* cache = query_cache(id);
+  if (cache == nullptr) return false;
+  if (now < cache->next_refresh) return holds(cache->members);
+  if (query_answers_live_when_stale(spec->kind)) return query_matches_live(id, *spec, member);
+  refresh_query(id, now, depth);
+  cache = query_cache(id);
+  return cache != nullptr && holds(cache->members);
+}
+
+GameTime World::query_next_refresh(ObjectId id, GameTime now) const noexcept {
+  const QuerySpec* spec = query_spec(id);
+  if (spec == nullptr || spec->kind == QueryKind::group) return now;
+  const QueryCache* cache = query_cache(id);
+  return cache == nullptr ? now : cache->next_refresh;
+}
+
+bool World::query_matches_live(ObjectId query, const QuerySpec& spec, ObjectId member) const {
+  const WorldObject* slot = find(member);
+  if (slot == nullptr) return false;
+  // Every live test reads the object's own stored position (`vtbl + 0x3c`),
+  // so a held object tests from `(-1, -1)`.
+  const Point at = slot->state.position;
+  switch (spec.kind) {
+    case QueryKind::map_area_circle: {
+      // 0x004f8c60: the object resolves and `dx² + dy² <= [query+0x60]`, the
+      // radius squared, and **nothing else** -- no class, no death, no
+      // template bit. A stale `AreaObjs(circle, "Hero").Contains(sheep)`
+      // answers true for a sheep inside the circle.
+      Point centre = spec.center;
+      if (spec.subject != kNoObject) {
+        const WorldObject* anchor = find(spec.subject);
+        if (anchor == nullptr) return false;
+        centre = anchor->state.position;
+      }
+      const std::int64_t r = spec.radius;
+      return dist2(at, centre) <= r * r;
+    }
+    case QueryKind::map_area_rect:
+      // 0x004f8c10: the four corners, inclusive, and nothing else.
+      return at.x >= spec.left && at.x <= spec.right && at.y >= spec.top && at.y <= spec.bottom;
+    case QueryKind::objs_in_sight: {
+      // 0x004f91a0: the observer and the object both resolve; the observer
+      // can see it by 0x005a7870 -- a non-zero sight `[obj+0xd0]`, and the
+      // edge-to-edge distance (0x005a77b0: the floored root of the centres'
+      // squared distance, less both class radii) within that sight -- and the
+      // object's class passes the filter. **Not** the radius the refresh
+      // sweeps (`[query+0x74]`, sight less 100), not a death test, and the
+      // observer is not left out: it is at distance minus two radii from
+      // itself. `VisibleObjsInSight`'s visibility arm (`[query+0x78]`, the
+      // object's `vtbl + 0x74` for the observer's player) is fog, which this
+      // engine keeps out of the sim, as the refresh does.
+      const WorldObject* watcher = find(spec.subject);
+      if (watcher == nullptr || watcher->sight == 0) return false;
+      const std::int64_t centres = isqrt(dist2(watcher->state.position, at));
+      const auto radius = [this](const WorldObject& object) -> std::int64_t {
+        if (classes_ == nullptr || object.class_index == kNoClass) return 0;
+        return parse_int(classes_->property(object.class_index, "radius"), 0);
+      };
+      if (centres - radius(*watcher) - radius(*slot) > watcher->sight) return false;
+      return matches_filter(*slot, spec.filter);
+    }
+    case QueryKind::player_flags:
+    case QueryKind::party: {
+      // 0x004f8ad0 (the relation mask against the owner's bit, then the class)
+      // and 0x004f97c0 (a scan of the session's party) make the refresh's own
+      // test of one object, and neither refresh tests death; so membership of
+      // a fresh evaluation is the same answer. The player-flags test also
+      // refuses an object carrying bit 26 of `[obj+0x2c]` for `EnemyObjs`
+      // (0x004f8b16), which the refresh's sweep reads too and this engine
+      // does not model (a labelled gap of `objects_by_relation`'s).
+      std::vector<ObjectId> fresh;
+      evaluate_query(query, fresh);
+      return std::find(fresh.begin(), fresh.end(), member) != fresh.end();
+    }
+    case QueryKind::class_player_area:
+    case QueryKind::units_in_settlement:
+    case QueryKind::buildings_in_settlement:
+    case QueryKind::set_op:
+    case QueryKind::group:
+    case QueryKind::count:
+      break;
+  }
+  return false;
 }
 
 // --------------------------------------------------------------------------
@@ -2427,6 +2814,17 @@ void World::serialize(std::vector<std::byte>& out) const {
   // query, and the numbering is hashed.
   bytes::put_u32(out, static_cast<std::uint32_t>(queries_.size()));
   for (const QuerySpec& spec : queries_) put_query_spec(out, spec);
+  // World version 38: each query's cache, by the same index -- the list its
+  // last refresh made and the time the next one falls due. Not hashed (the
+  // dumps print neither), and saved because a loaded game that refreshed
+  // every query on its first read would answer differently from the one
+  // that was saved for up to four seconds.
+  for (const QueryCache& cache : query_caches_) {
+    bytes::put_i64(out, cache.next_refresh);
+    bytes::put_u8(out, cache.collectable ? 1u : 0u);
+    bytes::put_u32(out, static_cast<std::uint32_t>(cache.members.size()));
+    for (const ObjectId member : cache.members) bytes::put_u32(out, member);
+  }
 
   // -- the players. Not folded into `state_hash`, and written all the same:
   // combat cannot pick a target and the economy cannot decide who a tribute may
@@ -2668,6 +3066,23 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
     if (!get_query_spec(reader, spec)) return FormatError::truncated;
     queries.push_back(spec);
   }
+  std::vector<QueryCache> caches(queries.size());
+  for (QueryCache& cache : caches) {
+    std::uint32_t members = 0;
+    std::uint8_t collectable = 0;
+    if (!bytes::get_i64(reader, cache.next_refresh) || !reader.u8(collectable) ||
+        !reader.u32(members)) {
+      return FormatError::truncated;
+    }
+    cache.collectable = collectable != 0;
+    // Bounded by what is left to read rather than trusted: a corrupt count
+    // must not reserve gigabytes.
+    for (std::uint32_t i = 0; i < members; ++i) {
+      ObjectId member = kNoObject;
+      if (!reader.u32(member)) return FormatError::truncated;
+      cache.members.push_back(member);
+    }
+  }
   // A query object indexes this table. An index past its end would evaluate
   // against a default spec, which is a different question asked silently.
   for (const WorldObject& slot : objects) {
@@ -2853,6 +3268,8 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
   rebuild_index();  // derived, so never in the save: rebuilt from what was
   gate_lines_.forget();  // derived too: learnt again from the gates restored
   queries_ = std::move(queries);
+  query_caches_ = std::move(caches);
+  rebuild_query_pool();  // derived: which live query each definition names
   players_ = std::move(table);
   groups_ = std::move(groups);
   rects_ = std::move(rects);

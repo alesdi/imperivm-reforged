@@ -1344,7 +1344,7 @@ struct Receivers {
     out.error = kNoReceiver;
     return out;
   }
-  out.ids = receiver_objects(*out.world, receiver, accept_query);
+  out.ids = receiver_objects(ctx, *out.world, receiver, accept_query);
   return out;
 }
 

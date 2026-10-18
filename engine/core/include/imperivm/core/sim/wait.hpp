@@ -53,11 +53,13 @@
 /// `min(interval, remaining timeout)` -- so the last poll of a finite wait
 /// lands **exactly** on the deadline rather than overshooting it.
 ///
-///   * **100 ms** -- every query-based wait. Four independent sites carry the
-///     literal: the shared helper at `0x005eca10`/`0x005eca27`, the two-query
-///     helper at `0x005eca70`/`0x005ecaa8`, and inlined copies in
-///     `WaitHealthBetween` (`0x005ed41b`) and `WaitPlayerChat` (`0x005ee973`).
-///     The helper reads a *hint* from the query -- `max(hint - now, 100)`.
+///   * **The query's own hint, floored at 100 ms** -- every query-based wait.
+///     The floor is a literal at four independent sites: the shared helper at
+///     `0x005eca10`/`0x005eca27`, the two-query helper at
+///     `0x005eca70`/`0x005ecaa8`, and inlined copies in `WaitHealthBetween`
+///     (`0x005ed41b`) and `WaitPlayerChat` (`0x005ee973`). The helper reads a
+///     *hint* from the query, its `vtbl + 0x34` -- and sleeps `hint - now`, or
+///     100 when that is under 101.
 ///
 ///     **The floor does not always win, and this header used to say it did.**
 ///     `0x00571700` -- four instructions returning the current game time, so
@@ -65,14 +67,15 @@
 ///     explicit-membership query kinds inherit it: `CVXGroupQuery`
 ///     (`0x7c47e8`) and `CVXNamedObjQuery` (`0x7c4830`). The other twelve query
 ///     vtables override the slot with `0x005e1350`, which returns
-///     `[this+0x4c]`, the query's own cache-expiry stamp. A `CVXObjQuery` sets
-///     its period to 1000 (`0x004ff356`), so a wait on one with a fresh cache
-///     polls at 1000 ms, not 100. **The cadence of a query wait depends on the
-///     runtime kind of the query.** This engine does not cache query evaluation
-///     at all (`sim/query.hpp`), so it has no expiry stamp to read and uses the
-///     floor throughout -- a labelled divergence, and the same one
-///     `sim/query.hpp` records from the other side. The eleven remaining kinds'
-///     periods were not read.
+///     `[this+0x4c]`, the query's own next-refresh time. A failed test has
+///     just read the list -- which refreshed it if it was due -- so a wait on
+///     a sight query polls once a second, on a set operation every two and on
+///     `EnemyObjs` every four (`query_refresh_period` in `sim/query.hpp`); a
+///     wait on a group or a named object polls every 100 ms. **The cadence of
+///     a query wait depends on the runtime kind of the query**, and since the
+///     query-model round this engine reads it (`query_poll_slice`): it used
+///     to poll every query at the floor, which tested a sight query ten times
+///     between two of its refreshes and could only ever see the same list.
 ///   * **1000 ms** -- `WaitSettlementCapture`, `WaitSettlementAllied`,
 ///     `WaitConvRequest`, `WaitUnitsInArea`, `WaitIdleUnitsInArea`
 ///     (`0x005ecb30`, and inline at `0x005ee4e4`).
@@ -147,7 +150,17 @@
 namespace imperivm::core::sim {
 
 /// The poll cadences, in game-time milliseconds. See the header.
+/// `kQueryPollInterval` is the query waits' floor, not their cadence.
 inline constexpr std::int64_t kQueryPollInterval = 100;
+
+/// A query wait's interval from its hint, the time until the query's next
+/// refresh: the hint itself, or the 100 ms floor when the hint is under 101
+/// (`0x005eca10`: `if (hint < 0x65) hint = 100`; the two-query helper
+/// `0x005eca70` passes the smaller of its two hints through the same floor).
+/// `wait_slice` then clips it to what is left of the timeout.
+[[nodiscard]] constexpr std::int64_t query_poll_slice(std::int64_t hint) noexcept {
+  return hint < 101 ? kQueryPollInterval : hint;
+}
 inline constexpr std::int64_t kSettlementPollInterval = 1000;
 inline constexpr std::int64_t kEnvPollInterval = 2000;
 

@@ -341,7 +341,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// section's `UnitRecord::experience` alone, and `Combatant::level` is the
 /// stored level the rebuild writes. A hero record carries its army addend
 /// (`HeroRecord::army_addend`, `[hero+0x2c0]`).
-inline constexpr std::uint32_t kStateVectorVersion = 39;
+/// 40: the world section carries each query's cache after the query specs
+/// (`World::QueryCache`: the list its last refresh made and when the next one
+/// falls due, `[query+0x4c]`). A version-39 file has neither, and a query
+/// is no longer evaluated on every read: docs/formats/query-model.md.
+inline constexpr std::uint32_t kStateVectorVersion = 40;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

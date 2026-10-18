@@ -353,7 +353,7 @@ HostOutcome fn_objs_in_sight(CallContext& ctx) {
   if (!class_arg_resolves(*world, ctx.arg(1), true)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_sight(observer->id, sight_query_radius(*observer, -1),
                                        filter_arg(*world, ctx.arg(1)), kVisible);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ObjsInCircle(point, radius, "class")` (0x005775e0).
@@ -372,7 +372,7 @@ HostOutcome fn_objs_in_circle(CallContext& ctx) {
   if (!class_arg_resolves(*world, ctx.arg(2), true)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_circle(unpack_point(ctx.arg(0)), ctx.arg(1).as_integer(),
                                         filter_arg(*world, ctx.arg(2)));
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ObjsInRange(object, "class", radius)` (0x00576130) -- **a sight query with
@@ -392,7 +392,7 @@ HostOutcome fn_objs_in_range(CallContext& ctx) {
   if (!class_arg_resolves(*world, ctx.arg(1), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_range(anchor->id, sight_query_radius(*anchor, ctx.arg(2).as_integer()),
                                        filter_arg(*world, ctx.arg(1)));
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ClassPlayerObjs("class", player)` (0x005754b0).
@@ -415,7 +415,7 @@ HostOutcome fn_class_player_objs(CallContext& ctx) {
   if (player == kNoPlayer) return HostOutcome::ok_with(invalid_object());
   if (!class_arg_resolves(*world, ctx.arg(0), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = class_player_area(filter_arg(*world, ctx.arg(0)), player, Point{}, 0);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `UnitsInSettlement`, `UnitsAroundSettlement` and `UnitsGuardingSettlement`.
@@ -471,7 +471,7 @@ HostOutcome fn_units_in_settlement(CallContext& ctx) {
 
   if (!class_arg_resolves(*world, ctx.arg(1), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = units_in_settlement(settlement, filter_arg(*world, ctx.arg(1)), kScope);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `Group(n)` (0x005765a0).
@@ -503,10 +503,10 @@ HostOutcome fn_group(CallContext& ctx) {
     // by name in first-mention order, which is deterministic because script
     // execution order is. See `docs/formats/map.md`.
     return HostOutcome::ok_with(query_value(
-        world->create_query(group_query(world->group_index(ctx.arg(0).as_string())))));
+        world->intern_query(group_query(world->group_index(ctx.arg(0).as_string())))));
   }
   if (!ctx.arg(0).is_integer()) return HostOutcome::failed("Group: expected an integer");
-  return HostOutcome::ok_with(query_value(world->create_query(group_query(ctx.arg(0).as_integer()))));
+  return HostOutcome::ok_with(query_value(world->intern_query(group_query(ctx.arg(0).as_integer()))));
 }
 
 /// `GetInnState(inn)` / `SetInnState(inn, state)` -- 3 sites and 1, and the
@@ -603,7 +603,7 @@ struct MembershipReceiver {
   const Value& receiver = ctx.arg(0);
   if (is_objlist(receiver)) {
     out.found = true;
-    for (const ObjectId id : receiver_objects(world, receiver)) {
+    for (const ObjectId id : receiver_objects(ctx, world, receiver)) {
       const WorldObject* slot = world.find(id);
       if (slot != nullptr && !object_is_dead(*slot)) out.members.push_back(id);
     }
@@ -611,7 +611,7 @@ struct MembershipReceiver {
   }
   if (object_of(world, receiver) == nullptr) return out;
   out.found = true;
-  out.members = receiver_objects(world, receiver);
+  out.members = receiver_objects(ctx, world, receiver);
   return out;
 }
 
@@ -1531,18 +1531,19 @@ HostOutcome m_set_no_ai_flag(CallContext& ctx) { return set_no_ai_flag<false>(ct
 ///     player 0x00996a44, sight 0x00996a84 on `(observer, class, radius,
 ///     visible)`, circle 0x00996aa4 on `(x, y, r, class)`, settlement 0x00996a70);
 ///   * **a timed cache**: a query refreshes its list only when the game clock
-///     passes its next-due time (`+0x4c`), every 2000 ms for a set-op or
-///     settlement query and 1000 ms for the others (`GetList`, 0x004f9490), so
-///     a read can be a second or two stale; and
+///     reaches its next-due time (`+0x4c`), every 4000 ms for a player-flags
+///     query, 2000 for a set-op or units-in-settlement query and 1000 for the
+///     others (`GetList`, 0x004f9490), so a read can be seconds stale; and
 ///   * **a refcounted lifetime** (0x00571670 adds, 0x00571680 releases and
 ///     destroys at zero).
 ///
-/// Here every call mints a fresh query object, evaluated afresh on every read
-/// and never freed (`World::create_query`). The answers agree except for the
-/// staleness, and the handles a script sees are allocated differently. That is
-/// a design of its own -- a query pool keyed as the original keys it, a clock
-/// on each query, and a reference count the script VM maintains -- and is left
-/// for a round of its own. Results also come in ascending id order rather than
+/// The timed cache is modelled (`World::read_query`, docs/formats/
+/// query-model.md); interning and the reference count are not yet: every call
+/// mints a fresh query object, refreshed on its first read and never freed
+/// (`World::create_query`). A temporary therefore reads as fresh, as the
+/// original's freshly made one does; what differs is that two equal calls
+/// share one cache there and two here, and that the handles a script sees are
+/// allocated differently. Results also come in ascending id order rather than
 /// the original's grid order (`sim/spatial_index.hpp`).
 template <SetOp kOp>
 HostOutcome fn_set_op(CallContext& ctx) {
@@ -1552,7 +1553,7 @@ HostOutcome fn_set_op(CallContext& ctx) {
   const WorldObject* rhs = object_of(*world, ctx.arg(1));
   if (lhs == nullptr || rhs == nullptr) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = set_op(kOp, lhs->id, rhs->id);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `Count(player, "class")` -- how many objects of a class a player owns.
@@ -5404,7 +5405,7 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed("SetMessengerStatus: no world");
   const bool on = ctx.count() > 1 && ctx.arg(1).is_integer() && ctx.arg(1).as_integer() != 0;
   const bool query = ctx.arg(0).is_object() && ctx.arg(0).as_object().type == kTypeQuery;
-  for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+  for (const ObjectId id : receiver_objects(ctx, *world, ctx.arg(0))) {
     const WorldObject* slot = world->find(id);
     if (slot == nullptr || (query && object_is_dead(*slot))) continue;
     if (ObjectState* state = world->mutable_state(id); state != nullptr) {
@@ -6089,17 +6090,18 @@ HostOutcome m_erase(CallContext& ctx) {
   // -- as a `continue` and not an abort. So a query holding six units and a
   // wall loses the six.
   //
-  // It also reads before it refreshes, where every other `Query` member
-  // refreshes first. That inversion is unobservable here: this engine caches no
-  // query result at all (`World::evaluate_query`'s note says why), so there is
-  // no stale list for the order to matter to.
+  // It also reads before it purges, where every other `Query` member purges
+  // first: the list accessor (`vtbl + 0x20`, refreshed when due) and only then
+  // `vtbl + 0x1c`. So a stale list hands the walk its dead too, which the
+  // building test above lets through to `erase_one`.
   std::vector<ObjectId> found;
-  world->evaluate_query(slot->id, found);
+  world->read_query(slot->id, script_clock(ctx, *world), found, World::QueryRead::as_cached);
   for (const ObjectId id : found) {
     const WorldObject* target = world->find(id);
     if (target == nullptr || target->state.flags.is_building) continue;
     erase_one(ctx, *world, id);
   }
+  world->purge_query(slot->id);
   // And the query itself survives. `0x00578c40` releases one reference on it and
   // erases nothing.
   return HostOutcome::ok_void();
@@ -6122,8 +6124,9 @@ HostOutcome m_erase(CallContext& ctx) {
 ///     answers **true** -- then the query's refresh (`vtbl + 0x1c`, which for
 ///     a group or named query purges the dead) and its emptiness test
 ///     (`vtbl + 0x28`, count == 0; a sight query refreshes first if stale).
-///     Here the query is evaluated on the spot; how stale the original's
-///     cached answer may be is the query model's (see `fn_set_op`).
+///     Here that is `World::purge_query` and `World::query_is_empty`: the
+///     cached list while it is fresh, and once due a refresh -- or, for the
+///     area, sight, player-flags and party kinds, a sweep that only counts.
 ///   * `Sacrifice::IsEmpty` (0x00594eb0): the handle check -- a miss answers
 ///     true -- then the stop flag at `[sacrifice+0x15c]`, the one `Consume`'s
 ///     core (0x00596050) reads. Nothing in this engine sets it (there is no
@@ -6140,8 +6143,9 @@ HostOutcome m_query_is_empty(CallContext& ctx) {
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_with(Value::boolean(true));
   if (slot->internal != InternalKind::query) return HostOutcome::ok_with(Value::boolean(false));
-  std::vector<ObjectId> found;
-  return HostOutcome::ok_with(Value::boolean(world->evaluate_query(slot->id, found) == 0));
+  world->purge_query(slot->id);
+  return HostOutcome::ok_with(
+      Value::boolean(world->query_is_empty(slot->id, script_clock(ctx, *world))));
 }
 
 // --------------------------------------------------------------------------
@@ -6916,8 +6920,31 @@ std::size_t stop_behaviors(script::Scheduler& scheduler, ScriptLibrary& library,
   return doomed.size();
 }
 
+GameTime script_clock(const script::CallContext& ctx, const World& world) noexcept {
+  return ctx.scheduler != nullptr ? ctx.scheduler->now() : world.time();
+}
+
+namespace {
+
+std::vector<ObjectId> receiver_objects_at(World& world, const script::Value& receiver,
+                                          bool accept_query, GameTime now);
+
+}  // namespace
+
+std::vector<ObjectId> receiver_objects(script::CallContext& ctx, World& world,
+                                      const script::Value& receiver, bool accept_query) {
+  return receiver_objects_at(world, receiver, accept_query, script_clock(ctx, world));
+}
+
 std::vector<ObjectId> receiver_objects(World& world, const script::Value& receiver,
                                       bool accept_query) {
+  return receiver_objects_at(world, receiver, accept_query, world.time());
+}
+
+namespace {
+
+std::vector<ObjectId> receiver_objects_at(World& world, const script::Value& receiver,
+                                          bool accept_query, GameTime now) {
   std::vector<ObjectId> ids;
   if (is_objlist(receiver)) {
     const std::span<const ObjectId> items = objlist_pool_of(world).items(objlist_of(receiver));
@@ -6931,12 +6958,16 @@ std::vector<ObjectId> receiver_objects(World& world, const script::Value& receiv
   const WorldObject* slot = object_of(world, receiver);
   if (slot == nullptr) return ids;
   if (slot->internal == InternalKind::query) {
-    if (accept_query) world.evaluate_query(slot->id, ids);
+    // The `Query` registrations' opening pair: purge, then the list accessor,
+    // which refreshes only when due (`World::read_query`).
+    if (accept_query) world.read_query(slot->id, now, ids);
     return ids;
   }
   ids.push_back(slot->id);
   return ids;
 }
+
+}  // namespace
 
 void install_deferred_erase(script::Scheduler& scheduler) noexcept {
   scheduler.set_step_hook([](void* user, script::Scheduler& sched, script::ScriptId) {

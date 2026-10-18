@@ -57,7 +57,7 @@
 0x00425250	verified	Settlement::IsEnemy: row idPlayer-1, column owner, bit 0 clear; the original has no range check (out of range answers false here)
 0x004252c0	verified	Settlement::IsOwn: owner id == idPlayer-1
 0x004251e0	verified	Settlement::IsAlly: row idPlayer-1, column owner, bit 0 set
-0x005756b0	partial	EnemyObjs: 1..16, one class by registry lookup, unknown class -> invalid handle (fixed); the factory 0x004fe990 interns (same player/type/class string returns the existing query) where this mints one per call (query-lifetime design); query evaluation is the query batch's
+0x005756b0	partial	EnemyObjs: 1..16, one class by registry lookup, unknown class -> invalid handle (fixed); interned on (player, type, class) as 0x004fe990 does, 4000 ms cache, stale Contains/IsEmpty live, swept when unreachable (FIXED, query-model round). Left: bit 26 of [obj+0x2c] refuses an object for type 2 (0x004f8b16), not modelled
 0x00575ab0	partial	FriendlyObjs: type 1, as EnemyObjs
 0x005758b0	partial	ControllableObjs: type 3, as EnemyObjs
 0x005dea90	partial	GetPlayerUnits(player, class): FIXED -- the squads' members by 0x005de750's three arms (Hero heir: each squad's hero front member; BaseMage heir: heirs in squads a mage or hero leads; else every heir); test get_player_units_by_class_takes_the_three_arms; gap: the ClassCount tally gate 0x004441e0 is taken as 'some member descends from the class', which differs for members the AI never registered (bit 0x800000 of [unit+0x194])

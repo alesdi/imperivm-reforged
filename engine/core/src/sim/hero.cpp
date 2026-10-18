@@ -276,7 +276,27 @@ void HeroSystem::forget(World& world, ObjectId id) {
   squads_.prune_empty();
 }
 
+namespace {
+
+/// Where `Hero::army`'s aliased handle points: the hero's own army
+/// (`[hero+0x1cc]`, `HeroRecord::army`), or null for an object that is not a
+/// hero, which the pool reads as an empty list. Resolved through the system
+/// on every access, since `heroes_` is a vector that grows.
+std::vector<ObjectId>* resolve_hero_army(void* user, ObjectId owner) {
+  World* world = static_cast<World*>(user);
+  if (world == nullptr) return nullptr;
+  HeroSystem* heroes = hero_system_of(*world);
+  if (heroes == nullptr) return nullptr;
+  HeroRecord* record = heroes->hero(owner);
+  return record == nullptr ? nullptr : &record->army;
+}
+
+}  // namespace
+
 void HeroSystem::start(World& world) {
+  // The seam `Hero::army` needs (sim/objlist.cpp's `m_army`), installed here
+  // for `EconomySystem::start`'s reason: the pool must not learn what a hero is.
+  objlist_pool_of(world).set_army_resolver(&resolve_hero_army, &world);
   // Adopt whatever the world was populated with: heroes first, so that a unit
   // registered afterwards can already find its hero's squad.
   for (const WorldObject& slot : world.objects()) {
