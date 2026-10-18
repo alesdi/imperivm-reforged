@@ -497,7 +497,7 @@ HostOutcome fn_area_objs(CallContext& ctx) {
                              ? objs_in_circle(shape->centre(), shape->radius, filter)
                              : objs_in_rect(shape->left, shape->top, shape->right,
                                             shape->bottom, filter);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ClassPlayerAreaObjs("class", player, "area")`. 274 sites.
@@ -539,7 +539,7 @@ HostOutcome fn_class_player_area_objs(CallContext& ctx) {
           ? class_player_area(filter, player, shape->centre(), shape->radius)
           : class_player_area_rect(filter, player, shape->left, shape->top, shape->right,
                                    shape->bottom);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// The number of `define` calls `register_area_host` makes. Kept next to the

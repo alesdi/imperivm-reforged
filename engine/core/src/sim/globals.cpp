@@ -203,27 +203,14 @@ namespace {
 
 /// The world's query object over `group`, minting one only if there is none.
 ///
-/// `Group("X")` mints a fresh query object on every call and that is right for
-/// a call: the original mints one there too. A *global* is read once per
-/// mention -- `while (Q_Army.count != 0)` reads it every turn -- and minting
-/// per read would spend an object handle per read, which is unbounded growth
-/// in the hashed slot table and shifts every later allocation, i.e. a desync.
-/// The original does not have the problem because its prologue mints one
-/// object per group per script *start* (`0x005bc8ee`).
-///
-/// Reusing one is safe because a query object's spec is immutable in practice:
-/// nothing in this engine but a test calls `World::mutable_query_spec`, and no
-/// host entry point rewrites a spec. The scan is over `World::objects()`,
-/// which is ascending id order and holds only live slots, so the object chosen
-/// is a function of world state alone and identical on every peer.
+/// `Group("X")` answers the group's own handle (0x005765a0 interns the name in
+/// the map at 0x009bdac8 and creates the group on a miss), so a *global* naming
+/// a group and a `Group` call naming it answer the same object -- which is
+/// `World::intern_query`, and a group is never collected. Minting per read
+/// would spend an object handle per read, unbounded growth in the hashed slot
+/// table and a shift in every later allocation.
 [[nodiscard]] ObjectId group_query_object(World& world, std::int32_t group) {
-  const QuerySpec want = group_query(group);
-  for (const WorldObject& slot : world.objects()) {
-    if (slot.internal != InternalKind::query) continue;
-    const QuerySpec* spec = world.query_spec(slot.id);
-    if (spec != nullptr && *spec == want) return slot.id;
-  }
-  return world.create_query(want);
+  return world.intern_query(group_query(group));
 }
 
 // --------------------------------------------------------------------------

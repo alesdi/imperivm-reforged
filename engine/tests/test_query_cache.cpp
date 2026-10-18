@@ -310,3 +310,67 @@ TEST(a_saved_world_keeps_each_querys_cache) {
   CHECK(restored.query_next_refresh(circle, 500) == 1300);
   CHECK(read(restored, circle, 500) == Ids{a});
 }
+
+// --------------------------------------------------------------------------
+// interning and the reference count
+// --------------------------------------------------------------------------
+
+TEST(equal_query_constructions_answer_one_object_and_share_its_cache) {
+  World world;
+  const ObjectId a = unit_at(world, pt(100, 100));
+  // 0x004ff860 scans the circle pool for (x, y, r, class) before it allocates.
+  const ObjectId first = world.intern_query(objs_in_circle(pt(100, 100), 500, ClassFilter{}));
+  const ObjectId again = world.intern_query(objs_in_circle(pt(100, 100), 500, ClassFilter{}));
+  const ObjectId wider = world.intern_query(objs_in_circle(pt(100, 100), 600, ClassFilter{}));
+  CHECK(first == again);
+  CHECK(first != wider);
+  CHECK(read(world, first, 0) == Ids{a});
+  const ObjectId b = unit_at(world, pt(120, 100));
+  // One object, so one cache: the second construction reads the first's list.
+  CHECK(read(world, again, 500) == Ids{a});
+  (void)b;
+  // Gone, the definition makes a fresh object, which refreshes on first read.
+  REQUIRE(world.destroy_query(first));
+  const ObjectId fresh = world.intern_query(objs_in_circle(pt(100, 100), 500, ClassFilter{}));
+  CHECK(fresh != first);
+  CHECK(read(world, fresh, 500).size() == 2);
+}
+
+TEST(a_script_query_nothing_reaches_is_destroyed_and_its_operands_live_through_it) {
+  World world;
+  const ObjectId left = world.intern_query(objs_in_circle(pt(0, 0), 100, ClassFilter{}));
+  const ObjectId right = world.intern_query(objs_in_circle(pt(500, 0), 100, ClassFilter{}));
+  const ObjectId both = world.intern_query(set_op(SetOp::set_union, left, right));
+  const ObjectId loose = world.intern_query(objs_in_circle(pt(900, 0), 100, ClassFilter{}));
+  const ObjectId mine = world.create_query(objs_in_circle(pt(900, 900), 100, ClassFilter{}));
+  const ObjectId group = world.intern_query(group_query(world.group_index("Army")));
+
+  // A variable holds the union; the set operation holds a reference on each
+  // operand (0x004fb1b0); nothing holds `loose`.
+  const std::vector<ObjectId> roots{both};
+  CHECK(world.collect_queries(roots) == 1);
+  CHECK(world.query_spec(loose) == nullptr);
+  CHECK(world.query_spec(both) != nullptr);
+  CHECK(world.query_spec(left) != nullptr);
+  CHECK(world.query_spec(right) != nullptr);
+  // The embedder's query and the group are nobody's to collect.
+  CHECK(world.query_spec(mine) != nullptr);
+  CHECK(world.query_spec(group) != nullptr);
+
+  CHECK(world.collect_queries({}) == 3);
+  CHECK(world.query_spec(left) == nullptr);
+  CHECK(world.query_spec(mine) != nullptr);
+  CHECK(world.query_spec(group) != nullptr);
+}
+
+TEST(the_interning_pool_survives_a_save) {
+  World world;
+  const ObjectId q = world.intern_query(objs_in_circle(pt(0, 0), 100, ClassFilter{}));
+  std::vector<std::byte> bytes;
+  world.serialize(bytes);
+  World restored;
+  REQUIRE(restored.deserialize(bytes).ok());
+  CHECK(restored.intern_query(objs_in_circle(pt(0, 0), 100, ClassFilter{})) == q);
+  // And it is still the scripts', so still collectable.
+  CHECK(restored.collect_queries({}) == 1);
+}

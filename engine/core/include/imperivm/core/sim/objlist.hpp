@@ -380,8 +380,23 @@ void install_objlist_teardown(script::Scheduler& scheduler) noexcept;
 /// in index order, and a handle in a suspended script's local is world state.
 std::size_t sweep_objlists(const script::Scheduler& scheduler, ObjListPool& pool);
 
+/// Destroy every query a script made (`World::intern_query`) that no live
+/// coroutine can still name. Returns how many.
+///
+/// `gbr.exe` counts references to a query (`[query+0x48]`): one per value on
+/// the script stack, one per variable, one per set-operation operand
+/// (docs/formats/query-model.md), and deletes it at zero. This language has no
+/// destructor and the VM no copy hook, so -- as for `ObjList` -- the count is
+/// arrived at from the other side: a reachability sweep at the end of every
+/// pass over the same roots `sweep_objlists` reads, with a query's operands
+/// reached through it (`World::collect_queries`). The difference is when: the
+/// original deletes a temporary the moment its member call releases it, this
+/// at the end of the pass, so a second equal call later in the same pass finds
+/// the old object and its cache where the original would make a fresh one.
+std::size_t sweep_queries(const script::Scheduler& scheduler, World& world);
+
 /// Install both halves of the lifetime policy on `scheduler`: the teardown hook
-/// above, and `sweep_objlists` at the end of every pass.
+/// above, and `sweep_objlists` and `sweep_queries` at the end of every pass.
 ///
 /// The one call an embedder needs. Without it the pool grows for the life of
 /// the match.

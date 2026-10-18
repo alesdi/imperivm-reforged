@@ -1414,12 +1414,38 @@ std::size_t sweep_objlists(const script::Scheduler& scheduler, ObjListPool& pool
   return pool.release_unmarked(keep);
 }
 
+std::size_t sweep_queries(const script::Scheduler& scheduler, World& world) {
+  // The roots are the query handles a live coroutine holds, in the same three
+  // places `sweep_objlists` marks. A query handle travels as a `Query` value,
+  // and an `Obj` value can carry one too (`object_of` accepts either tag).
+  std::vector<ObjectId> roots;
+  const auto mark = [&roots, &world](const script::Value& value) {
+    if (!value.is_object()) return;
+    const script::ObjectRef ref = value.as_object();
+    if (ref.type != kTypeQuery && ref.type != kTypeObj) return;
+    const auto id = static_cast<ObjectId>(ref.id);
+    if (world.query_spec(id) != nullptr) roots.push_back(id);
+  };
+  for (const script::ScriptRecord& record : scheduler.scripts()) {
+    if (record.dead) continue;
+    for (const script::Frame& frame : record.execution.frames) {
+      for (const script::Value& value : frame.locals) mark(value);
+      for (const script::Value& value : frame.stack) mark(value);
+    }
+    mark(record.execution.result);
+  }
+  return world.collect_queries(roots);
+}
+
 void install_objlist_lifetime(script::Scheduler& scheduler) noexcept {
   install_objlist_teardown(scheduler);
   scheduler.set_pass_hook([](void* user, const script::Scheduler& sched) {
     auto* context = static_cast<HostContext*>(user);
     if (context == nullptr || context->world == nullptr) return;
     (void)sweep_objlists(sched, objlist_pool_of(*context->world));
+    // And the scripts' queries, by the same reachability: the original's
+    // reference count (`[query+0x48]`) brought to zero, from the other side.
+    (void)sweep_queries(sched, *context->world);
   });
 }
 

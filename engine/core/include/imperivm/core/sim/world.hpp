@@ -42,6 +42,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <span>
 #include <string>
@@ -1306,8 +1307,35 @@ class World {
 
   [[nodiscard]] const QuerySpec* query_spec(ObjectId id) const noexcept;
   [[nodiscard]] QuerySpec* mutable_query_spec(ObjectId id) noexcept;
-  /// Query objects live and die like everything else; this is `despawn`.
-  bool destroy_query(ObjectId id) { return despawn(id); }
+  /// Query objects live and die like everything else; this is `despawn`, and
+  /// the query leaves the interning pool with it.
+  bool destroy_query(ObjectId id);
+
+  /// What a constructor entry point answers: the **existing** live query with
+  /// this definition, or a new one when there is none.
+  ///
+  /// `gbr.exe` interns every query kind -- each constructor scans a per-kind
+  /// pool for its key before it allocates (0x004fe490 for a set operation,
+  /// 0x004fee10 for sight, 0x004ff860 for a circle, ...; the table is in
+  /// docs/formats/query-model.md) -- so two equal calls answer one handle and
+  /// share one cache. The key here is the whole `QuerySpec`, which is each
+  /// kind's key with its class *string* resolved: `"Unit"` and `"Unit,"` are
+  /// two objects there and one here. Among equal live queries the oldest wins.
+  ///
+  /// A query made here is the scripts': `collect_queries` destroys it once no
+  /// script can name it, the reference count's end arrived at from the other
+  /// side. One made by `create_query` is the embedder's and is never collected.
+  ObjectId intern_query(const QuerySpec& spec);
+
+  /// Destroy every script-made query (`intern_query`) that nothing reaches,
+  /// and answer how many. `roots` are the query handles the scripts hold; a
+  /// query reaches its set-operation operands (0x004fb1b0 takes a reference on
+  /// each), and an embedder's query is a root of its own. A group and the
+  /// party are never collected: a group's query is the group (0x005765a0
+  /// answers the group's own handle) and the party query is a singleton the
+  /// session holds a reference to (0x004fa6e0). Destruction is in ascending
+  /// handle order, so two peers destroy the same objects alike.
+  std::size_t collect_queries(std::span<const ObjectId> roots);
 
   /// Evaluate a query into `out`, which is cleared first, **afresh and without
   /// touching its cache**. Returns the count. Ids come out in ascending order,
@@ -1376,6 +1404,9 @@ class World {
     /// original sets the creation time, and every read comes at or after it,
     /// so the first read always refreshes either way.
     GameTime next_refresh = kNeverRefreshed;
+    /// Made by `intern_query` for a script, and so `collect_queries`' to
+    /// destroy once unreachable.
+    bool collectable = false;
     static constexpr GameTime kNeverRefreshed = std::numeric_limits<GameTime>::min();
   };
   [[nodiscard]] const QueryCache* query_cache(ObjectId id) const noexcept;
@@ -1833,6 +1864,10 @@ class World {
   std::vector<QuerySpec> queries_;
   /// Each query's cache, indexed as `queries_` is. Saved, never hashed.
   std::vector<QueryCache> query_caches_;
+  /// The interning pool: live query handles by `query_key` of their spec.
+  /// Derived from the objects and `queries_`, never saved, rebuilt on load.
+  std::map<std::uint64_t, std::vector<ObjectId>> query_pool_;
+  void rebuild_query_pool();
 
   ObjectId deferred_erase_ = kNoObject;
   const ClassGraph* classes_ = nullptr;

@@ -1,9 +1,10 @@
 # The query model
 
 **Status:** read from `gbr.exe` for the host audit's eleventh round; the engine models the
-cache, the refresh periods, the read protocol, the set-operation refresh and the waits'
-cadence (`engine/core/src/sim/world.cpp`, `sim/wait.cpp`). Interning, the reference count and
-the live aliases are described here and their state in the engine is given in each section.
+cache, the refresh periods, the read protocol, the set-operation refresh, the waits' cadence,
+interning and (by a reachability sweep) the reference count (`engine/core/src/sim/world.cpp`,
+`sim/wait.cpp`, `sim/objlist.cpp`). Where a section's model is only partly the engine's, the
+section says so.
 **Not a file format.** Nothing here is on disk; it is the runtime model behind the `Query`
 values the shipped scripts hold, kept beside the host API ([`vs-host-api.md`](vs-host-api.md))
 because every query entry point answers through it.
@@ -140,9 +141,11 @@ matches; only a miss allocates (and a new object is appended to the pool and reg
 | group (0x005765a0) | the name map at 0x009bdac8 | the name; a miss creates the group |
 | party (0x004fa6e0) | the singleton at 0x00996a0c | |
 
-Class strings are compared as strings. **The engine does not intern yet**: every call mints a
-fresh object, which is evaluated on its first read; `globals.cpp` reuses one object per group
-for a group *global*.
+Class strings are compared as strings. The engine interns every constructor entry point
+through `World::intern_query`, keyed by the whole `QuerySpec` -- each kind's key with the class
+string resolved to classes, so two spellings of one filter are one object here and two there;
+an area is keyed by its geometry rather than its pointer. A group global and `Group(name)`
+answer the same object.
 
 ## The reference count
 
@@ -162,9 +165,13 @@ for a group *global*.
 
 So a query used as a temporary -- `EnemyObjs(p, "Unit").count` -- is made, read once and
 destroyed, and the next call makes a fresh one that refreshes on its first read; a query held in
-a variable across a loop keeps its cache. **The engine has no reference count yet**: its query
-objects are never destroyed, which, with no interning, gives a temporary the same fresh first
-read the original gives it.
+a variable across a loop keeps its cache. The engine's VM has no copy or destroy hook, so the
+count is arrived at from the other side, as `ObjList`'s is: at the end of every scheduler pass,
+`sweep_queries` destroys each script-made query that no live coroutine's locals, stack or result
+names and no surviving set operation has as an operand. The difference is the moment: a
+temporary lives to the end of the pass rather than to the end of its member call, so a second
+equal call later in the same pass finds the old object and its cache. A group and the party are
+never collected, and neither is a query the embedder made with `create_query`.
 
 ## Live aliases
 

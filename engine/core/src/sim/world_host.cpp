@@ -353,7 +353,7 @@ HostOutcome fn_objs_in_sight(CallContext& ctx) {
   if (!class_arg_resolves(*world, ctx.arg(1), true)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_sight(observer->id, sight_query_radius(*observer, -1),
                                        filter_arg(*world, ctx.arg(1)), kVisible);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ObjsInCircle(point, radius, "class")` (0x005775e0).
@@ -372,7 +372,7 @@ HostOutcome fn_objs_in_circle(CallContext& ctx) {
   if (!class_arg_resolves(*world, ctx.arg(2), true)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_circle(unpack_point(ctx.arg(0)), ctx.arg(1).as_integer(),
                                         filter_arg(*world, ctx.arg(2)));
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ObjsInRange(object, "class", radius)` (0x00576130) -- **a sight query with
@@ -392,7 +392,7 @@ HostOutcome fn_objs_in_range(CallContext& ctx) {
   if (!class_arg_resolves(*world, ctx.arg(1), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_range(anchor->id, sight_query_radius(*anchor, ctx.arg(2).as_integer()),
                                        filter_arg(*world, ctx.arg(1)));
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ClassPlayerObjs("class", player)` (0x005754b0).
@@ -415,7 +415,7 @@ HostOutcome fn_class_player_objs(CallContext& ctx) {
   if (player == kNoPlayer) return HostOutcome::ok_with(invalid_object());
   if (!class_arg_resolves(*world, ctx.arg(0), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = class_player_area(filter_arg(*world, ctx.arg(0)), player, Point{}, 0);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `UnitsInSettlement`, `UnitsAroundSettlement` and `UnitsGuardingSettlement`.
@@ -471,7 +471,7 @@ HostOutcome fn_units_in_settlement(CallContext& ctx) {
 
   if (!class_arg_resolves(*world, ctx.arg(1), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = units_in_settlement(settlement, filter_arg(*world, ctx.arg(1)), kScope);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `Group(n)` (0x005765a0).
@@ -503,10 +503,10 @@ HostOutcome fn_group(CallContext& ctx) {
     // by name in first-mention order, which is deterministic because script
     // execution order is. See `docs/formats/map.md`.
     return HostOutcome::ok_with(query_value(
-        world->create_query(group_query(world->group_index(ctx.arg(0).as_string())))));
+        world->intern_query(group_query(world->group_index(ctx.arg(0).as_string())))));
   }
   if (!ctx.arg(0).is_integer()) return HostOutcome::failed("Group: expected an integer");
-  return HostOutcome::ok_with(query_value(world->create_query(group_query(ctx.arg(0).as_integer()))));
+  return HostOutcome::ok_with(query_value(world->intern_query(group_query(ctx.arg(0).as_integer()))));
 }
 
 /// `GetInnState(inn)` / `SetInnState(inn, state)` -- 3 sites and 1, and the
@@ -1553,7 +1553,7 @@ HostOutcome fn_set_op(CallContext& ctx) {
   const WorldObject* rhs = object_of(*world, ctx.arg(1));
   if (lhs == nullptr || rhs == nullptr) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = set_op(kOp, lhs->id, rhs->id);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `Count(player, "class")` -- how many objects of a class a player owns.

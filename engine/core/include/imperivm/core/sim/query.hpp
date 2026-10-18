@@ -136,6 +136,11 @@ enum class QueryKind : std::uint8_t {
 /// in mode 0, against mode 1 for a refresh) and a one-object test.
 [[nodiscard]] bool query_answers_live_when_stale(QueryKind kind) noexcept;
 
+struct QuerySpec;
+/// A digest of every field of a spec, for the interning pool's lookup. Equal
+/// specs digest alike; the pool still compares the specs themselves.
+[[nodiscard]] std::uint64_t query_key(const QuerySpec& spec) noexcept;
+
 /// `CVXSetOpQuery.operation`.
 ///
 /// **Read from the bodies.** Each of the three entry points ends in one call

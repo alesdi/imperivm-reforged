@@ -63,6 +63,40 @@ bool query_answers_live_when_stale(QueryKind kind) noexcept {
   return false;
 }
 
+std::uint64_t query_key(const QuerySpec& spec) noexcept {
+  // FNV-1a over the fields, one integer at a time. Only a lookup key: the
+  // pool compares whole specs, so a collision costs a comparison, not a bug.
+  std::uint64_t h = 0xcbf29ce484222325ull;
+  const auto mix = [&h](std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+      h ^= (v >> (i * 8)) & 0xffu;
+      h *= 0x100000001b3ull;
+    }
+  };
+  mix(static_cast<std::uint64_t>(spec.kind));
+  mix(spec.subject);
+  mix(static_cast<std::uint32_t>(spec.center.x));
+  mix(static_cast<std::uint32_t>(spec.center.y));
+  mix(static_cast<std::uint32_t>(spec.radius));
+  mix(static_cast<std::uint32_t>(spec.left));
+  mix(static_cast<std::uint32_t>(spec.top));
+  mix(static_cast<std::uint32_t>(spec.right));
+  mix(static_cast<std::uint32_t>(spec.bottom));
+  mix(spec.area_is_rect ? 1u : 0u);
+  mix(static_cast<std::uint64_t>(spec.settlement_scope));
+  mix(spec.player);
+  mix(static_cast<std::uint32_t>(spec.flags_type));
+  mix(static_cast<std::uint32_t>(spec.group));
+  mix(spec.visible_only ? 1u : 0u);
+  mix(spec.lhs);
+  mix(spec.rhs);
+  mix(static_cast<std::uint64_t>(spec.op));
+  mix(spec.filter.match_all ? 1u : 0u);
+  mix(spec.filter.count);
+  for (std::uint8_t i = 0; i < spec.filter.count; ++i) mix(spec.filter.classes[i]);
+  return h;
+}
+
 ClassFilter ClassFilter::of(ClassIndex index) {
   ClassFilter filter;
   if (index == kNoClass) return filter;

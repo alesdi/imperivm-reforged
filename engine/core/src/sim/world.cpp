@@ -1353,7 +1353,83 @@ ObjectId World::create_query(const QuerySpec& spec) {
   const ObjectId id = spawn_internal(InternalKind::query);
   WorldObject* slot = find(id);
   if (slot != nullptr) slot->query = index;
+  query_pool_[query_key(spec)].push_back(id);
   return id;
+}
+
+bool World::destroy_query(ObjectId id) {
+  if (const QuerySpec* spec = query_spec(id)) {
+    const auto it = query_pool_.find(query_key(*spec));
+    if (it != query_pool_.end()) {
+      std::vector<ObjectId>& ids = it->second;
+      ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
+      if (ids.empty()) query_pool_.erase(it);
+    }
+  }
+  return despawn(id);
+}
+
+ObjectId World::intern_query(const QuerySpec& spec) {
+  // The pool's bucket is kept in creation order, which is ascending handle
+  // order, so the first equal live spec is the oldest.
+  const auto it = query_pool_.find(query_key(spec));
+  if (it != query_pool_.end()) {
+    for (const ObjectId id : it->second) {
+      const QuerySpec* existing = query_spec(id);
+      if (existing != nullptr && *existing == spec) return id;
+    }
+  }
+  const ObjectId id = create_query(spec);
+  if (QueryCache* cache = mutable_query_cache(id)) cache->collectable = true;
+  return id;
+}
+
+void World::rebuild_query_pool() {
+  query_pool_.clear();
+  for (const WorldObject& slot : objects_) {  // ascending ids
+    if (slot.internal != InternalKind::query || slot.query >= queries_.size()) continue;
+    query_pool_[query_key(queries_[slot.query])].push_back(slot.id);
+  }
+}
+
+std::size_t World::collect_queries(std::span<const ObjectId> roots) {
+  // Mark: what the scripts hold, every query nobody may collect, and -- to a
+  // fixed point -- the operands of whatever is marked.
+  std::vector<ObjectId> marked;
+  std::vector<ObjectId> work;
+  const auto mark = [&](ObjectId id) {
+    if (query_spec(id) == nullptr) return;
+    if (std::find(marked.begin(), marked.end(), id) != marked.end()) return;
+    marked.push_back(id);
+    work.push_back(id);
+  };
+  for (const ObjectId id : roots) mark(id);
+  for (const WorldObject& slot : objects_) {
+    if (slot.internal != InternalKind::query || slot.query >= queries_.size()) continue;
+    const QuerySpec& spec = queries_[slot.query];
+    const bool collectable =
+        slot.query < query_caches_.size() && query_caches_[slot.query].collectable;
+    if (!collectable || spec.kind == QueryKind::group || spec.kind == QueryKind::party) {
+      mark(slot.id);
+    }
+  }
+  while (!work.empty()) {
+    const ObjectId id = work.back();
+    work.pop_back();
+    const QuerySpec* spec = query_spec(id);
+    if (spec == nullptr || spec->kind != QueryKind::set_op) continue;
+    mark(spec->lhs);
+    mark(spec->rhs);
+  }
+  std::sort(marked.begin(), marked.end());
+
+  std::vector<ObjectId> doomed;
+  for (const WorldObject& slot : objects_) {
+    if (slot.internal != InternalKind::query) continue;
+    if (!std::binary_search(marked.begin(), marked.end(), slot.id)) doomed.push_back(slot.id);
+  }
+  for (const ObjectId id : doomed) (void)destroy_query(id);
+  return doomed.size();
 }
 
 const QuerySpec* World::query_spec(ObjectId id) const noexcept {
@@ -2722,6 +2798,7 @@ void World::serialize(std::vector<std::byte>& out) const {
   // that was saved for up to four seconds.
   for (const QueryCache& cache : query_caches_) {
     bytes::put_i64(out, cache.next_refresh);
+    bytes::put_u8(out, cache.collectable ? 1u : 0u);
     bytes::put_u32(out, static_cast<std::uint32_t>(cache.members.size()));
     for (const ObjectId member : cache.members) bytes::put_u32(out, member);
   }
@@ -2969,9 +3046,12 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
   std::vector<QueryCache> caches(queries.size());
   for (QueryCache& cache : caches) {
     std::uint32_t members = 0;
-    if (!bytes::get_i64(reader, cache.next_refresh) || !reader.u32(members)) {
+    std::uint8_t collectable = 0;
+    if (!bytes::get_i64(reader, cache.next_refresh) || !reader.u8(collectable) ||
+        !reader.u32(members)) {
       return FormatError::truncated;
     }
+    cache.collectable = collectable != 0;
     // Bounded by what is left to read rather than trusted: a corrupt count
     // must not reserve gigabytes.
     for (std::uint32_t i = 0; i < members; ++i) {
@@ -3166,6 +3246,7 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
   gate_lines_.forget();  // derived too: learnt again from the gates restored
   queries_ = std::move(queries);
   query_caches_ = std::move(caches);
+  rebuild_query_pool();  // derived: which live query each definition names
   players_ = std::move(table);
   groups_ = std::move(groups);
   rects_ = std::move(rects);
