@@ -574,11 +574,11 @@ TEST(mis_zero_damage_skips_candidates_that_deal_no_damage) {
   armed.require_armed = true;
   CHECK(combat.best_target(1, armed) == 3);
 
-  // Measured against `Obj::attack`, which is `damage + attack_bonus`: a
-  // peasant a hero has buffed into something that can hit back is a target.
-  combat.find(2)->attack_bonus = 5;
+  // Measured against `Obj::attack`, the stored `[obj+0xdc]`: a peasant a
+  // rebuild has buffed into something that can hit back is a target.
+  combat.find(2)->stats.attack += 5;
   CHECK(combat.best_target(1, armed) == 2);
-  combat.find(2)->attack_bonus = 0;
+  combat.find(2)->stats.attack -= 5;
 
   // Nothing armed in sight is no target at all, not the nearest harmless one.
   combat.remove(3);
@@ -3017,6 +3017,9 @@ TEST(combat_heal_stamina_adds_clamps_refuses_negatives_and_fans_out) {
   CombatProfile profile = melee(16, 12, 200);
   profile.max_stamina = 10;
   combat.set_profile(kHastatus, profile);
+  // The ceiling is the stored `[obj+0xcc]`, which the enrolment filled from
+  // the old profile; a rebuild brings it up to the new one.
+  for (const ObjectId id : {ObjectId{1}, ObjectId{2}, ObjectId{3}}) combat.recalc(id);
 
   // Additive, not a target value.
   CHECK(call("HealStamina", 1, {one, Value::integer(3)}).status ==
@@ -3181,12 +3184,16 @@ TEST(combat_enemies_in_sight_needs_an_armed_living_enemy) {
 
   // A one-damage enemy. `melee(1, ...)` is armed by the target sweep's rule and
   // not by this one.
+  // The damage read is the stored `[obj+0xdc]`, so each change of numbers is
+  // followed by the rebuild that would carry it there.
   b.combat.find(foe)->class_index = b.villager_class;
+  b.combat.recalc(foe);
   CHECK(!b.enemies_in_sight(looker));
 
   // Two damage is enough.
   CombatProfile feeble = melee(2, 0, 40);
   b.combat.set_profile(b.villager_class, feeble);
+  b.combat.recalc(foe);
   CHECK(b.enemies_in_sight(looker));
 }
 
@@ -3669,17 +3676,24 @@ TEST(set_experience_modifier_takes_a_one_based_player_then_the_percentage) {
   CHECK(after_junk == in_range);
 }
 
-/// `u.RecalcBonuses()` is a no-op, and the assertion is that it *runs* and
-/// changes nothing -- this engine writes the modifiers at the source rather
-/// than caching them, so there is nothing to rebuild.
-TEST(recalc_bonuses_runs_and_rebuilds_nothing) {
+/// `u.RecalcBonuses()` rebuilds the stored stats (0x005e0380 -> `vtbl+0xc4`,
+/// 0x005d9df0): whatever the fields held, they are the class's numbers plus
+/// the `AddBonus` record afterwards, and health is rescaled by the new
+/// maximum over the old. Without a rebuild the stale numbers would stand.
+TEST(recalc_bonuses_rebuilds_the_stored_stats_from_the_class_and_the_record) {
   World world;
   CombatSystem combat = make_system();
   REQUIRE(world.add_system(&combat));
-  combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
+  combat.add(unit(1, kHastatus, 0, 100, Point{0, 0}));
   REQUIRE(combat.find(1) != nullptr);
-  combat.find(1)->attack_bonus = 7;
-  combat.find(1)->armour_bonus = 3;
+  // Enrolled from the class: 16 attack, 12 of each armour, 200 health, 17 range.
+  CHECK(combat.attack_of(*combat.find(1)) == 16);
+  CHECK(combat.range_of(*combat.find(1)) == 17);
+  // A stale field, and a record the rebuild has to add back.
+  combat.find(1)->stats.attack = 7;
+  combat.find(1)->stats.armour_slash = 3;
+  combat.find(1)->bonus.attack = 2;
+  combat.find(1)->bonus.max_health = 200;
 
   script::HostRegistry registry;
   script::declare_shipped_surface(registry);
@@ -3696,8 +3710,11 @@ TEST(recalc_bonuses_runs_and_rebuilds_nothing) {
   ctx.name = "RecalcBonuses";
   ctx.kind = script::CallKind::member;
   CHECK(registry.entry(index).fn(ctx).status == script::HostStatus::ok);
-  CHECK(combat.find(1)->attack_bonus == 7);
-  CHECK(combat.find(1)->armour_bonus == 3);
+  CHECK(combat.attack_of(*combat.find(1)) == 18);  // 16 + 2
+  CHECK(combat.armour_of(*combat.find(1), DamageType::slash) == 12);
+  CHECK(combat.max_health_of(*combat.find(1)) == 400);
+  // 100 of 200 is 200 of 400: the rescale, not a heal to full.
+  CHECK(combat.health(1) == 200);
 
   // And a receiver naming no unit runs too, rather than refusing.
   args[0] = script::Value::object(kTypeObj, 9999);
@@ -3890,34 +3907,35 @@ TEST(add_bonus_does_not_survive_a_mutate) {
   CHECK(combat.max_health_of(*combat.find(1)) == 200);
 }
 
-/// The maximum moves and the current health does not, which is what the
-/// original's rebuild does: it writes `[obj+0xc8]` and never touches
-/// `[obj+0xc0]`. So a bonus does not heal, and a *negative* one leaves a unit
-/// standing above its own maximum until something else clamps it.
-TEST(add_bonus_moves_the_maximum_and_not_the_health) {
+/// **The health follows the maximum.** The rebuild `AddBonus` ends in stores
+/// health as `health * new maximum / old maximum` (0x005da815, through the
+/// plain setter 0x005a7a00): a unit at full health stays at full health, one
+/// at half stays at half, and a lower maximum takes health away with it. It
+/// used to move the maximum alone and leave a unit standing over its cap.
+TEST(add_bonus_rescales_the_health_with_the_maximum) {
   CombatSystem combat = make_system();
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
   StatBonus put;
   put.max_health = 100;
   CHECK(combat.add_bonus(1, put));
-  CHECK(combat.find(1)->health == 200);
   CHECK(combat.max_health(1) == 300);
-  // ...and the raised maximum is what `Heal` now fills to.
-  CHECK(combat.heal(1, 1000) == 100);
+  CHECK(combat.find(1)->health == 300);  // 200 of 200 is 300 of 300
+  CHECK(combat.heal(1, 1000) == 0);      // already full
+
+  // Half health stays half.
+  combat.find(1)->health = 150;
+  StatBonus more;
+  more.max_health = 300;
+  CHECK(combat.add_bonus(1, more));
+  CHECK(combat.max_health(1) == 600);
   CHECK(combat.find(1)->health == 300);
 
+  // Down, and truncating: 300 * 50 / 600 is 25.
   StatBonus down;
-  down.max_health = -250;
+  down.max_health = -550;
   CHECK(combat.add_bonus(1, down));
   CHECK(combat.max_health(1) == 50);
-  CHECK(combat.find(1)->health == 300);  // left standing over its own maximum
-
-  // And the next `Heal` is what pulls it down, because `heal` clamps to the
-  // cap after adding rather than refusing when it is already above it. So a
-  // negative maximum does not cost health at the moment it lands; it costs it
-  // the first time anything heals the unit at all, by 250 for an offer of 10.
-  CHECK(combat.heal(1, 10) == -250);
-  CHECK(combat.find(1)->health == 50);
+  CHECK(combat.find(1)->health == 25);
 }
 
 /// The record reaches the blow, on both sides of it.

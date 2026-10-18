@@ -872,7 +872,6 @@ std::uint16_t object_power(const World& world, const CombatSystem* combat,
   if (combat == nullptr) return 1;
   const Combatant* unit = combat->find(slot.id);
   if (unit == nullptr) return 1;
-  const CombatProfile profile = combat->profile(unit->class_index);
 
   // Signed division truncating toward zero, which is what `cdq / and edx,3 /
   // sar 2` performs -- and it matters for nothing on shipped data, where a
@@ -887,12 +886,11 @@ std::uint16_t object_power(const World& world, const CombatSystem* combat,
   // owner's difficulty addend.
   const std::int64_t level_term =
       unit->base_effective_level() + combat->player_level_addend(unit->owner) + 13;
-  // `armour_bonus` -- what a hero's Team Defense puts on its army -- is
-  // deliberately *not* folded in here. Whether the original's skills reach
-  // `[obj+0xe4]` through the same rebuild the record does is a separate
-  // question this block does not open; only the record is added.
+  // The stored `[obj+0xe4]`, which the rebuild fills with the record, the
+  // items, the Team and Epic skills and the formation alike
+  // (`docs/formats/unit-stats.md`).
   const std::int64_t attack_term = static_cast<std::int64_t>(combat->attack_of(*unit)) +
-                                   profile.armor_slash + unit->bonus.armour_slash;
+                                   combat->armour_of(*unit, DamageType::slash);
   const std::int64_t value = attack_term * level_term * health_term / 1000 + 1;
   return static_cast<std::uint16_t>(static_cast<std::uint64_t>(value) & 0xFFFFu);
 }

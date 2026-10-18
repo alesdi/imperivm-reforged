@@ -940,8 +940,9 @@ std::size_t start_victory_scripts(World& world, script::Scheduler& scheduler);
 std::size_t register_match_host(script::HostRegistry& registry);
 
 /// One object's worth to the power census: 0x004439d0's
-/// `(damage + attack_bonus + armor_slash) * (level + 13) * (maxhealth / 4 +
-/// health) / 1000 + 1`, truncated to 16 bits, with a ram worth exactly 1. See
+/// `(attack + armor_slash) * (level + 13) * (maxhealth / 4 +
+/// health) / 1000 + 1` over the stored `[obj+0xdc]`, `[obj+0xe4]` and
+/// `[obj+0xc8]`, truncated to 16 bits, with a ram worth exactly 1. See
 /// `MatchSystem::power_score`, whose census this is the per-object term of.
 /// Exported because `EvalGroup` sums the same valuation over a named group,
 /// and a second copy of the formula is how the two would drift.

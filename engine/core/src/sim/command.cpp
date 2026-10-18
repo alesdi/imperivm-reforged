@@ -2,6 +2,7 @@
 // See include/imperivm/core/sim/command.hpp.
 
 #include "imperivm/core/sim/command.hpp"
+#include "imperivm/core/sim/stats.hpp"
 
 #include "imperivm/core/sim/host_context.hpp"
 
@@ -630,7 +631,27 @@ void CommandSystem::advance(World& world, const Turn& turn) {
   }
   // Ascending id, which is spawn order. `service` never inserts a queue, so the
   // vector cannot move under this walk.
-  for (Entry& entry : queues_) service(world, entry, turn.time);
+  for (Entry& entry : queues_) {
+    service(world, entry, turn.time);
+    track_formation(world, entry);
+  }
+}
+
+void CommandSystem::track_formation(World& world, ObjectId id) {
+  const std::size_t at = lower_bound(id);
+  if (at < queues_.size() && queues_[at].id == id) track_formation(world, queues_[at]);
+}
+
+void CommandSystem::track_formation(World& world, Entry& entry) {
+  const Command* head = entry.queue.running();
+  const bool standing =
+      head != nullptr && head->started && head->verb == kStandPositionCommand;
+  if (standing == entry.standing) return;
+  entry.standing = standing;
+  // 0x005b4f20: the command advance rebuilds a unit whose command named
+  // `stand_position` as it ends, and again as one starts, which is when the
+  // party formation's bonus comes and goes (`docs/formats/unit-stats.md`).
+  recalc_bonuses(world, entry.id);
 }
 
 namespace {
@@ -840,6 +861,7 @@ bool CommandSystem::remove_at(World& world, ObjectId id, std::size_t index) {
     retire(q->entries[at]);
   }
   q->entries.erase(q->entries.begin() + static_cast<std::ptrdiff_t>(at));
+  if (at == 0) track_formation(world, id);
   return true;
 }
 
@@ -907,6 +929,7 @@ std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_
       }
     }
   }
+  track_formation(world, id);
   return issued;
 }
 
@@ -1169,6 +1192,7 @@ bool CommandSystem::issue_research(World& world, ObjectId id, Command command) {
   runner.started = false;
   runner.script = script::kNoScript;
   queue_ref.entries.insert(queue_ref.entries.begin(), std::move(command));
+  track_formation(world, id);
   return true;
 }
 
@@ -2197,7 +2221,8 @@ HostOutcome goto_attack_impl(CallContext& ctx) {
     const Combatant* attacker = combat->find(self.id);
     if (attacker != nullptr) {
       const CombatProfile profile = combat->profile(attacker->class_index);
-      order.range = profile.range + profile.radius;
+      // The stored range, as `in_attack_range` measures it (0x005a7800).
+      order.range = combat->range_of(*attacker) + profile.radius;
       order.min_range = profile.min_range;
       const Combatant* defender = target == kNoObject ? nullptr : combat->find(target);
       if (defender != nullptr) {

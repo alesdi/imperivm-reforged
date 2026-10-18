@@ -6537,6 +6537,13 @@ std::int32_t object_max_health(World& world, const WorldObject& slot) {
   return max_health_of_object(world, slot);
 }
 
+bool object_has_special(World& world, ObjectId id, std::int32_t index) {
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr || index < 0 || index >= kUnitSpecialsCount) return false;
+  if (index == kSpecialFreedom && slot->state.flags.is_hero) return true;
+  return class_has_special(world, *slot, index);
+}
+
 bool unit_has_freedom(World& world, ObjectId id) {
   const WorldObject* slot = world.find(id);
   if (slot == nullptr) return false;

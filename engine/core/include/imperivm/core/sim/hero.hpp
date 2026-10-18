@@ -260,6 +260,14 @@ struct HeroConstants {
   std::int32_t stamina_per_charge_level = 1;
   std::int32_t stamina_per_rush_level = 1;
 
+  // -- the stat rebuild's own two --------------------------------------
+  /// `ToughnessHealthIncrease` and `StatueOfAmonRaHealthIncrease`: maximum
+  /// health per level past the first, for a unit with the `Toughness` special
+  /// and for one whose owner has researched the Statue of Amon-Ra. Read by the
+  /// rebuild (0x005d9df0) and nothing else; see `sim/stats.hpp`.
+  std::int32_t toughness_health_increase = 5;
+  std::int32_t statue_of_amon_ra_health_increase = 5;
+
   /// The highest a skill goes: 10, written into the skill writer's clamp
   /// (0x0052def0) and the balance's ten per offered skill (0x0052da80) as a
   /// literal, not read from `CONST.INI`. The AI tactic scripts' goal levels
@@ -892,7 +900,7 @@ class HeroSystem final : public System {
   [[nodiscard]] std::size_t unit_slot(ObjectId id) const noexcept;
   [[nodiscard]] std::size_t hero_slot(ObjectId id) const noexcept;
   void apply_item_bonus(UnitModifiers& out, ObjectId owner) const;
-  void expire_effects(GameTime now);
+  void expire_effects(World& world, GameTime now);
   void run_egoism(World& world, GameTime from, GameTime to);
   void clear_dead(World& world);
   /// The detaches `on_death` and `on_erase` share.

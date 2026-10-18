@@ -327,7 +327,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (0x005d28c0) rather than kept beside it. A version-36 file holds progress
 /// within the level and the level as a second word; read as a total, every
 /// veteran would load at level 1.
-inline constexpr std::uint32_t kStateVectorVersion = 37;
+/// 38: a combatant carries its stored stats (`Combatant::stats`: maximum
+/// health and stamina, range, attack and both armours, `[obj+0xc8..0xe8]`),
+/// which the rebuild `recalc_bonuses` (0x005d9df0) writes, in place of the
+/// three modifier words `attack_bonus`, `armour_bonus` and `level_floor`
+/// nothing wrote. A version-37 file has no stats to load, and every unit
+/// would fight with zero attack until something rebuilt it.
+inline constexpr std::uint32_t kStateVectorVersion = 38;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

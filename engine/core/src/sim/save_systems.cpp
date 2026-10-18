@@ -789,9 +789,15 @@ void CombatSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, u.anim);
     bytes::put_i64(out, u.death_time);
     bytes::put_i64(out, u.next_action_time);
-    bytes::put_i32(out, u.attack_bonus);
-    bytes::put_i32(out, u.armour_bonus);
-    bytes::put_i32(out, u.level_floor);
+    // The stored stats: rebuilt only at the original's moments, so between
+    // two of them they are state of their own, and a load that rebuilt them
+    // instead would hand back numbers the game had not yet reached.
+    bytes::put_i32(out, u.stats.max_health);
+    bytes::put_i32(out, u.stats.max_stamina);
+    bytes::put_i32(out, u.stats.range);
+    bytes::put_i32(out, u.stats.attack);
+    bytes::put_i32(out, u.stats.armour_slash);
+    bytes::put_i32(out, u.stats.armour_pierce);
     bytes::put_i32(out, u.damage_multiplier_percent);
     // `Unit::AddBonus`'s record. Written rather than derived: nothing outside
     // the entry point produces it, so a load that dropped it would hand back a
@@ -878,8 +884,11 @@ Status CombatSystem::deserialize(std::span<const std::byte> data) {
         !reader.u32(u.unit_flags) || !get_action(reader, u.action) ||
         !bytes::get_i32(reader, u.anim) || !bytes::get_i64(reader, u.death_time) ||
         !bytes::get_i64(reader, u.next_action_time) ||
-        !bytes::get_i32(reader, u.attack_bonus) || !bytes::get_i32(reader, u.armour_bonus) ||
-        !bytes::get_i32(reader, u.level_floor) ||
+        !bytes::get_i32(reader, u.stats.max_health) ||
+        !bytes::get_i32(reader, u.stats.max_stamina) || !bytes::get_i32(reader, u.stats.range) ||
+        !bytes::get_i32(reader, u.stats.attack) ||
+        !bytes::get_i32(reader, u.stats.armour_slash) ||
+        !bytes::get_i32(reader, u.stats.armour_pierce) ||
         !bytes::get_i32(reader, u.damage_multiplier_percent) ||
         !bytes::get_i32(reader, u.bonus.attack) ||
         !bytes::get_i32(reader, u.bonus.armour_slash) ||

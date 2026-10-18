@@ -2,6 +2,7 @@
 #include "imperivm/core/sim/player_host.hpp"
 
 #include "imperivm/core/sim/squad.hpp"
+#include "imperivm/core/sim/stats.hpp"
 
 #include <algorithm>
 
@@ -376,6 +377,8 @@ bool HeroSystem::attach(World& world, ObjectId unit_id, ObjectId hero_id) {
   record->squad = leader->squad;
   leader->army.push_back(unit_id);
   squads_.join(leader->squad, unit_id);
+  // `AttachHero` (0x005ddf50) rebuilds the unit: its new leader's skills.
+  recalc_bonuses(world, unit_id);
   return true;
 }
 
@@ -390,6 +393,8 @@ bool HeroSystem::detach(World& world, ObjectId unit_id) {
   }
   record->hero = kNoObject;
   record->squad = kNoSquad;
+  // `DetachHero` (0x005db190) rebuilds it without them.
+  recalc_bonuses(world, unit_id);
   return true;
 }
 
@@ -500,6 +505,20 @@ bool HeroSystem::write_skill(World* world, ObjectId hero_id, HeroSkill which,
         }
       }
       slot->sight = sight;
+    }
+  }
+  // The rebuilds the writer makes: the whole party for the Team skills and
+  // Discipline, the hero alone for the Epic ones. Leadership waits for the
+  // hero's tick, which carries it through the army addend.
+  if (world != nullptr) {
+    switch (which) {
+      case HeroSkill::team_attack:
+      case HeroSkill::team_defense:
+      case HeroSkill::discipline: recalc_party(*world, hero_id); break;
+      case HeroSkill::epic_endurance:
+      case HeroSkill::epic_attack:
+      case HeroSkill::epic_armor: recalc_bonuses(*world, hero_id); break;
+      default: break;
     }
   }
   return true;
@@ -644,6 +663,10 @@ bool HeroSystem::use_skill(World& world, ObjectId hero_id, HeroSkill which) {
       default: break;  // battle_cry, ceasefire, assault, defensive_cry: the slot is the effect
     }
   }
+  // A timed skill's stamp (0x0052d8f0) comes after its walk and rebuilds the
+  // party, which is how Defensive Cry's armour and Frenzy's doubled attack
+  // reach the stored stats.
+  if (duration > 0) recalc_party(world, hero_id);
   return true;
 }
 
@@ -739,6 +762,9 @@ bool HeroSystem::set_experience(World& world, ObjectId id, std::int32_t value) {
     }
   }
   record->experience = value;
+  // The virtual's refresh flag, which its callers here set: the rebuild,
+  // whose Toughness and Statue of Amon-Ra terms read the new level.
+  recalc_bonuses(world, id);
   return true;
 }
 
@@ -889,7 +915,25 @@ UnitModifiers HeroSystem::hero_modifiers(ObjectId hero_id) const {
   return out;
 }
 
+namespace {
+
+/// The stored stats of `id`, when a combat system holds it: the numbers the
+/// original's readers take (`[obj+0xc8]`, `[obj+0xcc]`). The lookup is by
+/// name and changes nothing, so the const world is honoured.
+[[nodiscard]] const Combatant* stored_stats(const World& world, ObjectId id) {
+  const CombatSystem* combat = combat_system_of(const_cast<World&>(world));
+  return combat != nullptr ? combat->find(id) : nullptr;
+}
+
+}  // namespace
+
 std::int32_t HeroSystem::max_health_of(const World& world, ObjectId id) const {
+  if (const Combatant* unit = stored_stats(world, id); unit != nullptr) {
+    return unit->stats.max_health;
+  }
+  // A world with no combat system -- the synthetic ones -- has nothing
+  // stored; the class and this system's own view of the skills and items
+  // stand in for the rebuild.
   const std::int32_t base = class_int_property(world, id, "maxhealth", 0);
   if (base <= 0) return 0;
   const UnitModifiers mods = is_hero(id) ? hero_modifiers(id) : modifiers_for(id);
@@ -898,6 +942,9 @@ std::int32_t HeroSystem::max_health_of(const World& world, ObjectId id) const {
 
 std::int32_t HeroSystem::max_stamina_of(const World& world, ObjectId id,
                                         std::int32_t fallback) const {
+  if (const Combatant* unit = stored_stats(world, id); unit != nullptr) {
+    return unit->stats.max_stamina;
+  }
   return class_int_property(world, id, "maxstamina", fallback);
 }
 
@@ -905,12 +952,20 @@ std::int32_t HeroSystem::max_stamina_of(const World& world, ObjectId id,
 // the turn
 // --------------------------------------------------------------------------
 
-void HeroSystem::expire_effects(GameTime now) {
+void HeroSystem::expire_effects(World& world, GameTime now) {
+  // The expiry message (0x0052de70) clears every slot whose time has come
+  // and rebuilds the party for each. Here at the turn's end rather than on
+  // the millisecond; heroes in id order, slots in skill order.
+  std::vector<ObjectId> ended;
   for (HeroRecord& record : heroes_) {
     for (GameTime& until : record.effect_until) {
-      if (until != 0 && until <= now) until = 0;
+      if (until != 0 && until <= now) {
+        until = 0;
+        ended.push_back(record.id);
+      }
     }
   }
+  for (const ObjectId hero_id : ended) recalc_party(world, hero_id);
 }
 
 void HeroSystem::clear_dead(World& world) {
@@ -995,7 +1050,7 @@ void HeroSystem::advance(World& world, const Turn& turn) {
   // manager exists: 0x0041e820's job, done once a turn. See sim/squad.hpp.
   squad_watermark_ = enrol_new_units_in_squads(world, *this, squad_watermark_);
   run_egoism(world, from, now_);
-  expire_effects(now_);
+  expire_effects(world, now_);
   squads_.prune_empty();
   // The two AI fields nothing used to write. `sim/squad.hpp` carries the two
   // chains this stands in for and why once a turn is the same answer.
@@ -2044,8 +2099,7 @@ HostOutcome fn_get_best_curse_target(CallContext& ctx) {
     if (!world->players().is_enemy(caster->state.owner, other->state.owner)) continue;
     if (is_a(*world, *other, "BaseMage")) continue;
     const Combatant* stats = combat == nullptr ? nullptr : combat->find(id);
-    const std::int32_t attack =
-        stats == nullptr ? 0 : combat->profile(stats->class_index).damage + stats->attack_bonus;
+    const std::int32_t attack = stats == nullptr ? 0 : combat->attack_of(*stats);
     if (attack <= best_attack) continue;
     best = id;
     best_attack = attack;
@@ -2728,8 +2782,10 @@ HostOutcome fn_exchange_item(CallContext& ctx) {
   if (host->world->find(me) == nullptr) return HostOutcome::ok_with(Value::boolean(false));
   const ItemInstance* held = host->heroes->items().find(item);
   if (held == nullptr || held->owner != me) return HostOutcome::ok_with(Value::boolean(false));
-  return HostOutcome::ok_with(
-      Value::boolean(host->heroes->items().exchange(item, string_arg(ctx, 2))));
+  const bool exchanged = host->heroes->items().exchange(item, string_arg(ctx, 2));
+  // The slot write (0x005ae3c0) rebuilds the holder.
+  if (exchanged) recalc_bonuses(*host->world, me);
+  return HostOutcome::ok_with(Value::boolean(exchanged));
 }
 
 /// `Obj::DropItem(item, pt)` (0x005acdf0): an unresolvable or dead receiver
