@@ -112,7 +112,7 @@ for every member of a hero's party through 0x005f5520, the hero first.
 | an item enters the inventory | the add virtual 0x005b60a0, the slot write 0x005ae3c0 (`Obj::GetItem` 0x005ac910 and `ExchangeItem` reach these) |
 | an item leaves it | 0x005afc50, unless the holder is dead |
 | attached to a hero, detached from one | 0x005ddf50, 0x005db190 |
-| `Unit::SetExperience` and every experience award | the virtual 0x005dbf70, when its second argument is set (every caller sets it) |
+| `Unit::SetExperience` and every experience award | the virtual 0x005dbf70, when its second argument is set (the entry point 0x005d7610, the blow 0x00511550 and the hero tick 0x0052fc50 all set it) |
 | a mutation's fresh object | 0x005deef0 |
 | a command named `stand_position` starts or ends | the command advance 0x005b4f20 |
 | Team Attack, Team Defense or Discipline written | the skill writer 0x0052def0, the whole party |
@@ -120,7 +120,7 @@ for every member of a hero's party through 0x005f5520, the hero first.
 | a timed skill starts | 0x0052d8f0, the whole party, after the skill's own walk |
 | a timed skill ends | the expiry message 0x0052de70, the whole party |
 | the hero's army addend changes | the hero's tick 0x0052fc50, every army member |
-| the hero is loaded | 0x005307a0 |
+| a hero's attributes are loaded | 0x005307a0, after its skills |
 
 Leadership is not in the skill writer's list: it reaches the army through the
 addend, at the next tick.
@@ -144,6 +144,19 @@ the army.
 | `Unit::level` 0x005d7740 | `vtbl+0x114`, the stored `[unit+0x184]` |
 | `Unit::InRange` 0x005d72e0 | `[obj+0xd4]` and `[obj+0xd8]` through 0x005a7800 |
 | the blow, 0x0050ff30 | the attacker's `[obj+0xdc]`, the defender's `[obj+0xe4]`/`[obj+0xe8]`, both levels through `vtbl+0x114` |
+
+## Where the engine still differs
+
+* A timed skill's expiry rebuild runs at the end of the turn its slot ends
+  in, not on the millisecond (`HeroSystem::expire_effects`).
+* The hero's tick runs on multiples of 1,013 ms of the world clock, not
+  1,013 ms after the hero was made; its accumulator half has nothing to
+  convert, because the engine's one writer of it (Wisdom) pays at once.
+* The formation loader's clamp to `[-1000, 1000]` is taken where the rebuild
+  reads a bonus, not where `FORMATIONS.XML` is read.
+* The amount of experience a blow pays is still the engine's
+  (`target level / LevelExpDivider + 1` per damaging blow); only where it
+  goes is the original's.
 
 ## What is still unknown
 
