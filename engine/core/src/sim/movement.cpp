@@ -923,10 +923,21 @@ MovementSystem::RingGoal MovementSystem::ring_goal(const World& world, ObjectId 
 
 bool MovementSystem::free_spot(World& world, ObjectId id, Point centre, Point& out) const {
   // `0x004180b0`, which the route search runs when an owner's search found no
-  // goal point left and got nowhere (`0x00419197`). Its opening test -- a
-  // squad whose `[squad+0x7c]` is over 10 asks nothing -- reads a field
-  // nothing in `gbr.exe` sets but to 0 (see `Unit::IsEnemyInSquadSight` in
-  // `sim/squad.cpp`), so it never refuses and is not built.
+  // goal point left and got nowhere (`0x00419197`). Its opening test refuses
+  // a unit that has a target (`[unit+0x1a8]`, `Combatant::target`) and whose
+  // squad's `Enemies` (`[squad+0x7c]`, `Squad::enemies`, what the squad's
+  // look saw) holds more than 10: the answer is (-1, -1), with no draw, and
+  // the unit stays queued where it is. A unit in a big fight does not walk
+  // round it.
+  if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+    const Squad* squad = squad_containing(*heroes, id);
+    const CombatSystem* combat = combat_system_of(world);
+    const Combatant* self = combat != nullptr ? combat->find(id) : nullptr;
+    if (squad != nullptr && squad->enemies.size() > kFreeSpotCrowd && self != nullptr &&
+        self->target != kNoObject) {
+      return false;
+    }
+  }
   //
   // One heading, `rand(0, 359)` degrees from the synchronised generator
   // (slot `0x14`), turned into a step of the unit's radius with `Rot`'s

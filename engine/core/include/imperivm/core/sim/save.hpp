@@ -327,7 +327,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (0x005d28c0) rather than kept beside it. A version-36 file holds progress
 /// within the level and the level as a second word; read as a total, every
 /// veteran would load at level 1.
-inline constexpr std::uint32_t kStateVectorVersion = 37;
+/// 38: a squad carries its `Enemies` list (`Squad::enemies`, what its look
+/// last saw, `[squad+0x64]`) and when its look next fires (`look_due`). Not
+/// hashed; a version-37 file would load every squad blind and never looking,
+/// and its members would find no target until a new member joined.
+inline constexpr std::uint32_t kStateVectorVersion = 38;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

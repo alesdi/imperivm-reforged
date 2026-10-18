@@ -28,6 +28,8 @@
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/sim/avoidance.hpp"
+#include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/entrance.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/path.hpp"
@@ -1525,6 +1527,41 @@ TEST(the_free_spot_search_draws_one_heading_and_steps_out_from_the_centre) {
   REQUIRE(open.movement.free_spot(open.world, lone, kTarget, spot));
   CHECK(spot == kTarget);
   CHECK(open.world.rng() == once);
+}
+
+TEST(the_free_spot_search_refuses_a_targeting_unit_whose_squad_sees_a_crowd) {
+  // 0x004180b0's opening test: a unit with a target (`[unit+0x1a8]`) whose
+  // squad's look saw more than 10 enemies (`[squad+0x7c]`) gets no spot, and
+  // the search draws nothing. Ten is not a crowd; no target, no refusal.
+  Field field(128, false);
+  HeroSystem heroes;
+  CombatSystem combat;
+  REQUIRE(field.world.add_system(&combat));
+  REQUIRE(field.world.add_system(&heroes));
+  field.world.start();
+  const ObjectId asker = field.unit("Soldier", Point{100, 100});
+  const SquadKey key = heroes.squads().create(0);
+  REQUIRE(heroes.squads().join(key, asker));
+  Combatant fighter;
+  fighter.id = asker;
+  fighter.target = 999;
+  combat.add(fighter);
+  std::vector<ObjectId> seen;
+  for (ObjectId id = 1000; id < 1011; ++id) seen.push_back(id);
+  heroes.squads().find(key)->enemies = seen;  // 11
+
+  Point spot{7, 7};
+  Rng untouched = field.world.rng();
+  CHECK(!field.movement.free_spot(field.world, asker, kTarget, spot));
+  CHECK(field.world.rng() == untouched);
+
+  heroes.squads().find(key)->enemies.pop_back();  // 10
+  CHECK(field.movement.free_spot(field.world, asker, kTarget, spot));
+  CHECK(!(field.world.rng() == untouched));
+
+  heroes.squads().find(key)->enemies = seen;
+  combat.find(asker)->target = kNoObject;
+  CHECK(field.movement.free_spot(field.world, asker, kTarget, spot));
 }
 
 TEST(an_attacker_queued_behind_a_full_band_is_re_aimed_round_it_once) {

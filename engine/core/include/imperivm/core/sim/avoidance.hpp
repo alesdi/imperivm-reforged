@@ -162,8 +162,8 @@
 //     `(trunc(r sin a), trunc(r cos a))` with `Rot`'s constant (`0x007ac490`);
 //   * up to forty probes from the band's centre outward, the first passable
 //     free spot (`0x0040a990`) the answer; a probe off the map ends it. Its
-//     opening test, on `[squad+0x7c]`, reads a field nothing sets but to 0
-//     and never refuses.
+//     opening test refuses, with no draw, a unit that has a target and whose
+//     squad's look saw more than 10 enemies (`[squad+0x7c]`, `kFreeSpotCrowd`).
 //
 // A spot more than 200 units nearer the centre than the unit stands
 // (`0x00419230`, both distances through the integer square root) becomes the
@@ -179,6 +179,7 @@
 // refused, a route is cut short, and a unit on a taken spot stays there, not
 // arrived, until its script asks again.
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -226,6 +227,9 @@ inline constexpr std::int32_t kFormationStride = 200;
 /// (`0x00419230`).
 inline constexpr std::int32_t kFreeSpotHeadings = 360;
 inline constexpr std::int32_t kFreeSpotProbes = 40;
+/// More than this many entries on a targeting unit's squad's `Enemies` and
+/// the free-spot search refuses (0x004180c5: `cmp 10, [squad+0x7c]`).
+inline constexpr std::size_t kFreeSpotCrowd = 10;
 inline constexpr std::int32_t kFreeSpotGain = 200;
 
 /// The `<point>` types that make ownerless locks, and their radii

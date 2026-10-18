@@ -5,8 +5,10 @@
 
 #include <vector>
 
+#include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/query.hpp"
@@ -285,7 +287,8 @@ HostOutcome fn_player_flags_query(CallContext& ctx) {
 // GetPlayerUnits
 // --------------------------------------------------------------------------
 
-/// `GetPlayerUnits(player)` and `GetPlayerUnits(player, "class")`.
+/// `GetPlayerUnits(player)` and `GetPlayerUnits(player, "class")` -- the
+/// members of the player's **squads**, not a census of the world.
 ///
 /// Returns an `ObjList`, not a query. `EQ_HEROES.VS` proves it by writing the
 /// same variable two ways: `OL_Heroes = ControllableObjs(playerid, cHero)
@@ -293,10 +296,28 @@ HostOutcome fn_player_flags_query(CallContext& ctx) {
 /// cHero);` in another. The executable agrees -- the two registrations at
 /// 0x005e0193 declare return type 0x17 where `EnemyObjs` declares 0x20.
 ///
-/// The one-argument form's implicit filter is **inferred** to be `Unit`. The
-/// name says units, every call site downcasts the members with `.AsUnit()` or
-/// `.AsWagon()`, and a match-all reading would hand a script buildings to call
-/// `SetLevel` on. Nothing in the data states it.
+/// Both bodies (0x005debe0, 0x005dea90) mint a list and hand it to
+/// 0x005de750 with the player's record, which walks the squad vector of the
+/// record's squad holder (`[record+0x8c]`) in index order, and each squad's
+/// members front to back:
+///
+///   * **no class** -- every member of every squad;
+///   * **a class** (a name nothing resolves, or a player outside 1..16, is a
+///     logged empty list) -- first the holder's per-class tally
+///     (0x004441e0, `ClassCount`, which 0x004448a0 keeps for each class and
+///     its ancestors) must be non-zero, then by the class itself:
+///       - an heir of `Hero`: each squad's **front member** (0x00443df0),
+///         when it carries the hero bit (`[obj+0x2c] & 0x1000000`) and is an
+///         heir of the class -- a hero is listed once, not with its army;
+///       - an heir of `BaseMage`: the members heir of the class of every
+///         squad whose front member is an heir of `BaseMage` or of `Hero`;
+///       - anything else: every member heir of the class.
+///
+/// **Approximated:** the tally gate is taken as "some member of the player's
+/// squads is an heir of the class", which is what the tally counts for
+/// members still in their squads; the walk answers nothing in every other
+/// case anyway. A member is listed by its handle whether or not it still
+/// resolves, as the original pushes it.
 HostOutcome fn_get_player_units(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetPlayerUnits: no world");
@@ -307,10 +328,71 @@ HostOutcome fn_get_player_units(CallContext& ctx) {
   if (items == nullptr) return HostOutcome::failed("GetPlayerUnits: no list");
 
   const PlayerId player = player_arg(ctx.arg(0));
-  if (player != kNoPlayer) {
-    const ClassFilter filter = ctx.count() > 1 ? filter_arg(*world, ctx.arg(1))
-                                               : ClassFilter::parse("Unit", world->class_graph());
-    world->objects_of_class_for_player(filter, player, Point{}, 0, *items);
+  const HeroSystem* heroes = hero_system_of(*world);
+  if (player == kNoPlayer || heroes == nullptr) return HostOutcome::ok_with(make_objlist_value(list));
+  const auto squads_of_player = [&](auto&& visit) {
+    for (const Squad& squad : heroes->squads().squads()) {
+      if (squad.key.player == player) visit(squad);
+    }
+  };
+
+  if (ctx.count() < 2) {
+    squads_of_player([&](const Squad& squad) {
+      items->insert(items->end(), squad.members.begin(), squad.members.end());
+    });
+    return HostOutcome::ok_with(make_objlist_value(list));
+  }
+
+  const ClassGraph* graph = world->class_graph();
+  const ClassIndex cls = graph != nullptr && ctx.arg(1).is_string()
+                             ? graph->find(ctx.arg(1).as_string())
+                             : kNoClass;
+  if (cls == kNoClass) return HostOutcome::ok_with(make_objlist_value(list));
+  const auto heir = [&](ObjectId id, ClassIndex base) {
+    return base != kNoClass && world->find(id) != nullptr && world->class_is_a(id, base);
+  };
+  const auto class_heir = [&](ClassIndex base) {
+    ClassIndex current = cls;
+    for (std::size_t guard = 0; base != kNoClass && current != kNoClass && guard <= graph->size();
+         ++guard) {
+      if (current == base) return true;
+      const ClassIndex parent = graph->at(current).parent_index;
+      if (parent == current) return false;
+      current = parent;
+    }
+    return false;
+  };
+  const ClassIndex hero = graph->find("Hero");
+  const ClassIndex mage = graph->find("BaseMage");
+
+  bool counted = false;  // the tally gate
+  squads_of_player([&](const Squad& squad) {
+    for (const ObjectId member : squad.members) counted = counted || heir(member, cls);
+  });
+  if (!counted) return HostOutcome::ok_with(make_objlist_value(list));
+
+  if (class_heir(hero)) {
+    squads_of_player([&](const Squad& squad) {
+      if (squad.members.empty()) return;
+      const ObjectId front = squad.members.front();
+      const WorldObject* slot = world->find(front);
+      if (slot != nullptr && slot->state.flags.is_hero && heir(front, cls)) items->push_back(front);
+    });
+  } else if (class_heir(mage)) {
+    squads_of_player([&](const Squad& squad) {
+      if (squad.members.empty()) return;
+      const ObjectId front = squad.members.front();
+      if (!heir(front, mage) && !heir(front, hero)) return;
+      for (const ObjectId member : squad.members) {
+        if (heir(member, cls)) items->push_back(member);
+      }
+    });
+  } else {
+    squads_of_player([&](const Squad& squad) {
+      for (const ObjectId member : squad.members) {
+        if (heir(member, cls)) items->push_back(member);
+      }
+    });
   }
   return HostOutcome::ok_with(make_objlist_value(list));
 }
@@ -497,31 +579,44 @@ HostOutcome fn_outposts(CallContext& ctx) {
       Value::integer(count_settlements(*world, player, SettlementKind::outpost)));
 }
 
-/// `MilUnits(idPlayer)` -- 0x00421ee0, and a known gap.
+/// `MilUnits(idPlayer)` -- 0x00421ee0: the size of the player's fielded
+/// armies, counted over its **squads**.
 ///
 /// The body takes `idPlayer - 1`, answers 0 at 16 and above, and calls
-/// 0x00443eb0 on the player record's AI object (`[record+0x8c]`), which walks
-/// that player's **squads**: it skips a squad whose `Squad::Eval` (`+0x1c`) is
-/// zero or whose flags have any of 0x25 set (no-AI, peaceful, sentries), and
-/// counts the members still in the object table that are neither `Peaceful`
-/// nor `Animal` (0x005402f0, 0x00540280). So it is the size of the player's
-/// *fielded* armies, not a census of military classes.
+/// 0x00443eb0 on the player record's squad holder (`[record+0x8c]`), which
+/// walks that player's squad vector in index order: a squad whose
+/// `Squad::Eval` (`+0x1c`) is zero, or whose flags carry any of 0x25 (no-AI,
+/// peaceful, sentries), is skipped; every member of the others that is still
+/// in the object table and is neither a `Peaceful` nor an `Animal` heir
+/// (0x005402f0) counts one. No life test: a member is counted until it leaves
+/// the squad.
 ///
-/// **This engine counts every `Military`-class object the player owns.** The
-/// faithful walk needs `Squad::Eval`, which nothing here writes yet
-/// (`sim/squad.hpp`'s standing gap): with it at zero every squad would be
-/// skipped and every AI would read an empty army. The census stands in until
-/// the squad model carries the strength the original keeps.
+/// `Squad::Eval` is the strength `revalue_squads` keeps (it was never
+/// written when this answered a census of `Military` objects instead), and
+/// the player's squad vector is the squad table's run for that player, which
+/// is kept in index order.
 HostOutcome fn_mil_units(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("MilUnits: no world");
   const PlayerId player = player_arg(ctx.arg(0));
-  if (player == kNoPlayer) return HostOutcome::ok_with(Value::integer(0));
-  std::vector<ObjectId> found;
-  const ClassFilter filter = ClassFilter::parse("Military", world->class_graph());
-  const std::size_t count =
-      world->objects_of_class_for_player(filter, player, Point{}, 0, found);
-  return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(count)));
+  const HeroSystem* heroes = hero_system_of(*world);
+  if (player == kNoPlayer || heroes == nullptr) return HostOutcome::ok_with(Value::integer(0));
+  const ClassGraph* graph = world->class_graph();
+  const ClassIndex peaceful = graph != nullptr ? graph->find("Peaceful") : kNoClass;
+  const ClassIndex animal = graph != nullptr ? graph->find("Animal") : kNoClass;
+  std::int32_t count = 0;
+  for (const Squad& squad : heroes->squads().squads()) {
+    if (squad.key.player != player) continue;
+    if (squad.eval == 0) continue;
+    if ((squad.flags & (kSquadFlagNoAi | kSquadFlagPeaceful | kSquadFlagSentries)) != 0) continue;
+    for (const ObjectId member : squad.members) {
+      if (world->find(member) == nullptr) continue;
+      if (peaceful != kNoClass && world->class_is_a(member, peaceful)) continue;
+      if (animal != kNoClass && world->class_is_a(member, animal)) continue;
+      ++count;
+    }
+  }
+  return HostOutcome::ok_with(Value::integer(count));
 }
 
 // --------------------------------------------------------------------------

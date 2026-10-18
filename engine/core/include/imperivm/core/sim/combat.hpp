@@ -864,16 +864,15 @@ inline constexpr std::int32_t kProjectileSpeed = 800;
 /// preference.
 ///
 /// The three hard filters -- damage, independents, exclusive class -- are exact
-/// as filters, **but the circle path does not pass them where their names
-/// say.** 0x005dc950 builds the no-squad predicate one argument over
+/// as filters, and **where they apply depends on the path.** On the squad
+/// path (a unit in a squad, walking its squad's `Enemies`,
+/// `best_target_in_list`) 0x005dc950 passes them where their names say. On
+/// the circle path it builds the predicate one argument over
 /// (0x005dca31..0x005dca5a): the damage flag lands in the exclusive slot and
 /// does nothing, the independents flag is dropped, and the exclusive flag
-/// lands in the independents slot. The host entry points in `combat.cpp`
-/// therefore set `exclude_independents` for `Exclusive` (with a soft class
-/// preference) and nothing for the other two, and a held or dead unit is
-/// answered before this filter is consulted (`squad_sight_blind`, which also
-/// says why the original's "no target for a squad member" is not applied).
-/// `require_armed` and `only_class` are kept for callers inside the engine.
+/// lands in the independents slot. `squad_sight_target` in `combat.cpp`
+/// builds each path's filter, and answers a held or dead unit before either
+/// is consulted.
 struct TargetFilter {
   /// `BestTargetInSquadSightMisZeroDamage`. Skip a candidate whose own attack
   /// is not strictly positive. Measured against `Obj::attack`, so it is
@@ -1226,6 +1225,20 @@ class CombatSystem final : public System {
   /// is GAIKA's, not combat's.
   [[nodiscard]] ObjectId best_target_among(ObjectId id,
                                            std::span<const ObjectId> candidates) const;
+
+  /// The squad path of the `BestTargetInSquadSight` core (0x005dc950 ->
+  /// 0x005dbb20): every entry of the attacker's squad's `Enemies`, in order,
+  /// offered to the predicate (0x005db7f0 -> 0x005db650) with **no reach** --
+  /// the list is what the squad's look saw, and nothing measures it again --
+  /// under `filter`'s hard filters and class preference.
+  ///
+  /// **A tie goes to the later candidate.** The predicate keeps the one it
+  /// holds only when the new score is strictly worse (0x005db7c7, `jg`), so
+  /// an equal score replaces it; and the walk never stops early, because
+  /// 0x005dbb20 discards what the predicate answers. The score is still this
+  /// system's (`target_score`); see the note above `TargetFilter`.
+  [[nodiscard]] ObjectId best_target_in_list(ObjectId id, std::span<const ObjectId> candidates,
+                                             const TargetFilter& filter) const;
 
   /// Whether `attacker` can strike `defender` from where they stand: squared
   /// distance between `min_range^2` and `(range + both radii)^2`. Comparing
