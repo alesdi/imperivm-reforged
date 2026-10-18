@@ -2423,6 +2423,8 @@ TEST(a_heros_army_comes_back_as_a_list_in_attach_order) {
 
   sim::HostContext context_state;
   context_state.world = &f.world;
+  // What a session does: the system's start installs the pool's army seam.
+  f.heroes.start(f.world);
 
   const auto call = [&](script::CallKind kind, std::string_view name,
                         std::vector<script::Value> args) -> script::HostOutcome {
@@ -2473,15 +2475,16 @@ TEST(a_heros_army_comes_back_as_a_list_in_attach_order) {
   CHECK(items[0] == first);
   CHECK(items[1] == second);
 
-  // A snapshot, not the hero's own vector. `gbr.exe` 0x00530580 returns a live
-  // reference -- `{handle, 0x1cc, hero + 0x1cc}` -- and the divergence is
-  // recorded at `m_army`; this pins which of the two this engine does, so that
-  // changing it is a decision rather than an accident.
+  // The hero's own vector, not a snapshot: `gbr.exe` 0x00530580 pushes a live
+  // reference -- `{handle, 0x1cc, hero + 0x1cc}` -- so a list taken before a
+  // detach sees it, and the list taken before the attaches sees them.
   REQUIRE(f.heroes.detach(f.world, first));
-  CHECK(call(script::CallKind::member, "count", {full.value}).value.as_integer() == 2);
-  CHECK(call(script::CallKind::member, "count",
-             {call(script::CallKind::member, "army", {hero_ref}).value})
-            .value.as_integer() == 1);
+  CHECK(call(script::CallKind::member, "count", {full.value}).value.as_integer() == 1);
+  CHECK(call(script::CallKind::member, "count", {empty.value}).value.as_integer() == 1);
+  // And a write through it reaches the hero: `.army.ClearDead` (4 sites).
+  (void)f.world.set_health(second, 0);
+  (void)call(script::CallKind::member, "ClearDead", {full.value});
+  CHECK(f.heroes.hero(hero)->army.empty());
 
   // An invalid receiver is a fresh empty list, not a refusal: 0x005305ad
   // diagnoses and allocates one, so `h.army.count` on a dead hero is 0.

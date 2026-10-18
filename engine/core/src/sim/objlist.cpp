@@ -147,22 +147,36 @@ std::span<const ObjectId> ObjListPool::items(ObjListId id) const noexcept {
   // in a vector somebody else may have grown since. A resolver that answers
   // null -- no resolver installed, or an owner that has gone -- reads as an
   // empty list, which is what a stale handle already reads as here.
-  if (alias_resolver_ == nullptr) return {};
-  const std::vector<ObjectId>* items = alias_resolver_(alias_user_, entry.alias);
+  const std::vector<ObjectId>* items = resolve_alias(entry.alias);
   return items == nullptr ? std::span<const ObjectId>{} : std::span<const ObjectId>(*items);
+}
+
+std::vector<ObjectId>* ObjListPool::resolve_alias(ObjectId owner) const noexcept {
+  // Two owner kinds, and an object is at most one of them -- a settlement's
+  // holder record or a hero -- so asking each in turn cannot pick the wrong
+  // collection.
+  if (alias_resolver_ != nullptr) {
+    if (std::vector<ObjectId>* items = alias_resolver_(alias_user_, owner)) return items;
+  }
+  if (army_resolver_ != nullptr) return army_resolver_(army_user_, owner);
+  return nullptr;
 }
 
 std::vector<ObjectId>* ObjListPool::mutable_items(ObjListId id) noexcept {
   if (!contains(id)) return nullptr;
   Entry& entry = entries_[index_of_id(id)];
   if (entry.alias == kNoObject) return &entry.items;
-  if (alias_resolver_ == nullptr) return nullptr;
-  return alias_resolver_(alias_user_, entry.alias);
+  return resolve_alias(entry.alias);
 }
 
 void ObjListPool::set_alias_resolver(AliasResolver resolver, void* user) noexcept {
   alias_resolver_ = resolver;
   alias_user_ = user;
+}
+
+void ObjListPool::set_army_resolver(AliasResolver resolver, void* user) noexcept {
+  army_resolver_ = resolver;
+  army_user_ = user;
 }
 
 ObjectId ObjListPool::alias_of(ObjListId id) const noexcept {
@@ -586,39 +600,33 @@ HostOutcome m_get_units_in_same_holder(CallContext& ctx) {
 /// `gbr.exe` (0x00530580) returns a **live reference** rather than a snapshot:
 /// the value it pushes is `{hero handle, 0x1cc, hero + 0x1cc}`, the hero's own
 /// army vector with its refcount bumped, so a mutation through the handle
-/// reaches the hero. This returns a snapshot, like `GetObjList` above.
+/// reaches the hero, and a list held across a recruitment sees the recruit.
+/// This is the alias `Settlement::Units` already is (`acquire_alias`), with the
+/// hero as the owner: `HeroSystem::start` installs the pool's army resolver,
+/// which answers `HeroRecord::army` on every access.
 ///
-/// The difference is observable in exactly one member. Of the corpus's uses --
-/// `SetCommand` (18), bare `.army` in a count or a condition (26), `count` (15),
-/// `AddToGroup`/`RemoveFromGroup`/`RemoveFromAllGroups` (6), `KillCommand`,
-/// `AddCommand` -- every one either reads the membership or commands the units
-/// it names, and both read the same ids from either representation. Only
-/// `.army.ClearDead` (4 sites) writes the list itself, and `HeroSystem::advance`
-/// already prunes the dead out of every army once a turn, which is what those
-/// four sites are asking for. So the divergence is bounded by one turn, and it
-/// is written down here rather than papered over.
+/// Of the corpus's uses -- `SetCommand` (18), bare `.army` in a count or a
+/// condition (26), `count` (15), `AddToGroup`/`RemoveFromGroup`/
+/// `RemoveFromAllGroups` (6), `KillCommand`, `AddCommand` -- the one that writes
+/// is `.army.ClearDead` (4 sites), which now takes the dead out of the hero's
+/// army at once rather than at `HeroSystem::advance`'s next prune.
 ///
 /// An invalid receiver is **not** a refusal: 0x005305ad diagnoses and then
 /// allocates a fresh empty list, so `h.army.count` on a dead hero is 0.
 ///
-/// **Why it is still a snapshot.** Making it the live list is the alias
-/// `Settlement::Units` already is, and the pool's one `AliasResolver` is
-/// installed by `EconomySystem` and knows settlement holders only. A hero's
-/// army needs that seam to serve a second kind of owner -- a resolver per
-/// owner kind, or one that asks each system in turn -- which is a change to
-/// the pool's design rather than to this entry point.
 HostOutcome m_army(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("army: no world");
   ObjListPool& pool = objlist_pool_of(*world);
-  const ObjListId list = pool.acquire_temporary(ctx.script);
-  std::vector<ObjectId>* items = pool.mutable_items(list);
-  if (items == nullptr) return HostOutcome::failed("army: the pool refused a new list");
-
   HeroSystem* heroes = hero_system_of(*world);
   const ObjectId id = live_object_of(*world, ctx.arg(0));
   const HeroRecord* record = heroes == nullptr || id == kNoObject ? nullptr : heroes->hero(id);
-  if (record != nullptr) *items = record->army;
+  // The live list: an alias the hero owns, resolved on every access.
+  if (record != nullptr) return HostOutcome::ok_with(make_objlist_value(pool.acquire_alias(ctx.script, id)));
+  const ObjListId list = pool.acquire_temporary(ctx.script);
+  if (pool.mutable_items(list) == nullptr) {
+    return HostOutcome::failed("army: the pool refused a new list");
+  }
   return HostOutcome::ok_with(make_objlist_value(list));
 }
 

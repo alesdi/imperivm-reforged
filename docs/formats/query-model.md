@@ -178,8 +178,11 @@ never collected, and neither is a query the embedder made with `create_query`.
 Two getters answer a list that is another object's own rather than a copy: `Hero::army`
 (0x00530580) pushes the hero's army list at `[hero+0x1cc]` with its count bumped, and
 `Settlement::Buildings` (0x005c3d40) pushes the settlement's building list at `[s+0x60]`.
-The engine's `ObjListPool` aliases one kind of owner (a settlement's holder, for
-`Settlement::Units`); these two still answer snapshots.
+The engine's `ObjListPool` resolves an alias through two seams, a settlement's holder (for
+`Settlement::Units`) and a hero (for `Hero::army`, `HeroRecord::army`), so `army` is live.
+`Settlement::Buildings` still answers a snapshot: the settlement's roll here is a vector of
+rows carrying per-building figures, not a list of handles the pool could alias, and no shipped
+site writes through the list.
 
 ## What is still unknown
 
