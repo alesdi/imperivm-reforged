@@ -14,6 +14,7 @@
 
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/player.hpp"
@@ -45,6 +46,8 @@ ClassGraph wagon_graph() {
                 <properties maxhealth="50" radius="10" sight="300"/></class>)",
            R"(<class id="Trader" parent="Object" cpp_class="CVXWagon">
                 <properties maxhealth="400" radius="40" sight="500" max_load="1000"/></class>)",
+           R"(<class id="Hall" parent="Object" cpp_class="CVXTownHall">
+                <properties maxhealth="5000" radius="100" sight="600"/></class>)",
        }) {
     graph.add(bytes_of(xml), "test_wagon.cpp");
   }
@@ -57,6 +60,7 @@ struct WagonBench {
   script::HostRegistry registry;
   World world;
   EconomySystem economy;
+  CombatSystem combat;
   ObjectId wagon = kNoObject;
 
   WagonBench() {
@@ -65,6 +69,9 @@ struct WagonBench {
     register_economy_hosts(registry);
     world.set_class_graph(&graph);
     REQUIRE(world.add_system(&economy));
+    combat.set_world_bound(true);
+    REQUIRE(world.add_system(&combat));
+    world.players().set_relation_word(1, 1, kRelationSelf);
     wagon = world.spawn(NativeClass::wagon, nullptr, graph.find("Trader"));
     world.set_position(wagon, Point{5000, 5000});
     world.set_owner(wagon, 1);
@@ -124,6 +131,31 @@ struct WagonBench {
           script::HostStatus::ok);
   }
   [[nodiscard]] const WagonLoyalty* row() const { return economy.find_wagon_loyalty(wagon); }
+
+  /// A town of `owner`'s with its hall at `at` and `gold` in store.
+  SettlementId town(PlayerId owner, Point at, std::int32_t gold) {
+    SettlementInit init;
+    init.kind = SettlementKind::stronghold;
+    init.owner = owner;
+    init.anchor = world.spawn(NativeClass::town_hall, nullptr, graph.find("Hall"));
+    world.set_position(init.anchor, at);
+    world.set_owner(init.anchor, owner);
+    world.set_health(init.anchor, 5000);
+    init.gold = gold;
+    init.food = 0;
+    init.max_gold = 100000;
+    init.max_food = 100000;
+    init.max_units = 100;
+    return economy.create(world, init);
+  }
+  [[nodiscard]] std::int32_t gold(SettlementId id) const {
+    return economy.find(id)->warehouse.gold;
+  }
+  [[nodiscard]] std::int32_t cargo() const { return world.find(wagon)->state.cargo; }
+  [[nodiscard]] bool dead() const { return world.find(wagon)->state.health <= 0; }
+  void cargo_call(const char* name, std::int32_t v) {
+    CHECK(call(name, 1, {handle(), script::Value::integer(v)}).status == script::HostStatus::ok);
+  }
 };
 
 }  // namespace
@@ -284,4 +316,69 @@ TEST(a_wagons_loyalty_row_goes_with_the_wagon) {
   b.play(100);
   CHECK(b.row() == nullptr);
   CHECK(b.economy.wagon_loyalties().empty());
+}
+
+/// The cargo setter, 0x005eb0a0: `Wagon::SetFood`/`SetGold` write the kind
+/// and then the cargo, unclamped, and **a cargo of exactly zero kills the
+/// wagon** -- its death virtual, health to 0 -- unless it is already dead.
+/// That is why `WAGON_UNLOAD.VS` can end `.SetFood(0); .SetGold(0);
+/// .Erase();`: the first kills the mule, the second only writes the field.
+TEST(a_wagon_emptied_to_zero_dies) {
+  WagonBench b;
+  b.cargo_call("SetFood", 300);
+  CHECK(b.cargo() == 300);
+  b.cargo_call("SetGold", -5);  // below zero is not empty
+  CHECK(b.cargo() == -5);
+  CHECK(!b.dead());
+  CHECK(!b.combat.is_dying(b.wagon));
+
+  b.cargo_call("SetFood", 0);
+  CHECK(b.dead());
+  CHECK(b.combat.is_dying(b.wagon));
+  CHECK(b.world.find(b.wagon)->state.cargo_resource == 1);
+  b.cargo_call("SetGold", 0);
+  CHECK(b.world.find(b.wagon)->state.cargo_resource == 0);
+  CHECK(b.cargo() == 0);
+}
+
+/// `LoadFood`/`LoadGold` set the new cargo through the same setter, so an
+/// empty mule paid nothing by an empty store dies -- and one refused before
+/// the setter (no hall it supports in reach) is left alone.
+TEST(an_empty_mule_paid_nothing_dies_and_a_refused_one_does_not) {
+  WagonBench b;
+  // Player 2's hall beside it: no share-support, so a refusal, and alive.
+  const SettlementId theirs = b.town(2, Point{5200, 5000}, 0);
+  b.cargo_call("LoadGold", 100);
+  CHECK(!b.dead());
+  CHECK(b.gold(theirs) == 0);
+  // Its own, with nothing in store: paid nothing, and dies.
+  (void)b.town(1, Point{4800, 5000}, 0);
+  b.cargo_call("LoadGold", 100);
+  CHECK(b.cargo() == 0);
+  CHECK(b.dead());
+}
+
+/// The open arm of 0x005ebc90: a mule standing in no holder loads at the
+/// first town hall the grid sweep of its sight (500 here, centre distance)
+/// meets that its owner supports -- 256-unit cells a row at a time, top to
+/// bottom, then left to right -- whoever's settlement it is and however far
+/// the others are.
+TEST(a_mule_in_the_open_loads_at_the_first_supported_hall_it_sees) {
+  WagonBench b;
+  const SettlementId lower = b.town(1, Point{4900, 5400}, 1000);    // row 21
+  const SettlementId far = b.town(1, Point{5000, 5600}, 1000);      // 600 out
+  const SettlementId foreign = b.town(2, Point{5000, 4700}, 1000);  // row 18, unsupported
+  const SettlementId upper = b.town(1, Point{5300, 5100}, 1000);    // row 19
+  b.cargo_call("LoadGold", 400);
+  CHECK(b.cargo() == 400);
+  CHECK(b.gold(upper) == 600);
+  CHECK(b.gold(lower) == 1000);
+  CHECK(b.gold(far) == 1000);
+  CHECK(b.gold(foreign) == 1000);
+
+  // Granted share-support, the foreign hall's higher row comes first.
+  b.world.players().set_relation_word(1, 2, kRelationAllied);
+  b.cargo_call("LoadGold", 100);
+  CHECK(b.cargo() == 500);
+  CHECK(b.gold(foreign) == 900);
 }

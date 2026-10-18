@@ -1262,13 +1262,12 @@ using script::Value;
   return slot;
 }
 
-/// `Wagon::SetGold`/`SetFood`: the kind word first, then the cargo, as
-/// 0x005ebec0/0x005ebe70 and the setter 0x005eb0a0 write them -- unclamped,
-/// neither against the class's `max_load` nor at zero. The death of an emptied
-/// wagon is not reproduced; see the note at `SetFood`.
-void set_wagon_cargo(WorldObject& wagon, Resource kind, std::int32_t value) noexcept {
+/// `Wagon::SetGold`/`SetFood`: the kind word first, then the cargo through
+/// the setter, as 0x005ebec0/0x005ebe70 write them -- unclamped, neither
+/// against the class's `max_load` nor at zero, and an emptied wagon dies.
+void write_wagon_cargo(World& world, WorldObject& wagon, Resource kind, std::int32_t value) {
   wagon.state.cargo_resource = static_cast<std::int32_t>(kind);
-  wagon.state.cargo = value;
+  set_wagon_cargo(world, wagon.id, value);
 }
 
 /// `LoadGold`/`LoadFood`. See the note at the registrations for the order the
@@ -1282,25 +1281,67 @@ HostOutcome load_cargo(CallContext& ctx) {
   WorldObject* mule = world->find(ctx.arg(0).as_object().id);
   if (mule == nullptr) return HostOutcome::ok_void();
 
-  // 1. The settlement the mule is inside, by `GetHolderSett`'s own two hops,
-  //    whose central building is a `CVXTownHall` that the mule's owner
-  //    grants share-support (0x005ebc90's held arm, 0x005eb070).
-  if (mule->state.holder == kNoObject) return HostOutcome::ok_void();
-  Settlement* here = economy->settlements().for_object(mule->state.holder);
-  if (here == nullptr) return HostOutcome::ok_void();
+  // 1. The town hall to load at (0x005ebc90): a `CVXTownHall` whose owner
+  //    the mule's owner grants share-support (0x005eb070).
+  //
   // `CVXTownHall` by the binary's own type query, in which an outpost is not
   // one: `CVXOutpost`'s query (0x00563aa0) answers its own name and passes
   // everything else to `CVXBuilding`'s (0x004db2a0). `game/registry.hpp`
   // files `CVXOutpost` under `CVXTownHall` from the class data, so the outpost
   // is excluded here by name.
-  const WorldObject* hall = world->find(here->anchor);
-  if (hall == nullptr || hall->object == nullptr || !hall->object->is_a(NativeClass::town_hall) ||
-      hall->object->is_a(NativeClass::outpost)) {
-    return HostOutcome::ok_void();
-  }
-  if (!PlayerTable::is_valid(mule->state.owner) || !PlayerTable::is_valid(hall->state.owner) ||
-      !world->players().has(mule->state.owner, hall->state.owner, Relation::share_support)) {
-    return HostOutcome::ok_void();
+  const auto is_hall = [](const WorldObject* slot) {
+    return slot != nullptr && slot->object != nullptr &&
+           slot->object->is_a(NativeClass::town_hall) && !slot->object->is_a(NativeClass::outpost);
+  };
+  const auto supports = [&](const WorldObject& hall) {
+    return PlayerTable::is_valid(mule->state.owner) && PlayerTable::is_valid(hall.state.owner) &&
+           world->players().has(mule->state.owner, hall.state.owner, Relation::share_support);
+  };
+  Settlement* here = nullptr;
+  if (mule->state.holder != kNoObject) {
+    // The held arm: the settlement the mule is inside, by `GetHolderSett`'s
+    // own two hops, and its central building.
+    here = economy->settlements().for_object(mule->state.holder);
+    if (here == nullptr) return HostOutcome::ok_void();
+    const WorldObject* hall = world->find(here->anchor);
+    if (!is_hall(hall) || !supports(*hall)) return HostOutcome::ok_void();
+  } else {
+    // The open arm: the first building the grid sweep 0x005eb4b0 meets
+    // within the mule's sight (`[mule+0xd0]`, centre distance) that is a
+    // `CVXTownHall` the mule's owner supports and that the mule can see --
+    // 0x005a7870, a nonzero sight at least the distance less both class
+    // radii. The sweep walks 256-unit cells a row at a time, top to bottom
+    // and left to right; within a cell it walks the cell's own list, whose
+    // order was not read, and here goes by id (labelled). No central-building
+    // test: any town hall the mule stands by will do.
+    const Point at = mule->state.position;
+    const std::int32_t sight = mule->sight;
+    if (sight == 0) return HostOutcome::ok_void();
+    std::vector<ObjectId> near;
+    (void)world->objects_in_radius(at, sight, ClassFilter{}, near);
+    const WorldObject* best = nullptr;
+    std::int64_t best_row = 0;
+    std::int64_t best_col = 0;
+    for (const ObjectId id : near) {
+      const WorldObject* slot = world->find(id);
+      if (slot == nullptr || !slot->state.flags.is_building || !is_hall(slot)) continue;
+      if (!supports(*slot)) continue;
+      const Point p = slot->state.position;
+      const std::int64_t dx = static_cast<std::int64_t>(p.x) - at.x;
+      const std::int64_t dy = static_cast<std::int64_t>(p.y) - at.y;
+      const std::int64_t edge = isqrt(dx * dx + dy * dy) - class_int(*world, *mule, "radius") -
+                                class_int(*world, *slot, "radius");
+      if (edge > sight) continue;
+      const std::int64_t row = p.y / 256;
+      const std::int64_t col = p.x / 256;
+      if (best != nullptr && (row > best_row || (row == best_row && col >= best_col))) continue;
+      best = slot;
+      best_row = row;
+      best_col = col;
+    }
+    if (best == nullptr) return HostOutcome::ok_void();
+    here = economy->settlements().for_object(best->settlement);
+    if (here == nullptr) return HostOutcome::ok_void();
   }
 
   // 2. Empty, or already carrying this kind.
@@ -1325,10 +1366,11 @@ HostOutcome load_cargo(CallContext& ctx) {
   // order and is observable: a mule that asked and got nothing still reports
   // the kind it asked for.
   mule->state.cargo_resource = kind;
-  if (want <= 0) return HostOutcome::ok_void();
 
-  // 4. Whatever the warehouse can pay.
-  mule->state.cargo += here->warehouse.take(kKind, want);
+  // 4. Whatever the warehouse can pay, added through the cargo setter -- so
+  //    an empty mule that is paid nothing dies (0x005eb0a0).
+  const std::int32_t paid = want > 0 ? here->warehouse.take(kKind, want) : 0;
+  set_wagon_cargo(*world, mule->id, mule->state.cargo + paid);
   return HostOutcome::ok_void();
 }
 
@@ -3755,10 +3797,9 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // for a positive food load and cleared otherwise, and -- **outside the
     // editor (`[0x00a8734c]`), an emptied wagon that is not already dead runs
     // its death virtual (`vtbl+0xb0`)**. That last step is why
-    // `WAGON_UNLOAD.VS` ends `.SetFood(0); .SetGold(0); .Erase();`. A wagon
-    // here is reached through `ObjectState::cargo`, and the receiver below
-    // takes this path for a wagon object; its death is not reproduced (the
-    // mule journey is `EconomySystem`'s table, see `CreateMuleGold`).
+    // `WAGON_UNLOAD.VS` ends `.SetFood(0); .SetGold(0); .Erase();`: the first
+    // call kills the mule, the second finds it dead. The receiver below takes
+    // this path for a wagon object, through `set_wagon_cargo`.
     {CallKind::member, "SetFood", 1,  // 32 sites
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -3769,7 +3810,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        World* world = world_of(ctx);
        if (world == nullptr) return no_settlement(ctx);
        if (WorldObject* wagon = wagon_receiver(ctx, *world); wagon != nullptr) {
-         set_wagon_cargo(*wagon, Resource::food, int_arg(ctx, 1));
+         write_wagon_cargo(*world, *wagon, Resource::food, int_arg(ctx, 1));
          return HostOutcome::ok_void();
        }
        // `ObjList::SetFood` (0x0055e890) and `Query::SetFood` (0x005798b0, the
@@ -4322,7 +4363,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
          World* world = world_of(ctx);
          if (world == nullptr) return no_settlement(ctx);
          if (WorldObject* wagon = wagon_receiver(ctx, *world); wagon != nullptr) {
-           set_wagon_cargo(*wagon, Resource::gold, int_arg(ctx, 1));
+           write_wagon_cargo(*world, *wagon, Resource::gold, int_arg(ctx, 1));
            return HostOutcome::ok_void();
          }
          return no_settlement(ctx);
@@ -5259,18 +5300,18 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // The kind is written **before** the warehouse is asked, so a mule that
     // asked for food and got none still reports `restype == food`. Reproduced.
     //
-    // **Two things are not reproduced, and they are the reason both rows are
-    // `partial`.** (a) 0x005ebc90 has a second arm, for a mule that is *not*
-    // in a holder: a cell sweep (0x005eb4b0) of the mule's sight
-    // (`[mule+0xd0]`) for the first `CVXTownHall` it can see (0x005a7870) whose
-    // owner it grants share-support -- so a mule standing beside a friendly
-    // town loads from it without entering. The sweep's cell order decides
-    // which hall when there are two, and this engine sweeps by id. (b) The new
-    // cargo is set through 0x005eb0a0, which **kills a mule whose cargo comes
-    // out at zero** (`vtbl+0xb0`, unless it is already dead or the global at
-    // 0x00a8734c is set) -- so an empty mule asking an empty warehouse dies.
-    // That setter is shared with `Wagon::SetGold`/`SetFood` and wants one
-    // model of a wagon's death, which belongs with those rows.
+    // The new cargo is set through 0x005eb0a0, `set_wagon_cargo`, which
+    // **kills a mule whose cargo comes out at zero** -- so an empty mule
+    // asking an empty warehouse dies, and a refused one (no hall, the other
+    // kind aboard) is not touched at all.
+    //
+    // 0x005ebc90 has a second arm, for a mule that is *not* in a holder: a
+    // cell sweep (0x005eb4b0) of the mule's sight (`[mule+0xd0]`) for the
+    // first `CVXTownHall` it can see (0x005a7870) whose owner it grants
+    // share-support -- so a mule standing beside a friendly town loads from it
+    // without entering. Reproduced in `load_cargo`, with one labelled reading:
+    // two halls in one 256-unit cell are taken by id, the cell's own list
+    // order not having been read.
     // `set.CreateBoatGold(n)` / `CreateBoatFood(n)` -- 3 sites each, and
     // between them the whole of four scripts: `CREATE_GOLD_BOAT_BIG.VS` and its
     // three siblings differ only in `1000` against `250` and which of the two
@@ -5737,6 +5778,16 @@ constexpr EconomyHostDef kEconomyHosts[] = {
 };
 
 }  // namespace
+
+void set_wagon_cargo(World& world, ObjectId wagon, std::int32_t value) {
+  WorldObject* slot = world.find(wagon);
+  if (slot == nullptr) return;
+  slot->state.cargo = value;
+  if (value != 0 || slot->state.health <= 0) return;
+  if (CombatSystem* combat = combat_system_of(world); combat != nullptr) {
+    (void)combat->kill(world, wagon);
+  }
+}
 
 bool economy_constant(const EconomyRules& rules, std::string_view key,
                       std::int32_t& out) noexcept {

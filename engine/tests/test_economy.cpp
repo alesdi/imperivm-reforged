@@ -5578,8 +5578,9 @@ TEST(a_mule_loads_from_the_settlement_it_stands_in_and_carries_one_kind) {
   CHECK(amount() == 0);
   CHECK(restype() == 0);
 
-  // 1. Standing nowhere, it loads nothing -- the settlement comes from the
-  //    holder, not from ownership or from the nearest town.
+  // 1. Standing nowhere, it loads nothing: out of a holder the mule looks for
+  //    a hall within its sight, and this class declares none (see
+  //    `a_mule_in_the_open_loads_at_the_first_supported_hall_it_sees`).
   CHECK(call("LoadGold", {self, script::Value::integer(500)}).status ==
         script::HostStatus::ok);
   CHECK(amount() == 0);

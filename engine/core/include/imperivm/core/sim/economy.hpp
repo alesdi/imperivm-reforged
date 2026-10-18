@@ -670,6 +670,16 @@ struct CommandDef;
 
 [[nodiscard]] EconomySystem* economy_of(World& world) noexcept;
 
+/// The wagon's cargo setter, 0x005eb0a0 -- every write of a wagon's cargo
+/// goes through it (`docs/formats/wagon.md`): `ObjectState::cargo` takes
+/// `value` unclamped, and **a value of exactly zero kills a wagon that is not
+/// already dead** through its death virtual (`CombatSystem::kill`, `ondie`
+/// and all). The kind is the caller's to write first. The carrying-food flag
+/// the original also sets here (`0x20000000`) is not modelled: nothing but
+/// the state dump reads it. The editor guard (`[0x00a8734c]`) is not either:
+/// no script runs under it here. Nothing for an id that is not an object.
+void set_wagon_cargo(World& world, ObjectId wagon, std::int32_t value);
+
 // -- the garrison ----------------------------------------------------------
 //
 // A settlement's garrison is its holder (`settlement handle + 1`): the units

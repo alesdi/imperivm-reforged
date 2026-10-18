@@ -21,10 +21,10 @@
 0x005c1d80	verified	Settlement::UnitsCount: [holder+0x40], the holder list's size; invalid prints, 0
 0x005c6de0	verified	Ship::UnitsCount: [[ship+0x1dc] holder +0x14] occupancy; invalid prints, 0; engine counts units_on_board
 0x005d7cd0	verified	Unit::SetFood: FIXED -- [u+0x16c] written unclamped (above maxfood and below 0), flag 0x20000000 set at >= 1 (feeder hungry mark); FeederSystem::write_food; test feeder_host_reads_and_writes_a_units_food
-0x005ebe70	partial	Wagon::SetFood: FIXED -- kind [+0x1d4]=1 then cargo [+0x1cc] via 0x005eb0a0, unclamped; test economy_wagon_set_food_and_set_gold_write_kind_and_cargo. Gap: 0x005eb0a0 kills an emptied wagon (vtbl+0xb0) outside the editor -- not reproduced
+0x005ebe70	verified	Wagon::SetFood: FIXED -- kind [+0x1d4]=1 then cargo [+0x1cc] through the setter 0x005eb0a0 (set_wagon_cargo): unclamped, and a cargo of exactly 0 kills a wagon not already dead (death virtual, CombatSystem::kill). Carrying-food flag 0x20000000 not modelled (only the dump reads it); editor guard moot (no script runs under it). Tests economy_wagon_set_food_and_set_gold_write_kind_and_cargo, a_wagon_emptied_to_zero_dies
 0x005c1bc0	verified	Settlement::ForceAddUnit: unit then settlement resolved (each miss prints, void); holder entry 0x005d3e10 with force 1 = garrison_enter(force) + onenter hook
 0x005c21a0	verified	Settlement::SetGold: FIXED -- min(value, cap [wh+0x10]) with no floor; test economy_settlement_setters_clamp_only_from_above
-0x005ebec0	partial	Wagon::SetGold: FIXED -- kind 0 then cargo via 0x005eb0a0; test economy_wagon_set_food_and_set_gold_write_kind_and_cargo. Gap: emptied-wagon death not reproduced (as Wagon::SetFood)
+0x005ebec0	verified	Wagon::SetGold: FIXED -- kind 0 then cargo through the setter 0x005eb0a0, emptied wagon dies (as Wagon::SetFood); test a_wagon_emptied_to_zero_dies
 0x00535260	verified	Item::name: FIXED -- [item+8] handle -> [+0x24] definition -> its first string, the <item id> (reader 0x005361f0 at 0x0053638d); invalid prints, ""; test item_name_answers_the_definitions_id
 0x005aea60	partial	Obj::name: reverse lookup of the NamedObj at [obj+0x84] in the named-object manager (0x0054b3a0), "" when absent; engine looks up the object itself -- the +0x84 indirection is not modelled (agrees for every top-level object)
 0x005c2700	verified	Settlement::name: std::string at [s+0xcc]; invalid prints, ""

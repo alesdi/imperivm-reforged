@@ -203,7 +203,12 @@ settlement is 1,200 nearer; loads a mule through 0x005eed90 and orders it
   in the constructed state; the timers count in the economy's event-stepped
   clock and are armed from the script's own instant. `StartCapture` and
   `StopCapture` are not bound (no shipped site).
-* **The cargo** is `ObjectState::cargo` / `cargo_resource` on the object.
+* **The cargo** is `ObjectState::cargo` / `cargo_resource` on the object, and
+  every script write goes through `set_wagon_cargo`, the setter: an emptied
+  wagon dies through `CombatSystem::kill`, the unit death with no blow. The
+  carrying-food flag is not kept (only the state dump reads it).
+* **Loading** has both arms; the open arm orders candidates by grid row, then
+  column, then id within a cell.
 * **A settlement's mule and the squad's food wagon** are not objects here:
   `EconomySystem::Wagon` is a shipment row with a build timer that delivers
   itself (`CreateMule*`) or stands as a squad's larder (`SendFoodWagon`). The
