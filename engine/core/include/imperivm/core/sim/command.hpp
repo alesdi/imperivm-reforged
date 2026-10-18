@@ -747,6 +747,14 @@ class CommandSystem final : public System {
   /// put back to nothing at 0x004ef6ad..0x004ef6f2). `ACTIVATE_HERO_SKILL.VS`,
   /// the dispatch of the nine hero skill rows, reads both. False when the
   /// script could not be had.
+  /// Run `id`'s class method `verb` now, to its end, with `This` bound and
+  /// `row`'s strings and costs ambient for the length of the call -- outside
+  /// the queue: no accept test, no payment, nothing queued, nothing replaced.
+  /// 0x0059af00 (finding the method on the object's class and running it
+  /// through 0x006a0360) under the ambient globals 0x004dfcd0 writes and puts
+  /// back. A trap is reported with the pass. False when the object has no
+  /// such method or the script cannot be had.
+  bool run_method(World& world, ObjectId id, std::string_view verb, const CommandDef& row);
   bool dispatch(World& world, std::span<const ObjectId> actors, const CommandDef& def,
                 Point point, ObjectId object, bool replace, bool modifier,
                 std::int32_t player_arg);

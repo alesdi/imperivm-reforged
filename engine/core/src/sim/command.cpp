@@ -1114,6 +1114,27 @@ bool CommandSystem::dispatch(World& world, std::span<const ObjectId> actors, con
   return ran.id != script::kNoScript;
 }
 
+bool CommandSystem::run_method(World& world, ObjectId id, std::string_view verb,
+                               const CommandDef& row) {
+  if (scheduler_ == nullptr || world.find(id) == nullptr) return false;
+  const std::string path(script_for(world, id, verb));
+  const std::uint32_t chunk = path.empty()                ? script::kNoChunk
+                              : library_ != nullptr ? library_->chunk_for(path)
+                                                    : scheduler_->find_chunk(path);
+  if (chunk == script::kNoChunk || chunk >= scheduler_->chunk_count()) return false;
+  const script::Value self = script::Value::object(kTypeObj, id);
+  const Command ambient = row_command(row);
+  const Command* outer = hooked_;
+  hooked_ = &ambient;
+  const script::CallReport ran = scheduler_->call(chunk, std::span<const script::Value>(&self, 1));
+  hooked_ = outer;
+  if (ran.status == script::ExecStatus::failed) {
+    scheduler_->report_trap(
+        script::FailedScript{ran.id, scheduler_->chunk(chunk).source_name, ran.trap});
+  }
+  return true;
+}
+
 void CommandSystem::run_immediate(World& world, ObjectId id, Command command) {
   // The command was built, so it has its id (0x00599302), whatever follows.
   command.id = world.next_command_id();

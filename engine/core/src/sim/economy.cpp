@@ -3913,19 +3913,20 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // finds an idle lab that offers it, and issues the command there.
     //
     // `Building::Research` (0x004dfcd0) is the other registration on this
-    // name and arity, and it is a different thing: it looks the row up, and
-    // runs the building's `research` method **synchronously** (0x0059af00)
-    // with the row's name, `costgold`, `costfood`, `+0x1f4` and `costpop` in
-    // the four globals the `cmdcost_*` names read, restoring them after --
-    // no affordability test, no lab search, no queue, no payment. **Known
-    // gap:** 22 campaign sites call it (`NO_AI.obj.AsBuilding().Research(...)`
-    // and its kin, granting an AI its researches), and here a building
-    // handle resolves to its settlement and takes the settlement's path --
-    // paid for, refused when unaffordable, run on whichever idle lab offers
-    // the row. Closing it needs a method run outside the command queue, which
-    // `CommandSystem` does not offer; `set_command` on the building would
-    // charge the row (`charge`) and replace its running command, neither of
-    // which the original does.
+    // name and arity, and it is a different thing: it looks the row up (no
+    // row, nothing), and runs **the building's own** `research` method
+    // **synchronously** (0x0059af00) with the row's parameter as `cmdparam`
+    // and its `costgold`, `costfood`, `+0x1f4` and `costpop` in the four
+    // globals the `cmdcost_*` names read, restoring them after -- no
+    // affordability test, no lab search, no queue, no payment
+    // (`CommandSystem::run_method`). An invalid building prints "Building::
+    // Research called with invalid object as parameter" and does nothing.
+    // 22 campaign sites call it (`NO_AI.obj.AsBuilding().Research(...)` and
+    // its kin, granting an AI its researches). The receiver's declared type
+    // picks the body in the original; here a `kTypeObj` handle that is not a
+    // settlement's own object is the `Building` form. It used to resolve to its
+    // settlement and take the settlement's path -- paid for, refused when
+    // unaffordable, run on whichever idle lab offers the row.
     //
     // Every refusal on the way is a **return**, printed into the sink that is a
     // bare `ret` in retail: an unknown upgrade name prints *"No such upgrade
@@ -3946,6 +3947,24 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     {CallKind::member, "Research", 1,  // 41 sites
      +[](CallContext& ctx) -> HostOutcome {
        World* world = world_of(ctx);
+       if (world != nullptr && ctx.count() == 2 && ctx.arg(0).is_object() &&
+           ctx.arg(0).as_object().type == kTypeObj) {
+         EconomySystem* economy = host_economy(ctx);
+         const ObjectId building = ctx.arg(0).as_object().id;
+         const Settlement* owning =
+             economy == nullptr ? nullptr : economy->settlements().for_object(building);
+         if (owning == nullptr || owning->object != building) {
+           if (world->find(building) == nullptr || !ctx.arg(1).is_string()) {
+             return HostOutcome::ok_void();
+           }
+           const CommandDef* row = command_row(ctx, ctx.arg(1).as_string());
+           CommandSystem* commands = command_system(*world);
+           if (row != nullptr && commands != nullptr) {
+             (void)commands->run_method(*world, building, "research", *row);
+           }
+           return HostOutcome::ok_void();
+         }
+       }
        Settlement* s = receiver(ctx);
        if (world == nullptr || s == nullptr || !ctx.arg(1).is_string()) {
          return HostOutcome::ok_void();
