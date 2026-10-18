@@ -875,6 +875,10 @@ ObjectId CombatSystem::best_target(ObjectId id, const TargetFilter& filter) cons
   // rather than as a term inside it. See `TargetFilter::prefer_class`.
   bool best_preferred = false;
   for (const Combatant& other : units_) {
+    // The circle first: every test here is a filter, so the order changes no
+    // answer, and the circle is the cheap one -- `targetable` asks the
+    // `CanAttack` virtual, which looks a building's settlement up.
+    if (distance_squared(centre, other.position) > reach2) continue;
     if (!targetable(*self, other)) continue;
     // `BestTargetInSquadSightExclusive`. Exact class, not ancestry.
     if (filter.only_class != kNoClass && other.class_index != filter.only_class) continue;
@@ -981,7 +985,10 @@ bool CombatSystem::unit_can_attack(const Combatant& self, const Combatant& targe
   }
   if (theirs.is(CombatProfile::kLineFish)) return false;
 
-  if (target_is_building && them->settlement != kNoObject) {
+  // The settlement is looked up only for the two clauses that read it: it is
+  // a scan of the store, and every unit's sweep asks this of every building.
+  if (target_is_building && them->settlement != kNoObject &&
+      (theirs.is(CombatProfile::kLineFakeTower) || mine.is(CombatProfile::kLineRamUnit))) {
     if (EconomySystem* economy = economy_of(*world_); economy != nullptr) {
       if (const Settlement* set = economy->settlements().for_object(them->settlement);
           set != nullptr) {
