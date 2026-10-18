@@ -100,15 +100,13 @@
 ///     visibility mask, the two unit flag bits at 21 and 22 of `[unit+0x194]`,
 ///     the class flag at `[class+0xb30]`, and the settlement field at
 ///     `[settlement+0x40]` are not modelled and are treated as passing.
-///   * **The catapult's target is `Catapult::SetTarget`'s.** 0x004389d5
+///   * **The catapult's target is the engine's own slot.** 0x004389d5
 ///     writes the target handle into `[cat+0x228]`, the slot
-///     `Catapult::GetCurrentTarget` reads back, which this engine keeps as the
-///     combatant's target; an engine the combat system has not yet met is
-///     reconciled first. `CombatSystem::act` acquires and strikes for every
-///     combatant whose class can attack **except an engine not yet built**
-///     (playtest #19): an engine at one point of health used to shoot here
-///     before its crew had assembled it. The planner's aim changes which
-///     target a built engine shoots at, not whether.
+///     `Catapult::GetCurrentTarget` reads back -- `ObjectState::catapult_target`
+///     here -- directly, with no validation and no walk onto the engine's
+///     towers. Nothing is engaged: an engine shoots only when its autofire
+///     script throws (`docs/formats/siege-fire.md`), and that script reads the
+///     slot to choose what to throw at.
 ///   * **A site query with no catapult class is answered with no site.** The
 ///     original reaches it with a null class when no crew voted -- the race
 ///     comes from the first unit's pointer then -- and faults inside the

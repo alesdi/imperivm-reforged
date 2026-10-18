@@ -798,7 +798,12 @@ TEST(a_fight_runs_to_a_death_and_the_body_is_removed) {
 /// An engine fires through `Catapult::Attack`, which `CATAPULT_IDLE.VS` sets
 /// going (`autofire`) only after `SetBuilt`; at one point of health, with its
 /// builders still on their way, it used to shoot at whatever came into range.
-/// Built, the same engine fights, and an ordinary unit never asks.
+///
+/// **Built, it still does not fight on its own** (`docs/formats/siege-fire.md`):
+/// in `gbr.exe` no building acquires or strikes on a clock -- every engine's
+/// shot is its script's `Catapult::Attack(point)` and every tower's its
+/// script's `Building::Attack` -- so `CombatSystem::act` leaves a building to
+/// its scripts, and an ordinary unit beside it fights all along.
 TEST(an_unbuilt_siege_engine_takes_no_part_in_the_fight) {
   World world;
   const ObjectId engine = world.spawn(NativeClass::catapult, nullptr);
@@ -829,7 +834,8 @@ TEST(an_unbuilt_siege_engine_takes_no_part_in_the_fight) {
   REQUIRE(combat.find(soldier) != nullptr);
   CHECK(combat.find(soldier)->target == enemy);
   world.find(engine)->state.flags.built = true;
-  CHECK(strikes_by(engine, 10) > 0);
+  CHECK(strikes_by(engine, 10) == 0);
+  CHECK(combat.find(engine)->target == kNoObject);
 }
 
 /// **The flag is read off the world by the blow, not by the preview.**
@@ -2341,10 +2347,12 @@ TEST(a_map_placed_siege_engine_is_unbuilt_and_holds_its_fire) {
   };
   CHECK(strikes_by(engine, 40) == 0);
   CHECK(combat.health(gaul) == 200);
-  // The arrangement is one the engine can fight in: built, the same engine
-  // shoots the same enemy.
+  // Built, it holds its fire all the same until a script throws:
+  // `Catapult::Attack(point)` is the only thing that shoots an engine
+  // (`docs/formats/siege-fire.md`).
   world.find(engine)->state.flags.built = true;
-  CHECK(strikes_by(engine, 40) > 0);
+  CHECK(strikes_by(engine, 40) == 0);
+  CHECK(combat.health(gaul) == 200);
 }
 
 TEST(combat_population_follows_objects_that_appear_and_disappear) {
@@ -2404,9 +2412,9 @@ TEST(a_building_keeps_a_running_total_of_the_damage_it_takes) {
   const std::int32_t left = combat.find(hut)->health;
   CHECK(combat.apply_damage(world, hut, 1000) == left);
   CHECK(world.state(hut)->damage_taken == 200);
-  // A unit has no such total -- not from the hut's blows back, not from
-  // `Obj::Damage`.
-  CHECK(combat.find(man)->health < 200);
+  // A unit has no such total, not from `Obj::Damage`. (The hut does not hit
+  // back: a building fires only from its scripts.)
+  CHECK(combat.find(man)->health == 200);
   CHECK(world.state(man)->damage_taken == 0);
   CHECK(combat.apply_damage(world, man, 50) == 50);
   CHECK(world.state(man)->damage_taken == 0);

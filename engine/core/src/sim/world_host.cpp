@@ -1,6 +1,7 @@
 // The object-model half of the .vs host API.
 // See include/imperivm/core/sim/world_host.hpp.
 
+#include "imperivm/core/sim/siege_fire.hpp"
 #include "imperivm/core/sim/gaika.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "imperivm/core/game/entity.hpp"
@@ -3033,28 +3034,17 @@ HostOutcome m_get_stamina_dec_time(CallContext& ctx) {
 /// `TOWER_ATTACK.VS` writes with `Bld.SetUITarget(target)`: the fake towers
 /// are the engine's guns, and taking their target away is what stops them.
 ///
-/// **The gate is not reproduced.** `[cat+0x22c]` is the slot `RotateTo` reads
-/// as a turn in progress, and this engine keeps no such slot -- its `RotateTo`
-/// turns at once -- so the clear here is unconditional. The divergence is a
-/// stopped catapult that was not mid-swing, whose towers keep their target
-/// in the original; the target the catapult itself keeps is left alone in
-/// both readings, which is what the script's comment asks for.
+/// **The gate is `has_towers`.** `[cat+0x22c]` is the engine's `HasTowers`
+/// (the persist stream names it, 0x004e1c90), raised when the tower
+/// placement put a `CatapultTower` down -- not a turn in progress, as this
+/// note once read it. An engine with no towers has nothing to silence. The
+/// walk is `catapult_clear_tower_target` (`sim/siege_fire.cpp`).
 HostOutcome m_clear_tower_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("ClearTowerTarget: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_void();
-  const EconomySystem* economy = economy_of(*world);
-  const Settlement* set =
-      economy == nullptr ? nullptr : economy->settlements().for_object(slot->id);
-  if (set == nullptr) return HostOutcome::ok_void();
-  for (const SettlementBuilding& building : set->buildings) {
-    const WorldObject* member = world->find(building.object);
-    if (member == nullptr || !class_is(*world, *member, "CatapultTower")) continue;
-    if (ObjectState* state = world->mutable_state(building.object); state != nullptr) {
-      state->ui_target = kNoObject;
-    }
-  }
+  catapult_clear_tower_target(*world, slot->id);
   return HostOutcome::ok_void();
 }
 
@@ -3088,12 +3078,11 @@ HostOutcome m_is_built(CallContext& ctx) {
 /// the start of the next, and a full crew of ten waits 1,000 less than
 /// `600000 / 292`.
 ///
-/// **One term is not reproduced and is named.** When the catapult's action
-/// state (`[obj+0x44]`) is between 4 and 7 -- a shot still in progress -- the
-/// original (0x004e3326..0x004e3365) adds the time left on that state to the
-/// answer. This engine keeps no such action state on a catapult, and the
-/// three callers ask from idle, so the answer here is the interval less the
-/// animation, floored at 0. A negative result is 0 there too (0x004e330c).
+/// **One term cannot arise here.** When the catapult's action state is
+/// between 4 and 7 the original (0x004e3326..0x004e3365) adds the time left
+/// on it to the answer. `Catapult::Attack` suspends its script to the end of
+/// the throw and `RotateTo` turns at once, so none of the three callers can
+/// ask with a state in progress. A negative result is 0 (0x004e330c).
 /// One cycle of the entity's `attack` state, in game-time milliseconds, or 0
 /// for an object with no entity or no such state. What `AttackWait` takes off
 /// the shot interval, and how long `TrainAttack`'s swing lasts.
@@ -3133,7 +3122,12 @@ HostOutcome m_attack_wait(CallContext& ctx) {
   if (rate <= 0) return HostOutcome::ok_with(Value::integer(0));
   std::int32_t wait = 600000 / rate;
 
-  wait -= attack_animation_ms(*slot);
+  // The attack animation's `duration` attribute: the record at
+  // `[entity+0x147c]` is `<anim idx="5">` (the table at `+0x146c` is indexed
+  // by `idx - 1`) and its `+0x4c` is `duration` (the writer 0x005fd720 prints
+  // the fields in that order). Not the `attack` *state*, which only one
+  // shipped catapult entity names.
+  wait -= catapult_throw_ms(*world, slot->id);
   return HostOutcome::ok_with(Value::integer(wait < 0 ? 0 : wait));
 }
 
@@ -3168,6 +3162,9 @@ HostOutcome m_rotate_to(CallContext& ctx) {
   // fault that drops it survives the suite. The original writes the test
   // here (0x004e2ca7), so this does too.
   if (towards == world->resolve_position(slot->id)) return HostOutcome::ok_void();
+  // And an engine with towers does not turn: the same `[cat+0x22c]` gate
+  // `Catapult::Attack` has, read in the same place (0x004e2c50).
+  if (slot->state.flags.has_towers) return HostOutcome::ok_void();
   if (MovementSystem* movement = movement_system(*world); movement != nullptr) {
     movement->face(*world, slot->id, towards);
   }

@@ -17,6 +17,8 @@
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/movement.hpp"
+#include "imperivm/core/sim/settlement.hpp"
+#include "imperivm/core/sim/siege_fire.hpp"
 #include "imperivm/core/sim/world.hpp"
 // `unpack_point`: `BestTargetInRange/2` takes a `point`, and the object model
 // owns how one is packed into a `Value`.
@@ -267,6 +269,8 @@ CombatConstants CombatConstants::from_const_ini(std::span<const std::byte> bytes
       out.catapult_base_fire_rate = to_int(value, out.catapult_base_fire_rate);
     } else if (equal_ignoring_case(key, "CatapultAddFireRate")) {
       out.catapult_add_fire_rate = to_int(value, out.catapult_add_fire_rate);
+    } else if (equal_ignoring_case(key, "BaseFireRate")) {
+      out.base_fire_rate = to_int(value, out.base_fire_rate);
     } else if (equal_ignoring_case(key, "CatapultMaxUnits")) {
       out.catapult_max_units = to_int(value, out.catapult_max_units);
     } else if (equal_ignoring_case(key, "SquadLookIvl")) {
@@ -1653,6 +1657,14 @@ void CombatSystem::land(World& world, Projectile& shot, GameTime now) {
   // The shooter is re-found at every use, and the splash walks ids rather than
   // `units_`: each `hit` can kill, and a kill runs hooks to completion.
   const auto shooter_now = [this, &shot]() { return find(shot.shooter); };
+
+  if (shot.ground) {
+    land_on_ground(world, shot, now);
+    world.despawn(shot.id);
+    shot.id = kNoObject;
+    return;
+  }
+
   Combatant* target = mutable_find(shot.target);
 
   const auto apply = [&](Combatant& victim) {
@@ -1694,6 +1706,101 @@ void CombatSystem::land(World& world, Projectile& shot, GameTime now) {
   shot.id = kNoObject;
 }
 
+/// A ground shot's impact, 0x004e4520 -> 0x005ac640 -> 0x005a9770 ->
+/// 0x005a8e10 (`docs/formats/siege-fire.md`, "A catapult's shot").
+///
+/// Every combatant -- every unit and building -- whose centre is inside the
+/// box and the circle of `splash_radius + 512` about the point, **whoever owns
+/// it**, takes, where its surface distance `d` (centre distance less its
+/// class's `radius`) is under `R = splash_radius`: the class damage `D` for
+/// `d < 1`, else `D * (R - d)^2 / R^2`, times the counter percent of the
+/// shooter's class against its own, over 100, applied as `Obj::Damage`
+/// applies it -- no armour, no level, no experience, nobody credited. The
+/// original walks its grid cell by cell; this walks ids ascending, which only
+/// orders the deaths' hooks among themselves.
+void CombatSystem::land_on_ground(World& world, const Projectile& shot, GameTime now) {
+  const std::int64_t radius = shot.splash_radius;
+  if (radius <= 0) return;
+  const std::int64_t reach = radius + 512;
+  std::vector<ObjectId> around;
+  around.reserve(units_.size());
+  for (const Combatant& other : units_) around.push_back(other.id);
+  for (const ObjectId id : around) {
+    const Combatant* victim = find(id);
+    if (victim == nullptr || !victim->alive || victim->action == Action::dying) continue;
+    if (victim->position == kHeldPosition) continue;
+    const std::int64_t dx = static_cast<std::int64_t>(victim->position.x) - shot.aim.x;
+    const std::int64_t dy = static_cast<std::int64_t>(victim->position.y) - shot.aim.y;
+    if (dx < -reach || dx > reach || dy < -reach || dy > reach) continue;
+    const std::int64_t d2 = dx * dx + dy * dy;
+    if (d2 > reach * reach) continue;
+    const std::int64_t surface = isqrt(d2) - profile(victim->class_index).radius;
+    if (surface >= radius) continue;
+    const std::int64_t base = surface < 1 ? shot.attack
+                                          : shot.attack * (radius - surface) * (radius - surface) /
+                                                (radius * radius);
+    const std::int64_t percent =
+        counters_.damage_percent(shot.shooter_class, victim->class_index, counter_mode_);
+    const std::int64_t blow = percent * base / 100;
+    now_ = now;
+    (void)apply_damage(world, id, static_cast<std::int32_t>(blow < 0 ? 0 : blow), shot.shooter);
+  }
+}
+
+bool CombatSystem::valid_target(const Combatant& self, const Combatant& other) const {
+  if (!other.alive || other.action == Action::dying || other.health <= 0) return false;
+  if (other.position == kHeldPosition) return false;
+  if (!is_enemy(self, other)) return false;
+  if (!profile(other.class_index).can_be_attacked) return false;
+  return unit_can_attack(self, other);
+}
+
+bool CombatSystem::launch_at_point(World& world, ObjectId catapult, Point from, Point at,
+                                   GameTime release) {
+  const Combatant* shooter = find(catapult);
+  if (shooter == nullptr) return false;
+  const CombatProfile mine = profile(shooter->class_index);
+  Projectile shot;
+  shot.shooter = catapult;
+  shot.target = kNoObject;
+  shot.class_index = mine.projectile;
+  shot.origin = from;
+  shot.aim = at;
+  shot.position = from;
+  shot.launched = release;
+  shot.id = world.spawn(NativeClass::catapult_shot, nullptr);
+  // The class's numbers, `[class+0x2a0]` and `[class+0x664]`, which is what
+  // 0x005a8e10 reads -- not the object's own attack.
+  shot.attack = mine.damage;
+  shot.type = mine.damage_type;
+  shot.splash_radius = mine.splash_radius;
+  shot.ground = true;
+  shot.shooter_class = shooter->class_index;
+  // The flight keeps the invented speed `launch` uses; the original's ten
+  // units a timer step is not settled in game time (siege-fire.md).
+  const std::int64_t distance = isqrt(distance_squared(from, at));
+  GameTime flight = distance * 1000 / kProjectileSpeed;
+  if (flight < 1) flight = 1;
+  shot.impact = release + flight;
+  shots_.push_back(shot);
+  events_.push_back(CombatEvent{CombatEvent::Kind::launch, release, catapult, kNoObject,
+                                shot.attack, 0});
+  return true;
+}
+
+bool CombatSystem::fire_arrow(World& world, ObjectId tower, ObjectId target, GameTime now) {
+  Combatant* shooter = mutable_find(tower);
+  const Combatant* victim = find(target);
+  if (shooter == nullptr || victim == nullptr) return false;
+  shooter->last_attack_time = now;
+  ++shooter->attacks;
+  // 0x0041e6c0: the victim's squad hears it was attacked, by the tower. No
+  // army stamp: `Building::Attack` calls no virtual on its target.
+  record_squad_attacked(world, target, tower, now);
+  launch(world, *shooter, *victim, now);
+  return true;
+}
+
 namespace {
 
 /// A siege engine its crew has not finished assembling, which takes no part
@@ -1715,11 +1822,24 @@ namespace {
          slot->object->is_a(NativeClass::catapult) && !slot->state.flags.built;
 }
 
+/// **A building fires only when a script makes it** (`docs/formats/siege-fire.md`).
+/// In `gbr.exe` a catapult's every shot is a `Catapult::Attack(point)` call
+/// from its autofire or attack script and a tower's a `Building::Attack` call
+/// from its guard script, each with the waits those entry points impose; no
+/// building acquires or strikes on a clock of its own. So the acquisition
+/// below is a unit's alone, and a building in it only waits. A synthetic roll
+/// with no world object behind an id keeps the old behaviour: it has no
+/// scripts to fire it.
+[[nodiscard]] bool fires_by_script(const World& world, ObjectId id) noexcept {
+  const WorldObject* slot = world.find(id);
+  return slot != nullptr && slot->state.flags.is_building;
+}
+
 }  // namespace
 
 void CombatSystem::act(World& world, Combatant& unit, GameTime now) {
   const CombatProfile mine = profile(unit.class_index);
-  if (!mine.can_attack() || unbuilt_engine(world, unit.id)) {
+  if (!mine.can_attack() || unbuilt_engine(world, unit.id) || fires_by_script(world, unit.id)) {
     unit.next_action_time = now + constants_.acquire_interval;
     return;
   }
@@ -1772,6 +1892,10 @@ void CombatSystem::act(World& world, Combatant& unit, GameTime now) {
 
 void CombatSystem::advance(World& world, const Turn& turn) {
   events_.clear();
+  // The fake towers owed to an outpost or an engine created since the last
+  // turn, before the roll is reconciled so that they are on it: where this
+  // engine delivers the original's message 0x3d (`sim/siege_fire.hpp`).
+  if (world_bound_) (void)post_fake_towers(world);
   // **Before the early return, not after it.** Objects appear and disappear
   // during a match, and a system that returned on an empty population would
   // never notice the first one that appeared. See `reconcile`.
@@ -1817,8 +1941,12 @@ void CombatSystem::advance(World& world, const Turn& turn) {
     std::size_t shot_index = 0;
     for (std::size_t i = 0; i < shots_.size(); ++i) {
       if (shots_[i].id == kNoObject) continue;
+      // No lower bound. A script's shot (`Catapult::Attack`, `Building::Attack`)
+      // is launched in the script pass, after this drain has run over the same
+      // slice of time, and can come due inside it; it lands at the head of the
+      // next drain, before anything else, at the time it was due.
       const GameTime t = shots_[i].impact;
-      if (t <= begin || t > end) continue;
+      if (t > end) continue;
       if (!have_shot || t < shot_when) {
         have_shot = true;
         shot_when = t;
@@ -2330,9 +2458,98 @@ HostOutcome host_set_experience(CallContext& ctx) {
 /// `eax = 0`, which is this protocol's "done"; only the accepted path returns
 /// 1. So `while (.Attack(u))` leaves the instant the target stops being
 /// attackable, without spending game time on the attempt.
+/// `Catapult::Attack(point)` (0x004e2d10), suspending: one throw. Refused --
+/// nothing launched, nothing suspended -- for a receiver that does not
+/// resolve, a point on the engine itself, or an engine that carries towers
+/// (`has_towers`, `[cat+0x22c]`). Otherwise the shot leaves at the attack
+/// animation's action moment for the point and the script resumes when the
+/// animation ends. `docs/formats/siege-fire.md`, "A catapult's shot", has
+/// the state machine this stands for and what is approximated.
+HostOutcome catapult_attack(CallContext& ctx, CombatSystem& combat, World& world) {
+  const ObjectId catapult = id_of(ctx.arg(0));
+  const WorldObject* slot = world.find(catapult);
+  if (slot == nullptr) return HostOutcome::ok_void();
+  const Point at = unpack_point(ctx.arg(1));
+  const Point from = world.resolve_position(catapult);
+  if (at == from || slot->state.flags.has_towers) return HostOutcome::ok_void();
+  const std::int32_t release = catapult_release_ms(world, catapult);
+  if (!combat.launch_at_point(world, catapult, from, at, ctx.now + release)) {
+    return HostOutcome::ok_void();
+  }
+  const std::int32_t throw_ms = catapult_throw_ms(world, catapult);
+  HostOutcome out;
+  out.status = script::HostStatus::suspend;
+  out.suspend_for = throw_ms > 0 ? throw_ms : 1;
+  return out;
+}
+
+/// `Building::Attack(obj)` (0x004df650), suspending: one arrow, or a wait
+/// and another try. In the original's order: receiver and target resolve;
+/// the settlement's fire rate (`settlement_fire_rate`) is not 0; the tower
+/// may hit the target (`valid_target`) and it is in range (0x005a7800:
+/// surface distance within `range`, and past `min_range` when that is 1 or
+/// more). Any of those failing answers false at once. Then the tower's own
+/// `attack_delay` since its last shot, and the settlement's `1000 / rate`
+/// since any of its towers' last shot (`last_tower_fire_time`, reset if it
+/// lies ahead): while either has time left the call suspends for it and is
+/// made again (the original's return 1 with the wait in `[0x00a77eac]`).
+/// Otherwise both clocks are stamped, the arrow is loosed and the answer is
+/// true with no suspension. See `docs/formats/siege-fire.md`.
+HostOutcome building_attack(CallContext& ctx, CombatSystem& combat, World& world) {
+  const ObjectId tower = id_of(ctx.arg(0));
+  const ObjectId target = id_of(ctx.arg(1));
+  const WorldObject* slot = world.find(tower);
+  const Combatant* self = combat.find(tower);
+  const Combatant* other = combat.find(target);
+  const auto no = [] { return HostOutcome::ok_with(Value::boolean(false)); };
+  if (slot == nullptr || self == nullptr || world.find(target) == nullptr || other == nullptr) {
+    return no();
+  }
+  Settlement* set = siege_settlement_of(world, tower);
+  const std::int32_t rate =
+      set == nullptr ? 0 : settlement_fire_rate(world, *set, combat.constants().base_fire_rate);
+  if (rate <= 0) return no();
+  if (!combat.valid_target(*self, *other)) return no();
+  const CombatProfile mine = combat.profile(self->class_index);
+  const std::int64_t d =
+      isqrt(distance_squared(world.resolve_position(tower), world.resolve_position(target))) -
+      mine.radius - combat.profile(other->class_index).radius;
+  if ((mine.min_range >= 1 && d < mine.min_range) || d > mine.range) return no();
+
+  const GameTime now = ctx.now;
+  const auto wait = [](GameTime ms) {
+    HostOutcome out;
+    out.status = script::HostStatus::retry;
+    out.suspend_for = ms;
+    return out;
+  };
+  const GameTime delay = class_int(world, *slot, "attack_delay");
+  const GameTime since_shot = now - self->last_attack_time;
+  if (since_shot >= 0 && since_shot < delay) return wait(delay - since_shot);
+  if (now < set->last_tower_fire_time) set->last_tower_fire_time = 0;
+  const GameTime cadence = 1000 / rate;
+  const GameTime since_any = now - set->last_tower_fire_time;
+  if (cadence > since_any) return wait(cadence - since_any);
+
+  set->last_tower_fire_time = now;
+  (void)combat.fire_arrow(world, tower, target, now);
+  return HostOutcome::ok_with(Value::boolean(true));
+}
+
 HostOutcome host_attack(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  // Three bodies behind one name: the receiver's type picks it in the
+  // original, the argument and the receiver's class here. Only
+  // `Catapult::Attack` takes a point; a building's object form is
+  // `Building::Attack`, a unit's `Unit::Attack`.
+  if (World* world = world_of(ctx); world != nullptr && combat->world_bound()) {
+    if (ctx.count() >= 2 && is_point(ctx.arg(1))) return catapult_attack(ctx, *combat, *world);
+    const WorldObject* slot = world->find(id_of(ctx.arg(0)));
+    if (slot != nullptr && slot->state.flags.is_building) {
+      return building_attack(ctx, *combat, *world);
+    }
+  }
   const ObjectId attacker = id_of(ctx.arg(0));
   const bool ok = combat->order_attack(attacker, id_of(ctx.arg(1)));
   if (!ok) return HostOutcome::ok_with(Value::boolean(false));
@@ -2415,6 +2632,13 @@ HostOutcome host_is_enemy(CallContext& ctx) {
 HostOutcome host_in_range(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  // `Catapult::InRange(point)` (0x004e3230), the only point form.
+  if (ctx.count() >= 2 && is_point(ctx.arg(1))) {
+    World* world = world_of(ctx);
+    const bool in = world != nullptr && catapult_point_in_range(*world, *combat, id_of(ctx.arg(0)),
+                                                                unpack_point(ctx.arg(1)));
+    return HostOutcome::ok_with(Value::boolean(in));
+  }
   const Combatant* a = combat->find(id_of(ctx.arg(0)));
   const Combatant* d = combat->find(id_of(ctx.arg(1)));
   if (a == nullptr || d == nullptr) return HostOutcome::ok_with(Value::boolean(false));
@@ -2537,10 +2761,23 @@ HostOutcome host_add_bonus(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
+/// `BestTarget/0` is registered twice, `Catapult::BestTarget` (0x004e2f60)
+/// and `Building::BestTarget` (0x004dcc60); both are in
+/// `sim/siege_fire.cpp`. A unit receiver has no body of its own in the
+/// original and keeps the unit sweep here.
 HostOutcome host_best_target(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)))));
+  const ObjectId id = id_of(ctx.arg(0));
+  if (World* world = world_of(ctx); world != nullptr && combat->world_bound()) {
+    if (is_catapult(*world, id)) {
+      return HostOutcome::ok_with(ref_to(ctx, catapult_best_target(*world, *combat, id)));
+    }
+    if (const WorldObject* slot = world->find(id); slot != nullptr && slot->state.flags.is_building) {
+      return HostOutcome::ok_with(ref_to(ctx, building_best_target(*world, *combat, id)));
+    }
+  }
+  return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id)));
 }
 
 /// Whether the `*InSquadSight` family answers the invalid handle before it
@@ -2892,9 +3129,22 @@ HostOutcome host_get_point_on_target(CallContext& ctx) {
   return HostOutcome::ok_with(pack_point(world->resolve_position(target)));
 }
 
+/// The three are registered only on `Catapult` (0x004e3500, 0x004e3600,
+/// 0x004e3710) and are the engine's target slot, `ObjectState::catapult_target`,
+/// with its mirror onto the engine's towers (`sim/siege_fire.cpp`). A
+/// receiver that is not a catapult has no body in the original; it keeps the
+/// combatant's target here, which no shipped script reaches.
+[[nodiscard]] World* catapult_world(CallContext& ctx, const Value& receiver) {
+  World* world = world_of(ctx);
+  return world != nullptr && is_catapult(*world, id_of(receiver)) ? world : nullptr;
+}
+
 HostOutcome host_get_target(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  if (World* world = catapult_world(ctx, ctx.arg(0)); world != nullptr) {
+    return HostOutcome::ok_with(ref_to(ctx, world->state(id_of(ctx.arg(0)))->catapult_target));
+  }
   const Combatant* unit = combat->find(id_of(ctx.arg(0)));
   return HostOutcome::ok_with(ref_to(ctx, unit == nullptr ? kNoObject : unit->target));
 }
@@ -2902,6 +3152,10 @@ HostOutcome host_get_target(CallContext& ctx) {
 HostOutcome host_clear_target(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  if (World* world = catapult_world(ctx, ctx.arg(0)); world != nullptr) {
+    catapult_clear_target(*world, id_of(ctx.arg(0)));
+    return HostOutcome::ok_void();
+  }
   combat->stop(id_of(ctx.arg(0)));
   return HostOutcome::ok_void();
 }
@@ -2909,6 +3163,10 @@ HostOutcome host_clear_target(CallContext& ctx) {
 HostOutcome host_set_target(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  if (World* world = catapult_world(ctx, ctx.arg(0)); world != nullptr) {
+    catapult_set_target(*world, id_of(ctx.arg(0)), id_of(ctx.arg(1)));
+    return HostOutcome::ok_void();
+  }
   combat->order_attack(id_of(ctx.arg(0)), id_of(ctx.arg(1)));
   return HostOutcome::ok_void();
 }

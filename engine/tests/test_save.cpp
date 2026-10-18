@@ -191,6 +191,8 @@ void populate(World& world, std::uint32_t seed) {
     slot->state.flags.commands_disabled = phase(17);
     slot->state.flags.half_damage = phase(18);
     slot->state.flags.training = phase(19);
+    slot->state.flags.towers_posted = phase(20);
+    slot->state.flags.has_towers = phase(21);
     // The flight altitudes, for the same reason: two ints that only
     // `Flying::PlayAnim` writes, and a build that dropped either would
     // round-trip clean over a fixture that left them at zero.
@@ -203,6 +205,8 @@ void populate(World& world, std::uint32_t seed) {
     // which is what a build that dropped either would have to get wrong.
     slot->state.mist = 500 + static_cast<ObjectId>(i);
     slot->state.sheltered_by = 700 + static_cast<ObjectId>(i);
+    // A catapult's own target (version 38), for the same reason.
+    slot->state.catapult_target = 900 + static_cast<ObjectId>(i);
   }
   const World::SingletonIds singletons = world.spawn_singletons();
   (void)singletons;
@@ -409,6 +413,8 @@ TEST(save_the_fixture_sets_and_clears_every_writable_flag) {
       {"cursed", &ObjectFlags::cursed},
       {"ondie_fired", &ObjectFlags::ondie_fired},
       {"diseased", &ObjectFlags::diseased},
+      {"towers_posted", &ObjectFlags::towers_posted},
+      {"has_towers", &ObjectFlags::has_towers},
   };
 
   for (const Named& named : kWritable) {
@@ -493,6 +499,9 @@ TEST(save_world_restores_every_field_it_claims) {
     CHECK(x.state.flags.commands_disabled == y.state.flags.commands_disabled);
     CHECK(x.state.flags.half_damage == y.state.flags.half_damage);
     CHECK(x.state.flags.training == y.state.flags.training);
+    CHECK(x.state.flags.towers_posted == y.state.flags.towers_posted);
+    CHECK(x.state.flags.has_towers == y.state.flags.has_towers);
+    CHECK(x.state.catapult_target == y.state.catapult_target);
     CHECK(x.state.z_from == y.state.z_from);
     CHECK(x.state.damage_taken == y.state.damage_taken);
     CHECK(x.state.z_to == y.state.z_to);

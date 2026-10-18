@@ -25,9 +25,9 @@
 0x00694a90	verified	b <= a ? a : b over ints
 0x00695060	verified	the double overload of MAX; unreachable from the corpus, not bound
 0x00694be0	verified	negate when negative; abs(INT32_MIN) is INT32_MIN
-0x004e32b0	partial	600000/(base+(crew-1)*add) less the attack animation, no crew or negative answers 0 (0x004e2030); the time left on a shot in progress (action state 4..7) is not added, there being no catapult action state here
+0x004e32b0	verified	600000/(base+(crew-1)*add) less the attack animation's duration, the record [entity+0x147c] = <anim idx=5> whose +0x4c is duration (table +0x146c indexed idx-1; writer 0x005fd720); no crew or negative answers 0 (0x004e2030). FIXED: subtracted the cycle of a state named attack, which four of the five firing catapult entities lack (2234 ms not taken off); test attack_wait_takes_off_the_attack_animations_duration. The in-progress term (action state 4..7) cannot arise: Attack suspends to the end of its throw and RotateTo turns at once
 0x004e2dc0	verified	[obj+0x208] != 0, invalid receiver false
-0x004e2c50	partial	the point and the no-turn-in-progress gate are read; the original stores the point, sets action state 7 and suspends until the turn ends, this engine faces at once (no catapult turn rate)
+0x004e2c50	partial	the point, the no-turn-on-itself test and the HasTowers [cat+0x22c] gate (FIXED: the gate was missing, read as a turn in progress) are reproduced; the original stores the point, sets action state 7 and suspends until the turn ends, this engine faces at once (no catapult turn rate)
 0x005135a0	verified	stores the bool byte at [obj+0x1d4], silent on an unresolvable receiver
 0x005135e0	verified	[obj+0x1d4] != 0, false and silent on an unresolvable receiver
 0x004e23d0	verified	CatapultVariationRadius from CONST.INI; no loop and offset (r, r) when isqrt(2r^2) <= r, else x then y drawn from [-r, r] until isqrt of the length <= r; clamped into the inclusive map rect
@@ -81,7 +81,7 @@
 0x00695100	verified	the reference form of right (field +8, an lvalue); no shipped site assigns it, and a read is the same number
 0x00695120	verified	the reference form of bottom (field +0xc, an lvalue); no shipped site assigns it, and a read is the same number
 0x004e2e20	verified	[cat+0x208] = 1 and the build frame to -1; the frozen-frame sprite bit 0x2000000 cleared and the idle animation restored (presentation)
-0x004e37f0	partial	writes 0xffff to [bld+0x1fc] on every CatapultTower heir of the catapult settlement [cat+0x148]; the original does so only while [cat+0x22c] is set, a slot not modelled, and the clear here is unconditional; an invalid receiver pushes a stray 0 there
+0x004e37f0	verified	ClearTowerTarget: under HasTowers [cat+0x22c] (raised by the tower placement 0x004e38d0, not a turn in progress), 0xffff to ui_target [bld+0x1fc] of every CatapultTower heir of the engine's settlement. FIXED: the clear was unconditional; test clear_tower_target_clears_the_settlements_catapult_towers. An invalid receiver's stray pushed 0 is not reproduced (nothing reads it)
 0x004e3380	verified	fixed: a threat at zero distance falls through to the random direction (two draws), and a random direction on the origin answers (1000, 0) (0x004e26c0); nearest enemy Tower/Outpost building in sight by squared distance, first met keeps a tie (spawn order here, grid order there, labelled); invalid receiver pushes 4 bytes in the original, (0,0) stands in
 0x004e3dc0	verified	fixed: the env write of 1 under /<map>/Player<n>/CatapultBuilt that ends 0x004e3be0, which BUILDINGSADVICE5.VS polls; race table 0x004e3b30, owner n-1, the site revealed to CatapultBuildSight (here through FogSystem), its own settlement, health 1, unbuilt
 0x005134b0	verified	the handle at [self+0x1d0] when it resolves to a unit (kSyncUnit), else 0xffff; no receiver test in the original

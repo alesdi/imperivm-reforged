@@ -327,7 +327,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (0x005d28c0) rather than kept beside it. A version-36 file holds progress
 /// within the level and the level as a second word; read as a total, every
 /// veteran would load at level 1.
-inline constexpr std::uint32_t kStateVectorVersion = 37;
+/// 38: siege fire is the scripts' (`docs/formats/siege-fire.md`). Every
+/// object carries a catapult's own target (`ObjectState::catapult_target`,
+/// `[cat+0x228]`) and two more flag bits, `towers_posted` and `has_towers`;
+/// a version-37 file would load every engine with no target and every
+/// outpost and Roman tower still owed its fake towers, which would be
+/// placed a second time.
+inline constexpr std::uint32_t kStateVectorVersion = 38;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

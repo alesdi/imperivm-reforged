@@ -275,9 +275,11 @@ TEST(siege_of_a_gate_places_an_engine_crews_it_and_stands_the_rest_back) {
   CHECK(engine->state.owner == 1);
   CHECK(engine->state.health == 1);
   CHECK(engine->state.position == site0);
-  // Aimed at the gate, in the slot `Catapult::GetCurrentTarget` reads.
+  // Aimed at the gate, in the slot `Catapult::GetCurrentTarget` reads
+  // (`[cat+0x228]`), and nothing engaged: an engine shoots from its script.
+  CHECK(engine->state.catapult_target == town.gate);
   REQUIRE(b.combat.find(engines[0]) != nullptr);
-  CHECK(b.combat.find(engines[0])->target == town.gate);
+  CHECK(b.combat.find(engines[0])->target == kNoObject);
   // With a settlement of its own whose holder caps the crew at `max_units`.
   const Settlement* own = b.economy.settlements().for_object(engine->settlement);
   REQUIRE(own != nullptr);
@@ -487,8 +489,7 @@ TEST(siege_of_an_outpost_uses_the_circle_and_never_stacks_two_engines) {
   // (4000 + 475, 4000 - 475) or its mirror, both 475 from the axis.
   CHECK((second == Point{4475, 3525} || second == Point{4475, 4475}));
   for (const ObjectId id : engines) {
-    REQUIRE(b.combat.find(id) != nullptr);
-    CHECK(b.combat.find(id)->target == post.hall);
+    CHECK(b.world.find(id)->state.catapult_target == post.hall);
   }
   // The ten unassigned stand back from the second engine's site.
   std::size_t standing = 0;
@@ -571,7 +572,9 @@ TEST(siege_fills_an_existing_engine_first) {
   const ObjectId engine = place_catapult(b.world, b.graph.find("GCatapult"), Point{5300, 4600}, 2);
   REQUIRE(engine != kNoObject);
   b.combat.start(b.world);
-  REQUIRE(b.combat.order_attack(engine, town.gate));
+  // Aimed through the engine's own slot, as `Catapult::SetTarget` or an
+  // earlier plan leaves it.
+  b.world.mutable_state(engine)->catapult_target = town.gate;
   // One crewman is already inside: it counts toward the ten and takes a slot.
   const Settlement* own = b.economy.settlements().for_object(b.world.find(engine)->settlement);
   REQUIRE(own != nullptr);
