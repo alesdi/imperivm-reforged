@@ -60,9 +60,9 @@
 0x005756b0	partial	EnemyObjs: 1..16, one class by registry lookup, unknown class -> invalid handle (fixed); the factory 0x004fe990 interns (same player/type/class string returns the existing query) where this mints one per call (query-lifetime design); query evaluation is the query batch's
 0x00575ab0	partial	FriendlyObjs: type 1, as EnemyObjs
 0x005758b0	partial	ControllableObjs: type 3, as EnemyObjs
-0x005dea90	partial	GetPlayerUnits(player, class): members of the squads on the player's AI record (0x005de750, count gate 0x004441e0, Hero/BaseMage arms); this engine lists world objects of the class (squad-roster design)
-0x005debe0	partial	GetPlayerUnits(player): every member of every squad on the player's AI record; this engine lists Unit-class objects (squad-roster design)
-0x00421ee0	partial	MilUnits: members of squads with Squad::Eval != 0 and no 0x25 flag, neither Peaceful nor Animal (0x00443eb0); kept as a Military-class census because Squad::Eval is never written (squad design)
+0x005dea90	partial	GetPlayerUnits(player, class): FIXED -- the squads' members by 0x005de750's three arms (Hero heir: each squad's hero front member; BaseMage heir: heirs in squads a mage or hero leads; else every heir); test get_player_units_by_class_takes_the_three_arms; gap: the ClassCount tally gate 0x004441e0 is taken as 'some member descends from the class', which differs for members the AI never registered (bit 0x800000 of [unit+0x194])
+0x005debe0	verified	GetPlayerUnits(player): FIXED -- every member of every squad of the player, squads in index order, members front to back (0x005de750); was a census of Unit-class objects; test get_player_units_returns_an_objlist_of_the_players_squad_members
+0x00421ee0	verified	MilUnits: FIXED -- over the player's squads in index order ([record+0x8c] via 0x00443eb0), members still in the object table of squads with Squad::Eval != 0 (revalue_squads) and no 0x25 flag, less Peaceful/Animal heirs (0x005402f0); was a Military-class census; test mil_units_counts_the_members_of_the_players_fielded_squads
 0x0042d2f0	verified	Strongholds: settlements of idPlayer-1 whose central building's class is_a BaseTownhall now (0x0043ffc0) (fixed: was the creation-time kind)
 0x0042d770	verified	Outposts: as Strongholds with is_a Outpost (0x00440060); a negative decremented number counts every owner
 0x00436f50	verified	GetSettlements: one class lookup, is_a on the central building (0x0059c020); a decremented player below 0 is the wildcard (fixed: only 0 was); pushes central-building handles

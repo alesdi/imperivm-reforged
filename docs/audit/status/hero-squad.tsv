@@ -20,7 +20,7 @@
 0x00421820	verified	and byte [squad+0x30], 0xf7
 0x0042bce0	verified	lock bit on every squad of the list from its first, regardless of cursor
 0x0042bde0	verified	unlock bit on every squad of the list from its first
-0x005d7400	verified	[squad+0x7c], written only zero by two constructors: false; an invalid/dead receiver pushes a wrong-sized value there, false here
+0x005d7400	verified	IsEnemyInSquadSight: FIXED -- [squad+0x7c] is the size of the squad's Enemies, which the look 0x00447700 rewrites every SquadLookIvl (the copy at 0x00447a17 is the writer the constructor sweep missed): true when non-empty; no squad -> false; invalid/dead receiver -> the invalid handle; test squad_is_enemy_in_squad_sight_reads_the_squads_enemies
 0x00421720	verified	(flags & mask) == mask, word compare
 0x004271d0	verified	no-squad/SF_NOAI silent; word state, clock, flags; vtbl+0xc0(1) on every member (0x005b1120: end from the back, head included), no hero stop -- fixed (silence, word)
 0x00421520	verified	player's AI present ([+0x88]), not SF_NOAI, post verb 1 with the node and n as words (0x004494c0)
@@ -88,8 +88,8 @@
 0x00513990	partial	threshold = level virtual + HealAmount (was a class property), score 300*h/max + max(0, edge - range), 1000 park, least wins; squad pass 0x00513620 (added); grid order and stealth bits not modelled
 0x00513aa0	partial	stamina [+0xc4]/[+0xcc] (was health); +256 floor, hero halves, 1000 park, least wins; squad pass 0x00513700 (added); grid order and stealth bits not modelled
 0x00513bb0	verified	friendly mask then IsEnemy required: empty on any data; its squad pass (0x005137e0 -> 0x005121e0) wants an enemy squadmate, also empty
-0x00513e10	partial	enemy mask, most stamina behind 0x00512260; a squadded caster (not held, or SF_ADVCHOOSER) walks the squad deque at [squad+0x70] instead of its circle -- that deque not modelled (design)
-0x005d9cb0	partial	enemy mask, most attack; squadded caster walks [squad+0x70] (0x005d94f0) instead of its circle -- not modelled; the retail caster-for-candidate clauses recorded at the section note
+0x00513e10	verified	enemy mask, most stamina behind 0x00512260; FIXED -- a squadded caster (not held, or SF_ADVCHOOSER) walks its squad's Enemies (0x005138c0, non-units handed on as nothing, no stealth clause) instead of its circle; test hero_curse_and_cripple_walk_the_casters_squads_enemies
+0x005d9cb0	verified	enemy mask, most attack, predicate 0x005d4760 opens on the unit bit (added); FIXED -- a squadded caster walks its squad's Enemies (0x005d94f0) instead of its circle; test hero_curse_and_cripple_walk_the_casters_squads_enemies; the retail caster-for-candidate clauses are labelled at the section note (unobservable on shipped casters)
 0x005132f0	partial	0x00512360: nearest-by-grid search (0x0053eaf0, predicate 0x005122f0: unit, alive, inherent level < n, not Sentry, Military or BaseMage) within sight, then not caster, not enemy, not held, not messenger; first in id order here, not the grid's
 0x00513390	partial	the radius overload of 0x005132f0; no shipped site, not bound
 0x0052d9a0	verified	0x005c8d10: exact strcmp over the 25 SKILLS.INI names, -1 for none (was case-insensitive and took the hs* constants)
