@@ -339,8 +339,10 @@ struct CombatConstants {
 
   [[nodiscard]] std::int32_t difficulty_addend(Difficulty level) const noexcept;
 
-  /// `Exp[level]`, the cumulative experience the recurrence puts a level at.
-  /// `Exp[1] = 0`. Saturates rather than overflowing.
+  /// `Exp[level]` as the recurrence reads **without** the original's division
+  /// by 100 -- kept for its own tests, and read by nothing in the simulation:
+  /// a unit levels by `HeroSystem::level_for_experience` (0x005d28c0), whose
+  /// table is the executable's. Saturates rather than overflowing.
   [[nodiscard]] std::int32_t experience_for_level(std::int32_t level) const noexcept;
   /// The same, with an explicit modifier percentage in place of the global
   /// `BattleTacticsExpModifier`. `SetExperienceModifier(player, c)` makes that
@@ -712,8 +714,12 @@ struct Combatant {
 
   std::int32_t health = 0;
   std::int32_t stamina = 0;
-  std::int32_t experience = 0;
-  /// 1..24 in the dumps.
+  /// `[unit+0x184]`, the level the game uses: `Unit::level` (`vtbl+0x114`)
+  /// and both sides of the blow read it. 1..24 in the dumps. **Stored, and
+  /// written only by the rebuild** (`recalc_bonuses`): the level the running
+  /// experience stands at, plus the items', Battle Cry's and the formation's,
+  /// at least 1, then Discipline's floor. The running total itself is
+  /// `UnitRecord::experience` (`[unit+0x180]`), which every award goes to.
   std::int32_t level = 1;
 
   /// `last attack time`, in game-time milliseconds. 0..1,738,000 in the dumps.
@@ -1472,7 +1478,7 @@ class CombatSystem final : public System {
   /// Hand a unit that has stopped swinging back to its idle pose through the
   /// entity's `toidle` transition.
   void settle_swing(World& world, const Combatant& unit, GameTime now) const;
-  void award_experience(Combatant& attacker, const Combatant& defender);
+  void award_experience(World& world, const Combatant& attacker, const Combatant& defender);
   [[nodiscard]] std::int32_t effective_level(const Combatant& unit) const noexcept;
   [[nodiscard]] DamageInputs inputs_for(const Combatant& attacker,
                                         const Combatant& defender) const;

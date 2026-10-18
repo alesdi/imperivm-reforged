@@ -304,3 +304,95 @@ TEST(stats_obj_range_answers_a_non_combatant_its_class_range) {
   CHECK(range(man) == 100);
   CHECK(range(9999) == 0);
 }
+
+/// A blow's experience goes where every award goes in the original: the
+/// running total `[unit+0x180]` scripts read, through `SetExperience` with the
+/// refresh (0x00511550 -> 0x005dbf70), so the stored level follows it -- for a
+/// unit no record had been made for too. Scaled by the *attacker's* owner's
+/// `SetExperienceModifier`. It used to rise in a copy of combat's own, on a
+/// table without the division by 100, that no script could see.
+TEST(stats_a_blows_experience_lands_in_the_running_total_and_the_level_follows) {
+  Bench b;
+  const ObjectId attacker = b.world.spawn(NativeClass::unit, nullptr, b.soldier);
+  b.world.set_owner(attacker, 1);
+  b.world.set_position(attacker, Point{1000, 1000});
+  b.world.set_health(attacker, 200);
+  const ObjectId victim = b.world.spawn(NativeClass::unit, nullptr, b.soldier);
+  b.world.set_owner(victim, 2);
+  b.world.set_position(victim, Point{1040, 1000});
+  b.world.set_health(victim, 200);
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.heroes.unit(attacker) == nullptr);  // nothing has met it yet
+  b.combat.set_player_experience_modifier(1, 200);
+
+  REQUIRE(b.combat.order_attack(attacker, victim));
+  std::int32_t strikes = 0;
+  for (int turn = 0; turn < 4; ++turn) {
+    b.world.advance(400);
+    for (const CombatEvent& event : b.combat.events()) {
+      if (event.kind == CombatEvent::Kind::strike && event.attacker == attacker &&
+          event.damage > 0) {
+        ++strikes;
+      }
+    }
+    b.combat.clear_events();
+  }
+  REQUIRE(strikes > 0);
+  // A victim below level 8 is worth 1, doubled by the attacker's research.
+  CHECK(b.heroes.experience(attacker) == 2 * strikes);
+  const Combatant* a = b.combat.find(attacker);
+  REQUIRE(a != nullptr);
+  CHECK(a->level == b.heroes.level_for_experience(b.heroes.experience(attacker)));
+  CHECK(a->level > 1);
+}
+
+/// The stored level, 0x005d9f0c..0x005da80f: the running total plus the
+/// hero's army addend plus the items' experience, through the table; plus the
+/// items' levels, the formation's `BonusLevel` and Battle Cry's levels (not
+/// for a hero); at least 1; then Discipline's floor. The addend is the hero's
+/// tick's (0x0052fc50, every 1,013 ms), from the hero's own stored level, and
+/// only a changed addend rebuilds the army.
+TEST(stats_the_stored_level_takes_the_addend_items_cry_and_discipline) {
+  Bench b;
+  const ObjectId chief = b.spawn(b.hero_class);
+  const ObjectId man = b.spawn(b.soldier);
+  REQUIRE(b.heroes.attach(b.world, man, chief));
+  REQUIRE(b.heroes.set_experience(b.world, chief, b.heroes.experience_for_level(10)));
+  CHECK(b.combat.find(chief)->level == 10);
+  CHECK(b.combat.find(man)->level == 1);  // no tick yet: no addend
+
+  // One tick: 40% of Exp[10], plus one.
+  b.world.advance(1100);
+  const std::int32_t addend = 40 * b.heroes.experience_for_level(10) / 100 + 1;
+  CHECK(b.heroes.hero(chief)->army_addend == addend);
+  const std::int32_t standing = b.heroes.level_for_experience(addend);
+  CHECK(b.combat.find(man)->level == standing);
+  CHECK(b.combat.find(chief)->level == 10);  // a hero is nobody's army
+
+  // Battle Cry: two levels for the army while it lasts, none for the hero.
+  REQUIRE(b.heroes.set_skill(b.world, chief, HeroSkill::battle_cry, 2));
+  REQUIRE(b.heroes.use_skill(b.world, chief, HeroSkill::battle_cry));
+  CHECK(b.combat.find(man)->level == standing + 2);
+  CHECK(b.combat.find(chief)->level == 10);
+  for (int turn = 0; turn < 15; ++turn) b.world.advance(400);
+  CHECK(b.combat.find(man)->level == standing);
+
+  // Discipline is a floor, not an addend.
+  REQUIRE(b.heroes.set_skill(b.world, chief, HeroSkill::discipline, 10));
+  CHECK(b.combat.find(man)->level == std::max(standing, 12));
+  REQUIRE(b.heroes.set_skill(b.world, chief, HeroSkill::discipline, 0));
+  CHECK(b.combat.find(man)->level == standing);
+
+  // An item's level adds; its experience goes into the total first.
+  ItemDefinition medal;
+  medal.id = "Medal";
+  medal.bonus.level = 1;
+  medal.bonus.experience = 1000;
+  (void)b.catalog.add(medal);
+  REQUIRE(b.heroes.items().add(b.world, man, "Medal") != kNoObject);
+  CHECK(b.combat.find(man)->level ==
+        b.heroes.level_for_experience(addend + 1000) + 1);
+
+  // And `Unit::level` answers the stored number.
+  CHECK(b.heroes.level(b.world, man) == b.combat.find(man)->level);
+}

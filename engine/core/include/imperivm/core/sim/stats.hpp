@@ -37,9 +37,11 @@ class World;
 ///   6. the store, which rescales health and stamina by the new maximum over
 ///      the old (`CombatSystem::store_stats`).
 ///
-/// The level steps of the same rebuild -- items' level and experience,
-/// Battle Cry, the formation's level, the hero's army addend, Discipline --
-/// are not stored yet: `HeroSystem::level` still computes them when asked.
+/// And the stored level (`Combatant::level`, `[unit+0x184]`): the level the
+/// running experience plus the hero's army addend plus the items' experience
+/// stands at, plus the items' levels, the formation's `BonusLevel` and Battle
+/// Cry's levels (neither for a hero), at least 1, then Discipline's floor
+/// from the unit's own hero.
 ///
 /// Nothing for an id that is not a living combatant unit of a world-bound
 /// combat system: a building keeps its class numbers, a dead unit what it had.

@@ -1053,7 +1053,6 @@ TEST(save_combat_section_round_trips) {
   first.owner = 1;
   first.position = Point{300, 400};
   first.health = 57;
-  first.experience = 900;
   first.level = 4;
   first.target = 12;
   first.action = Action::engaging;

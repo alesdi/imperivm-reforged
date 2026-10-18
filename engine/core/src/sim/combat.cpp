@@ -784,7 +784,6 @@ std::size_t CombatSystem::reconcile(World& world) {
     // if the ranges agreed there would be no evidence for which one the
     // attribute is. `effective_level` feeds the damage formula on every strike
     // on every map, so a plausible number here would be worse than none.
-    fresh.experience = 0;
     fresh.level = 1;
     // Built from the class, then rebuilt once it is in place (0x005d3090: the
     // object start, then `vtbl+0xc4`), so a unit that already has a hero, an
@@ -1378,14 +1377,30 @@ void CombatSystem::die_as_engine(World& world, ObjectId id, GameTime now) {
   }
 }
 
-void CombatSystem::award_experience(Combatant& attacker, const Combatant& defender) {
+void CombatSystem::award_experience(World& world, const Combatant& attacker,
+                                    const Combatant& defender) {
   // CONST.INI: exp_gain = target_level / LevelExpDivider + 1, scaled by the
   // **attacker's own** `BattleTacticsExpModifier` -- the research is per player
   // and `SetExperienceModifier` writes it there.
-  attacker.experience += constants_.experience_gain(
+  //
+  // Paid where the original pays every award: into the running total
+  // `[unit+0x180]` through the unit's `SetExperience` virtual with the
+  // refresh flag (0x00511550 -> `vtbl+0x118`), so the stored level the next
+  // blow reads is rebuilt from it. That total is `HeroSystem`'s, and it is
+  // the one scripts read; a world with no hero system, or ids that are not
+  // the world's, keeps no total and the award goes nowhere.
+  //
+  // **Still this engine's:** the amount. 0x00511550 credits the blow's own
+  // award from 0x0050ff30 plus, on a kill, a gain from both units' inherent
+  // levels (0x0050fec0) that also feeds the hero's accumulator `[hero+0x2c4]`,
+  // and caps a non-hero at the owner's `max_battle_level`; here it is the
+  // CONST.INI line above on every damaging blow.
+  if (!world_bound_) return;
+  HeroSystem* heroes = hero_system_of(world);
+  if (heroes == nullptr) return;
+  const std::int32_t gain = constants_.experience_gain(
       defender.base_effective_level(), player_experience_modifier(attacker.owner));
-  const std::int32_t level = constants_.level_for_experience(attacker.experience);
-  if (level > attacker.level) attacker.level = level;
+  (void)heroes->set_experience(world, attacker.id, heroes->experience(attacker.id) + gain);
 }
 
 /// A building keeps its own running total of what it has taken --
@@ -1674,9 +1689,9 @@ void CombatSystem::strike(World& world, Combatant& attacker, Combatant& defender
   // Experience is paid per damaging attack, not per kill -- see
   // CombatConstants. Paid before the defender is reaped so a killing blow
   // still counts. Both re-found: a fatal blow ran two hooks in between.
-  Combatant* a = mutable_find(attacker_id);
+  const Combatant* a = find(attacker_id);
   const Combatant* d = find(defender_id);
-  if (a != nullptr && d != nullptr) award_experience(*a, *d);
+  if (a != nullptr && d != nullptr) award_experience(world, *a, *d);
 }
 
 void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& defender,
@@ -2008,7 +2023,6 @@ void CombatSystem::hash(std::uint64_t& accumulator) const {
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.position.y)));
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.health)));
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.stamina)));
-    fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.experience)));
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.level)));
     fold(static_cast<std::uint64_t>(unit.last_attack_time));
     fold(unit.target);
@@ -2342,24 +2356,6 @@ HostOutcome host_heal_stamina(CallContext& ctx) {
     unit->stamina = static_cast<std::int32_t>(raised > max ? max : raised);
     sync_to_world(ctx, *combat, id);
   }
-  return HostOutcome::ok_void();
-}
-
-HostOutcome host_set_level(CallContext& ctx) {
-  CombatSystem* combat = system_of(ctx);
-  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
-  if (unit == nullptr) return HostOutcome::ok_void();
-  if (ctx.arg(1).is_integer()) unit->level = ctx.arg(1).as_integer();
-  return HostOutcome::ok_void();
-}
-
-HostOutcome host_set_experience(CallContext& ctx) {
-  CombatSystem* combat = system_of(ctx);
-  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
-  if (unit == nullptr) return HostOutcome::ok_void();
-  if (ctx.arg(1).is_integer()) unit->experience = ctx.arg(1).as_integer();
   return HostOutcome::ok_void();
 }
 

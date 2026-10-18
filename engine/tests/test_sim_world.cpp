@@ -6939,8 +6939,8 @@ TEST(mutate_clears_the_squad_and_the_commands_and_re_classes_the_combatant) {
 
   Combatant* before = const_cast<Combatant*>(b.combat.find(who));
   REQUIRE(before != nullptr);
-  before->experience = 4200;
-  before->level = 5;
+  REQUIRE(b.heroes.set_experience(b.world, who, b.heroes.experience_for_level(5)));
+  REQUIRE(before->level == 5);
   before->target = prey;
   before->attacks = 3;
 
@@ -6953,7 +6953,7 @@ TEST(mutate_clears_the_squad_and_the_commands_and_re_classes_the_combatant) {
   CHECK(after->class_index == b.archer);
   // `[obj+0x180]` is one of the copied fields, so a converted Teuton keeps
   // what it has learnt; a combatant rebuilt from scratch would start at 1.
-  CHECK(after->experience == 4200);
+  CHECK(b.heroes.experience(who) == b.heroes.experience_for_level(5));
   CHECK(after->level == 5);
   // And everything the destroyed object was in the middle of is gone.
   CHECK(after->target == kNoObject);

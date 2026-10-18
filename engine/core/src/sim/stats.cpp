@@ -107,6 +107,15 @@ void recalc_bonuses(World& world, ObjectId id) {
 
   // The class, then the `AddBonus` record.
   StatBlock next = combat->class_stats(*unit);
+  // The experience the level is read from -- the running total plus, under a
+  // hero, the hero's army addend -- and the additive levels.
+  std::int32_t experience = heroes != nullptr ? heroes->experience(id) : 0;
+  if (heroes != nullptr) {
+    if (const HeroRecord* own_hero = heroes->hero(heroes->hero_of(id)); own_hero != nullptr) {
+      experience += own_hero->army_addend;
+    }
+  }
+  std::int32_t level_add = 0;
 
   // The items, each kind once, percents of the class's own numbers.
   if (heroes != nullptr && heroes->items().catalog() != nullptr) {
@@ -134,6 +143,8 @@ void recalc_bonuses(World& world, ObjectId id) {
       next.armour_slash += b.armor_slash;
       next.armour_pierce += b.armor_pierce;
       next.max_health += b.health;
+      level_add += b.level;
+      experience += b.experience;
     }
   }
 
@@ -173,6 +184,7 @@ void recalc_bonuses(World& world, ObjectId id) {
         next.armour_slash += formation_bonus(form->bonus_defence_slash);
         next.armour_pierce += formation_bonus(form->bonus_defence_pierce);
         next.range += percent_of(next.range, formation_bonus(form->bonus_range));
+        if (!is_hero) level_add += formation_bonus(form->bonus_level);
       }
       next.attack = std::max(next.attack, 0);
       next.armour_slash = std::max(next.armour_slash, 0);
@@ -189,9 +201,28 @@ void recalc_bonuses(World& world, ObjectId id) {
       next.armour_slash += constants.defensive_cry_defense;
       next.armour_pierce += constants.defensive_cry_defense;
     }
+    if (!is_hero && in_effect(*leader, HeroSkill::battle_cry)) {
+      level_add += constants.levels_per_battle_cry_level * points(*leader, HeroSkill::battle_cry);
+    }
     if (!is_hero && in_effect(*leader, HeroSkill::frenzy)) next.attack *= 2;
   }
 
+  // The level: the table's, plus the additive levels, at least 1, then the
+  // unit's own hero's Discipline as a floor (never a hero's: it has none).
+  if (heroes != nullptr) {
+    std::int32_t level = heroes->level_for_experience(experience) + level_add;
+    if (level < 1) level = 1;
+    if (const HeroRecord* own_hero = heroes->hero(heroes->hero_of(id)); own_hero != nullptr) {
+      const std::int32_t discipline = points(*own_hero, HeroSkill::discipline);
+      if (discipline > 0) {
+        level = std::max(level, constants.discipline_bonus_base +
+                                    constants.discipline_bonus_step * discipline);
+      }
+    }
+    // The sprite refresh a changed level asks for (`vtbl+0x5c`) is
+    // presentation and is not modelled.
+    unit->level = level;
+  }
   combat->store_stats(*unit, next);
 }
 

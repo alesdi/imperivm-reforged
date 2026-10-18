@@ -332,7 +332,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// which the rebuild `recalc_bonuses` (0x005d9df0) writes, in place of the
 /// three modifier words `attack_bonus`, `armour_bonus` and `level_floor`
 /// nothing wrote. A version-37 file has no stats to load, and every unit
-/// would fight with zero attack until something rebuilt it.
+/// would fight with zero attack until something rebuilt it. The combatant
+/// also loses its own `experience` word: the running total is the hero
+/// section's `UnitRecord::experience` alone, and `Combatant::level` is the
+/// stored level the rebuild writes. A hero record carries its army addend
+/// (`HeroRecord::army_addend`, `[hero+0x2c0]`).
 inline constexpr std::uint32_t kStateVectorVersion = 38;
 
 /// The section the world writes.
