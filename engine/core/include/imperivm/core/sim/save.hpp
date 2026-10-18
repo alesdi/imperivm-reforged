@@ -330,8 +330,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// 38: the economy section grew the wagons' loyalty rows -- a wagon's
 /// loyalty, pending change, capture flag and its two capture timers
 /// (`WagonLoyalty`), which `Wagon::loyalty`, `SetLoyalty` and
-/// `DecreaseLoyalty` read and write. Hashed, so a version-37 file would load
-/// a caravan mid-capture as one nobody had touched.
+/// `DecreaseLoyalty` read and write -- and lost its shipment table: a
+/// settlement's mule and a squad's food wagon are wagon objects in the world
+/// section now, not rows with a build timer. Hashed, so a version-37 file
+/// would load a caravan mid-capture as one nobody had touched, and its mules
+/// in transit as loads nobody carried.
 inline constexpr std::uint32_t kStateVectorVersion = 38;
 
 /// The section the world writes.

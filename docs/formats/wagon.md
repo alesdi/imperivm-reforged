@@ -209,10 +209,20 @@ settlement is 1,200 nearer; loads a mule through 0x005eed90 and orders it
   carrying-food flag is not kept (only the state dump reads it).
 * **Loading** has both arms; the open arm orders candidates by grid row, then
   column, then id within a cell.
-* **A settlement's mule and the squad's food wagon** are not objects here:
-  `EconomySystem::Wagon` is a shipment row with a build timer that delivers
-  itself (`CreateMule*`) or stands as a squad's larder (`SendFoodWagon`). The
-  rows this leaves `partial` say so.
+* **A settlement's mule and the squad's food wagon are world objects**:
+  `make_mule` is 0x005eed90 (the race's class, both clamps, the draw, the
+  owner, into the holder), behind `CreateMule*`, `CreateBoat*` and
+  `SendFoodWagon`; the calling script walks the mule where it goes, and
+  `WAGON_UNLOAD.VS` delivers it. `FoodComing` and `SendFoodWagon` walk the
+  player's peaceful squads and the wagons' running commands. Two differences
+  remain: the AI's new-unit hook (0x0041f310) files a fresh mule into a squad
+  at once, where this engine's `enrol_new_units_in_squads` does it at the next
+  turn; and a negative request loads nothing.
+* **Feeding from a wagon** is approximated in its reach only: the feeder's
+  second path (`draw_from_food_wagon`) draws, through the setter, from the
+  fullest food wagon whose running command is aimed at one of the hungry
+  unit's squad-mates, where the original's search (0x005dbba0) sweeps around
+  the unit -- a design of the feeder's, not modelled.
 
 ## What is still unknown
 

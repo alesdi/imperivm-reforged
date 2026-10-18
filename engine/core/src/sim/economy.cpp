@@ -232,9 +232,6 @@ void EconomySystem::advance(World& world, const Turn& turn) {
         if (remaining > 0 && remaining < step) step = remaining;
       }
     }
-    for (const Wagon& w : wagons_) {
-      if (w.build_remaining > 0 && w.build_remaining < step) step = w.build_remaining;
-    }
     for (const WagonLoyalty& w : wagon_loyalty_) {
       if (w.gain_remaining > 0 && w.gain_remaining < step) step = w.gain_remaining;
       if (w.cap_remaining > 0 && w.cap_remaining < step) step = w.cap_remaining;
@@ -247,32 +244,13 @@ void EconomySystem::advance(World& world, const Turn& turn) {
         if (s.timers[i] > 0) s.timers[i] -= step;
       }
     }
-    for (Wagon& w : wagons_) {
-      if (w.build_remaining > 0) w.build_remaining -= step;
-    }
     for (WagonLoyalty& w : wagon_loyalty_) {
       if (w.gain_remaining > 0) w.gain_remaining -= step;
       if (w.cap_remaining > 0) w.cap_remaining -= step;
     }
     left -= step;
 
-    // 3. Wagons that finished building unload first: a delivery is an input to
-    //    the settlement it lands in, and inputs precede that settlement's own
-    //    timers at the same instant.
-    if (auto_deliver_) {
-      for (std::size_t i = 0; i < wagons_.size();) {
-        // A wagon following a unit has nowhere to unload; it is the squad's
-        // larder from here on and the feeder empties it. See `Wagon::follow`.
-        if (wagons_[i].build_remaining <= 0 && !wagons_[i].follows()) {
-          const std::uint32_t wagon_id = wagons_[i].id;
-          deliver_wagon(wagon_id);
-          continue;  // deliver_wagon erased it; index i is the next wagon
-        }
-        ++i;
-      }
-    }
-
-    // 4. Then every settlement, in `ID` order, and within a settlement every
+    // 3. Then every settlement, in `ID` order, and within a settlement every
     //    timer in `SettlementTimer` order. Both orders are world state.
     for (Settlement& s : store_.all()) {
       for (std::size_t i = 0; i < kSettlementTimerCount; ++i) {
@@ -284,7 +262,7 @@ void EconomySystem::advance(World& world, const Turn& turn) {
       }
     }
 
-    // 5. Then every wagon under capture, by handle: timer 9 before timer 10
+    // 4. Then every wagon under capture, by handle: timer 9 before timer 10
     //    when both fall due together. That is the wheel's order and not a
     //    choice -- 0x005ec160 arms 9 before 10, and from then on 10 is always
     //    re-armed into an instant 9 was armed into first, and a bucket fires
@@ -669,80 +647,6 @@ void EconomySystem::tick_outpost_trade(World& world, Settlement& s) {
 // transport
 // --------------------------------------------------------------------------
 
-std::uint32_t EconomySystem::create_mule(SettlementId source, SettlementId destination,
-                                         Resource r, std::int32_t amount) {
-  if (amount <= 0) return 0;
-  Settlement* src = store_.find(source);
-  if (src == nullptr) return 0;
-  const std::int32_t taken = src->warehouse.take(r, amount);
-  if (taken <= 0) return 0;
-
-  Wagon w;
-  w.id = next_wagon_++;
-  w.source = source;
-  w.destination = destination;
-  w.resource = r;
-  w.amount = taken;
-  w.build_remaining = rules_.wagon_build_time;
-  wagons_.push_back(w);
-  return w.id;
-}
-
-std::uint32_t EconomySystem::create_feeding_mule(SettlementId source, ObjectId follow,
-                                                 std::int32_t amount) {
-  if (follow == kNoObject) return 0;
-  const std::uint32_t id = create_mule(source, kNoSettlement, Resource::food, amount);
-  if (id == 0) return 0;
-  wagons_.back().follow = follow;
-  return id;
-}
-
-std::int32_t EconomySystem::draw_from_larder(std::span<const ObjectId> members,
-                                             std::int32_t want) {
-  if (want <= 0) return 0;
-  for (std::size_t i = 0; i < wagons_.size(); ++i) {
-    Wagon& w = wagons_[i];
-    // The resource test is an invariant guard: `create_feeding_mule` is the
-    // one writer of `follow` and loads food only. Kept so the larder stays a
-    // food store if a gold one is ever made to follow; the sweep cannot tell.
-    if (!w.follows() || !w.ready() || w.resource != Resource::food || w.amount <= 0) continue;
-    if (std::find(members.begin(), members.end(), w.follow) == members.end()) continue;
-    const std::int32_t taken = std::min(want, w.amount);
-    w.amount -= taken;
-    if (w.amount == 0) wagons_.erase(wagons_.begin() + static_cast<std::ptrdiff_t>(i));
-    return taken;
-  }
-  return 0;
-}
-
-const Wagon* EconomySystem::find_wagon(std::uint32_t wagon) const noexcept {
-  for (const Wagon& w : wagons_) {
-    if (w.id == wagon) return &w;
-  }
-  return nullptr;
-}
-
-std::int32_t EconomySystem::deliver_wagon(std::uint32_t wagon) {
-  for (std::size_t i = 0; i < wagons_.size(); ++i) {
-    if (wagons_[i].id != wagon) continue;
-    const Wagon w = wagons_[i];
-    wagons_.erase(wagons_.begin() + static_cast<std::ptrdiff_t>(i));
-    Settlement* dst = store_.find(w.destination);
-    if (dst == nullptr) return 0;
-    return dst->warehouse.store(w.resource, w.amount);
-  }
-  return 0;
-}
-
-bool EconomySystem::lose_wagon(std::uint32_t wagon) {
-  for (std::size_t i = 0; i < wagons_.size(); ++i) {
-    if (wagons_[i].id != wagon) continue;
-    wagons_.erase(wagons_.begin() + static_cast<std::ptrdiff_t>(i));
-    return true;
-  }
-  return false;
-}
-
 bool EconomySystem::set_supplied(SettlementId id, SettlementId target) {
   Settlement* s = store_.find(id);
   if (s == nullptr) return false;
@@ -1122,19 +1026,6 @@ void EconomySystem::hash(std::uint64_t& accumulator) const {
     }
   };
   mix(store_.hash());
-  // Wagons in flight are world state: two peers that disagree about a wagon
-  // disagree about where a thousand food is going to land.
-  for (const Wagon& w : wagons_) {
-    mix(w.id);
-    mix(w.source);
-    mix(w.destination);
-    mix(static_cast<std::uint64_t>(w.resource));
-    mix(static_cast<std::uint32_t>(w.amount));
-    mix(static_cast<std::uint32_t>(w.build_remaining));
-    mix(w.object);
-    mix(w.follow);
-  }
-  mix(next_wagon_);
   // A wagon's loyalty decides when `UNIT_CAPTURE.VS` takes it. Only rows are
   // mixed, so a world where no script has touched a wagon hashes as before.
   for (const WagonLoyalty& w : wagon_loyalty_) {
@@ -1518,46 +1409,16 @@ void enter_settlement(CallContext& ctx, const Settlement& s, ObjectId unit) {
   return Value::object(kTypeObj, id);
 }
 
-/// `CreateBoatGold(n)` / `CreateBoatFood(n)`. See the note at the registrations.
-template <Resource kKind>
-HostOutcome create_boat(CallContext& ctx) {
+/// `CreateBoatGold(n)` / `CreateBoatFood(n)` and `CreateMuleGold(n)` /
+/// `CreateMuleFood(n)`: all four are 0x005eed90, `make_mule`. See the notes
+/// at the registrations.
+template <Resource kKind, bool kBoat>
+HostOutcome create_carrier(CallContext& ctx) {
   Settlement* s = receiver(ctx);
   World* world = world_of(ctx);
-  const auto none = HostOutcome::ok_with(object_handle(kNoObject));
-  if (s == nullptr || world == nullptr) return none;
-  const ClassGraph* graph = world->class_graph();
-  if (graph == nullptr) return none;
-  const ClassIndex boat = graph->lookup("ShipS");
-  if (boat == kNoClass) return none;
-
-  // The class's `max_load` first, then whatever the warehouse can pay --
-  // `Warehouse::take` is exactly the second clamp and the deduction in one.
-  std::int32_t want = int_arg(ctx, 1);
-  // `max_load` off the class the boat *will* be, resolved before it exists --
-  // `class_int` needs an object, so this reads the resolved property directly.
-  std::int32_t capacity = 0;
-  {
-    const std::string_view text = graph->property(boat, "max_load");
-    for (const char c : text) {
-      if (c < '0' || c > '9') { capacity = 0; break; }
-      capacity = capacity * 10 + (c - '0');
-    }
-  }
-  if (want > capacity) want = capacity;
-  const std::int32_t taken = want > 0 ? s->warehouse.take(kKind, want) : 0;
-  if (taken <= 0) return none;
-
-  const ObjectId id = world->spawn_of_class(boat);
-  if (id == kNoObject) return none;
-  WorldObject* slot = world->find(id);
-  if (slot == nullptr) return none;
-  slot->state.cargo = taken;
-  slot->state.cargo_resource = static_cast<std::int32_t>(kKind);
-  world->set_owner(id, s->owner);
-  // Into the settlement's holder, which is where the script's `Select` and
-  // `SetCommand` find it and walk it out of.
-  (void)world->put_in_holder(id, s->holder.object);
-  return HostOutcome::ok_with(object_handle(id));
+  if (world == nullptr) return no_settlement(ctx);
+  if (s == nullptr) return HostOutcome::ok_with(object_handle(kNoObject));
+  return HostOutcome::ok_with(object_handle(make_mule(*world, s->id, kKind, int_arg(ctx, 1), kBoat)));
 }
 
 
@@ -3481,8 +3342,8 @@ void give_settlement_to(CallContext& ctx, EconomySystem& economy, World& world, 
   // reads, `[warehouse+0x38]`, goes to 0xffff. The same routine also clears
   // the warehouse's supply lists at `+0x24` and, for every settlement with a
   // warehouse, takes this one out of theirs (0x005ef970) -- bookkeeping of the
-  // original's mule routing, which `EconomySystem`'s wagon table has no
-  // counterpart for.
+  // original's mule routing, which this engine has no counterpart for: the
+  // mules themselves are objects the scripts send (`make_mule`).
   s.supplied = kNoSettlement;
   (void)economy.set_owner(s.id, owner);
   // And the settlement's own owner as its members read it. 0x005c4f78 writes
@@ -4791,37 +4652,14 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // the settlement's holder (0x005d3e10 with 1). The answer is its handle,
     // or 0xffff for nothing loaded or an invalid receiver (printed).
     //
-    // **Known gap, a design.** `EconomySystem::create_mule` is a table entry
-    // whose journey is abstracted: it draws the store and delivers to
-    // `supplied` after `wagon_build_time`, with no object to hand back, so the
-    // answer is the invalid handle and the shipped `if (wagon.IsValid)
-    // wagon.SetCommand(...)` never runs. The amount is not clamped to
-    // `max_load`, and the race's class is not chosen.
-    {CallKind::member, "CreateMuleGold", 1,  // 10 sites
-     +[](CallContext& ctx) -> HostOutcome {
-       Settlement* s = receiver(ctx);
-       EconomySystem* economy = host_economy(ctx);
-       if (world_of(ctx) == nullptr) return no_settlement(ctx);
-       if (s == nullptr || economy == nullptr) return HostOutcome::ok_with(invalid_handle());
-       const std::uint32_t wagon =
-           economy->create_mule(s->id, s->supplied, Resource::gold, int_arg(ctx, 1));
-       const Wagon* w = economy->find_wagon(wagon);
-       // The cargo and the endpoints are the economy's; the object that carries
-       // them is movement's, and until one is spawned this is an invalid handle
-       // rather than a fabricated id.
-       return HostOutcome::ok_with(w == nullptr ? invalid_handle() : object_handle(w->object));
-     }},
-    {CallKind::member, "CreateMuleFood", 1,  // 8 sites
-     +[](CallContext& ctx) -> HostOutcome {
-       Settlement* s = receiver(ctx);
-       EconomySystem* economy = host_economy(ctx);
-       if (world_of(ctx) == nullptr) return no_settlement(ctx);
-       if (s == nullptr || economy == nullptr) return HostOutcome::ok_with(invalid_handle());
-       const std::uint32_t wagon =
-           economy->create_mule(s->id, s->supplied, Resource::food, int_arg(ctx, 1));
-       const Wagon* w = economy->find_wagon(wagon);
-       return HostOutcome::ok_with(w == nullptr ? invalid_handle() : object_handle(w->object));
-     }},
+    // `make_mule` is that body. The mule is a world object from here on: the
+    // calling script orders it (`VILLAGE_BEHAVIOR_SUPPLY.VS`: `unload` at the
+    // supplied settlement's hall, then `unload` back home), `WAGON_UNLOAD.VS`
+    // walks it there and empties it into the store, and it dies of the
+    // emptying (`set_wagon_cargo`). Nothing is delivered that the mule does
+    // not carry in.
+    {CallKind::member, "CreateMuleGold", 1, &create_carrier<Resource::gold, false>},  // 10 sites
+    {CallKind::member, "CreateMuleFood", 1, &create_carrier<Resource::food, false>},  // 8 sites
     // The supply link, `StopSupply` / `StartSupplyFood` / `supplied`.
     //
     // A settlement's object at `[set+0x5c]` carries the link: the handle of the
@@ -5236,8 +5074,8 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // The mule's load. Four entry points over the two fields `ObjectState`
     // carries for them, and they are on the **object**: `Wagon::amount`
     // (0x005ebdb0) and `Wagon::restype` (0x005ebe10) are plain reads of
-    // `[obj+0x1cc]` and `[obj+0x1d4]`, not lookups in the shipment table this
-    // system keeps for settlement-to-settlement trade.
+    // `[obj+0x1cc]` and `[obj+0x1d4]` -- every mule a settlement sends is
+    // such an object (`make_mule`).
     //
     // `ES_OUTPOSTSELLGOLD.VS` is why that distinction is load-bearing and the
     // reason 73 call sites were blocked: it walks a *group of objects*
@@ -5342,8 +5180,8 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // one -- all six pass 1000 or 250 -- and importing it would mean writing
     // past `Warehouse::set`'s own clamp, which is a real invariant here and was
     // not one there.
-    {CallKind::member, "CreateBoatGold", 1, &create_boat<Resource::gold>},  // 3 sites
-    {CallKind::member, "CreateBoatFood", 1, &create_boat<Resource::food>},  // 3 sites
+    {CallKind::member, "CreateBoatGold", 1, &create_carrier<Resource::gold, true>},  // 3 sites
+    {CallKind::member, "CreateBoatFood", 1, &create_carrier<Resource::food, true>},  // 3 sites
     {CallKind::member, "LoadGold", 1, &load_cargo<Resource::gold>},   // 2 sites
     {CallKind::member, "LoadFood", 1, &load_cargo<Resource::food>},   // 2 sites
     {CallKind::member, "GetHolderSett", 0,
@@ -5778,6 +5616,96 @@ constexpr EconomyHostDef kEconomyHosts[] = {
 };
 
 }  // namespace
+
+namespace {
+
+/// 0x005eed10: the class a settlement's carrier is. A boat is always
+/// `ShipS`; a mule is its race's -- the race read off the settlement's
+/// central building's class (0x005a75f0, `[class+0xb48]`) -- `Tradecar_Donkey`
+/// for 1, 4 and 5, `Camel` for 2 and 6, `CartTrader` for 3 and 7, and `Trader`
+/// for 0 and anything else (the class names 0x005efd71..0x005efdcf load).
+[[nodiscard]] std::string_view carrier_class(World& world, const Settlement& s, bool boat) {
+  if (boat) return "ShipS";
+  const ClassGraph* graph = world.class_graph();
+  const WorldObject* centre = world.find(s.anchor);
+  std::int32_t race = -1;
+  if (graph != nullptr && centre != nullptr && centre->class_index != kNoClass) {
+    race = race_from_name(graph->property(centre->class_index, "race"));
+  }
+  switch (race) {
+    case 1: case 4: case 5: return "Tradecar_Donkey";
+    case 2: case 6: return "Camel";
+    case 3: case 7: return "CartTrader";
+    default: return "Trader";
+  }
+}
+
+}  // namespace
+
+ObjectId make_mule(World& world, SettlementId id, Resource kind, std::int32_t amount, bool boat) {
+  EconomySystem* economy = economy_of(world);
+  const ClassGraph* graph = world.class_graph();
+  if (economy == nullptr || graph == nullptr) return kNoObject;
+  Settlement* s = economy->find(id);
+  if (s == nullptr) return kNoObject;
+  const ClassIndex cls = graph->lookup(carrier_class(world, *s, boat));
+  if (cls == kNoClass) return kNoObject;
+
+  // The class's `max_load` first, then whatever the warehouse holds;
+  // `Warehouse::take` is the second clamp and the draw in one. Read off the
+  // resolved property, since the carrier does not exist yet.
+  std::int32_t capacity = 0;
+  for (const char c : graph->property(cls, "max_load")) {
+    if (c < '0' || c > '9') {
+      capacity = 0;
+      break;
+    }
+    capacity = capacity * 10 + (c - '0');
+  }
+  std::int32_t want = amount;
+  if (want > capacity) want = capacity;
+  const std::int32_t taken = want > 0 ? s->warehouse.take(kind, want) : 0;
+  // Nothing loaded, no carrier.
+  if (taken <= 0) return kNoObject;
+
+  const ObjectId carrier = world.spawn_of_class(cls);
+  if (carrier == kNoObject) return kNoObject;
+  WorldObject* slot = world.find(carrier);
+  if (slot == nullptr) return kNoObject;
+  // The kind, then the cargo through the setter (nonzero, so nobody dies),
+  // then the owner, then into the settlement's holder by force -- which is
+  // where the script's `Select` and `SetCommand` find it and walk it out.
+  slot->state.cargo_resource = static_cast<std::int32_t>(kind);
+  set_wagon_cargo(world, carrier, taken);
+  world.set_owner(carrier, s->owner);
+  (void)world.put_in_holder(carrier, s->holder.object);
+  return carrier;
+}
+
+std::int32_t draw_from_food_wagon(World& world, std::span<const ObjectId> members,
+                                  std::int32_t want) {
+  if (want <= 0 || members.empty()) return 0;
+  const CommandSystem* commands = command_system(world);
+  if (commands == nullptr) return 0;
+  const WorldObject* fullest = nullptr;
+  for (const WorldObject& slot : world.objects()) {
+    if (slot.object == nullptr || !slot.object->is_a(NativeClass::wagon)) continue;
+    if (slot.state.health <= 0 || slot.state.cargo <= 0) continue;
+    if (slot.state.cargo_resource != static_cast<std::int32_t>(Resource::food)) continue;
+    const CommandQueue* queue = commands->find(slot.id);
+    const Command* running = queue == nullptr ? nullptr : queue->running();
+    if (running == nullptr || running->arg_kind != CommandArgKind::object) continue;
+    if (std::find(members.begin(), members.end(), running->object) == members.end()) continue;
+    // The fullest, and the first met of two that are equally full: 0x005d58d0
+    // replaces its pick only with a wagon carrying strictly more.
+    if (fullest != nullptr && slot.state.cargo <= fullest->state.cargo) continue;
+    fullest = &slot;
+  }
+  if (fullest == nullptr) return 0;
+  const std::int32_t taken = std::min(want, fullest->state.cargo);
+  set_wagon_cargo(world, fullest->id, fullest->state.cargo - taken);
+  return taken;
+}
 
 void set_wagon_cargo(World& world, ObjectId wagon, std::int32_t value) {
   WorldObject* slot = world.find(wagon);

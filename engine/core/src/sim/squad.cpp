@@ -3817,77 +3817,88 @@ HostOutcome eval_attach_impl(CallContext& ctx) {
 ///     if (food + 100 < needed)
 ///     if (sq.SendFoodWagon(needed - food, 3000)) …
 ///
-/// ## What the original keeps, and what this engine keeps instead
+/// A food wagon is a **unit**: a `CVXWagon` with a cargo (`[obj+0x1cc]`) and a
+/// kind (`[obj+0x1d4]`, 1 for food), standing in one of its player's peaceful
+/// squads, running `follow` on the soldier it was sent after
+/// (`docs/formats/wagon.md`). Both walks below go over the player's squads in
+/// index order from 1 (`each_peaceful_wagon`), keep the `SF_PEACEFUL` ones,
+/// and look at every member that is a wagon.
 ///
-/// There a food wagon is a **unit**: a `Wagon`-class peasant with a cargo
-/// (`[obj+0x1cc]`) and a kind (`[obj+0x1d4]`, 1 for food), standing in one of
-/// its player's peaceful squads, running `follow` on the soldier it was sent
-/// after. `FoodComing` (0x0042a5b0) walks the player's squads, takes the
-/// peaceful ones, and for every member that is a wagon carrying food whose
-/// running command is an object-command aimed at a **unit in the asking
-/// squad** (`[unit+0x174]` against the handle), adds the cargo.
-///
-/// Here a wagon in flight is a row in `EconomySystem::wagons()` with a build
-/// timer and no object -- the journey is abstracted away for every wagon the
-/// economy moves -- and `Wagon::follow` is the unit it was sent after. So the
-/// walk is over that table: every food wagon whose `follow` is currently a
-/// member of this squad, built or not, counts its cargo. That is the same
-/// membership test, read off the squad rather than off the unit, and the same
-/// sum.
+/// `FoodComing` (0x0042a5b0) adds the cargo of every such wagon carrying food
+/// whose **running command** is an object command aimed at a live-handled
+/// **unit** (`[obj+0x2c] & 0x400000`) whose squad (`[unit+0x174]`) is the
+/// asking one. A wagon with no command, or one walking to a building, is not
+/// coming.
 ///
 /// ## `SendFoodWagon`, in the original's order
 ///
 /// 0x0042a750 answers false for a receiver naming no squad or a squad with no
-/// front member. Then, with the front member's position:
+/// front member. Then, measured from the front member's stored position:
 ///
-///   1. **an existing wagon to redirect.** The same walk as above, keeping a
-///      food wagon whose cargo is **not more than `amount`**, whose running
-///      command is not aimed at a unit -- one already following somebody is
-///      left alone -- and, when aimed at a building, only one whose settlement's
-///      central building is a heir of `BaseTownhall` (0x0043ffc0); within
-///      `range` of the leader, nearest first, strictly. **Not reproduced**: a
-///      wagon here has no object and no command, so nothing could pass the
-///      command test, and a phase that can select nothing is written down
-///      rather than written;
+///   1. **an existing wagon to redirect.** The same walk, keeping a food
+///      wagon whose cargo is **not more than `amount`** and that has a running
+///      command, unless that command is aimed at a unit -- one already
+///      following somebody is left alone -- or at a building whose settlement
+///      is not a stronghold (0x0043ffc0); within `range` of the leader
+///      (`<=`), nearest strictly;
 ///   2. **a settlement to load one at.** Every settlement the player owns
 ///      whose store holds **100 food or more** and whose central building is
 ///      within `range` of the leader; the nearest, strictly. No class test on
 ///      this pass -- a village will do;
-///   3. **which.** No settlement: the wagon, if there was one. Both: the wagon
-///      when the settlement is at least **1,200** further than it; otherwise
-///      the settlement. With phase 1 empty the settlement always wins here,
-///      and that arm of the decision is named rather than written;
-///   4. the mule is loaded with `amount` **clamped to the store's food**
-///      through the same body `CreateMuleFood` is (0x005eed90 with kind 1 and
-///      the flag that picks the race's mule), and a load of nothing is false;
-///   5. it is ordered **`follow`** on the leader (0x005aef20 with the unit
-///      handle; a class binding no `follow` is false), the way every walker
-///      here orders -- `vtbl+0xc0(0)`, `vtbl+0xbc`, 0x005b07d0 -- and the
-///      answer is true.
+///   3. **which.** No settlement: the wagon, if there was one. Both: the
+///      settlement unless it is **1,200 or more** further than the wagon;
+///   4. a settlement chosen, a mule is loaded with `amount` **clamped to the
+///      store's food** through `make_mule` (0x005eed90 with kind 1 and the
+///      race's mule), and a load of nothing is false;
+///   5. the wagon -- found or made -- is ordered **`follow`** on the leader in
+///      place of whatever it ran (0x005aef20, `vtbl+0xc0(0)`, `vtbl+0xbc`,
+///      0x005b07d0: `CommandSystem::set_command`); a class binding no
+///      `follow` is false. Otherwise true.
 ///
-/// Here step 4 is `create_feeding_mule`, which is `create_mule` with
-/// `Wagon::follow` set and no destination, and step 5 is that field: the
-/// wagon "follows" by being drawn down by the squad's hungry members once it
-/// is built, through the feeder's second path. `max_load` is not applied,
-/// which is `CreateMuleFood`'s standing here and is named there.
+/// The mule then follows its army as any unit follows (`WAGON_FOLLOW.VS`),
+/// and the feeder's second path draws on it (`draw_from_food_wagon`).
+template <typename Fn>
+void each_peaceful_wagon(World& world, const HeroSystem& heroes, PlayerId player, Fn&& fn) {
+  for (const Squad& squad : heroes.squads().squads()) {
+    if (squad.key.player != player || !squad.key.valid()) continue;
+    if ((squad.flags & kSquadFlagPeaceful) == 0) continue;
+    for (const ObjectId id : squad.members) {
+      WorldObject* slot = world.find(id);
+      if (slot == nullptr || slot->object == nullptr || !slot->object->is_a(NativeClass::wagon)) {
+        continue;
+      }
+      fn(*slot);
+    }
+  }
+}
+
+/// The object a wagon's running command is aimed at, or null: no command, a
+/// command that is not an object command, or a target the world no longer has.
+const WorldObject* running_target(World& world, ObjectId wagon) {
+  const CommandSystem* commands = command_system(world);
+  if (commands == nullptr) return nullptr;
+  const CommandQueue* queue = commands->find(wagon);
+  const Command* running = queue == nullptr ? nullptr : queue->running();
+  if (running == nullptr || running->arg_kind != CommandArgKind::object) return nullptr;
+  return world.find(running->object);
+}
+
 HostOutcome food_coming_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {
     if (self.error == kNoSquadFound) return HostOutcome::ok_with(Value::integer(0));
     return HostOutcome::failed(self.error);
   }
-  const EconomySystem* economy = economy_of(*self.world);
-  if (economy == nullptr) return HostOutcome::ok_with(Value::integer(0));
-  const std::vector<ObjectId>& members = self.squad->members;
+  World& world = *self.world;
+  const SquadKey asking = self.squad->key;
   std::int32_t total = 0;
-  for (const Wagon& w : economy->wagons()) {
-    // The kind test is the original's (`[wagon+0x1d4] == 1`) and an
-    // invariant here: `create_feeding_mule` is the only writer of `follow`
-    // and loads food. Injected as a fault it survives, which is what says so.
-    if (!w.follows() || w.resource != Resource::food) continue;
-    if (std::find(members.begin(), members.end(), w.follow) == members.end()) continue;
-    total += w.amount;
-  }
+  each_peaceful_wagon(world, *self.heroes, asking.player, [&](const WorldObject& wagon) {
+    if (wagon.state.cargo_resource != static_cast<std::int32_t>(Resource::food)) return;
+    const WorldObject* target = running_target(world, wagon.id);
+    if (target == nullptr || !target->state.flags.is_unit) return;
+    if (!(self.heroes->squads().squad_of(target->id) == asking)) return;
+    total += wagon.state.cargo;
+  });
   return HostOutcome::ok_with(Value::integer(total));
 }
 
@@ -3900,45 +3911,78 @@ HostOutcome send_food_wagon_impl(CallContext& ctx) {
   }
   World& world = *self.world;
   const Squad& squad = *self.squad;
-  // Both are the original's early-outs (0x0042a7cf) and both are covered by
-  // `create_feeding_mule` refusing to follow nothing; an empty squad would
-  // fall out false there too. Kept for the order of refusals, not for the
-  // answer.
   if (squad.members.empty()) return no;
   const ObjectId leader = squad.members.front();
   if (world.find(leader) == nullptr) return no;
   EconomySystem* economy = economy_of(world);
-  if (economy == nullptr) return no;
+  CommandSystem* commands = command_system(world);
+  if (economy == nullptr || commands == nullptr) return no;
   const std::int32_t amount = ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
   const std::int32_t range = ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
   // The leader's **stored** position, `vtbl+0x3c` (0x0042a7fc; 0x0063d900
-  // reads `[obj+0x24/0x28]`): `(-1, -1)` for a garrisoned leader, which then
-  // finds no store in range. `resolve_position` measured from its holder.
+  // reads `[obj+0x24/0x28]`): `(-1, -1)` for a garrisoned leader.
   const Point at = world.find(leader)->state.position;
-  constexpr std::int32_t kLoadableFood = 100;
+  const auto distance_to = [&](Point there) {
+    const std::int64_t dx = static_cast<std::int64_t>(there.x) - at.x;
+    const std::int64_t dy = static_cast<std::int64_t>(there.y) - at.y;
+    return isqrt(dx * dx + dy * dy);
+  };
+
+  // Phase 1: a wagon already on the road to redirect.
+  ObjectId wagon = kNoObject;
+  std::int64_t wagon_distance = 0;
+  each_peaceful_wagon(world, *self.heroes, squad.key.player, [&](const WorldObject& w) {
+    if (w.state.cargo_resource != static_cast<std::int32_t>(Resource::food)) return;
+    if (w.state.cargo > amount) return;
+    const CommandQueue* queue = commands->find(w.id);
+    const Command* running = queue == nullptr ? nullptr : queue->running();
+    if (running == nullptr) return;
+    if (running->arg_kind == CommandArgKind::object) {
+      if (const WorldObject* target = world.find(running->object); target != nullptr) {
+        if (target->state.flags.is_unit) return;
+        if (target->state.flags.is_building) {
+          const Settlement* s = economy->settlements().for_object(target->settlement);
+          if (s == nullptr || !s->is_stronghold()) return;
+        }
+      }
+    }
+    const std::int64_t d = distance_to(w.state.position);
+    if (d > range) return;
+    if (wagon != kNoObject && d >= wagon_distance) return;
+    wagon = w.id;
+    wagon_distance = d;
+  });
 
   // Phase 2: the nearest own settlement with food to spare within range.
+  constexpr std::int32_t kLoadableFood = 100;
   const Settlement* source = nullptr;
   std::int64_t nearest = 0;
   for (const Settlement& set : economy->settlements().all()) {
     if (set.owner != squad.key.player) continue;
     if (set.warehouse.food < kLoadableFood) continue;
-    const Point there = world.resolve_position(set.anchor);
-    const std::int64_t dx = there.x - at.x;
-    const std::int64_t dy = there.y - at.y;
-    const std::int64_t distance = isqrt(dx * dx + dy * dy);
-    if (distance > range) continue;
-    if (source != nullptr && distance >= nearest) continue;
+    const std::int64_t d = distance_to(world.resolve_position(set.anchor));
+    if (d > range) continue;
+    if (source != nullptr && d >= nearest) continue;
     source = &set;
-    nearest = distance;
+    nearest = d;
   }
-  if (source == nullptr) return no;
-  // The original's clamp, kept as its own step: `create_mule` takes what the
-  // warehouse can pay anyway, so a fault here changes nothing, and the sweep
-  // says so.
-  const std::int32_t load = std::min(amount, source->warehouse.food);
-  return HostOutcome::ok_with(
-      Value::boolean(economy->create_feeding_mule(source->id, leader, load) != 0));
+
+  // Phases 3 and 4: the settlement unless the wagon is 1,200 nearer.
+  constexpr std::int64_t kWagonPreference = 1200;
+  if (source != nullptr && (wagon == kNoObject || nearest < wagon_distance + kWagonPreference)) {
+    const std::int32_t load = std::min(amount, source->warehouse.food);
+    wagon = make_mule(world, source->id, Resource::food, load, /*boat=*/false);
+  }
+  if (wagon == kNoObject) return no;
+
+  // Phase 5: `follow` the leader, in place of whatever it was doing -- if
+  // the wagon's class binds `follow` on an object (0x005aef20 finds the
+  // method by name and signature, and answers nothing otherwise).
+  if (!commands->binds(world, wagon, "follow", CommandArgKind::object)) return no;
+  Command follow;
+  follow.arg_kind = CommandArgKind::object;
+  follow.object = leader;
+  return HostOutcome::ok_with(Value::boolean(commands->set_command(world, wagon, "follow", follow) != 0));
 }
 
 /// `Squadize(ObjList ol, SquadList sl, int nState)` -- 2 sites, both in

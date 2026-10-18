@@ -15,6 +15,7 @@
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/player.hpp"
@@ -48,6 +49,11 @@ ClassGraph wagon_graph() {
                 <properties maxhealth="400" radius="40" sight="500" max_load="1000"/></class>)",
            R"(<class id="Hall" parent="Object" cpp_class="CVXTownHall">
                 <properties maxhealth="5000" radius="100" sight="600"/></class>)",
+           R"(<class id="CHall" parent="Hall" cpp_class="CVXTownHall">
+                <properties race="Carthage"/></class>)",
+           R"(<class id="Camel" parent="Trader" cpp_class="CVXWagon"/>)",
+           R"(<class id="ShipS" parent="Object" cpp_class="CVXWagon">
+                <properties maxhealth="400" radius="90" sight="400" max_load="1000"/></class>)",
        }) {
     graph.add(bytes_of(xml), "test_wagon.cpp");
   }
@@ -61,6 +67,7 @@ struct WagonBench {
   World world;
   EconomySystem economy;
   CombatSystem combat;
+  CommandSystem commands;
   ObjectId wagon = kNoObject;
 
   WagonBench() {
@@ -71,6 +78,7 @@ struct WagonBench {
     REQUIRE(world.add_system(&economy));
     combat.set_world_bound(true);
     REQUIRE(world.add_system(&combat));
+    REQUIRE(world.add_system(&commands));
     world.players().set_relation_word(1, 1, kRelationSelf);
     wagon = world.spawn(NativeClass::wagon, nullptr, graph.find("Trader"));
     world.set_position(wagon, Point{5000, 5000});
@@ -133,16 +141,17 @@ struct WagonBench {
   [[nodiscard]] const WagonLoyalty* row() const { return economy.find_wagon_loyalty(wagon); }
 
   /// A town of `owner`'s with its hall at `at` and `gold` in store.
-  SettlementId town(PlayerId owner, Point at, std::int32_t gold) {
+  SettlementId town(PlayerId owner, Point at, std::int32_t gold, const char* hall = "Hall",
+                    std::int32_t food = 0) {
     SettlementInit init;
     init.kind = SettlementKind::stronghold;
     init.owner = owner;
-    init.anchor = world.spawn(NativeClass::town_hall, nullptr, graph.find("Hall"));
+    init.anchor = world.spawn(NativeClass::town_hall, nullptr, graph.find(hall));
     world.set_position(init.anchor, at);
     world.set_owner(init.anchor, owner);
     world.set_health(init.anchor, 5000);
     init.gold = gold;
-    init.food = 0;
+    init.food = food;
     init.max_gold = 100000;
     init.max_food = 100000;
     init.max_units = 100;
@@ -381,4 +390,92 @@ TEST(a_mule_in_the_open_loads_at_the_first_supported_hall_it_sees) {
   b.cargo_call("LoadGold", 100);
   CHECK(b.cargo() == 500);
   CHECK(b.gold(foreign) == 900);
+}
+
+/// `CreateMuleGold`/`CreateMuleFood` (0x005ef140/0x005ef040 -> 0x005eed90):
+/// the race's mule -- `Trader` for a hall that names no race, `Camel` for a
+/// Carthaginian one (0x005eed10) -- loaded with the request clamped to its
+/// `max_load` and to the store, the store drawn by it, owned by the
+/// settlement's player and **forced into the settlement's holder**, and its
+/// handle answered, which is what `VILLAGE_BEHAVIOR_SUPPLY.VS` then orders to
+/// `unload`. Nothing in store, no mule: the invalid handle.
+TEST(a_settlement_makes_its_races_mule_with_the_load_in_it) {
+  WagonBench b;
+  const SettlementId home = b.town(1, Point{2000, 2000}, 1500);
+  const SettlementId carthage = b.town(1, Point{8000, 2000}, 0, "CHall", 300);
+  const auto make = [&](SettlementId id, const char* verb, std::int32_t n) {
+    const Settlement* s = b.economy.find(id);
+    const script::HostOutcome out =
+        b.call(verb, 1, {script::Value::object(kTypeSettlement, s->object), script::Value::integer(n)});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_object() ? out.value.as_object().id : kNoObject;
+  };
+
+  const ObjectId first = make(home, "CreateMuleGold", 1200);
+  REQUIRE(b.world.find(first) != nullptr);
+  const WorldObject& mule = *b.world.find(first);
+  CHECK(mule.class_index == b.graph.find("Trader"));
+  CHECK(mule.state.cargo == 1000);
+  CHECK(mule.state.cargo_resource == 0);
+  CHECK(mule.state.owner == 1);
+  CHECK(mule.state.holder == b.economy.find(home)->holder.object);
+  CHECK(b.gold(home) == 500);
+
+  const ObjectId second = make(home, "CreateMuleGold", 800);
+  REQUIRE(b.world.find(second) != nullptr);
+  CHECK(b.world.find(second)->state.cargo == 500);
+  CHECK(b.gold(home) == 0);
+  const ObjectId before = b.world.next_id();
+  CHECK(make(home, "CreateMuleGold", 100) == kNoObject);
+  CHECK(b.world.next_id() == before);
+
+  const ObjectId camel = make(carthage, "CreateMuleFood", 1000);
+  REQUIRE(b.world.find(camel) != nullptr);
+  CHECK(b.world.find(camel)->class_index == b.graph.find("Camel"));
+  CHECK(b.world.find(camel)->state.cargo == 300);
+  CHECK(b.world.find(camel)->state.cargo_resource == 1);
+  CHECK(b.economy.find(carthage)->warehouse.food == 0);
+}
+
+/// The feeder's draw on a food wagon (`draw_from_food_wagon`): among live
+/// food wagons whose running command is aimed at one of the squad's members,
+/// the fullest (0x005d58d0 replaces its pick only with a strictly fuller
+/// one), `min(want, cargo)` through the cargo setter -- so the wagon that
+/// gives its last food dies. A gold wagon, and one following nobody here,
+/// give nothing.
+TEST(a_squad_eats_from_the_fullest_food_wagon_following_it) {
+  WagonBench b;
+  const ObjectId leader = b.place("Swordsman", 1, Point{3000, 3000});
+  const ObjectId stranger = b.place("Swordsman", 1, Point{6000, 3000});
+  const auto mule = [&](std::int32_t cargo, Resource kind, ObjectId after) {
+    const ObjectId id = b.world.spawn(NativeClass::wagon, nullptr, b.graph.find("Trader"));
+    b.world.set_owner(id, 1);
+    b.world.set_health(id, 400);
+    b.world.find(id)->state.cargo = cargo;
+    b.world.find(id)->state.cargo_resource = static_cast<std::int32_t>(kind);
+    Command follow;
+    follow.verb = "follow";
+    follow.arg_kind = CommandArgKind::object;
+    follow.object = after;
+    follow.started = true;
+    b.commands.queue(id).entries.push_back(follow);
+    return id;
+  };
+  const ObjectId small = mule(40, Resource::food, leader);
+  const ObjectId big = mule(60, Resource::food, leader);
+  const ObjectId gold = mule(900, Resource::gold, leader);
+  const ObjectId elsewhere = mule(900, Resource::food, stranger);
+  b.play(100);  // the combat roll takes the new wagons in
+  const ObjectId squad[] = {leader};
+
+  CHECK(draw_from_food_wagon(b.world, squad, 0) == 0);
+  CHECK(draw_from_food_wagon(b.world, squad, 25) == 25);  // from the 60
+  CHECK(b.world.find(big)->state.cargo == 35);
+  CHECK(draw_from_food_wagon(b.world, squad, 20) == 20);  // now the 40
+  CHECK(b.world.find(small)->state.cargo == 20);
+  CHECK(draw_from_food_wagon(b.world, squad, 100) == 35);  // 35 against 20
+  CHECK(b.world.find(big)->state.cargo == 0);
+  CHECK(b.world.find(big)->state.health == 0);
+  CHECK(b.world.find(gold)->state.cargo == 900);
+  CHECK(b.world.find(elsewhere)->state.cargo == 900);
 }
