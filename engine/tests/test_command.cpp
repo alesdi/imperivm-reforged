@@ -1226,12 +1226,12 @@ TEST(idle_is_an_order_that_costs_game_time) {
 
   HostCall timed(f.world, {obj(u), Value::integer(1900)});
   const HostOutcome slept = invoke(registry, CallKind::member, "Idle", 1, timed);
-  CHECK(slept.status == HostStatus::suspend);
+  CHECK(slept.status == HostStatus::retry);  // the activity's steps are re-entries
   CHECK(slept.suspend_for == 1900);
 
   HostCall bare(f.world, {obj(u)});
   const HostOutcome fallback = invoke(registry, CallKind::member, "Idle", 0, bare);
-  CHECK(fallback.status == HostStatus::suspend);
+  CHECK(fallback.status == HostStatus::retry);
   CHECK(fallback.suspend_for == kDefaultIdleSlice);
   CHECK(fallback.suspend_for > 0);  // or SHIP_IDLE.VS spins
 
@@ -1269,7 +1269,7 @@ TEST(idle_on_the_map_drops_the_target_and_still_waits_its_argument) {
 
   HostCall standing(f.world, {obj(u), Value::integer(1900)});
   const HostOutcome idled = invoke(registry, CallKind::member, "Idle", 1, standing);
-  CHECK(idled.status == HostStatus::suspend);
+  CHECK(idled.status == HostStatus::retry);
   CHECK(idled.suspend_for == 1900);
   REQUIRE(combat.find(u) != nullptr);
   CHECK(combat.find(u)->target == kNoObject);
@@ -1335,7 +1335,7 @@ TEST(taunt_drops_the_target_on_the_map_and_waits_in_a_holder) {
   const HostOutcome yielded = invoke(registry, CallKind::member, "Taunt", 1, standing);
   // Two seconds of taunting, not one scheduler step: `UNIT_CAPTURE.VS` takes
   // a point of loyalty after each.
-  CHECK(yielded.status == HostStatus::suspend);
+  CHECK(yielded.status == HostStatus::retry);
   CHECK(yielded.suspend_for == 2000);
   // "A new order supersedes combat" -- the prologue this shares with `Stop`,
   // both `Goto`s, `Attack` and `AttackEveryone`.
@@ -1383,7 +1383,7 @@ TEST(taunt_without_a_combat_system_still_yields) {
   const ObjectId u = f.spawn(f.unit_class);
 
   HostCall standing(f.world, {obj(u), Value::integer(2000)});
-  CHECK(invoke(registry, CallKind::member, "Taunt", 1, standing).status == HostStatus::suspend);
+  CHECK(invoke(registry, CallKind::member, "Taunt", 1, standing).status == HostStatus::retry);
 
   // No receiver at all refuses, which is `resolve`'s answer and `Idle`'s too.
   HostCall nobody(f.world, {obj(kNoObject), Value::integer(2000)});
