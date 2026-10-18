@@ -137,6 +137,7 @@
 /// function, because `(member, "ID", 0)` is a key the object model also owns.
 /// See `sim/host_setup.hpp` on what a second `define` does.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -295,6 +296,36 @@ class GaikaView {
   std::vector<Laika> laika_;       ///< rank order; [0] is the reserved node
 };
 
+/// A settlement's two AI script slots.
+///
+/// The original holds these as two `uint16` arrays on the per-player AI object
+/// (`[ai+0x70]` economy, `[ai+0x80]` tactic), indexed by settlement index and
+/// sized by `CVXAI::Start` (0x0041e2d0), beside the threads they name, which
+/// run in the AI's own thread manager at a fixed id per settlement (economy
+/// `0x34 + nodes + 2 * index`, tactic one more). Held here per settlement id
+/// instead, because a settlement index is a position in a table that can
+/// shrink and the id is not; and the thread by its scheduler id, since the
+/// fixed thread id is never visible to a script.
+struct AiSettlementScripts {
+  SettlementId settlement = kNoSettlement;
+  /// The `ES_*` constant last written, or 0 (`ES_NONE`).
+  std::int32_t economy = 0;
+  script::ScriptId economy_script = script::kNoScript;
+  /// The `TS_*` constant last written, or 0 (`TS_NONE`).
+  std::int32_t tactic = 0;
+  script::ScriptId tactic_script = script::kNoScript;
+};
+
+/// The first id of the AI thread manager's `AIRun` range and one past its
+/// last: 0x0041cd00, asked for no particular id, takes the first of 3 ..
+/// 0x33 that holds no thread (0x0069f950 on each), and answers -1 when all 49
+/// do. `Main.vs` is started the same way (0x0041e338), so it holds 3 until it
+/// ends. 0x0041cdc0 (`AIBreakScript`) acts on this range only.
+inline constexpr std::int32_t kFirstAiRunSlot = 3;
+inline constexpr std::int32_t kAiRunSlotEnd = 0x34;
+inline constexpr std::size_t kAiRunSlots =
+    static_cast<std::size_t>(kAiRunSlotEnd - kFirstAiRunSlot);
+
 /// One player's AI, which is what `AIStart` creates and `AIStop` destroys.
 struct AiPlayer {
   PlayerId player = kNoPlayer;
@@ -308,25 +339,16 @@ struct AiPlayer {
   script::ScriptId root = script::kNoScript;
   /// This player's view of the node graph, sized by `AIStart`.
   GaikaView gaika;
+  /// The AI thread manager's `AIRun` range: the thread in id
+  /// `kFirstAiRunSlot + i`, or `kNoScript`. An id whose thread has ended is
+  /// free again, as the manager deletes a thread the moment it ends
+  /// (0x0069f7a0). The handle `AIRun` answers is the id, not the thread.
+  std::array<script::ScriptId, kAiRunSlots> runs{};
+  /// The per-settlement economy and tactic slots, ascending by settlement id.
+  std::vector<AiSettlementScripts> settlements;
 };
 
-/// A settlement's two AI script slots.
-///
-/// The original holds these as two `uint16` arrays on the per-player AI object,
-/// indexed by settlement index, sized by `CVXAI::Start`. Held here per
-/// settlement id instead, because a settlement index is a position in a table
-/// that can shrink and the id is not.
-struct AiSettlementScripts {
-  SettlementId settlement = kNoSettlement;
-  /// The `ES_*` constant currently running, or 0 (`ES_NONE`).
-  std::int32_t economy = 0;
-  script::ScriptId economy_script = script::kNoScript;
-  /// The `TS_*` constant currently running, or 0 (`TS_NONE`).
-  std::int32_t tactic = 0;
-  script::ScriptId tactic_script = script::kNoScript;
-};
-
-/// The per-player AI state, and the script-ownership table `AIGetPlayer` reads.
+/// The per-player AI state.
 ///
 /// A `System` so that it is found the way every other domain's state is found
 /// -- by name through `World::systems()` -- rather than by growing `World` a
@@ -339,8 +361,15 @@ struct AiSettlementScripts {
 /// that the omission is a statement rather than an oversight.
 ///
 /// Every container here is ordered and every walk is an index walk. The
-/// script-ownership table is sorted by script id, the per-settlement table by
-/// settlement id, and the per-player table is fixed-size.
+/// per-settlement tables are sorted by settlement id and the per-player table
+/// is fixed-size.
+///
+/// **Whose AI a thread belongs to is the thread's context**, as in the
+/// original: every thread an AI starts carries its seat as `%d`
+/// (`ai_thread_context`), 0x0043caa0 reads it back with `atol`, and nothing
+/// else is consulted -- no table of owners, no walk up the spawn tree. A
+/// thread the AI did not start reads no seat, and so does a synchronous call
+/// from one of its threads, which runs on a fresh thread (0x0069dca0).
 class AiSystem final : public System {
  public:
   [[nodiscard]] std::string_view name() const noexcept override { return "ai"; }
@@ -378,9 +407,10 @@ class AiSystem final : public System {
   AiStartStatus start(PlayerId player, std::string_view profile, AiDifficulty difficulty,
                       script::Scheduler& scheduler);
 
-  /// `AIStop`. Kills the player's `Main.vs` and every script under it that is
-  /// still alive, and forgets the player's settlement slots. False if the
-  /// player had no AI.
+  /// `AIStop`. Deletes the AI object and its thread manager with it: every
+  /// live thread the AI started -- every one whose context is its seat --
+  /// is stopped, and its `AIRun` ids and settlement slots are forgotten.
+  /// False if the player had no AI.
   bool stop(PlayerId player, script::Scheduler& scheduler);
 
   /// Give `player` a record for every node. `AIStart`'s last act, and the one
@@ -398,40 +428,59 @@ class AiSystem final : public System {
   [[nodiscard]] std::span<const AiPlayer> players() const noexcept { return players_; }
   [[nodiscard]] std::size_t active_count() const noexcept;
 
-  // -- script ownership --------------------------------------------------
+  // -- whose thread ------------------------------------------------------
 
-  /// `AIGetPlayer`'s answer: the **1-based** player owning `script`, or -1.
-  ///
-  /// Walks the spawn tree upward, consulting this table before the scheduler at
-  /// every step, and caches what it learns. Not `const` for that reason.
+  /// 0x0043caa0: the seat a thread's context names -- `atol` of it, so a
+  /// decimal seat reads as itself and anything else (a sequence's `/`) as 0 --
+  /// and -1 when the thread has none.
+  [[nodiscard]] static std::int32_t thread_seat(std::string_view context) noexcept;
+
+  /// `AIGetPlayer`'s answer for a live scheduled script: its seat plus one, or
+  /// -1 when it has no context. A convenience for callers holding an id; a
+  /// host call reads its own thread's context instead.
   [[nodiscard]] std::int32_t script_player(script::ScriptId script,
-                                           const script::Scheduler& scheduler);
+                                           const script::Scheduler& scheduler) const;
 
-  /// Record that `script` belongs to `player`. Used by the bootstrap and by
-  /// the synchronous-call helper; a test may use it to plant a root.
-  void adopt(script::ScriptId script, PlayerId player, bool root = false);
-  void forget(script::ScriptId script);
+  // -- the AIRun range ---------------------------------------------------
 
-  [[nodiscard]] std::size_t owner_entries() const noexcept { return owners_.size(); }
+  /// 0x0041cd00 asked for no particular id: start `chunk` with `args` in the
+  /// first free id of `seat`'s `AIRun` range, tag it with the seat, and answer
+  /// the id; -1 when the seat has no AI or every id is taken. `parent` is
+  /// bookkeeping only.
+  std::int32_t run(PlayerId seat, std::uint32_t chunk, std::span<const script::Value> args,
+                   script::Scheduler& scheduler, script::ScriptId parent = script::kNoScript);
+  /// 0x0041cdc0: stop the thread in id `handle` of `seat`'s range, when the
+  /// handle is in 3..51 and a thread holds it. False otherwise.
+  bool break_run(PlayerId seat, std::int32_t handle, script::Scheduler& scheduler);
+  /// The live thread in id `handle` of `seat`'s range, or `kNoScript`.
+  [[nodiscard]] script::ScriptId run_script(PlayerId seat, std::int32_t handle,
+                                            const script::Scheduler& scheduler) const;
 
   // -- per-settlement script slots ---------------------------------------
 
-  /// `Settlement::EconomyScript` / `Settlement::TacticScript`.
+  /// `Settlement::EconomyScript` / `Settlement::TacticScript` as `seat`'s AI
+  /// reads them.
   ///
   /// Reports 0 (`ES_NONE` / `TS_NONE`) once the recorded coroutine is gone,
   /// which is the original's own rule: 0x0041d2a0 asks the AI's thread manager
   /// whether the settlement's fixed thread id still runs and zeroes the stored
-  /// id when it does not. This is the raw slot; the entry points add the
-  /// owner's-AI reading (`owner_slot` in `ai.cpp`).
-  [[nodiscard]] std::int32_t economy_script(SettlementId settlement,
+  /// id when it does not. 0 too for a seat with no AI, and for a settlement
+  /// the seat's AI never ran anything on: the arrays are the AI object's own.
+  [[nodiscard]] std::int32_t economy_script(PlayerId seat, SettlementId settlement,
                                             const script::Scheduler& scheduler) const;
-  [[nodiscard]] std::int32_t tactic_script(SettlementId settlement,
+  [[nodiscard]] std::int32_t tactic_script(PlayerId seat, SettlementId settlement,
                                            const script::Scheduler& scheduler) const;
-  void set_economy_script(SettlementId settlement, std::int32_t id, script::ScriptId script);
-  void set_tactic_script(SettlementId settlement, std::int32_t id, script::ScriptId script);
-  [[nodiscard]] std::span<const AiSettlementScripts> settlement_scripts() const noexcept {
-    return settlements_;
-  }
+  /// The live thread behind those, or `kNoScript`.
+  [[nodiscard]] script::ScriptId economy_thread(PlayerId seat, SettlementId settlement,
+                                                const script::Scheduler& scheduler) const;
+  [[nodiscard]] script::ScriptId tactic_thread(PlayerId seat, SettlementId settlement,
+                                               const script::Scheduler& scheduler) const;
+  void set_economy_script(PlayerId seat, SettlementId settlement, std::int32_t id,
+                          script::ScriptId script);
+  void set_tactic_script(PlayerId seat, SettlementId settlement, std::int32_t id,
+                         script::ScriptId script);
+  [[nodiscard]] std::span<const AiSettlementScripts> settlement_scripts(
+      PlayerId seat) const noexcept;
 
   // -- the AI helpers -----------------------------------------------------
   //
@@ -524,13 +573,12 @@ class AiSystem final : public System {
   /// Append this system's state to `out`, as one self-describing section with
   /// its own magic and version -- the shape `Scheduler::serialize` established.
   ///
-  /// **Written:** the sixteen per-player rows, the script-owner table, the
-  /// per-settlement economy/tactic bindings and the prune counter.
+  /// **Written:** the sixteen per-player rows, each with its `AIRun` ids and
+  /// its per-settlement economy/tactic bindings.
   ///
   /// **The other section whose absence is silent.** `AiSystem::hash` is a
   /// no-op, so a load that dropped this passes `sim::verify_hashes` and then
-  /// diverges once `AIGetPlayer` starts answering -1 for scripts that used to
-  /// have an owner.
+  /// diverges once `AIBreakScript` stops finding the scripts it started.
   void serialize(std::vector<std::byte>& out) const;
 
   /// Replace this system's state with the one in `bytes`.
@@ -654,26 +702,13 @@ class AiSystem final : public System {
     const AiProfile* profile = nullptr;
     std::string script_prefix;
   };
-  struct ScriptOwner {
-    script::ScriptId script = script::kNoScript;
-    PlayerId player = kNoPlayer;
-    bool root = false;
-  };
-
   [[nodiscard]] const ProfileEntry* profile_entry(std::string_view name) const noexcept;
   [[nodiscard]] const ProfileEntry* profile_of_player(PlayerId player) const noexcept;
-  [[nodiscard]] const ScriptOwner* owner(script::ScriptId script) const noexcept;
-  [[nodiscard]] AiSettlementScripts* slot(SettlementId settlement);
-  [[nodiscard]] const AiSettlementScripts* slot(SettlementId settlement) const;
-  void prune_owners(const script::Scheduler& scheduler);
+  [[nodiscard]] AiSettlementScripts* slot(PlayerId seat, SettlementId settlement);
+  [[nodiscard]] const AiSettlementScripts* slot(PlayerId seat, SettlementId settlement) const;
 
   std::vector<ProfileEntry> profiles_;              ///< sorted by name
   std::vector<AiPlayer> players_ = std::vector<AiPlayer>(kPlayerCount);
-  std::vector<ScriptOwner> owners_;                 ///< sorted by script id
-  std::vector<AiSettlementScripts> settlements_;    ///< sorted by settlement id
-  /// Resolutions since the last prune. Prunes on a count rather than on a
-  /// clock so that two runs prune at the same points.
-  std::uint32_t since_prune_ = 0;
   bool manager_started_ = false;
 };
 
@@ -698,6 +733,16 @@ class AiSystem final : public System {
                                                  std::span<const script::Value> args,
                                                  const char* what, script::Value& result,
                                                  std::vector<script::Value>* out_locals = nullptr);
+
+/// `run_script_now` read as the original reads a failed run: a script that
+/// traps or suspends is reported with the pass (`Scheduler::report_trap`) and
+/// the answer is false, as is a chunk that names nothing (0x006a0360's
+/// `NOTFOUND`); the caller then answers its own default. `out_locals` is
+/// filled whether or not the run finished.
+[[nodiscard]] bool run_script_or_report(script::CallContext& ctx, std::uint32_t chunk_index,
+                                        std::span<const script::Value> args,
+                                        script::Value& result,
+                                        std::vector<script::Value>* out_locals = nullptr);
 
 /// `CheckLsaPath`'s answer, and the route behind it.
 struct LsaRoute {

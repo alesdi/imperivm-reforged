@@ -323,16 +323,16 @@ AiStartStatus AiSystem::start(PlayerId player, std::string_view profile, AiDiffi
   }
 
   // `CVXAI::Start` runs exactly one script, with no arguments and signature
-  // `void`. Parent `kNoScript`: this coroutine is the root of the player's AI,
-  // and the entry recorded for it is what every descendant resolves through.
-  ai.root = scheduler.spawn(chunk, {}, script::ObjectRef{}, script::kNoScript);
-  if (ai.root == script::kNoScript) {
+  // `void`, through the AI's own launcher asked for no particular id
+  // (0x0041e338 -> 0x0041cd00 with -1): the first free id of the `AIRun`
+  // range, which on a fresh AI is 3, tagged with the seat.
+  ai.active = true;
+  const std::int32_t slot = run(player, chunk, {}, scheduler);
+  if (slot < 0) {
     ai.active = false;
     return AiStartStatus::no_main_script;
   }
-  ai.active = true;
-  (void)scheduler.set_context(ai.root, ai_thread_context(player));
-  adopt(ai.root, player, /*root=*/true);
+  ai.root = run_script(player, slot, scheduler);
   return AiStartStatus::ok;
 }
 
@@ -358,161 +358,151 @@ bool AiSystem::stop(PlayerId player, script::Scheduler& scheduler) {
   AiPlayer& ai = players_[player];
   if (!ai.active) return false;
 
-  // Kill every coroutine attributed to the player, in id order. `kill` on a
-  // dead or unknown id is a no-op, so the roots that outlive their scripts cost
-  // nothing here.
-  for (const ScriptOwner& owned : owners_) {
-    if (owned.player == player) scheduler.kill(owned.script);
+  // The AI object goes, and its thread manager with it: every thread in it is
+  // stopped. Those are exactly the live threads whose context is the seat,
+  // since the AI's launcher is the only one that writes a seat. In id order;
+  // `kill` only marks, so the walk is over a vector nothing reshapes.
+  const std::string tag = ai_thread_context(player);
+  for (const script::ScriptRecord& record : scheduler.scripts()) {
+    if (!record.dead && record.context == tag) scheduler.kill(record.id);
   }
-  std::vector<ScriptOwner> kept;
-  kept.reserve(owners_.size());
-  for (const ScriptOwner& owned : owners_) {
-    if (owned.player != player) kept.push_back(owned);
-  }
-  owners_ = std::move(kept);
 
   ai.active = false;
   ai.root = script::kNoScript;
   ai.profile.clear();
   ai.difficulty = AiDifficulty::none;
-  // The view lives on the AI object in the original and is constructed with
-  // it, so it goes with it -- and a restart rebuilds it from scratch, which is
-  // why `start` calls `stop` first.
+  // The view, the `AIRun` ids and the settlement slots live on the AI object
+  // in the original and are constructed with it, so they go with it -- and a
+  // restart rebuilds them from scratch, which is why `start` calls `stop`
+  // first. Another seat's slots for the same settlements are its own.
   ai.gaika.clear();
-
-  // The slots live on the AI object in the original, so they go with it. The
-  // player's slots are the ones whose recorded coroutine this stop just killed;
-  // another player's settlements keep theirs.
-  std::vector<AiSettlementScripts> slots;
-  slots.reserve(settlements_.size());
-  for (AiSettlementScripts s : settlements_) {
-    if (s.economy != 0 && !scheduler.alive(s.economy_script)) {
-      s.economy = 0;
-      s.economy_script = script::kNoScript;
-    }
-    if (s.tactic != 0 && !scheduler.alive(s.tactic_script)) {
-      s.tactic = 0;
-      s.tactic_script = script::kNoScript;
-    }
-    if (s.economy != 0 || s.tactic != 0) slots.push_back(s);
-  }
-  settlements_ = std::move(slots);
+  ai.runs.fill(script::kNoScript);
+  ai.settlements.clear();
   return true;
 }
 
-// -- script ownership -------------------------------------------------------
+// -- whose thread -----------------------------------------------------------
 
-const AiSystem::ScriptOwner* AiSystem::owner(ScriptId script) const noexcept {
-  const auto at = std::lower_bound(
-      owners_.begin(), owners_.end(), script,
-      [](const ScriptOwner& e, ScriptId key) { return e.script < key; });
-  if (at == owners_.end() || at->script != script) return nullptr;
-  return &*at;
+std::int32_t AiSystem::thread_seat(std::string_view context) noexcept {
+  if (context.empty()) return -1;
+  return env_parse_int(context);
 }
 
-void AiSystem::adopt(ScriptId script, PlayerId player, bool root) {
-  if (script == script::kNoScript) return;
-  const auto at = std::lower_bound(
-      owners_.begin(), owners_.end(), script,
-      [](const ScriptOwner& e, ScriptId key) { return e.script < key; });
-  if (at != owners_.end() && at->script == script) {
-    at->player = player;
-    at->root = at->root || root;
-    return;
-  }
-  owners_.insert(at, ScriptOwner{script, player, root});
+std::int32_t AiSystem::script_player(ScriptId script,
+                                     const script::Scheduler& scheduler) const {
+  const std::string_view context = scheduler.context(script);
+  if (context.empty()) return -1;
+  return thread_seat(context) + 1;
 }
 
-void AiSystem::forget(ScriptId script) {
-  const auto at = std::lower_bound(
-      owners_.begin(), owners_.end(), script,
-      [](const ScriptOwner& e, ScriptId key) { return e.script < key; });
-  if (at != owners_.end() && at->script == script) owners_.erase(at);
-}
+// -- the AIRun range --------------------------------------------------------
 
-void AiSystem::prune_owners(const script::Scheduler& scheduler) {
-  std::vector<ScriptOwner> kept;
-  kept.reserve(owners_.size());
-  for (const ScriptOwner& owned : owners_) {
-    // Roots are never pruned: `Main.vs` dies within a tick of spawning its
-    // monitors and is the only thing that can attribute them afterwards.
-    if (owned.root || scheduler.alive(owned.script)) kept.push_back(owned);
-  }
-  owners_ = std::move(kept);
-}
-
-std::int32_t AiSystem::script_player(ScriptId script, const script::Scheduler& scheduler) {
-  if (script == script::kNoScript) return -1;
-
-  // 4,096 resolutions between prunes. A count rather than a clock so that two
-  // runs of the same match prune at the same points.
-  if (++since_prune_ >= 4096) {
-    since_prune_ = 0;
-    prune_owners(scheduler);
-  }
-
-  // Walk upward through the spawn tree, consulting this table first at every
-  // step so that a compacted parent (which `Main.vs` always is) still resolves.
-  std::vector<ScriptId> chain;
-  ScriptId current = script;
-  for (int depth = 0; depth < 64; ++depth) {
-    if (const ScriptOwner* found = owner(current); found != nullptr) {
-      const PlayerId player = found->player;
-      for (const ScriptId id : chain) adopt(id, player);
-      return static_cast<std::int32_t>(player) + 1;
-    }
-    const script::ScriptRecord* record = scheduler.find(current);
-    if (record == nullptr || record->parent == script::kNoScript) return -1;
-    chain.push_back(current);
-    current = record->parent;
+std::int32_t AiSystem::run(PlayerId seat, std::uint32_t chunk,
+                           std::span<const script::Value> args, script::Scheduler& scheduler,
+                           ScriptId parent) {
+  if (seat >= players_.size()) return -1;
+  AiPlayer& ai = players_[seat];
+  if (!ai.active) return -1;
+  for (std::size_t i = 0; i < ai.runs.size(); ++i) {
+    if (ai.runs[i] != script::kNoScript && scheduler.alive(ai.runs[i])) continue;
+    // Started at once with the manager's default interval (0x006a03d0 with
+    // 0 and 100), then tagged (0x0041cd8c .. 0x0041cdaa).
+    const ScriptId spawned = scheduler.spawn(chunk, args, script::ObjectRef{}, parent);
+    if (spawned == script::kNoScript) return -1;
+    (void)scheduler.set_context(spawned, ai_thread_context(seat));
+    ai.runs[i] = spawned;
+    return kFirstAiRunSlot + static_cast<std::int32_t>(i);
   }
   return -1;
 }
 
-// -- per-settlement slots ---------------------------------------------------
-
-AiSettlementScripts* AiSystem::slot(SettlementId settlement) {
-  const auto at = std::lower_bound(
-      settlements_.begin(), settlements_.end(), settlement,
-      [](const AiSettlementScripts& e, SettlementId key) { return e.settlement < key; });
-  if (at != settlements_.end() && at->settlement == settlement) return &*at;
-  AiSettlementScripts fresh;
-  fresh.settlement = settlement;
-  return &*settlements_.insert(at, fresh);
+bool AiSystem::break_run(PlayerId seat, std::int32_t handle, script::Scheduler& scheduler) {
+  const ScriptId script = run_script(seat, handle, scheduler);
+  if (script == script::kNoScript) return false;
+  // 0x0069fee0: at once, or -- for the thread running right now -- by
+  // flagging it to stop after the current call; `kill` is safe on either.
+  return scheduler.kill(script);
 }
 
-const AiSettlementScripts* AiSystem::slot(SettlementId settlement) const {
+ScriptId AiSystem::run_script(PlayerId seat, std::int32_t handle,
+                              const script::Scheduler& scheduler) const {
+  if (seat >= players_.size()) return script::kNoScript;
+  if (handle < kFirstAiRunSlot || handle >= kAiRunSlotEnd) return script::kNoScript;
+  const ScriptId script = players_[seat].runs[static_cast<std::size_t>(handle - kFirstAiRunSlot)];
+  return scheduler.alive(script) ? script : script::kNoScript;
+}
+
+// -- per-settlement slots ---------------------------------------------------
+
+AiSettlementScripts* AiSystem::slot(PlayerId seat, SettlementId settlement) {
+  if (seat >= players_.size()) return nullptr;
+  std::vector<AiSettlementScripts>& table = players_[seat].settlements;
   const auto at = std::lower_bound(
-      settlements_.begin(), settlements_.end(), settlement,
+      table.begin(), table.end(), settlement,
       [](const AiSettlementScripts& e, SettlementId key) { return e.settlement < key; });
-  if (at == settlements_.end() || at->settlement != settlement) return nullptr;
+  if (at != table.end() && at->settlement == settlement) return &*at;
+  AiSettlementScripts fresh;
+  fresh.settlement = settlement;
+  return &*table.insert(at, fresh);
+}
+
+const AiSettlementScripts* AiSystem::slot(PlayerId seat, SettlementId settlement) const {
+  if (seat >= players_.size()) return nullptr;
+  const std::vector<AiSettlementScripts>& table = players_[seat].settlements;
+  const auto at = std::lower_bound(
+      table.begin(), table.end(), settlement,
+      [](const AiSettlementScripts& e, SettlementId key) { return e.settlement < key; });
+  if (at == table.end() || at->settlement != settlement) return nullptr;
   return &*at;
 }
 
-std::int32_t AiSystem::economy_script(SettlementId settlement,
+std::int32_t AiSystem::economy_script(PlayerId seat, SettlementId settlement,
                                       const script::Scheduler& scheduler) const {
-  const AiSettlementScripts* entry = slot(settlement);
+  const AiSettlementScripts* entry = slot(seat, settlement);
   if (entry == nullptr || entry->economy == 0) return 0;
   return scheduler.alive(entry->economy_script) ? entry->economy : 0;
 }
 
-std::int32_t AiSystem::tactic_script(SettlementId settlement,
+std::int32_t AiSystem::tactic_script(PlayerId seat, SettlementId settlement,
                                      const script::Scheduler& scheduler) const {
-  const AiSettlementScripts* entry = slot(settlement);
+  const AiSettlementScripts* entry = slot(seat, settlement);
   if (entry == nullptr || entry->tactic == 0) return 0;
   return scheduler.alive(entry->tactic_script) ? entry->tactic : 0;
 }
 
-void AiSystem::set_economy_script(SettlementId settlement, std::int32_t id, ScriptId script) {
-  AiSettlementScripts* entry = slot(settlement);
+ScriptId AiSystem::economy_thread(PlayerId seat, SettlementId settlement,
+                                  const script::Scheduler& scheduler) const {
+  const AiSettlementScripts* entry = slot(seat, settlement);
+  if (entry == nullptr || !scheduler.alive(entry->economy_script)) return script::kNoScript;
+  return entry->economy_script;
+}
+
+ScriptId AiSystem::tactic_thread(PlayerId seat, SettlementId settlement,
+                                 const script::Scheduler& scheduler) const {
+  const AiSettlementScripts* entry = slot(seat, settlement);
+  if (entry == nullptr || !scheduler.alive(entry->tactic_script)) return script::kNoScript;
+  return entry->tactic_script;
+}
+
+void AiSystem::set_economy_script(PlayerId seat, SettlementId settlement, std::int32_t id,
+                                  ScriptId script) {
+  AiSettlementScripts* entry = slot(seat, settlement);
+  if (entry == nullptr) return;
   entry->economy = id;
   entry->economy_script = script;
 }
 
-void AiSystem::set_tactic_script(SettlementId settlement, std::int32_t id, ScriptId script) {
-  AiSettlementScripts* entry = slot(settlement);
+void AiSystem::set_tactic_script(PlayerId seat, SettlementId settlement, std::int32_t id,
+                                 ScriptId script) {
+  AiSettlementScripts* entry = slot(seat, settlement);
+  if (entry == nullptr) return;
   entry->tactic = id;
   entry->tactic_script = script;
+}
+
+std::span<const AiSettlementScripts> AiSystem::settlement_scripts(PlayerId seat) const noexcept {
+  if (seat >= players_.size()) return {};
+  return players_[seat].settlements;
 }
 
 // -- script lookup ----------------------------------------------------------
@@ -820,9 +810,11 @@ namespace {
 /// handle that outlives the ordinary script that minted it.
 ///
 /// The synthetic id is `kSyntheticScript + depth`, outside anything
-/// `Scheduler` issues (ids start at 1 and only increase). It is registered in
-/// the ownership table for the duration of the call so that `AIGetPlayer`
-/// inside the callee answers the caller's player, then removed.
+/// `Scheduler` issues (ids start at 1 and only increase). **It has no
+/// context**: 0x0069dca0 runs the callee on a thread it has just made, and
+/// nothing sets that thread's `+0x44`, so `AIGetPlayer` inside a synchronous
+/// callee answers 0 and the free `AIRun` refuses, whoever called it. No
+/// shipped callee calls either.
 constexpr ScriptId kSyntheticScript = 0x40000000u;
 constexpr int kMaxSyncDepth = 8;
 int g_sync_depth = 0;
@@ -836,21 +828,84 @@ int g_sync_depth = 0;
 /// `TSRecruitHero` needs it and it is a pointer rather than a second overload
 /// so that the one caller that does is the only one that pays for the copy.
 ///
-/// **A callee that fails traps the caller here, and that is a known gap.** The
-/// original's synchronous launcher (0x006a0360) reports a failed run as a
-/// non-zero status, and every trampoline read in the tenth round's audit
-/// (0x0043d740, 0x0043d820, the four recruiters, 0x00426c00) carries on with
-/// what it had -- 0, the list it minted, whatever the by-reference slot holds
-/// -- after at most a message through the retail no-op sink; 0x00426680 counts
-/// the skill as weight 0, which `m_ai_get_skill_to_develop` does too. This runner returns
-/// the failure instead, so the trap sweep sees a callee that broke: with the
-/// shipped scripts a failing callee is this engine's bug, not the game's, and
-/// a silent default would hide it. A missing script file is not a failure of
-/// that kind, and each caller answers its own default for it.
+/// **A callee that fails traps the caller here, and that is a known gap for
+/// the callers still on it.** The original's synchronous launcher (0x006a0360)
+/// reports a failed run as a non-zero status, and every trampoline read in the
+/// tenth round's audit (0x0043d740, 0x0043d820, the four recruiters,
+/// 0x00426c00) carries on with what it had -- 0, the list it minted, whatever
+/// the by-reference slot holds -- after at most a message through the retail
+/// no-op sink; 0x00426680 counts the skill as weight 0, which
+/// `m_ai_get_skill_to_develop` does too. `run_script_or_report` is that
+/// reading: the failure goes to the pass's report, where the trap sweep still
+/// sees it, and the caller answers its default. The four recruiters use it;
+/// the rest still trap, which keeps a broken callee loud. A missing script
+/// file is not a failure of that kind, and each caller answers its own
+/// default for it.
 ///
 /// **Exported, not local.** `sim/squad.cpp` runs `CheckMAIKA.vs` from
 /// `Squad::CalcGoAround` through the same trampoline shape (0x0043d670 beside
 /// 0x0043d740), and one runner is one set of refusals.
+namespace {
+
+/// One synchronous run, as both readings of its failure need it.
+struct SyncRun {
+  script::ExecStatus status = script::ExecStatus::failed;
+  script::Trap trap;
+  ScriptId id = script::kNoScript;
+};
+
+[[nodiscard]] SyncRun run_now(CallContext& ctx, std::uint32_t chunk_index,
+                              std::span<const Value> args, Value& result,
+                              std::vector<Value>* out_locals) {
+  SyncRun out;
+  const script::Chunk& chunk = ctx.scheduler->chunk(chunk_index);
+  const ScriptId synthetic = kSyntheticScript + static_cast<ScriptId>(g_sync_depth);
+  out.id = synthetic;
+
+  script::VmEnv env;
+  env.registry = ctx.scheduler->registry();
+  env.host = ctx.host;
+  env.scheduler = ctx.scheduler;
+  env.user = ctx.user;
+  env.script = synthetic;
+  // No context: see `kSyntheticScript`.
+  env.now = ctx.scheduler->now();
+  env.call_trace = env.scheduler != nullptr ? env.scheduler->call_trace() : nullptr;
+  env.trace_user = env.scheduler != nullptr ? env.scheduler->trace_user() : nullptr;
+
+  script::Execution execution = script::start(chunk, args, ctx.host);
+  execution.chunk_index = chunk_index;
+  ++g_sync_depth;
+  out.status = script::run(execution, chunk, env);
+  --g_sync_depth;
+  // And the pooled state the callee declared. See the header: this is the
+  // scheduler's own teardown, run by hand because a synchronous call never
+  // enters the scheduler's lifecycle and so never leaves it either.
+  if (const script::Scheduler::TeardownHook hook = ctx.scheduler->teardown_hook();
+      hook != nullptr) {
+    hook(ctx.user, synthetic);
+  }
+  // The frame is not popped whatever ended the run, so a by-reference slot
+  // holds whatever the callee had put there by then -- which is what the
+  // original's caller reads back after a failed run too.
+  if (out_locals != nullptr && !execution.frames.empty()) {
+    *out_locals = execution.frames.front().locals;
+  }
+  if (out.status == script::ExecStatus::finished) {
+    result = execution.result;
+  } else {
+    out.trap = execution.trap;
+    if (out.status == script::ExecStatus::suspended) {
+      out.trap.detail = "the script suspended inside a synchronous call";
+      out.trap.source_name = chunk.source_name;
+    }
+    if (out.trap.source_name.empty()) out.trap.source_name = chunk.source_name;
+  }
+  return out;
+}
+
+}  // namespace
+
 HostOutcome run_script_now(CallContext& ctx, std::uint32_t chunk_index,
                            std::span<const Value> args, const char* what, Value& result,
                            std::vector<Value>* out_locals) {
@@ -859,40 +914,8 @@ HostOutcome run_script_now(CallContext& ctx, std::uint32_t chunk_index,
   if (g_sync_depth >= kMaxSyncDepth) {
     return HostOutcome::failed("synchronous AI script nesting too deep");
   }
-  const script::Chunk& chunk = ctx.scheduler->chunk(chunk_index);
-
-  AiSystem* ai = host_ai(ctx);
-  const std::int32_t player = ai == nullptr ? -1 : ai->script_player(ctx.script, *ctx.scheduler);
-  const ScriptId synthetic = kSyntheticScript + static_cast<ScriptId>(g_sync_depth);
-  if (ai != nullptr && player > 0) {
-    ai->adopt(synthetic, static_cast<PlayerId>(player - 1));
-  }
-
-  script::VmEnv env;
-  env.registry = ctx.scheduler->registry();
-  env.host = ctx.host;
-  env.scheduler = ctx.scheduler;
-  env.user = ctx.user;
-  env.script = synthetic;
-  env.now = ctx.scheduler->now();
-  env.call_trace = env.scheduler != nullptr ? env.scheduler->call_trace() : nullptr;
-  env.trace_user = env.scheduler != nullptr ? env.scheduler->trace_user() : nullptr;
-
-  script::Execution execution = script::start(chunk, args, ctx.host);
-  execution.chunk_index = chunk_index;
-  ++g_sync_depth;
-  const script::ExecStatus status = script::run(execution, chunk, env);
-  --g_sync_depth;
-  if (ai != nullptr) ai->forget(synthetic);
-  // And the pooled state the callee declared. See the header: this is the
-  // scheduler's own teardown, run by hand because a synchronous call never
-  // enters the scheduler's lifecycle and so never leaves it either.
-  if (const script::Scheduler::TeardownHook hook = ctx.scheduler->teardown_hook();
-      hook != nullptr) {
-    hook(ctx.user, synthetic);
-  }
-
-  if (status != script::ExecStatus::finished) {
+  const SyncRun ran = run_now(ctx, chunk_index, args, result, out_locals);
+  if (ran.status != script::ExecStatus::finished) {
     // Name the callee's own failure, not just the caller's. `HostOutcome::error`
     // is a static string, so the composed text lives in a small ring of
     // statics: the VM copies it into its trap before the next call can reuse
@@ -904,19 +927,36 @@ HostOutcome run_script_now(CallContext& ctx, std::uint32_t chunk_index,
     static std::size_t next = 0;
     std::string& text = ring[next++ % 4];
     text = what;
-    if (status == script::ExecStatus::suspended) {
-      text += ": the script suspended inside a synchronous call";
-    } else if (!execution.trap.detail.empty() || !execution.trap.source_name.empty()) {
-      text += ": " + execution.trap.detail + " (" + execution.trap.source_name + ":" +
-              std::to_string(execution.trap.line) + ")";
+    if (!ran.trap.detail.empty() || !ran.trap.source_name.empty()) {
+      text += ": " + ran.trap.detail + " (" + ran.trap.source_name + ":" +
+              std::to_string(ran.trap.line) + ")";
     }
     return HostOutcome::failed(text.c_str());
   }
-  result = execution.result;
-  if (out_locals != nullptr && !execution.frames.empty()) {
-    *out_locals = execution.frames.front().locals;
-  }
   return HostOutcome::ok_void();
+}
+
+bool run_script_or_report(CallContext& ctx, std::uint32_t chunk_index,
+                          std::span<const Value> args, Value& result,
+                          std::vector<Value>* out_locals) {
+  // `NOTFOUND`: 0x006a0360 answers its own non-zero status for a name the
+  // library does not hold, and the caller prints and carries on.
+  if (ctx.scheduler == nullptr || chunk_index >= ctx.scheduler->chunk_count()) return false;
+  if (g_sync_depth >= kMaxSyncDepth) {
+    ctx.scheduler->report_trap(script::FailedScript{
+        kSyntheticScript + static_cast<ScriptId>(g_sync_depth),
+        ctx.scheduler->chunk(chunk_index).source_name,
+        script::Trap{script::TrapCode::host_error, "synchronous AI script nesting too deep",
+                     ctx.scheduler->chunk(chunk_index).source_name, 0}});
+    return false;
+  }
+  const SyncRun ran = run_now(ctx, chunk_index, args, result, out_locals);
+  if (ran.status == script::ExecStatus::finished) return true;
+  // Reported with the pass, as the member `AIRun`'s callee is, so the trap
+  // sweep still sees a callee that broke; the caller goes on as the
+  // original's does.
+  ctx.scheduler->report_trap(script::FailedScript{ran.id, ran.trap.source_name, ran.trap});
+  return false;
 }
 
 std::uint32_t ai_script_chunk(CallContext& ctx, PlayerId player, std::string_view file) {
@@ -937,17 +977,89 @@ namespace {
 /// point pushes that **plus one**. The tag is written by the AI's own spawn
 /// (0x0041cd00 formats `[ai+0x24]`, the 0-based seat, with `%d` and stores it
 /// through 0x0069d040), so an AI-owned script reads its seat + 1 and anything
-/// else reads -1 + 1 = 0. No argument, no receiver, no failure arm.
-/// `AiSystem::script_player` keeps -1 for "no owner" because its other callers
-/// (the script-slot and helper families) test for it; only this entry point
-/// adds the original's increment to that case. All nine shipped sites run
-/// inside an AI, so the retail scripts never see the 0.
+/// else reads -1 + 1 = 0 -- and a sequence, whose context is `/`, reads
+/// `atol("/") + 1 = 1`, which no shipped sequence asks. No argument, no
+/// receiver, no failure arm. The tag is the calling thread's own
+/// (`CallContext::context`); all nine shipped sites run inside an AI.
 HostOutcome f_ai_get_player(CallContext& ctx) {
+  return HostOutcome::ok_with(Value::integer(AiSystem::thread_seat(ctx.context) + 1));
+}
+
+/// The handle every `AIRun` failure answers: 0x00422f90, 0x00424a20 and
+/// 0x00424c30 all start from -1 and keep it when 0x0041cd00 refuses.
+constexpr std::int32_t kNoAiScript = -1;
+
+/// `AIRun(name)` and `AIRun(name, set, ol, obj, n)` -- 72 sites between the
+/// spellings, and **a thread, not a call**.
+///
+/// 0x00422f90 (name only) and 0x00424a20 (name and four parameters) take the
+/// calling thread's AI seat from its context (0x0043caa0: `atol`, -1 for
+/// none), refuse a seat outside 0..15 or one with no AI record (`+0x88`) or an
+/// empty name, and hand the script to that AI's launcher 0x0041cd00. That
+/// resolves the file on the seat's AI search path (0x0043d030 -- the
+/// profile's own directory first, then the plain name; `find_script`), checks
+/// the library holds it (0x006a0270), takes the **first free thread id from 3
+/// to 51** in the AI's own thread manager (0x0069f950 per id; -1 when all 49
+/// are taken), starts it with no delay and a default interval of 100
+/// (0x006a03d0 -> 0x0069fd80), tags it with the seat, and answers **the id**
+/// (`AiSystem::run`). The four-parameter form binds the settlement and object
+/// as handles and the list as the caller's own list object, against the
+/// signature `void, Settlement set, ObjList ol, Obj obj, int nParam`. Every
+/// failure prints "Cannot run '%s' script" and answers -1. 0x00424c30 is the
+/// same with the player passed explicitly first; no shipped script calls it,
+/// and it is not bound.
+///
+/// This used to answer the scheduler's own monotonic id, spawn whatever the
+/// caller, and resolve the name through the library's leaf fallback rather
+/// than the seat's directory -- so a `DEFENSIVE` AI's `Main.vs` ran the root
+/// profile's monitors.
+HostOutcome f_ai_run(CallContext& ctx) {
   AiSystem* ai = host_ai(ctx);
-  if (ai == nullptr) return HostOutcome::failed("AIGetPlayer: no world");
-  if (ctx.scheduler == nullptr) return HostOutcome::failed("AIGetPlayer: no scheduler");
-  const std::int32_t owner = ai->script_player(ctx.script, *ctx.scheduler);
-  return HostOutcome::ok_with(Value::integer(owner < 0 ? 0 : owner));
+  if (ai == nullptr) return HostOutcome::failed("AIRun: no world");
+  if (ctx.scheduler == nullptr) return HostOutcome::failed("AIRun needs a scheduler");
+  if (ctx.count() < 1 || !ctx.arg(0).is_string()) {
+    return HostOutcome::failed("AIRun expects a script name");
+  }
+  const std::int32_t seat = AiSystem::thread_seat(ctx.context);
+  const std::string_view name = ctx.arg(0).as_string();
+  const Value refused = Value::integer(kNoAiScript);
+  if (seat < 0 || seat >= static_cast<std::int32_t>(kPlayerCount) || name.empty()) {
+    return HostOutcome::ok_with(refused);
+  }
+  const auto player = static_cast<PlayerId>(seat);
+  const AiPlayer* owner = ai->player_ai(player);
+  if (owner == nullptr || !owner->active) return HostOutcome::ok_with(refused);
+  const std::uint32_t chunk = ai->find_script(*ctx.scheduler, player, name);
+  if (chunk == script::kNoChunk) return HostOutcome::ok_with(refused);
+  const std::int32_t handle =
+      ai->run(player, chunk, ctx.arguments.subspan(1), *ctx.scheduler, ctx.script);
+  return HostOutcome::ok_with(Value::integer(handle));
+}
+
+/// `AIBreakScript(handle)` -- 74 sites. 0x00421cd0 takes the calling thread's
+/// AI seat (0x0043caa0), and when that seat has an AI record calls 0x0041cdc0
+/// on it, which acts only on a handle from 3 to 51: if the AI's thread
+/// manager holds that id (0x0069f950) it is stopped (0x0069fee0) -- at once,
+/// or, when it is the thread running right now, by flagging it (`[vm+0x40]`)
+/// so the interpreter stops after the current call. Anything else is silently
+/// nothing; so is a caller with no seat. 0x00421d20 is the same with the
+/// player passed first; no shipped script calls it. Because the handle is an
+/// id and not a thread, a handle whose thread has ended and whose id a later
+/// `AIRun` of the same seat has taken stops the newer thread, as there.
+HostOutcome f_ai_break_script(CallContext& ctx) {
+  AiSystem* ai = host_ai(ctx);
+  if (ai == nullptr) return HostOutcome::failed("AIBreakScript: no world");
+  if (ctx.scheduler == nullptr) return HostOutcome::failed("AIBreakScript needs a scheduler");
+  if (ctx.count() != 1 || !ctx.arg(0).is_integer()) {
+    return HostOutcome::failed("AIBreakScript expects a script handle");
+  }
+  const std::int32_t seat = AiSystem::thread_seat(ctx.context);
+  if (seat < 0 || seat >= static_cast<std::int32_t>(kPlayerCount)) return HostOutcome::ok_void();
+  const auto player = static_cast<PlayerId>(seat);
+  const AiPlayer* owner = ai->player_ai(player);
+  if (owner == nullptr || !owner->active) return HostOutcome::ok_void();
+  (void)ai->break_run(player, ctx.arg(0).as_integer(), *ctx.scheduler);
+  return HostOutcome::ok_void();
 }
 
 /// `AIStart(player, profile, difficulty)` -- 20 sites, every one of them inside
@@ -1216,33 +1328,25 @@ HostOutcome m_ai(CallContext& ctx) {
 /// answer is the stored id masked to 16 bits.
 ///
 /// **Both the array and the threads are the AI's**, so the slot is per
-/// (AI, settlement). This engine keeps one slot per settlement
-/// (`AiSettlementScripts`) and recovers the per-AI reading by asking who owns
-/// the recorded script: a live script another seat started -- the settlement
-/// has changed hands and the old owner's economy script has not yet noticed --
-/// is not in the new owner's array, so it reads 0 here as it does there. What
-/// that does not reproduce is a seat recapturing a settlement while its *own*
-/// old script still runs and a third seat's has overwritten the slot (the
-/// original still sees the first); labelled, and a per-AI slot table is the
-/// fix. The receiver failing to resolve is a null dereference in the original;
-/// here it traps.
+/// (AI, settlement), and so is it here (`AiPlayer::settlements`): a live
+/// script another seat started -- the settlement has changed hands and the
+/// old owner's economy script has not yet noticed -- is in the old owner's
+/// array and not the new owner's, and a seat that takes a settlement back
+/// finds its own entry as it left it. The receiver failing to resolve is a
+/// null dereference in the original; here it traps.
 [[nodiscard]] std::int32_t owner_slot(AiSystem& ai, const Settlement& set, AiEnum family,
                                       const script::Scheduler& scheduler,
                                       script::ScriptId* running = nullptr) {
   const AiPlayer* seat = ai.player_ai(set.owner);
   if (seat == nullptr || !seat->active) return 0;
-  const std::int32_t id = family == AiEnum::economy_script
-                              ? ai.economy_script(set.id, scheduler)
-                              : ai.tactic_script(set.id, scheduler);
+  const bool economy = family == AiEnum::economy_script;
+  const std::int32_t id = economy ? ai.economy_script(set.owner, set.id, scheduler)
+                                  : ai.tactic_script(set.owner, set.id, scheduler);
   if (id == 0) return 0;
-  script::ScriptId script = script::kNoScript;
-  for (const AiSettlementScripts& slot : ai.settlement_scripts()) {
-    if (slot.settlement != set.id) continue;
-    script = family == AiEnum::economy_script ? slot.economy_script : slot.tactic_script;
-    break;
+  if (running != nullptr) {
+    *running = economy ? ai.economy_thread(set.owner, set.id, scheduler)
+                       : ai.tactic_thread(set.owner, set.id, scheduler);
   }
-  if (ai.script_player(script, scheduler) != static_cast<std::int32_t>(set.owner) + 1) return 0;
-  if (running != nullptr) *running = script;
   return id & 0xffff;
 }
 
@@ -1329,8 +1433,8 @@ HostOutcome m_get_tactic_script(CallContext& ctx) {
 ///      an id past the table's end names `""`), appends `.vs`, and starts it in
 ///      the owner's thread manager at the settlement's fixed id through
 ///      0x0041cd00, with the signature `void, Settlement set` and the
-///      settlement as its argument, tagged with the owner's seat so
-///      `AIGetPlayer` inside it answers the owner. A name with no script file
+///      settlement as its argument, tagged with the owner's seat (its
+///      context) so `AIGetPlayer` inside it answers the owner. A name with no script file
 ///      makes 0x0041cd00 answer -1 and start nothing: no message, and the id
 ///      stays written, which the next read turns back into 0 because no
 ///      thread runs at that id.
@@ -1338,8 +1442,8 @@ HostOutcome m_get_tactic_script(CallContext& ctx) {
 /// The constant names here come from the profile family by family
 /// (`AiProfile::constant_name`), which is this engine's numbering of the same
 /// names (`sim/ai_profile.hpp` says why it differs from retail's single
-/// table). The spawned script's parent is the caller, which only matters for
-/// the ownership walk; it is adopted for the owner explicitly.
+/// table). The spawned script's parent is the caller, which nothing reads;
+/// whose AI it is, is its context.
 HostOutcome run_script_common(CallContext& ctx, AiEnum family, const char* what) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed(what);
@@ -1360,9 +1464,9 @@ HostOutcome run_script_common(CallContext& ctx, AiEnum family, const char* what)
   const std::int32_t id = static_cast<std::int32_t>(ctx.arg(1).as_integer() & 0xffff);
   const auto write = [&](ScriptId script) {
     if (family == AiEnum::economy_script) {
-      ai->set_economy_script(set->id, id, script);
+      ai->set_economy_script(owner, set->id, id, script);
     } else {
-      ai->set_tactic_script(set->id, id, script);
+      ai->set_tactic_script(owner, set->id, id, script);
     }
   };
   write(script::kNoScript);
@@ -1378,7 +1482,6 @@ HostOutcome run_script_common(CallContext& ctx, AiEnum family, const char* what)
                                                 script::ObjectRef{}, ctx.script);
   if (spawned == script::kNoScript) return HostOutcome::ok_void();
   (void)ctx.scheduler->set_context(spawned, ai_thread_context(owner));
-  ai->adopt(spawned, owner);
   write(spawned);
   return HostOutcome::ok_void();
 }
@@ -1695,9 +1798,10 @@ HostOutcome m_ai_get_skill_to_develop(CallContext& ctx) {
   const std::uint32_t chunk = (ai == nullptr || set->owner == kNoPlayer)
                                   ? ctx.scheduler->find_chunk(file)
                                   : ai->find_script(*ctx.scheduler, set->owner, file);
+  // A run that fails prints "<name>: Error running script!" into the retail
+  // no-op sink and answers the list as it stands (0x00431c2b .. 0x00431c37).
   Value ignored;
-  const HostOutcome ran = run_script_now(ctx, chunk, args, what, ignored);
-  if (ran.status != script::HostStatus::ok) return ran;
+  (void)run_script_or_report(ctx, chunk, args, ignored);
   return HostOutcome::ok_with(out);
 }
 
@@ -1733,10 +1837,11 @@ HostOutcome m_ts_recruit_hero(CallContext& ctx) {
   const std::uint32_t chunk = (ai == nullptr || set->owner == kNoPlayer)
                                   ? ctx.scheduler->find_chunk(kFile)
                                   : ai->find_script(*ctx.scheduler, set->owner, kFile);
+  // A failed run answers whatever the by-reference slot holds by then, as
+  // the original's caller reads its own argument memory back.
   Value ignored;
   std::vector<Value> locals;
-  const HostOutcome ran = run_script_now(ctx, chunk, args, kWhat, ignored, &locals);
-  if (ran.status != script::HostStatus::ok) return ran;
+  (void)run_script_or_report(ctx, chunk, args, ignored, &locals);
   // Slot 1 is `Hero *h`. Read positionally rather than by scanning `is_out`,
   // because the helper's signature is fixed by `AI.INI` and a file that
   // declared a *different* second parameter would be the wrong file, not a
@@ -3110,10 +3215,7 @@ HostOutcome m_gaika_run_strat(CallContext& ctx) {
   Laika* record = laika_of(ctx, 1);
   if (record == nullptr) return HostOutcome::ok_void();
 
-  if (record->strat != 0) {
-    ctx.scheduler->kill(record->strat_script);
-    ai->forget(record->strat_script);
-  }
+  if (record->strat != 0) ctx.scheduler->kill(record->strat_script);
   const std::int32_t strat = ctx.arg(2).as_integer();
   record->strat = strat;
   record->strat_script = script::kNoScript;
@@ -3128,7 +3230,6 @@ HostOutcome m_gaika_run_strat(CallContext& ctx) {
       chunk, std::span<const Value>(&argument, 1), script::ObjectRef{}, ctx.script);
   if (spawned == script::kNoScript) return HostOutcome::ok_void();
   (void)ctx.scheduler->set_context(spawned, ai_thread_context(owner));
-  ai->adopt(spawned, owner);
   record->strat_script = spawned;
   return HostOutcome::ok_void();
 }
@@ -4804,6 +4905,12 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
   constexpr script::CallKind kMember = script::CallKind::member;
 
   registry.define(kFree, "AIGetPlayer", 0, &f_ai_get_player);
+  // `AIRun` in five free arities, as the scheduler bound them before the
+  // AI's launcher was this domain's; `AIBreakScript` beside it.
+  for (std::uint16_t arity = 1; arity <= 5; ++arity) {
+    registry.define(kFree, "AIRun", arity, &f_ai_run);  // 72 between the spellings
+  }
+  registry.define(kFree, "AIBreakScript", 1, &f_ai_break_script);  // 74
   registry.define(kFree, "AIStart", 3, &f_ai_start);  // 20, all in containers
   registry.define(kFree, "AIStop", 1, &f_ai_stop);     //  1, in a container, and a trap message
   // The one- and two-argument forms (0x00434e20, 0x00434e60) are **not**

@@ -209,9 +209,12 @@ TEST(wakeup_a_sleep_100_poll_runs_eight_times_in_an_800_ms_turn) {
 TEST(wakeup_a_script_spawned_mid_turn_starts_at_its_spawners_millisecond) {
   Bench bench;
   REQUIRE(bench.session != nullptr);
-  REQUIRE(bench.add("// void\nMark(2, GetTime());\nSleep(50);\nMark(3, GetTime());\n",
+  // Spawned by `StartPlayerScript`, which any thread may call: the free
+  // `AIRun` starts nothing for a thread no AI started.
+  REQUIRE(bench.add("// void, int player\nMark(2, GetTime());\nSleep(50);\nMark(3, GetTime());\n",
                     "child.vs") != script::kNoChunk);
-  REQUIRE(bench.spawn("// void\nSleep(40);\nMark(1, GetTime());\nAIRun(\"child.vs\");\n",
+  REQUIRE(bench.spawn("// void\nSleep(40);\nMark(1, GetTime());\n"
+                      "StartPlayerScript(1, \"child.vs\");\n",
                       "parent.vs") != script::kNoScript);
   bench.session->advance(2, 150);
 

@@ -1504,12 +1504,12 @@ TEST(save_match_section_round_trips) {
 
 TEST(save_ai_section_round_trips) {
   AiSystem ai;
-  ai.adopt(11, /*player=*/2, /*root=*/true);
-  ai.adopt(19, /*player=*/2);
-  ai.adopt(23, /*player=*/5);
-  ai.set_economy_script(4, 6, 31);
-  ai.set_tactic_script(4, 9, 37);
-  ai.set_economy_script(1, 2, 41);
+  // Each seat's slots are its own: seat 2 holds two settlements, seat 5 one
+  // of the same.
+  ai.set_economy_script(2, 4, 6, 31);
+  ai.set_tactic_script(2, 4, 9, 37);
+  ai.set_economy_script(2, 1, 2, 41);
+  ai.set_economy_script(5, 4, 3, 43);
   // The ship transport orders, out of order on the way in so that the table's
   // own sort is what the save writes.
   ai.set_ship_transport(9, "advance", Point{640, 960});
@@ -1522,12 +1522,14 @@ TEST(save_ai_section_round_trips) {
   CHECK(!bytes.empty());
   CHECK(bytes != default_section<AiSystem>());
   CHECK(fresh.manager_started());
-  CHECK(fresh.owner_entries() == 3);
-  REQUIRE(fresh.settlement_scripts().size() == 2);
+  REQUIRE(fresh.settlement_scripts(2).size() == 2);
   // Sorted by settlement id: the vector's order is what `slot` binary-searches.
-  CHECK(fresh.settlement_scripts()[0].settlement == 1);
-  CHECK(fresh.settlement_scripts()[1].economy == 6);
-  CHECK(fresh.settlement_scripts()[1].tactic_script == 37);
+  CHECK(fresh.settlement_scripts(2)[0].settlement == 1);
+  CHECK(fresh.settlement_scripts(2)[1].economy == 6);
+  CHECK(fresh.settlement_scripts(2)[1].tactic_script == 37);
+  REQUIRE(fresh.settlement_scripts(5).size() == 1);
+  CHECK(fresh.settlement_scripts(5)[0].economy_script == 43);
+  CHECK(fresh.settlement_scripts(1).empty());
 
   // **The transport orders survive, ascending by ship id**, which is the order
   // the table keeps and therefore the order the bytes have to come back in.
@@ -1812,7 +1814,7 @@ TEST(save_command_and_ai_are_invisible_to_the_hash_and_caught_by_the_bytes) {
   move.arg_kind = CommandArgKind::point;
   move.point = Point{100, 200};
   command.queue(unit).entries.push_back(move);
-  ai.adopt(/*script=*/13, /*player=*/2, /*root=*/true);
+  ai.set_economy_script(/*seat=*/2, /*settlement=*/1, /*id=*/6, /*script=*/13);
 
   // Half of the claim: the world hash is the same with the state and without.
   const std::uint64_t with_state = world.state_hash();
@@ -1852,7 +1854,7 @@ TEST(save_command_and_ai_are_invisible_to_the_hash_and_caught_by_the_bytes) {
   CHECK(report->unrestored_systems.empty());  // the sections are there
   CHECK(verify_hashes(target, reader->meta()).ok);
   CHECK(lost_command.tracked() == 0);  // ...and were not applied
-  CHECK(lost_ai.owner_entries() == 0);
+  CHECK(lost_ai.settlement_scripts(2).empty());
 
   // The other half: re-saving the target and comparing the bytes does catch it.
   // This is the mechanism `engine/tools/imsave.cpp` uses over a real map, and

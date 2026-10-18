@@ -748,11 +748,12 @@ TEST(vs_the_shipped_surface_is_wired_even_though_it_is_not_written) {
   CHECK(registry.find(CallKind::member, "AddCommand", 3) != kUnresolvedHost);
   CHECK(shipped_global_names().size() == 245);
 
-  // The runtime implements twenty-one of them itself: `Sleep`, `AIBreakScript`,
-  // `KillScript`, `StartPlayerScript`, `Run` in six free arities and the
-  // settlement's member one, and `AIRun` in five free and five member arities.
+  // The runtime implements fifteen of them itself: `Sleep`, `KillScript`,
+  // `StartPlayerScript`, `Run` in six free arities and the settlement's member
+  // one, and the member `AIRun` in five arities. The free `AIRun` and
+  // `AIBreakScript` are the AI's launcher and live with it (`sim/ai.cpp`).
   register_scheduler_builtins(registry);
-  CHECK(registry.implemented() == 21);
+  CHECK(registry.implemented() == 15);
 }
 
 TEST(vs_a_runaway_loop_traps_instead_of_hanging) {
@@ -1007,59 +1008,10 @@ TEST(vs_member_airun_runs_the_helper_before_the_callers_next_statement) {
   CHECK(stage.scheduler.live_count() == 0);
 }
 
-TEST(vs_airun_spawns_a_peer_and_aibreakscript_kills_it) {
-  Stage stage;
-  // The child is the standard behaviour shape: an infinite loop around a sleep.
-  // 101 shipped scripts look exactly like this.
-  REQUIRE(stage.add("// void\nwhile (1) {\n  Tick();\n  Sleep(10);\n}\n", "child.vs"));
-  REQUIRE(stage.add(
-      "// void\n"
-      "int handle;\n"
-      "handle = AIRun(\"child.vs\");\n"
-      "Note(handle);\n"
-      "Sleep(35);\n"
-      "AIBreakScript(handle);\n",
-      "parent.vs"));
-
-  const ScriptId parent = stage.scheduler.spawn(1);
-  CHECK(parent == 1);
-
-  // The child is spawned during the parent's first slice and runs in the same
-  // pass, because ids only increase and the walk is over a growing vector.
-  stage.scheduler.run_ready();
-  REQUIRE(stage.world.log.size() == 1);
-  CHECK(stage.world.log[0] == "2");
-  CHECK(stage.scheduler.alive(2));
-  CHECK(stage.world.ticks == 1);
-
-  for (int i = 0; i < 3; ++i) stage.scheduler.advance(10);
-  CHECK(stage.world.ticks == 4);
-
-  // At t = 35 the parent wakes and kills the child.
-  stage.scheduler.advance(5);
-  CHECK(!stage.scheduler.alive(2));
-  CHECK(!stage.scheduler.alive(1));
-  CHECK(stage.scheduler.live_count() == 0);
-
-  const int ticks_at_death = stage.world.ticks;
-  for (int i = 0; i < 5; ++i) stage.scheduler.advance(10);
-  CHECK(stage.world.ticks == ticks_at_death);
-}
-
-TEST(vs_a_missing_script_is_survivable) {
-  Stage stage;
-  // Four `<behavior script=...>` bindings in the shipped class tree name files
-  // that are not in the pack at all, so this must not be fatal.
-  REQUIRE(stage.add("// void\nint handle;\nhandle = AIRun(\"not_shipped.vs\");\nNote(handle);\n",
-                    "orphan.vs"));
-  stage.scheduler.spawn(0);
-  const RunReport report = stage.scheduler.run_ready();
-  CHECK(report.failed == 0);
-  REQUIRE(stage.world.log.size() == 1);
-  // "Cannot run '%s' script", and the handle every failed `AIRun` answers:
-  // 0x00422f90 starts from -1 and keeps it.
-  CHECK(stage.world.log[0] == "-1");
-}
+// The free `AIRun` and `AIBreakScript` -- a thread in the caller's AI and an
+// id in its range -- are tested with the AI they belong to:
+// `ai_run_answers_an_id_in_the_callers_ai_and_the_id_is_reused` in
+// test_ai.cpp, which also covers a name the library does not hold.
 
 /// Two scripts due on the same millisecond run in the order they went to
 /// sleep, not by id: the original's wheel appends each armed thread at the

@@ -102,28 +102,6 @@ HostOutcome builtin_sleep(CallContext& context) {
   return HostOutcome::sleep_for(context.arg(0).as_integer());
 }
 
-/// The handle every `AIRun` failure answers: 0x00422f90, 0x00424a20 and
-/// 0x00424c30 all start from -1 and keep it when 0x0041cd00 refuses.
-constexpr std::int32_t kNoAiScript = -1;
-
-/// Shared by every spawning shape of `AIRun`: a script name, then the
-/// arguments to bind.
-HostOutcome spawn_from(CallContext& context, const Value& name, std::span<const Value> args) {
-  if (context.scheduler == nullptr) return HostOutcome::failed("AIRun needs a scheduler");
-  if (!name.is_string()) return HostOutcome::failed("AIRun expects a script name");
-  const ScriptId id = context.scheduler->spawn_by_name(name.as_string(), args, ObjectRef{},
-                                                       context.script);
-  // Tagged with the caller's seat, which is what 0x0041cd00 writes: the AI it
-  // launches in is the one the caller's own context names.
-  if (id != kNoScript) (void)context.scheduler->set_context(id, context.context);
-  // A missing script is survivable: four `<behavior script=...>` bindings in
-  // the shipped class tree name files that are not in `data.pak` at all. The
-  // original prints "Cannot run '%s' script" and answers -1; `AIBreakScript`
-  // of -1 is a no-op in both.
-  if (id == kNoScript) return HostOutcome::ok_with(Value::integer(kNoAiScript));
-  return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(id)));
-}
-
 /// `Run(name[, i1 .. i5])` and `set.Run(name)` -- **a call, not a spawn**.
 ///
 /// The six free bodies (0x004c6e30 for the name alone, then 0x004c6f00,
@@ -164,39 +142,6 @@ HostOutcome builtin_run_free(CallContext& context) {
 HostOutcome builtin_run_settlement(CallContext& context) {
   if (context.count() < 2) return HostOutcome::failed("Run expects a script name");
   return run_synchronously(context, context.arg(1), context.arguments.subspan(0, 1));
-}
-
-/// `AIRun(name)` and `AIRun(name, set, ol, obj, n)` -- 72 sites between the
-/// spellings, and **a thread, not a call**.
-///
-/// 0x00422f90 (name only) and 0x00424a20 (name and four parameters) take the
-/// calling thread's AI player from the context's player tag (0x0043caa0 reads
-/// `[context+0x44]` as a decimal string, -1 when there is none), reach that
-/// player's AI record (`+0x88`), and hand the script to 0x0041cd00. That checks
-/// the library holds it (0x006a0270), takes the **first free thread id from 3
-/// to 51** in the AI's own thread manager (0x0069f950 per id; -1 when all 49
-/// are taken), starts it with no delay and a default interval of 100
-/// (0x006a03d0 -> 0x0069fd80, through 0x00688240 at the wheel's clock), tags
-/// it with the same player, and answers the id. The four-parameter form binds
-/// the settlement and object as handles and the list as the caller's own list
-/// object, against the signature `void, Settlement set, ObjList ol, Obj obj,
-/// int nParam`. Every failure prints "Cannot run '%s' script" and answers -1.
-/// 0x00424c30 is the same with the player passed explicitly first (`player -
-/// 1` indexes the record); no shipped script calls it.
-///
-/// **What this does not reproduce is the handle.** The original's is a small
-/// per-player id that is reused as soon as its thread ends; this answers the
-/// scheduler's own monotonic id, which never is. The two differ only for an
-/// `AIBreakScript` of a handle whose script has already ended and whose id a
-/// later `AIRun` of the same player has taken -- the original then stops the
-/// newer script. The shipped tactic scripts break their `TS_AttackAtWill`
-/// child, which never ends on its own, once and then return, so they cannot
-/// reach that case. Matching it needs a per-player handle table the scheduler
-/// does not keep. Nor is the caller's player checked: every shipped caller is
-/// an AI script, which is the case the original lets through.
-HostOutcome builtin_airun_free(CallContext& context) {
-  if (context.count() < 1) return HostOutcome::failed("AIRun expects a script name");
-  return spawn_from(context, context.arg(0), context.arguments.subspan(1));
 }
 
 /// `set.AIRun('ESH_NeedTech.vs')`, `gaika.AIRun('GSH_SynchApproach.vs',
@@ -240,24 +185,6 @@ HostOutcome builtin_airun_member(CallContext& context) {
   if (ran.status == ExecStatus::failed) {
     scheduler.report_trap(FailedScript{ran.id, scheduler.chunk(chunk).source_name, ran.trap});
   }
-  return HostOutcome::ok_void();
-}
-
-/// `AIBreakScript(handle)` -- 74 sites. 0x00421cd0 takes the calling thread's
-/// AI player (0x0043caa0), and when that player has an AI record calls
-/// 0x0041cdc0, which acts only on a handle from 3 to 51: if the AI's thread
-/// manager holds that id (0x0069f950) it is stopped (0x0069fee0) -- at once,
-/// or, when it is the thread running right now, by flagging it (`[vm+0x40]`)
-/// so the interpreter stops after the current call. Anything else is silently
-/// nothing. 0x00421d20 is the same with the player passed first; no shipped
-/// script calls it. Here the handle is the scheduler's id (see `AIRun`) and
-/// `Scheduler::kill` is the stop, safe on the running script.
-HostOutcome builtin_break_script(CallContext& context) {
-  if (context.scheduler == nullptr) return HostOutcome::failed("AIBreakScript needs a scheduler");
-  if (context.count() != 1 || !context.arg(0).is_integer()) {
-    return HostOutcome::failed("AIBreakScript expects a script handle");
-  }
-  context.scheduler->kill(static_cast<ScriptId>(context.arg(0).as_integer()));
   return HostOutcome::ok_void();
 }
 
@@ -798,9 +725,9 @@ HostOutcome builtin_kill_script(CallContext& context) {
 
 void register_scheduler_builtins(HostRegistry& registry) {
   registry.define(CallKind::free_function, "Sleep", 1, &builtin_sleep);
-  for (std::uint16_t arity = 1; arity <= 5; ++arity) {
-    registry.define(CallKind::free_function, "AIRun", arity, &builtin_airun_free);
-  }
+  // The free `AIRun` and `AIBreakScript` are the AI's launcher and live with
+  // the AI (`sim/ai.cpp`): which thread manager they act in is the calling
+  // thread's seat, and the handle is an id in that manager.
   // Member `AIRun`: the receiver is argument zero, so arity 1 is
   // `set.AIRun("x.vs")` and arity 2 adds one bound parameter.
   for (std::uint16_t arity = 1; arity <= 5; ++arity) {
@@ -812,7 +739,6 @@ void register_scheduler_builtins(HostRegistry& registry) {
     registry.define(CallKind::free_function, "Run", arity, &builtin_run_free);
   }
   registry.define(CallKind::member, "Run", 1, &builtin_run_settlement);
-  registry.define(CallKind::free_function, "AIBreakScript", 1, &builtin_break_script);
   registry.define(CallKind::free_function, "KillScript", 0, &builtin_kill_script);
   registry.define(CallKind::free_function, "StartPlayerScript", 2,
                   &builtin_start_player_script);
