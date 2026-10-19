@@ -6,6 +6,8 @@
 // Contract: sim/system.hpp. Movement: sim/movement.hpp. Class methods:
 // game/class_graph.hpp. Command metadata: `DATA\COMMANDS\*.XML`.
 // Inventory: docs/formats/vs-host-api.md; verb table: docs/formats/sc-xml.md.
+// The original's model -- the slot's end, the idle at the head, the issue's
+// group-move set-up: docs/formats/command-queue.md.
 //
 // `AddCommand` (215 call sites) and `SetCommand` (200) are the first and third
 // most used members in the whole host API after the trivial accessors, and
