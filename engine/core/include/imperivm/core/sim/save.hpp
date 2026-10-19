@@ -372,7 +372,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// 38). A version-43 file would load a unit walking on from a failed search
 /// as one walking to the end of its old route, and one stopped after it as
 /// arrived when it stands in its band.
-inline constexpr std::uint32_t kStateVectorVersion = 44;
+/// 45: every combatant carries the danger counter the target searches raise
+/// and read (`Combatant::danger`, `[unit+0x1b0]`, and its stamp
+/// `danger_time`, `[unit+0x1b4]`; system section version 39,
+/// `docs/formats/target-score.md`). A version-44 file would load every unit
+/// as nobody's recent pick, and the next searches would bunch on it.
+inline constexpr std::uint32_t kStateVectorVersion = 45;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

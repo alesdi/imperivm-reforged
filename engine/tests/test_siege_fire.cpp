@@ -504,3 +504,45 @@ TEST(a_tower_takes_the_first_unit_in_range_after_the_first_it_sees) {
   CHECK(best != nearer);
   CHECK(best != first);
 }
+
+/// **The tower reads `danger` twice** (0x004dbb20, `docs/formats/target-score.md`):
+/// the first unit it takes sets a "low danger" mark when its danger is under
+/// 4, and while the mark stands a farther unit beyond range cannot replace
+/// the one held; a unit beyond range whose own danger is over 3 is passed
+/// over. The answer's danger then goes up by one (0x004dcd80).
+TEST(a_towers_search_spreads_its_fire_by_the_danger_counter) {
+  Bench b;
+  const ObjectId post = b.spawn(NativeClass::outpost, "BOutpost", Point{8000, 8000}, kUs, 5000);
+  const SettlementId town = b.settle(post, kUs);
+  const ObjectId tower = b.spawn(NativeClass::building, "WatchTower", Point{8000, 8000}, kUs, 1500);
+  REQUIRE(b.economy.add_building(b.world, town, tower, 1500));
+  // Both beyond the 300 range: the first swept 340 off at the surface, the
+  // second (the next cell along the same row) 400 off.
+  const ObjectId first = b.unit("Swordsman", Point{8000, 7600}, kThem);
+  const ObjectId farther = b.unit("Swordsman", Point{8300, 7650}, kThem);
+  b.world.start();
+  b.run(1);
+  CombatSystem& combat = b.combat;
+  const auto set_danger = [&](ObjectId id, std::int32_t value) {
+    combat.find(id)->danger = value;
+    combat.find(id)->danger_time = b.world.time();
+  };
+  const auto best = [&] { return b.handle(b.call("BestTarget", {Bench::obj(tower)})); };
+
+  // Calm: the first is held and the mark is set, so the farther one waits.
+  CHECK(best() == first);
+  CHECK(combat.find(first)->danger == 1);
+  CHECK(combat.find(farther)->danger == 0);
+
+  // The first already wanted by four searches: no mark, and the farther one,
+  // calm, replaces it.
+  set_danger(first, 4);
+  CHECK(best() == farther);
+  CHECK(combat.find(farther)->danger == 1);
+  CHECK(combat.find(first)->danger == 4);
+
+  // Both wanted: a far unit over 3 is passed over, and the first stands.
+  set_danger(farther, 4);
+  CHECK(best() == first);
+  CHECK(combat.find(first)->danger == 5);
+}

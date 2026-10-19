@@ -439,6 +439,12 @@ TEST(a_counter_relationship_changes_who_wins) {
 // target acquisition
 // ---------------------------------------------------------------------------
 
+// Every case here runs on a system with no world: every combatant counts as a
+// unit and the sweep is the roll in id order. The score is 0x005d3630's,
+// `target_factor + 40 * danger + surface distance` (`docs/formats/target-score.md`);
+// with `make_system`'s radius of 15 a surface distance is the centre distance
+// less 30, and reach is 17 of it.
+
 TEST(the_nearest_enemy_wins_when_nothing_else_differs) {
   CombatSystem combat = make_system();
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
@@ -447,33 +453,44 @@ TEST(the_nearest_enemy_wins_when_nothing_else_differs) {
   CHECK(combat.best_target(1) == 3);
 }
 
-TEST(target_factor_makes_a_target_less_attractive) {
-  // Peaceful sets target_factor = 1000; its own child BaseMage overrides it
-  // back to 100. A peasant twice as close as a soldier is still not picked.
+/// `target_factor` is **added** to the surface distance (0x005d36b1), not
+/// multiplied into a squared one. The board is one the old ratio reading
+/// answered the other way: 200 + 170 = 370 against 100 + 260 = 360 takes the
+/// farther, cheaper one, where `d^2 * factor` (80,002 against 84,101) kept
+/// the nearer.
+TEST(target_factor_is_added_to_the_surface_distance) {
   CombatSystem combat = make_system();
+  CombatProfile hero = melee(16, 12, 200);
+  hero.target_factor = 200;  // `Hero`
+  combat.set_profile(kPeasant, hero);
+  combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
+  combat.add(unit(2, kPeasant, 1, 200, Point{200, 0}));
+  combat.add(unit(3, kSwordsman, 1, 200, Point{290, 0}));
+  CHECK(combat.best_target(1) == 3);
+  // Eleven units nearer and the hero wins: ten nearer is 360 against 360, a
+  // tie, which the later candidate takes.
+  combat.set_position(2, Point{189, 0});
+  CHECK(combat.best_target(1) == 2);
+
+  // Peaceful's 1000 is out of reach of a nearer peasant.
   CombatProfile peasant = melee(0, 0, 100);
   peasant.target_factor = 1000;
   combat.set_profile(kPeasant, peasant);
-
-  combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
-  combat.add(unit(2, kPeasant, 1, 100, Point{100, 0}));
-  combat.add(unit(3, kSwordsman, 1, 200, Point{200, 0}));
+  combat.set_position(2, Point{100, 0});
   CHECK(combat.best_target(1) == 3);
 }
 
-TEST(target_priority_makes_a_target_more_attractive) {
-  // Gate declares target_priority = 200 against Building's 100.
+/// The unit score has no `target_priority` in it: a gate's 200 makes it no
+/// keener a pick.
+TEST(target_priority_plays_no_part_in_the_unit_score) {
   CombatSystem combat = make_system();
   CombatProfile gate = melee(0, 0, 5000);
   gate.target_priority = 200;
-  gate.radius = 15;
   combat.set_profile(kGate, gate);
-
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
   combat.add(unit(2, kSwordsman, 1, 200, Point{130, 0}));
   combat.add(unit(3, kGate, 1, 5000, Point{160, 0}));
-  // 130^2 * 100 / 100 = 16,900 against 160^2 * 100 / 200 = 12,800.
-  CHECK(combat.best_target(1) == 3);
+  CHECK(combat.best_target(1) == 2);
 }
 
 TEST(a_target_factor_of_minus_one_is_never_targeted) {
@@ -538,12 +555,83 @@ TEST(min_range_is_a_dead_zone) {
   CHECK(!combat.in_attack_range(*combat.find(1), *combat.find(2)));
 }
 
-TEST(ties_in_score_keep_the_lower_object_id) {
+/// A held unit is replaced by a later one that only ties it: the predicate
+/// keeps the one it holds only against a strictly worse score (0x005db7c7).
+TEST(ties_in_score_go_to_the_later_candidate) {
   CombatSystem combat = make_system();
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
   combat.add(unit(7, kSwordsman, 1, 200, Point{100, 0}));
   combat.add(unit(3, kSwordsman, 1, 200, Point{0, 100}));
+  CHECK(combat.best_target(1) == 7);
+}
+
+/// **Within reach, 100 off -- and under 50, the search ends there.** The
+/// score's third output is `distance <= range`; a matching candidate in reach
+/// with a score under 50 is taken and the sweep stops (0x005db7a5), any other
+/// in reach loses 100 (0x005db7b6).
+TEST(a_candidate_in_reach_loses_a_hundred_and_under_fifty_ends_the_search) {
+  CombatSystem combat = make_system();
+  CombatProfile cheap = melee(12, 6, 200);
+  cheap.target_factor = 0;
+  combat.set_profile(kPeasant, cheap);
+  combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
+  // In reach at 17: 100 + 17 - 100 = 17. Out of it at 18 for nothing: 18.
+  combat.add(unit(2, kSwordsman, 1, 200, Point{47, 0}));
+  combat.add(unit(3, kPeasant, 1, 200, Point{48, 0}));
+  CHECK(combat.best_target(1) == 2);
+  // Control: one unit out of reach and the cheap one wins, 118 against 18.
+  combat.set_position(2, Point{48, 1});
   CHECK(combat.best_target(1) == 3);
+
+  // The early take: unit 4 scores 0 + 10 = 10 in reach and ends the sweep,
+  // so unit 5 behind it, which would score 100 + 2 - 100 = 2, is never seen.
+  combat.remove(2);
+  combat.remove(3);
+  combat.add(unit(4, kPeasant, 1, 200, Point{40, 0}));
+  combat.add(unit(5, kSwordsman, 1, 200, Point{0, 32}));
+  CHECK(combat.best_target(1) == 4);
+  // Control: out of reach, 4 scores 18 and is no early take; 5 wins on 0.
+  combat.set_position(4, Point{48, 0});
+  CHECK(combat.best_target(1) == 5);
+}
+
+/// **`danger`** (`[unit+0x1b0]`): 40 a point on the score, raised by one on
+/// an answer, 0..6, and a point lost per whole 1024 ms -- with the remainder
+/// lost at every read (0x005d2800, 0x005d2850).
+TEST(the_danger_counter_rises_on_a_pick_and_decays_a_point_a_second) {
+  CombatSystem combat = make_system();
+  combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
+  combat.add(unit(2, kSwordsman, 1, 200, Point{100, 0}));  // 170
+  combat.add(unit(3, kSwordsman, 1, 200, Point{120, 0}));  // 190
+
+  // A search reads; it does not raise. `acquire` does, as the entry points do.
+  CHECK(combat.best_target(1) == 2);
+  CHECK(combat.find(2)->danger == 0);
+  CHECK(combat.acquire(1, TargetFilter{}) == 2);
+  CHECK(combat.find(2)->danger == 1);
+  CHECK(combat.acquire(1, TargetFilter{}) == 3);  // 210 against 190
+  CHECK(combat.find(3)->danger == 1);
+  CHECK(combat.find(2)->danger == 1);
+
+  // The cap and the floor.
+  for (int i = 0; i < 9; ++i) combat.raise_danger(2, 1, 0);
+  CHECK(combat.find(2)->danger == 6);
+  combat.raise_danger(2, -9, 0);
+  CHECK(combat.find(2)->danger == 0);
+
+  // The decay: nothing at 1024 ms, a point past it, and the stamp moved to
+  // the read so the part of a second it did not count is gone.
+  combat.raise_danger(2, 6, 0);
+  combat.raise_danger(3, 4, 0);
+  CHECK(combat.danger(2, 1024) == 6);
+  CHECK(combat.danger(2, 1025) == 5);
+  CHECK(combat.find(2)->danger_time == 1025);
+  CHECK(combat.danger(2, 3600) == 3);  // 2575 ms: two points
+  CHECK(combat.danger(2, 4100) == 3);  // 500 ms since the last read
+  CHECK(combat.danger(3, 4100) == 1);  // one read over the same 4100 ms: four
+  // `danger_at` answers the same without the store.
+  CHECK(combat.danger_at(3, 9000) == 0);
+  CHECK(combat.find(3)->danger == 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -552,14 +640,12 @@ TEST(ties_in_score_keep_the_lower_object_id) {
 // Every case below pairs the filtered answer with the *unfiltered* answer over
 // the same board, and the two differ in every one of them. A filter that did
 // nothing at all would pass a test that only asserted the filtered answer; the
-// control is what makes each of these say something. Each was also run once
-// with its filter deliberately disabled in `best_target`, and each failed.
+// control is what makes each of these say something.
 // ---------------------------------------------------------------------------
 
 TEST(mis_zero_damage_skips_candidates_that_deal_no_damage) {
-  // `BestTargetInSquadSightMisZeroDamage`: `0x005db6a5` rejects a candidate
-  // whose own `damage` is not positive. A wagon standing between an idle unit
-  // and a swordsman is not what the idle unit walks off to fight.
+  // The predicate's armed slot: `0x005db6a5` rejects a candidate whose own
+  // `damage` is not positive.
   CombatSystem combat = make_system();
   combat.set_profile(kPeasant, melee(0, 0, 100));  // Peaceful: damage = 0
 
@@ -607,10 +693,8 @@ TEST(no_independent_skips_player_fourteen_and_only_player_fourteen) {
 }
 
 TEST(exclusive_takes_the_named_class_and_no_other) {
-  // `BestTargetInSquadSightExclusive`: `0x005db774` rejects outright, where the
-  // plain `/1` form only penalises. Exact class -- the executable compares the
-  // class object's own name, so this is an index equality and not an ancestry
-  // walk.
+  // The exclusive slot: `0x005db774` rejects a class mismatch outright. Exact
+  // class -- the executable compares the class object's own name.
   CombatSystem combat = make_system();
   combat.set_profile(kArcher, melee(8, 4, 120));
 
@@ -621,59 +705,60 @@ TEST(exclusive_takes_the_named_class_and_no_other) {
   CHECK(combat.best_target(1) == 2);  // control: the archer is nearer
 
   TargetFilter only_swordsmen;
-  only_swordsmen.only_class = kSwordsman;
+  only_swordsmen.named = true;
+  only_swordsmen.named_class = kSwordsman;
+  only_swordsmen.exclusive = true;
   CHECK(combat.best_target(1, only_swordsmen) == 3);
 
   combat.remove(3);
   CHECK(combat.best_target(1, only_swordsmen) == sim::kNoObject);
 }
 
-/// The plain `/1` form **prefers** where `Exclusive` **requires**, and the two
-/// differ by one argument to 0x005dc950.
-///
-/// With the exclusive flag clear, 0x005db774 adds 200 to a mismatch instead of
-/// rejecting it. `TargetFilter::prefer_class` records why that 200 is taken to
-/// its limit here rather than scaled -- and this test is the pair of cases the
-/// limit gets right, plus the one it does not.
-TEST(prefer_class_outranks_the_score_and_falls_back_when_nothing_matches) {
+/// The plain `/1` form **charges** where `Exclusive` **rejects**: a class
+/// mismatch is 200 worse (0x005db789) and earns no in-reach bonus.
+TEST(a_named_class_charges_a_mismatch_two_hundred) {
   CombatSystem combat = make_system();
   combat.set_profile(kArcher, melee(8, 4, 120));
 
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
-  combat.add(unit(2, kArcher, 1, 120, Point{100, 0}));
-  combat.add(unit(3, kSwordsman, 1, 200, Point{200, 0}));
+  combat.add(unit(2, kArcher, 1, 120, Point{100, 0}));     // 170, 370 named
+  combat.add(unit(3, kSwordsman, 1, 200, Point{200, 0}));  // 270
 
   CHECK(combat.best_target(1) == 2);  // control: the archer is nearer
 
   TargetFilter prefer_swordsmen;
-  prefer_swordsmen.prefer_class = kSwordsman;
+  prefer_swordsmen.named = true;
+  prefer_swordsmen.named_class = kSwordsman;
   CHECK(combat.best_target(1, prefer_swordsmen) == 3);
 
-  // **And it is a preference, not a filter.** Take the swordsman away and the
-  // archer is the answer again -- where `Exclusive` above answers nothing.
+  // **A charge, not a rank.** A swordsman 200 farther than the archer's 370
+  // loses to it: 100 + 420 = 520.
+  combat.set_position(3, Point{450, 0});
+  CHECK(combat.best_target(1, prefer_swordsmen) == 2);
+
+  // And none at all: the archer is the answer again.
   combat.remove(3);
   CHECK(combat.best_target(1, prefer_swordsmen) == 2);
 
-  // Within the preferred class the ordinary score still orders, and the earlier
-  // id keeps a tie: the first swordsman met must not be displaced by a second
-  // one standing the same distance away.
-  combat.add(unit(4, kSwordsman, 1, 200, Point{300, 0}));
-  combat.add(unit(5, kSwordsman, 1, 200, Point{-300, 0}));
-  CHECK(combat.best_target(1, prefer_swordsmen) == 4);
-  combat.remove(4);
-  CHECK(combat.best_target(1, prefer_swordsmen) == 5);
-
-  // A preference for a class nobody has is no preference at all: every
-  // candidate takes the same penalty in the original, so the ranking is the
-  // unfiltered one.
-  TargetFilter prefer_absent;
-  prefer_absent.prefer_class = kPeasant;
-  CHECK(combat.best_target(1, prefer_absent) == combat.best_target(1));
+  // A name that matches nothing charges everyone, and so denies everyone the
+  // in-reach bonus: the swordsman in reach at 17 (17 plain) scores 317 named,
+  // and the cheap peasant out of reach at 18 wins on 218.
+  CombatProfile cheap = melee(12, 6, 200);
+  cheap.target_factor = 0;
+  combat.set_profile(kPeasant, cheap);
+  combat.remove(2);
+  combat.add(unit(4, kSwordsman, 1, 200, Point{47, 0}));
+  combat.add(unit(5, kPeasant, 1, 200, Point{48, 0}));
+  CHECK(combat.best_target(1) == 4);
+  TargetFilter nobody;
+  nobody.named = true;
+  nobody.named_class = kNoClass;
+  CHECK(combat.best_target(1, nobody) == 5);
 }
 
 TEST(for_pos_takes_only_what_the_attacker_could_already_strike) {
-  // `BestTargetForPos`: `0x005dd280` sets the in-range flag, which turns on the
-  // `[min_range, range]` test at `0x005db820`. Reach here is 17 + 15 + 15 = 47.
+  // `BestTargetForPos`: `0x005dd280` sets the in-range slot, which turns on the
+  // surface `[min_range, range]` test at `0x005db820`.
   CombatSystem combat = make_system();
   CombatProfile awkward = melee(12, 6, 200);
   awkward.target_factor = 1000;  // less attractive, so the control differs
@@ -683,8 +768,8 @@ TEST(for_pos_takes_only_what_the_attacker_could_already_strike) {
   combat.add(unit(2, kPeasant, 1, 200, Point{40, 0}));    // in reach, dull
   combat.add(unit(3, kSwordsman, 1, 200, Point{60, 0}));  // out of reach
 
-  // Control: 1601 * 1000 / 100 = 16,010 against 3601 * 100 / 100 = 3,601, so
-  // the ordinary acquisition walks past the one it could already hit.
+  // Control: 1000 + 10 - 100 = 910 against 100 + 30 = 130, so the ordinary
+  // search walks past the one it could already hit.
   CHECK(combat.best_target(1) == 3);
 
   TargetFilter here;
@@ -695,6 +780,13 @@ TEST(for_pos_takes_only_what_the_attacker_could_already_strike) {
   combat.remove(2);
   CHECK(combat.best_target(1) == 3);
   CHECK(combat.best_target(1, here) == sim::kNoObject);
+
+  // **The near end is a surface distance too.** `min_range` 2: centres 31
+  // apart are 1 apart at the surface and too near; 32 apart are 2.
+  combat.set_position(3, Point{31, 0});
+  CHECK(combat.best_target(1, here) == sim::kNoObject);
+  combat.set_position(3, Point{32, 0});
+  CHECK(combat.best_target(1, here) == 3);
 }
 
 TEST(in_range_sweeps_around_the_point_but_still_scores_from_the_attacker) {
@@ -726,6 +818,14 @@ TEST(in_range_sweeps_around_the_point_but_still_scores_from_the_attacker) {
   defaulted.centre = Point{1000, 0};
   defaulted.radius = 0;
   CHECK(combat.best_target(1, defaulted) == 4);  // 700 is within 500 of 1000
+
+  // An x of -1 is the attacker's own position (0x005dd0a7).
+  TargetFilter own;
+  own.centre_on_point = true;
+  own.centre = Point{-1, 0};
+  own.radius = 400;
+  CHECK(combat.best_target(1, own) == 2);
+
   combat.remove(4);
   CHECK(combat.best_target(1, defaulted) == 3);
   combat.remove(3);
@@ -734,23 +834,15 @@ TEST(in_range_sweeps_around_the_point_but_still_scores_from_the_attacker) {
   // radius is used at all rather than always deferring to sight.
   CHECK(combat.best_target(1, defaulted) == 5);
   CHECK(combat.best_target(1, around) == sim::kNoObject);
+  // **A shooter's radius is always its sight** (0x005dd123): the 400 asked
+  // for is replaced by the 500 that reaches unit 5.
+  CombatProfile archer = melee(16, 12, 200);
+  archer.shoots = true;
+  combat.set_profile(kHastatus, archer);
+  CHECK(combat.best_target(1, around) == 5);
+  combat.set_profile(kHastatus, melee(16, 12, 200));
   combat.remove(5);
   CHECK(combat.best_target(1, defaulted) == sim::kNoObject);  // 2 is 900 away
-}
-
-TEST(prefer_undiseased_is_the_plain_acquisition_while_no_disease_exists) {
-  // `BestTargetInSquadSight_PreferUndiseased` adds 200 to a diseased
-  // candidate's score at `0x005db6e0` -- a penalty, not an exclusion. Nothing
-  // in this engine sets disease and `Combatant` has no field for it, so no
-  // candidate can carry the penalty and the two entry points agree exactly.
-  // This case exists so that adding a disease state without revisiting the
-  // filter is caught here rather than in a battle.
-  CombatSystem combat = make_system();
-  combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
-  combat.add(unit(2, kSwordsman, 1, 200, Point{300, 0}));
-  combat.add(unit(3, kSwordsman, 1, 200, Point{100, 0}));
-  CHECK(combat.best_target(1, TargetFilter{}) == combat.best_target(1));
-  CHECK(combat.best_target(1, TargetFilter{}) == 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -1991,17 +2083,24 @@ TEST(the_target_selection_family_is_defined_answers_and_refuses_a_null_context) 
 
   const Value me = Value::object(1, 1);
   CHECK(call("BestTargetInSquadSight", 0, {me}).value.as_object().id == 2);
+  // The answer is one more search's pick (0x005dcad9): 40 worse next time.
+  CHECK(combat.find(2)->danger == 1);
+  const auto calm = [&] { combat.find(2)->danger = combat.find(3)->danger = 0; };
+  calm();
   // The circle path builds its predicate one argument over (0x005dca31), so
   // the damage flag lands where it does nothing: the unarmed peasant is still
   // the answer, and `UNIT_IDLE.VS` re-tests `.attack` itself.
   CHECK(call("BestTargetInSquadSightMisZeroDamage", 0, {me}).value.as_object().id == 2);
+  calm();
   CHECK(call("BestNoIndependentTargetInSquadSight", 0, {me}).value.as_object().id == 2);
+  calm();
   // `Exclusive`'s flag lands in the independents slot: a name that resolves
-  // to nothing is a penalty every candidate takes, so the ranking is the
+  // to nothing is a charge every candidate takes, so the ranking is the
   // unfiltered one minus wildlife -- the same answer as the plain `/1`.
   CHECK(call("BestTargetInSquadSightExclusive", 1, {me, Value::string("GSwordsman")})
             .value.as_object()
             .id == 2);
+  calm();
   CHECK(call("BestTargetInSquadSight", 1, {me, Value::string("GSwordsman")})
             .value.as_object()
             .id == 2);
@@ -2082,7 +2181,7 @@ TEST(a_class_that_cannot_attack_never_strikes) {
   combat.set_profile(kPeasant, peasant);
   combat.add(unit(1, kPeasant, 0, 100, Point{0, 0}));
   combat.add(unit(2, kSwordsman, 1, 200, Point{40, 0}));
-  CHECK(combat.best_target(1) == sim::kNoObject);
+  CHECK(combat.auto_target(1) == sim::kNoObject);
   for (int turn = 0; turn < 5; ++turn) {
     world.advance(400);
     combat.advance(world, world.turn());
@@ -2438,7 +2537,10 @@ TEST(a_building_at_no_health_stands_broken_and_is_no_longer_a_target) {
   const ObjectId man = combat.combatants()[0].id;
   const ObjectId hut = combat.combatants()[1].id;
   REQUIRE(world.find(hut)->state.flags.is_building);
-  REQUIRE(combat.best_target(man) == hut);
+  // `act`'s own acquisition, which takes a building where the unit family
+  // never does.
+  REQUIRE(combat.auto_target(man) == hut);
+  CHECK(combat.best_target(man) == kNoObject);
 
   std::size_t blows_at_zero = 0;
   std::size_t hut_deaths = 0;
@@ -3435,6 +3537,164 @@ TEST(a_squad_members_sight_search_walks_its_squads_enemies) {
                {Value::object(1, me), Value::string("Villager")})
             .value.as_object()
             .id == peasant);
+}
+
+/// **A unit that follows a hero measures from both** (0x005d3630: the mean of
+/// the hero's surface distance and its own), and on the circle path it sweeps
+/// around the hero, out to the hero's sight (0x005dca1d).
+TEST(a_unit_following_a_hero_scores_from_both_and_sweeps_around_the_hero) {
+  SightBench b;
+  HeroSystem heroes;
+  b.world.add_system(&heroes);
+  const ObjectId me = b.soldier(0, Point{1000, 1000});
+  const ObjectId hero = b.world.spawn(NativeClass::hero, nullptr, b.soldier_class);
+  b.world.set_position(hero, Point{1000, 1600});
+  b.world.set_owner(hero, 0);
+  b.world.set_health(hero, 200);
+  b.combat.add(unit(hero, b.soldier_class, 0, 200, Point{1000, 1600}));
+  // Mine at 170 and the hero's at 602: 386. Mine at 370 and the hero's at
+  // 170: 270.
+  const ObjectId mine_near = b.soldier(1, Point{1200, 1000});
+  const ObjectId hero_near = b.soldier(1, Point{1000, 1400});
+  b.combat.start(b.world);
+
+  CHECK(b.combat.best_target(me) == mine_near);  // control: no hero yet
+  REQUIRE(heroes.attach(b.world, me, hero));
+  CHECK(b.combat.best_target(me) == hero_near);
+
+  TargetFilter circle;
+  circle.around_hero = true;
+
+  // 1050 from me, beyond my 500; 450 from the hero, inside its.
+  const ObjectId by_hero = b.soldier(1, Point{1000, 2050});
+  b.combat.apply_damage(b.world, mine_near, b.combat.health(mine_near));
+  b.combat.apply_damage(b.world, hero_near, b.combat.health(hero_near));
+  CHECK(b.combat.best_target(me, circle) == by_hero);
+  CHECK(b.combat.best_target(me) == kNoObject);  // control: my own circle
+}
+
+/// **The unit family scores units and nothing else.** A building is never its
+/// answer; an enemy siege engine is, but only while no unit has been taken
+/// (the fallback 0x005db856), and any unit met later displaces it whatever
+/// either scores.
+TEST(the_unit_family_never_takes_a_building_and_falls_back_on_an_engine) {
+  SightBench b;
+  CombatProfile ram = melee(16, 12, 200);
+  ram.damage_type = DamageType::siege;  // so its `CanAttack` takes buildings
+  b.combat.set_profile(b.soldier_class, ram);
+  CombatProfile engine = melee(0, 0, 1000);
+  engine.lineage = CombatProfile::kLineCatapult;
+  b.combat.set_profile(b.fog_class, engine);
+  const auto place = [&](NativeClass native, ClassIndex cls, Point at) {
+    const ObjectId id = b.world.spawn(native, nullptr, cls);
+    b.world.set_position(id, at);
+    b.world.set_owner(id, 1);
+    b.world.set_health(id, 1000);
+    b.combat.add(unit(id, cls, 1, 1000, at));
+    return id;
+  };
+  const ObjectId me = b.soldier(0, Point{1000, 1000});
+  const ObjectId wall = place(NativeClass::building, b.wall_class, Point{1100, 1000});
+  const ObjectId catapult = place(NativeClass::catapult, b.fog_class, Point{1000, 700});
+  // Swept after the engine (a lower row comes later), and scoring 520.
+  const ObjectId foe = b.soldier(1, Point{1000, 1450});
+  b.combat.start(b.world);
+  REQUIRE(b.world.state(wall)->flags.is_building);
+  REQUIRE(!b.world.state(catapult)->flags.is_unit);
+
+  CHECK(b.combat.best_target(me) == foe);
+  b.combat.apply_damage(b.world, foe, b.combat.health(foe));
+  CHECK(b.combat.best_target(me) == catapult);
+  b.combat.remove(catapult);
+  CHECK(b.combat.best_target(me) == kNoObject);
+  CHECK(b.combat.auto_target(me) == wall);  // control: `act`'s own rule
+
+  // And once a unit is held, an engine met later is not weighed at all, even
+  // 270 off against the unit's 520.
+  const ObjectId early = b.soldier(1, Point{1000, 550});
+  const ObjectId late_engine = place(NativeClass::catapult, b.fog_class, Point{1000, 1300});
+  CHECK(b.combat.best_target(me) == early);
+  b.combat.apply_damage(b.world, early, b.combat.health(early));
+  CHECK(b.combat.best_target(me) == late_engine);
+}
+
+/// The circle is walked in grid order -- 256-unit rows top to bottom, cells
+/// left to right -- and the predicate's early take ends it (0x005db8c0), so of
+/// two candidates that would each end it, the one in the upper row is the
+/// answer even with the higher id.
+TEST(the_unit_sweep_walks_the_grid_and_stops_at_an_early_take) {
+  SightBench b;
+  CombatProfile cheap = melee(1, 0, 40);
+  cheap.target_factor = 0;
+  b.combat.set_profile(b.villager_class, cheap);
+  const ObjectId me = b.soldier(0, Point{1000, 1000});
+  // Each 30 off, centre to centre: 0 at the surface, under `min_range`, so 40.
+  const ObjectId below = b.soldier(1, Point{1000, 1030}, b.villager_class);  // row 4
+  const ObjectId above = b.soldier(1, Point{1000, 970}, b.villager_class);   // row 3
+  b.combat.start(b.world);
+  REQUIRE(below < above);
+  CHECK(b.combat.best_target(me) == above);
+  // Control: with no early take the later candidate takes the tie.
+  cheap.target_factor = 100;
+  b.combat.set_profile(b.villager_class, cheap);
+  CHECK(b.combat.best_target(me) == below);
+}
+
+/// A hidden enemy is swept only when its owner shares its view with the
+/// searcher's player (the side mask, `seeflags`).
+TEST(a_hidden_enemy_is_swept_only_when_its_owner_shares_its_view) {
+  SightBench b;
+  const ObjectId me = b.soldier(0, Point{1000, 1000});
+  const ObjectId sneak = b.soldier(1, Point{1100, 1000});
+  b.combat.start(b.world);
+  CHECK(b.combat.best_target(me) == sneak);
+  b.world.mutable_state(sneak)->flags.hidden = true;
+  CHECK(b.combat.best_target(me) == kNoObject);
+  b.world.players().set(1, 0, Relation::share_view, true);
+  CHECK(b.combat.best_target(me) == sneak);
+}
+
+/// 80 for a candidate with a path (the active-path bit, 0x005d36d2), and with
+/// `_PreferUndiseased` 200 for a diseased one (0x005db6e0).
+TEST(a_moving_or_diseased_candidate_scores_worse) {
+  SightBench b;
+  const ObjectId me = b.soldier(0, Point{1000, 1000});
+  const ObjectId near_one = b.soldier(1, Point{1150, 1000});  // 220
+  const ObjectId far_one = b.soldier(1, Point{1200, 1000});   // 270
+  b.combat.start(b.world);
+  CHECK(b.combat.best_target(me) == near_one);
+  b.world.mutable_state(near_one)->flags.has_active_path = true;  // 300
+  CHECK(b.combat.best_target(me) == far_one);
+  b.world.mutable_state(near_one)->flags.has_active_path = false;
+
+  b.world.mutable_state(near_one)->flags.diseased = true;
+  TargetFilter undiseased;
+  undiseased.prefer_undiseased = true;
+  CHECK(b.combat.best_target(me) == near_one);  // control: no flag, no charge
+  CHECK(b.combat.best_target(me, undiseased) == far_one);
+}
+
+/// **`Unit::BestTrainingTarget`** (0x005d5bf0, predicate 0x005d3cb0) scores a
+/// partner from its surface distance with the partner's `danger`, a later
+/// partner takes a tie, and the answer's danger goes up by one.
+TEST(the_training_search_reads_and_raises_the_danger_counter) {
+  using imperivm::core::script::Value;
+  SightBench b;
+  const ObjectId me = b.soldier(0, Point{1000, 1000});
+  // Two partners 200 off (170 at the surface), the second in a lower row.
+  const ObjectId first = b.soldier(0, Point{1200, 1000});
+  const ObjectId second = b.soldier(0, Point{1000, 1200});
+  b.world.mutable_state(first)->flags.training = true;
+  b.world.mutable_state(second)->flags.training = true;
+  b.combat.start(b.world);
+  const auto partner = [&] {
+    return b.call("BestTrainingTarget", 0, {Value::object(1, me)}).value.as_object().id;
+  };
+  CHECK(partner() == second);  // a tie: the later one
+  CHECK(b.combat.find(second)->danger == 1);
+  CHECK(partner() == first);  // 40 worse now
+  CHECK(b.combat.find(first)->danger == 1);
+  CHECK(partner() == second);  // a tie again
 }
 
 /// `EnemiesInSight` counts a candidate only when the looker's `CanAttack`

@@ -723,6 +723,10 @@ bool CombatSystem::reclass(ObjectId id, ClassIndex to) {
   unit->attacks = 0;
   unit->last_attack_time = 0;
   unit->next_action_time = 0;
+  // The constructor's zeros (0x005d3170); what the mutation copies across
+  // was not read to include them, so the fresh object starts unpicked.
+  unit->danger = 0;
+  unit->danger_time = 0;
   unit->damage_multiplier_percent = 100;
   unit->ignores_armour = false;
   unit->bonus = StatBonus{};
@@ -856,134 +860,328 @@ bool CombatSystem::in_attack_range(const Combatant& attacker, const Combatant& d
   return true;
 }
 
-ObjectId CombatSystem::best_target(ObjectId id) const {
-  return best_target(id, TargetFilter{});
-}
+// ---------------------------------------------------------------------------
+// the engine's own acquisition
+// ---------------------------------------------------------------------------
 
-// The target-selection family, as `sim/combat.hpp`'s `TargetFilter` note
-// documents it. Every filter below is a hard reject read off `0x005db650` in
-// `gbr.exe`. The two variants whose rule is a *score* adjustment are not here:
-// this system's score is not the executable's, and a 200-point nudge on the
-// wrong scale is not the same rule. `prefer_class` is a third of that kind and
-// is the one exception: it is taken to the limit the nudge points at rather
-// than scaled, because dropping it would drop the argument entirely and leave
-// two scripts trapping. Its declaration says exactly what that costs.
-ObjectId CombatSystem::best_target(ObjectId id, const TargetFilter& filter) const {
+// What `act` gives a unit with no target, and what `BestTarget` answers on a
+// unit receiver. **Not the original's** -- `sim/combat.hpp` says why it is
+// kept -- and so it keeps the rule it was written with and changes nothing.
+ObjectId CombatSystem::auto_target(ObjectId id) const {
   const Combatant* self = find(id);
   if (self == nullptr || !self->alive || self->action == Action::dying) return kNoObject;
-  // Inside a holder, nothing: see `targetable`.
   if (self->position == kHeldPosition) return kNoObject;
   const CombatProfile mine = profile(self->class_index);
   if (!mine.can_attack()) return kNoObject;
-
-  // The sweep circle. `BestTargetInRange` is the only variant that moves it:
-  // `0x005dd060` passes the script's point as the grid-sweep centre and keeps
-  // the attacker's own position as the predicate's origin, so the *search* and
-  // the *score* measure from different places, and only there.
-  const Point centre = filter.centre_on_point ? filter.centre : self->position;
   const std::int64_t sight = mine.sight > 0 ? mine.sight : mine.range;
-  const std::int64_t reach = filter.radius > 0 ? filter.radius : sight;
-  const std::int64_t reach2 = squared(reach);
-
+  const std::int64_t reach2 = squared(sight);
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
-  // `BestTargetInSquadSight/1`'s preference, as a rank ahead of the score
-  // rather than as a term inside it. See `TargetFilter::prefer_class`.
-  bool best_preferred = false;
   for (const Combatant& other : units_) {
-    // The circle first: every test here is a filter, so the order changes no
-    // answer, and the circle is the cheap one -- `targetable` asks the
-    // `CanAttack` virtual, which looks a building's settlement up.
-    if (distance_squared(centre, other.position) > reach2) continue;
+    if (distance_squared(self->position, other.position) > reach2) continue;
     if (!targetable(*self, other)) continue;
-    // `BestTargetInSquadSightExclusive`. Exact class, not ancestry.
-    if (filter.only_class != kNoClass && other.class_index != filter.only_class) continue;
-    // `BestNoIndependentTargetInSquadSight`. Bit 14 of the enemy mask, alone.
-    if (filter.exclude_independents && other.owner == kNeutralWildlife) continue;
-    // `BestTargetInSquadSightMisZeroDamage`. The candidate's own attack, which
-    // is `[obj+0xdc]` there and `Obj::attack` here -- the same number
-    // `UNIT_IDLE.VS` re-tests as `u.attack > 0` on the result it gets back.
-    if (filter.require_armed && attack_of(other) <= 0) continue;
-
-    const std::int64_t d2 = distance_squared(centre, other.position);
-    if (d2 > reach2) continue;
-    // `BestTargetForPos`. Only what the attacker could strike from here.
-    if (filter.require_in_attack_range && !in_attack_range(*self, other)) continue;
-
     const std::int64_t score = target_score(*self, other);
-    const bool preferred =
-        filter.prefer_class != kNoClass && other.class_index == filter.prefer_class;
-    // Preference first, score second. Both comparisons are strict, so ties keep
-    // the lower id, which the ascending iteration already gives -- and a
-    // preferred candidate that is already best must not be displaced by a later
-    // preferred one that only ties it.
-    const bool better = best == kNoObject || (preferred && !best_preferred) ||
-                        (preferred == best_preferred && score < best_score);
-    if (better) {
+    // Strict, so a tie keeps the lower id the ascending roll meets first.
+    if (best == kNoObject || score < best_score) {
       best = other.id;
       best_score = score;
-      best_preferred = preferred;
     }
   }
   return best;
 }
 
-// `Unit::BestTargetInGAIKA`'s half. Same predicate, same score, no circle --
-// see the declaration in `sim/combat.hpp` for why there is no circle, and
-// `sim/ai.cpp` for where the candidates come from.
-ObjectId CombatSystem::best_target_among(ObjectId id,
-                                         std::span<const ObjectId> candidates) const {
+// ---------------------------------------------------------------------------
+// the danger counter
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// 0x005d2800's decay, on a copy: a point per whole 1024 ms since the stamp,
+/// floored at 0, and the stamp moved to `now` -- the whole difference, so
+/// what the shift dropped is lost. The difference is unsigned 32-bit, as the
+/// original's is, and 1024 ms or less changes nothing.
+void decay_danger(std::int32_t& danger, GameTime& stamp, GameTime now) noexcept {
+  const std::uint32_t elapsed =
+      static_cast<std::uint32_t>(now) - static_cast<std::uint32_t>(stamp);
+  if (elapsed <= 0x400u) return;
+  const std::int64_t left = static_cast<std::int64_t>(danger) - (elapsed >> 10);
+  danger = left < 0 ? 0 : static_cast<std::int32_t>(left);
+  stamp += elapsed;
+}
+
+/// The cap 0x005d2850 keeps the counter under.
+constexpr std::int32_t kMaxDanger = 6;
+
+}  // namespace
+
+std::int32_t CombatSystem::danger(ObjectId id, GameTime now) {
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr) return 0;
+  decay_danger(unit->danger, unit->danger_time, now);
+  return unit->danger;
+}
+
+std::int32_t CombatSystem::danger_at(ObjectId id, GameTime now) const {
+  const Combatant* unit = find(id);
+  if (unit == nullptr) return 0;
+  std::int32_t value = unit->danger;
+  GameTime stamp = unit->danger_time;
+  decay_danger(value, stamp, now);
+  return value;
+}
+
+void CombatSystem::raise_danger(ObjectId id, std::int32_t amount, GameTime now) {
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr) return;
+  decay_danger(unit->danger, unit->danger_time, now);
+  const std::int64_t sum = static_cast<std::int64_t>(unit->danger) + amount;
+  unit->danger = sum < 0 ? 0 : sum > kMaxDanger ? kMaxDanger : static_cast<std::int32_t>(sum);
+}
+
+GameTime CombatSystem::clock() const noexcept {
+  return world_ != nullptr ? world_->time() : now_;
+}
+
+// ---------------------------------------------------------------------------
+// the unit target family (`docs/formats/target-score.md`)
+// ---------------------------------------------------------------------------
+
+void target_sweep(const World& world, Point centre, std::int32_t radius, PlayerId viewer,
+                  std::vector<ObjectId>& out) {
+  out.clear();
+  if (radius < 0) return;
+  std::vector<ObjectId> found;
+  world.objects_located_in_rect(centre.x - radius, centre.y - radius, centre.x + radius,
+                                centre.y + radius, found);
+  const std::int64_t reach2 = squared(radius);
+  const PlayerTable& players = world.players();
+  for (const ObjectId id : found) {
+    const WorldObject* slot = world.find(id);
+    if (slot == nullptr || slot->state.flags.unspawned) continue;
+    if (distance_squared(centre, slot->state.position) > reach2) continue;
+    if (slot->state.flags.hidden) {
+      // Past only with its owner's bit in the viewer's `seeflags`: the owner
+      // shares its view with the viewer. A player's own bit is taken as set
+      // (`docs/formats/target-score.md` names it unknown).
+      const PlayerId owner = slot->state.owner;
+      const bool seen = owner == viewer ||
+                        (PlayerTable::is_valid(owner) && PlayerTable::is_valid(viewer) &&
+                         players.has(owner, viewer, Relation::share_view));
+      if (!seen) continue;
+    }
+    out.push_back(id);
+  }
+  // Rows of 256-unit cells top to bottom, cells left to right; within a cell
+  // the original follows the cell's list, for which id order stands in.
+  std::sort(out.begin(), out.end(), [&world](ObjectId a, ObjectId b) {
+    const Point pa = world.find(a)->state.position;
+    const Point pb = world.find(b)->state.position;
+    const std::int32_t ra = pa.y / kTargetSweepCell;
+    const std::int32_t rb = pb.y / kTargetSweepCell;
+    if (ra != rb) return ra < rb;
+    const std::int32_t ca = pa.x / kTargetSweepCell;
+    const std::int32_t cb = pb.x / kTargetSweepCell;
+    if (ca != cb) return ca < cb;
+    return a < b;
+  });
+}
+
+/// One run of the search object 0x005d45a0 builds: the attacker, the five
+/// slots, and what the predicate holds so far.
+struct CombatSystem::Search {
+  CombatSystem& sys;
+  const Combatant& self;
+  const CombatProfile mine;
+  const TargetFilter& filter;
+  GameTime now;
+  bool commit;
+  /// The attacker's hero (`[unit+0x170]`), when it resolves: the score
+  /// measures from both.
+  const Combatant* hero = nullptr;
+
+  ObjectId best = kNoObject;             ///< `[search+0x14]`
+  std::int64_t best_score = 0x7fffffff;  ///< `[search+0x20]`
+  bool best_unit = false;                ///< `[search+0x24]`
+
+  [[nodiscard]] bool is_unit(const Combatant& c) const {
+    if (sys.world_ == nullptr) return true;
+    const WorldObject* slot = sys.world_->find(c.id);
+    return slot == nullptr || slot->state.flags.is_unit;
+  }
+
+  /// 0x005a77b0: centre to centre, less both class radii.
+  [[nodiscard]] std::int64_t surface(const Combatant& from, const Combatant& to) const {
+    return isqrt(distance_squared(from.position, to.position)) -
+           sys.profile(from.class_index).radius - sys.profile(to.class_index).radius;
+  }
+
+  /// 0x005d3630. Answers the score; `in_range` is its third output.
+  std::int64_t score(const Combatant& cand, bool& in_range) {
+    std::int64_t d = surface(self, cand);
+    // A unit that follows a hero measures from both, the sum halved toward
+    // zero.
+    if (hero != nullptr) d = (surface(*hero, cand) + d) / 2;
+    const std::int32_t danger = commit ? sys.danger(cand.id, now) : sys.danger_at(cand.id, now);
+    std::int64_t s = sys.profile(cand.class_index).target_factor +
+                     static_cast<std::int64_t>(danger) * 40 + d;
+    if (d < mine.min_range) s += 40;
+    if (sys.world_ != nullptr) {
+      // Moving: the active-path bit, 0x20000 of the sync word.
+      if (const WorldObject* slot = sys.world_->find(cand.id);
+          slot != nullptr && slot->state.flags.has_active_path) {
+        s += 80;
+      }
+    }
+    in_range = d <= sys.range_of(self);
+    return s;
+  }
+
+  void take(ObjectId id, std::int64_t s) {
+    best = id;
+    best_score = s;
+    best_unit = true;
+  }
+
+  /// 0x005db650, for a unit. False ends a sweep.
+  bool predicate(const Combatant& cand) {
+    // The `CanAttack` virtual, held, dead, a negative `target_factor`, the
+    // enemy mask: `targetable`.
+    if (!sys.targetable(self, cand)) return true;
+    if (filter.exclude_independents && cand.owner == kNeutralWildlife) return true;
+    if (filter.require_armed && sys.attack_of(cand) <= 0) return true;
+    bool in_range = false;
+    std::int64_t s = score(cand, in_range);
+    if (filter.prefer_undiseased && sys.world_ != nullptr) {
+      if (const WorldObject* slot = sys.world_->find(cand.id);
+          slot != nullptr && slot->state.flags.diseased) {
+        s += 200;
+      }
+    }
+    const bool mismatch = filter.named && (filter.named_class == kNoClass ||
+                                           cand.class_index != filter.named_class);
+    if (mismatch) {
+      if (filter.exclusive) return true;
+      s += 200;
+    } else if (in_range) {
+      if (s < 50) {
+        take(cand.id, s);
+        return false;
+      }
+      s -= 100;
+    }
+    // A unit held keeps its place only against a strictly worse score.
+    if (best != kNoObject && best_unit && best_score < s) return true;
+    take(cand.id, s);
+    return true;
+  }
+
+  /// 0x005db7f0. False ends a sweep.
+  bool offer(const Combatant& cand) {
+    if (filter.require_in_attack_range) {
+      const std::int64_t d = surface(self, cand);
+      if (d > sys.range_of(self) || d < mine.min_range) return true;
+    }
+    if (is_unit(cand)) return predicate(cand);
+    // The catapult fallback (0x005db856): only while no unit is held, only a
+    // siege engine the attacker may strike, by plain surface distance.
+    if (best_unit) return true;
+    if (!sys.profile(cand.class_index).is(CombatProfile::kLineCatapult)) return true;
+    if (!sys.targetable(self, cand)) return true;
+    const std::int64_t d = surface(self, cand);
+    if (best != kNoObject && d > best_score) return true;
+    best = cand.id;
+    best_score = d;
+    return true;
+  }
+};
+
+ObjectId CombatSystem::search(ObjectId id, const TargetFilter& filter,
+                              std::span<const ObjectId> list, bool use_list, bool commit,
+                              bool raise) {
   const Combatant* self = find(id);
   if (self == nullptr || !self->alive || self->action == Action::dying) return kNoObject;
-  if (!profile(self->class_index).can_attack()) return kNoObject;
-
-  ObjectId best = kNoObject;
-  std::int64_t best_score = 0;
-  for (const ObjectId candidate : candidates) {
-    const Combatant* other = find(candidate);
-    if (other == nullptr) continue;
-    if (!targetable(*self, *other)) continue;
-    const std::int64_t score = target_score(*self, *other);
-    // Strictly less, so a tie keeps the **first offered** rather than the
-    // lowest id: nothing sorts this walk, and the order it arrives in is the
-    // order the original's own two loops produce.
-    if (best == kNoObject || score < best_score) {
-      best = other->id;
-      best_score = score;
+  const GameTime now = clock();
+  Search run{*this, *self, profile(self->class_index), filter, now, commit};
+  if (world_ != nullptr) {
+    if (const HeroSystem* heroes = hero_system_of(*world_); heroes != nullptr) {
+      const ObjectId leader = heroes->hero_of(id);
+      if (leader != kNoObject && leader != id) run.hero = find(leader);
     }
   }
-  return best;
+
+  if (use_list) {
+    // The squad's `Enemies` or a GAIKA node's squads: every entry offered,
+    // whatever the predicate answers.
+    for (const ObjectId candidate : list) {
+      if (const Combatant* other = find(candidate); other != nullptr) (void)run.offer(*other);
+    }
+  } else {
+    // Inside a holder, nothing: 0x005dca02 and 0x005dd0f0 both refuse it.
+    if (self->position == kHeldPosition) return kNoObject;
+    const auto sight_of = [this](const Combatant& c) -> std::int32_t {
+      if (world_ != nullptr) {
+        if (const WorldObject* slot = world_->find(c.id); slot != nullptr) return slot->sight;
+      }
+      const CombatProfile p = profile(c.class_index);
+      return p.sight > 0 ? p.sight : p.range;
+    };
+    Point centre = self->position;
+    std::int32_t radius = sight_of(*self);
+    if (filter.centre_on_point) {
+      // 0x005dd0f8: an x of -1 is the receiver's own position. 0x005dd11d:
+      // the radius given, unless it is under 1 or the receiver shoots (a
+      // declared `projectile_class`, 0x0053f5b0) -- then its sight.
+      if (filter.centre.x != -1) centre = filter.centre;
+      if (filter.radius >= 1 && !run.mine.shoots) radius = filter.radius;
+    } else if (filter.around_hero && run.hero != nullptr) {
+      centre = run.hero->position;
+      radius = sight_of(*run.hero);
+    }
+    // The enemy mask: the attacker's player's war word, less wildlife's bit
+    // for the no-independents flag.
+    const auto in_mask = [&](const Combatant& c) {
+      if (!is_enemy(*self, c)) return false;
+      return !(filter.exclude_independents && c.owner == kNeutralWildlife);
+    };
+    if (world_ != nullptr) {
+      std::vector<ObjectId> ids;
+      target_sweep(*world_, centre, radius, self->owner, ids);
+      for (const ObjectId candidate : ids) {
+        const Combatant* other = find(candidate);
+        if (other == nullptr || !in_mask(*other)) continue;
+        if (!run.offer(*other)) break;
+      }
+    } else {
+      const std::int64_t reach2 = squared(radius);
+      for (const Combatant& other : units_) {
+        if (distance_squared(centre, other.position) > reach2 || !in_mask(other)) continue;
+        if (!run.offer(other)) break;
+      }
+    }
+  }
+
+  if (raise && run.best_unit && run.best != kNoObject) raise_danger(run.best, 1, now);
+  return run.best;
+}
+
+ObjectId CombatSystem::best_target(ObjectId id) const { return best_target(id, TargetFilter{}); }
+
+ObjectId CombatSystem::best_target(ObjectId id, const TargetFilter& filter) const {
+  // With `commit` and `raise` clear the search writes nothing.
+  return const_cast<CombatSystem*>(this)->search(id, filter, {}, false, false, false);
+}
+
+ObjectId CombatSystem::acquire(ObjectId id, const TargetFilter& filter) {
+  return search(id, filter, {}, false, true, true);
+}
+
+ObjectId CombatSystem::best_target_among(ObjectId id, std::span<const ObjectId> candidates) {
+  return search(id, TargetFilter{}, candidates, true, true, false);
 }
 
 ObjectId CombatSystem::best_target_in_list(ObjectId id, std::span<const ObjectId> candidates,
-                                           const TargetFilter& filter) const {
-  const Combatant* self = find(id);
-  if (self == nullptr || !self->alive || self->action == Action::dying) return kNoObject;
-  if (!profile(self->class_index).can_attack()) return kNoObject;
-
-  ObjectId best = kNoObject;
-  std::int64_t best_score = 0;
-  bool best_preferred = false;
-  for (const ObjectId candidate : candidates) {
-    const Combatant* other = find(candidate);
-    if (other == nullptr || !targetable(*self, *other)) continue;
-    if (filter.only_class != kNoClass && other->class_index != filter.only_class) continue;
-    if (filter.exclude_independents && other->owner == kNeutralWildlife) continue;
-    if (filter.require_armed && attack_of(*other) <= 0) continue;
-    const std::int64_t score = target_score(*self, *other);
-    const bool preferred =
-        filter.prefer_class != kNoClass && other->class_index == filter.prefer_class;
-    // Preference first, as `best_target` ranks it; within one rank an equal
-    // score replaces the one held (0x005db7c7).
-    const bool better = best == kNoObject || (preferred && !best_preferred) ||
-                        (preferred == best_preferred && score <= best_score);
-    if (better) {
-      best = other->id;
-      best_score = score;
-      best_preferred = preferred;
-    }
-  }
-  return best;
+                                           const TargetFilter& filter) {
+  return search(id, filter, candidates, true, true, true);
 }
 
 bool CombatSystem::targetable(const Combatant& self, const Combatant& other) const {
@@ -1069,9 +1267,9 @@ bool CombatSystem::unit_can_attack(const Combatant& self, const Combatant& targe
 
 std::int64_t CombatSystem::target_score(const Combatant& self,
                                         const Combatant& other) const noexcept {
-  // distance^2 * target_factor / target_priority. Smallest wins. Always from
-  // the attacker's own position -- `BestTargetInRange` moves the *sweep*
-  // centre and leaves the score's origin where it was (`0x005dd060`).
+  // `auto_target`'s: distance^2 * target_factor / target_priority, smallest
+  // wins, from the attacker's own position. This engine's own rule; the
+  // original's family scores with 0x005d3630 (`Search::score`).
   const CombatProfile theirs = profile(other.class_index);
   const std::int64_t factor = theirs.target_factor > 0 ? theirs.target_factor : 100;
   const std::int64_t priority = theirs.target_priority > 0 ? theirs.target_priority : 100;
@@ -1996,7 +2194,7 @@ void CombatSystem::act(World& world, Combatant& unit, GameTime now) {
     unit.attacks = 0;
   }
   if (target == nullptr) {
-    const ObjectId picked = best_target(unit.id);
+    const ObjectId picked = auto_target(unit.id);
     if (picked != kNoObject) {
       unit.target = picked;
       unit.attacks = 0;
@@ -2212,6 +2410,8 @@ void CombatSystem::hash(std::uint64_t& accumulator) const {
     fold(unit.target);
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.attacks)));
     fold(unit.unit_flags);
+    fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.danger)));
+    fold(static_cast<std::uint64_t>(unit.danger_time));
     fold(static_cast<std::uint64_t>(unit.action));
     fold(static_cast<std::uint64_t>(unit.next_action_time));
     // Not in the dumps, and state all the same: the stored stats are only as
@@ -2899,7 +3099,7 @@ HostOutcome host_add_bonus(CallContext& ctx) {
 /// `BestTarget/0` is registered twice, `Catapult::BestTarget` (0x004e2f60)
 /// and `Building::BestTarget` (0x004dcc60); both are in
 /// `sim/siege_fire.cpp`. A unit receiver has no body of its own in the
-/// original and keeps the unit sweep here.
+/// original and keeps this engine's own acquisition (`auto_target`).
 HostOutcome host_best_target(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
@@ -2912,15 +3112,17 @@ HostOutcome host_best_target(CallContext& ctx) {
       return HostOutcome::ok_with(ref_to(ctx, building_best_target(*world, *combat, id)));
     }
   }
-  return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id)));
+  return HostOutcome::ok_with(ref_to(ctx, combat->auto_target(id)));
 }
 
-/// One acquisition under one variant's filter. The filter itself is
-/// `sim/combat.hpp`'s `TargetFilter`, which carries the disassembly.
+/// `BestTargetForPos` and `BestTargetInRange`'s core, 0x005dd060: a dead
+/// receiver answers nothing (and prints), a held one nothing; otherwise the
+/// search under `filter`, whose unit answer is one more search's pick
+/// (`CombatSystem::acquire`).
 HostOutcome best_target_with(CallContext& ctx, const TargetFilter& filter) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)), filter)));
+  return HostOutcome::ok_with(ref_to(ctx, combat->acquire(id_of(ctx.arg(0)), filter)));
 }
 
 /// The six `*InSquadSight` entry points' arguments to their one core,
@@ -2969,10 +3171,11 @@ struct SquadSightArgs {
 /// squad's look fills it every second: the copy at 0x00447a17 reaches it as
 /// `[squad+0x64]+8`, which a search for pushes at `+0x6c` could not see.
 ///
-/// Not reproduced, as on every path here: the score (0x005d3630, the note
-/// above `TargetFilter`), the counter a chosen unit's `0x005d2850(1)` raises,
-/// the disease penalty (no disease is modelled), and the catapult fallback of
-/// 0x005db856.
+/// Both paths score, prefer and stop as `docs/formats/target-score.md`
+/// describes (`CombatSystem::best_target_in_list` and `acquire`), and on both
+/// a unit answer's `danger` goes up by one (0x005dc9f2, 0x005dcad9). The
+/// circle path sweeps around the unit's hero, out to the hero's sight, when it
+/// follows one (0x005dca1d).
 HostOutcome squad_sight_target(CallContext& ctx, const SquadSightArgs& args) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
@@ -2981,32 +3184,38 @@ HostOutcome squad_sight_target(CallContext& ctx, const SquadSightArgs& args) {
   const Combatant* self = combat->find(id);
   if (self == nullptr || !combat->is_alive(id) || self->action == Action::dying) return none;
   World* world = world_of(ctx);
-  if (world == nullptr) return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id)));
 
-  const HeroSystem* heroes = hero_system_of(*world);
+  const HeroSystem* heroes = world == nullptr ? nullptr : hero_system_of(*world);
   if (const Squad* squad =
           heroes != nullptr ? squad_sight_squad(*world, *heroes, id) : nullptr;
       squad != nullptr) {
+    // The five words in their own slots (0x005dc9b7).
     TargetFilter filter;
     filter.exclude_independents = args.no_independent;
     filter.require_armed = args.mis_zero;
-    if (args.named && args.exclusive) {
-      if (args.cls == kNoClass) return none;  // a name that matches nothing
-      filter.only_class = args.cls;
-    } else if (args.named) {
-      filter.prefer_class = args.cls;
-    }
+    filter.prefer_undiseased = args.undiseased;
+    filter.named = args.named;
+    filter.named_class = args.cls;
+    filter.exclusive = args.exclusive;
     return HostOutcome::ok_with(
         ref_to(ctx, combat->best_target_in_list(id, squad->enemies, filter)));
   }
 
-  const ObjectState* state = world->state(id);
-  if (state != nullptr && state->is_held()) return none;
+  if (world != nullptr) {
+    const ObjectState* state = world->state(id);
+    if (state != nullptr && state->is_held()) return none;
+  }
+  // The circle path's slots, one word over (0x005dca31..0x005dca5a): the
+  // exclusive flag clears wildlife's bit, the unarmed flag lands in the
+  // exclusive slot, and nothing reaches the unarmed slot.
   TargetFilter filter;
-  // The circle path's slots, one word over: see above.
   filter.exclude_independents = args.exclusive;
-  if (args.named) filter.prefer_class = args.cls;
-  return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id, filter)));
+  filter.exclusive = args.mis_zero;
+  filter.prefer_undiseased = args.undiseased;
+  filter.named = args.named;
+  filter.named_class = args.cls;
+  filter.around_hero = true;
+  return HostOutcome::ok_with(ref_to(ctx, combat->acquire(id, filter)));
 }
 
 /// The class name of a `/1` form, resolved against the class graph.
@@ -3049,12 +3258,8 @@ HostOutcome host_best_target_no_independent(CallContext& ctx) {
 }
 
 /// `BestTargetInSquadSight_PreferUndiseased/0` -- argument 2, which adds 200
-/// to a diseased candidate's score at `0x005db6e0` on both paths. **This
-/// engine has no disease**: nothing sets it, and `Unit::Disease` and
-/// `Unit::IsDiseased` are both unimplemented, so no candidate can carry the
-/// penalty and this returns the object the executable would. It is answered
-/// rather than left trapping on that ground alone -- see `TargetFilter` -- and
-/// the moment a disease state exists this must gain the penalty.
+/// to a diseased candidate's score at `0x005db6e0` on both paths: the
+/// `ObjectFlags::diseased` bit `Unit::Disease` sets.
 HostOutcome host_best_target_prefer_undiseased(CallContext& ctx) {
   SquadSightArgs args;
   args.undiseased = true;
@@ -3072,10 +3277,9 @@ HostOutcome host_best_target_prefer_undiseased(CallContext& ctx) {
 /// **requires** it -- on the squad path. On the circle path the exclusive flag
 /// lands in the independents slot and both forms prefer.
 ///
-/// `TargetFilter::prefer_class` records how far the preference is reproduced
-/// and where it is not. A name no class graph resolves is **not** a failure:
-/// the original's string compare simply never matches, so every candidate
-/// takes the same penalty and the ranking is the unfiltered one.
+/// A name no class graph resolves is **not** a failure: the original's
+/// string compare simply never matches, so every candidate takes the same
+/// 200 and none earns the in-range bonus.
 HostOutcome host_best_target_prefer_class(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
@@ -3088,8 +3292,8 @@ HostOutcome host_best_target_prefer_class(CallContext& ctx) {
 /// independents slot (0x005dca31): the enemy mask loses bit 14, so wildlife
 /// is excluded, and a mismatch costs the +200 the plain string form charges
 /// instead of rejecting (0x005db789, the exclusive slot holding the zero
-/// meant for the damage flag); a name nothing resolves therefore ranks every
-/// candidate the same there -- the unfiltered answer minus wildlife.
+/// meant for the damage flag); a name nothing resolves therefore charges
+/// every candidate the same there.
 HostOutcome host_best_target_exclusive(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
@@ -3110,12 +3314,10 @@ HostOutcome host_best_target_for_pos(CallContext& ctx) {
 
 /// `BestTargetInRange/2(point, int)` -- `0x005dd2a0`, the same core with the
 /// script's point as the sweep centre and its integer as the sweep radius. A
-/// radius of zero or less falls back to the attacker's `sight` (`0x005dd11d`).
-///
-/// The executable has a second fallback to `sight` at `0x005dd123`, taken when
-/// the attacker's class name is the literal `**Invalid**`. That is a
-/// degenerate-object guard, not a rule about real units, and it is not
-/// reproduced.
+/// radius of zero or less falls back to the attacker's `sight` (`0x005dd11d`),
+/// and so does any radius for an attacker that shoots (`0x005dd123`: the
+/// class declares a `projectile_class` that is not `**Invalid**`,
+/// 0x0053f5b0). An x of -1 is the attacker's own position.
 HostOutcome host_best_target_in_range(CallContext& ctx) {
   TargetFilter filter;
   filter.centre_on_point = true;
@@ -3405,13 +3607,6 @@ void define_combat_host(script::HostRegistry& registry) {
   member("BestTargetInSquadSight", 1, &host_best_target_prefer_class);  // 6
   member("BestTargetForPos", 0, &host_best_target_for_pos);
   member("BestTargetInRange", 2, &host_best_target_in_range);
-  //
-  // `BestTargetInSquadSight/1(str)` is registered above, and its +200 for a
-  // class mismatch (0x005db789) is taken to its limit -- the named class
-  // always wins -- because this system's score (`distance^2 * factor /
-  // priority`) is not the executable's linear `target_factor + 40 * threat +
-  // surface_distance`, on which 200 means a couple of hundred units. See
-  // `TargetFilter::prefer_class`.
   //
   // `BestTargetInGAIKA/0` is not claimed here either, and it is **not**
   // refused: `0x0043bd35` registers it out of the GAIKA slice, its core

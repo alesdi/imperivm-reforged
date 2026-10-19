@@ -102,10 +102,11 @@
 /// `morale`, `flee`, `panic`, `rout` or `courage`; `CONST.INI` declares no
 /// morale constant; no class in the graph declares a morale property; and the
 /// desync dumps' unit block (docs/engine/state-vector.md) has no morale field.
-/// The one field that looks like it — `danger`, 0..6 — belongs to spatial
-/// threat assessment: the executable prints it as `Danger %d, Foe danger %d`
-/// alongside `lastdangertime` and `Min of MaxDangers`, which is pathfinding
-/// telemetry. **Imperivm units fight to the death and this file models that.**
+/// The one field that looks like it — `danger`, 0..6 — is not morale either:
+/// it counts how many target searches have recently chosen the unit, decays
+/// a point a second, and makes the next search 40 a point less keen on it
+/// (`Combatant::danger`, `docs/formats/target-score.md`). **Imperivm units
+/// fight to the death and this file models that.**
 ///
 /// ## What is deliberately absent
 ///
@@ -703,10 +704,9 @@ struct StatBlock {
 ///
 /// The field list is `docs/engine/state-vector.md`'s `CVXUnit` block minus the
 /// parts other systems own (`method`, the command queue, the path, `food`,
-/// `squad`, `hero handle`, `holder handle`). `danger` is absent because it is
-/// pathfinding telemetry, and `damage magic handle` is absent because it is
-/// null in all 3,432 unit blocks and its meaning is unknown — a field we cannot
-/// explain is left out rather than guessed.
+/// `squad`, `hero handle`, `holder handle`). `damage magic handle` is absent
+/// because it is null in all 3,432 unit blocks and its meaning is unknown — a
+/// field we cannot explain is left out rather than guessed.
 struct Combatant {
   ObjectId id = kNoObject;
   ClassIndex class_index = kNoClass;
@@ -736,6 +736,19 @@ struct Combatant {
   /// `unit flags`: 20 distinct values, bits 16-26 only, 9 of 11 bits
   /// unexplained. Carried verbatim and hashed; nothing here reads it.
   std::uint32_t unit_flags = 0;
+
+  /// `danger`, `[unit+0x1b0]`, 0..6: how many target searches have recently
+  /// answered this unit. Raised by 1 on every answer (0x005d2850), read by
+  /// the unit score, the tower's search and the training search, and decayed
+  /// by every read and raise -- a point per whole 1024 ms since
+  /// `danger_time` -- through `CombatSystem::danger`. Zero from the
+  /// constructor (0x005d3170); saved by the persist stream (0x005dd710).
+  /// `docs/formats/target-score.md`.
+  std::int32_t danger = 0;
+  /// `lastdangertime`, `[unit+0x1b4]`: when `danger` last decayed. A decay
+  /// moves it to the time of the read, dropping the part of a second it did
+  /// not count.
+  GameTime danger_time = 0;
 
   Action action = Action::idle;
   std::int32_t anim = kAnimIdle;
@@ -880,79 +893,54 @@ inline constexpr std::int32_t kProjectileSpeed = 800;
 ///     candidate outright (`0x005db774`) and the plain `/1` form instead adds
 ///     200 to its score (`0x005db789`).
 ///
-/// ## Which of those five this type can express, and which it cannot
+/// ## The score they share
 ///
-/// The two soft variants add **200 to the executable's own score**, and the
-/// executable's score (`0x005d3630`) is
-/// `target_factor + 40 * recent_target_count + surface_distance` -- a linear
-/// sum, not this system's `distance^2 * target_factor / target_priority`. 200
-/// on that scale is a nudge worth a couple of hundred world units; 200 on this
-/// system's scale is nothing at all. **A soft preference therefore cannot be
-/// transplanted**, and `BestTargetInSquadSight/1` is left trapping for that
-/// reason and no other -- its rule is known exactly and is not expressible
-/// here. `_PreferUndiseased` is answered, because this engine models no
-/// disease at all (nothing sets it; `Unit::Disease` and `Unit::IsDiseased` are
-/// both unimplemented), so no candidate can carry the penalty and the two
-/// entry points return the *same* object rather than a similar one. **The day
-/// disease exists, that stops being true** and this filter must gain the
-/// preference.
+/// The two soft variants add **200 to the executable's own score**, and that
+/// score (`0x005d3630`) is `target_factor + 40 * danger + surface_distance`
+/// with three adjustments -- a linear sum in world units, on which 200 is a
+/// couple of hundred units' nudge. `docs/formats/target-score.md` has the
+/// whole of it: the score, the predicate's in-range bonus and early stop, the
+/// danger counter, the catapult fallback and the sweeps.
+/// `CombatSystem::best_target` and its siblings are that model; each
+/// variant's flags reach it through this type.
 ///
-/// The three hard filters -- damage, independents, exclusive class -- are exact
-/// as filters, and **where they apply depends on the path.** On the squad
-/// path (a unit in a squad, walking its squad's `Enemies`,
-/// `best_target_in_list`) 0x005dc950 passes them where their names say. On
-/// the circle path it builds the predicate one argument over
-/// (0x005dca31..0x005dca5a): the damage flag lands in the exclusive slot and
-/// does nothing, the independents flag is dropped, and the exclusive flag
-/// lands in the independents slot. `squad_sight_target` in `combat.cpp`
-/// builds each path's filter, and answers a held or dead unit before either
-/// is consulted.
+/// **Where the flags apply depends on the path.** On the squad path (a unit
+/// in a squad, walking its squad's `Enemies`, `best_target_in_list`)
+/// 0x005dc950 passes them where their names say. On the circle path it builds
+/// the predicate one argument over (0x005dca31..0x005dca5a): the damage flag
+/// lands in the exclusive slot and does nothing without a name, the
+/// independents flag is dropped, and the exclusive flag lands in the
+/// independents slot. `squad_sight_target` in `combat.cpp` builds each path's
+/// filter, and answers a held or dead unit before either is consulted.
 struct TargetFilter {
-  /// `BestTargetInSquadSightMisZeroDamage`. Skip a candidate whose own attack
-  /// is not strictly positive. Measured against `Obj::attack`, the stored
-  /// `[obj+0xdc]`: the number a script reading `.attack` off the same object
-  /// sees.
+  /// The predicate's armed slot (`[search+0x30]`): skip a candidate whose own
+  /// attack is not strictly positive. Measured against `Obj::attack`, the
+  /// stored `[obj+0xdc]`.
   bool require_armed = false;
 
-  /// `BestNoIndependentTargetInSquadSight`. Skip candidates owned by
-  /// `kNeutralWildlife`. Only that player: the mask clears bit 14 alone.
+  /// The no-independents flag: the enemy mask loses bit 14, so candidates
+  /// owned by `kNeutralWildlife` are not offered. Only that player.
   bool exclude_independents = false;
 
-  /// `BestTargetInSquadSightExclusive`. When not `kNoClass`, a candidate of
-  /// any other class is rejected. Exact class, not ancestry: the executable
+  /// The predicate's class-name slot (`[search+0x34]`) is set. With it, a
+  /// candidate whose class is not `named_class` is a mismatch: rejected when
+  /// `exclusive`, otherwise 200 worse and denied the in-range bonus. A name
+  /// that resolves to nothing (`kNoClass`) mismatches every candidate.
+  bool named = false;
+  /// What the name resolves to. Exact class, not ancestry: the executable
   /// compares the class object's own name string.
-  ClassIndex only_class = kNoClass;
+  ClassIndex named_class = kNoClass;
+  /// The predicate's exclusive slot (`[search+0x2c]`): a class mismatch is
+  /// rejected (0x005db774) rather than charged 200 (0x005db789).
+  bool exclusive = false;
 
-  /// `BestTargetInSquadSight/1`. When not `kNoClass`, a candidate of that class
-  /// outranks every candidate that is not one, whatever the two scores say.
-  ///
-  /// **The one filter here that is a stated approximation.** The two arity-1
-  /// entry points reach the same core (0x005dc950) and differ by one argument:
-  /// the exclusive flag `only_class` above carries. With it clear, 0x005db774
-  /// does not reject a mismatch -- it adds 200 to the candidate's score, and a
-  /// *match* that also falls inside `[cand+0xd4]` takes 100 off, or wins
-  /// outright when its score is already under 50. So the original prefers by
-  /// about 300 on a scale that is `class_base + 40 * threat + surface distance`
-  /// (0x005d3630): linear world units, where 300 is a third of a footman's
-  /// sight and a preference a nearer wrong-class target can outbid.
-  ///
-  /// `target_score` here is `distance² * factor / priority`. There is no
-  /// exchange rate between the two, which is the standing decision at the head
-  /// of the target-selection block in `sim/combat.cpp` -- a 200-point nudge on
-  /// the wrong scale is not the same rule. So the preference is taken to its
-  /// limit instead of being scaled: a candidate of the named class always beats
-  /// one that is not, and the score orders within each group.
-  ///
-  /// That is exact wherever the original's 300 decides the answer and wherever
-  /// no candidate matches at all. It differs inside the band where a closer
-  /// wrong-class target outbids the preference -- the original takes that one,
-  /// this does not. Both shipped callers are `..._ENGAGE_UNIT_TYPE.VS`, which
-  /// exist to make a unit fight the kind of thing it was pointed at.
-  ClassIndex prefer_class = kNoClass;
+  /// The prefer-undiseased slot (`[search+0x28]`): a diseased candidate
+  /// (`ObjectFlags::diseased`, bit 1 of `[obj+0x194]`) is 200 worse.
+  bool prefer_undiseased = false;
 
-  /// `BestTargetForPos`. Keep only candidates the attacker could strike from
-  /// where it stands. The executable applies this as `surface_distance` inside
-  /// `[min_range, range]` (`0x005db820`); `in_attack_range` is that test.
+  /// `BestTargetForPos`'s in-range slot (`[search+0x38]`): keep only
+  /// candidates whose surface distance from the attacker is within
+  /// `[min_range, range]` (0x005db820), both ends surface to surface.
   bool require_in_attack_range = false;
 
   /// `BestTargetInRange`. Sweep a circle around `centre` of radius `radius`
@@ -961,9 +949,15 @@ struct TargetFilter {
   /// the attacker's own position as the predicate's origin.
   bool centre_on_point = false;
   Point centre{};
-  /// Zero or less means the attacker's `sight`, which is what `0x005dd118`
-  /// substitutes.
+  /// Zero or less means the attacker's `sight`, which is what `0x005dd11d`
+  /// substitutes -- as it does for any radius when the attacker shoots
+  /// (`CombatProfile::shoots`, 0x005dd123). A centre whose x is -1 is the
+  /// attacker's own position (0x005dd0f8).
   std::int32_t radius = 0;
+
+  /// The `*InSquadSight` circle path (0x005dca1d): sweep around the
+  /// attacker's hero, out to the hero's sight, when it has one.
+  bool around_hero = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -1255,49 +1249,61 @@ class CombatSystem final : public System {
   [[nodiscard]] bool has_fresh_deaths() const noexcept { return fresh_deaths_; }
   void forget_fresh_deaths() noexcept { fresh_deaths_ = false; }
 
-  /// The target `id` would pick right now, or `kNoObject`.
+  /// This engine's own acquisition: what `act` gives a unit with no target
+  /// between its scripted orders, and what `BestTarget` answers on a unit
+  /// receiver (which has no body of its own in the original).
   ///
-  /// Scoring is `distance^2 * target_factor / target_priority`, smallest wins,
-  /// ties broken by lower object id. The *directions* are evidenced (see
-  /// `CombatProfile`); combining the two properties as a ratio is **INFERRED**,
-  /// and is now known to be wrong -- see the note above `TargetFilter`.
-  /// Candidates must be enemies, alive, attackable, not `target_factor < 0`,
-  /// and within the attacker's `sight`.
-  [[nodiscard]] ObjectId best_target(ObjectId id) const;
+  /// **Not the original's.** Nothing in `gbr.exe` acquires a target for a
+  /// unit outside a script's search, so this has no counterpart to match; it
+  /// keeps the rule it was written with -- `(distance^2 + 1) * target_factor
+  /// / target_priority`, smallest wins, lower id on a tie, buildings
+  /// included, within the class `sight` -- and changes no counter.
+  [[nodiscard]] ObjectId auto_target(ObjectId id) const;
 
-  /// The same acquisition under one of the variant filters. See `TargetFilter`.
+  /// The unit target family's search, as the original runs it
+  /// (`docs/formats/target-score.md`): the sweep, the catapult fallback, the
+  /// predicate 0x005db650 and the score 0x005d3630, under `filter`'s slots.
+  /// A circle sweep in grid order that stops at the predicate's early take.
+  ///
+  /// **Reads, writes nothing**: the `danger` each score reads is decayed for
+  /// the reading and not stored, and the answer's is not raised. `acquire`
+  /// is the same search as the entry points run it. With no world, every
+  /// combatant counts as a unit and the sweep is the roll in id order.
+  [[nodiscard]] ObjectId best_target(ObjectId id) const;
   [[nodiscard]] ObjectId best_target(ObjectId id, const TargetFilter& filter) const;
 
-  /// The plain filter's eligibility and score over an **explicit** candidate
-  /// set, and **with no reach at all**.
-  ///
-  /// `Unit::BestTargetInGAIKA` is the one member of the family that does not
-  /// sweep a circle: `0x00431090` hands the search object one candidate at a
-  /// time out of the squads standing in a GAIKA node, so the radius every other
-  /// variant gets from `0x005dd060`'s grid query is simply never applied and a
-  /// target on the far side of the node is as eligible as one underfoot. The
-  /// tie rule differs for the same reason -- there is no ascending sweep to
-  /// give "lowest id", so the **first candidate offered** keeps a tie, which is
-  /// node order, then squad order, then join order.
+  /// `best_target` as the entry points run it: every candidate's `danger`
+  /// read decays it in place (0x005d3630's own read), and a unit answer has
+  /// its `danger` raised by one (0x005d2850, from 0x005dc950 and 0x005dd060).
+  ObjectId acquire(ObjectId id, const TargetFilter& filter);
+
+  /// The predicate and score over an **explicit** candidate set, with **no
+  /// reach** and no early stop, writing as `acquire` does except that the
+  /// answer's `danger` is not raised: `Unit::BestTargetInGAIKA`'s squad walk
+  /// (0x004282c0), whose core's raise was not read.
   ///
   /// `sim/ai.cpp` is the only caller; it lives there because the candidate set
   /// is GAIKA's, not combat's.
-  [[nodiscard]] ObjectId best_target_among(ObjectId id,
-                                           std::span<const ObjectId> candidates) const;
+  ObjectId best_target_among(ObjectId id, std::span<const ObjectId> candidates);
 
   /// The squad path of the `BestTargetInSquadSight` core (0x005dc950 ->
   /// 0x005dbb20): every entry of the attacker's squad's `Enemies`, in order,
   /// offered to the predicate (0x005db7f0 -> 0x005db650) with **no reach** --
   /// the list is what the squad's look saw, and nothing measures it again --
-  /// under `filter`'s hard filters and class preference.
-  ///
-  /// **A tie goes to the later candidate.** The predicate keeps the one it
-  /// holds only when the new score is strictly worse (0x005db7c7, `jg`), so
-  /// an equal score replaces it; and the walk never stops early, because
-  /// 0x005dbb20 discards what the predicate answers. The score is still this
-  /// system's (`target_score`); see the note above `TargetFilter`.
-  [[nodiscard]] ObjectId best_target_in_list(ObjectId id, std::span<const ObjectId> candidates,
-                                             const TargetFilter& filter) const;
+  /// under `filter`'s slots. The walk never stops early, because 0x005dbb20
+  /// discards what the predicate answers, so a later candidate can still
+  /// displace an early take. Writes as `acquire` does, raise included.
+  ObjectId best_target_in_list(ObjectId id, std::span<const ObjectId> candidates,
+                               const TargetFilter& filter);
+
+  /// `danger` as 0x005d2800 reads it at `now`: decayed one point per whole
+  /// 1024 ms since `danger_time`, the decay stored. 0 for no combatant.
+  std::int32_t danger(ObjectId id, GameTime now);
+  /// 0x005d2850: the same decay, then `amount` added and the sum kept in
+  /// 0..6. Nothing for no combatant.
+  void raise_danger(ObjectId id, std::int32_t amount, GameTime now);
+  /// The decay without the store: what a read at `now` would answer.
+  [[nodiscard]] std::int32_t danger_at(ObjectId id, GameTime now) const;
 
   /// Whether `attacker` can strike `defender` from where they stand: squared
   /// distance between `min_range^2` and `(range + both radii)^2`. Comparing
@@ -1485,10 +1491,21 @@ class CombatSystem final : public System {
   /// asked first there, the attacker's `CanAttack` (`unit_can_attack`). Split
   /// out so that the sweeping form and `best_target_among` cannot drift.
   [[nodiscard]] bool targetable(const Combatant& self, const Combatant& other) const;
-  /// `(distance^2 + 1) * target_factor / target_priority`, always measured from
-  /// the attacker's own position. Smallest wins.
+  /// `auto_target`'s score: `(distance^2 + 1) * target_factor /
+  /// target_priority`, always measured from the attacker's own position.
+  /// Smallest wins. This engine's, not the original's.
   [[nodiscard]] std::int64_t target_score(const Combatant& self,
                                           const Combatant& other) const noexcept;
+
+  /// The family's one search: `best_target`, `acquire`, `best_target_in_list`
+  /// and `best_target_among` are this with different candidates and modes.
+  /// `commit` stores every danger decay; `raise` raises a unit answer's.
+  struct Search;
+  ObjectId search(ObjectId id, const TargetFilter& filter,
+                  std::span<const ObjectId> list, bool use_list, bool commit, bool raise);
+  /// The current game time for a counter: the world's clock when there is
+  /// one, else the time this system last acted at.
+  [[nodiscard]] GameTime clock() const noexcept;
   void act(World& world, Combatant& unit, GameTime now);
   void strike(World& world, Combatant& attacker, Combatant& defender, GameTime now);
   void launch(World& world, Combatant& attacker, const Combatant& defender, GameTime now);
@@ -1598,6 +1615,21 @@ class CombatSystem final : public System {
 /// added again for every domain, and kept correct across a save and reload,
 /// which a name lookup does not.
 [[nodiscard]] CombatSystem* combat_system_of(World& world) noexcept;
+
+/// The object grid's cell, in world units: the `>> 8` of every target sweep
+/// (0x005db8c0, 0x005d4cd0).
+inline constexpr std::int32_t kTargetSweepCell = 256;
+
+/// The circle the target sweeps walk (0x005db8c0 and 0x005d4cd0), into `out`
+/// in their order: objects standing in no holder whose centre is within
+/// `radius` of `centre` (squared, inclusive), rows of `kTargetSweepCell`
+/// cells top to bottom, cells left to right, and -- standing in for the
+/// cell's own list, which is not kept -- ascending id within a cell. A
+/// hidden object is found only when its owner shares its view with `viewer`
+/// (the side mask, `[player+0x18]`, `seeflags`), or is `viewer`. Whose owner
+/// bits the caller wants is the caller's test.
+void target_sweep(const World& world, Point centre, std::int32_t radius, PlayerId viewer,
+                  std::vector<ObjectId>& out);
 
 /// Define the combat slice of the host surface with `HostRegistry::define`.
 ///

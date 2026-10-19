@@ -182,15 +182,16 @@ the receiver.
 `Building::BestTarget` (0x004dcc60 -> 0x004dc1e0 -> 0x004dbb20) sweeps the
 box `±sight` about the tower for **units** the tower may attack, whose class
 `target_factor` is not negative, that are not hidden, and whose surface
-distance is within `sight`. The first such unit is taken. After that a unit
+distance is within `sight`. The first such unit is taken, and sets a "low
+danger" mark when its danger counter (`[unit+0x1b0]`, 0..6, decaying one a
+second; `docs/formats/target-score.md`) is under 4. After that a unit
 nearer than `min_range` is skipped, one within `range` is taken and **ends
-the sweep**, and one beyond `range` replaces the best so far only when it is
-no farther and its danger counter (`[unit+0x1b0]`, 0..6, decaying one a
-second) is at most 3. The unit answered has its danger raised by one
-(0x005d2850). This engine keeps no danger counter (the unit target sweep's
-design gap, shared with `BestTargetInSquadSight`), so every unit reads 0
-here, and the sweep's order is cell rows then cells then id, where the
-original walks each cell's list in its own order.
+the sweep**, and one beyond `range` is skipped when its danger is over 3 and,
+while the mark stands, when it is farther than the best so far; otherwise it
+replaces it. The unit answered has its danger raised by one (0x005d2850).
+This engine keeps the counter (`Combatant::danger`); the sweep's order is
+cell rows then cells then id, where the original walks each cell's list in
+its own order.
 
 ## What is still unknown
 

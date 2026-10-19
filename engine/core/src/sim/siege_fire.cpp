@@ -212,15 +212,19 @@ ObjectId catapult_best_target(const World& world, const CombatSystem& combat, Ob
   return slot->state.flags.has_towers ? best_unit : kNoObject;
 }
 
-ObjectId building_best_target(const World& world, const CombatSystem& combat, ObjectId building) {
+ObjectId building_best_target(const World& world, CombatSystem& combat, ObjectId building) {
   const WorldObject* slot = world.find(building);
   const Combatant* self = combat.find(building);
   if (slot == nullptr || self == nullptr) return kNoObject;
   const CombatProfile mine = combat.profile(self->class_index);
   const Point at = world.resolve_position(building);
+  const GameTime now = world.time();
 
   ObjectId best = kNoObject;
   std::int64_t best_distance = 0;
+  // Set by the first unit taken when its danger is under 4: from then on a
+  // far unit must also be no farther than the one held.
+  bool low_danger = false;
   for (const ObjectId id : sweep_box(world, combat, at, slot->sight)) {
     const ObjectState* state = world.state(id);
     if (!state->flags.is_unit || state->flags.hidden) continue;
@@ -229,20 +233,26 @@ ObjectId building_best_target(const World& world, const CombatSystem& combat, Ob
     if (combat.profile(other->class_index).never_targeted()) continue;
     const std::int64_t d = surface_distance(combat, *self, at, *other, state->position);
     if (d > slot->sight) continue;
-    // The danger counter (`[unit+0x1b0]`) is not kept here and reads 0, so
-    // the first unit's "low danger" mark is always set and a far unit's
-    // danger never exceeds 3.
     if (best == kNoObject) {
+      // The first unit's danger is read (0x005d2800), and decays as it is.
+      low_danger = combat.danger(id, now) < 4;
       best = id;
       best_distance = d;
       continue;
     }
     if (d < mine.min_range) continue;
-    if (d <= mine.range) return id;
-    if (best_distance < d) continue;
+    if (d <= mine.range) {
+      // Taken at once, without a read; the sweep ends here.
+      best = id;
+      break;
+    }
+    if (combat.danger(id, now) > 3) continue;
+    if (low_danger && best_distance < d) continue;
     best = id;
     best_distance = d;
   }
+  // 0x004dcd80: the answer is one more search's pick.
+  if (best != kNoObject) combat.raise_danger(best, 1, now);
   return best;
 }
 
