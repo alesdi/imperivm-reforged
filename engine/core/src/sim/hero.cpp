@@ -1197,6 +1197,18 @@ void record_squad_attacked(World& world, ObjectId victim, ObjectId attacker,
   if (squad->last_fight_time == now) return;
   squad->last_fight_time = now;
   squad->last_attacker = attacker;
+  // The tail (0x0041e70d..0x0041e790): a squad hit while crossing a node
+  // between where it came from and where it is going records that node as a
+  // way-point on the node manager's MAIKA list -- source, heading (the
+  // order's node, else `DestGAIKA`) and the node it stands in, all three
+  // named and distinct.
+  if (world.gaika().count() == 0) return;
+  const GaikaId src = squad->src_gaika;
+  const GaikaId in = squad->gaika_in;
+  const GaikaId heading = squad_ai_dest(*squad);
+  if (src == kNoGaika || in == kNoGaika || in == src || heading == kNoGaika) return;
+  if (heading == in || heading == src) return;
+  heroes->squads().record_route(src, heading, in);
 }
 
 void record_army_attacked(World& world, ObjectId victim, GameTime now) noexcept {

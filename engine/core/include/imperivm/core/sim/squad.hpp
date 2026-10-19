@@ -92,6 +92,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -500,6 +501,7 @@ class SquadTable {
     squads_.clear();
     for (AiOrderQueue& queue : orders_) queue.reset();
     filed_.clear();
+    routes_.clear();
   }
 
   // -- the node deques ------------------------------------------------------
@@ -544,6 +546,32 @@ class SquadTable {
   /// so `DestGAIKA` is its heading -- it is refiled from the old one to `to`
   /// (0x0041ea10 -> 0x004501a0); with an order the deques are untouched.
   void set_dest(SquadKey key, GaikaId to);
+
+  // -- the MAIKA list -------------------------------------------------------
+  //
+  // The node manager's list of (source, destination, way-point) triples at
+  // `+0x38`: a node a squad was hit in while marching from one node to
+  // another. `docs/formats/gaika.md` has the reading. Kept here beside the
+  // node deques, for the same reason.
+
+  /// One record: `src` to `dst`, by way of `way`.
+  struct Route {
+    GaikaId src = kNoGaika;
+    GaikaId dst = kNoGaika;
+    GaikaId way = kNoGaika;
+    friend bool operator==(const Route&, const Route&) = default;
+  };
+  /// At most this many; the oldest goes (0x0044fc60's `0x1ff <` test).
+  static constexpr std::size_t kRouteCap = 512;
+
+  /// 0x0044fc60: put the triple at the **front**. One equal in all three ids
+  /// already on the list is moved to the front instead (and left alone when
+  /// it is already there); a new one on a full list first drops the back. The
+  /// callers' refusals -- zeros, repeats, no node table -- are theirs.
+  void record_route(GaikaId src, GaikaId dst, GaikaId way);
+
+  /// The list, newest first: the order 0x0043eda0 walks it in.
+  [[nodiscard]] const std::deque<Route>& routes() const noexcept { return routes_; }
 
   // -- the AI order queue -------------------------------------------------
   //
@@ -653,6 +681,8 @@ class SquadTable {
   /// The node deques, by node id; see `filed_under`. Saved, not hashed: like
   /// the squads' own AI fields, which decide them.
   std::vector<std::vector<SquadKey>> filed_;
+  /// The MAIKA list, newest first; see `record_route`. Saved, not hashed.
+  std::deque<Route> routes_;
 };
 
 /// Node `node`'s deque (`SquadTable::filed_under`) as a copy, for a walk that

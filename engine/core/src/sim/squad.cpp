@@ -345,6 +345,21 @@ void SquadTable::set_dest(SquadKey key, GaikaId to) {
   squad->dest_gaika = to;
 }
 
+// 0x0044fc60. The find (0x0044e460) compares all three ids; a hit not at
+// the front is erased (0x0044e700) and pushed on the front (0x0044f700); a
+// miss on a list of more than 511 pops the back first.
+void SquadTable::record_route(GaikaId src, GaikaId dst, GaikaId way) {
+  const Route route{src, dst, way};
+  const auto hit = std::find(routes_.begin(), routes_.end(), route);
+  if (hit == routes_.begin() && hit != routes_.end()) return;
+  if (hit != routes_.end()) {
+    routes_.erase(hit);
+  } else if (routes_.size() >= kRouteCap) {
+    routes_.pop_back();
+  }
+  routes_.push_front(route);
+}
+
 std::span<const SquadKey> SquadTable::filed_under(GaikaId node) {
   if (node <= kNoGaika) return {};
   const auto at = static_cast<std::size_t>(node);

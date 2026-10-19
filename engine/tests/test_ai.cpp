@@ -4400,38 +4400,201 @@ TEST(recruit_passes_over_squads_no_script_should_ever_see) {
   CHECK(pinned->ai_dest == 1);
 }
 
-/// `SetMAIKA` runs and stores nothing, on `GlobalSpellStart`'s footing -- and
-/// the assertion is that it *runs*, because the alternative to a body is
-/// `CHECKMAIKA.VS` stopping.
-///
-/// The original's seven refusals are written out on the body and not
-/// reproduced: with nothing stored none of them can change an answer, and this
-/// test is where that would show if one ever could.
-TEST(set_maika_runs_and_stores_nothing) {
+/// **`SetMAIKA` records its triple at the front of the node manager's MAIKA
+/// list** (0x00421b70 -> 0x0044fc60). It was accepted and dropped. The seven
+/// refusals -- no node table, a zero, two ids equal -- store nothing; an equal
+/// triple moves to the front; the list keeps the newest 512.
+TEST(set_maika_puts_the_triple_at_the_front_of_a_list_of_512) {
   Fixture f;
+  const auto set = [&](std::int32_t a, std::int32_t b, std::int32_t c) {
+    CHECK(f.call(script::CallKind::free_function, "SetMAIKA",
+                 {script::Value::integer(a), script::Value::integer(b),
+                  script::Value::integer(c)},
+                 script::kNoScript)
+              .status == script::HostStatus::ok);
+  };
+  using Route = SquadTable::Route;
+  const auto routes = [&] {
+    const auto& list = f.heroes.squads().routes();
+    return std::vector<Route>(list.begin(), list.end());
+  };
+  // No node table: nothing.
+  set(1, 2, 3);
+  CHECK(routes().empty());
+
   (void)f.make_settlement(1);
   (void)f.make_settlement(1);
   (void)f.make_settlement(1);
   f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
   REQUIRE(f.world.gaika().count() > 0);
-  const std::uint64_t before = f.world.state_hash();
-  const auto set = [&](std::int32_t a, std::int32_t b, std::int32_t c) {
-    return f.call(script::CallKind::free_function, "SetMAIKA",
-                  {script::Value::integer(a), script::Value::integer(b),
-                   script::Value::integer(c)},
-                  script::kNoScript)
-        .status;
+  set(1, 2, 3);
+  CHECK(routes() == std::vector<Route>({Route{1, 2, 3}}));
+  // The refusals.
+  set(0, 2, 3);
+  set(1, 0, 3);
+  set(1, 2, 0);
+  set(1, 1, 3);
+  set(1, 2, 1);
+  set(1, 2, 2);
+  CHECK(routes().size() == 1);
+  // Newest first; a repeat moves to the front rather than being added again.
+  set(3, 2, 1);
+  set(2, 3, 1);
+  CHECK(routes() == std::vector<Route>({Route{2, 3, 1}, Route{3, 2, 1}, Route{1, 2, 3}}));
+  set(1, 2, 3);
+  CHECK(routes() == std::vector<Route>({Route{1, 2, 3}, Route{2, 3, 1}, Route{3, 2, 1}}));
+  // Full: the oldest goes.
+  for (std::int32_t i = 0; i < 600; ++i) f.heroes.squads().record_route(10 + i, 9, 8);
+  CHECK(routes().size() == SquadTable::kRouteCap);
+  CHECK(routes().front() == (Route{609, 9, 8}));
+  CHECK(routes().back() == (Route{98, 9, 8}));
+
+  // And it is saved, in order.
+  std::vector<std::byte> bytes_out;
+  f.heroes.squads().serialize(bytes_out);
+  SquadTable copy;
+  REQUIRE(copy.deserialize(bytes_out).ok());
+  CHECK(copy.routes() == f.heroes.squads().routes());
+}
+
+/// **A squad hit while crossing a node records it as a way-point** (the tail
+/// of 0x0041e6c0): source, heading and the node it stands in, when all three
+/// are named and distinct. This was left out for want of a list.
+TEST(a_squad_hit_between_two_nodes_records_where_it_was_hit) {
+  Fixture f;
+  (void)f.make_settlement(1);
+  (void)f.make_settlement(1);
+  (void)f.make_settlement(1);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  REQUIRE(f.world.gaika().count() >= 3);
+  SquadTable& table = f.heroes.squads();
+  const SquadKey key = table.create(0);
+  const ObjectId unit = f.world.spawn(imperivm::core::NativeClass::unit, nullptr);
+  f.world.set_owner(unit, 0);
+  f.world.set_health(unit, 100);
+  REQUIRE(table.join(key, unit));
+  f.heroes.register_unit(f.world, unit).squad = key;
+  const auto routes = [&] {
+    return std::vector<SquadTable::Route>(table.routes().begin(), table.routes().end());
   };
-  CHECK(set(1, 2, 3) == script::HostStatus::ok);
-  // The triples the original refuses run here too, and none of them is an
-  // error either way.
-  CHECK(set(0, 2, 3) == script::HostStatus::ok);
-  CHECK(set(1, 0, 3) == script::HostStatus::ok);
-  CHECK(set(1, 2, 0) == script::HostStatus::ok);
-  CHECK(set(1, 1, 3) == script::HostStatus::ok);
-  CHECK(set(1, 2, 1) == script::HostStatus::ok);
-  CHECK(set(1, 2, 2) == script::HostStatus::ok);
-  CHECK(f.world.state_hash() == before);
+
+  // Standing in its source: nothing.
+  table.move_in(key, 1);
+  table.set_dest(key, 3);
+  record_squad_attacked(f.world, unit, kNoObject, 100);
+  CHECK(routes().empty());
+  // Crossing node 2 on the way from 1 to 3.
+  table.move_in(key, 2);
+  record_squad_attacked(f.world, unit, kNoObject, 200);
+  CHECK(routes() == std::vector<SquadTable::Route>({{1, 3, 2}}));
+  // Once a tick: the stamp's own gate comes first.
+  table.set_dest(key, 1);
+  REQUIRE(table.post_order(key, 3, 5));
+  record_squad_attacked(f.world, unit, kNoObject, 200);
+  CHECK(routes().size() == 1);
+  // The heading is the order's node, not `DestGAIKA`.
+  table.set_dest(key, 2);
+  record_squad_attacked(f.world, unit, kNoObject, 300);
+  CHECK(routes().size() == 1);   // (1, 3, 2) again: already at the front
+  REQUIRE(table.delete_order(key));
+  table.set_dest(key, 3);
+  // Arrived: heading and standing agree.
+  table.move_in(key, 3);
+  record_squad_attacked(f.world, unit, kNoObject, 400);
+  CHECK(routes().size() == 1);
+}
+
+/// **`Recruit`'s routing filter** (0x0043816e, 0x0043eda0): with a MAIKA
+/// record from the node a squad stands in to the recruiting node whose
+/// way-point `CheckMAIKA.vs` refuses, the squad is dropped, and a recruit the
+/// drops leave short of its minimum is abandoned. It was skipped.
+TEST(recruit_drops_a_squad_whose_route_crosses_a_refused_way_point) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, Squad sq, GAIKA g, GAIKA *gDepend\n"
+                "return sq.No;\n",
+                "DATA/AI/EVALRECRUIT.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, int idPlayer, GAIKA g, int *pOverneed\n"
+                "pOverneed = 1000;\n"
+                "return 1000;\n",
+                "DATA/AI/CALCMAXTAKE.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// bool, Squad sq, GAIKA g\n"
+                "sq.SendTo(g, 100);\n"
+                "return true;\n",
+                "DATA/AI/SENDSQUAD.VS") != script::kNoChunk);
+  // Way-point 3 is refused, every other one passes.
+  REQUIRE(build(f.scheduler, f.registry,
+                "// bool, int idPlayer, GAIKA gSrc, GAIKA gDst, GAIKA gMAIKA\n"
+                "if (gMAIKA == 3) return false;\n"
+                "return true;\n",
+                "DATA/AI/CHECKMAIKA.VS") != script::kNoChunk);
+
+  for (int i = 0; i < 4; ++i) (void)f.make_settlement(0);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  REQUIRE(f.world.gaika().count() >= 4);
+  REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(0)->root;
+
+  SquadTable& table = f.heroes.squads();
+  std::vector<SquadKey> keys;
+  for (std::int32_t i = 0; i < 3; ++i) {
+    const SquadKey key = table.create(0);
+    table.find(key)->eval = 10;
+    keys.push_back(key);
+  }
+  // Squads 1 and 2 stand in node 2, squad 3 in node 4.
+  table.move_in(keys[0], 2);
+  table.move_in(keys[1], 2);
+  table.move_in(keys[2], 4);
+
+  const auto recruit = [&](std::int32_t min_need) {
+    std::vector<script::Value> args{
+        script::Value::integer(1),        script::Value::integer(1),
+        script::Value::integer(min_need), script::Value::integer(1000),
+        script::Value::integer(1000)};
+    const std::uint32_t index = f.registry.find(script::CallKind::member, "Recruit", 4);
+    CHECK(index != script::kUnresolvedHost);
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.host = &f.host;
+    ctx.scheduler = &f.scheduler;
+    ctx.script = root;
+    ctx.user = &f.context;
+    ctx.name = "Recruit";
+    ctx.kind = script::CallKind::member;
+    const script::HostOutcome out = f.registry.entry(index).fn(ctx);
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_integer() ? out.value.as_integer() : -1;
+  };
+  const auto sent = [&](std::size_t which) { return table.find(keys[which])->ai_dest == 1; };
+  const auto reset = [&] {
+    for (const SquadKey key : keys) (void)table.delete_order(key);
+  };
+
+  // A record from 2 to 1 by way of 4, which the script lets through, and one
+  // from 4 to 1 by way of 2: nothing is dropped.
+  table.record_route(2, 1, 4);
+  table.record_route(4, 1, 2);
+  CHECK(recruit(5) == 30);
+  CHECK(sent(0));
+  CHECK(sent(1));
+  CHECK(sent(2));
+  reset();
+
+  // From 2 to 1 by way of 3, refused: both squads standing in 2 are dropped
+  // and the one in 4 goes alone.
+  table.record_route(2, 1, 3);
+  CHECK(recruit(5) == 10);
+  CHECK(!sent(0));
+  CHECK(!sent(1));
+  CHECK(sent(2));
+  reset();
+  // And with a minimum only all three could meet, nobody goes.
+  CHECK(recruit(25) == 0);
+  CHECK(!sent(2));
 }
 
 // --------------------------------------------------------------------------

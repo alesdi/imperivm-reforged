@@ -1003,11 +1003,12 @@ void record_army_attacked(World& world, ObjectId victim, GameTime now) noexcept;
 /// earlier one on record. It is one comparison in the original and it is the
 /// difference between "who is shooting at us" and "whoever shot last".
 ///
-/// **The GAIKA notification at the tail is deliberately absent.** After
-/// stamping, the original compares three node ids on the squad and tells the
-/// node table that a squad was attacked moving between two of them
-/// (0x0044fc60). `sim/gaika.hpp` does not model the node table and this does
-/// not invent it.
+/// **Then the node table hears of it.** After stamping, the original compares
+/// three node ids on the squad -- `SrcGAIKA`, `GAIKAIn` and its heading (the
+/// AI order's node, else `DestGAIKA`) -- and when all three are named and
+/// distinct records the node it stands in as a way-point between the other
+/// two on the MAIKA list (0x0044fc60, `SquadTable::record_route`), which
+/// `GAIKA::Recruit`'s routing filter reads. Only with a node table.
 ///
 /// The `0x800000` flag on the second word has no name here; it is one of the
 /// `dwUnitFlags` bits `docs/formats/state-vector.md` still lists as unexplained,

@@ -176,12 +176,29 @@ what can still be seen there.
 
 ## The `MAIKA` list
 
-`SetMAIKA(src, dst, waypoint)` (0x00421b70 -> 0x0044fc60) appends a
-(source, destination, way-point) triple to a list at the manager's `+0x38`,
-at most 512 of them, all three ids non-zero and distinct; 0x0041e6c0 feeds it
-natively too. Its reader is `GAIKA::Recruit` (0x00437b80): when the list is
-not empty, a squad's route is checked against it (0x0043eda0) before the squad
-is sent.
+A deque of (source, destination, way-point) triples at the manager's `+0x38`,
+six bytes each, **newest at the front**. 0x0044fc60 adds one: a triple equal
+in all three ids already on the list is moved to the front (left alone if it
+is the front already); a new one is pushed on the front, after the back is
+dropped when the list already holds 512. Two writers call it:
+
+* `SetMAIKA(src, dst, waypoint)` (0x00421b70), in argument order, when there
+  is a node table and the three ids are non-zero and distinct. The shipped
+  caller is `SQUADMONITOR.VS`, recording the node a squad detoured through;
+* the attacked hook 0x0041e6c0, the first time in a tick a squad's member is
+  hit: when the squad's source node, the node it stands in and its heading
+  (the order's node, else `DestGAIKA`) are all non-zero and distinct, it
+  records (source, heading, standing) -- the node a marching squad was hit in.
+
+Its reader is `GAIKA::Recruit` (0x00437b80). When the node is not the one the
+player's `AssUnderFireGaika` names and the list is not empty, each live
+candidate standing in a node other than the recruiting one is checked, once
+per source node: 0x0043eda0 walks the list front to back for records from that
+node to the recruiting one, and runs `CheckMAIKA.vs(player, src, dst, way)` on
+each (its trampoline 0x0043d670 answers true when the script cannot run); the
+first way-point the script refuses is the answer. A squad whose source has an
+answer is dropped from the recruit, and if what is dropped takes the total
+below the minimum the recruit is abandoned.
 
 ## How the table is built
 
@@ -217,5 +234,6 @@ passes (0x0044aaf0, 0x0044b740, 0x0044b840, 0x0044bae0).
 * **The per-player memory** is stamped from the fog's exploration map
   (`AiSystem::advance`), not by the sweep: `Revealed` reads false and the
   remembered enemy strength is 0, so the `Eval/6` memory tail adds nothing.
-* **The `MAIKA` list** is not kept; `SetMAIKA` accepts and drops its triple,
-  and `Recruit` skips the routing filter.
+* **The `MAIKA` list is kept** (`SquadTable::routes`, saved, newest first,
+  512 at most): `SetMAIKA` and the attacked hook (`record_squad_attacked`)
+  record into it, and `Recruit` runs the routing filter over it.

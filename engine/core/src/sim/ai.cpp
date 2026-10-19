@@ -2190,33 +2190,31 @@ HostOutcome f_ss_str(CallContext& ctx) {
   return text(profile->constant_name(AiEnum::squad_state, state));
 }
 
-/// `SetMAIKA(gSrc, gDst, gMAIKA)` -- 3 sites, and **accepted and dropped**.
+/// `SetMAIKA(gSrc, gDst, gMAIKA)` -- 3 sites, all in `SQUADMONITOR.VS`.
 ///
 /// 0x00421b70 refuses seven ways -- no node table, any of the three ids zero,
-/// or any two of them equal -- and otherwise hands the triple to 0x0044fc60,
-/// which records `gMAIKA` as the way-point between `gSrc` and `gDst` on the
-/// node manager's routing table.
+/// or any two of them equal -- and otherwise hands the triple, in argument
+/// order, to 0x0044fc60, which puts it at the front of the node manager's
+/// MAIKA list (`SquadTable::record_route`: an equal triple is moved to the
+/// front, the list keeps 512). Its reader is `GAIKA::Recruit`'s routing
+/// filter (0x0043eda0), through `CheckMAIKA.vs`; see `recruit_impl`. The
+/// native writer is the attacked hook, `record_squad_attacked`.
 ///
-/// **Nothing reads it back.** There is no `GetMAIKA` in the shipped inventory
-/// -- `CHECKMAIKA.VS`, the only caller, writes the table and never queries it
-/// -- and this engine keeps no routing table for the C++ side to read either.
-/// That is the test `ObjectState::user` passes and this fails, and it is
-/// `GlobalSpellStart`'s precedent exactly: the three ids are resolved, the
-/// refusals are reproduced so that a script cannot tell the difference, and
-/// nothing is stored.
-/// **The seven refusals are deliberately not reproduced**, and are written out
-/// above instead. `GlobalSpellStart` settled this shape: with nothing stored,
-/// no guard can change an answer, and a guard that cannot is validation
-/// theatre -- injecting a fault into any of them changes no test, because
-/// there is no test that could tell. They are the first thing to restore
-/// alongside a routing table.
+/// It was accepted and dropped here, on the reading that nothing read the
+/// list back; the reader is a native one, and it is what decides whether a
+/// squad across a recorded way-point is recruited at all.
 HostOutcome f_set_maika(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetMAIKA: no world");
-  // Named, and dropped. `CreateFeedback`'s gesture.
-  (void)gaika_of(ctx.arg(0));
-  (void)gaika_of(ctx.arg(1));
-  (void)gaika_of(ctx.arg(2));
+  const GaikaId src = gaika_of(ctx.arg(0));
+  const GaikaId dst = gaika_of(ctx.arg(1));
+  const GaikaId way = gaika_of(ctx.arg(2));
+  if (world->gaika().count() == 0) return HostOutcome::ok_void();
+  if (src == kNoGaika || dst == kNoGaika || way == kNoGaika) return HostOutcome::ok_void();
+  if (src == dst || src == way || dst == way) return HostOutcome::ok_void();
+  if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
+    heroes->squads().record_route(src, dst, way);
+  }
   return HostOutcome::ok_void();
 }
 
@@ -4616,24 +4614,22 @@ HostOutcome f_enemy_players_eval(CallContext& ctx) {
 ///     its minimum.
 ///  7. `*nAvail -= sent`, floored at zero, and the answer is `sent`.
 ///
-/// ## The block that is skipped, and why that is a gap
+/// ## The routing filter (0x0043816e..0x004382b0)
 ///
 /// Between steps 5 and 6 the original runs a fourth filter, gated on two
-/// conditions: the under-fire flag is clear **and the MAIKA routing deque at
-/// `[0x8c8e54]+0x38` is non-empty**. For each live candidate standing in some
-/// node other than this one (`GAIKAIn`, `[squad+0x22]`) it asks 0x0043eda0,
-/// once per source node, for a way-point between that node and this one,
-/// drops (marks -2) the squads that have none, and abandons the whole recruit
-/// if the drops take the total below `nMin`.
-///
-/// **That deque is empty in this engine and always will be**, because the only
-/// thing that ever fills it is `SetMAIKA`, which `f_set_maika` accepts and
-/// drops for want of a routing table -- it says so at length. **In retail it is
-/// not empty**: `SQUADMONITOR.VS`, which every computer player runs, calls
-/// `SetMAIKA` from three places, so the filter is live there and can refuse a
-/// squad that has no recorded way across. Skipping it is therefore the routing
-/// table's gap showing through, not a reproduction, and it is the first thing
-/// to restore alongside that table.
+/// conditions: the under-fire flag is clear **and the MAIKA list at
+/// `[0x8c8e54]+0x38` is not empty** (`SquadTable::routes`, which `SetMAIKA`
+/// and the attacked hook fill). Walking the ranking best-first to the first
+/// refused entry, each live candidate standing in some node other than this
+/// one (`GAIKAIn`, `[squad+0x22]`) is put to 0x0043eda0 -- once per source
+/// node, the verdict cached by node -- which walks the list newest first for
+/// a record from that node to this one and asks `CheckMAIKA.vs(idPlayer,
+/// gSrc, gDst, gMAIKA)` of each until one answers **false**: that record's
+/// way-point is the answer, and a squad with a way-point is dropped (marked
+/// -2) and its strength counted. If the drops take the total below `nMin`
+/// the whole recruit is abandoned. The script's trampoline answers true when
+/// it cannot be run (0x0043d70c), so with no `CheckMAIKA.vs` nothing is
+/// dropped. A way-point of 0 is never the answer, and cannot be recorded.
 ///
 /// ## Four narrowings, named
 ///
@@ -4858,9 +4854,59 @@ HostOutcome m_gaika_recruit(CallContext& ctx) {
     }
     if (total < min_need) return HostOutcome::ok_with(none);
   }
-  // The routing filter would run here. See the header: its gate is the MAIKA
-  // deque and this engine has none, so it is skipped rather than approximated.
-  (void)under_fire;
+  // The routing filter. See the header.
+  if (!under_fire && !squads.routes().empty()) {
+    const std::uint32_t check_chunk = ai->find_script(*ctx.scheduler, player, "CheckMAIKA.vs");
+    // 0x0043eda0 for one source node: the first record from `src` to `node`
+    // whose way-point `CheckMAIKA.vs` refuses.
+    const auto way_point = [&](GaikaId src, GaikaId& way, HostOutcome& failure) {
+      way = kNoGaika;
+      // A copy: the script can call `SetMAIKA`, and the walk is over the list
+      // as it stood (the original walks the live deque by index).
+      const std::vector<SquadTable::Route> routes(squads.routes().begin(),
+                                                  squads.routes().end());
+      for (const SquadTable::Route& route : routes) {
+        if (route.src != src || route.dst != node) continue;
+        bool passable = true;
+        if (check_chunk != script::kNoChunk) {
+          const Value args[4] = {Value::integer(asked), gaika_value(route.src),
+                                 gaika_value(route.dst), gaika_value(route.way)};
+          Value answer = Value::boolean(true);
+          failure = run_script_now(ctx, check_chunk, args, "Recruit: CheckMAIKA.vs failed", answer);
+          if (failure.status != script::HostStatus::ok) return;
+          passable = answer.truthy_scalar();
+        }
+        if (!passable && route.way != kNoGaika) {
+          way = route.way;
+          return;
+        }
+      }
+    };
+    std::vector<std::int8_t> verdict(static_cast<std::size_t>(world->gaika().count()) + 1, -1);
+    std::int32_t dropped = 0;
+    for (Candidate& candidate : ranked) {
+      if (candidate.score == 0) break;
+      if (candidate.score < 0) continue;
+      const Squad* squad = squads.find(candidate.squad);
+      if (squad == nullptr) continue;
+      const GaikaId in = squad->gaika_in;
+      if (in == kNoGaika || in == node) continue;
+      if (in < 0 || static_cast<std::size_t>(in) >= verdict.size()) continue;
+      std::int8_t& clear = verdict[static_cast<std::size_t>(in)];
+      if (clear < 0) {
+        GaikaId way = kNoGaika;
+        HostOutcome failure = HostOutcome::ok_void();
+        way_point(in, way, failure);
+        if (failure.status != script::HostStatus::ok) return failure;
+        clear = way == kNoGaika ? 1 : 0;
+      }
+      if (clear == 0) {
+        dropped += squad->eval;
+        candidate.score = -2;
+      }
+    }
+    if (total - dropped < min_need) return HostOutcome::ok_with(none);
+  }
 
   // Step 6, the free half.
   const auto send = [&](SquadKey key, HostOutcome& failure) {
