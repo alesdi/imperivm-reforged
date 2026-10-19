@@ -628,6 +628,15 @@ class CommandSystem final : public System {
   /// `KillCommand()`: end the running command. Returns false when there was
   /// none. The queue refills with the default verb if it would go empty.
   bool kill_command(World& world, ObjectId id);
+
+  /// The scheduler's step hook calls this after every slice
+  /// (`install_deferred_erase`): when `script` has just ended -- returned,
+  /// trapped, or stopped by its own `KillCommand` / `SetCommand` -- and it is
+  /// the running command of the object that owns it, the command ends there
+  /// and then (`end_slot`, its `onfinish` told it was not cancelled) and the
+  /// next one starts. 0x0069f7a0 calling the owner's `vtbl+0x1c` once the
+  /// slice is over.
+  void after_slice(World& world, script::ScriptId script);
   /// `ClearCommands()`: drop the pending tail, leave the runner alone.
   std::size_t clear_commands(World& world, ObjectId id);
   /// `CVXCmdCancelCmd`'s execution (0x004e63c0): the command `command_id` on
@@ -887,6 +896,15 @@ class CommandSystem final : public System {
   /// during a turn, and the default refill only happens for a verb the class
   /// actually binds.
   void service(World& world, Entry& entry, GameTime now);
+  /// 0x005b4f20: start the head, or -- the queue empty -- push the default
+  /// verb and start that. A head whose verb has no compiled script is left
+  /// standing unless `from_pass`, when it is dropped (and counted) and the
+  /// next tried. Nothing but the refill's absence without a scheduler.
+  void start_head(World& world, ObjectId id, bool from_pass = false);
+  /// 0x005b5160 with 0x005b19f0, the command slot's end: the head's
+  /// `onfinish` (run now, `canceled` as its flag), the head popped, and the
+  /// next started unless the object is dead.
+  void end_slot(World& world, ObjectId id, bool canceled);
   bool launch(World& world, ObjectId id, Command& command, GameTime now);
   /// The compiled chunk `verb` runs on `id`, compiling it through the library
   /// on a first use; `kNoChunk` when there is none, counted in
@@ -934,10 +952,14 @@ class CommandSystem final : public System {
   /// insert as an ordinary order instead. See `issue`.
   [[nodiscard]] bool issue_research(World& world, ObjectId id, Command command);
   /// 0x005b07d0: take the command at `index` out of `id`'s queue -- released
-  /// first, while it is still in place, then ended (index 0, its `onfinish`
-  /// told it was cancelled) or erased unrun. False when there is no such
-  /// index. Finds the command again after the hook, which could have run
-  /// anything.
+  /// first, while it is still in place, then erased unrun (index > 0) or
+  /// ended (index 0). The head's end depends on whose thread it is: another
+  /// script's is ended now (`end_slot`, its `onfinish` told it was cancelled,
+  /// the next started inside the call); the calling script's own only has its
+  /// stop flag raised (`Scheduler::stop`), and ends as the call returns. While
+  /// the object's slot is ending (`ending_`) nothing at all happens. False
+  /// when there is no such index or nothing happened. Finds the command again
+  /// after the hook, which could have run anything.
   bool remove_at(World& world, ObjectId id, std::size_t index);
 
   struct DisabledEntry {
@@ -982,6 +1004,10 @@ class CommandSystem final : public System {
   /// The script whose host call is changing a queue, or `kNoScript`; see
   /// `set_caller`. Transient, never saved.
   script::ScriptId caller_ = script::kNoScript;
+  /// The objects whose command slot is ending right now (`end_slot` running
+  /// their `onfinish`), innermost last: their slot has no thread, so ending
+  /// index 0 does nothing (`remove_at`). Transient, never saved.
+  std::vector<ObjectId> ending_;
   std::vector<script::FailedScript> hook_traps_;
   std::string default_verb_{kDefaultCommandVerb};
   /// Sorted by class index. Derived from the class graph, never hashed.

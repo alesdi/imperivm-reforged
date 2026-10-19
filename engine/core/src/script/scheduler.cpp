@@ -301,6 +301,12 @@ bool Scheduler::kill(ScriptId id) {
   return true;
 }
 
+bool Scheduler::stop(ScriptId id) noexcept {
+  if (id == kNoScript || id != running_) return false;
+  stop_ = true;
+  return true;
+}
+
 bool Scheduler::alive(ScriptId id) const {
   const ScriptRecord* record = find(id);
   return record != nullptr && !record->dead;
@@ -417,7 +423,13 @@ RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
     Execution execution = std::move(queued->execution);
     execution.status = ExecStatus::ready;
     ++report.resumed;
+    // The thread's stop flag, down as the slice opens (0x0069d4c0).
+    running_ = id;
+    stop_ = false;
+    env.stop = &stop_;
     run(execution, chunks_[chunk_index], env);
+    running_ = kNoScript;
+    stop_ = false;
 
     ScriptRecord* record = find(id);
     if (record != nullptr) {

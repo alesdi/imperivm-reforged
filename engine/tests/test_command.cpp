@@ -1710,7 +1710,6 @@ TEST(a_commands_onfinish_runs_with_the_cancel_flag_and_the_commands_param) {
   f.commands.set_command(f.world, u, "research", order);
   for (int i = 0; i < 10 && f.commands.command_name(u) == "research"; ++i) step(200);
   CHECK(f.commands.command_name(u) == "idle");
-  step(200);  // the onfinish spawned at the turn's end runs on the next pass
   CHECK(f.world.find(u)->state.user == 115);
 
   // Replaced while running: `bCanceled` true.
@@ -3275,7 +3274,9 @@ TEST(a_set_command_that_finds_no_method_clears_the_tail_and_only_a_list_ends_the
   *pool.mutable_items(list) = {b};
   HostCall group(f.world, {make_objlist_value(list), Value::string("move")});
   REQUIRE(invoke(f.registry, CallKind::member, "SetCommand", 1, group).status == HostStatus::ok);
-  CHECK(f.verbs(b).empty());
+  // The head ended, and the end refilled the queue with the class's `idle`
+  // there and then (0x005b5160 -> 0x005b4f20).
+  CHECK(f.verbs(b) == (std::vector<std::string>{"idle"}));
 }
 
 /// `Obj::KillCommand` and `Obj::ClearCommands` refuse a dead object
@@ -3366,6 +3367,172 @@ TEST(a_command_that_kills_itself_is_told_it_finished_and_not_that_it_was_cancell
   }
   CHECK(f.commands.command_name(u) != "research");
   CHECK(f.world.find(u)->state.user == 1);
+}
+
+// --------------------------------------------------------------------------
+// the command slot's end: 0x005b5160 -> 0x005b19f0 -> 0x005b4f20
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// A `RunFixture` with the session's step hook, which is where a command's
+/// thread ending is told to its queue (0x0069f7a0 -> `vtbl+0x1c`), and the
+/// four scripts the tests below queue. Each one leaves its mark in the unit's
+/// `user` word: `move` adds 1 and returns, `guard` adds 10 and stays,
+/// `research` waits, and `research`'s `onfinish` adds 1000 when it is told it
+/// was cancelled and 100 when not.
+struct EndFixture : RunFixture {
+  EndFixture() {
+    install_deferred_erase(scheduler);
+    (void)register_global_hosts(registry);
+    (void)add_script("// void, Obj This, point pt\nThis.SetUser(This.user + 1);\n",
+                     "data/subai/unit_move.vs");
+    (void)add_script("// void, Obj This\nThis.SetUser(This.user + 10);\nSleep(100000);\n",
+                     "data/subai/unit_guard.vs");
+    (void)add_script("// void, Obj This\nSleep(500);\n", "data/subai/research.vs");
+    (void)add_script("// void, Obj me\nwhile (1) Sleep(1000);\n", "data/subai/unit_idle.vs");
+  }
+  void onfinish(std::string_view first_line) {
+    std::string source = "// void, Obj This, bool bCanceled\n";
+    source += first_line;
+    source +=
+        "if (bCanceled) This.SetUser(This.user + 1000); else This.SetUser(This.user + 100);\n";
+    (void)add_script(source, "data/subai/onfinish_research.vs");
+  }
+  std::int32_t user(ObjectId id) { return world.find(id)->state.user; }
+  const Command* head(ObjectId id) {
+    const CommandQueue* q = commands.find(id);
+    return q == nullptr ? nullptr : q->running();
+  }
+};
+
+}  // namespace
+
+/// **A command whose script returns starts the next one there and then**,
+/// before any other script runs: 0x0069f7a0 calls the owner's `vtbl+0x1c` as
+/// soon as the thread's slice is over and it has finished, and 0x005b5160
+/// pops the head and starts the next through 0x005b4f20, whose thread is armed
+/// at the clock and so runs in the same pass. It used to wait for the next
+/// turn's command pass.
+TEST(a_command_that_returns_starts_the_next_in_the_same_pass) {
+  EndFixture f;
+  f.onfinish("");
+  const ObjectId u = f.spawn(f.unit_class);
+  Command order;
+  order.arg_kind = CommandArgKind::point;
+  order.point = Point{300, 300};
+  f.commands.set_command(f.world, u, "move", order);
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  // One scheduler pass and no command pass: `move` ran and returned, and
+  // `guard` started at its end and ran in the same pass.
+  f.scheduler.advance(100);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "guard");
+  CHECK(f.user(u) == 11);
+  // And a queue that runs dry is given its `idle` the same way.
+  f.commands.set_command(f.world, u, "move", order);
+  f.scheduler.advance(100);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "idle");
+  CHECK(f.head(u)->started);
+  CHECK(f.scheduler.alive(f.head(u)->script));
+}
+
+/// **Ended by another script, a command is told inside the call and the next
+/// starts inside it too**: 0x005b07d0 deletes the thread through 0x0069fee0,
+/// which calls `vtbl+0x1c` at once under the cancel flag -- the `onfinish`
+/// runs to its end there (0x0059af00 through the synchronous launcher
+/// 0x006a0360), the head is popped and the next started. The `onfinish` was
+/// spawned and ran a pass late, and the next command waited for the pass.
+TEST(a_command_ended_by_another_script_is_told_and_followed_inside_the_call) {
+  EndFixture f;
+  f.onfinish("");
+  const ObjectId u = f.spawn(f.unit_class);
+  f.commands.set_command(f.world, u, "research", Command{});
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  REQUIRE(f.head(u) != nullptr);
+  REQUIRE(f.head(u)->verb == "research");
+  REQUIRE(f.head(u)->started);
+
+  CHECK(f.commands.kill_command(f.world, u));
+  // No pass has run.
+  CHECK(f.user(u) == 1000);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "guard");
+  CHECK(f.head(u)->started);
+  CHECK(f.scheduler.alive(f.head(u)->script));
+}
+
+/// **A command ended by its own script stops at that call.** 0x0069fee0 finds
+/// the thread it is to end is the one running and only raises its stop flag
+/// (`[ctx+0x40]`); the interpreter reads it as the host call returns
+/// (0x0069d4c0) and ends the script there, so nothing after the call runs.
+/// The end then pops it with the cancel flag down and starts the next. Here
+/// the script used to run on to its next suspension.
+TEST(a_command_ending_itself_stops_at_the_call_and_the_next_starts_after_it) {
+  EndFixture f;
+  (void)f.add_script("// void, Obj This\nThis.KillCommand();\nThis.SetUser(This.user + 5);\n"
+                     "Sleep(100000);\n",
+                     "data/subai/barrack_train.vs");
+  const ObjectId u = f.spawn(f.unit_class);
+  f.commands.set_command(f.world, u, "train", Command{});
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  f.scheduler.advance(100);
+  // Not 15: the line after `KillCommand` never ran; `guard` started at the
+  // end and ran in the same pass.
+  CHECK(f.user(u) == 10);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "guard");
+}
+
+/// **While a command's `onfinish` runs, ending index 0 does nothing.** The
+/// thread is deleted before `vtbl+0x1c` is called, and 0x005b07d0 does
+/// nothing at all without a live thread in the command slot (0x0069f950), so
+/// a `KillCommand` inside the `onfinish` leaves the head for the end to pop,
+/// and the command behind it starts.
+TEST(a_kill_command_inside_an_onfinish_leaves_the_queue_to_the_end) {
+  EndFixture f;
+  f.onfinish("This.KillCommand();\n");
+  const ObjectId u = f.spawn(f.unit_class);
+  f.commands.set_command(f.world, u, "research", Command{});
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  CHECK(f.commands.kill_command(f.world, u));
+  CHECK(f.user(u) == 1000);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "guard");
+  CHECK(f.commands.command_count(u) == 1);
+}
+
+/// **A research that jumps a running order starts inside the issue**
+/// (0x004efa82..0x004efaba: the runner's thread deleted, its `onfinish` told
+/// it was cancelled, the research pushed to the front and started through
+/// 0x005b4f20). It used to stand unstarted until the next pass.
+TEST(a_research_that_jumps_the_queue_starts_inside_the_issue) {
+  EndFixture f;
+  f.onfinish("");
+  CommandDef study;
+  study.name = "researchArmour";
+  study.method = "research";
+  study.research_command = true;
+  f.commands.mutable_table().set(study);
+  CommandDef stand;
+  stand.name = "guardHere";
+  stand.method = "guard";
+  f.commands.mutable_table().set(stand);
+  const ObjectId u = f.spawn(f.unit_class);
+  HostCall order(f.world, {obj(u), Value::string("guardHere"), Value::nil(), Value::nil(),
+                           Value::boolean(true)});
+  REQUIRE(invoke(f.registry, CallKind::member, "ExecCmd", 4, order).status == HostStatus::ok);
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  REQUIRE(f.head(u) != nullptr);
+  REQUIRE(f.head(u)->verb == "guard");
+  HostCall call(f.world, {obj(u), Value::string("researchArmour"), Value::nil(), Value::nil(),
+                          Value::boolean(false)});
+  REQUIRE(invoke(f.registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "research");
+  CHECK(f.head(u)->started);
+  CHECK(f.scheduler.alive(f.head(u)->script));
 }
 
 // --------------------------------------------------------------------------

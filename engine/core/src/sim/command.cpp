@@ -458,17 +458,31 @@ void CommandSystem::finish_command(World& world, ObjectId id, const Command& com
   // `// void, Obj This, bool bCanceled` -- every shipped `onfinish` file.
   const script::Value args[2] = {script::Value::object(kTypeObj, id),
                                  script::Value::boolean(canceled)};
-  const script::ScriptId script = scheduler_->spawn(chunk, args, script::ObjectRef{kTypeObj, id});
-  if (script == script::kNoScript) return;
-  Command kept = command;
-  kept.script = script;
-  finishing_.push_back(std::move(kept));
+  // **Run now, to its end, inside whatever ended the command** (0x005b19f0
+  // calls 0x0059af00, which finds the class's `onfinish` by the verb and runs
+  // it through the synchronous launcher 0x006a0360), with the ended command's
+  // row strings and costs ambient for the length of the call (0x005b19f0
+  // writes them into the globals from the head's row and puts them back
+  // after). It was spawned and kept on a list until it ran, a pass late. No
+  // shipped `onfinish` suspends.
+  const Command* outer = hooked_;
+  hooked_ = &command;
+  const script::CallReport ran = scheduler_->call(chunk, args);
+  hooked_ = outer;
+  if (ran.status == script::ExecStatus::failed) {
+    hook_traps_.push_back(
+        script::FailedScript{ran.id, scheduler_->chunk(chunk).source_name, ran.trap});
+  }
 }
 
 void CommandSystem::retire(World& world, ObjectId id, Command& command, bool canceled) {
-  const bool started = command.started;
   retire(command);
-  if (started) finish_command(world, id, command, canceled);
+  // A copy: the `onfinish` runs inside this call and can reach the queue the
+  // command stands in.
+  if (command.started) {
+    const Command over = command;
+    finish_command(world, id, over, canceled);
+  }
 }
 
 bool CommandSystem::launch(World& world, ObjectId id, Command& command, GameTime now) {
@@ -580,41 +594,115 @@ void CommandSystem::end_resting_idle(World& world, ObjectId id) {
 }
 
 void CommandSystem::service(World& world, Entry& entry, GameTime now) {
+  // **What is left for the pass.** The original never waits for one: a
+  // command's end starts the next there and then (`end_slot`), and an object
+  // always has a head. The pass catches what this engine can still leave
+  // behind -- a head whose script was ended by something that told the queue
+  // nothing (`AIBreakScript` on a command's thread, a scheduler without the
+  // step hook, as unit fixtures run it) and a head queued on an empty queue,
+  // which only an object with no `idle` method has -- and settles it the
+  // same way, a pass late.
+  (void)now;
   std::vector<Command>& entries = entry.queue.entries;
-  // Bounded by construction: nothing enqueues during a turn, and the refill
-  // below only fires for a verb the class actually binds, so at most one
-  // command is added and the loop shortens on every other pass.
-  bool refilled = false;
-  while (true) {
-    if (entries.empty()) {
-      if (refilled || default_verb_.empty() || scheduler_ == nullptr) return;
-      if (script_for(world, entry.id, default_verb_).empty()) return;
-      Command fallback;
-      fallback.id = world.next_command_id();
-      fallback.verb = default_verb_;
-      entries.push_back(std::move(fallback));
-      refilled = true;
-      continue;
-    }
-
-    Command& head = entries.front();
-    if (!head.started) {
-      if (launch(world, entry.id, head, now)) return;
-      // The class binds no script for this verb. Retiring is the only safe
-      // answer: leaving it at the head would block the queue forever, and
-      // retrying it every turn would do the same more slowly.
-      entries.erase(entries.begin());
-      continue;
-    }
+  if (!entries.empty() && entries.front().started) {
     if (scheduler_ == nullptr) return;  // running, by definition, forever
+    const Command& head = entries.front();
     if (head.script != script::kNoScript && scheduler_->alive(head.script)) return;
     // The script returned (or trapped, or was killed). The command is over,
     // and its `onfinish`, if the class binds one, runs with `bCanceled` false.
-    head.script = script::kNoScript;
-    const Command over = std::move(head);
-    entries.erase(entries.begin());
-    finish_command(world, entry.id, over, /*canceled=*/false);
+    end_slot(world, entry.id, /*canceled=*/false);
+    return;
   }
+  start_head(world, entry.id, /*from_pass=*/true);
+}
+
+void CommandSystem::start_head(World& world, ObjectId id, bool from_pass) {
+  // 0x005b4f20, the command advance: the head starts, or -- with nothing
+  // queued -- the class's `idle` is looked up (0x005aef20, which builds the
+  // command and so draws its id), pushed (0x005b4960) and started. Its name
+  // becomes the running command's (`[obj+0x10c]`).
+  //
+  // No scheduler: a head is marked running and never retires, which is what
+  // a test of queue mechanics wants.
+  bool refilled = false;
+  while (true) {
+    CommandQueue* q = find(id);
+    if (q == nullptr) return;
+    if (q->entries.empty()) {
+      if (refilled || default_verb_.empty() || scheduler_ == nullptr) break;
+      if (script_for(world, id, default_verb_).empty()) break;
+      Command fallback;
+      fallback.id = world.next_command_id();
+      fallback.verb = default_verb_;
+      q->entries.push_back(std::move(fallback));
+      refilled = true;
+      continue;
+    }
+    Command& head = q->entries.front();
+    if (head.started) break;
+    if (scheduler_ == nullptr) {
+      (void)launch(world, id, head, world.time());
+      break;
+    }
+    const std::uint32_t chunk = chunk_of(world, id, head.verb, /*count_miss=*/from_pass);
+    if (chunk != script::kNoChunk) {
+      head.started = true;
+      head.started_at = world.time();
+      if (launch_chunk(world, id, head, chunk) || !from_pass) break;
+    } else if (!from_pass) {
+      // A verb the class binds no compiled script for is left for the pass,
+      // which counts it and retires it once, as it always has.
+      break;
+    }
+    // The class binds no script for this verb. Retiring is the only safe
+    // answer: leaving it at the head would block the queue forever, and
+    // retrying it every turn would do the same more slowly. (In the original
+    // every bound method has its script; this is the engine's.)
+    q->entries.erase(q->entries.begin());
+  }
+  track_formation(world, id);
+}
+
+void CommandSystem::end_slot(World& world, ObjectId id, bool canceled) {
+  // 0x005b5160, the object's script-end virtual (`vtbl+0x1c`) for slot 0 --
+  // what a command's thread ending calls, whether it returned (0x0069f7a0,
+  // after the slice) or was ended by another script (0x0069fee0) -- and its
+  // first half 0x005b19f0: the head's `onfinish`, then the head popped, then,
+  // unless the object is dead (`vtbl+0x50`), the next one started (0x005b4f20).
+  CommandQueue* q = find(id);
+  if (q != nullptr && !q->entries.empty()) {
+    Command& head = q->entries.front();
+    // The thread is gone before the hook runs (0x00687ce0 / 0x0069fee0 delete
+    // it first), so while the `onfinish` runs the slot is empty and an ending
+    // of index 0 inside it does nothing (`remove_at`).
+    retire(head);
+    const Command over = head;
+    ending_.push_back(id);
+    finish_command(world, id, over, canceled);
+    ending_.pop_back();
+    // 0x005b5160 pops whatever stands at the front: nothing in the `onfinish`
+    // can have taken it, since index 0 cannot be ended without a thread.
+    q = find(id);
+    if (q != nullptr && !q->entries.empty()) q->entries.erase(q->entries.begin());
+    track_formation(world, id);
+  }
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr || object_is_dead(*slot)) return;
+  start_head(world, id);
+}
+
+void CommandSystem::after_slice(World& world, script::ScriptId script) {
+  // 0x0069f7a0: once a thread's slice is over and it has finished or failed,
+  // its message is deleted and the owner's `vtbl+0x1c` is told -- for a
+  // command's thread, `end_slot`, with the cancel flag down. A thread that
+  // ended by its own `KillCommand` (the stop flag) ends here too.
+  if (scheduler_ == nullptr || script == script::kNoScript) return;
+  const script::ScriptRecord* record = scheduler_->find(script);
+  if (record == nullptr || !record->dead || record->owner.type != kTypeObj) return;
+  const ObjectId id = record->owner.id;
+  const CommandQueue* q = find(id);
+  if (q == nullptr || q->entries.empty() || q->entries.front().script != script) return;
+  end_slot(world, id, /*canceled=*/false);
 }
 
 void CommandSystem::advance(World& world, const Turn& turn) {
@@ -834,6 +922,12 @@ void CommandSystem::release(World& world, ObjectId id, const Command& command) {
 bool CommandSystem::remove_at(World& world, ObjectId id, std::size_t index) {
   CommandQueue* q = find(id);
   if (q == nullptr || index >= q->entries.size()) return false;
+  // **0x005b07d0 does nothing at all without a thread in the command slot**
+  // (0x0069f950 with 0): no release, no end. The one moment a live object's
+  // slot is empty is inside its own end, while the ended command's
+  // `onfinish` runs (`end_slot`), so a `KillCommand` or a replace there
+  // leaves the head for the end to pop.
+  if (std::find(ending_.begin(), ending_.end(), id) != ending_.end()) return false;
   // Released while it still stands in the queue, as 0x005b07d0 does: a copy,
   // because the hook can reach this queue.
   const Command released = q->entries[index];
@@ -847,21 +941,47 @@ bool CommandSystem::remove_at(World& world, ObjectId id, std::size_t index) {
     if (found == q->entries.end()) return true;
     at = static_cast<std::size_t>(found - q->entries.begin());
   }
-  // Index 0 is ended as `KillCommand` ends it, its `onfinish` told it was
-  // cancelled; anything behind it never ran and is erased. **Unless the
-  // script ending it is its own**: 0x0069fee0 then only raises the script's
-  // stop flag (`[ctx+0x40]`) and leaves the rest to the script's ordinary
-  // end, which pops it with the cancel flag (0x009bdb18) down, so its
-  // `onfinish` is told `false`.
-  if (at == 0) {
-    const Command& head = q->entries.front();
-    const bool own = head.script != script::kNoScript && head.script == caller_;
-    retire(world, id, q->entries.front(), /*canceled=*/!own);
-  } else {
+  if (at != 0) {
+    // Anything behind the head never ran and is erased (`vtbl+0x0(1)`, the
+    // command's destructor), its `onfinish` never told.
     retire(q->entries[at]);
+    q->entries.erase(q->entries.begin() + static_cast<std::ptrdiff_t>(at));
+    return true;
   }
-  q->entries.erase(q->entries.begin() + static_cast<std::ptrdiff_t>(at));
-  if (at == 0) track_formation(world, id);
+  Command& head = q->entries.front();
+  const bool live = scheduler_ != nullptr && head.started && head.script != script::kNoScript &&
+                    scheduler_->alive(head.script);
+  const bool own = live && head.script == caller_;
+  if (own && scheduler_->stop(head.script)) {
+    // **Ended by its own script**: 0x0069fee0 finds the thread is the one
+    // running and only raises its stop flag (`[ctx+0x40]`). The script ends as
+    // the host call returns, and its end (0x0069f7a0 -> `after_slice`) pops it
+    // with the cancel flag (0x009bdb18) down, so its `onfinish` is told
+    // `false`, and starts the next. Until then it stays at the head.
+    return true;
+  }
+  if (live) {
+    // **Ended by another script**: 0x0069fee0 deletes the thread and calls the
+    // owner's `vtbl+0x1c` there and then, under the cancel flag: the
+    // `onfinish` told `true`, the head popped, the next started -- all inside
+    // the call that ended it.
+    // (A script ending its own head from outside its slice -- a test's host
+    // call, nothing shipped -- has no stop flag to raise and is ended here,
+    // told it finished, as the stop would have told it.)
+    end_slot(world, id, /*canceled=*/!own);
+    return true;
+  }
+  // A head with no thread to end. In the original a live object's head
+  // always has one; here it is a head queued on an empty queue and not
+  // started yet, or any head with no scheduler at all. It goes unrun -- its
+  // `onfinish` told it was cancelled if it had started -- and what follows it
+  // is left to the caller, or to the pass.
+  retire(world, id, head, /*canceled=*/true);
+  q = find(id);
+  if (q != nullptr && !q->entries.empty() && q->entries.front().id == released.id) {
+    q->entries.erase(q->entries.begin());
+  }
+  track_formation(world, id);
   return true;
 }
 
@@ -897,37 +1017,27 @@ std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_
   for (std::size_t i = had_head ? q->entries.size() : 0; i-- > 1;) (void)remove_at(world, id, i);
   queue(id).entries.push_back(std::move(command));
   q = find(id);
+  // **And the new command starts now, inside the call.** Ending the head
+  // (0x005b07d0) ends its thread and starts the next command through
+  // 0x005b4f20 there and then (`end_slot`), and the command's script is a
+  // thread armed at the wheel's clock (0x00688240), so it runs in this same
+  // pass as soon as the script that gave the order yields. Leaving the start
+  // to the next command pass, as this once did, opened a window the shipped
+  // scripts walk into: `OUTPOST_BEHAVIOR.VS` orders a garrisoned defender out
+  // with `guardadvance`, `Sleep(200)`s and looks again for one still inside
+  // -- and with the order not yet started the same defender was still there,
+  // was ordered again (which cancels the order that never ran), and never
+  // left. When the head is the calling script's own, it ends as the call
+  // returns, and the new command starts then.
   if (had_head && q->entries.size() > 1 && q->entries.front().id == head) {
     (void)remove_at(world, id, 0);
   }
-  // **And the new command starts now, inside the call.** Ending the head
-  // (0x005b07d0) starts the next command through 0x005b4f20 there and then,
-  // and the command's script is a thread armed at the wheel's clock
-  // (0x00688240), so it runs in this same pass as soon as the script that
-  // gave the order yields. Leaving the start to the next command pass, as
-  // this did, opened a window the shipped scripts walk into:
-  // `OUTPOST_BEHAVIOR.VS` orders a garrisoned defender out with
-  // `guardadvance`, `Sleep(200)`s and looks again for one still inside --
-  // and with the order not yet started the same defender was still there,
-  // was ordered again (which cancels the order that never ran), and never
-  // left. Every outpost on the map spun in that loop for good once
-  // `ObjList::Add` stopped taking a duplicate, and the war around them went
-  // quiet.
-  // A verb the class binds no compiled script for is left for the pass, which
-  // retires it as it always has.
-  if (scheduler_ != nullptr) {
-    if (CommandQueue* now_q = find(id); now_q != nullptr && !now_q->entries.empty() &&
-                                        now_q->entries.front().id == issued &&
-                                        !now_q->entries.front().started) {
-      Command& fresh = now_q->entries.front();
-      // A miss is left for the pass, which counts and retires it once.
-      const std::uint32_t chunk = chunk_of(world, id, fresh.verb, /*count_miss=*/false);
-      if (chunk != script::kNoChunk) {
-        fresh.started = true;
-        fresh.started_at = world.time();
-        (void)launch_chunk(world, id, fresh, chunk);
-      }
-    }
+  // The new command at the head of a queue that had none, or behind a head
+  // that had no thread to end: it starts, as the end would have started it.
+  if (const CommandQueue* now_q = find(id); now_q != nullptr && !now_q->entries.empty() &&
+                                            now_q->entries.front().id == issued &&
+                                            !now_q->entries.front().started) {
+    start_head(world, id);
   }
   track_formation(world, id);
   return issued;
@@ -967,8 +1077,16 @@ std::uint32_t CommandSystem::append_order(World& world, ObjectId id, std::string
   const bool resting = before != nullptr && !before->entries.empty() &&
                        equal_fold(before->entries.front().verb, default_verb_);
   const std::uint32_t head = resting ? before->entries.front().id : 0u;
+  const bool was_empty = before == nullptr || before->entries.empty();
   const std::uint32_t issued = add_command(world, id, /*front=*/false, verb, prototype);
-  if (issued == 0 || !resting) return issued;
+  if (issued == 0) return issued;
+  if (was_empty) {
+    // An empty queue: the order is the head, and starts now, as it would
+    // have started once the head it was appended behind was ended.
+    start_head(world, id);
+    return issued;
+  }
+  if (!resting) return issued;
   const CommandQueue* q = find(id);
   if (q != nullptr && !q->entries.empty() && q->entries.front().id == head) {
     (void)remove_at(world, id, 0);
@@ -1208,12 +1326,20 @@ bool CommandSystem::issue_research(World& world, ObjectId id, Command command) {
     queue_ref.entries.push_back(std::move(command));
     return true;
   }
-  Command& runner = queue_ref.entries.front();
-  retire(world, id, runner, /*canceled=*/true);
-  runner.started = false;
-  runner.script = script::kNoScript;
-  queue_ref.entries.insert(queue_ref.entries.begin(), std::move(command));
+  // 0x0069fee0 with no callback, the cancel flag up, 0x005b19f0 (the
+  // runner's `onfinish`, told it was cancelled), the research pushed to the
+  // front (0x004ebc90) and started (0x005b4f20), all inside the issue.
+  const std::uint32_t runner_id = queue_ref.entries.front().id;
+  retire(world, id, queue_ref.entries.front(), /*canceled=*/true);
+  CommandQueue& after = queue(id);
+  for (Command& runner : after.entries) {
+    if (runner.id != runner_id) continue;
+    runner.started = false;
+    runner.script = script::kNoScript;
+  }
+  after.entries.insert(after.entries.begin(), std::move(command));
   track_formation(world, id);
+  start_head(world, id);
   return true;
 }
 
