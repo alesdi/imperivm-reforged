@@ -1623,6 +1623,27 @@ HostOutcome fn_autocast(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(state != nullptr && state->flags.autocast));
 }
 
+/// The circle a caster's search sweeps: every object standing within
+/// `radius` of `centre`, `dx² + dy² <= r²` inclusive, in the world grid's walk
+/// order -- rows of 256-unit cells top to bottom, cells left to right, each
+/// cell's list in the order its objects came into it. The searches
+/// 0x00512430, 0x00512830, 0x00512b60, 0x00512dc0, 0x00513060, 0x005d5450 and
+/// the nearest-by-grid walk 0x0053e290 all walk it so
+/// (`docs/formats/spatial-index.md`). The box is the point itself for a radius
+/// of 0, and empty for a negative one; a held object is in no cell.
+[[nodiscard]] std::vector<ObjectId> caster_circle(const World& world, Point centre,
+                                                  std::int32_t radius) {
+  std::vector<ObjectId> found;
+  if (radius < 0) return found;
+  if (radius == 0) {
+    world.objects_in_rect(centre.x, centre.y, centre.x, centre.y, ClassFilter{}, found,
+                          SweepOrder::grid);
+  } else {
+    world.objects_in_radius(centre, radius, ClassFilter{}, found, SweepOrder::grid);
+  }
+  return found;
+}
+
 /// The squad a caster falls back on when its sight circle found nobody --
 /// the second phase of `FindUnitToLearn`, `FindUnitToHeal`,
 /// `FindUnitToRevitalize` and `FindUnitToHide` (0x00513ce0, 0x00513990,
@@ -1674,12 +1695,12 @@ HostOutcome fn_autocast(CallContext& ctx) {
 /// with the same predicate, and **the last** member that passes wins -- the
 /// walk overwrites its answer and does not stop.
 ///
+/// The first match is the first in the sweep's order (0x00512dc0, the world
+/// grid's walk: `caster_circle`), which is not the nearest.
+///
 /// **Not reproduced:** the stealth half of the mask (the caster's team-vision
 /// bits against a hidden candidate; a hidden object is no candidate here, the
-/// section note says why), and the first match's order -- the original's
-/// 256-unit grid's cell order, which is not the nearest and not reproducible
-/// without that grid; this takes the first in ascending object id, which is
-/// spawn order, equally not the nearest, and identical on every peer.
+/// section note says why).
 ///
 /// A miss is an invalid handle, which `BDRUID_IDLE.VS` guards with
 /// `if (!tgt.IsValid())`.
@@ -1705,9 +1726,8 @@ HostOutcome fn_find_unit_to_learn(CallContext& ctx) {
     // because the original keeps it.
     if (other.id == self) return false;
     if (other.internal != InternalKind::none) return false;
-    // A spawn template is not in play: it is in no grid cell and no squad.
-    // This walk reads `World::objects()` rather than the spatial query the
-    // other searches use, so it has to say so itself.
+    // A spawn template is not in play. The circle's sweep leaves it out
+    // (`World::collect`); the squad pass has to say so itself.
     if (other.state.flags.unspawned) return false;
     if (!other.state.flags.is_unit) return false;            // a unit, or null
     if (other.state.health <= 0) return false;              // `vtbl[0x50]`, IsDead
@@ -1723,15 +1743,12 @@ HostOutcome fn_find_unit_to_learn(CallContext& ctx) {
     return true;
   };
 
-  for (const WorldObject& other : world->objects()) {
-    if (!learnable(other)) continue;
-    if (world->players().is_enemy(druid->state.owner, other.state.owner)) continue;  // the mask
-    if (other.state.flags.hidden) continue;
-    const Point at = world->resolve_position(other.id);
-    const std::int64_t dx = at.x - from.x;
-    const std::int64_t dy = at.y - from.y;
-    if (dx * dx + dy * dy > static_cast<std::int64_t>(sight) * sight) continue;
-    return HostOutcome::ok_with(Value::object(receiver_type(ctx), other.id));
+  for (const ObjectId id : caster_circle(*world, from, sight)) {
+    const WorldObject* other = world->find(id);
+    if (other == nullptr || !learnable(*other)) continue;
+    if (world->players().is_enemy(druid->state.owner, other->state.owner)) continue;  // the mask
+    if (other->state.flags.hidden) continue;
+    return HostOutcome::ok_with(Value::object(receiver_type(ctx), id));
   }
   // The squad pass: the last member that passes.
   ObjectId last = kNoObject;
@@ -1878,8 +1895,7 @@ HostOutcome fn_find_unit_to_heal(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), sight, ClassFilter{}, found);
+  const std::vector<ObjectId> found = caster_circle(*world, world->resolve_position(self), sight);
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
     if (other == nullptr || !caster_candidate_basics(*world, *other, self)) continue;
@@ -1998,9 +2014,8 @@ HostOutcome fn_find_unit_to_revitalize(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
+  const std::vector<ObjectId> found =
+      caster_circle(*world, world->resolve_position(self), caster_sight(*world, self));
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
     // The basics carry alive, not-self, not-held, not-hidden and not-a-ship,
@@ -2127,9 +2142,8 @@ HostOutcome fn_find_unit_to_hide(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
+  const std::vector<ObjectId> found =
+      caster_circle(*world, world->resolve_position(self), caster_sight(*world, self));
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
     if (other == nullptr || !caster_candidate_basics(*world, *other, self)) continue;
@@ -2164,7 +2178,6 @@ HostOutcome fn_find_unit_to_hide(CallContext& ctx) {
 /// wrote the list.
 [[nodiscard]] std::vector<ObjectId> enemy_sight_candidates(World& world, ObjectId self,
                                                            bool& from_squad) {
-  std::vector<ObjectId> found;
   from_squad = false;
   if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
     if (const Squad* squad = squad_sight_squad(world, *heroes, self); squad != nullptr) {
@@ -2172,9 +2185,7 @@ HostOutcome fn_find_unit_to_hide(CallContext& ctx) {
       return squad->enemies;
     }
   }
-  world.objects_in_radius(world.resolve_position(self), caster_sight(world, self), ClassFilter{},
-                          found);
-  return found;
+  return caster_circle(world, world.resolve_position(self), caster_sight(world, self));
 }
 
 /// `Unit::GetBestCurseTarget` -- the enemy with the highest `attack`.
@@ -2278,6 +2289,27 @@ HostOutcome fn_get_best_cripple_target(CallContext& ctx) {
 /// `.inherentlevel` for a teaching increment. The original registers a second
 /// overload taking an explicit radius; it has no shipped call site and is not
 /// bound, on the rectangle family's rule.
+///
+/// **The search is the nearest-by-grid walk, and its first candidate is
+/// special.** 0x005132f0 -> 0x00512360 -> 0x0053eaf0 -> 0x0053e290 walks the
+/// grid over the caster's sight circle (`caster_circle`'s order) and offers
+/// every object whose owner is in the caster's friendly mask (and, hidden,
+/// seen by its team; here a hidden object is no candidate). The walk keeps a
+/// current answer:
+///
+///   * the **first** candidate becomes the answer **untested**;
+///   * each later one is handed to the predicate 0x005122f0 -- a unit, alive,
+///     inherent level below the ceiling, not a `Sentry`, and a `Military` or
+///     `BaseMage` heir -- and the first that passes replaces the answer and
+///     ends the walk.
+///
+/// Then 0x00512360 checks the answer: a unit, not the caster, not an enemy,
+/// inherent level below the ceiling, `Military` or `BaseMage`, not held, not a
+/// messenger; anything else is the invalid handle. So the caster itself,
+/// when it qualifies and is met after the first candidate, ends the walk and
+/// is refused -- a druid that the grid reaches before its pupils teaches
+/// nobody -- and a messenger that qualifies does the same. A spawn template is
+/// no candidate here (the sweeps' `collect`), as for the other searches.
 HostOutcome fn_find_unit_below_ilevel(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("FindUnitBelowILevel: no world");
@@ -2288,21 +2320,51 @@ HostOutcome fn_find_unit_below_ilevel(CallContext& ctx) {
   const WorldObject* caster = world->find(self);
   if (caster == nullptr) return none;
   const std::int32_t ceiling = int_arg(ctx, 1);
+  const PlayerTable& players = world->players();
+  const PlayerId owner = caster->state.owner;
 
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
-  for (const ObjectId id : found) {
+  // The walk's own mask: an owner -- one bit of the low sixteen, which a
+  // decoration has none of -- the caster's player is not at war with.
+  const auto offered = [&](const WorldObject& other) {
+    if (other.internal != InternalKind::none) return false;
+    if (!PlayerTable::is_valid(other.state.owner)) return false;
+    if (players.is_enemy(owner, other.state.owner)) return false;
+    return !other.state.flags.hidden;
+  };
+  const auto teachable = [&](const WorldObject& other) {
+    return is_a(*world, other, "Military") || is_a(*world, other, "BaseMage");
+  };
+  // 0x005122f0.
+  const auto passes = [&](const WorldObject& other) {
+    if (!other.state.flags.is_unit || other.state.health <= 0) return false;
+    if (heroes->inherent_level(other.id) >= ceiling) return false;
+    if (is_a(*world, other, "Sentry")) return false;
+    return teachable(other);
+  };
+
+  ObjectId kept = kNoObject;
+  for (const ObjectId id :
+       caster_circle(*world, world->resolve_position(self), caster_sight(*world, self))) {
     const WorldObject* other = world->find(id);
-    if (other == nullptr || !caster_candidate_basics(*world, *other, self)) continue;
-    if (world->players().is_enemy(caster->state.owner, other->state.owner)) continue;
-    if (is_a(*world, *other, "Sentry")) continue;
-    if (other->state.flags.messenger) continue;
-    if (!is_a(*world, *other, "Military") && !is_a(*world, *other, "BaseMage")) continue;
-    if (heroes->inherent_level(id) >= ceiling) continue;
-    return HostOutcome::ok_with(Value::object(receiver_type(ctx), id));
+    if (other == nullptr || !offered(*other)) continue;
+    if (kept == kNoObject) {
+      kept = id;
+      continue;
+    }
+    if (passes(*other)) {
+      kept = id;
+      break;
+    }
   }
-  return none;
+  // 0x00512360's checks on whatever the walk kept.
+  const WorldObject* answer = world->find(kept);
+  if (answer == nullptr || !answer->state.flags.is_unit || answer->id == self) return none;
+  if (PlayerTable::is_valid(answer->state.owner) && players.is_enemy(owner, answer->state.owner)) {
+    return none;
+  }
+  if (heroes->inherent_level(kept) >= ceiling || !teachable(*answer)) return none;
+  if (answer->state.holder != kNoObject || answer->state.flags.messenger) return none;
+  return HostOutcome::ok_with(Value::object(receiver_type(ctx), kept));
 }
 
 /// `Unit::hero` (0x005d7380): the 16-bit hero handle at `[unit+0x170]`, as an

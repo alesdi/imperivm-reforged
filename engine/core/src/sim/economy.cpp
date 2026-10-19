@@ -2485,8 +2485,10 @@ namespace {
 /// nearer the unit than the best. Then the defenders: the settlement holder's
 /// units, and when fewer than two of the defender class are inside, the units
 /// of that class within the building's `range` (`[bld+0xd4]`) around it
-/// (0x004233b0) -- **two** are needed, the last one met being the defender
-/// remembered. The winner gets `approach` set on the unit, aimed at the
+/// (0x004233b0, visitor 0x00421de0: a unit, alive, the independents' own --
+/// the sweep's player record is player fourteen's -- of either defender class,
+/// not a spawn template), counting on from the holder's count and **stopping
+/// at two**: the unit that made the count two is the defender remembered. The winner gets `approach` set on the unit, aimed at the
 /// building (`vtbl+0xb8` with 1, `SetCommand`), then `engage` appended --
 /// or, for the Iberian outpost, `engage_unit_type_exclusive` aimed at the
 /// defender -- and the call answers **true**; with no winner, false and
@@ -2494,9 +2496,10 @@ namespace {
 ///
 /// The walk here is the roll in reverse, as the original's is, so an equal
 /// rank at an equal distance keeps the later settlement in both; the sweep
-/// around the building is ascending id where the original's is cell order,
-/// which can change *which* defender the exclusive engage names and nothing
-/// else.
+/// around the building walks the world's grid in its order (rows of 256-unit
+/// cells, cells, each cell's list in arrival order;
+/// `docs/formats/spatial-index.md`), as 0x004233b0 does, which decides *which*
+/// defender the exclusive engage names.
 HostOutcome attack_set_for_training_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("AttackSetForTraining: no world");
@@ -2580,16 +2583,18 @@ HostOutcome attack_set_for_training_impl(CallContext& ctx) {
     }
     if (found < 2) {
       std::vector<ObjectId> around;
-      world->objects_in_radius(there, class_int(*world, *building, "range"), ClassFilter{}, around);
+      world->objects_in_radius(there, class_int(*world, *building, "range"), ClassFilter{}, around,
+                               SweepOrder::grid);
       for (const ObjectId id : around) {
         const WorldObject* slot = world->find(id);
         if (slot == nullptr || !slot->state.flags.is_unit || !is_defender(*slot)) continue;
-        // A unit inside a holder is located at the holder here, where the
-        // original's cell sweep does not see it at all: the garrison was
-        // counted above and is not counted twice.
-        if (slot->state.holder != kNoObject || s.holder.contains(id)) continue;
+        if (object_is_dead(*slot) || slot->state.owner != kIndependents) continue;
+        // A held unit is in no grid cell, and the garrison was counted above:
+        // one this engine's roll lists without its world holder is not
+        // counted twice.
+        if (s.holder.contains(id)) continue;
         last = id;
-        ++found;
+        if (++found >= 2) break;
       }
     }
     if (found < 2) continue;

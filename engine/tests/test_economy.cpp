@@ -4107,6 +4107,36 @@ TEST(attack_set_for_training_picks_the_best_defended_outpost_and_engages) {
   CHECK(b.ask(999999, centre, 3000) == 0);
 }
 
+/// **The defenders around an outpost are swept in the grid's order, and the
+/// sweep stops at two.** 0x004233b0 walks the world's grid over the
+/// building's range (rows of 256-unit cells, cells, each cell's list in the
+/// order its objects came into it), offers only live units of the
+/// independents' (visitor 0x00421de0), counts on from the garrison and stops
+/// when the count reaches two: the exclusive engage names the unit that made
+/// it two.
+TEST(attack_set_for_training_sweeps_the_defenders_in_grid_order_and_stops_at_two) {
+  TrainingGroundBench b;
+  const ObjectId warrior = b.unit_of("Unit", Point{5000, 4000}, 1);
+  // An Iberian outpost straddling a row of cells (y 4352), nobody inside.
+  const auto [iberia, iberia_town] = b.outpost("IOutpost", Point{5000, 4350}, 14, {});
+  (void)iberia_town;
+  // Three slingers within its range of 150. By id: low, high, top. By the
+  // grid: top (the row above), then low and high in the row below.
+  const ObjectId low = b.unit_of("ISlinger", Point{5000, 4400}, 14);
+  const ObjectId high = b.unit_of("ISlinger", Point{5050, 4400}, 14);
+  const ObjectId top = b.unit_of("ISlinger", Point{5000, 4300}, 14);
+  // A dead one and a stranger's, both first in the walk, are not offered.
+  const ObjectId corpse = b.unit_of("ISlinger", Point{4990, 4290}, 14);
+  b.world.set_health(corpse, 0);
+  (void)b.unit_of("ISlinger", Point{4995, 4295}, 2);
+  CHECK(b.ask(warrior, Point{5000, 4350}, 400) == 1);
+  CHECK(b.target(warrior, 0) == iberia);
+  // `top`, then `low` makes two: the sweep stops there, short of `high`.
+  CHECK(b.target(warrior, 1) == low);
+  (void)high;
+  (void)top;
+}
+
 /// **`TSGetAllBarracks` and `BestBarrack` disagree, and the disagreement is
 /// the finding.** The first keeps ruins and skips the C++ downcast; the second
 /// does the opposite. Both run the same eight-name test, so a temple is in
