@@ -197,6 +197,7 @@ bool ObstructionGrid::blocked_cell(std::int32_t cx, std::int32_t cy) const noexc
 
 void ObstructionGrid::set_cell(std::int32_t cx, std::int32_t cy, bool blocked) noexcept {
   if (!in_bounds(cx, cy)) return;
+  regions_valid_ = false;
   const std::size_t bit = bit_index(cx, cy);
   const std::uint64_t mask = std::uint64_t{1} << (bit & 63);
   if (blocked) {
@@ -269,6 +270,47 @@ Point ObstructionGrid::clamp_to_map(Point world) const noexcept {
 Point ObstructionGrid::nearest_free(Point world, std::int32_t max_rings) const noexcept {
   return nearest_free_over(
       world, max_rings, [this](std::int32_t cx, std::int32_t cy) { return blocked_cell(cx, cy); });
+}
+
+std::uint32_t ObstructionGrid::region_of(std::int32_t cx, std::int32_t cy) const {
+  if (!in_bounds(cx, cy)) return 0;
+  if (!regions_valid_) label_regions();
+  return regions_[bit_index(cx, cy)];
+}
+
+void ObstructionGrid::label_regions() const {
+  constexpr std::int32_t kDx[4] = {0, 1, 0, -1};
+  constexpr std::int32_t kDy[4] = {-1, 0, 1, 0};
+  const std::size_t cells = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
+  regions_.assign(cells, 0);
+  std::vector<std::uint32_t> queue;
+  std::uint32_t next = 0;
+  for (std::int32_t y = 0; y < height_; ++y) {
+    for (std::int32_t x = 0; x < width_; ++x) {
+      const std::size_t seed = bit_index(x, y);
+      if (regions_[seed] != 0 || blocked_cell(x, y)) continue;
+      // A breadth-first flood over the four orthogonal neighbours.
+      ++next;
+      regions_[seed] = next;
+      queue.clear();
+      queue.push_back(static_cast<std::uint32_t>(seed));
+      for (std::size_t head = 0; head < queue.size(); ++head) {
+        const auto w = static_cast<std::uint32_t>(width_);
+        const auto qx = static_cast<std::int32_t>(queue[head] % w);
+        const auto qy = static_cast<std::int32_t>(queue[head] / w);
+        for (int i = 0; i < 4; ++i) {
+          const std::int32_t nx = qx + kDx[i];
+          const std::int32_t ny = qy + kDy[i];
+          if (blocked_cell(nx, ny)) continue;
+          const std::size_t at = bit_index(nx, ny);
+          if (regions_[at] != 0) continue;
+          regions_[at] = next;
+          queue.push_back(static_cast<std::uint32_t>(at));
+        }
+      }
+    }
+  }
+  regions_valid_ = true;
 }
 
 std::size_t ObstructionGrid::count_blocked() const noexcept {
@@ -429,17 +471,108 @@ PathFinder::Open PathFinder::pop() {
 Path PathFinder::find(const ObstructionGrid& grid, const PathRequest& request) {
   if (request.barrier != nullptr && !request.barrier->empty()) {
     const CellOverlay& barrier = *request.barrier;
-    return find_over(grid, request, [&grid, &barrier](std::int32_t cx, std::int32_t cy) {
-      return grid.blocked_cell(cx, cy) || barrier.contains(cx, cy);
-    });
+    return find_over(
+        grid, request,
+        [&grid, &barrier](std::int32_t cx, std::int32_t cy) {
+          return grid.blocked_cell(cx, cy) || barrier.contains(cx, cy);
+        },
+        /*by_regions=*/false);
   }
-  return find_over(grid, request,
-                   [&grid](std::int32_t cx, std::int32_t cy) { return grid.blocked_cell(cx, cy); });
+  return find_over(
+      grid, request,
+      [&grid](std::int32_t cx, std::int32_t cy) { return grid.blocked_cell(cx, cy); },
+      /*by_regions=*/true);
 }
+
+namespace {
+
+/// The regions a search from `(cx, cy)` can step into: the cell's own, or --
+/// for a start inside an obstruction, which the search leaves by any free
+/// orthogonal neighbour -- each of those neighbours'. At most four.
+struct StartRegions {
+  std::uint32_t ids[4] = {0, 0, 0, 0};
+  std::size_t count = 0;
+
+  [[nodiscard]] bool has(std::uint32_t region) const noexcept {
+    if (region == 0) return false;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (ids[i] == region) return true;
+    }
+    return false;
+  }
+  void add(std::uint32_t region) noexcept {
+    if (region != 0 && !has(region) && count < 4) ids[count++] = region;
+  }
+};
+
+[[nodiscard]] StartRegions start_regions(const ObstructionGrid& grid, std::int32_t cx,
+                                         std::int32_t cy) {
+  StartRegions out;
+  if (!grid.blocked_cell(cx, cy)) {
+    out.add(grid.region_of(cx, cy));
+    return out;
+  }
+  out.add(grid.region_of(cx, cy - 1));
+  out.add(grid.region_of(cx + 1, cy));
+  out.add(grid.region_of(cx, cy + 1));
+  out.add(grid.region_of(cx - 1, cy));
+  return out;
+}
+
+/// The cell of `regions` whose centre is nearest `goal` in straight distance,
+/// ties to the lower cell index (row by row). False when no cell of the grid
+/// is in them. Rings of growing Chebyshev radius round the goal's cell, each
+/// scanned whole, until no farther ring can hold anything nearer.
+[[nodiscard]] bool nearest_reachable(const ObstructionGrid& grid, const StartRegions& regions,
+                                     Point goal, std::int32_t& out_cx, std::int32_t& out_cy) {
+  const std::int32_t gx = ObstructionGrid::cell_of(goal.x);
+  const std::int32_t gy = ObstructionGrid::cell_of(goal.y);
+  const std::int32_t reach =
+      std::max({gx < 0 ? -gx : gx, gx - grid.width(), gy < 0 ? -gy : gy, gy - grid.height()}) +
+      std::max(grid.width(), grid.height()) + 1;
+  std::int64_t best = -1;
+  std::int64_t best_index = 0;
+  const auto consider = [&](std::int32_t x, std::int32_t y) {
+    if (!grid.in_bounds(x, y) || !regions.has(grid.region_of(x, y))) return;
+    const Point centre{ObstructionGrid::centre_of(x), ObstructionGrid::centre_of(y)};
+    const std::int64_t d = dist_sq(centre, goal);
+    const std::int64_t index = static_cast<std::int64_t>(y) * grid.width() + x;
+    if (best < 0 || d < best || (d == best && index < best_index)) {
+      best = d;
+      best_index = index;
+      out_cx = x;
+      out_cy = y;
+    }
+  };
+  for (std::int32_t r = 0; r <= reach; ++r) {
+    // Every centre on ring `r` is at least `16r - 8` from a goal anywhere in
+    // its own cell; once that is beyond the best, nothing farther can win.
+    if (best >= 0) {
+      const std::int64_t floor = static_cast<std::int64_t>(r) * kCollisionCellSize -
+                                 kCollisionCellSize / 2;
+      if (floor > 0 && floor * floor > best) break;
+    }
+    if (r == 0) {
+      consider(gx, gy);
+      continue;
+    }
+    for (std::int32_t x = gx - r; x <= gx + r; ++x) {
+      consider(x, gy - r);
+      consider(x, gy + r);
+    }
+    for (std::int32_t y = gy - r + 1; y <= gy + r - 1; ++y) {
+      consider(gx - r, y);
+      consider(gx + r, y);
+    }
+  }
+  return best >= 0;
+}
+
+}  // namespace
 
 template <typename Blocked>
 Path PathFinder::find_over(const ObstructionGrid& grid, const PathRequest& request,
-                           const Blocked& blocked) {
+                           const Blocked& blocked, bool by_regions) {
   Path out;
   if (grid.empty()) return out;
 
@@ -474,8 +607,40 @@ Path PathFinder::find_over(const ObstructionGrid& grid, const PathRequest& reque
   const std::int32_t goal_cy_raw = ObstructionGrid::cell_of(goal.y);
   if (blocked(goal_cx_raw, goal_cy_raw)) goal = nearest_free_over(goal, 32, blocked);
 
-  const std::int32_t goal_cx = ObstructionGrid::cell_of(goal.x);
-  const std::int32_t goal_cy = ObstructionGrid::cell_of(goal.y);
+  std::int32_t goal_cx = ObstructionGrid::cell_of(goal.x);
+  std::int32_t goal_cy = ObstructionGrid::cell_of(goal.y);
+
+  // **Whether the search can arrive is the regions' to say, not a budget's**
+  // (docs/formats/pathfinder.md). A goal in a region the start reaches is
+  // searched for with no budget: it is found, as the original's area search
+  // finds every goal it can reach. A goal in another region is not searched
+  // for at all: the route runs to the reachable cell whose centre is nearest
+  // the goal point, and is partial -- the original's status 2, a route to the
+  // area nearest the goal (0x00413690's best area, 0x0040e500's entry into
+  // it). With an arrival band that cell may already be in it, and then the
+  // route is the band's, complete.
+  bool retargeted = false;
+  bool to_nearest = false;
+  std::uint32_t budget = request.node_budget;
+  if (by_regions) {
+    budget = static_cast<std::uint32_t>(grid.width()) * static_cast<std::uint32_t>(grid.height());
+    const StartRegions from = start_regions(grid, start_cx, start_cy);
+    if (!from.has(grid.region_of(goal_cx, goal_cy))) {
+      std::int32_t near_cx = 0;
+      std::int32_t near_cy = 0;
+      if (!nearest_reachable(grid, from, request.goal, near_cx, near_cy) ||
+          (near_cx == start_cx && near_cy == start_cy)) {
+        // Walled in, or already as near as it can get: nowhere to go.
+        out.status = PathStatus::partial;
+        return out;
+      }
+      goal_cx = near_cx;
+      goal_cy = near_cy;
+      retargeted = true;
+      const Point centre{ObstructionGrid::centre_of(near_cx), ObstructionGrid::centre_of(near_cy)};
+      to_nearest = !within(centre, request.goal, request.arrival_range);
+    }
+  }
 
   reset(grid);
   const std::int32_t width = grid.width();
@@ -531,7 +696,7 @@ Path PathFinder::find_over(const ObstructionGrid& grid, const PathRequest& reque
       break;
     }
 
-    if (out.expanded >= request.node_budget) break;
+    if (out.expanded >= budget) break;
 
     const std::int32_t g = current.g;
     for (const Step& step : kSteps) {
@@ -593,7 +758,8 @@ Path PathFinder::find_over(const ObstructionGrid& grid, const PathRequest& reque
   }
   // The real destination, when it is reachable, rather than the centre of its
   // cell: a unit ordered to a point should stand on the point.
-  if (found && !raw.empty() && line_clear_over(raw.back(), request.goal, blocked)) {
+  if (found && !retargeted && !raw.empty() &&
+      line_clear_over(raw.back(), request.goal, blocked)) {
     raw.back() = request.goal;
   }
 
@@ -618,7 +784,7 @@ Path PathFinder::find_over(const ObstructionGrid& grid, const PathRequest& reque
   }
 
   out.waypoints = std::move(raw);
-  out.status = found ? PathStatus::found : PathStatus::partial;
+  out.status = found && !to_nearest ? PathStatus::found : PathStatus::partial;
   out.length = polyline_length(out.waypoints);
   return out;
 }

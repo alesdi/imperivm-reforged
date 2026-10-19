@@ -637,8 +637,9 @@ class MovementSystem : public System {
   void set_formations(FormationTable table) { formations_ = std::move(table); }
   [[nodiscard]] const FormationTable& formations() const noexcept { return formations_; }
 
-  /// Cap on nodes one search may expand. Lower it on a large map if a frame
-  /// budget demands; it changes routes, so it is world configuration.
+  /// Cap on nodes one search round a gate's line may expand
+  /// (`PathRequest::node_budget`); a search over the grid alone has none. It
+  /// changes routes, so it is world configuration.
   void set_node_budget(std::uint32_t budget) noexcept { node_budget_ = budget; }
 
   // -- per-object state --------------------------------------------------
