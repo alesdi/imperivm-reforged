@@ -2986,9 +2986,8 @@ TEST(a_map_enrolled_combatant_starts_at_level_one_with_no_experience) {
   const DamageBreakdown tilted = combat.preview(roman, gaul);
   CHECK(tilted.level_difference == 3);
 
-  // The first damaging blow pays exactly `experience_gain(defender_level)`,
-  // which is a figure the `CONST.INI` recurrence fixes and a non-zero seed
-  // would put out of reach.
+  // And a blow that does not kill pays nothing (0x00511550 pays a kill), so
+  // a total seeded at zero is still zero after the first strikes.
   combat.set_player_level_addend(0, 0);
   REQUIRE(combat.order_attack(roman, gaul));
   // Counted rather than assumed: a turn is long enough for more than one
@@ -3006,7 +3005,8 @@ TEST(a_map_enrolled_combatant_starts_at_level_one_with_no_experience) {
   const Combatant* after = combat.find(roman);
   REQUIRE(after != nullptr);
   REQUIRE(strikes > 0);
-  CHECK(heroes.experience(roman) == strikes * combat.constants().experience_gain(1));
+  REQUIRE(combat.is_alive(gaul));
+  CHECK(heroes.experience(roman) == 0);
 }
 
 TEST(the_obstruction_grid_keeps_a_rectangular_map_the_right_way_round) {
@@ -3851,19 +3851,21 @@ TEST(the_experience_modifier_is_per_player_and_scales_only_that_players_gain) {
   CombatSystem combat = make_system();
   REQUIRE(world.add_system(&combat));
 
-  // Untouched, every player reads the constant, which ships as 100.
+  // Untouched, every player has none: the player record's constructor
+  // (0x00565a00) zeroes `+0x84`. The constant is only what the research hands
+  // over.
   CHECK(combat.constants().experience_modifier == 100);
-  for (PlayerId p = 0; p < 4; ++p) CHECK(combat.player_experience_modifier(p) == 100);
+  for (PlayerId p = 0; p < 4; ++p) CHECK(combat.player_experience_modifier(p) == 0);
 
   combat.set_player_experience_modifier(0, 300);
   CHECK(combat.player_experience_modifier(0) == 300);
-  CHECK(combat.player_experience_modifier(1) == 100);
+  CHECK(combat.player_experience_modifier(1) == 0);
   // Overwriting a player already in the table replaces rather than appends.
   combat.set_player_experience_modifier(0, 200);
   CHECK(combat.player_experience_modifier(0) == 200);
 
-  // What it does to a blow's award is in test_stats.cpp, where the award
-  // has a running total to land in.
+  // What it does to a kill's gain is in test_stats.cpp, where the gain has a
+  // running total to land in.
 }
 
 /// It is turn state: research writes it mid-game, so it has to move the hash
@@ -3884,7 +3886,7 @@ TEST(the_experience_modifier_is_hashed_and_round_trips) {
   CombatSystem loaded = make_system();
   REQUIRE(loaded.deserialize(bytes).ok());
   CHECK(loaded.player_experience_modifier(3) == 250);
-  CHECK(loaded.player_experience_modifier(2) == 100);
+  CHECK(loaded.player_experience_modifier(2) == 0);
   std::uint64_t reloaded = 0;
   loaded.hash(reloaded);
   CHECK(reloaded == after);
@@ -3937,9 +3939,9 @@ TEST(set_experience_modifier_takes_a_one_based_player_then_the_percentage) {
   // 1-based, and the two arguments are in that order and not the other.
   CHECK(call(1, 250) == script::HostStatus::ok);
   CHECK(combat.player_experience_modifier(0) == 250);
-  CHECK(combat.player_experience_modifier(1) == 100);
+  CHECK(combat.player_experience_modifier(1) == 0);
   // ...and the percentage did not land as a player id.
-  CHECK(combat.player_experience_modifier(250 % 16) == 100);
+  CHECK(combat.player_experience_modifier(250 % 16) == 0);
 
   CHECK(call(16, 40) == script::HostStatus::ok);
   CHECK(combat.player_experience_modifier(15) == 40);
@@ -3954,7 +3956,7 @@ TEST(set_experience_modifier_takes_a_one_based_player_then_the_percentage) {
   CHECK(call(0, 999) == script::HostStatus::ok);
   CHECK(call(17, 999) == script::HostStatus::ok);
   CHECK(call(-3, 999) == script::HostStatus::ok);
-  for (PlayerId p = 1; p < 15; ++p) CHECK(combat.player_experience_modifier(p) == 100);
+  for (PlayerId p = 1; p < 15; ++p) CHECK(combat.player_experience_modifier(p) == 0);
   std::vector<std::byte> after_junk;
   combat.serialize(after_junk);
   CHECK(after_junk == in_range);

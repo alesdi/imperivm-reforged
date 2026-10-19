@@ -7,6 +7,7 @@
 #include "imperivm/core/sim/combat.hpp"
 
 #include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/player_host.hpp"
 #include "imperivm/core/sim/hooks.hpp"
@@ -615,7 +616,8 @@ std::int32_t CombatSystem::player_experience_modifier(PlayerId player) const noe
       experience_modifiers_.begin(), experience_modifiers_.end(), player,
       [](const std::pair<PlayerId, std::int32_t>& e, PlayerId p) { return e.first < p; });
   if (it != experience_modifiers_.end() && it->first == player) return it->second;
-  return constants_.experience_modifier;
+  // The player record's constructor (0x00565a00) zeroes `+0x84`.
+  return 0;
 }
 
 void CombatSystem::set_profile(ClassIndex index, const CombatProfile& profile) {
@@ -1627,30 +1629,79 @@ void CombatSystem::die_as_engine(World& world, ObjectId id, GameTime now) {
   }
 }
 
-void CombatSystem::award_experience(World& world, const Combatant& attacker,
-                                    const Combatant& defender) {
-  // CONST.INI: exp_gain = target_level / LevelExpDivider + 1, scaled by the
-  // **attacker's own** `BattleTacticsExpModifier` -- the research is per player
-  // and `SetExperienceModifier` writes it there.
-  //
-  // Paid where the original pays every award: into the running total
-  // `[unit+0x180]` through the unit's `SetExperience` virtual with the
-  // refresh flag (0x00511550 -> `vtbl+0x118`), so the stored level the next
-  // blow reads is rebuilt from it. That total is `HeroSystem`'s, and it is
-  // the one scripts read; a world with no hero system, or ids that are not
-  // the world's, keeps no total and the award goes nowhere.
-  //
-  // **Still this engine's:** the amount. 0x00511550 credits the blow's own
-  // award from 0x0050ff30 plus, on a kill, a gain from both units' inherent
-  // levels (0x0050fec0) that also feeds the hero's accumulator `[hero+0x2c4]`,
-  // and caps a non-hero at the owner's `max_battle_level`; here it is the
-  // CONST.INI line above on every damaging blow.
-  if (!world_bound_) return;
+std::int32_t CombatSystem::kill_gain(World& world, ObjectId attacker, ObjectId victim,
+                                     std::int32_t victim_experience) {
+  // 0x00511976..0x005119e0, the kill block of the blow. Both ends must be
+  // units -- the blow casts each to `CVXUnit` and drops one that is not --
+  // and the victim no `Sentry` (0x005400c0).
+  if (!world_bound_) return 0;
   HeroSystem* heroes = hero_system_of(world);
-  if (heroes == nullptr) return;
-  const std::int32_t gain = constants_.experience_gain(
-      defender.base_effective_level(), player_experience_modifier(attacker.owner));
-  (void)heroes->set_experience(world, attacker.id, heroes->experience(attacker.id) + gain);
+  if (heroes == nullptr) return 0;
+  const ObjectState* killer = world.state(attacker);
+  const ObjectState* dead = world.state(victim);
+  if (killer == nullptr || dead == nullptr || !killer->flags.is_unit || !dead->flags.is_unit) {
+    return 0;
+  }
+  if (const ClassGraph* graph = world.class_graph(); graph != nullptr) {
+    const ClassIndex sentry = graph->find("Sentry");
+    if (sentry != kNoClass && world.class_is_a(victim, sentry)) return 0;
+  }
+  // A sixth of how many levels the victim stood above the killer, truncated,
+  // kept to [0, 8], plus one: 1 for an equal or a lesser victim, 9 at most.
+  // Both levels are of the running totals (0x005d28c0), not the stored levels.
+  const std::int32_t mine = heroes->level_for_experience(heroes->experience(attacker));
+  const std::int32_t theirs = heroes->level_for_experience(victim_experience);
+  const std::int32_t steps = std::clamp((theirs - mine) / 6, 0, 8);
+  const std::int32_t base = steps + 1;
+  // The owner's modifier `[player+0x84]` (0x0050fec0): none keeps the base; a
+  // positive one multiplies it by `m / 100 + 1`, and by one more with a
+  // chance of `m % 100` in a hundred; a negative one loses the whole gain with
+  // a chance of `-m` in a hundred. A draw on the world's generator only where
+  // a chance is taken.
+  const std::int32_t modifier = player_experience_modifier(killer->owner);
+  std::int32_t gain = base;
+  if (modifier > 0) {
+    std::int32_t times = modifier / 100 + 1;
+    if (modifier % 100 > 0 && world.rng().between(0, 99) < modifier % 100) ++times;
+    gain = times * base;
+  } else if (modifier < 0) {
+    if (world.rng().between(0, 99) < -modifier) gain = 0;
+  }
+  // And the same gain goes into the killer's hero's pool (0x005119d7).
+  if (const ObjectId hero = heroes->hero_of(attacker); hero != kNoObject) {
+    heroes->pool_experience(hero, gain);
+  }
+  return gain;
+}
+
+void CombatSystem::pay_experience(World& world, ObjectId attacker, std::int32_t amount) {
+  // 0x005119f3..0x00511ad5. A hero or a unit in training takes it all;
+  // anyone else stops at the start of its owner's `max_battle_level` -- the
+  // Standardization researches' "cannot gain more experience" -- when that
+  // ledger entry is set: a total that would reach it is set to it, and one
+  // already there is left alone.
+  if (amount == 0 || !world_bound_) return;
+  HeroSystem* heroes = hero_system_of(world);
+  const ObjectState* killer = world.state(attacker);
+  if (heroes == nullptr || killer == nullptr) return;
+  const std::int32_t had = heroes->experience(attacker);
+  const std::int32_t total = had + amount;
+  if (!killer->flags.is_hero && !killer->flags.training) {
+    const EnvSystem* env = env_of(world);
+    const std::int32_t level =
+        env == nullptr
+            ? 0
+            : env->env().read_int(EnvScope::for_player(player_to_script(killer->owner)),
+                                  "max_battle_level");
+    if (level != 0) {
+      const std::int32_t cap = heroes->experience_for_level(level);
+      if (total >= cap) {
+        if (had < cap) (void)heroes->set_experience(world, attacker, cap);
+        return;
+      }
+    }
+  }
+  (void)heroes->set_experience(world, attacker, total);
 }
 
 /// A building keeps its own running total of what it has taken --
@@ -1743,8 +1794,16 @@ void CombatSystem::hit(World& world, Combatant& defender, const DamageInputs& in
   // The victim as it stood when the blow landed, for the score: the kill's
   // hook runs inside `enter_dying`, and `defender` is not safe to read after it.
   const Combatant scored = defender;
+  // The victim's running total, for the kill's gain. Its death changes
+  // nothing of it in the original; here the death may let its record go.
+  const HeroSystem* heroes = killed ? hero_system_of(world) : nullptr;
+  const std::int32_t victim_experience = heroes != nullptr ? heroes->experience(victim) : 0;
   if (killed) enter_dying(world, defender, now);
   record_score(world, source, scored, removed, killed);
+  // **Experience is paid for a kill, not for a blow** (0x00511550): the gain
+  // is drawn after the score and before the killer's hook, and paid after it.
+  // `docs/formats/unit-stats.md`, "What a blow pays".
+  const std::int32_t gain = killed ? kill_gain(world, source, victim, victim_experience) : 0;
   // The killer's own hook, after the victim's. `0x005119ee` fires it from the
   // block that pays kill experience, on the attacker, with the victim as the
   // second argument -- `UNIT_ON_KILL.VS`'s `Victim`, which its Gambler's Day
@@ -1758,6 +1817,7 @@ void CombatSystem::hit(World& world, Combatant& defender, const DamageInputs& in
   // does, so a second one would be a branch nothing can reach and therefore a
   // claim this engine is not making.
   if (killed) (void)fire_class_hook(world, ClassHook::on_kill, source, victim);
+  pay_experience(world, source, gain);
 }
 
 std::int32_t CombatSystem::apply_damage(World& world, ObjectId victim, std::int32_t amount,
@@ -1941,15 +2001,7 @@ void CombatSystem::strike(World& world, Combatant& attacker, Combatant& defender
     return;
   }
 
-  const ObjectId attacker_id = attacker.id;
-  const ObjectId defender_id = defender.id;
   hit(world, defender, inputs_for(attacker, defender), attacker.id, now);
-  // Experience is paid per damaging attack, not per kill -- see
-  // CombatConstants. Paid before the defender is reaped so a killing blow
-  // still counts. Both re-found: a fatal blow ran two hooks in between.
-  const Combatant* a = find(attacker_id);
-  const Combatant* d = find(defender_id);
-  if (a != nullptr && d != nullptr) award_experience(world, *a, *d);
 }
 
 void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& defender,

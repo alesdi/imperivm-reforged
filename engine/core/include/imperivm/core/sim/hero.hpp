@@ -464,6 +464,13 @@ struct HeroRecord {
   /// written by the hero's tick (0x0052fc50, `HeroSystem::advance`) and read
   /// by each member's rebuild. 0 until the first tick.
   std::int32_t army_addend = 0;
+
+  /// `[hero+0x2c4]` -- experience the hero's army has earned for it and it has
+  /// not yet taken: every kill a member of its army makes adds the killer's
+  /// own gain here (0x005119e0, `CombatSystem::hit`), and the hero's tick
+  /// (0x0052fc50) takes one point of experience per whole `ExpFromArmyDivider`
+  /// of it, keeping the remainder. Never negative.
+  std::int32_t experience_pool = 0;
 };
 
 /// How often a hero's tick runs: its message 0x1c reschedules itself 0x3f5
@@ -595,11 +602,15 @@ class HeroSystem final : public System {
   /// `ExpFromArmyDivider`, lazily read from `CONST.INI` (0x00530190), and
   /// `[hero+0x2c4]` is the accumulator 0x0052fc50 drains into the hero's
   /// experience at one point per divider -- so the credit is worth exactly one
-  /// point, which is also what `SKILLS.INI` promises. This engine's army share
-  /// (`add_experience`) has no accumulator and drops the remainder on the
-  /// spot, so the point is paid at once; when the original converts is not
-  /// read.
+  /// point, which is also what `SKILLS.INI` promises. This engine pays the
+  /// point at once rather than through the pool (`HeroRecord::
+  /// experience_pool`, which a kill by the army does feed), so the remainder
+  /// Wisdom would leave in the pool beside a kill's is not kept.
   void roll_wisdom(World& world, ObjectId unit);
+
+  /// Add to a hero's `experience_pool` (`[hero+0x2c4]`), which its next tick
+  /// converts. Nothing for an id that is not a hero.
+  void pool_experience(ObjectId hero, std::int32_t amount);
 
   /// Everything the death virtual undoes after the hook has run: a hero's
   /// army is detached (`DetachArmy`), the unit is detached from its hero, and
@@ -778,7 +789,9 @@ class HeroSystem final : public System {
   /// than `kMaxLevel`.
   [[nodiscard]] std::int32_t level_for_experience(std::int32_t experience) const;
 
-  /// `exp_gain = target_level / LevelExpDivider + 1`, verbatim from the file.
+  /// `exp_gain = target_level / LevelExpDivider + 1`, verbatim from the
+  /// file's comment, which the executable does not apply: what a kill pays
+  /// is `CombatSystem::kill_gain`'s. Read by nothing in the simulation.
   [[nodiscard]] std::int32_t experience_for_kill(std::int32_t target_level) const;
 
   /// Add to a unit's running total through `set_experience`, the way the

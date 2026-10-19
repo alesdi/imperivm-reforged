@@ -306,18 +306,19 @@ struct CombatConstants {
   //     ; Exp[level] = Exp[Level-1] + Pos(level - T) * ExpA + ExpB
   //     ; Where Pos(x) is (X > 0 ? X : 0)
   //
-  // What the comment does *not* say is what event pays `exp_gain`. Per
-  // damaging attack is the reading here, on the strength of the `Learning`
-  // special — "receives 1 experience *when attacking* a more experienced
-  // enemy" — and of the dumps' observed range (experience 0..74 against a
-  // level-2 threshold of 175, which a per-kill rate of 1-4 could never fill in
-  // a session that reaches level 24). **INFERRED.**
+  // **The comment's formula is dead in the executable.** The unit constructor
+  // (0x005d3170) reads `LevelExpDivider` into a global nothing reads again;
+  // what a kill pays is `CombatSystem::kill_gain`'s rule (0x00511550), and a
+  // plain blow pays nothing (`docs/formats/unit-stats.md`, "What a blow
+  // pays"). The two `experience_gain` overloads below are the comment's
+  // formula, kept for its own tests and read by nothing in the simulation.
   std::int32_t level_exp_divider = 8;  ///< `LevelExpDivider`
   std::int32_t exp_a = 50;             ///< `ExpA`
   std::int32_t exp_b = 125;            ///< `ExpB`
   std::int32_t exp_t = 1;              ///< `ExpT`
-  /// `BattleTacticsExpModifier`, a percentage; the research sets it through
-  /// `SetExperienceModifier(player, c)`.
+  /// `BattleTacticsExpModifier`, a percentage the *Battle tactics* research
+  /// hands `SetExperienceModifier(player, c)` through `GetConst`. The
+  /// executable never reads it; a player nobody has set has no modifier.
   std::int32_t experience_modifier = 100;
 
   // -- catapults ------------------------------------------------------
@@ -1034,8 +1035,9 @@ class CombatSystem final : public System {
   /// **Per player**, because `gbr.exe` 0x005d2fb0 writes it into the player
   /// record at `+0x84` and not into a global -- and therefore turn state, so it
   /// is saved and hashed, unlike `level_addends_` beside it which match setup
-  /// writes once. A player nobody has set reads `CombatConstants::
-  /// experience_modifier`, which is the same 100 the constants ship.
+  /// writes once. A player nobody has set reads 0, no modifier: the player
+  /// record's constructor (0x00565a00) zeroes the word. What it does to a
+  /// kill's gain is `kill_gain`'s.
   void set_player_experience_modifier(PlayerId player, std::int32_t percent) noexcept;
   [[nodiscard]] std::int32_t player_experience_modifier(PlayerId player) const noexcept;
 
@@ -1551,7 +1553,16 @@ class CombatSystem final : public System {
   /// Hand a unit that has stopped swinging back to its idle pose through the
   /// entity's `toidle` transition.
   void settle_swing(World& world, const Combatant& unit, GameTime now) const;
-  void award_experience(World& world, const Combatant& attacker, const Combatant& defender);
+  /// What a kill earns its killer (0x00511976..0x005119e0): `levels / 6 + 1`
+  /// on the two running totals' levels, 1..9, scaled by the owner's
+  /// experience modifier, and pooled for the killer's hero too. Zero unless
+  /// both are units and the victim is no `Sentry`. `victim_experience` is the
+  /// victim's total as the blow found it.
+  [[nodiscard]] std::int32_t kill_gain(World& world, ObjectId attacker, ObjectId victim,
+                                       std::int32_t victim_experience);
+  /// Pay `amount` into `attacker`'s running total, held at its owner's
+  /// `max_battle_level` unless it is a hero or training (0x005119f3).
+  void pay_experience(World& world, ObjectId attacker, std::int32_t amount);
   [[nodiscard]] std::int32_t effective_level(const Combatant& unit) const noexcept;
   [[nodiscard]] DamageInputs inputs_for(const Combatant& attacker,
                                         const Combatant& defender) const;
