@@ -530,67 +530,46 @@ bool CommandSystem::launch_chunk(World& world, ObjectId id, Command& command, st
       args, command.arg_kind == CommandArgKind::none ? std::size_t{1} : std::size_t{2});
   command.script = scheduler_->spawn(chunk, window, script::ObjectRef{kTypeObj, id});
   if (command.script == script::kNoScript) return false;
-  end_resting_idle(world, id);
   return true;
 }
 
-/// **One script holds an object's command slot, and an idle only holds it while
-/// nothing else does.** In `gbr.exe` the idle is a command: when the running one
-/// ends, 0x005b07d0 starts the next through 0x005b4f20, and a queue with nothing
-/// left gets the class's `idle` method pushed as a command (0x005aef20 finds the
-/// method, 0x005b4960 queues it) whose name becomes the running command at
-/// `obj+0x10c`. The desync dumps say the same from the outside: every live
-/// object's queue holds an entry, and the only empty ones are the fifteen dying
-/// units. An order therefore always displaces the idle; the two never run
-/// together.
+/// **One script holds an object's command slot, and its `idle` is a command
+/// in its queue from the moment it exists.** `gbr.exe`'s object start
+/// virtual (0x005aec40, which every factory path calls as an object is
+/// constructed, and the unit, building and other overrides 0x005d3090,
+/// 0x004d64d0, 0x004db2d0, 0x0053c730 call first) opens with the object's own
+/// script-end virtual for slot 0 (`vtbl+0x1c` with 0, 0x005b5160): with
+/// nothing queued there is no `onfinish` and nothing to pop, and 0x005b4f20
+/// finds the queue empty, builds the class's `idle` (0x005aef20, drawing a
+/// command id), pushes it (0x005b4960) and starts it. Only then does it spawn
+/// the class's behaviours into slots 1.. (0x006a07e0). So every live object's
+/// queue holds a running command -- the desync dumps say the same from the
+/// outside: every live object's queue has an entry, and the only empty ones
+/// are the dying units' -- and an order displaces the idle as it displaces
+/// any other head.
 ///
-/// This engine starts an object's first `idle` straight on the scheduler, from
-/// `GameSession::start_object_scripts`, outside any queue -- so nothing ended it
-/// when the object was ordered, and it ran beside every command it was given.
-/// The shipped unit idle halts its unit every four seconds or so (`Stop(2000)`,
-/// then `Idle(1900 + rand(100))`, in a loop), so a unit walking any order
-/// stopped on that rhythm and stood until the order's own `Goto` slice ran out
-/// and laid the route again: playtest #12, "a walking legionary stops for about
-/// a second every four seconds". It also left two idles on anything whose queue
-/// later drained and refilled.
-///
-/// So a command the object launches ends that idle: the live script it owns
-/// running its class's `idle` file that no queue entry holds, and none other.
-/// Behaviours run other files and are untouched; a queued `idle` -- the one a
-/// drained queue refills with, or a `SetCommand("idle")` -- is a queue entry
-/// and is retired the queue's own way. **The moment is this engine's, and
-/// inferred:** the object virtual that queues a command (0x005b4e90, reached
-/// through the vtables and not traced to a host entry point) ends a running
-/// command named `idle` in its appending branch, so the original's idle
-/// plausibly goes when the order is queued. Here it goes when the order
-/// starts, at the next command pass, which `GameSession::advance` runs before
-/// the next script pass; only an order queued by a script partway through a
-/// pass leaves the idle one more run in it.
-///
-/// Found by what it owns rather than recorded when it was spawned, so it needs
-/// no state of its own: a save holds the scheduler's coroutines and the queues,
-/// and the answer is the same after a load.
-void CommandSystem::end_resting_idle(World& world, ObjectId id) {
-  if (scheduler_ == nullptr) return;
-  const std::string_view path = script_for(world, id, default_verb_);
-  if (path.empty()) return;
-  // Looked up, not compiled: an idle that is running was compiled already, and
-  // one that was not has nothing to end.
-  const std::uint32_t chunk = scheduler_->find_chunk(path);
-  if (chunk == script::kNoChunk) return;
+/// This engine started that first `idle` straight on the scheduler, outside
+/// any queue, after every object's behaviours, and ended it when the object
+/// launched its first command (`end_resting_idle`); an `AddCommand` behind it
+/// started at the next pass, where the original's waits behind the running
+/// `idle` until something ends it, and `CmdCount` and `command` answered for
+/// an empty queue.
+bool CommandSystem::start_slot(World& world, ObjectId id) {
+  if (world.find(id) == nullptr) return false;
+  // Only an object whose class binds the default verb: anything else would
+  // keep an empty queue the pass walks for nothing.
+  if (default_verb_.empty() || script_for(world, id, default_verb_).empty()) return false;
+  if (const CommandQueue* q = find(id); q != nullptr && !q->entries.empty()) return false;
+  // With nothing queued, the end has no `onfinish` to run and nothing to pop,
+  // and goes straight to 0x005b4f20. **Its dead test (`vtbl+0x50`) is not
+  // asked here, a labelled reading:** whether an object's health is written
+  // before its start virtual runs was not traced, and an object with no
+  // health yet (an `Object` whose class declares none) would otherwise never
+  // be given its `idle`, which every one of them was given before.
+  (void)queue(id);
+  start_head(world, id);
   const CommandQueue* q = find(id);
-  const script::ObjectRef owner{kTypeObj, id};
-  // Collected before any kill: `kill` only marks, but the walk stays a read.
-  std::vector<script::ScriptId> resting;
-  for (const script::ScriptRecord& record : scheduler_->scripts()) {
-    if (record.dead || record.owner != owner || record.chunk_index != chunk) continue;
-    bool queued = false;
-    if (q != nullptr) {
-      for (const Command& command : q->entries) queued = queued || command.script == record.id;
-    }
-    if (!queued) resting.push_back(record.id);
-  }
-  for (const script::ScriptId script : resting) (void)scheduler_->kill(script);
+  return q != nullptr && !q->entries.empty() && q->entries.front().script != script::kNoScript;
 }
 
 void CommandSystem::service(World& world, Entry& entry, GameTime now) {
@@ -706,17 +685,6 @@ void CommandSystem::after_slice(World& world, script::ScriptId script) {
 }
 
 void CommandSystem::advance(World& world, const Turn& turn) {
-  // The `onfinish` scripts that have run their course, before anything else
-  // spawns one: a finished one is a dead script id, and `command_of_script`
-  // must not answer for it.
-  if (scheduler_ != nullptr) {
-    finishing_.erase(std::remove_if(finishing_.begin(), finishing_.end(),
-                                    [&](const Command& c) {
-                                      return c.script == script::kNoScript ||
-                                             !scheduler_->alive(c.script);
-                                    }),
-                     finishing_.end());
-  }
   // Ascending id, which is spawn order. `service` never inserts a queue, so the
   // vector cannot move under this walk.
   for (Entry& entry : queues_) {
@@ -1051,6 +1019,12 @@ std::uint32_t CommandSystem::add_command(World& world, ObjectId id, bool front,
   Command command = prototype;
   command.id = world.next_command_id();
   command.verb.assign(verb);
+  return insert_made(world, id, front, std::move(command));
+}
+
+std::uint32_t CommandSystem::insert_made(World& world, ObjectId id, bool front, Command command) {
+  if (world.find(id) == nullptr) return 0;
+  (void)queue(id);
   command.script = script::kNoScript;
   command.started = false;
   const std::uint32_t issued = command.id;
@@ -1147,11 +1121,9 @@ const Command* CommandSystem::command_of_script(script::ScriptId script) const n
       if (command.script == script) return &command;
     }
   }
-  for (const Command& command : finishing_) {
-    if (command.script == script) return &command;
-  }
-  // Inside a row's `onaddremovescript`, `groupdispatch` or immediate method,
-  // none of which is a queued command's own script: the row it was run for,
+  // Inside a row's `onaddremovescript`, `groupdispatch`, immediate method or
+  // an ended command's `onfinish`, none of which is a queued command's own
+  // script: the command it was run for,
   // as the original's ambient globals say for as long as the call lasts.
   return hooked_;
 }
@@ -1305,8 +1277,8 @@ void CommandSystem::run_immediate(World& world, ObjectId id, Command command) {
 bool CommandSystem::issue_research(World& world, ObjectId id, Command command) {
   const CommandQueue* q = find(id);
   // At most one command, and that one `idle` (case and all, 0x00429c60): an
-  // ordinary order. An empty queue here is an object still on the `idle` it
-  // was started with outside its queue.
+  // ordinary order. So is an empty queue, which only an object whose class
+  // binds no `idle` has.
   if (q == nullptr || q->entries.empty()) return false;
   if (q->entries.size() <= 1 && q->entries.front().verb == kDefaultCommandVerb) return false;
 
@@ -1661,12 +1633,12 @@ HostOutcome add_command_impl(CallContext& ctx) {
 /// `kill_command` ends the runner. An empty queue is left empty, as the
 /// original leaves it.
 ///
-/// **Known gap, the ids.** The original builds the new command first (its id
-/// drawn then) and the clone second, and the clone, having drawn an id of its
-/// own, takes the runner's id and row (0x00599cdb). Here the clone is issued a
-/// fresh id ahead of the new command's. The counter ends in the same place;
-/// only a cancel by id of the resumed command could tell, and no shipped
-/// script reaches one.
+/// **The ids are drawn as the original draws them.** The lookup builds the
+/// new command first (0x005aef20; its id drawn by the constructor, 0x00599302
+/// through 0x0051d4b0), and the clone second: its constructor (0x00599210)
+/// draws an id as every command's does, and the clone then takes the
+/// runner's id and row over it (0x00599cdb). So the resumed command keeps the
+/// id it had -- a cancel by id still finds it -- and the counter moves by two.
 HostOutcome sneak_command_impl(CallContext& ctx) {
   Receivers targets = receivers_of(ctx);
   if (!targets.ok()) return HostOutcome::failed(targets.error);
@@ -1679,10 +1651,14 @@ HostOutcome sneak_command_impl(CallContext& ctx) {
     if (!targets.commands->binds(*targets.world, id, verb, CommandArgKind::none)) continue;
     q = targets.commands->find(id);
     if (q == nullptr || q->entries.empty()) continue;
-    const Command clone = q->entries.front();
-    const std::string running = clone.verb;
-    (void)targets.commands->add_command(*targets.world, id, /*front=*/true, running, clone);
-    (void)targets.commands->add_command(*targets.world, id, /*front=*/true, verb, Command{});
+    Command made;
+    made.id = targets.world->next_command_id();
+    made.verb = verb;
+    Command clone = q->entries.front();
+    (void)targets.world->next_command_id();
+    // `clone.id` stays the runner's.
+    (void)targets.commands->insert_made(*targets.world, id, /*front=*/true, std::move(clone));
+    (void)targets.commands->insert_made(*targets.world, id, /*front=*/true, std::move(made));
     (void)targets.commands->kill_command(*targets.world, id);
   }
   return HostOutcome::ok_void();
@@ -1835,23 +1811,25 @@ HostOutcome clear_commands_impl(CallContext& ctx) {
 
 /// `command()` / `command(i)`: the name of the command at that queue index.
 ///
-/// **An object with nothing queued answers the default verb, `idle`, at index
-/// 0 -- a reading.** The original keeps the running command's name as a string
-/// on the object (`obj+0x10c`, which `WaitIdle` compares against `"idle"` at
-/// 0x005ece5a), and an object that has never been ordered is running its
-/// `idle` there. This engine starts that first `idle` straight on the scheduler
-/// (`GameSession::start_object_scripts`), outside any queue, so the queue is
-/// empty and the name used to come back `""`. `ES_STRONGHOLD.VS` asks
-/// `barrack.command == "idle"` before it trains anything, so a barracks nobody
-/// had ordered never trained. `CmdCount` is left at 0: it counts the queue, and
-/// `barrack.CmdCount < 5` reads the same either way.
+/// `Obj::command/0` (0x005abe40) answers the name of the command the object
+/// last started, a string the start writes on the object (`[obj+0x110]`);
+/// `Obj::command/1` (0x005ae620) answers the verb (`[cmd+0x34]`) of the
+/// command at that index, and `""` past the end. Every started object's queue
+/// holds its running `idle` from its start (`CommandSystem::start_slot`), so
+/// both read the head's verb here.
+///
+/// **The bare form on an empty queue answers the default verb, `idle` -- a
+/// labelled reading.** The queue is empty only for an object whose class binds
+/// no `idle`, or a dying one; the original's string still holds the last
+/// command it started, which this engine does not keep. `ES_STRONGHOLD.VS`
+/// asks `barrack.command == "idle"` before it trains anything.
 HostOutcome command_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   const std::int32_t index =
       ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
   if (index < 0) return HostOutcome::ok_with(Value::string(std::string()));
-  if (index == 0 && self.commands->command_count(self.id) == 0) {
+  if (ctx.count() <= 1 && self.commands->command_count(self.id) == 0) {
     return HostOutcome::ok_with(Value::string(std::string(self.commands->default_verb())));
   }
   return HostOutcome::ok_with(Value::string(

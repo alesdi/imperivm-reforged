@@ -25,6 +25,7 @@
 
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/feeder.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/session.hpp"
@@ -1316,17 +1317,19 @@ TEST(a_load_restores_the_script_watermark_rather_than_the_fresh_sessions) {
   run.advance(1, 400);
   REQUIRE(run.report().scripts_started == 3);
   REQUIRE(run.script_watermark() == run.world().next_id());
-  // Retire the copy's idle the way a command does, so that the only thing
-  // that could bring one back is the sweep running over it a second time.
+  // Take the copy's idle away with its whole queue -- a queue whose head
+  // merely ended would start another `idle` at once, as the original's does
+  // (0x005b5160 -> 0x005b4f20) -- so that the only thing that could bring
+  // one back is the sweep running over it a second time.
   {
-    std::size_t killed = 0;
+    std::size_t live = 0;
     for (const script::ScriptRecord& record : run.scheduler().scripts()) {
-      if (record.owner.id == copy && !record.dead) {
-        REQUIRE(run.scheduler().kill(record.id));
-        ++killed;
-      }
+      if (record.owner.id == copy && !record.dead) ++live;
     }
-    REQUIRE(killed == 1);
+    REQUIRE(live == 1);
+    CommandSystem* commands = command_system(run.world());
+    REQUIRE(commands != nullptr);
+    commands->forget(copy);
   }
   run.advance(1, 400);
   const std::size_t live_before = run.scheduler().live_count();

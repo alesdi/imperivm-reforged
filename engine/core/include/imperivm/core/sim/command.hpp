@@ -580,6 +580,10 @@ class CommandSystem final : public System {
   /// empty. `!front` appends. 0 when refused, as `set_command`.
   std::uint32_t add_command(World& world, ObjectId id, bool front, std::string_view verb,
                             const Command& prototype);
+  /// `add_command`'s insert (`vtbl+0xbc`, 0x005b5c30) for a command already
+  /// made, its id already drawn: the accept test, then index 1 or the back.
+  /// Returns the command's id, or 0 when refused.
+  std::uint32_t insert_made(World& world, ObjectId id, bool front, Command command);
   /// An **order** appended through the order core -- `ExecCmd(..., false)`,
   /// a queued player order, `UpgradeBestBarrack` -- rather than a script's
   /// own `AddCommand`. The one difference: a head that is the default verb
@@ -628,6 +632,14 @@ class CommandSystem final : public System {
   /// `KillCommand()`: end the running command. Returns false when there was
   /// none. The queue refills with the default verb if it would go empty.
   bool kill_command(World& world, ObjectId id);
+
+  /// 0x005aec40's first act on an object it starts: its slot-0 end with
+  /// nothing queued, which pushes the class's `idle` and starts it
+  /// (`end_slot` -> `start_head`). Nothing for an object that is dead, binds
+  /// no `idle`, or already has a queue. True when an `idle` was started.
+  /// `GameSession::start_object_scripts` calls it before the object's
+  /// behaviours.
+  bool start_slot(World& world, ObjectId id);
 
   /// The scheduler's step hook calls this after every slice
   /// (`install_deferred_erase`): when `script` has just ended -- returned,
@@ -912,17 +924,14 @@ class CommandSystem final : public System {
   std::uint32_t chunk_of(World& world, ObjectId id, std::string_view verb, bool count_miss);
   /// `launch`'s second half: spawn `command`'s script from `chunk`.
   bool launch_chunk(World& world, ObjectId id, Command& command, std::uint32_t chunk);
-  /// End the `idle` an object was started with outside its queue, now that a
-  /// command holds the object's command slot. See `launch`.
-  void end_resting_idle(World& world, ObjectId id);
   void retire(Command& command);
   /// `retire`, then the method's `onfinish` script for a command that had
   /// started, with `canceled` as its second argument. See `finish_command`.
   void retire(World& world, ObjectId id, Command& command, bool canceled);
   /// Run `<method onfinish>` for a command that is over: `(This, bCanceled)`,
-  /// spawned on the scheduler with the command kept on `finishing_` so that
-  /// `cmdparam` and the costs still answer inside it. Nothing when the class
-  /// binds no `onfinish` for the verb.
+  /// to its end, now (0x0059af00 through 0x006a0360), with the command
+  /// ambient so that `cmdparam` and the costs answer inside it. Nothing when
+  /// the class binds no `onfinish` for the verb.
   void finish_command(World& world, ObjectId id, const Command& command, bool canceled);
   /// The class's `<method>` row for `verb`, or null. Static and private so
   /// the cache's shape stays this file's.
@@ -982,10 +991,6 @@ class CommandSystem final : public System {
   [[nodiscard]] std::size_t disabled_lower_bound(ObjectId id) const noexcept;
 
   std::vector<Entry> queues_;  ///< sorted by id; iteration order is world state
-  /// Commands whose `onfinish` script is running, `script` being that script.
-  /// Pruned when the script is gone. `command_of_script` reads it after the
-  /// queues, so an `onfinish` sees the command it is finishing.
-  std::vector<Command> finishing_;
   /// Sorted by id, and only objects a script has taken a command from are in
   /// it: the set is empty on every map at turn zero.
   std::vector<DisabledEntry> disabled_;

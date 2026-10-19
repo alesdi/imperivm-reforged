@@ -525,15 +525,22 @@ TEST(sneak_command_interrupts_the_runner_and_resumes_it_after) {
   (void)f.add(u, false, "guard");
   CHECK(f.verbs(u) == (std::vector<std::string>{"move", "guard"}));
 
+  const std::uint32_t runner = f.commands.find(u)->entries.front().id;
+  const std::uint32_t next = f.world.next_command_id();
   HostCall sneak(f.world, {obj(u), Value::string("engage")});
   CHECK(invoke(registry, CallKind::member, "SneakCommand", 1, sneak).status == HostStatus::ok);
   CHECK(f.verbs(u) == (std::vector<std::string>{"engage", "move", "guard"}));
   const CommandQueue* q = f.commands.find(u);
   REQUIRE(q != nullptr && q->entries.size() == 3);
-  // The resumed march is the old one, argument and all, under a fresh id.
+  // The resumed march is the old one, argument, row and id: the clone draws
+  // an id in its constructor and then takes the runner's (0x00599cdb). The
+  // new command drew the id after the one the probe above took, the clone
+  // the one after that.
   CHECK(q->entries[1].arg_kind == CommandArgKind::point);
   CHECK(q->entries[1].point == (Point{640, 480}));
-  CHECK(q->entries[1].id != q->entries[0].id);
+  CHECK(q->entries[1].id == runner);
+  CHECK(q->entries[0].id == next + 1);
+  CHECK(f.world.next_command_id() == next + 3);
   CHECK(q->entries[0].arg_kind == CommandArgKind::none);
 
   // A verb the class does not bind prints and adds nothing.
@@ -641,13 +648,14 @@ TEST(the_host_add_and_set_command_reach_the_queue) {
   CHECK(invoke(registry, CallKind::member, "CmdCount", 0, count).value.as_integer() == 3);
 }
 
-TEST(an_object_nobody_has_ordered_is_running_idle) {
-  // The original keeps the running command's name on the object (`obj+0x10c`,
-  // `WaitIdle`'s compare at 0x005ece5a), and an object never ordered is
-  // running its `idle`. Here that first `idle` is started outside any queue,
-  // so the queue is empty -- and `ES_STRONGHOLD.VS`'s `barrack.command ==
-  // "idle"` has to be true of it, or no barracks trains until something else
-  // has ordered it once.
+TEST(the_bare_command_of_an_empty_queue_is_idle) {
+  // The original's bare `command` (0x005abe40) reads the name of the command
+  // the object last started, a string on the object; the indexed form
+  // (0x005ae620) reads the queue, `""` past its end. A started object's queue
+  // holds its running `idle` (`CommandSystem::start_slot`); a queue the
+  // fixture never started is empty, and the bare form answers the resting
+  // verb for it (the labelled reading at `command_impl`) --
+  // `ES_STRONGHOLD.VS`'s `barrack.command == "idle"`.
   Fixture f;
   HostRegistry registry;
   register_command_host(registry);
@@ -657,11 +665,10 @@ TEST(an_object_nobody_has_ordered_is_running_idle) {
     return invoke(registry, CallKind::member, "command", arity, call).value.as_string();
   };
   CHECK(name({obj(barracks)}, 0) == "idle");
-  CHECK(name({obj(barracks), Value::integer(0)}, 1) == "idle");
-  // Only the running slot: nothing is queued behind it.
+  // The indexed form reads the queue, which holds nothing.
+  CHECK(name({obj(barracks), Value::integer(0)}, 1).empty());
   CHECK(name({obj(barracks), Value::integer(1)}, 1).empty());
-  // And the queue is still empty -- `CmdCount` counts what is queued, and
-  // `barrack.CmdCount < 5` reads the same either way.
+  // And the queue is still empty: `CmdCount` counts what is queued.
   HostCall count(f.world, {obj(barracks)});
   CHECK(invoke(registry, CallKind::member, "CmdCount", 0, count).value.as_integer() == 0);
   CHECK(f.commands.find(barracks) == nullptr || f.commands.find(barracks)->empty());
