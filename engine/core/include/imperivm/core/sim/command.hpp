@@ -1083,13 +1083,13 @@ inline constexpr std::int64_t kDefaultIdleSlice = 1000;
 ///     .FormSetupAndMoveTo(pt, 0, 0, true);
 ///     while (.HasPath()) .FormKeepMoving(1500);
 ///
-/// Setup lays the hero's own route and records the order; each `FormKeepMoving`
-/// re-places the army at its formation offsets around the hero's *current*
-/// position and facing, then suspends for the lesser of its argument and the
-/// hero's time to arrival. The offsets come from `formation_offsets` and the
-/// hero's `formation` -- both already in `sim/movement.hpp`, both read from
-/// `DATA\FORMATIONS.XML`. Arguments two and three are the arrival annulus, which
-/// `Hero.FormSetupAndMoveTo(b, 100, 100, false)` shows using both halves of.
+/// Setup lays the hero's own route, which stands for the formation's, and
+/// the first sample; each `FormKeepMoving` updates the hero's formation
+/// object (`sim/formation.hpp`, docs/formats/formation.md), samples it again
+/// ahead of him, sends every marching member to its slot's sample, then
+/// suspends for its argument. Arguments two and three are the arrival
+/// annulus, which `Hero.FormSetupAndMoveTo(b, 100, 100, false)` shows using
+/// both halves of.
 ///
 /// ### The flag argument
 ///

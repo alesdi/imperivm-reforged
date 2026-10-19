@@ -1007,7 +1007,6 @@ TEST(save_movement_section_round_trips) {
   MoveState& first = movement.state(a);
   first.speed = 220;
   first.speed_factor = 150;
-  first.formation = "Wedge";
   first.target = Point{900, 400};
   first.target_object = b;
   first.has_path = true;
@@ -1036,7 +1035,6 @@ TEST(save_movement_section_round_trips) {
   const MoveState* restored = fresh.find(a);
   REQUIRE(restored != nullptr);
   CHECK(restored->speed == 220);
-  CHECK(restored->formation == "Wedge");
   CHECK(restored->target_object == b);
   CHECK(restored->progress == 123456789);
   CHECK(restored->walking);

@@ -372,7 +372,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// 38). A version-43 file would load a unit walking on from a failed search
 /// as one walking to the end of its old route, and one stopped after it as
 /// arrived when it stands in its band.
-inline constexpr std::uint32_t kStateVectorVersion = 44;
+/// 45: the movement section carries every hero's formation object
+/// (`sim/formation.hpp`, `[hero+0x2b0]`: its slots, pending units, marks,
+/// sample and flags; system section version 39), and the movement record no
+/// longer carries the shape, the spacing, the lock flag or the radius that
+/// stood in for it. A version-44 file has no slots, so a loaded march would
+/// stand until its hero laid the formation out again.
+inline constexpr std::uint32_t kStateVectorVersion = 45;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

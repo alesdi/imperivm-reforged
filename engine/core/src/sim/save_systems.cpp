@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 38;  // 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 39;  // 39: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -603,8 +603,6 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, m.speed);
     bytes::put_i32(out, m.speed_factor);
     bytes::put_i32(out, m.walk_anim);
-    bytes::put_i32(out, m.formation_radius);
-    bytes::put_string(out, m.formation);
     put_point(out, m.target);
     bytes::put_u32(out, m.target_object);
     bytes::put_i32(out, m.range);
@@ -655,18 +653,13 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     // from running again, and it draws from the world's generator when it runs.
     put_bool(out, m.free_spot_tried);
     put_bool(out, m.free_spot_aimed);
-    // The formation's lock flag a march's hero carries, and `Unit::Stop`'s
-    // request: a unit that came back without it would stop where it stood
-    // rather than walk on to a free spot.
-    put_bool(out, m.form_lock);
+    // `Unit::Stop`'s request: a unit that came back without it would stop
+    // where it stood rather than walk on to a free spot.
     put_bool(out, m.stop_requested);
     // And the failed search's bit: a unit that came back without it would
     // stop where it stood on a column-mate rather than walk on, and would
     // count as arrived where the original does not.
     put_bool(out, m.route_failed);
-    // The formation's radius a march's hero carries: how far short of a gate
-    // the march stands, until `place_army` lays its stations again.
-    bytes::put_i32(out, m.form_extent);
     // The pace a march gives the unit: a unit that came back without it
     // would walk at its own speed until its hero next lays the stations.
     bytes::put_i64(out, m.march_rate);
@@ -688,6 +681,34 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     put_point(out, lock.at);
     bytes::put_i32(out, lock.radius);
   }
+  // The heroes' formations (`sim/formation.hpp`): who has a slot and where,
+  // who is pending, the two marks, the sample and the march's flags. None of
+  // it is recomputable -- the slots were chosen against where the members
+  // stood when the reassign last ran.
+  bytes::put_u32(out, static_cast<std::uint32_t>(formation_objects_.size()));
+  for (const Formation& f : formation_objects_) {
+    bytes::put_u32(out, f.hero);
+    bytes::put_string(out, f.shape);
+    bytes::put_u32(out, static_cast<std::uint32_t>(f.slots.size()));
+    for (const FormationSlot& slot : f.slots) {
+      bytes::put_u32(out, slot.unit);
+      bytes::put_u32(out, slot.klass);
+      put_point(out, slot.offset);
+      put_point(out, slot.sample);
+    }
+    bytes::put_u32(out, static_cast<std::uint32_t>(f.pending.size()));
+    for (const ObjectId id : f.pending) bytes::put_u32(out, id);
+    put_bool(out, f.rebuild);
+    put_bool(out, f.reassign);
+    bytes::put_i32(out, f.alive);
+    bytes::put_i32(out, f.died);
+    bytes::put_i32(out, f.radius);
+    put_point(out, f.dir);
+    put_point(out, f.centre);
+    bytes::put_i32(out, f.samples);
+    put_bool(out, f.path);
+    put_bool(out, f.should_lock);
+  }
 }
 
 Status MovementSystem::deserialize(std::span<const std::byte> data) {
@@ -704,8 +725,7 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
     std::uint32_t waypoints = 0;
     if (!reader.u32(entry.id) || !get_point(reader, m.facing) ||
         !bytes::get_i32(reader, m.speed) || !bytes::get_i32(reader, m.speed_factor) ||
-        !bytes::get_i32(reader, m.walk_anim) || !bytes::get_i32(reader, m.formation_radius) ||
-        !bytes::get_string(reader, m.formation) || !get_point(reader, m.target) ||
+        !bytes::get_i32(reader, m.walk_anim) || !get_point(reader, m.target) ||
         !reader.u32(m.target_object) || !bytes::get_i32(reader, m.range) ||
         !bytes::get_i32(reader, m.min_range) || !get_bool(reader, m.has_path) ||
         !get_bool(reader, m.goto_active) || !get_bool(reader, m.walking) ||
@@ -731,9 +751,8 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
         !get_point(reader, m.offset_from) || !get_point(reader, m.offset_to) ||
         !bytes::get_i32(reader, m.retry_time) || !reader.u32(m.party) ||
         !get_bool(reader, m.dest_lock) || !get_bool(reader, m.free_spot_tried) ||
-        !get_bool(reader, m.free_spot_aimed) || !get_bool(reader, m.form_lock) ||
+        !get_bool(reader, m.free_spot_aimed) ||
         !get_bool(reader, m.stop_requested) || !get_bool(reader, m.route_failed) ||
-        !bytes::get_i32(reader, m.form_extent) ||
         !bytes::get_i64(reader, m.march_rate)) {
       return FormatError::truncated;
     }
@@ -764,8 +783,44 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
     }
     locks.push_back(lock);
   }
+  std::uint32_t formation_count = 0;
+  if (!reader.u32(formation_count)) return FormatError::truncated;
+  std::vector<Formation> formations;
+  for (std::uint32_t i = 0; i < formation_count; ++i) {
+    Formation f;
+    std::uint32_t slot_count = 0;
+    if (!reader.u32(f.hero) || !bytes::get_string(reader, f.shape) || !reader.u32(slot_count)) {
+      return FormatError::truncated;
+    }
+    for (std::uint32_t k = 0; k < slot_count; ++k) {
+      FormationSlot slot;
+      if (!reader.u32(slot.unit) || !reader.u32(slot.klass) || !get_point(reader, slot.offset) ||
+          !get_point(reader, slot.sample)) {
+        return FormatError::truncated;
+      }
+      f.slots.push_back(slot);
+    }
+    std::uint32_t pending_count = 0;
+    if (!reader.u32(pending_count)) return FormatError::truncated;
+    for (std::uint32_t k = 0; k < pending_count; ++k) {
+      ObjectId id = kNoObject;
+      if (!reader.u32(id)) return FormatError::truncated;
+      f.pending.push_back(id);
+    }
+    if (!get_bool(reader, f.rebuild) || !get_bool(reader, f.reassign) ||
+        !bytes::get_i32(reader, f.alive) || !bytes::get_i32(reader, f.died) ||
+        !bytes::get_i32(reader, f.radius) || !get_point(reader, f.dir) ||
+        !get_point(reader, f.centre) || !bytes::get_i32(reader, f.samples) ||
+        !get_bool(reader, f.path) || !get_bool(reader, f.should_lock)) {
+      return FormatError::truncated;
+    }
+    // By hero id, which `formation` binary-searches.
+    if (i != 0 && f.hero <= formations.back().hero) return FormatError::malformed;
+    formations.push_back(std::move(f));
+  }
   if (const Status status = finish(reader); !status.ok()) return status;
   states_ = std::move(states);
+  formation_objects_ = std::move(formations);
   grid_generation_ = generation;
   static_locks_ = std::move(locks);
   static_locks_built_ = built;
