@@ -1576,7 +1576,13 @@ class World {
   [[nodiscard]] const BoardingTable& boarding() const noexcept { return boarding_; }
   [[nodiscard]] BoardingTable& mutable_boarding() noexcept { return boarding_; }
 
-  /// Everything a holder contains, directly. Ascending id order.
+  /// Everything a holder contains, directly, in the holder's roster order:
+  /// the order they came in. Every `CVXHolder` keeps its members in a deque
+  /// (`[holder+0x30]`): the entry 0x00532160 appends one it does not already
+  /// hold and the exit 0x00531a80 erases it where it stands, so the others
+  /// keep their order. Here each member's stamp of joining
+  /// (`SpatialSlot::arrival`, written by `put_in_holder`) is that order, and
+  /// it is saved.
   std::size_t contents_of(ObjectId holder, std::vector<ObjectId>& out) const;
 
   /// Squared distance between two objects' resolved positions, in world units.

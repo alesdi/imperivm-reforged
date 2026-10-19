@@ -68,8 +68,11 @@ struct SpatialBox {
 /// `World` carries a grid that still agrees with it.
 struct SpatialSlot {
   std::int32_t cell = -1;  ///< grid cell, or -1 when not in the grid
-  /// The stamp of the object's last arrival in a cell: its place in that
-  /// cell's list, earlier first. Saved; 0 for an object never filed.
+  /// The stamp of the object's last arrival in a cell, or in a holder: its
+  /// place in that cell's list or that holder's roster, earlier first (a
+  /// holder keeps its members in a deque in the order they came in,
+  /// 0x00532160 appending and 0x00531a80 closing the gap; `World::contents_of`).
+  /// Saved; 0 for an object never filed.
   std::uint64_t arrival = 0;
 };
 
@@ -104,6 +107,9 @@ class SpatialIndex {
   /// objects carry (a load), and stamp on from `next_arrival` -- or from past
   /// the latest stamp, should that be later.
   void rebuild(std::span<WorldObject> objects, std::uint64_t next_arrival);
+
+  /// A fresh stamp, for an object that joins a holder's roster.
+  [[nodiscard]] std::uint64_t stamp() noexcept { return next_arrival_++; }
 
   /// The stamp the next arrival takes. Saved with the world, so that a loaded
   /// game stamps exactly as the saved one would have.

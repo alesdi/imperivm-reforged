@@ -93,6 +93,21 @@ the original; here only a held object is out of the grid, and a free object at `
 filed in column 0. Points outside the grid are filed in the border cell here and would run off
 the array there. A shipped map puts nothing in either place.
 
+## A holder's roster
+
+A holder is out of the grid, and keeps its members another way: every `CVXHolder` has a deque
+of handles at `[holder+0x30]`. The entry 0x00532160 (from the unit's 0x005d3e10) searches it
+and appends the unit when it is not already there; the exit 0x00531a80 erases the unit where it
+stands, so the others close up in their order. `GetUnitsOnBoard` (0x005c89f0) and
+`GetUnitsInSameHolder` (0x005df620) copy that deque front to back, and `UnboardAllUnits`
+(0x005c84b0) drops from its front. So a holder lists its members **in the order they came in**.
+
+The engine keeps no list on the holder; the member's back-link (`ObjectState::holder`) is the
+membership and the same arrival stamp is the order: `put_in_holder` stamps a unit that joins a
+holder it was not in, and `World::contents_of` answers the members in stamp order. The stamp is
+saved, so a loaded holder keeps its order too. A settlement's holder has its own roster
+(`Holder::units`, in garrison order), which those entry points read first.
+
 ## What is still unknown
 
 * Whether any position write bypasses the setter 0x0053f000 (a direct write to

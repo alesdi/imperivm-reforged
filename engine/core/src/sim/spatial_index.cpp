@@ -84,12 +84,13 @@ void SpatialIndex::rebuild(std::span<WorldObject> objects, std::uint64_t next_ar
   next_arrival_ = std::max<std::uint64_t>(next_arrival, 1);
   for (WorldObject& slot : objects) {
     slot.spatial.cell = -1;
+    // A held object's stamp is its place in its holder's roster: past it too.
+    next_arrival_ = std::max(next_arrival_, slot.spatial.arrival + 1);
     if (!stands(slot)) continue;
     const std::int32_t cell = cell_of(slot.state.position);
     cells_[static_cast<std::size_t>(cell)].push_back(
         Entry{slot.id, slot.state.position, slot.spatial.arrival});
     slot.spatial.cell = cell;
-    next_arrival_ = std::max(next_arrival_, slot.spatial.arrival + 1);
   }
   // Each list back into the order its objects came in. The objects are taken
   // in id order above, so equal stamps -- none, unless a file was written by

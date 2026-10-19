@@ -840,9 +840,13 @@ bool World::put_in_holder(ObjectId id, ObjectId holder) noexcept {
     walk = next->state.holder;
   }
 
+  const bool joining = slot->state.holder != holder;
   slot->state.holder = holder;
   slot->state.position = kHeldPosition;
   reindex(*slot);
+  // Onto the back of the holder's roster (0x00532160 appends a member it does
+  // not already hold), which is the order `contents_of` answers in.
+  if (joining) slot->spatial.arrival = index_.stamp();
   return true;
 }
 
@@ -1369,6 +1373,11 @@ std::size_t World::contents_of(ObjectId holder, std::vector<ObjectId>& out) cons
   for (const WorldObject& slot : objects_) {
     if (slot.state.holder == holder) out.push_back(slot.id);
   }
+  // The holder's roster order: the order they came in (each member's stamp
+  // of joining), as the deque at `[holder+0x30]` keeps them.
+  std::stable_sort(out.begin(), out.end(), [this](ObjectId a, ObjectId b) {
+    return find(a)->spatial.arrival < find(b)->spatial.arrival;
+  });
   return out.size();
 }
 
