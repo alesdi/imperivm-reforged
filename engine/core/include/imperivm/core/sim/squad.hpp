@@ -499,7 +499,51 @@ class SquadTable {
   void clear() noexcept {
     squads_.clear();
     for (AiOrderQueue& queue : orders_) queue.reset();
+    filed_.clear();
   }
+
+  // -- the node deques ------------------------------------------------------
+  //
+  // `docs/formats/gaika.md` has the reading. Each GAIKA node keeps a deque of
+  // squad handles, `[node+0x18]`, and every walk over "the squads of a node"
+  // -- `GetSquads`, `Count`, `Eval`, `GetAIControlledUnits`, `Empty`,
+  // `BestTargetInGAIKA`, `BestMDPos`, ... -- is a walk of that deque front to
+  // back. A squad is on node N's deque exactly when N is where it stands
+  // (`GAIKAIn`) or where it is heading (the AI order's node, else
+  // `DestGAIKA`); it is **appended** when it becomes either and erased when
+  // it stops being both, so the order is the order squads arrived. The deques
+  // live here, beside the fields that decide them, rather than on the node
+  // table, which is map configuration and never saved.
+
+  /// Node `node`'s deque, front to back. Empty for a node nothing is filed
+  /// under, which is `GAIKA::Empty`'s `[node+0x18] == 0`.
+  ///
+  /// **It first settles any squad whose fields were written without the
+  /// filing** -- every writer in the simulation goes through `move_in`,
+  /// `set_dest` and the order queue, so in play this changes nothing; a test
+  /// that pokes `gaika_in` directly gets its squad filed here, after the ones
+  /// already on the deque and in table order, and a squad whose fields no
+  /// longer name the node is dropped. Labelled: the original has no such
+  /// step, because nothing there writes the fields any other way.
+  [[nodiscard]] std::span<const SquadKey> filed_under(GaikaId node);
+
+  /// The deques as they stand, without settling -- for the serialiser and
+  /// the tests that check the filing itself. Element `n` is node `n`'s.
+  [[nodiscard]] std::span<const std::vector<SquadKey>> filing() const noexcept {
+    return filed_;
+  }
+
+  /// 0x0041eac0 -> 0x00450240: the squad's front member now stands in node
+  /// `to`. Off the deque of the node it stood in unless that is also where it
+  /// is heading, onto the back of `to`'s unless it is already heading there,
+  /// and `GAIKAIn` written. `SrcGAIKA` is then stamped from `GAIKAIn` if it
+  /// is still 0 (0x0041eb04), whether or not anything moved.
+  void move_in(SquadKey key, GaikaId to);
+
+  /// 0x00444210: `DestGAIKA` becomes `to`. When the squad has no AI order --
+  /// so `DestGAIKA` is its heading -- it is refiled from the old one to `to`
+  /// (0x0041ea10 -> 0x004501a0); with an order the deques are untouched.
+  void set_dest(SquadKey key, GaikaId to);
 
   // -- the AI order queue -------------------------------------------------
   //
@@ -568,7 +612,7 @@ class SquadTable {
   [[nodiscard]] std::size_t lower_bound(SquadKey key) const noexcept;
   /// 0x00448a10: the squad's record back on the free chain, and the squad
   /// pointed at none.
-  void free_order(Squad& squad) noexcept;
+  void free_order(Squad& squad);
   /// `id` out of the squad `key` names: the squad, or null when either is not
   /// there.
   Squad* remove_member(SquadKey key, ObjectId id);
@@ -591,11 +635,32 @@ class SquadTable {
   ///
   /// The squad itself stays, with whatever members it has: nothing here
   /// destroys it, and the leave's two callers ignore what it answers.
-  void stand_down(Squad& squad) noexcept;
+  void stand_down(Squad& squad);
+
+  /// 0x004501a0: the squad's heading moves from `from` to `to`. Off `from`'s
+  /// deque unless the squad stands there, onto the back of `to`'s unless it
+  /// stands there. Nothing when the two are the same node.
+  void refile_heading(const Squad& squad, GaikaId from, GaikaId to);
+  /// 0x00437870 / 0x00435d90: append. 0x0044f300: erase the first entry for
+  /// `key`, if any -- the deque is freed when that empties it.
+  void file(GaikaId node, SquadKey key);
+  void unfile(GaikaId node, SquadKey key);
+  /// Every entry for `key` off every deque: a squad leaving the table.
+  void forget(SquadKey key);
 
   std::vector<Squad> squads_;  ///< sorted by squad_key_less; iteration order is state
   std::array<AiOrderQueue, kPlayerCount> orders_{};  ///< by player; see `AiOrderQueue`
+  /// The node deques, by node id; see `filed_under`. Saved, not hashed: like
+  /// the squads' own AI fields, which decide them.
+  std::vector<std::vector<SquadKey>> filed_;
 };
+
+/// Node `node`'s deque (`SquadTable::filed_under`) as a copy, for a walk that
+/// may touch the table while it goes.
+[[nodiscard]] inline std::vector<SquadKey> squads_filed_under(SquadTable& table, GaikaId node) {
+  const std::span<const SquadKey> deque = table.filed_under(node);
+  return std::vector<SquadKey>(deque.begin(), deque.end());
+}
 
 /// Bring every squad's `eval` and `gaika_in` up to date -- **the two stored
 /// fields nothing in this engine used to write**, and the reason nine shipped

@@ -1291,9 +1291,9 @@ TEST(get_ai_controlled_units_counts_a_squad_that_is_heading_to_the_node) {
   // `DestGAIKA` is the fallback "heading to", so node 1 counts it now.
   squad->dest_gaika = 1;
   CHECK(controlled(b, 1, "Military", 2, 10, false) == std::vector<ObjectId>{marching});
-  // And the order's node wins over `DestGAIKA` when there is one, which is the
-  // one place this rule differs from `GetSquads`'s.
-  squad->order_dest = 2;
+  // And the order's node wins over `DestGAIKA` when there is one: the deque
+  // `GetSquads` walks, filed by the post.
+  REQUIRE(b.heroes.squads().post_order(key, 2, 1));
   CHECK(controlled(b, 1, "Military", 2, 10, false).empty());
   CHECK(controlled(b, 2, "Military", 2, 10, false) == std::vector<ObjectId>{marching});
 }
@@ -1793,11 +1793,18 @@ TEST(gaika_empty_is_true_until_a_squad_stands_in_the_node) {
   CHECK(empty(99));
 
   const ObjectId soldier = b.soldier("Legionary", 1);
-  b.band(1, 1, {soldier});
+  const SquadKey band = b.band(1, 1, {soldier});
   CHECK(!empty(1));
   // ...and only that node.
   CHECK(empty(2));
   CHECK(empty(kNoGaika));
+  // **A squad on its way is on the deque too** (0x004501a0 files it under its
+  // heading), so the node it is marching on is not empty before it arrives.
+  // This read "no squad whose `GAIKAIn` is here" and answered true.
+  b.heroes.squads().set_dest(band, 2);
+  CHECK(!empty(2));
+  b.heroes.squads().set_dest(band, 1);
+  CHECK(empty(2));
 
   // A squad standing in a node the table does not have. The original cannot
   // build this -- its container hangs off the node -- but this engine can,

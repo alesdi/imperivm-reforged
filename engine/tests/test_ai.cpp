@@ -4763,6 +4763,34 @@ TEST(gaika_eval_adds_the_settlement_skips_messengers_and_sees_as_the_ai_sees) {
   // A Normal one sees 32000.
   REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
   CHECK(eval6(1)[2] == 18);
+
+  // **`Count/6` is the same walk counting heads** (0x00430a30): the member
+  // count where `Eval` has the strength, the wall's head count `[+0xf4]`
+  // where it has the wall's strength, and the same messengers, sight and
+  // viewer. It used to have a walk of its own that knew none of them.
+  const auto count6 = [&](std::int32_t presence, std::int32_t player) {
+    std::vector<script::Value> args{gaika_value(kHere), script::Value::integer(presence),
+                                    script::Value::integer(player), script::Value::integer(-1),
+                                    script::Value::integer(-1), script::Value::integer(-1),
+                                    script::Value::integer(-1)};
+    const std::uint32_t index = f.registry.find(script::CallKind::member, "Count", 6);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return std::array<std::int32_t, 4>{};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &f.context;
+    CHECK(f.registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+    return std::array<std::int32_t, 4>{args[3].as_integer(), args[4].as_integer(),
+                                       args[5].as_integer(), args[6].as_integer()};
+  };
+  {
+    const auto t = count6(4, 1);
+    CHECK(t[0] == 2);          // the own pair; the two messengers are nobody
+    CHECK(t[2] == 2 + 3 + 1);  // the lurkers, three on the wall, the lingerer
+  }
+  CHECK(count6(1, 1)[2] == 2);  // the two columns, as a Normal AI sees them
+  // A player of 0 is nobody, and every squad is then its own: the wall too.
+  CHECK(count6(4, 0)[0] == 2 + 2 + 3);
 }
 
 /// **`MilitaryPresence` asks the node's settlement when no squad answers**

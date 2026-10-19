@@ -2300,16 +2300,12 @@ HostOutcome m_gaika_need(CallContext& ctx) {
 /// squad there. `sim/squad.cpp` walks that same container for
 /// `GetAIControlledUnits` and `GetSquads`.
 ///
-/// Modelled from the squad side, because that is where this engine keeps node
-/// membership: no squad whose `GAIKAIn` is this node. The two agree wherever
-/// the original's container exists, and the original cannot distinguish an
-/// allocated-but-empty container from an absent one in any way a script can
-/// see -- nothing shrinks it back to null.
-///
-/// **It answers true on every shipped map today**, because nothing here assigns
-/// a GAIKA to a squad. `RECRUITER.VS` reads it as "this node has no army in it
-/// and has not been explored, so skip it", and true is the answer that keeps
-/// that walk moving rather than the one that stops it.
+/// That deque is `SquadTable::filed_under`, and it holds a squad that is
+/// **standing in the node or heading for it** -- so a node an army is
+/// marching on is not empty before the army arrives. This read "no squad
+/// whose `GAIKAIn` is this node", which missed every squad on its way.
+/// 0x0044f300 frees the deque when its last entry is erased, so an emptied
+/// deque is null again and empty is "no entry", nothing more.
 HostOutcome m_gaika_empty(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr || ctx.count() == 0) {
@@ -2319,12 +2315,9 @@ HostOutcome m_gaika_empty(CallContext& ctx) {
   if (node == kNoGaika || world->gaika().find(node) == nullptr) {
     return HostOutcome::ok_with(Value::boolean(true));
   }
-  const HeroSystem* heroes = hero_system_of(*world);
+  HeroSystem* heroes = hero_system_of(*world);
   if (heroes == nullptr) return HostOutcome::ok_with(Value::boolean(true));
-  for (const Squad& squad : heroes->squads().squads()) {
-    if (squad.gaika_in == node) return HostOutcome::ok_with(Value::boolean(false));
-  }
-  return HostOutcome::ok_with(Value::boolean(true));
+  return HostOutcome::ok_with(Value::boolean(heroes->squads().filed_under(node).empty()));
 }
 
 /// `g.MilitaryPresence(idPlayer)` -- 2 sites, and the sole blocker of both
@@ -2386,9 +2379,12 @@ HostOutcome m_gaika_military_presence(CallContext& ctx) {
     return viewer < 0 ? kAiOwn : ai_relation(players, viewer, owner);
   };
 
-  const HeroSystem* heroes = hero_system_of(*world);
+  HeroSystem* heroes = hero_system_of(*world);
   if (heroes == nullptr) return no;
-  for (const Squad& squad : heroes->squads().squads()) {
+  for (const SquadKey& key : squads_filed_under(heroes->squads(), node)) {
+    const Squad* filed = heroes->squads().find(key);
+    if (filed == nullptr) continue;
+    const Squad& squad = *filed;
     if (squad.eval == 0) continue;
     if ((category(squad.key.player) & kAiOwn) == 0) continue;
     if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
@@ -2808,7 +2804,10 @@ HostOutcome m_best_target_in_gaika(CallContext& ctx) {
   // -- the squads standing here ------------------------------------------
   if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
     std::vector<ObjectId> candidates;
-    for (const Squad& squad : heroes->squads().squads()) {
+    for (const SquadKey& key : squads_filed_under(heroes->squads(), node)) {
+      const Squad* filed = heroes->squads().find(key);
+      if (filed == nullptr) continue;
+      const Squad& squad = *filed;
       if (squad.eval == 0) continue;
       if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
       if (!players.is_enemy(mine, squad.key.player)) continue;
@@ -4225,7 +4224,10 @@ struct SpellSite {
   site.ok = true;
   site.mine = mine;
   site.from = unit_pos_rh(world, self);
-  for (const Squad& squad : heroes->squads().squads()) {
+  for (const SquadKey& key : squads_filed_under(heroes->squads(), node)) {
+    const Squad* filed = heroes->squads().find(key);
+    if (filed == nullptr) continue;
+    const Squad& squad = *filed;
     if (squad.eval == 0) continue;
     if (!players.is_enemy(mine, squad.key.player)) continue;
     if ((squad.flags & kSquadFlagPeaceful) != 0) continue;

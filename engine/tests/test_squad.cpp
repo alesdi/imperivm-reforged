@@ -2195,7 +2195,8 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
 
   // Player 0 is asking. 1 is its ally, 2 its enemy, and 3 one it has granted a
   // truce that 3 has not returned -- which `Eval` counts as an ally (0x0044e250
-  // reads the asking player's row alone) and `Count` still counts as nobody.
+  // reads the asking player's row alone) -- and so does `Count`, whose walk is
+  // the same (0x00430a30 asks 0x0044e250 too; it counted nobody here once).
   PlayerTable& players = f.world.players();
   players.set(0, 1, Relation::allied, true);
   players.set(1, 0, Relation::allied, true);
@@ -2258,7 +2259,7 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   {
     const auto bodies = census("Count", 6, 4);
     CHECK(bodies[0] == 3);
-    CHECK(bodies[1] == 2);
+    CHECK(bodies[1] == 2 + 9);
     CHECK(bodies[2] == 0);
   }
   CHECK(census("Count", 6, 0xFFFF)[2] == 6);
@@ -2400,6 +2401,12 @@ TEST(gaika_count_by_class_walks_the_staying_squads_and_then_the_settlement) {
   graph.add(bytes(R"(<class id="Peasant" cpp_class="CVXUnit" parent="Unit"/>)"), "peasant.sc.xml");
   graph.add(bytes(R"(<class id="Sentry" cpp_class="CVXUnit" parent="Unit"/>)"), "sentry.sc.xml");
   graph.add(bytes(R"(<class id="RSentry" cpp_class="CVXUnit" parent="Sentry"/>)"), "rsentry.sc.xml");
+  // A town hall of a race whose sentry class is `RSentry`, so the wall has a
+  // strength (`per_sentry_eval` is at least 1 once the class exists).
+  graph.add(bytes(R"(<class id="RTownhall" cpp_class="CVXTownHall" parent="">
+      <properties race="RepublicanRome"/>
+    </class>)"),
+            "rtownhall.sc.xml");
   graph.link();
 
   World world;
@@ -2448,7 +2455,7 @@ TEST(gaika_count_by_class_walks_the_staying_squads_and_then_the_settlement) {
   // The settlement is node 1: `GaikaTable::build` lays the settlements down
   // first, in store order, so the id is a function of the map rather than of
   // anything that happens in play.
-  const ObjectId hall = world.spawn(NativeClass::building, nullptr);
+  const ObjectId hall = world.spawn(NativeClass::town_hall, nullptr, graph.find("RTownhall"));
   world.set_owner(hall, 2);
   SettlementInit init;
   init.settlement_object = hall;
@@ -2458,7 +2465,7 @@ TEST(gaika_count_by_class_walks_the_staying_squads_and_then_the_settlement) {
   const SettlementId town = economy.settlements().create(init);
   // A second settlement, so that "the node's settlement" is a claim a test can
   // fail. With one of them every wrong node answers the right way.
-  const ObjectId outpost = world.spawn(NativeClass::building, nullptr);
+  const ObjectId outpost = world.spawn(NativeClass::town_hall, nullptr, graph.find("RTownhall"));
   world.set_owner(outpost, 1);
   SettlementInit second;
   second.settlement_object = outpost;
@@ -2560,6 +2567,14 @@ TEST(gaika_count_by_class_walks_the_staying_squads_and_then_the_settlement) {
   set->sentries_ready = -3;
   CHECK(count(4, 1, "Sentry") == 1);
   set->sentries_ready = 6;
+
+  // **Only a town hall offers its wall, and only one with strength**
+  // (0x00420c00: 0x0043ffc0, then `[+0xf8] > 0`). This gated on the head
+  // count alone, so a village's sentries were counted.
+  set->kind = SettlementKind::village;
+  CHECK(count(4, 1, "Sentry") == 1);
+  set->kind = SettlementKind::stronghold;
+  CHECK(count(4, 1, "Sentry") == 6 + 1);
 
   // **The settlement is the node's own**, which is a claim about `GaikaTable`'s
   // numbering as much as about this walk: the settlements are laid down first
@@ -3492,6 +3507,117 @@ TEST(get_squads_filters_by_arity_and_presence_is_0x0044e1f0) {
   // `/4`: the relation mask.
   CHECK(fill({Value::integer(4), Value::integer(2), Value::integer(4)}) ==
         std::vector<SquadKey>({theirs}));
+}
+
+/// **A node's squads come in the order they were filed** -- the deque at
+/// `[node+0x18]`, appended to (0x00437870) when a squad comes to stand in the
+/// node (0x00450240) or to head for it (0x004501a0), erased (0x0044f300) when
+/// it is neither. Every `GetSquads` form walks it front to back. This walked
+/// the squad table instead, so the answer was always in (player, index) order:
+/// the squad with the higher index, there first, came back second.
+TEST(a_nodes_squads_come_back_in_the_order_they_were_filed) {
+  Fixture f;
+  HostRegistry registry;
+  register_squad_host(registry);
+  constexpr GaikaId kHere = 4;
+  constexpr GaikaId kThere = 7;
+
+  SquadTable& table = f.heroes.squads();
+  const SquadKey first = f.squad_of(1, 1);   // index 1
+  const SquadKey second = f.squad_of(1, 1);  // index 2
+  const SquadKey third = f.squad_of(2, 1);
+  // The higher index arrives first, then the lower, then a squad that is only
+  // on its way.
+  table.move_in(second, kHere);
+  table.move_in(first, kHere);
+  table.set_dest(third, kHere);
+
+  const SquadListId list = make_list(f.world);
+  const auto all = [&](GaikaId node) {
+    HostCall call(f.world, {Value::integer(node), make_squadlist_value(list)});
+    CHECK(invoke(registry, CallKind::member, "GetSquads", 1, call).status == HostStatus::ok);
+    const std::span<const SquadKey> items = squadlist_pool_of(f.world).items(list);
+    return std::vector<SquadKey>(items.begin(), items.end());
+  };
+  CHECK(all(kHere) == std::vector<SquadKey>({second, first, third}));
+
+  // Leaving for elsewhere keeps the place on the deque while it still stands
+  // here (heading changed, standing did not)...
+  table.set_dest(second, kThere);
+  CHECK(all(kHere) == std::vector<SquadKey>({second, first, third}));
+  CHECK(all(kThere) == std::vector<SquadKey>({second}));
+  // ...and loses it when it walks out; coming back is a new arrival, at the
+  // back.
+  table.move_in(second, kThere);
+  CHECK(all(kHere) == std::vector<SquadKey>({first, third}));
+  table.set_dest(second, kHere);
+  CHECK(all(kHere) == std::vector<SquadKey>({first, third, second}));
+  CHECK(all(kThere) == std::vector<SquadKey>({second}));
+}
+
+/// The AI order refiles too: a post takes the squad from `DestGAIKA` to the
+/// order's node (0x004494c0 -> 0x0041ea60) after freeing the previous record,
+/// which refiles it from that record's node back to `DestGAIKA`
+/// (0x00448a10). So **a squad sent again to the node it is already sent to
+/// goes to the back of that node's deque**, and a deleted order takes it off.
+TEST(a_squad_sent_again_goes_to_the_back_of_the_nodes_deque) {
+  Fixture f;
+  constexpr GaikaId kHome = 3;
+  constexpr GaikaId kTarget = 5;
+  SquadTable& table = f.heroes.squads();
+  const SquadKey a = f.squad_of(1, 1);
+  const SquadKey b = f.squad_of(1, 1);
+  table.move_in(a, kHome);
+  table.move_in(b, kHome);
+  table.set_dest(a, kHome);
+  table.set_dest(b, kHome);
+  const auto at = [&](GaikaId node) {
+    const std::span<const SquadKey> deque = table.filed_under(node);
+    return std::vector<SquadKey>(deque.begin(), deque.end());
+  };
+
+  REQUIRE(table.post_order(a, kTarget, 5));
+  REQUIRE(table.post_order(b, kTarget, 5));
+  CHECK(at(kTarget) == std::vector<SquadKey>({a, b}));
+  REQUIRE(table.post_order(a, kTarget, 7));
+  CHECK(at(kTarget) == std::vector<SquadKey>({b, a}));
+  // Standing at home, so still on home's deque throughout.
+  CHECK(at(kHome) == std::vector<SquadKey>({a, b}));
+
+  REQUIRE(table.delete_order(b));
+  CHECK(at(kTarget) == std::vector<SquadKey>({a}));
+  // With an order, `DestGAIKA` is not the heading and moving it files nothing.
+  table.set_dest(a, 9);
+  CHECK(at(9).empty());
+}
+
+/// A squad whose strength reaches 0 at a leave is stood down: the order freed,
+/// filed under no node, bound for none (0x0041e9c0, 0x0041eac0 with 0,
+/// 0x00444210 with 0) -- off every deque. And the deques are saved, in order.
+TEST(a_stood_down_squad_leaves_every_deque_and_the_deques_are_saved) {
+  Fixture f;
+  SquadTable& table = f.heroes.squads();
+  const SquadKey a = f.squad_of(1, 1);
+  const SquadKey b = f.squad_of(1, 1);
+  table.move_in(b, 4);
+  table.move_in(a, 4);
+  table.set_dest(a, 6);
+  const auto filed = [](const SquadTable& t, std::size_t node) {
+    const std::span<const std::vector<SquadKey>> all = t.filing();
+    return node < all.size() ? all[node] : std::vector<SquadKey>{};
+  };
+
+  SquadTable copy;
+  std::vector<std::byte> bytes_out;
+  table.serialize(bytes_out);
+  REQUIRE(copy.deserialize(bytes_out).ok());
+  CHECK(filed(copy, 4) == std::vector<SquadKey>({b, a}));
+  CHECK(filed(copy, 6) == std::vector<SquadKey>({a}));
+
+  const ObjectId only = table.find(a)->members.front();
+  REQUIRE(table.leave(a, only));
+  CHECK(filed(table, 4) == std::vector<SquadKey>({b}));
+  CHECK(filed(table, 6).empty());
 }
 
 /// **`SquadList::Add` is the same name on another type**, and its body lives in
