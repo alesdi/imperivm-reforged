@@ -1263,13 +1263,11 @@ HostOutcome fn_is_protected(CallContext& ctx) {
 /// An invalid receiver's answer is the original's own fault: it pushes four
 /// bytes of zero where a point is eight, and `(0, 0)` stands in.
 ///
-/// **The tie rule is the one labelled divergence.** The original's sweep
-/// visits 256-unit cells row by row and the objects within a cell in the
-/// order they were entered; `World::objects_in_radius` answers in id order.
-/// Two enemy towers at exactly the same squared distance -- which needs
-/// symmetric placement to the unit -- would pick the lower id here and the
-/// earlier-swept one there. Nothing shipped places towers that way, and the
-/// sweep order is not worth a second index to reproduce.
+/// The sweep (0x004e2760) walks the world's grid -- 256-unit cells row by
+/// row, and the objects within a cell in the order they came into it -- and
+/// so does this one (`SweepOrder::grid`, `docs/formats/spatial-index.md`), so
+/// of two enemy towers at exactly the same squared distance the earlier-swept
+/// one wins, as there.
 HostOutcome m_calc_escape_direction(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("CalcEscapeDirection: no world");
@@ -1282,7 +1280,7 @@ HostOutcome m_calc_escape_direction(CallContext& ctx) {
   const ClassIndex outpost = graph == nullptr ? kNoClass : graph->lookup("Outpost");
 
   std::vector<ObjectId> around;
-  (void)world->objects_in_radius(here, self->sight, ClassFilter{}, around);
+  (void)world->objects_in_radius(here, self->sight, ClassFilter{}, around, SweepOrder::grid);
   const WorldObject* threat = nullptr;
   std::int64_t best = 0;
   for (const ObjectId id : around) {
@@ -1352,8 +1350,8 @@ HostOutcome m_calc_escape_direction(CallContext& ctx) {
 ///   * and is strictly nearer than the best so far (`jge` skips an equal
 ///     distance), so a tie keeps the first the sweep met.
 ///
-/// The tie rule is the same labelled divergence `CalcEscapeDirection`
-/// carries: the sweep's cell order there, id order here.
+/// The sweep walks the world's grid in its order, as `CalcEscapeDirection`'s
+/// does, so a tie keeps the first the grid walk met.
 HostOutcome m_ram_best_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RamBestTarget: no world");
@@ -1370,7 +1368,8 @@ HostOutcome m_ram_best_target(CallContext& ctx) {
   }
 
   std::vector<ObjectId> around;
-  (void)world->objects_in_radius(here, self->sight + 512, ClassFilter{}, around);
+  (void)world->objects_in_radius(here, self->sight + 512, ClassFilter{}, around,
+                                 SweepOrder::grid);
   ObjectId best = kNoObject;
   std::int64_t best_d2 = 1000000;
   for (const ObjectId id : around) {
@@ -1544,8 +1543,8 @@ HostOutcome m_set_no_ai_flag(CallContext& ctx) { return set_no_ai_flag<false>(ct
 /// (`World::create_query`). A temporary therefore reads as fresh, as the
 /// original's freshly made one does; what differs is that two equal calls
 /// share one cache there and two here, and that the handles a script sees are
-/// allocated differently. Results also come in ascending id order rather than
-/// the original's grid order (`sim/spatial_index.hpp`).
+/// allocated differently. An area operand's list is in the original's grid
+/// order (`sim/spatial_index.hpp`), and the operation walks it in that order.
 template <SetOp kOp>
 HostOutcome fn_set_op(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -2899,8 +2898,9 @@ HostOutcome m_set_training(CallContext& ctx) {
 /// family that shares this formula -- so the term is 0 here and the score is
 /// the distance with its four adjustments. The distance is centre to centre;
 /// the original's is the same `isqrt` over the same squares (0x005a77b0).
-/// The sweep here is in ascending id, the original's in grid order, which is
-/// the tie the last clause names.
+/// The sweep (0x005d4cd0) walks the world's grid in its order, and so does
+/// this one (`SweepOrder::grid`): that order decides the tie the last clause
+/// names, and which enemy ends the sweep first.
 HostOutcome m_best_training_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("BestTrainingTarget: no world");
@@ -2914,7 +2914,7 @@ HostOutcome m_best_training_target(CallContext& ctx) {
   const PlayerId owner = self->state.owner;
 
   std::vector<ObjectId> around;
-  world->objects_in_radius(at, self->sight, ClassFilter{}, around);
+  world->objects_in_radius(at, self->sight, ClassFilter{}, around, SweepOrder::grid);
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
   for (const ObjectId id : around) {
@@ -5251,30 +5251,36 @@ HostOutcome m_has_special(CallContext& ctx) {
 /// aliveness test, no visibility test, no diplomacy test** -- a crow will fly
 /// toward an enemy crow, or a dead one.
 ///
-/// It takes the first match in the scan's cell order and stops, which is not the
-/// nearest. This engine has no 256-unit object grid, so the order it can offer
-/// is ascending object id -- spawn order, deterministic, and equally not the
-/// nearest. The divergence is recorded rather than papered over: the shipped
-/// caller, `CROW_IDLE.VS`, uses the answer only to pick a direction to fly in
-/// when its own 900-unit query found no flock.
+/// It takes the first match in the sweep's order and stops, which is not the
+/// nearest: the grid walk 0x0051b840 -- rows of 256-unit cells, cells left to
+/// right, each cell's list in the order its objects came into it
+/// (`docs/formats/spatial-index.md`) -- over the circle of 2,048 about the
+/// receiver's own point, squared distance at most 2048 squared. A held object
+/// is in no cell and is never found; a spawn template is (no `0x08000000`
+/// test).
 HostOutcome m_find_near_bird(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("FindNearBird: no world");
   const WorldObject* self = object_of(*world, ctx.arg(0));
   if (self == nullptr) return HostOutcome::ok_with(invalid_object());
-  const Point from = world->resolve_position(self->id);
-  constexpr std::int64_t kBirdRange = 2048;
-  for (const WorldObject& other : world->objects()) {
-    if (other.id == self->id) continue;
-    if (other.internal != InternalKind::none) continue;
+  const Point from = self->state.position;
+  constexpr std::int32_t kBirdRange = 2048;
+  std::vector<ObjectId> around;
+  world->objects_located_in_rect(from.x - kBirdRange, from.y - kBirdRange, from.x + kBirdRange,
+                                 from.y + kBirdRange, around, SweepOrder::grid);
+  for (const ObjectId id : around) {
+    if (id == self->id) continue;
+    const WorldObject* other = world->find(id);
     // "The same entity class" is the class *pointer* in the original -- two
     // objects of one `<class>` -- which here is the class graph index.
-    if (other.class_index == kNoClass || other.class_index != self->class_index) continue;
-    const Point at = world->resolve_position(other.id);
-    const std::int64_t dx = at.x - from.x;
-    const std::int64_t dy = at.y - from.y;
-    if (dx * dx + dy * dy > kBirdRange * kBirdRange) continue;
-    return HostOutcome::ok_with(object_value(other.id));
+    if (other == nullptr || other->class_index == kNoClass ||
+        other->class_index != self->class_index) {
+      continue;
+    }
+    const std::int64_t dx = std::int64_t{other->state.position.x} - from.x;
+    const std::int64_t dy = std::int64_t{other->state.position.y} - from.y;
+    if (dx * dx + dy * dy > std::int64_t{kBirdRange} * kBirdRange) continue;
+    return HostOutcome::ok_with(object_value(id));
   }
   return HostOutcome::ok_with(invalid_object());
 }
@@ -5475,13 +5481,12 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
 /// the first qualifying object's owner -- which is the whole difference between
 /// the two entry points.
 ///
-/// **A known gap, by design: the order of the walk.** The original visits the
-/// object grid's cells row by row and each cell's list in its own order; this
-/// engine's spatial queries answer in spawn order (`sim/spatial_index.hpp`:
-/// "the order the grid holds its entries in is not" state). The predicate is
+/// **The order of the walk** is the grid's (0x004dc6f0): cells row by row and
+/// each cell's list in the order its objects came into it
+/// (`docs/formats/spatial-index.md`), and so is this one's. The predicate is
 /// unaffected -- its reference is pinned -- but the counter adopts the *first*
 /// qualifying owner, and `share_control` is one-directional, so with two
-/// players' mages under a one-sided grant the two orders can count differently.
+/// players' mages under a one-sided grant the order decides the count.
 [[nodiscard]] std::int32_t stonehenge_mages(World& world, const WorldObject& henge,
                                             PlayerId reference) {
   const ClassGraph* graph = world.class_graph();
@@ -5498,7 +5503,8 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
     radius = 0;
   }
   std::vector<ObjectId> found;
-  world.objects_in_radius(world.resolve_position(henge.id), radius, ClassFilter{}, found);
+  world.objects_in_radius(world.resolve_position(henge.id), radius, ClassFilter{}, found,
+                          SweepOrder::grid);
   std::int32_t count = 0;
   for (const ObjectId id : found) {
     const WorldObject* other = world.find(id);

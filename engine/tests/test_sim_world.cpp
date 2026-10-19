@@ -4428,6 +4428,13 @@ TEST(sim_find_near_bird_tests_only_the_class_and_the_radius) {
   // Never itself.
   CHECK(b.found("FindNearBird", near) == self);
   CHECK(b.found("FindNearBird", 9999) == kNoObject);
+
+  // The first the grid walk 0x0051b840 meets, not the lowest id nor the
+  // nearest: a crow two rows of 256-unit cells up, spawned last, is met
+  // before `near` far below it.
+  const ObjectId above = b.unit(b.classes.crow, Point{1500, 500});
+  CHECK(above > near);
+  CHECK(b.found("FindNearBird", self) == above);
 }
 
 /// `FindUnitToLearn` wants **strictly** more experience, and skips four kinds of
@@ -5268,6 +5275,29 @@ TEST(sim_the_stonehenge_count_is_one_alliances_mages_and_a_hostile_zeroes_it) {
   // And one hostile soldier zeroes the whole thing.
   (void)b.unit(b.soldier_class, Point{250, 0}, 7);
   CHECK(b.mages(henge) == 0);
+}
+
+/// The counter adopts the owner of the **first** mage or soldier its sweep
+/// meets, and the sweep is the grid's walk (0x004dc6f0: rows of 256-unit
+/// cells, then cells, then each cell's list; `docs/formats/spatial-index.md`).
+/// With control shared one way only, which owner is met first decides the
+/// count.
+TEST(sim_the_stonehenge_counter_adopts_the_owner_its_grid_walk_meets_first) {
+  HengeBench b;
+  const ObjectId henge = b.henge(Point{0, 0});
+  b.world.players().set(1, 2, Relation::allied, true);
+  b.world.players().set(2, 1, Relation::allied, true);
+  b.world.players().set(2, 1, Relation::share_control, true);  // 2 shares with 1, not back
+  // Player 2's mage first by id, but a row of cells below player 1's.
+  const ObjectId theirs = b.unit(b.mage_class, Point{100, 300}, 2);
+  const ObjectId ours = b.unit(b.mage_class, Point{600, 100}, 1);
+  CHECK(theirs < ours);
+  // Met first, player 1 is the reference, and player 2 shares with it: two.
+  CHECK(b.mages(henge) == 2);
+  // Player 1's mage steps a row down, behind: player 2 is met first, and
+  // player 1 shares nothing with it: one.
+  REQUIRE(b.world.set_position(ours, Point{600, 400}));
+  CHECK(b.mages(henge) == 1);
 }
 
 /// The two entry points differ in **one thing**: which player the row is read
@@ -6488,8 +6518,10 @@ TEST(best_training_target_is_the_nearest_training_unit_unless_an_enemy_is_armed)
   };
   const auto train = [&](ObjectId who) { b.world.mutable_state(who)->flags.training = true; };
   // The class: `range` 30, `min_range` 20, `sight` 500. Every term of the score
-  // is arranged to decide one answer below, and the sweep is in id order, so
-  // the order of spawning is part of every arrangement.
+  // is arranged to decide one answer below, and the sweep is the grid's walk
+  // (rows of 256-unit cells, cells left to right, each cell's list in arrival
+  // order), so where each unit stands and when it came are part of every
+  // arrangement.
 
   const ObjectId self = unit_at(Point{0, 0}, 1);
   train(self);
@@ -6500,11 +6532,13 @@ TEST(best_training_target_is_the_nearest_training_unit_unless_an_enemy_is_armed)
   const ObjectId far_partner = unit_at(Point{300, 0}, 1);
   train(far_partner);
   CHECK(best(self) == far_partner);
-  // A tie keeps the one met first.
-  const ObjectId twin = unit_at(Point{-300, 0}, 1);
+  // A tie keeps the one met first: `twin`, also 300 away, is in the first
+  // cell of the row and `far_partner` in the second, so `twin` is met first
+  // though it came later.
+  const ObjectId twin = unit_at(Point{180, 240}, 1);
   train(twin);
-  CHECK(best(self) == far_partner);
-  CHECK(twin != far_partner);
+  CHECK(best(self) == twin);
+  CHECK(twin > far_partner);
   const ObjectId near_partner = unit_at(Point{0, 120}, 2);
   train(near_partner);
   CHECK(best(self) == near_partner);

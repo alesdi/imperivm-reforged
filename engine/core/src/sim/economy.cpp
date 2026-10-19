@@ -1201,18 +1201,17 @@ HostOutcome load_cargo(CallContext& ctx) {
     // within the mule's sight (`[mule+0xd0]`, centre distance) that is a
     // `CVXTownHall` the mule's owner supports and that the mule can see --
     // 0x005a7870, a nonzero sight at least the distance less both class
-    // radii. The sweep walks 256-unit cells a row at a time, top to bottom
-    // and left to right; within a cell it walks the cell's own list, whose
-    // order was not read, and here goes by id (labelled). No central-building
-    // test: any town hall the mule stands by will do.
+    // radii. The sweep walks the world's grid: 256-unit cells a row at a
+    // time, top to bottom and left to right, and each cell's list in the
+    // order its objects came into it (`docs/formats/spatial-index.md`), and
+    // the first that passes is the answer. No central-building test: any
+    // town hall the mule stands by will do.
     const Point at = mule->state.position;
     const std::int32_t sight = mule->sight;
     if (sight == 0) return HostOutcome::ok_void();
     std::vector<ObjectId> near;
-    (void)world->objects_in_radius(at, sight, ClassFilter{}, near);
+    (void)world->objects_in_radius(at, sight, ClassFilter{}, near, SweepOrder::grid);
     const WorldObject* best = nullptr;
-    std::int64_t best_row = 0;
-    std::int64_t best_col = 0;
     for (const ObjectId id : near) {
       const WorldObject* slot = world->find(id);
       if (slot == nullptr || !slot->state.flags.is_building || !is_hall(slot)) continue;
@@ -1223,12 +1222,8 @@ HostOutcome load_cargo(CallContext& ctx) {
       const std::int64_t edge = isqrt(dx * dx + dy * dy) - class_int(*world, *mule, "radius") -
                                 class_int(*world, *slot, "radius");
       if (edge > sight) continue;
-      const std::int64_t row = p.y / 256;
-      const std::int64_t col = p.x / 256;
-      if (best != nullptr && (row > best_row || (row == best_row && col >= best_col))) continue;
       best = slot;
-      best_row = row;
-      best_col = col;
+      break;
     }
     if (best == nullptr) return HostOutcome::ok_void();
     here = economy->settlements().for_object(best->settlement);
@@ -5166,9 +5161,8 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // cell sweep (0x005eb4b0) of the mule's sight (`[mule+0xd0]`) for the
     // first `CVXTownHall` it can see (0x005a7870) whose owner it grants
     // share-support -- so a mule standing beside a friendly town loads from it
-    // without entering. Reproduced in `load_cargo`, with one labelled reading:
-    // two halls in one 256-unit cell are taken by id, the cell's own list
-    // order not having been read.
+    // without entering. Reproduced in `load_cargo`, in the grid's walk order,
+    // a cell's own list included.
     // `set.CreateBoatGold(n)` / `CreateBoatFood(n)` -- 3 sites each, and
     // between them the whole of four scripts: `CREATE_GOLD_BOAT_BIG.VS` and its
     // three siblings differ only in `1000` against `250` and which of the two

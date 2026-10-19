@@ -5673,6 +5673,66 @@ TEST(a_mule_loads_only_from_a_town_hall_whose_owner_it_supports) {
   CHECK(foreign->warehouse.gold == 4500);
 }
 
+/// **A mule in the open loads from the first hall its grid sweep meets.**
+/// 0x005eb4b0 walks the world's grid over the mule's sight -- rows, then
+/// cells, then each cell's list in the order its objects came into it
+/// (`docs/formats/spatial-index.md`) -- so of two supported halls in one
+/// cell the one that stood there first is taken, whatever their ids.
+TEST(a_mule_in_the_open_loads_from_the_hall_first_in_its_grid_cell) {
+  ClassGraph graph;
+  const std::string docs[] = {
+      R"(<class id="Object" cpp_class="CVXDecor" parent=""/>)",
+      R"(<class id="Wagon" cpp_class="CVXWagon" parent="Object"><properties max_load="1000" sight="2000"/></class>)",
+  };
+  const char* names[] = {"object.sc.xml", "wagon.sc.xml"};
+  for (std::size_t i = 0; i < 2; ++i) REQUIRE(graph.add(bytes_of(docs[i]), names[i]).ok());
+  graph.link();
+
+  World world;
+  EconomySystem economy;
+  script::HostRegistry registry;
+  (void)register_all_hosts(registry);
+  world.set_class_graph(&graph);
+  REQUIRE(world.add_system(&economy));
+  economy.start(world);
+  HostContext context;
+  context.world = &world;
+  world.players().set_relation_word(1, 1, kRelationSelf);
+
+  const auto settle = [&](Point at) {
+    SettlementInit init = town_hall();
+    init.owner = 1;
+    init.anchor = world.spawn(NativeClass::town_hall, nullptr);
+    world.set_owner(init.anchor, 1);
+    (void)world.set_position(init.anchor, at);
+    const SettlementId id = economy.create(world, init);
+    economy.find(id)->warehouse.set(Resource::gold, 5000);
+    return id;
+  };
+  const SettlementId older_id = settle(Point{1100, 1100});
+  const SettlementId younger_id = settle(Point{1200, 1200});
+  // The older hall's anchor leaves the cell and comes back: it is now behind.
+  const ObjectId older_hall = economy.find(older_id)->anchor;
+  REQUIRE(world.set_position(older_hall, Point{9000, 9000}));
+  REQUIRE(world.set_position(older_hall, Point{1100, 1100}));
+
+  const ObjectId mule = world.spawn(NativeClass::wagon, nullptr, graph.find("Wagon"));
+  world.set_owner(mule, 1);
+  (void)world.set_position(mule, Point{1000, 1000});
+  script::CallContext ctx;
+  std::vector<script::Value> args{script::Value::object(kTypeObj, mule),
+                                  script::Value::integer(500)};
+  ctx.arguments = args;
+  ctx.user = &context;
+  ctx.name = "LoadGold";
+  ctx.kind = script::CallKind::member;
+  const std::uint32_t index = registry.find(script::CallKind::member, "LoadGold", 1);
+  REQUIRE(index != script::kUnresolvedHost);
+  CHECK(registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+  CHECK(economy.find(younger_id)->warehouse.gold == 4500);
+  CHECK(economy.find(older_id)->warehouse.gold == 5000);
+}
+
 /// The cargo is state: two peers that disagree about a mule's load sell
 /// different amounts, so it moves the hash and survives a save.
 TEST(the_mules_cargo_is_hashed_and_round_trips) {
