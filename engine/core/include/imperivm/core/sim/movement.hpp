@@ -399,8 +399,9 @@ struct MoveState {
   /// `Unit::Stop` does -- to the first passable free spot, for an order that
   /// owns a lock, and not a step for one that does not -- instead of
   /// stopping where it is. `IsArrived` (0x00417c10) is false while either bit
-  /// is set. (`SetDest` also searches again whenever one is set, 0x0041a4da;
-  /// **not reproduced**, see `run_goto`.)
+  /// is set. `SetDest` also searches again whenever one is set, whatever the
+  /// failing unit's draw says (0x0041a4da, 0x0041a5da; `run_goto`,
+  /// `order_goto`).
   ///
   /// When the walk ends the order stays: the unit's step (0x005d3b50) deletes
   /// a route with no next step only when no `Goto`-family call is waiting on
@@ -1032,9 +1033,11 @@ struct GotoOrder {
   ///     which for an unchanged goal skips the search and answers from the
   ///     route the record already has (0x0041a513, 0x0041a53c). A unit five
   ///     seconds stuck searches one call in five, and one stuck for 21
-  ///     seconds or more one call in twenty-one. (In the original only when
-  ///     no stop bit is set, which a search that laid nothing leaves set --
-  ///     `MoveState::route_failed`; **not reproduced**, see `run_goto`.)
+  ///     seconds or more one call in twenty-one -- **but only with no stop
+  ///     bit set**: a search that laid nothing leaves bit 2
+  ///     (`MoveState::route_failed`), and `SetDest` then searches at every
+  ///     call whatever was drawn (0x0041a4da), so the draw binds a unit whose
+  ///     route has run out, not one whose search failed.
   ///   * **the end of the unit's command clears the stamp**, inferred: slot 9
   ///     of the seven unit vtables (0x005d2940) clears it, with the walking
   ///     flags, before the base (0x005b5160) pops the command queue's head.

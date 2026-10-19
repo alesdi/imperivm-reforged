@@ -673,9 +673,12 @@ MoveOutcome MovementSystem::order_goto(World& world, ObjectId id, Point dest, st
   MoveState& move = state(id);
   resolve_class_fields(world, id, move);
   // `SetDest` (`0x0041a4c0`) to anywhere else -- another point, band or
-  // march -- forgets that the free-spot search has run (`0x0041a594`).
-  if (!move.goto_active || move.target_object != kNoObject || move.target != dest ||
-      move.range != range || move.min_range != min_range || move.party != party) {
+  // march -- forgets that the free-spot search has run (`0x0041a594`); so
+  // does one to the same goal while a stop bit is set, which takes the same
+  // branch (`test al, 6` at 0x0041a4da). Flag 0x40 survives both.
+  if (!move.goto_active || move.stopping() || move.target_object != kNoObject ||
+      move.target != dest || move.range != range || move.min_range != min_range ||
+      move.party != party) {
     move.free_spot_tried = false;
   }
   move.target_object = kNoObject;
@@ -696,9 +699,10 @@ MoveOutcome MovementSystem::order_goto_object(World& world, ObjectId id, ObjectI
                                               bool lock_destination) {
   MoveState& move = state(id);
   resolve_class_fields(world, id, move);
-  // The object form (`0x0041a5c0`) asks after the object, not where it is.
-  if (!move.goto_active || move.target_object != target || move.range != range ||
-      move.min_range != min_range || move.party != kNoObject) {
+  // The object form (`0x0041a5c0`) asks after the object, not where it is,
+  // and takes the new-goal branch on a stop bit too (0x0041a5da).
+  if (!move.goto_active || move.stopping() || move.target_object != target ||
+      move.range != range || move.min_range != min_range || move.party != kNoObject) {
     move.free_spot_tried = false;
   }
   move.target_object = target;
@@ -3110,22 +3114,23 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
                           move.target_object == order.target && move.range == order.range &&
                           move.min_range == order.min_range;
 
-  // A new order always searches. A live one searches again only when its
-  // route has run out -- walked to the end of a partial route, or taken away
-  // by the grid -- since neither is arrival (`GotoOrder::give_up`); and the
-  // draw above may skip that search, which leaves the unit with no route.
+  // A new order always searches. So does a live one whose follower has a
+  // stop bit set: `SetDest` tests them before anything else (`test al, 6` at
+  // 0x0041a4da / 0x0041a5da) and takes its new-goal branch whenever one is,
+  // so after a search that laid nothing (`MoveState::route_failed`) or a
+  // `Stop` (`stop_requested`) the unit searches again on every call, whatever
+  // the draw above says -- and that branch forgets the free-spot search's
+  // flag 8 (0x0041a594, `MovementSystem::order_goto`). Otherwise a live order
+  // searches again only when its route has run out -- walked to the end of a
+  // partial route, or taken away by the grid -- since neither is arrival
+  // (`GotoOrder::give_up`), and then only on the draw's 0 (0x0041a513).
   //
-  // **Not reproduced:** `SetDest` tests the path follower's stop bits before
-  // anything else (`test al, 6` at 0x0041a4da / 0x0041a5da) and takes its
-  // new-goal branch whenever one is set -- so after a search that laid
-  // nothing (`MoveState::route_failed`) the original searches on every call
-  // whatever this draw says, and that branch also clears the free-spot
-  // search's flag 8 (0x0041a594), which then draws again at a full band.
-  // Built, it moves the generator's stream, and on Alesia seed 1 that brings
-  // in a wave of horsemen whose bounded search (`PathRequest::node_budget`)
-  // ends in a queue along a partial route and leaves them on their door; with
-  // a budget that reaches, they route. That has to be dealt with first.
-  if (!continuing || (!move.has_path && may_search)) {
+  // This waited on the search's budget: built over a search that gave up at
+  // 20,000 nodes with a partial route, it sent a wave of Alesia's horsemen
+  // (seed 1) into a queue along one and left them on their door, 150 bodies
+  // touching. The search now reaches whatever its region holds
+  // (`PathFinder`, docs/formats/pathfinder.md), as the original's does.
+  if (!continuing || move.stopping() || (!move.has_path && may_search)) {
     const MoveOutcome outcome =
         order.target == kNoObject
             ? movement.order_goto(world, id, dest, order.range, order.min_range, kNoObject,

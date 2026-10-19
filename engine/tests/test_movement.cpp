@@ -1889,6 +1889,12 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
   // Six seconds on: `rand(0, 4)` and up. The field opens just before the
   // first call whose draw is not 0, which must not search; the first call
   // after that whose draw is 0 must. Every call takes exactly its draw.
+  //
+  // The draw binds only with neither of the follower's stop bits set
+  // (0x0041a4da): a search that laid nothing leaves bit 2, and then the next
+  // call searches whatever it drew (the test after this one). So each call
+  // here starts as a unit whose route has been walked to its end does -- no
+  // route, no stop bit, the order still on.
   world.advance(5000);
   bool opened = false;
   bool skipped = false;
@@ -1901,6 +1907,7 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
       movement.set_grid(open_field(32));
       opened = true;
     }
+    movement.find(unit)->route_failed = false;
     (void)goto_once(registry, world, unit, away, 100, -1);
     CHECK(world.rng() == expect);
     searched = movement.find(unit)->has_path;
@@ -1911,6 +1918,57 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
   CHECK(skipped);
   CHECK(searched);
   CHECK(movement.find(unit)->goto_failed_at == kNoGotoFailure);
+}
+
+TEST(a_search_that_laid_nothing_searches_again_at_the_next_call_whatever_the_draw) {
+  // `SetDest` tests the path follower's stop bits before it compares the goal
+  // (`test al, 6` at 0x0041a4da, 0x0041a5da) and takes its new-goal branch
+  // when one is set: the search runs whatever the draw before it said, and the
+  // free-spot search's flag 8 is forgotten (0x0041a594). A search that laid
+  // nothing leaves bit 2 (0x00419a1e, `MoveState::route_failed`).
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(sealed_cell(9, 10));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{9 * 16 + 8, 10 * 16 + 8}, 100);
+  const Point away{25 * 16 + 8, 10 * 16 + 8};
+
+  (void)goto_once(registry, world, unit, away, 1000, -1);
+  const GameTime stamped = movement.find(unit)->goto_failed_at;
+  REQUIRE(stamped == world.time());
+  REQUIRE(movement.find(unit)->route_failed);
+
+  // Far enough on that the draw is `rand(0, 4)` or more; wait for a call
+  // whose draw is not 0 and open the field just before it.
+  world.advance(6000);
+  bool tested = false;
+  for (int i = 0; i < 80 && !tested; ++i) {
+    const std::int64_t spans = std::min<std::int64_t>((world.time() - stamped) >> 11, 10);
+    Rng expect = world.rng();
+    const bool draws_zero = expect.between(0, static_cast<std::int32_t>(2 * spans)) == 0;
+    if (draws_zero) {
+      // Still sealed: the search runs and fails again, and the bit stays.
+      (void)goto_once(registry, world, unit, away, 100, -1);
+      CHECK(world.rng() == expect);
+      CHECK(movement.find(unit)->route_failed);
+      world.advance(100);
+      continue;
+    }
+    movement.set_grid(open_field(32));
+    movement.find(unit)->free_spot_tried = true;
+    (void)goto_once(registry, world, unit, away, 100, -1);
+    // The draw is taken all the same, and ignored.
+    CHECK(world.rng() == expect);
+    CHECK(movement.find(unit)->has_path);
+    CHECK(!movement.find(unit)->route_failed);
+    CHECK(!movement.find(unit)->free_spot_tried);
+    CHECK(movement.find(unit)->goto_failed_at == kNoGotoFailure);
+    tested = true;
+  }
+  CHECK(tested);
 }
 
 /// `PathTo` asks the same question with the same flag.
