@@ -341,6 +341,12 @@ enum class CommandArgKind : std::uint8_t {
   none,
   point,
   object,
+  /// A list and a point, `(ObjList ol, point pt)`: 0x005aef20's kind 5, which
+  /// only the issue's group-move set-up makes, for a ship's `unboard`
+  /// (0x004ef1c0, `SHIP_UNBOARD.VS`'s `// void, Obj This, ObjList ol, point
+  /// pt`). The list is `Command::list`; the script is handed a fresh `ObjList`
+  /// holding it.
+  list_point,
 };
 
 /// One entry in an object's queue.
@@ -356,6 +362,9 @@ struct Command {
   CommandArgKind arg_kind = CommandArgKind::none;
   Point point{};
   ObjectId object = kNoObject;
+  /// The objects of a `list_point` command, in order. Empty for every other
+  /// kind.
+  std::vector<ObjectId> list;
 
   /// `<cmd param="...">` when the command came in through `ExecCmd`. Empty for
   /// a direct `AddCommand`.
@@ -580,6 +589,19 @@ class CommandSystem final : public System {
   /// empty. `!front` appends. 0 when refused, as `set_command`.
   std::uint32_t add_command(World& world, ObjectId id, bool front, std::string_view verb,
                             const Command& prototype);
+  /// 0x004e9100: the ship the first of `actors` is aboard, or `kNoObject`.
+  [[nodiscard]] static ObjectId carrier_of_first(const World& world,
+                                                 std::span<const ObjectId> actors);
+  /// The issue's group-move set-up, 0x004e8ae0 and 0x004ef1c0: false when
+  /// nobody is to get the order; otherwise, when the actors must be put ashore
+  /// first, the ship's `unboard` made and queued. `kind` is the first actor's
+  /// resolved form. See `issue`.
+  bool group_move_set_up(World& world, ObjectId ship, std::span<const ObjectId> actors,
+                         CommandArgKind kind, Point point, ObjectId object, bool replace);
+  /// `set_command` and `append_order` for a command already made, its id
+  /// already drawn (`Command::id`) and its verb set.
+  std::uint32_t set_made(World& world, ObjectId id, Command command);
+  std::uint32_t append_made(World& world, ObjectId id, Command command);
   /// `add_command`'s insert (`vtbl+0xbc`, 0x005b5c30) for a command already
   /// made, its id already drawn: the accept test, then index 1 or the back.
   /// Returns the command's id, or 0 when refused.

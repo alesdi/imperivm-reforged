@@ -3421,6 +3421,30 @@ struct EndFixture : RunFixture {
 /// pops the head and starts the next through 0x005b4f20, whose thread is armed
 /// at the clock and so runs in the same pass. It used to wait for the next
 /// turn's command pass.
+/// **A list-and-point command hands its script a list and a point**: kind 5,
+/// `SHIP_UNBOARD.VS`'s `// void, Obj This, ObjList ol, point pt`, which the
+/// issue's group-move set-up makes for a ship (0x004ef1c0). The list is the
+/// script's temporary and goes with it.
+TEST(a_list_and_point_command_hands_its_script_both) {
+  EndFixture f;
+  (void)register_objlist_host(f.registry);
+  REQUIRE(f.add_script("// void, Obj This, ObjList ol, point pt\n"
+                       "This.SetUser(ol.count * 1000 + pt.x);\n",
+                       "data/subai/wagon_unload.vs"));
+  const ObjectId u = f.spawn(f.unit_class);
+  const ObjectId a = f.spawn(f.unit_class);
+  const ObjectId b = f.spawn(f.unit_class);
+  CHECK(f.commands.binds(f.world, u, "unload", CommandArgKind::list_point));
+  CHECK(!f.commands.binds(f.world, u, "unload", CommandArgKind::point));
+  Command unload;
+  unload.arg_kind = CommandArgKind::list_point;
+  unload.point = Point{321, 50};
+  unload.list = {a, b};
+  REQUIRE(f.commands.set_command(f.world, u, "unload", unload) != 0);
+  f.scheduler.advance(100);
+  CHECK(f.user(u) == 2321);
+}
+
 TEST(a_command_that_returns_starts_the_next_in_the_same_pass) {
   EndFixture f;
   f.onfinish("");

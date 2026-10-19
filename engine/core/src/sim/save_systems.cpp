@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 39;  // 39: no finishing commands in the command section (an `onfinish` runs inside the end that calls it); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 39;  // 39: no finishing commands in the command section (an `onfinish` runs inside the end that calls it), and a command's list (`Command::list`, a ship's `unboard`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -1312,6 +1312,8 @@ void put_command(std::vector<std::byte>& out, const Command& c) {
   bytes::put_u8(out, static_cast<std::uint32_t>(c.arg_kind));
   put_point(out, c.point);
   bytes::put_u32(out, c.object);
+  bytes::put_u32(out, static_cast<std::uint32_t>(c.list.size()));
+  for (const ObjectId id : c.list) bytes::put_u32(out, id);
   bytes::put_string(out, c.param);
   bytes::put_string(out, c.name);
   bytes::put_i32(out, c.cost_gold);
@@ -1325,11 +1327,24 @@ void put_command(std::vector<std::byte>& out, const Command& c) {
   bytes::put_i64(out, c.started_at);
 }
 
+[[nodiscard]] bool get_list(ByteReader& reader, std::vector<ObjectId>& list) {
+  std::uint32_t count = 0;
+  if (!reader.u32(count)) return false;
+  list.clear();
+  for (std::uint32_t i = 0; i < count; ++i) {
+    ObjectId id = kNoObject;
+    if (!reader.u32(id)) return false;
+    list.push_back(id);
+  }
+  return true;
+}
+
 [[nodiscard]] bool get_command(ByteReader& reader, Command& command) {
   return reader.u32(command.id) && bytes::get_string(reader, command.verb) &&
-         get_enum(reader, command.arg_kind, static_cast<std::uint8_t>(CommandArgKind::object) + 1) &&
+         get_enum(reader, command.arg_kind,
+                  static_cast<std::uint8_t>(CommandArgKind::list_point) + 1) &&
          get_point(reader, command.point) && reader.u32(command.object) &&
-         bytes::get_string(reader, command.param) && bytes::get_string(reader, command.name) &&
+         get_list(reader, command.list) && bytes::get_string(reader, command.param) && bytes::get_string(reader, command.name) &&
          bytes::get_i32(reader, command.cost_gold) &&
          bytes::get_i32(reader, command.cost_food) && bytes::get_i32(reader, command.cost_pop) &&
          bytes::get_i32(reader, command.cost_stamina) && bytes::get_i32(reader, command.delay) &&

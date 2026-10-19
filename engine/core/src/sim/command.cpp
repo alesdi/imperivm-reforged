@@ -14,6 +14,7 @@
 #include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/entrance.hpp"
 #include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/movement.hpp"
@@ -168,6 +169,9 @@ script::Value Command::argument() const noexcept {
   switch (arg_kind) {
     case CommandArgKind::point: return pack_point(point);
     case CommandArgKind::object: return script::Value::object(kTypeObj, object);
+    // The point: the list is a script value only once the command is launched
+    // (`launch_chunk`).
+    case CommandArgKind::list_point: return pack_point(point);
     case CommandArgKind::none: break;
   }
   return script::Value::nil();
@@ -525,6 +529,22 @@ bool CommandSystem::launch_chunk(World& world, ObjectId id, Command& command, st
   // The receiver first, the command's argument second: exactly what the
   // shipped scripts declare. `UNIT_MOVE.VS` opens `// void, Obj This, point pt`
   // and `UNIT_ENTER.VS` `// void, Obj This, Obj bld`.
+  if (command.arg_kind == CommandArgKind::list_point) {
+    // `SHIP_UNBOARD.VS`'s `// void, Obj This, ObjList ol, point pt`: the list
+    // is a temporary of the script it is handed to, and goes with it.
+    ObjListPool& pool = objlist_pool_of(world);
+    const ObjListId list = pool.acquire_temporary(script::kNoScript);
+    if (std::vector<ObjectId>* items = pool.mutable_items(list)) *items = command.list;
+    const script::Value args[3] = {script::Value::object(kTypeObj, id), make_objlist_value(list),
+                                   pack_point(command.point)};
+    command.script = scheduler_->spawn(chunk, args, script::ObjectRef{kTypeObj, id});
+    if (command.script == script::kNoScript) {
+      pool.release_script(script::kNoScript);
+      return false;
+    }
+    pool.adopt(list, command.script);
+    return true;
+  }
   script::Value args[2] = {script::Value::object(kTypeObj, id), command.argument()};
   const std::span<const script::Value> window(
       args, command.arg_kind == CommandArgKind::none ? std::size_t{1} : std::size_t{2});
@@ -963,6 +983,12 @@ std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_
   Command command = prototype;
   command.id = world.next_command_id();
   command.verb.assign(verb);
+  return set_made(world, id, std::move(command));
+}
+
+std::uint32_t CommandSystem::set_made(World& world, ObjectId id, Command command) {
+  if (world.find(id) == nullptr) return 0;
+  (void)queue(id);
   command.script = script::kNoScript;
   command.started = false;
   const std::uint32_t issued = command.id;
@@ -1042,6 +1068,14 @@ std::uint32_t CommandSystem::insert_made(World& world, ObjectId id, bool front, 
 
 std::uint32_t CommandSystem::append_order(World& world, ObjectId id, std::string_view verb,
                                           const Command& prototype) {
+  if (world.find(id) == nullptr) return 0;
+  Command command = prototype;
+  command.id = world.next_command_id();
+  command.verb.assign(verb);
+  return append_made(world, id, std::move(command));
+}
+
+std::uint32_t CommandSystem::append_made(World& world, ObjectId id, Command command) {
   // A resting head gives way; anything else keeps running and the order waits
   // its turn behind it, as `ExecCmd`'s five-deep training queue needs. See the
   // header for why this is here and not in `add_command`. The order is paid for
@@ -1052,7 +1086,7 @@ std::uint32_t CommandSystem::append_order(World& world, ObjectId id, std::string
                        equal_fold(before->entries.front().verb, default_verb_);
   const std::uint32_t head = resting ? before->entries.front().id : 0u;
   const bool was_empty = before == nullptr || before->entries.empty();
-  const std::uint32_t issued = add_command(world, id, /*front=*/false, verb, prototype);
+  const std::uint32_t issued = insert_made(world, id, /*front=*/false, std::move(command));
   if (issued == 0) return issued;
   if (was_empty) {
     // An empty queue: the order is the head, and starts now, as it would
@@ -1155,6 +1189,10 @@ bool CommandSystem::binds(World& world, ObjectId id, std::string_view verb, Comm
     case CommandArgKind::none: return chunk.parameter_count == 1;
     case CommandArgKind::point: return second_is("point");
     case CommandArgKind::object: return second_is("Obj");
+    case CommandArgKind::list_point:
+      return chunk.parameter_count == 3 && chunk.locals.size() > 2 &&
+             equal_fold(chunk.locals[1].type_name, "ObjList") &&
+             equal_fold(chunk.locals[2].type_name, "point");
   }
   return false;
 }
@@ -1339,6 +1377,11 @@ std::size_t CommandSystem::issue(World& world, std::span<const ObjectId> actors,
 
   const std::string_view verb = def.method.empty() ? std::string_view{def.name} : def.method;
   std::size_t issued = 0;
+  // The group-move set-up (0x004efada..0x004efbb3): asked once, of the first
+  // actor that gets this far, when the list's first member is aboard a ship.
+  const ObjectId ship = carrier_of_first(world, actors);
+  bool set_up = false;
+  bool give = true;
   for (const ObjectId id : actors) {
     if (world.find(id) == nullptr || !command_enabled(world, id, def.name)) continue;
     Command command = row_command(def);
@@ -1365,12 +1408,108 @@ std::size_t CommandSystem::issue(World& world, std::span<const ObjectId> actors,
       ++issued;
       continue;
     }
+    // Made -- its id drawn -- before the set-up, which makes the ship's
+    // `unboard` after it and inserts it first.
+    command.id = world.next_command_id();
+    if (!set_up) {
+      set_up = true;
+      if (!def.research_command && ship != kNoObject) {
+        give = group_move_set_up(world, ship, actors, command.arg_kind, point, object, replace);
+      }
+    }
+    // Refused by the set-up: every actor's command is made and dropped
+    // (0x004efbb3 with `local_9c` 0), its id spent.
+    if (!give) continue;
     const std::uint32_t made = replace && !def.train_command
-                                   ? set_command(world, id, verb, command)
-                                   : append_order(world, id, verb, command);
+                                   ? set_made(world, id, std::move(command))
+                                   : append_made(world, id, std::move(command));
     if (made != 0) ++issued;
   }
   return issued;
+}
+
+ObjectId CommandSystem::carrier_of_first(const World& world, std::span<const ObjectId> actors) {
+  // 0x004e9100: the list's first member, as a unit (`CVXUnit` cast), in a
+  // holder (`[unit+0x154] != 0xffff`), and the object that holder belongs to
+  // (0x005319a0, `[holder+0xe]`) -- a ship; a settlement's holder belongs to
+  // none (`held_by_carrier`).
+  if (actors.empty()) return kNoObject;
+  const WorldObject* first = world.find(actors.front());
+  if (first == nullptr || !first->state.flags.is_unit) return kNoObject;
+  if (!held_by_carrier(world, first->id)) return kNoObject;
+  return first->state.holder - 1;
+}
+
+bool CommandSystem::group_move_set_up(World& world, ObjectId ship,
+                                      std::span<const ObjectId> actors, CommandArgKind kind,
+                                      Point point, ObjectId object, bool replace) {
+  // 0x004e8ae0: whether anybody gets the order, and whether the ship is to
+  // put them ashore first.
+  bool unboard = true;
+  switch (kind) {
+    case CommandArgKind::none:
+    case CommandArgKind::list_point:
+      // Nothing to sail to: nobody gets it.
+      return false;
+    case CommandArgKind::point:
+      // 0x004e8a80: the terrain index at the point, half a cell rounded, is
+      // deep water (13): nobody gets it.
+      if (terrain_at(world.terrain(), point) == kDeepWaterIndex) return false;
+      break;
+    case CommandArgKind::object: {
+      const WorldObject* target = world.find(object);
+      if (target == nullptr) return true;
+      // A water unit's class (`[class+0xb30]`, `water_unit`): nobody.
+      if (class_flag(world, *target, "water_unit")) return false;
+      if (target->state.flags.is_unit && target->state.is_held() &&
+          target->state.holder != kNoObject) {
+        // Held, by anything but this ship -- a settlement's holder belongs to
+        // no object, so a garrisoned target is one -- refuses; held by this
+        // one, everybody is already where the target is.
+        if (!held_by_carrier(world, target->id) || target->state.holder - 1 != ship) return false;
+        unboard = false;
+      }
+      break;
+    }
+  }
+  if (!unboard) return true;
+
+  // 0x004ef1c0: the passengers are the list, in order, then each hero's army
+  // members not already in it (0x0050e2a0 finds, 0x0041f290 appends) ...
+  std::vector<ObjectId> passengers(actors.begin(), actors.end());
+  if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+    for (const ObjectId id : actors) {
+      const HeroRecord* record = heroes->hero(id);
+      if (record == nullptr) continue;
+      for (const ObjectId member : record->army) {
+        if (std::find(passengers.begin(), passengers.end(), member) == passengers.end()) {
+          passengers.push_back(member);
+        }
+      }
+    }
+  }
+  // ... and the ship gets `unboard` (0x005aef20 kind 5) to the point, or to
+  // the target's position (`vtbl+0x3c`): the order form (`vtbl+0xb8` with 1)
+  // when the order replaces, else appended behind what it is doing
+  // (`vtbl+0xbc` with 0, the `AddCommand` insert).
+  //
+  // **A ship whose class binds no kind-5 `unboard` gets nothing here, a
+  // labelled reading:** 0x005aef20 answers null and 0x004ef1c0 hands the null
+  // to the insert, whose accept test (`vtbl+0x8c`) was not traced with one.
+  // Every shipped ship class that carries passengers binds it.
+  if (!binds(world, ship, "unboard", CommandArgKind::list_point)) return true;
+  Command unboard_command;
+  unboard_command.id = world.next_command_id();
+  unboard_command.verb = "unboard";
+  unboard_command.arg_kind = CommandArgKind::list_point;
+  unboard_command.point = kind == CommandArgKind::object ? world.resolve_position(object) : point;
+  unboard_command.list = std::move(passengers);
+  if (replace) {
+    (void)set_made(world, ship, std::move(unboard_command));
+  } else {
+    (void)insert_made(world, ship, /*front=*/false, std::move(unboard_command));
+  }
+  return true;
 }
 
 CommandSystem* command_system(World& world) noexcept {

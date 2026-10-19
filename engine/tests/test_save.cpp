@@ -1400,6 +1400,14 @@ TEST(save_command_section_round_trips) {
   enter.cost_gold = 120;
   enter.delay = 250;
   queue.entries.push_back(enter);
+  // A ship's `unboard`, the one kind that carries a list.
+  Command unboard;
+  unboard.id = 0x16a;
+  unboard.verb = "unboard";
+  unboard.arg_kind = CommandArgKind::list_point;
+  unboard.point = Point{300, 200};
+  unboard.list = {12, 9, 30};
+  queue.entries.push_back(unboard);
   command.queue(3).entries.push_back(move);
 
   // The commands two scripts took away. Written last in the section, so a
@@ -1427,6 +1435,10 @@ TEST(save_command_section_round_trips) {
   CHECK(bytes != default_section<CommandSystem>());
   CHECK(fresh.tracked() == 2);
   CHECK(fresh.command_name(7) == "move");
+  REQUIRE(fresh.find(7) != nullptr && fresh.find(7)->entries.size() == 3);
+  CHECK(fresh.find(7)->entries[2].arg_kind == CommandArgKind::list_point);
+  CHECK(fresh.find(7)->entries[2].list == (std::vector<ObjectId>{12, 9, 30}));
+  CHECK(fresh.find(7)->entries[1].list.empty());
   // The table is deliberately not restored -- it is merged from
   // `DATA/COMMANDS/*.XML` at load -- so the set is checked directly rather than
   // through `command_enabled`, which needs a row to answer at all.
@@ -1459,10 +1471,10 @@ TEST(save_command_section_round_trips) {
   std::vector<std::byte> untouched;
   never.serialize(untouched);
   CHECK(given_back == untouched);
-  CHECK(fresh.command_count(7) == 2);
+  CHECK(fresh.command_count(7) == 3);
   const CommandQueue* restored = fresh.find(7);
   REQUIRE(restored != nullptr);
-  REQUIRE(restored->entries.size() == 2);
+  REQUIRE(restored->entries.size() == 3);
   CHECK(restored->entries[0].script == 21);
   CHECK(restored->entries[0].started);
   CHECK(restored->entries[1].param == "Barrack");
