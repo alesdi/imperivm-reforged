@@ -212,10 +212,12 @@ struct EnvEntry {
 /// The `$$<id>$$` encoding `gbr.exe` uses for an object inside the registry:
 /// `EnvWriteObj` formats the object's index with `$$%d$$` (0x006ac9b0) and
 /// `EnvReadObj` reads it back with `sscanf` of the same format (0x006ac790).
+/// `kNoObject` is written as the original's invalid index, `$$65535$$`.
 [[nodiscard]] std::string env_format_object(ObjectId id);
 /// Returns `kNoObject` when `text` is not an encoded object. `sscanf`'s rules:
 /// the leading `$$` is literal, the number may have white space and a sign
-/// before it, and the trailing `$$` is not checked.
+/// before it, and the trailing `$$` is not checked. 0 and 65535, the invalid
+/// index, are nothing.
 [[nodiscard]] ObjectId env_parse_object(std::string_view text) noexcept;
 
 /// The flat, sorted, scope-and-key-addressed store.

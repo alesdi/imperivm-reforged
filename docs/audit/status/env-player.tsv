@@ -16,14 +16,14 @@
 0x006ad7e0	verified	EnvWriteString(Settlement): invalid handle stores nothing (fixed)
 0x006ad070	verified	EnvWriteString(Building): invalid or dead handle stores nothing (fixed)
 0x006ac890	verified	EnvWriteString(str): set through MakePath with the thread's own context, every launcher's modelled (as EnvReadInt(str), fixed)
-0x006add10	partial	EnvReadObj(int plr): sscanf $$%d$$ rules and dead object -> invalid (fixed); original's 0..65535 index range not carried (32-bit never-reused ids, design)
+0x006add10	verified	EnvReadObj(int plr): sscanf $$%d$$ rules and dead object -> invalid (fixed); FIXED (spatial-index round): 65535, the invalid index EnvWriteObj writes for nothing, reads as nothing (kCompatNoHandle), as the original's empty table slot does; a number above 65535 still names this engine's object of that id (32-bit never-reused ids, compat_handle; no shipped game reaches 65535 objects); test env_object_values_round_trip_through_the_dollar_encoding
 0x006ad6c0	partial	EnvReadObj(Settlement): as the int form; invalid scope -> invalid handle (fixed)
 0x006acf40	partial	EnvReadObj(Building): as the int form; invalid scope -> invalid handle (fixed)
 0x006acbd0	partial	EnvReadObj(str): root form registered; MakePath context now the thread's own for every launcher (fixed, as EnvReadInt(str)); id-space gap as the int form (0..65535 slot index vs 32-bit never-reused ids, design)
-0x006adf70	partial	EnvWriteObj(int plr): invalid object stored as $$0$$ where the original writes $$65535$$ (both read back as nothing; id-space design)
-0x006ada00	partial	EnvWriteObj(Settlement): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
-0x006ad2b0	partial	EnvWriteObj(Building): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
-0x006ac9b0	partial	EnvWriteObj(str): root form registered; MakePath context now the thread's own for every launcher (fixed, as EnvReadInt(str)); $$0$$ vs $$65535$$ for an invalid object as the int form (id-space design)
+0x006adf70	verified	EnvWriteObj(int plr): FIXED (spatial-index round): an invalid object is stored as $$65535$$, the original's invalid index (was $$0$$); test env_object_values_round_trip_through_the_dollar_encoding
+0x006ada00	verified	EnvWriteObj(Settlement): invalid scope stores nothing (fixed); an invalid object is $$65535$$ as the int form (FIXED, spatial-index round)
+0x006ad2b0	verified	EnvWriteObj(Building): invalid scope stores nothing (fixed); an invalid object is $$65535$$ as the int form (FIXED, spatial-index round)
+0x006ac9b0	verified	EnvWriteObj(str): root form registered; MakePath context now the thread's own for every launcher (fixed, as EnvReadInt(str)); an invalid object is $$65535$$ as the int form (FIXED, spatial-index round)
 0x00433790	verified	IsResearched(Settlement): command row by name, first NamePlr/NameSet triple of its param (tokenizer 0x006ab970), owner+1 or settlement id; no row/no triple/invalid receiver -> false (fixed: was the research catalog, last triple, trap)
 0x00433b70	verified	IsResearched(int): Player%d verbatim (0x00433be6 -> 0x00433e39); NameSet row -> false (fixed)
 0x00434000	verified	IsResearching(Settlement): as IsResearched with "researching" (fixed)
@@ -66,7 +66,7 @@
 0x0042d2f0	verified	Strongholds: settlements of idPlayer-1 whose central building's class is_a BaseTownhall now (0x0043ffc0) (fixed: was the creation-time kind)
 0x0042d770	verified	Outposts: as Strongholds with is_a Outpost (0x00440060); a negative decremented number counts every owner
 0x00436f50	verified	GetSettlements: one class lookup, is_a on the central building (0x0059c020); a decremented player below 0 is the wildcard (fixed: only 0 was); pushes central-building handles
-0x004ca9c0	partial	Party: copies the roster deque at globals+0x1030; this engine lists in_party objects in ascending id (roster order approximated)
+0x004ca9c0	partial	Party: copies the roster deque at globals+0x1030; this engine lists in_party objects in ascending id. Spatial-index round: the deque's filling site was not found (0x004f97c0 only searches it; IsInParty 0x005d7b10 reads SyncFlags bit 19, not the deque), and in_party is written here only from a map's SyncFlags, so the order it was filled in is not known; the four sites act on every member and none reads the order
 0x005731e0	partial	PartyQuery: the session's party query refreshed, invalid handle with no party; this engine answers an empty party query (no party object)
 0x00422900	verified	IsAIPlayer: record(idPlayer-1)+0x88 (the AI pointer AIStart builds and AIStop nulls) non-null, i.e. AiPlayer::active (fixed: was the slot's control)
 0x005a80e0	partial	GetPlayerRace: reads the session setup table at 0x00a87c48 [(p-1)*0xc0+0xa4], -1 when the table is absent; its writer was not read; this answers the race match setup resolved into PlayerSetup::race
