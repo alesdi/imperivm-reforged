@@ -35,6 +35,7 @@
 #include "imperivm/core/sim/gaika_table.hpp"
 #include "imperivm/core/sim/tick.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/objlist.hpp"
@@ -5054,118 +5055,194 @@ TEST(ai_enemy_players_eval_ranges_over_the_enemies_squads) {
   CHECK(out[3].as_integer() == 30);
 }
 
-/// **A node is `Explored` for a player once the exploration map shows its
-/// centre explored for that player** -- the `Explored` half of the original's
-/// per-node visibility sweep, which `AiSystem::advance` runs. Without it
-/// `RECRUITER.VS:104-116` skipped every node but home: `Explored` was false
-/// everywhere, and so was `CanExplore`, which asks it of the neighbours.
-TEST(the_ai_sweep_marks_a_node_explored_once_its_centre_is_and_stamps_last_seen) {
+/// **The per-node visibility sweep** (0x0044ecc0, `sweep_gaika`, run on every
+/// node by `AiSystem::advance`): a node is `Explored` and `Revealed` for a
+/// seated AI while that player -- or one whose view its row shares, flag 0x10
+/// -- stands in it, with a squad or by owning its settlement; when that stops,
+/// `Revealed` clears, `LastSeen` is stamped and the enemy strength standing
+/// there is remembered. This marked a node explored from the fog's
+/// exploration map, which the original never consults for a node, stamped
+/// `LastSeen` with "now" while it was explored, and never set `Revealed`.
+TEST(the_sweep_marks_what_a_player_stands_in_and_remembers_it_when_it_leaves) {
   Fixture f;
-  FogSystem fog;
-  // Registered after the AI: the order the session registers them in, so
-  // this turn's sweep reads the map as the previous turn left it.
-  REQUIRE(f.world.add_system(&fog));
-  fog.map().resize(16384);
-
-  const SettlementId near = f.make_settlement(1);
-  const SettlementId away = f.make_settlement(1);
-  ObjectId a_object = kNoObject;
-  ObjectId b_object = kNoObject;
-  {
-    const Settlement* a = f.economy.settlements().find(near);
-    const Settlement* b = f.economy.settlements().find(away);
-    REQUIRE(a != nullptr);
-    REQUIRE(b != nullptr);
-    a_object = a->object;
-    b_object = b->object;
-    CHECK(f.world.set_position(a->anchor, Point{1000, 1000}));
-    CHECK(f.world.set_position(b->anchor, Point{9000, 9000}));
-  }
+  // Node 1 is player 1's town, node 2 player 3's.
+  const SettlementId home = f.make_settlement(1);
+  const SettlementId away = f.make_settlement(3);
   f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
   REQUIRE(f.world.gaika().count() == 2);
-  const GaikaId seen = f.world.gaika().for_settlement(a_object);
-  const GaikaId unseen = f.world.gaika().for_settlement(b_object);
+  const GaikaId mine = f.world.gaika().for_settlement(f.economy.settlements().find(home)->object);
+  const GaikaId theirs =
+      f.world.gaika().for_settlement(f.economy.settlements().find(away)->object);
   f.ai.seed_gaika_view(1, f.world.gaika().count());
-  f.ai.seed_gaika_view(2, f.world.gaika().count());
-  // A slot past the eighth: the map answers true for it everywhere, which is
-  // the original's own short circuit (0x00515958).
-  f.ai.seed_gaika_view(9, f.world.gaika().count());
-  const GaikaView* one = f.ai.gaika_view(1);
-  const GaikaView* two = f.ai.gaika_view(2);
-  const GaikaView* ten = f.ai.gaika_view(9);
-  REQUIRE(one != nullptr);
-  REQUIRE(two != nullptr);
-  REQUIRE(ten != nullptr);
-  const auto explored = [](const GaikaView* view, GaikaId id) {
-    return (view->find(id)->flags & kLaikaExplored) != 0;
+  const auto record = [&](GaikaId id) { return f.ai.gaika_view(1)->find(id); };
+  const auto sweep = [&](GameTime time) {
+    Turn turn;
+    turn.time = time;
+    f.ai.advance(f.world, turn);
+  };
+  SquadTable& table = f.heroes.squads();
+  const auto squad_of = [&](PlayerId owner, std::int32_t eval, GaikaId in) {
+    const SquadKey key = table.create(owner);
+    table.find(key)->eval = eval;
+    table.move_in(key, in);
+    table.set_dest(key, in);
+    return key;
+  };
+  constexpr std::uint16_t kSeen = kLaikaExplored | kLaikaRevealed;
+
+  // Its own town it sees from the start; the other, nothing.
+  sweep(1000);
+  CHECK((record(mine)->flags & kSeen) == kSeen);
+  CHECK((record(theirs)->flags & kSeen) == 0);
+  CHECK(record(theirs)->last_seen == 0);
+
+  // An enemy army of 30 stands in node 2; player 1's scouts walk in.
+  (void)squad_of(3, 30, theirs);
+  const SquadKey scouts = squad_of(1, 5, theirs);
+  sweep(2000);
+  CHECK((record(theirs)->flags & kSeen) == kSeen);
+  CHECK(record(theirs)->last_seen == 0);
+  // Flags already on the record stay: the sweep sets bits.
+  record(theirs)->flags |= kLaikaNoRecruit;
+
+  // They walk out: still explored, no longer revealed, seen last now, and the
+  // 30 remembered.
+  table.move_in(scouts, mine);
+  sweep(3000);
+  CHECK((record(theirs)->flags & kLaikaExplored) != 0);
+  CHECK((record(theirs)->flags & kLaikaRevealed) == 0);
+  CHECK((record(theirs)->flags & kLaikaNoRecruit) != 0);
+  CHECK(record(theirs)->last_seen == 3000);
+  CHECK(record(theirs)->enemies == 30);
+  // Once: a later pass out of sight changes nothing.
+  sweep(4000);
+  CHECK(record(theirs)->last_seen == 3000);
+
+  // An ally standing there is not sight -- unless player 1's row shares its
+  // view with that ally.
+  f.world.players().set(1, 2, Relation::allied, true);
+  (void)squad_of(2, 9, theirs);
+  sweep(5000);
+  CHECK((record(theirs)->flags & kLaikaRevealed) == 0);
+  f.world.players().set(1, 2, Relation::share_view, true);
+  sweep(6000);
+  CHECK((record(theirs)->flags & kLaikaRevealed) != 0);
+
+  // And the scripts read it: `g.Explored(2)`, `g.Revealed(2)`, `g.LastSeen(2)`
+  // are player 1's.
+  const auto ask = [&](const char* name, GaikaId id) {
+    return f.call(script::CallKind::member, name, {gaika_value(id), script::Value::integer(2)},
+                  script::kNoScript)
+        .value;
+  };
+  CHECK(ask("Explored", theirs).truthy_scalar());
+  CHECK(ask("Revealed", theirs).truthy_scalar());
+  CHECK(ask("LastSeen", theirs).as_integer() == 3000);
+}
+
+/// **The two session overrides** (0x0041cb80, 0x0041cbd0): with exploration
+/// off every node is explored, and with fog of war off `Revealed` is
+/// `Explored`. A world with neither rule nor sweep is one where nothing is.
+TEST(explored_and_revealed_answer_the_match_rules_before_the_bits) {
+  Fixture f;
+  (void)f.make_settlement(3);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  f.ai.seed_gaika_view(1, f.world.gaika().count());
+  const auto ask = [&](const char* name) {
+    return f.call(script::CallKind::member, name, {gaika_value(1), script::Value::integer(2)},
+                  script::kNoScript)
+        .value.truthy_scalar();
+  };
+  CHECK(!ask("Explored"));
+  CHECK(!ask("Revealed"));
+  MatchSystem match;
+  REQUIRE(f.world.add_system(&match));
+  MatchRules rules;
+  match.configure(rules, 0, false);
+  CHECK(!ask("Explored"));
+  rules.fog_of_war = false;
+  match.configure(rules, 0, false);
+  CHECK(!ask("Revealed"));  // `Explored`, which is still false
+  rules.exploration = false;
+  match.configure(rules, 0, false);
+  CHECK(ask("Explored"));
+  CHECK(ask("Revealed"));
+  rules.fog_of_war = true;
+  match.configure(rules, 0, false);
+  CHECK(ask("Explored"));
+  CHECK(!ask("Revealed"));  // the bit, which nothing set
+}
+
+/// **`Eval`'s memory tail** (0x0042fc40, 0x0042f670): for a node not revealed
+/// to the asking AI, the staying enemy total is the strength remembered when
+/// sight was lost, corrected by what can be seen there now. This answered
+/// what could be seen.
+TEST(eval_remembers_the_enemy_in_a_node_out_of_sight) {
+  Fixture f;
+  (void)f.make_settlement(1);
+  (void)f.make_settlement(3);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  constexpr GaikaId kHome = 1;
+  constexpr GaikaId kThere = 2;
+  f.ai.seed_gaika_view(1, f.world.gaika().count());
+  SquadTable& table = f.heroes.squads();
+  const auto squad_of = [&](PlayerId owner, std::int32_t eval, GaikaId in) {
+    const SquadKey key = table.create(owner);
+    table.find(key)->eval = eval;
+    table.move_in(key, in);
+    table.set_dest(key, in);
+    return key;
   };
   const auto sweep = [&](GameTime time) {
     Turn turn;
     turn.time = time;
     f.ai.advance(f.world, turn);
   };
+  const auto enemy6 = [&](std::int32_t presence) {
+    std::vector<script::Value> args{gaika_value(kThere), script::Value::integer(presence),
+                                    script::Value::integer(2), script::Value::integer(-1),
+                                    script::Value::integer(-1), script::Value::integer(-1),
+                                    script::Value::integer(-1)};
+    const std::uint32_t index = f.registry.find(script::CallKind::member, "Eval", 6);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return -1;
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &f.context;
+    CHECK(f.registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+    return args[5].as_integer();
+  };
+  const auto eval3 = [&](std::int32_t sides) {
+    return f.call(script::CallKind::member, "Eval",
+                  {gaika_value(kThere), script::Value::integer(4), script::Value::integer(2),
+                   script::Value::integer(sides)},
+                  script::kNoScript)
+        .value.as_integer();
+  };
 
-  // Nothing seen yet: nothing explored, nothing stamped.
+  const SquadKey army = squad_of(3, 30, kThere);
+  const SquadKey scouts = squad_of(1, 5, kThere);
   sweep(1000);
-  CHECK(!explored(one, seen));
-  CHECK(!explored(one, unseen));
-  CHECK(one->find(seen)->last_seen == 0);
-  CHECK(explored(ten, seen));
-  CHECK(explored(ten, unseen));
-
-  // Player 1 sees the first node's centre. Flags already on the record stay:
-  // the sweep sets a bit, it does not write the word.
-  f.ai.gaika_view(1)->find(seen)->flags |= kLaikaNoRecruit;
-  fog.map().explore(Point{1000, 1000}, 1);
-  sweep(5000);
-  CHECK(explored(one, seen));
-  CHECK((one->find(seen)->flags & kLaikaNoRecruit) != 0);
-  CHECK(one->find(seen)->last_seen == 5000);
-  CHECK(!explored(one, unseen));
-  CHECK(one->find(unseen)->last_seen == 0);
-  // Another player's slot is another player's.
-  CHECK(!explored(two, seen));
-  CHECK(two->find(seen)->last_seen == 0);
-
-  // `LastSeen` follows the sweep for as long as the node is explored, which
-  // is for good: the map only ever gains ground.
-  sweep(7000);
-  CHECK(one->find(seen)->last_seen == 7000);
-
-  // **The centre, not any cell.** A cell beside the second node's centre --
-  // 1,100 units off, in the next 1,024-unit fog cell -- is not its centre.
-  fog.map().explore(Point{9000 - 1100, 9000}, 1);
-  sweep(8000);
-  CHECK(!explored(one, unseen));
-  fog.map().explore(Point{9000, 9000}, 1);
-  sweep(9000);
-  CHECK(explored(one, unseen));
-
-  // And the script reads it: `g.Explored(2)` is player 1's bit.
-  const script::HostOutcome asked =
-      f.call(script::CallKind::member, "Explored", {gaika_value(seen), script::Value::integer(2)},
-             script::kNoScript);
-  CHECK(asked.status == script::HostStatus::ok);
-  CHECK(asked.value.truthy_scalar());
+  // In sight: what is there.
+  CHECK(enemy6(4) == 30);
+  table.move_in(scouts, kHome);
+  sweep(2000);
+  // Out of sight with the army still there: remembered 30, seen 30.
+  CHECK(enemy6(4) == 30);
+  // The army marches off unseen: still 30 -- and the census itself says 0.
+  table.move_in(army, kHome);
+  table.set_dest(army, kHome);
+  CHECK(enemy6(4) == 30);
+  CHECK(eval3(4) == 30);
+  CHECK(eval3(1) == 0);       // the tail is the enemy total's
+  CHECK(enemy6(1) == 0);      // and only with `AI_STAYING` in the mask
+  // A reinforcement arrives unseen: it is seen by the census, and the tail
+  // takes what is seen off the remembered 30 -- so the answer stays 30.
+  (void)squad_of(3, 12, kThere);
+  CHECK(enemy6(4) == 30);
+  // Back in sight: what is there, 12.
+  table.move_in(scouts, kThere);
+  sweep(3000);
+  CHECK(enemy6(4) == 12);
 }
 
-TEST(the_ai_sweep_does_nothing_without_an_exploration_map) {
-  // A world with no fog system -- every synthetic test in this file -- is not
-  // a world where everything is explored.
-  Fixture f;
-  const SettlementId only = f.make_settlement(1);
-  {
-    const Settlement* s = f.economy.settlements().find(only);
-    REQUIRE(s != nullptr);
-    CHECK(f.world.set_position(s->anchor, Point{1000, 1000}));
-  }
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
-  f.ai.seed_gaika_view(1, f.world.gaika().count());
-  Turn turn;
-  turn.time = 4000;
-  f.ai.advance(f.world, turn);
-  const Laika* record = f.ai.gaika_view(1)->find(1);
-  REQUIRE(record != nullptr);
-  CHECK((record->flags & kLaikaExplored) == 0);
-  CHECK(record->last_seen == 0);
-}

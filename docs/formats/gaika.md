@@ -170,9 +170,14 @@ revealed: bit `0x04` is cleared, `LastSeen` becomes the current turn, and the
 enemy strength remembered becomes the strength of the enemy squads standing
 there (peaceful squads of players 14 and 15 aside) plus the settlement's wall.
 
-That memory is what `Eval/6` (0x0042fc40) adds back when its mask asks for it
-and the node is not revealed to the asking AI: the remembered strength less
-what can still be seen there.
+That memory is what `Eval/6` (0x0042fc40), `Eval/3` (0x0042f670, when its
+sides include the enemy) and `EvalNeighbors`' per-node census (0x004302a0) add
+back when the mask has `AI_STAYING` and the node is not revealed to the asking
+AI: the remembered strength less what can still be seen there, so the answer
+for the enemy staying in an unwatched node is what was there when it was last
+watched. `EvalNeighbors` (0x00430800) sums that census over the node's
+neighbours, passing over a stronghold, a Teuton tent or an independent guarded
+outpost, and -- with its flag -- any neighbour not revealed to the asker.
 
 ## The `MAIKA` list
 
@@ -231,9 +236,13 @@ passes (0x0044aaf0, 0x0044b740, 0x0044b840, 0x0044bae0).
   The partition 0x0044e050 is not reproduced, so node ids, their extents and
   their neighbours differ from the original's on any map with more than one
   region per area.
-* **The per-player memory** is stamped from the fog's exploration map
-  (`AiSystem::advance`), not by the sweep: `Revealed` reads false and the
-  remembered enemy strength is 0, so the `Eval/6` memory tail adds nothing.
+* **The per-player memory is the sweep's** (`sweep_gaika`), run on every
+  node once a tick after the squads' standing is refreshed, where the
+  original runs it on the nodes a unit crosses between. `Explored` and
+  `Revealed` read the match's exploration and fog rules first; the scenario
+  path's explored-everywhere flag, which a script's `ExploreAll` sets in a
+  match with exploration on, is not kept. `Eval/6`, `Eval/3` and
+  `EvalNeighbors` add the memory tail.
 * **The `MAIKA` list is kept** (`SquadTable::routes`, saved, newest first,
   512 at most): `SetMAIKA` and the attacked hook (`record_squad_attacked`)
   record into it, and `Recruit` runs the routing filter over it.

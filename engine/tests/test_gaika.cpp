@@ -6052,44 +6052,74 @@ constexpr std::initializer_list<std::string_view> kOpenLand = {
 
 }  // namespace
 
-/// **A node is `Explored` once any slot credited to it is**, not only its
-/// centre (`AiSystem::advance`, the second reading). The node here is the
-/// whole of one open field and its centre is in the top-left fog cell; seeing
-/// the far corner of the field is seeing the node.
-TEST(a_node_is_explored_once_any_slot_credited_to_it_is) {
+/// **`EvalNeighbors`** (0x00430800): `Eval/6`'s census (0x004302a0) summed
+/// over the node's neighbours, passing over a neighbour whose settlement is a
+/// stronghold, a Teuton tent or an independent guarded outpost, and -- with
+/// the flag -- one not revealed to the asking player. It answered three zeros.
+TEST(eval_neighbors_sums_the_census_of_the_neighbours_it_may_count) {
   LinkBench b(kOpenLand, /*shore=*/false, /*rect=*/true);
-  FogSystem fog;
-  REQUIRE(b.world.add_system(&fog));
-  fog.map().resize(2560);
-  b.plant(5, 5);
-  b.rebuild();
-  REQUIRE(b.world.gaika().count() == 1);
-  const GaikaTable& table = b.world.gaika();
-  // Every slot of the field is credited to the one node.
-  REQUIRE(table.slot_columns() == 20);
-  REQUIRE(table.slot_nodes().size() == 160);
-  for (const GaikaId id : table.slot_nodes()) CHECK(id == 1);
-
+  HeroSystem heroes;
   AiSystem ai;
-  ai.seed_gaika_view(1, table.count());
-  ai.seed_gaika_view(2, table.count());
-  const auto explored = [&](PlayerId player) {
-    return (ai.gaika_view(player)->find(1)->flags & kLaikaExplored) != 0;
+  REQUIRE(b.world.add_system(&heroes));
+  REQUIRE(b.world.add_system(&ai));
+  const SettlementId west = b.plant(4, 8, 3);
+  (void)b.plant(20, 8, 3);
+  const SettlementId east = b.plant(36, 8, 3);
+  b.rebuild();
+  REQUIRE(b.world.gaika().count() == 3);
+  REQUIRE(b.touching(2, 1));
+  REQUIRE(b.touching(2, 3));
+  REQUIRE(!b.touching(1, 3));
+  // Villages, so that the census is not refused.
+  b.economy.settlements().find(west)->kind = SettlementKind::village;
+  b.economy.settlements().find(east)->kind = SettlementKind::village;
+
+  SquadTable& table = heroes.squads();
+  const auto squad_of = [&](PlayerId owner, std::int32_t eval, GaikaId in) {
+    const SquadKey key = table.create(owner);
+    table.find(key)->eval = eval;
+    table.move_in(key, in);
+    table.set_dest(key, in);
+    return key;
   };
-  const auto sweep = [&](GameTime time) {
-    Turn turn;
-    turn.time = time;
-    ai.advance(b.world, turn);
+  (void)squad_of(2, 40, 1);   // an enemy of player 1 in the west
+  (void)squad_of(2, 7, 3);    // and one in the east
+  const SquadKey scouts = squad_of(1, 5, 3);
+  (void)squad_of(2, 100, 2);  // the node itself is not its own neighbour
+
+  script::HostRegistry registry;
+  (void)register_all_hosts(registry);
+  HostContext context;
+  context.world = &b.world;
+  const std::uint32_t index = registry.find(script::CallKind::member, "EvalNeighbors", 6);
+  REQUIRE(index != script::kUnresolvedHost);
+  const auto neighbours = [&](bool in_sight_only) {
+    std::vector<script::Value> args{gaika_value(2),           script::Value::integer(4),
+                                    script::Value::integer(2), script::Value::integer(-1),
+                                    script::Value::integer(-1), script::Value::integer(-1),
+                                    script::Value::boolean(in_sight_only)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = "EvalNeighbors";
+    ctx.kind = script::CallKind::member;
+    CHECK(registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+    return std::array<std::int32_t, 3>{args[3].as_integer(), args[4].as_integer(),
+                                       args[5].as_integer()};
   };
-  sweep(1000);
-  CHECK(!explored(1));
-  // Player 1 sees the far end, two fog cells east of the centre.
-  fog.map().explore(Point{2400, 500}, 1);
-  sweep(2000);
-  CHECK(explored(1));
-  CHECK(ai.gaika_view(1)->find(1)->last_seen == 2000);
-  CHECK(!explored(2));
-  // And the stamp follows it on later passes, as a centre-explored node's does.
-  sweep(3000);
-  CHECK(ai.gaika_view(1)->find(1)->last_seen == 3000);
+  CHECK(neighbours(false) == (std::array<std::int32_t, 3>{5, 0, 47}));
+  // A stronghold is not ground to cross.
+  b.economy.settlements().find(east)->kind = SettlementKind::stronghold;
+  CHECK(neighbours(false) == (std::array<std::int32_t, 3>{0, 0, 40}));
+  b.economy.settlements().find(east)->kind = SettlementKind::village;
+
+  // With the flag, only what player 1 has in sight: nothing before a sweep,
+  // the east once its scouts are swept there.
+  ai.seed_gaika_view(1, b.world.gaika().count());
+  CHECK(neighbours(true) == (std::array<std::int32_t, 3>{0, 0, 0}));
+  Turn turn;
+  turn.time = 1000;
+  ai.advance(b.world, turn);
+  CHECK(neighbours(true) == (std::array<std::int32_t, 3>{5, 0, 7}));
+  (void)scouts;
 }

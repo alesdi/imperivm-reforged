@@ -2572,16 +2572,17 @@ void add_squad_to_buckets(World& world, Census& out, std::int32_t category, cons
 ///      and it is added when the mask has `AI_STAYING` and the category passes
 ///      the form's gate (to the category's bucket, in the six-argument form).
 ///      The strength is `sentry_strength` (`sim/economy.cpp`);
-///   4. **the memory tail, which is not modelled**: when the mask has
-///      `AI_STAYING`, the three- and six-argument forms (the first only when
-///      `sides` has `AI_ENEMY`) look the node up in the asking AI's per-node
-///      record (`[ai+0x40]`, a vector of indices into `[ai+0x30]`, 0x18 bytes
-///      each) and, when the node is not in sight (0x0041cbd0 answers 0), add
-///      the **remembered** enemy strength (`record+8`) minus the enemy staying
-///      strength they can see -- the walk and the settlement redone with
-///      `AI_ENEMY` and `AI_STAYING` fixed. This engine keeps no per-player
-///      memory of enemy force, so the seen strength is answered; that is the
-///      AI-record design the ninth round left partial.
+///   4. **the memory tail** (`memory`): when the mask has `AI_STAYING`, the
+///      three- and six-argument forms (the first only when `sides` has
+///      `AI_ENEMY`) and `EvalNeighbors`' per-node census look the node up in
+///      the asking AI's per-node record (`laika_for`) and, when the node is not
+///      revealed to it (0x0041cbd0, `laika_revealed`), add the **remembered**
+///      enemy strength (`Laika::enemies`, `record+8`) minus the enemy staying
+///      strength they can see (`seen_enemy_staying` -- the walk and the
+///      settlement redone with `AI_ENEMY` and `AI_STAYING` fixed). So an
+///      unwatched node answers what was there when it was last watched,
+///      corrected by what can be seen there now. The record is the visibility
+///      sweep's (`sweep_gaika`, 0x0044ecc0); twelfth round.
 ///
 /// The six-argument form's failure arm writes three out-parameters and leaves
 /// `enemy_hidden` as it was, but it is reached only when the node vector does
@@ -2589,7 +2590,7 @@ void add_squad_to_buckets(World& world, Census& out, std::int32_t category, cons
 ///
 [[nodiscard]] Census gaika_eval(World& world, HeroSystem& heroes, GaikaId node,
                                 std::int32_t presence, std::int32_t viewer, std::int32_t sides,
-                                bool buckets, bool bodies = false) {
+                                bool buckets, bool bodies = false, bool memory = false) {
   Census out;
   const PlayerTable& players = world.players();
   SquadTable& table = heroes.squads();
@@ -2618,23 +2619,34 @@ void add_squad_to_buckets(World& world, Census& out, std::int32_t category, cons
     }
   }
 
-  // The settlement, 0x00420c00.
   if ((presence & kAiStaying) == 0) return out;
-  const GaikaNode* here = world.gaika().find(node);
-  const EconomySystem* economy = economy_of(world);
-  if (here == nullptr || here->settlement == kNoObject || economy == nullptr) return out;
-  if (world.find(here->settlement) == nullptr) return out;
-  const Settlement* set = economy->settlements().for_object(here->settlement);
-  // 0x0043ffc0: only a `BaseTownhall` heir offers its wall -- `stronghold` is
-  // that class test made at load. A village or outpost with sentries is not.
-  if (set == nullptr || set->kind != SettlementKind::stronghold) return out;
-  const std::int32_t strength = sentry_strength(world, *set);
-  if (strength <= 0) return out;
-  const std::int32_t category = viewer < 0 ? kAiOwn : ai_relation(players, viewer, set->owner);
-  if ((category & sides) == 0) return out;
-  // 0x00420c00's two outputs: the strength `[+0xf8]` gates both forms, and
-  // `Count/6` adds the wall's head count `[+0xf4]` (0x00430d2b).
-  out.add(category, bodies ? set->sentries_ready : strength);
+  // The settlement, 0x00420c00.
+  [&] {
+    const GaikaNode* here = world.gaika().find(node);
+    const EconomySystem* economy = economy_of(world);
+    if (here == nullptr || here->settlement == kNoObject || economy == nullptr) return;
+    if (world.find(here->settlement) == nullptr) return;
+    const Settlement* set = economy->settlements().for_object(here->settlement);
+    // 0x0043ffc0: only a `BaseTownhall` heir offers its wall -- `stronghold`
+    // is that class test made at load. A village or outpost with sentries is
+    // not.
+    if (set == nullptr || set->kind != SettlementKind::stronghold) return;
+    const std::int32_t strength = sentry_strength(world, *set);
+    if (strength <= 0) return;
+    const std::int32_t category =
+        viewer < 0 ? kAiOwn : ai_relation(players, viewer, set->owner);
+    if ((category & sides) == 0) return;
+    // 0x00420c00's two outputs: the strength `[+0xf8]` gates both forms, and
+    // `Count/6` adds the wall's head count `[+0xf4]` (0x00430d2b).
+    out.add(category, bodies ? set->sentries_ready : strength);
+  }();
+
+  // The memory tail (step 4). A viewer past the table has no record.
+  if (!memory || (sides & kAiEnemy) == 0 || node == kNoGaika) return out;
+  if (viewer < 0 || viewer >= static_cast<std::int32_t>(kPlayerCount)) return out;
+  const Laika* record = laika_for(world, viewer, node);
+  if (record == nullptr || laika_revealed(world, *record)) return out;
+  out.enemy += record->enemies - seen_enemy_staying(world, heroes, node, viewer);
   return out;
 }
 
@@ -2667,8 +2679,8 @@ HostOutcome eval_out_impl(CallContext& ctx) {
   if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
   if (ctx.count() < 7) return HostOutcome::failed("Eval: expected four out-parameters");
   const CensusCall call = census_args(ctx);
-  const Census census =
-      gaika_eval(*world, *heroes, call.node, call.presence, call.viewer, 0xFFFF, true);
+  const Census census = gaika_eval(*world, *heroes, call.node, call.presence, call.viewer,
+                                   0xFFFF, true, false, /*memory=*/true);
   ctx.out(3) = Value::integer(census.own);
   ctx.out(4) = Value::integer(census.ally);
   ctx.out(5) = Value::integer(census.enemy);
@@ -2692,36 +2704,80 @@ HostOutcome eval_total_impl(CallContext& ctx) {
   const CensusCall call = census_args(ctx);
   const std::int32_t sides =
       ctx.count() > 3 ? (ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0) : kAiOwn;
-  const Census census =
-      gaika_eval(*world, *heroes, call.node, call.presence, call.viewer, sides, false);
+  // The memory tail is 0x0042f670's and not 0x0042f3d0's: the two-argument
+  // form's gate is `AI_OWN`, and the tail only ever touches the enemy total.
+  const Census census = gaika_eval(*world, *heroes, call.node, call.presence, call.viewer,
+                                   sides, false, false, /*memory=*/ctx.count() > 3);
   return HostOutcome::ok_with(Value::integer(census.selected(sides)));
 }
 
-/// `g.EvalNeighbors(presence, idPlayer, &own, &ally, &enemy, bool)` -- 1 site.
+/// `g.EvalNeighbors(presence, idPlayer, &own, &ally, &enemy, bool)` -- 1 site
+/// (`GETARMYNEED.VS`, with the flag set), 0x00430800.
 ///
-/// The same census over the node's **neighbours** rather than the node, with
-/// three out-parameters instead of four and a trailing `bool` whose meaning is
-/// not established. It is bound on the same standing as its four siblings.
+/// `Eval/6`'s census summed over the node's **neighbours**, in adjacency order,
+/// into three out-parameters (the hidden total is kept and dropped). Each
+/// neighbour is passed over when:
 ///
-/// **The adjacency it needs now exists** -- `GaikaTable::neighbours`, built for
-/// `ControlledNeighbors` -- and so do the squad fields, so the two things this
-/// note used to be waiting for are both here. What is still unread is the rest
-/// of 0x00430800: the trailing `bool` gates a filter that walks the asking
-/// player's own node view (`[ai+0x88]`, a per-node record reached through a
-/// vector of ids at `[+0x40]`) and then refuses a neighbour on three
-/// settlement predicates, 0x00440100, 0x0043ffc0 and 0x004401c0. Answering the
-/// census over every neighbour regardless would be a different function, so
-/// this stays a zero until those are read.
+///   * the flag is set and the neighbour is not revealed to the asking player
+///     (0x0041cbd0 on its record, `laika_revealed`) -- so the census is of
+///     what is in sight, and the remembered strength of what is not comes in
+///     through each census's memory tail only when the flag is clear. A
+///     neighbour the player has no record for is passed over here; the
+///     original reads through the null;
+///   * its settlement is a Teuton tent (0x00440100, `IsTTent`), a
+///     `BaseTownhall` heir (0x0043ffc0, a stronghold) or an independent
+///     guarded outpost (0x004401c0, `IsIndependentGuarded`): places that are
+///     strategies of their own rather than ground to cross.
+///
+/// The census is 0x004302a0, `Eval/6`'s walk (0x00427e90's buckets, the wall,
+/// the memory tail) on the neighbour, for the viewer `idPlayer - 1`. An id
+/// with no node answers three zeros.
+///
+/// This answered three zeros always, waiting on the node memory the flag
+/// reads; twelfth round.
 HostOutcome eval_neighbors_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  if (hero_system_of(*world) == nullptr) return HostOutcome::failed(kNoHeroes);
+  HeroSystem* heroes = hero_system_of(*world);
+  if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
   if (ctx.count() < 7) {
     return HostOutcome::failed("EvalNeighbors: expected three out-parameters");
   }
-  ctx.out(3) = Value::integer(0);
-  ctx.out(4) = Value::integer(0);
-  ctx.out(5) = Value::integer(0);
+  const CensusCall call = census_args(ctx);
+  const bool in_sight_only = ctx.arg(6).truthy_scalar();
+  Census total;
+  const GaikaTable& table = world->gaika();
+  const EconomySystem* economy = economy_of(*world);
+  const ClassGraph* graph = world->class_graph();
+  const auto refused = [&](GaikaId id) {
+    const GaikaNode* node = table.find(id);
+    if (node == nullptr || node->settlement == kNoObject || economy == nullptr) return false;
+    const Settlement* set = economy->settlements().for_object(node->settlement);
+    if (set == nullptr) return false;
+    if (set->is_teuton_tent() || set->kind == SettlementKind::stronghold) return true;
+    if (!set->is_outpost() || !set->independent()) return false;
+    const WorldObject* central = world->find(set->anchor);
+    if (central == nullptr || graph == nullptr || central->class_index == kNoClass) return false;
+    return !graph->property(central->class_index, "defender_cls_1").empty() ||
+           !graph->property(central->class_index, "defender_cls_2").empty();
+  };
+  if (table.find(call.node) != nullptr) {
+    for (const GaikaId next : table.neighbours(call.node)) {
+      if (in_sight_only) {
+        const Laika* record = laika_for(*world, call.viewer, next);
+        if (record == nullptr || !laika_revealed(*world, *record)) continue;
+      }
+      if (refused(next)) continue;
+      const Census census = gaika_eval(*world, *heroes, next, call.presence, call.viewer,
+                                       0xFFFF, true, false, /*memory=*/true);
+      total.own += census.own;
+      total.ally += census.ally;
+      total.enemy += census.enemy;
+    }
+  }
+  ctx.out(3) = Value::integer(total.own);
+  ctx.out(4) = Value::integer(total.ally);
+  ctx.out(5) = Value::integer(total.enemy);
   return HostOutcome::ok_void();
 }
 
@@ -3356,6 +3412,15 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
 }
 
 }  // namespace
+
+std::int32_t seen_enemy_staying(World& world, HeroSystem& heroes, GaikaId node,
+                                std::int32_t viewer) {
+  // The sweep's and the tail's own walk: a squad's category is 0x0044e250's,
+  // its presence 0x0044e1f0's with peaceful squads absent, refined by
+  // 0x0044eb80; the two bodies also skip a peaceful squad of player 14 or 15,
+  // which the absent presence has already skipped. Then the wall.
+  return gaika_eval(world, heroes, node, kAiStaying, viewer, kAiEnemy, false).enemy;
+}
 
 SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest) {
   return add_to_squad(world, heroes, id, dest, 0);

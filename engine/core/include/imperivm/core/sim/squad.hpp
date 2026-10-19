@@ -110,6 +110,7 @@ class Scheduler;
 
 namespace imperivm::core::sim {
 class World;
+class HeroSystem;
 struct Command;
 }
 
@@ -684,6 +685,15 @@ class SquadTable {
   /// The MAIKA list, newest first; see `record_route`. Saved, not hashed.
   std::deque<Route> routes_;
 };
+
+/// The enemy strength `viewer` can see **staying** in `node`: every enemy
+/// squad on the node's deque that is staying as `viewer` sees it (0x0044e1f0,
+/// then 0x0044eb80), plus the node's settlement's wall when its owner is an
+/// enemy (0x00420c00). The figure the visibility sweep (0x0044ecc0) remembers
+/// when sight is lost, and the one the `Eval` memory tail subtracts from what
+/// was remembered.
+[[nodiscard]] std::int32_t seen_enemy_staying(World& world, HeroSystem& heroes, GaikaId node,
+                                              std::int32_t viewer);
 
 /// Node `node`'s deque (`SquadTable::filed_under`) as a copy, for a walk that
 /// may touch the table while it goes.
