@@ -331,7 +331,15 @@ the answer — and it is marked as such:
 | 10 | `RAM_ATTACK.VS`, three: `(10,0..2)` | ram impact points |
 | 17 | `RAM_ATTACK.VS`, guarded by `IsHeirOf("Gate")` | gate hinge or breach points |
 
-**The meaning of the remaining five is unknown**: 4, 5, 6, 7 and 16. What the data supports: type 16 is
+**Type 7 is named by the executable's reader too**: the deferred construction
+step of a `CVXOutpost` (0x005641d0) places a `FakeTower` at every type-7 point
+and that of a `CVXCatapult` (0x004e38d0) a `CatapultTower`, each after the same
+screen-offset round trip -- the invisible guns of an outpost and of the Roman
+tower (`docs/formats/siege-fire.md`). The siege planner also reads a gate's
+type-7 pair as its wall axis. Every race outpost carries three or four; of the
+catapult entities only `RCatapult`'s carries one.
+
+**The meaning of the remaining four is unknown**: 4, 5, 6 and 16. What the data supports: type 16 is
 building-exclusive and plausibly the sentry slots (`EBarracks` has five type-16 points and a
 class `num_sentry_slots` of 4–5); type 5 never appears on a building at all. Confirming any
 of this needs runtime observation. Do not guess in the loader — carry `(idx, type, x, y)`

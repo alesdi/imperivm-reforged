@@ -21,6 +21,7 @@
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/settlement.hpp"
 #include "imperivm/core/sim/world.hpp"
+#include "imperivm/core/sim/world_host.hpp"
 #include "test.hpp"
 
 using namespace imperivm::core;
@@ -68,7 +69,7 @@ struct Bench {
         R"(<class id="Outpost" parent="Building" cpp_class="CVXTownHall"><properties is_central_building="1"/></class>)",
         R"(<class id="Gate" parent="Building" cpp_class="CVXGate"/>)",
         R"(<class id="FakeTower" parent="Building" cpp_class="CVXBuilding"/>)",
-        R"(<class id="Catapult" parent="Building" cpp_class="CVXCatapult"><properties damage="120" damage_type="siege" range="800" min_range="301" radius="50"/></class>)",
+        R"(<class id="Catapult" parent="Building" cpp_class="CVXCatapult"><properties damage="120" damage_type="siege" range="800" min_range="301" radius="50" splash_radius="100"/></class>)",
     };
     int n = 0;
     for (const char* doc : docs) graph.add(bytes_of(doc), "class" + std::to_string(n++) + ".sc.xml");
@@ -132,6 +133,19 @@ struct Bench {
   }
 
   /// Advance `turns` turns of 400 ms.
+  /// `Catapult::Attack(point)`: the one entry point that takes a point.
+  script::HostOutcome attack_point(ObjectId self, Point at, std::int64_t now) {
+    const std::uint32_t index = registry.find(script::CallKind::member, "Attack", 1);
+    std::vector<script::Value> args{script::Value::object(1, self), pack_point(at)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = "Attack";
+    ctx.kind = script::CallKind::member;
+    ctx.now = now;
+    return registry.entry(index).fn(ctx);
+  }
+
   void run(int turns) {
     for (int i = 0; i < turns; ++i) world.advance(400);
   }
@@ -199,7 +213,8 @@ TEST(an_archer_may_attack_a_building_and_damages_it) {
 
 /// **A catapult and a siege-damage unit hurt a building.** The engine is a
 /// building, whose own `Catapult::Attack` (0x004e2d10) this rule does not
-/// gate; `siege` damage accepts anything.
+/// gate -- it throws at a point, and the ground shot hurts what stands there
+/// (`docs/formats/siege-fire.md`); `siege` damage accepts anything.
 TEST(a_catapult_and_a_ram_damage_a_building) {
   Bench b(false);
   const ObjectId engine =
@@ -212,7 +227,7 @@ TEST(a_catapult_and_a_ram_damage_a_building) {
   const ObjectId shed = b.spawn(NativeClass::building, "House", Point{2160, 2000}, kThem, 3000);
   b.world.start();
 
-  CHECK(b.combat.order_attack(engine, target));
+  CHECK(b.attack_point(engine, Point{1500, 1000}, 0).status == script::HostStatus::suspend);
   CHECK(b.may(ram, shed));
   CHECK(b.combat.order_attack(ram, shed));
   b.run(30);

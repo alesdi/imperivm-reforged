@@ -323,6 +323,9 @@ struct CombatConstants {
   std::int32_t catapult_base_fire_rate = 40;  ///< `CatapultBaseFireRate`, shots per 10 min
   std::int32_t catapult_add_fire_rate = 28;   ///< `CatapultAddFireRate`, shots per 10 min
   std::int32_t catapult_max_units = 10;       ///< `CatapultMaxUnits`
+  /// `BaseFireRate` (100): a tower settlement's shots a second per square
+  /// root of its garrison, in percent (0x005c2fb0, the global 0x009bf7b0).
+  std::int32_t base_fire_rate = 100;
 
   // -- pacing ---------------------------------------------------------
   /// How often a unit with nothing to hit looks for something. `SquadLookIvl`,
@@ -811,6 +814,14 @@ struct Projectile {
   std::int32_t attacker_level = 1;
   std::int32_t splash_radius = 0;
   bool ignores_armour = false;
+  /// A catapult's shot at a point (`Catapult::Attack(point)`): it lands on
+  /// the ground at `aim` and hurts what stands there by the impact rule of
+  /// `docs/formats/siege-fire.md` -- everyone, raw, by distance -- rather
+  /// than striking `target`, which is none.
+  bool ground = false;
+  /// The class of whoever fired a ground shot, for its counter percent: the
+  /// shooter may be gone when it lands.
+  ClassIndex shooter_class = kNoClass;
 };
 
 /// INVENTED. World units per second of flight.
@@ -1132,6 +1143,25 @@ class CombatSystem final : public System {
   /// own `while (.Attack(u))` would put it back into the engaged state and it
   /// would swing from the grave.
   bool order_attack(ObjectId attacker, ObjectId target);
+
+  /// `IsValidTarget`'s virtual (`vtbl+0xb4`, 0x005b1da0) as `host_is_valid_target`
+  /// answers it: an enemy, alive, with health, not inside a holder, a class
+  /// that may be attacked, and `unit_can_attack`. What the two siege target
+  /// sweeps and `Building::Attack` ask of a candidate.
+  [[nodiscard]] bool valid_target(const Combatant& self, const Combatant& other) const;
+
+  /// `Catapult::Attack(point)`'s shot (0x004e22a0): a ground shot of the
+  /// engine's class leaving `from` at `release` -- the attack animation's
+  /// action moment, which may lie ahead -- for `at`, carrying the class's
+  /// `damage` and `splash_radius`. False when `catapult` is no combatant.
+  /// See `docs/formats/siege-fire.md`.
+  bool launch_at_point(World& world, ObjectId catapult, Point from, Point at, GameTime release);
+
+  /// `Building::Attack`'s arrow (0x004df650): `tower` shoots `target` now,
+  /// the arrow resolved as any ranged attacker's is. Stamps the tower's last
+  /// shot and the target's squad; no swing, no army stamp. False when either
+  /// is no combatant.
+  bool fire_arrow(World& world, ObjectId tower, ObjectId target, GameTime now);
 
   /// `Unit::CanAttack(target)`, the virtual at `vtbl+0xb4` (body 0x005b1da0,
   /// shared by the unit vtables): **whether this kind of unit may strike that
@@ -1457,6 +1487,7 @@ class CombatSystem final : public System {
   void strike(World& world, Combatant& attacker, Combatant& defender, GameTime now);
   void launch(World& world, Combatant& attacker, const Combatant& defender, GameTime now);
   void land(World& world, Projectile& shot, GameTime now);
+  void land_on_ground(World& world, const Projectile& shot, GameTime now);
   void hit(World& world, Combatant& defender, const DamageInputs& inputs, ObjectId source,
            GameTime now);
 

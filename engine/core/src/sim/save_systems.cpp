@@ -831,6 +831,11 @@ void CombatSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, s.attacker_level);
     bytes::put_i32(out, s.splash_radius);
     put_bool(out, s.ignores_armour);
+    // Version 38: where it is going, which a ground shot has no target to
+    // re-derive from, and the two fields that make it one.
+    put_point(out, s.aim);
+    put_bool(out, s.ground);
+    bytes::put_u32(out, s.shooter_class);
   }
 
   // Not a log: a caller drains this with `clear_events`, so an undrained event
@@ -917,7 +922,9 @@ Status CombatSystem::deserialize(std::span<const std::byte> data) {
         !bytes::get_i32(reader, s.attack) ||
         !get_enum(reader, s.type, static_cast<std::uint8_t>(DamageType::siege) + 1) ||
         !bytes::get_i32(reader, s.attacker_level) ||
-        !bytes::get_i32(reader, s.splash_radius) || !get_bool(reader, s.ignores_armour)) {
+        !bytes::get_i32(reader, s.splash_radius) || !get_bool(reader, s.ignores_armour) ||
+        !get_point(reader, s.aim) || !get_bool(reader, s.ground) ||
+        !reader.u32(s.shooter_class)) {
       return FormatError::truncated;
     }
     projectiles.push_back(s);

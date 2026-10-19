@@ -154,7 +154,8 @@ std::int32_t advance_elapsed(std::int32_t cycle_ms, std::int32_t elapsed, GameTi
       (flags.entering ? 0x100000u : 0u) | (flags.summoning_death ? 0x200000u : 0u) |
       (flags.ondie_fired ? 0x400000u : 0u) | (flags.diseased ? 0x800000u : 0u) |
       (flags.commands_disabled ? 0x1000000u : 0u) |
-      (flags.half_damage ? 0x2000000u : 0u) | (flags.training ? 0x4000000u : 0u));
+      (flags.half_damage ? 0x2000000u : 0u) | (flags.training ? 0x4000000u : 0u) |
+      (flags.towers_posted ? 0x8000000u : 0u) | (flags.has_towers ? 0x10000000u : 0u));
 }
 
 [[nodiscard]] ObjectFlags unpack_object_flags(std::uint32_t bits) noexcept {
@@ -185,6 +186,8 @@ std::int32_t advance_elapsed(std::int32_t cycle_ms, std::int32_t elapsed, GameTi
   flags.diseased = (bits & 0x800000u) != 0;
   flags.commands_disabled = (bits & 0x1000000u) != 0;
   flags.half_damage = (bits & 0x2000000u) != 0;
+  flags.towers_posted = (bits & 0x8000000u) != 0;
+  flags.has_towers = (bits & 0x10000000u) != 0;
   flags.training = (bits & 0x4000000u) != 0;
   return flags;
 }
@@ -2433,6 +2436,9 @@ std::uint64_t World::state_hash() const noexcept {
     // The player's manual target for a tower. Hashed because a tower fires at
     // it -- see `ObjectState::ui_target`.
     hash_u64(state, slot.state.ui_target);
+    // A catapult's own target: the autofire loop shoots at it. See
+    // `ObjectState::catapult_target`.
+    hash_u64(state, slot.state.catapult_target);
     // The two effect tags: who is burning this unit, and who shelters it.
     hash_u64(state, slot.state.mist);
     hash_u64(state, slot.state.sheltered_by);
@@ -2576,7 +2582,7 @@ constexpr std::uint8_t kNoNativeClass = 0xFFu;
 /// spots that only bite together: the mask is only reachable through a saved
 /// world that actually carries the bit. See
 /// `save_the_fixture_sets_and_clears_every_writable_flag`.
-constexpr std::uint32_t kObjectFlagMask = 0x7FFFFFFu;  // 27 bits since `training`, again since `gate_passable` went
+constexpr std::uint32_t kObjectFlagMask = 0x1FFFFFFFu;  // 29 bits since `towers_posted` and `has_towers`
 
 void put_query_spec(std::vector<std::byte>& out, const QuerySpec& spec) {
   bytes::put_u8(out, static_cast<std::uint32_t>(spec.kind));
@@ -2779,6 +2785,8 @@ void World::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, slot.state.parry_mode);
     bytes::put_i32(out, slot.state.damage_state);
     bytes::put_u32(out, slot.state.ui_target);
+    // World version 38: a catapult's own target.
+    bytes::put_u32(out, slot.state.catapult_target);
     bytes::put_u32(out, slot.state.mist);
     bytes::put_u32(out, slot.state.sheltered_by);
     bytes::put_u32(out, slot.state.teleport_destination);
@@ -2999,7 +3007,8 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
         !bytes::get_i32(reader, slot.state.damage_taken) ||
         !bytes::get_i32(reader, slot.state.parry_mode) ||
         !bytes::get_i32(reader, slot.state.damage_state) ||
-        !reader.u32(slot.state.ui_target) || !reader.u32(slot.state.mist) ||
+        !reader.u32(slot.state.ui_target) || !reader.u32(slot.state.catapult_target) ||
+        !reader.u32(slot.state.mist) ||
         !reader.u32(slot.state.sheltered_by) ||
         !reader.u32(slot.state.teleport_destination) ||
         !reader.u32(slot.state.traversed_by) ||

@@ -353,7 +353,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// section now, not rows with a build timer. Hashed, so a version-40 file
 /// would load a caravan mid-capture as one nobody had touched, and its mules
 /// in transit as loads nobody carried.
-inline constexpr std::uint32_t kStateVectorVersion = 41;
+/// 42: siege fire is the scripts' (`docs/formats/siege-fire.md`). Every
+/// object carries a catapult's own target (`ObjectState::catapult_target`,
+/// `[cat+0x228]`) and two more flag bits, `towers_posted` and `has_towers`;
+/// a version-41 file would load every engine with no target and every
+/// outpost and Roman tower still owed its fake towers, which would be
+/// placed a second time.
+inline constexpr std::uint32_t kStateVectorVersion = 42;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";
