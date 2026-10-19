@@ -367,7 +367,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// and settlement slots on its row (system section version 37), and a
 /// retrying call's word of state (`Execution::retry_scratch`, the coroutine
 /// payload's version 5), which the `Goto` family's re-entry answers on.
-inline constexpr std::uint32_t kStateVectorVersion = 43;
+/// 44: the movement section carries each route's failed-search bit
+/// (`MoveState::route_failed`, `[retry+0x20] & 4`; system section version
+/// 38). A version-43 file would load a unit walking on from a failed search
+/// as one walking to the end of its old route, and one stopped after it as
+/// arrived when it stands in its band.
+inline constexpr std::uint32_t kStateVectorVersion = 44;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";
