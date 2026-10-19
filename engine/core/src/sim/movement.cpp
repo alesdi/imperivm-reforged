@@ -2540,6 +2540,32 @@ HostOutcome has_path_impl(CallContext& ctx) {
   return answer(false);
 }
 
+/// `PathTo`'s goal: of the sixteen points at exactly `range` round `dest`
+/// (0x00409cf0) that the grid lets a unit stand on (0x00409b80), the one
+/// nearest `from` in a straight line, the first in ring order on a tie; `dest`
+/// itself for a `range` of 0 or when none is passable.
+Point path_to_goal(const ObstructionGrid& grid, Point from, Point dest, std::int32_t range) {
+  if (range <= 0) return dest;
+  Point best_at = dest;
+  std::int64_t best = -1;
+  for (const auto& dir : kRingDirections) {
+    const Point p{
+        truncate_fixed((static_cast<std::int64_t>(dest.x) << kRingShift) +
+                       static_cast<std::int64_t>(range) * dir[0]),
+        truncate_fixed((static_cast<std::int64_t>(dest.y) << kRingShift) +
+                       static_cast<std::int64_t>(range) * dir[1])};
+    const std::int32_t cx = ObstructionGrid::cell_of(p.x);
+    const std::int32_t cy = ObstructionGrid::cell_of(p.y);
+    if (!grid.in_bounds(cx, cy) || grid.blocked_cell(cx, cy)) continue;
+    const std::int64_t gap = dist_sq(from, p);
+    if (best < 0 || gap < best) {
+      best = gap;
+      best_at = p;
+    }
+  }
+  return best_at;
+}
+
 /// `PathTo(dest, range, ?)` -> the route's length in world units, or -1 when
 /// there is no route. Two bodies, one per destination type:
 ///
@@ -2556,13 +2582,26 @@ HostOutcome has_path_impl(CallContext& ctx) {
 ///     belongs to an object (0x005319a0), and the search is not made;
 ///   * the third argument is popped and never read.
 ///
-/// **Not reproduced:** the search itself. The original asks the pathfinder
-/// (`[0x8c528c]`, `vtbl+8`) with the unit's class radius and its class's
-/// `+0x31c`, from the unit's position -- or, for a unit at `(-1, -1)`, from
-/// an exit point found by 0x004db6c0 -- and answers the result's `+0x18`
-/// shifted down sixteen bits. That it is the route's length is **inferred**:
-/// the scripts compare it with `.sight` and `.FormRadius`, both distances.
-/// Here it is this engine's pathfinder from where the unit resolves.
+/// **The search** (docs/formats/pathfinder.md, "`PathTo`"). The original lays
+/// the goal points as one ring of sixteen at exactly `range` round the goal
+/// (0x00409cf0, the directions `ring_goal` uses; a `range` of 0 is the goal
+/// alone), each a goal only where the grid lets a unit stand (0x00409b80),
+/// asks the live pathfinder (`[0x8c528c]`, `vtbl+8`) with the unit's class
+/// radius and its class's `+0x31c`, and answers the path record's `+0x34`
+/// shifted down sixteen bits (0x005de354; the record is at `esp+0x20`, so
+/// `esp+0x54` is `+0x34`): **the route's length**, the sum of its legs'
+/// integer square roots (0x0041a8f0), **complete or not** -- a partial
+/// route's length, with no 32,000. A search that answers 0, which is one
+/// whose route has no length, answers -1 (0x005de34c). So a unit already
+/// inside the band is answered the walk out to the ring point nearest it, and
+/// one standing on that point -1. Here the ring point nearest the unit in a
+/// straight line is the goal -- the inference `ring_goal` makes for the
+/// first goal cell the search reaches -- or the goal itself when no point is
+/// passable, and this engine's search runs to it.
+///
+/// This used to answer 0 inside the band and -1 for a partial route.
+/// **Not reproduced:** a unit at `(-1, -1)` searches from an exit point
+/// (0x004db6c0); here from where it resolves.
 HostOutcome path_to_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::integer(-1)));
@@ -2586,12 +2625,11 @@ HostOutcome path_to_impl(CallContext& ctx) {
   if (held_by_carrier(*self.world, self.id)) return HostOutcome::ok_with(Value::integer(1000000));
   PathRequest request;
   request.start = self.world->resolve_position(self.id);
-  request.goal = dest;
-  request.arrival_range = range;
+  request.goal = path_to_goal(self.movement->grid(), request.start, dest, range);
+  request.arrival_range = 0;
   request.ignore_passability = self.movement->ignores_passability(*self.world, self.id);
   const Path path = self.movement->pathfinder().find(self.movement->grid(), request);
-  if (path.status == PathStatus::arrived) return HostOutcome::ok_with(Value::integer(0));
-  if (path.status != PathStatus::found) return none;
+  if (!path.usable() || path.length <= 0) return none;
   return HostOutcome::ok_with(
       Value::integer(static_cast<std::int32_t>(std::min<std::int64_t>(path.length, 0x7FFFFFFF))));
 }

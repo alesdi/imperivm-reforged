@@ -2012,6 +2012,27 @@ TEST(path_to_answers_a_straight_line_for_a_class_that_ignores_passability) {
   CHECK(invoke(registry, CallKind::member, "PathTo", 3, walled).value.as_integer() == -1);
 }
 
+/// `PathTo` answers the path record's length (0x005de354 reads `+0x34`) for
+/// whatever route the search laid -- a partial one included, with no 32,000
+/// -- and -1 only when the search answered 0.
+TEST(path_to_answers_the_length_of_a_partial_route) {
+  ObstructionGrid grid = open_field(64);
+  for (std::int32_t y = 0; y < 64; ++y) grid.set_cell(32, y, true);
+  World world;
+  MovementSystem movement;
+  movement.set_grid(std::move(grid));
+  attach(world, movement);
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  const ObjectId unit = spawn_unit(world, movement, Point{10 * 16 + 8, 20 * 16 + 8}, 100);
+  // Beyond the wall: the route runs to the reachable cell nearest the goal,
+  // (31, 20), a straight 21 cells.
+  HostCall beyond(world, {Value::object(kTypeObj, unit), pack_point(Point{50 * 16 + 8, 20 * 16 + 8}),
+                          Value::integer(0), Value::integer(0)});
+  CHECK(invoke(registry, CallKind::member, "PathTo", 3, beyond).value.as_integer() == 21 * 16);
+}
+
 TEST(both_forms_of_goto_drop_the_combat_target) {
   // The point form empties `[unit+0x1a8]` once the unit is out of any holder
   // (0x005d639a), the object form on every entry before anything else
@@ -2715,10 +2736,14 @@ TEST(path_to_an_object_reaches_its_edge_and_a_passenger_answers_a_million) {
     CHECK(out.status == HostStatus::ok);
     return out.value.is_integer() ? out.value.as_integer() : -999;
   };
-  // 100 between centres: a walk of 100 to the point, and none to the object,
-  // whose band is 15 + 100 wide.
+  // 100 between centres: a walk of 100 to the point. To the object the goal
+  // is the ring of sixteen points at its band, 15 + 100, round its centre
+  // (0x00409cf0), and the walker inside it is answered the walk out to the
+  // nearest of them, (985, 1000): 15, where this used to answer 0.
   CHECK(path_to(walker, pack_point(Point{1100, 1000})) == 100);
-  CHECK(path_to(walker, Value::object(kTypeObj, camp)) == 0);
+  CHECK(path_to(walker, Value::object(kTypeObj, camp)) == 15);
+  // Standing on the point it was asked for, the route has no length: -1.
+  CHECK(path_to(walker, pack_point(Point{1000, 1000})) == -1);
 
   const ObjectId doomed = f.place("Walker", Point{1000, 1400});
   REQUIRE(f.world.despawn(doomed));
