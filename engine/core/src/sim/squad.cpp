@@ -4575,9 +4575,13 @@ namespace {
 /// single-member squads the final pass writes the state to. So here a unit
 /// attached to a hero stays where it is and takes no state, which is the same
 /// place it ends up. **A hero keeps its own squad and that squad takes the
-/// state** -- the one case the reading does not settle, because the
-/// assignment's leader branch was not followed to its end; it is labelled
-/// rather than guessed. `GAIKAIn` and the last attacker are left at their
+/// state** -- where the original moves the hero alone: the join
+/// (0x00445a50) takes one object out of its squad, appends it to the fresh
+/// one and files that squad under the unit's node when it is the first
+/// member, and the assignment's leader branch (0x00446a70) only re-sets the
+/// `DestGAIKA` of the squad the hero is now in. So a regrouped hero leaves
+/// his army in its squad and ends in a single-member squad of his own, which
+/// takes the state. Labelled, not reproduced. `GAIKAIn` and the last attacker are left at their
 /// defaults on a fresh squad, where the original leaves whatever the pooled
 /// slot held. **The old squad's AI order is re-posted on the fresh one** --
 /// same node, same priority as it stands (0x00447527..0x0044755d); see
@@ -4591,9 +4595,10 @@ namespace {
 /// Here each trainee and each enterer gets a squad of its own. Using
 /// `squadize_bodies` instead needs the hero case settled first: 0x00447330 has
 /// no hero branch of its own, 0x00446a70's only re-sets the `DestGAIKA` of the
-/// squad a hero is in, and whether a hero's army follows him into his fresh
-/// squad turns on the join (0x00445a50), which is not read. Until it is, the
-/// one-squad-each reading stays, labelled.
+/// squad a hero is in, and the join (0x00445a50) moves the one object -- so in
+/// the original a hero's army does not follow him into his fresh squad (see
+/// above). The one-squad-each reading stays, labelled, until the merge and
+/// that split are reproduced together.
 ///
 /// ## What the answer is not
 ///
