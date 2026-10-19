@@ -812,8 +812,10 @@ ORDER_TURN = 300
 #: p1's gates stands closed with nobody near, so the gate it walks through is
 #: shut when it is sent. At 300 on the tenth round's tree p1's two swordsmen
 #: stand within 350 of the south and the west gate and hold both open; at 400
-#: all four are shut and three swordsmen stand clear of them.
-GATE_ORDER_TURN = 400
+#: all four were shut and three swordsmen stood clear of them. On the eleventh
+#: round's (the idle activity's draws, the `Goto` family's re-entry) a friend
+#: opens the west gate at 311 and leaves it at 401, so the order is at 420.
+GATE_ORDER_TURN = 420
 
 
 def _inside(x: int, y: int) -> bool:

@@ -4881,8 +4881,8 @@ bool execute_order(World& world, script::Scheduler& scheduler, ScriptLibrary* li
   pool.hand_to(handle, runner, kOrderListSlot);
   queue.runner = runner;
   // A script of the AI object's: `AIGetPlayer` answers its player, and
-  // `AIStop` takes it with the rest.
-  if (ai != nullptr) ai->adopt(runner, player);
+  // `AIStop` takes it with the rest. 0x0041ccb0 tags it with the seat.
+  (void)scheduler.set_context(runner, ai_thread_context(player));
   return true;
 }
 

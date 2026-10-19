@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 36;  // 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 37;  // 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -1583,25 +1583,18 @@ void AiSystem::serialize(std::vector<std::byte>& out) const {
       bytes::put_i32(out, r.priority);
       bytes::put_i32(out, r.optimism);
     }
+    // The `AIRun` range, id 3 first, and the settlement slots ascending: the
+    // AI object's own, so they ride with its row.
+    for (const script::ScriptId run : p.runs) bytes::put_u32(out, run);
+    bytes::put_u32(out, static_cast<std::uint32_t>(p.settlements.size()));
+    for (const AiSettlementScripts& s : p.settlements) {
+      bytes::put_u32(out, s.settlement);
+      bytes::put_i32(out, s.economy);
+      bytes::put_u32(out, s.economy_script);
+      bytes::put_i32(out, s.tactic);
+      bytes::put_u32(out, s.tactic_script);
+    }
   }
-
-  bytes::put_u32(out, static_cast<std::uint32_t>(owners_.size()));
-  for (const ScriptOwner& o : owners_) {
-    bytes::put_u32(out, o.script);
-    bytes::put_u8(out, o.player);
-    put_bool(out, o.root);
-  }
-
-  bytes::put_u32(out, static_cast<std::uint32_t>(settlements_.size()));
-  for (const AiSettlementScripts& s : settlements_) {
-    bytes::put_u32(out, s.settlement);
-    bytes::put_i32(out, s.economy);
-    bytes::put_u32(out, s.economy_script);
-    bytes::put_i32(out, s.tactic);
-    bytes::put_u32(out, s.tactic_script);
-  }
-
-  bytes::put_u32(out, since_prune_);
 
   // The AI-helper table, ascending by name -- which is `std::map`'s order and
   // therefore the order `helpers()` iterates in. `AiSystem::hash` is a no-op
@@ -1679,38 +1672,26 @@ Status AiSystem::deserialize(std::span<const std::byte> data) {
     // node. A file whose permutation and map disagreed would make every
     // per-node accessor answer about a different node, silently.
     if (!p.gaika.adopt(std::move(slots), std::move(records))) return FormatError::malformed;
+    for (script::ScriptId& run : p.runs) {
+      if (!reader.u32(run)) return FormatError::truncated;
+    }
+    std::uint32_t settlement_count = 0;
+    if (!reader.u32(settlement_count)) return FormatError::truncated;
+    for (std::uint32_t k = 0; k < settlement_count; ++k) {
+      AiSettlementScripts s;
+      if (!reader.u32(s.settlement) || !bytes::get_i32(reader, s.economy) ||
+          !reader.u32(s.economy_script) || !bytes::get_i32(reader, s.tactic) ||
+          !reader.u32(s.tactic_script)) {
+        return FormatError::truncated;
+      }
+      // Sorted by settlement id, which `slot` binary-searches on.
+      if (k != 0 && s.settlement <= p.settlements.back().settlement) {
+        return FormatError::malformed;
+      }
+      p.settlements.push_back(s);
+    }
     players.push_back(std::move(p));
   }
-
-  std::uint32_t owner_count = 0;
-  if (!reader.u32(owner_count)) return FormatError::truncated;
-  std::vector<ScriptOwner> owners;
-  for (std::uint32_t i = 0; i < owner_count; ++i) {
-    ScriptOwner o;
-    if (!reader.u32(o.script) || !reader.u8(o.player) || !get_bool(reader, o.root)) {
-      return FormatError::truncated;
-    }
-    // Sorted by script id, which `owner` binary-searches on.
-    if (i != 0 && o.script <= owners.back().script) return FormatError::malformed;
-    owners.push_back(o);
-  }
-
-  std::uint32_t settlement_count = 0;
-  if (!reader.u32(settlement_count)) return FormatError::truncated;
-  std::vector<AiSettlementScripts> settlements;
-  for (std::uint32_t i = 0; i < settlement_count; ++i) {
-    AiSettlementScripts s;
-    if (!reader.u32(s.settlement) || !bytes::get_i32(reader, s.economy) ||
-        !reader.u32(s.economy_script) || !bytes::get_i32(reader, s.tactic) ||
-        !reader.u32(s.tactic_script)) {
-      return FormatError::truncated;
-    }
-    if (i != 0 && s.settlement <= settlements.back().settlement) return FormatError::malformed;
-    settlements.push_back(s);
-  }
-
-  std::uint32_t since_prune = 0;
-  if (!reader.u32(since_prune)) return FormatError::truncated;
 
   std::uint32_t helper_count = 0;
   if (!reader.u32(helper_count)) return FormatError::truncated;
@@ -1756,9 +1737,6 @@ Status AiSystem::deserialize(std::span<const std::byte> data) {
   if (!adopt_ship_transports(std::move(transports))) return FormatError::malformed;
 
   players_ = std::move(players);
-  owners_ = std::move(owners);
-  settlements_ = std::move(settlements);
-  since_prune_ = since_prune;
   manager_started_ = manager_started;
   helpers_ = std::move(helpers);
   // `profiles_` is left alone: its entries hold borrowed `const AiProfile*`,

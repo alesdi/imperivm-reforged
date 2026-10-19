@@ -586,6 +586,52 @@ TEST(conversation_the_condition_decides_which_line_plays) {
   CHECK(stage.campaign.results().get("T_Gate") == "OPEN");
 }
 
+/// Two conversations keeping a once-only flag under one **relative** key, the
+/// shape five of the tutorial's map-1 conversations are written in: the first
+/// phrase plays while the flag is clear and sets it, the second plays after.
+constexpr std::string_view kOnceA = R"(<conversation name="T_OnceA" startup="first">
+		<actor name="Herald"/>
+		<phrase actor="Herald" text="First time."
+			condition="EnvReadInt(\'first\') == 0"
+			action="EnvWriteInt(\'first\', 1);"
+			return="\'NEW\'"
+			followup="end"/>
+		<phrase actor="Herald" text="Again." return="\'OLD\'" followup="end"/>
+	</conversation>
+)";
+constexpr std::string_view kOnceB = R"(<conversation name="T_OnceB" startup="first">
+		<actor name="Herald"/>
+		<phrase actor="Herald" text="First time."
+			condition="EnvReadInt(\'first\') == 0"
+			action="EnvWriteInt(\'first\', 1);"
+			return="\'NEW\'"
+			followup="end"/>
+		<phrase actor="Herald" text="Again." return="\'OLD\'" followup="end"/>
+	</conversation>
+)";
+
+/// **A phrase's scripts run with the conversation's own context**, `/`, its
+/// name and `/` (0x0050aa90 for the action and the return, 0x0050b070 for the
+/// condition, each setting it through 0x0069d040), so `MakePath` (0x006ab0e0)
+/// files a relative root key under the conversation: `'first'` in `T_OnceA` is
+/// `/T_OnceA/first`, and `T_OnceB`'s is a different key. With no context the
+/// two shared one, and the second conversation opened on its repeat line.
+TEST(conversation_a_relative_env_key_in_a_phrase_is_the_conversations_own) {
+  Stage stage;
+  REQUIRE(stage.campaign.conversations().add(bytes_of(kOnceA)).ok());
+  REQUIRE(stage.campaign.conversations().add(bytes_of(kOnceB)).ok());
+
+  CHECK(stage.run("//void\nRunConv(\"T_OnceA\");\nRunConv(\"T_OnceA\");\n"
+                  "RunConv(\"T_OnceB\");\n",
+                  "once.vs"));
+  CHECK(stage.env.env().read_int(EnvScope::root(), "/T_OnceA/first") == 1);
+  CHECK(stage.env.env().read_int(EnvScope::root(), "/T_OnceB/first") == 1);
+  CHECK(stage.env.env().find(EnvScope::root(), "first") == nullptr);
+  // The second run of `T_OnceA` found its own flag set; `T_OnceB` did not.
+  CHECK(stage.campaign.results().get("T_OnceA") == "OLD");
+  CHECK(stage.campaign.results().get("T_OnceB") == "NEW");
+}
+
 TEST(conversation_run_conv_answers_the_result_and_run_does_not) {
   Stage stage;
   REQUIRE(stage.campaign.conversations().add(bytes_of(kGated)).ok());

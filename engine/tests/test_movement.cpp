@@ -1277,10 +1277,20 @@ struct HostCall {
   // sim/host_context.hpp exists to make impossible.
   imperivm::core::sim::HostContext context_state;
 
+  /// The call's word of state (`CallContext::scratch`), as the VM keeps it.
+  std::int32_t scratch = 0;
+
   HostCall(World& world, std::initializer_list<Value> args) : arguments(args) {
     context_state.world = &world;
     context.arguments = arguments;
     context.user = &context_state;
+    context.scratch = &scratch;
+  }
+
+  /// Run the same call again after its wait, as the VM does after a `retry`.
+  HostCall& reenter() {
+    context.first_call = false;
+    return *this;
   }
 };
 
@@ -1413,13 +1423,10 @@ TEST(a_host_goto_lays_a_path_and_suspends) {
                         Value::integer(0), Value::integer(2000), Value::boolean(true),
                         Value::integer(0)});
   const HostOutcome first = invoke(registry, CallKind::member, "Goto", 5, call);
-  CHECK(first.status == HostStatus::suspend);
-  CHECK(first.value.as_integer() == 0);  // not arrived yet
-  // 400 units at 100 per second is four seconds, which is more than the 2,000
-  // ms slice the call was given, so it waits out the slice and the caller's
-  // loop re-tests. A destination inside the slice waits only for the arrival:
-  // the checks below cover both halves of that `min`.
+  // The first run lays the route and waits; the answer is its re-entry's.
+  CHECK(first.status == HostStatus::retry);
   CHECK(first.suspend_for == 2000);
+  CHECK(call.scratch == 1);  // it laid a route
 
   const MoveState* state = movement.find(unit);
   REQUIRE(state != nullptr);
@@ -1427,11 +1434,13 @@ TEST(a_host_goto_lays_a_path_and_suspends) {
   CHECK(state->target == (Point{500, 100}));
   CHECK(movement.eta(unit) == 4000);
 
-  // The same order with a slice longer than the journey waits for the arrival.
+  // A slice longer than the journey is waited whole all the same
+  // (0x005d65e8): the script goes on when the slice runs out, not when the
+  // unit arrives.
   HostCall generous(world, {Value::object(kTypeObj, unit), pack_point(Point{500, 100}),
                             Value::integer(0), Value::integer(20000), Value::boolean(true),
                             Value::integer(0)});
-  CHECK(invoke(registry, CallKind::member, "Goto", 5, generous).suspend_for == 4000);
+  CHECK(invoke(registry, CallKind::member, "Goto", 5, generous).suspend_for == 20000);
   // And `SyncFlags` bit 17 is on the object, where the world hash sees it.
   REQUIRE(world.state(unit) != nullptr);
   CHECK(world.state(unit)->flags.has_active_path);
@@ -1541,17 +1550,15 @@ TEST(dist_to_measures_from_the_edges_not_the_centres) {
 // so a unit sent to a camp with range 0 stops where the camp begins rather
 // than on its anchor -- which is where `UNIT_CAPTURE.VS`'s mirror walk used to
 // find it, aiming at its own feet and never yielding.
-/// A route walked to its end whose arrival the next turn decides has no time
-/// left to wait and has not arrived: `Goto` waits for the world's next step
-/// (a zero wait, run at the next pass's end) rather than answering at once.
-///
-/// Answered at once, `UNIT_ADVANCE.VS`'s `while (1) { ... if (.Goto(pt, 0,
-/// 2000, true, 0)) return; }` spun through its instruction budget, since
-/// nothing moves inside a pass. Scripts poll eight times as often at 800-ms
-/// turns now that they wake on their own millisecond, and two of six
-/// Crossroads seeds trapped there, three times. The state is set by hand: the step
-/// done, the route still held.
-TEST(a_host_goto_on_a_spent_route_waits_for_the_next_step) {
+/// **The answer comes at the re-entry** (0x005d61b0 at 0x005d6340): run
+/// again after its wait, the call measures nothing new and lays nothing new.
+/// Not arrived, it answers false and keeps the route, so the script's loop
+/// calls again; arrived, it answers true and drops the route (0x005d3830
+/// with 0). A first run that laid no route answers false at its re-entry
+/// whatever, and a re-entry that finds no order -- something stopped the unit
+/// during the wait -- runs as a first run. With the answer given before the
+/// wait, the loop's next call was what found the unit arrived.
+TEST(a_host_goto_answers_at_its_reentry) {
   HostRegistry registry;
   register_movement_host(registry);
 
@@ -1564,16 +1571,49 @@ TEST(a_host_goto_on_a_spent_route_waits_for_the_next_step) {
   HostCall call(world, {Value::object(kTypeObj, unit), pack_point(Point{500, 100}),
                         Value::integer(0), Value::integer(2000), Value::boolean(true),
                         Value::integer(0)});
-  REQUIRE(invoke(registry, CallKind::member, "Goto", 5, call).status == HostStatus::suspend);
-  MoveState& move = movement.state(unit);
-  REQUIRE(move.has_path);
-  move.progress = move.path_length * kSpeedScale;
-  REQUIRE(movement.eta(unit) == 0);
+  REQUIRE(invoke(registry, CallKind::member, "Goto", 5, call).status == HostStatus::retry);
+  run(world, movement, {2000});
+  // Half way: false, and still walking.
+  const HostOutcome midway = invoke(registry, CallKind::member, "Goto", 5, call.reenter());
+  CHECK(midway.status == HostStatus::ok);
+  CHECK(midway.value.as_integer() == 0);
+  CHECK(movement.find(unit)->has_path);
+  CHECK(movement.find(unit)->goto_active);
 
-  const HostOutcome again = invoke(registry, CallKind::member, "Goto", 5, call);
-  CHECK(again.status == HostStatus::suspend);
-  CHECK(again.suspend_for == 0);
-  CHECK(again.value.as_integer() == 0);  // not arrived
+  // The loop calls again: a first run, which waits the slice once more.
+  HostCall again(world, {Value::object(kTypeObj, unit), pack_point(Point{500, 100}),
+                         Value::integer(0), Value::integer(2000), Value::boolean(true),
+                         Value::integer(0)});
+  REQUIRE(invoke(registry, CallKind::member, "Goto", 5, again).status == HostStatus::retry);
+  run(world, movement, {2000});
+  CHECK(position_of(world, unit) == (Point{500, 100}));
+  const HostOutcome there = invoke(registry, CallKind::member, "Goto", 5, again.reenter());
+  CHECK(there.status == HostStatus::ok);
+  CHECK(there.value.as_integer() == 1);
+  CHECK(!movement.find(unit)->goto_active);  // the order is dropped
+
+  // Stopped during the wait: the re-entry finds no order and runs as a first
+  // run -- here, already arrived, so true at once.
+  HostCall third(world, {Value::object(kTypeObj, unit), pack_point(Point{700, 100}),
+                         Value::integer(0), Value::integer(2000), Value::boolean(true),
+                         Value::integer(0)});
+  REQUIRE(invoke(registry, CallKind::member, "Goto", 5, third).status == HostStatus::retry);
+  movement.stop(world, unit);
+  const HostOutcome rerun = invoke(registry, CallKind::member, "Goto", 5, third.reenter());
+  CHECK(rerun.status == HostStatus::retry);  // a first run again: laid and waiting
+  CHECK(movement.find(unit)->goto_active);
+
+  // A first run that laid no route answers false at its re-entry, even if
+  // the unit is somehow in the band by then.
+  movement.stop(world, unit);
+  HostCall blocked(world, {Value::object(kTypeObj, unit), pack_point(Point{500, 100}),
+                           Value::integer(1000), Value::integer(2000), Value::boolean(true),
+                           Value::integer(-1)});
+  blocked.scratch = 0;
+  (void)movement.order_goto(world, unit, Point{900, 100}, 0, 0, kNoObject, true);
+  const HostOutcome unlaid = invoke(registry, CallKind::member, "Goto", 5, blocked.reenter());
+  CHECK(unlaid.status == HostStatus::ok);
+  CHECK(unlaid.value.as_integer() == 0);
 }
 
 TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
@@ -1582,7 +1622,7 @@ TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   const ObjectId camp = f.place("Camp", Point{1600, 1000});
 
   const HostOutcome first = f.go(walker, Value::object(kTypeObj, camp), 0);
-  CHECK(first.status == HostStatus::suspend);
+  CHECK(first.status == HostStatus::retry);
   // Short turns, because arrival is tested where a turn ends.
   for (int i = 0; i < 100; ++i) run(f.world, f.movement, {100});
   const Point stood = position_of(f.world, walker);
@@ -1596,7 +1636,7 @@ TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   CHECK(again.value.as_integer() == 1);
   // The same range against the camp's *point* is centre to centre and walks on.
   const HostOutcome to_point = f.go(walker, pack_point(Point{1600, 1000}), 0);
-  CHECK(to_point.status == HostStatus::suspend);
+  CHECK(to_point.status == HostStatus::retry);
   CHECK(to_point.value.as_integer() == 0);
 
   // A range adds to the gap, it does not replace it: 50 more out.
@@ -1662,7 +1702,7 @@ TEST(a_host_goto_into_a_wall_reports_no_path) {
   // no `.HasPath` guard need: an immediate `ok` in `while (!.Goto(pt, 0, 2000,
   // true, -1));` spins the VM against an unreachable point until the
   // instruction budget traps it. The original waits the slice too (0x005d65e8).
-  CHECK(outcome.status == HostStatus::suspend);
+  CHECK(outcome.status == HostStatus::retry);
   CHECK(outcome.suspend_for == 2000);
 }
 
@@ -1711,7 +1751,7 @@ TEST(a_host_goto_times_the_failure_and_not_the_walk) {
   GameTime ended_at = -1;
   for (int i = 0; i < 60 && !ended; ++i) {
     const HostOutcome out = goto_once(registry, world, unit, beyond, 500, 2000);
-    CHECK(out.status == HostStatus::suspend || out.status == HostStatus::finish);
+    CHECK(out.status == HostStatus::retry || out.status == HostStatus::finish);
     CHECK(out.value.as_integer() == 0);
     if (movement.find(unit)->has_path) last_route = world.time();
     ended = out.status == HostStatus::finish;
@@ -1741,7 +1781,7 @@ TEST(a_host_goto_keeps_its_failure_stamp_across_orders_until_a_route_is_laid) {
   const ObjectId unit = spawn_unit(world, movement, Point{9 * 16 + 8, 10 * 16 + 8}, 100);
 
   CHECK(goto_once(registry, world, unit, Point{2000, 2000}, 1000, -1).status ==
-        HostStatus::suspend);
+        HostStatus::retry);
   const GameTime stamped = world.time();
   CHECK(movement.find(unit)->goto_failed_at == stamped);
   world.advance(3000);
@@ -1754,7 +1794,7 @@ TEST(a_host_goto_keeps_its_failure_stamp_across_orders_until_a_route_is_laid) {
   // The wall comes down and a route is laid: the stamp clears.
   movement.set_grid(open_field(32));
   CHECK(goto_once(registry, world, unit, Point{400, 160}, 1000, 0).status ==
-        HostStatus::suspend);
+        HostStatus::retry);
   CHECK(movement.find(unit)->has_path);
   CHECK(movement.find(unit)->goto_failed_at == kNoGotoFailure);
 }
@@ -2043,7 +2083,7 @@ TEST(the_deer_prelude_runs_through_the_host) {
   HostCall go(world, {Value::object(kTypeObj, deer), pack_point(Point{500, 900}),
                       Value::integer(0), Value::integer(2000), Value::boolean(true),
                       Value::integer(0)});
-  CHECK(invoke(registry, CallKind::member, "Goto", 5, go).status == HostStatus::suspend);
+  CHECK(invoke(registry, CallKind::member, "Goto", 5, go).status == HostStatus::retry);
   run(world, movement, {400});
   CHECK(position_of(world, deer) == (Point{500, 504}));
 }
@@ -2349,10 +2389,100 @@ TEST(a_point_goto_walks_to_its_destination_clamped_to_the_map) {
   HostField f;  // 64 cells, so the map runs 0..1023
   const ObjectId unit = f.unit(Point{100, 100});
   CHECK(goto_once(f.registry, f.world, unit, Point{5000, -300}, 1000, -1).status ==
-        HostStatus::suspend);
+        HostStatus::retry);
   REQUIRE(f.movement.find(unit) != nullptr);
   CHECK(f.movement.find(unit)->has_path);
   CHECK(f.movement.find(unit)->target == (Point{1023, 0}));
+}
+
+/// **`SetDest` keeps a capped range** (0x0041a4c0, 0x0041a5c0): a point goal
+/// at most 999, an object goal clamped to 999 and then, above 919, 920 -- and
+/// the object form of `Goto` routes to a unit as an object goal, whose band
+/// is the gap between the edges, and to anything else as a point goal at its
+/// centre with both radii added before the cap. Uncapped, a `Goto` with the
+/// range of a long sight arrived from further away than the original lets it.
+TEST(the_goto_family_keeps_setdests_range_caps) {
+  HostField f;
+  const ObjectId walker = f.unit(Point{100, 100});
+  const auto go = [&](Value where, std::int32_t range) {
+    return f.call("Goto", {Value::object(kTypeObj, walker), where, Value::integer(range),
+                           Value::integer(500), Value::boolean(true), Value::integer(-1)});
+  };
+  // Out of range of each other by more than any cap.
+  CHECK(go(pack_point(Point{1000, 1000}), 5000).status == HostStatus::retry);
+  CHECK(f.movement.find(walker)->range == 999);
+  CHECK(go(pack_point(Point{1000, 1000}), 400).status == HostStatus::retry);
+  CHECK(f.movement.find(walker)->range == 400);
+  // A unit: 920 at most, the radii (none here) on top.
+  const ObjectId other = f.unit(Point{1000, 1000});
+  f.world.set_owner(other, 2);
+  CHECK(go(Value::object(kTypeObj, other), 950).status == HostStatus::retry);
+  CHECK(f.movement.find(walker)->range == 920);
+  CHECK(go(Value::object(kTypeObj, other), 919).status == HostStatus::retry);
+  CHECK(f.movement.find(walker)->range == 919);
+  // Not a unit: a point goal, 999 at most.
+  const ObjectId post = f.unit(Point{1000, 1000}, NativeClass::building);
+  CHECK(go(Value::object(kTypeObj, post), 950).status == HostStatus::retry);
+  CHECK(f.movement.find(walker)->range == 950);
+  CHECK(go(Value::object(kTypeObj, post), 5000).status == HostStatus::retry);
+  CHECK(f.movement.find(walker)->range == 999);
+}
+
+/// `GotoEnter` (0x005d6620) answers **true** for a receiver naming nothing
+/// and `GotoAttack` (0x005d6a90) **false**; `GotoEnter` clamps its point to
+/// the map and writes it back into its own argument, as `Goto` does; and
+/// `GotoAttack` makes its argument the combat target and approaches only what
+/// it may, so a garrisoned enemy lays no route and waits the slice.
+TEST(goto_enter_and_goto_attack_read_their_receivers_and_targets_as_the_original) {
+  HostField f;
+  register_command_host(f.registry);
+  CombatSystem combat;
+  f.world.add_system(&combat);
+  const ObjectId walker = f.unit(Point{100, 100});
+  const ObjectId gone = f.unit(Point{200, 200});
+  REQUIRE(f.world.despawn(gone));
+  const Value there = pack_point(Point{5000, -300});
+  const HostOutcome enter_gone =
+      f.call("GotoEnter", {Value::object(kTypeObj, gone), there, Value::integer(0),
+                           Value::integer(500), Value::boolean(true), Value::integer(-1)});
+  CHECK(enter_gone.status == HostStatus::ok);
+  CHECK(enter_gone.value.as_integer() == 1);
+  const HostOutcome attack_gone =
+      f.call("GotoAttack", {Value::object(kTypeObj, gone), Value::object(kTypeObj, walker),
+                            Value::integer(500), Value::boolean(true)});
+  CHECK(attack_gone.status == HostStatus::ok);
+  CHECK(attack_gone.value.as_integer() == 0);
+
+  HostCall enter(f.world, {Value::object(kTypeObj, walker), there, Value::integer(0),
+                           Value::integer(500), Value::boolean(true), Value::integer(-1)});
+  CHECK(invoke(f.registry, CallKind::member, "GotoEnter", 5, enter).status == HostStatus::retry);
+  CHECK(f.movement.find(walker)->target == (Point{1023, 0}));
+  CHECK(unpack_point(enter.arguments[1]) == (Point{1023, 0}));
+
+  // An enemy inside a tower: the target is handed over, no route is laid.
+  f.movement.stop(f.world, walker);
+  const ObjectId tower = f.unit(Point{600, 100}, NativeClass::building);
+  const ObjectId inside = f.unit(Point{600, 140});
+  f.world.set_owner(inside, 2);
+  REQUIRE(f.world.put_in_holder(inside, tower));
+  Combatant mine;
+  mine.id = walker;
+  mine.owner = 1;
+  mine.position = Point{100, 100};
+  mine.health = 100;
+  combat.add(mine);
+  HostCall attack(f.world, {Value::object(kTypeObj, walker), Value::object(kTypeObj, inside),
+                            Value::integer(750), Value::boolean(true)});
+  const HostOutcome out = invoke(f.registry, CallKind::member, "GotoAttack", 3, attack);
+  CHECK(out.status == HostStatus::retry);
+  CHECK(out.suspend_for == 750);
+  CHECK(attack.scratch == 0);
+  CHECK(!f.movement.find(walker)->has_path);
+  REQUIRE(combat.find(walker) != nullptr);
+  CHECK(combat.find(walker)->target == inside);
+  // With no order to answer on, its re-entry is a first run again: it waits.
+  CHECK(invoke(f.registry, CallKind::member, "GotoAttack", 3, attack.reenter()).status ==
+        HostStatus::retry);
 }
 
 /// The object `Goto` routes only to a target it may approach (0x005d40c0 at
@@ -2366,7 +2496,7 @@ TEST(an_object_goto_routes_only_to_a_target_it_may_approach) {
                            Value::integer(-1)});
   };
   const auto refused = [&](const HostOutcome& out) {
-    return out.status == HostStatus::suspend && out.value.as_integer() == 0 &&
+    return out.status == HostStatus::retry && out.value.as_integer() == 0 &&
            out.suspend_for == 751 && !f.movement.find(walker)->has_path;
   };
 
@@ -2387,7 +2517,7 @@ TEST(an_object_goto_routes_only_to_a_target_it_may_approach) {
   CHECK(refused(go(lurker)));
   const ObjectId scout = f.unit(Point{400, 600});
   f.world.mutable_state(scout)->flags.hidden = true;
-  CHECK(go(scout).status == HostStatus::suspend);
+  CHECK(go(scout).status == HostStatus::retry);
   CHECK(f.movement.find(walker)->has_path);
   CHECK(f.movement.find(walker)->target_object == scout);
 }
@@ -2420,14 +2550,14 @@ TEST(time_without_walking_is_how_long_goto_has_failed_to_lay_a_route) {
   CHECK(without(sealed) == 0);
 
   CHECK(goto_once(f.registry, f.world, sealed, Point{2000, 2000}, 1000, -1).status ==
-        HostStatus::suspend);
+        HostStatus::retry);
   CHECK(without(sealed) == 0);
   f.world.advance(1500);
   CHECK(without(sealed) == 1500);
   // A route laid clears the stamp.
   f.movement.set_grid(open_field(32));
   CHECK(goto_once(f.registry, f.world, sealed, Point{400, 160}, 1000, -1).status ==
-        HostStatus::suspend);
+        HostStatus::retry);
   CHECK(without(sealed) == 0);
 }
 

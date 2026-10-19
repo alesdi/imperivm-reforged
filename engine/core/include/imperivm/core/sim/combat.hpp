@@ -1236,6 +1236,12 @@ class CombatSystem final : public System {
   /// The action is left alone: the setter does not touch it. False for an
   /// unknown id.
   bool drop_target(ObjectId id);
+  /// The same setter handed a handle (0x005d2c70's shape, inline in
+  /// `Unit::GotoAttack` at 0x005d6b10 .. 0x005d6b2d): `[unit+0x1a8]` takes
+  /// `target` -- `kNoObject` for a handle naming nothing -- and the attack
+  /// count is zeroed, only when the handle changes. The action is left alone.
+  /// False for an unknown id.
+  bool hand_target(ObjectId id, ObjectId target);
   /// Whether `id` is a combatant in its dying state: still in the world as a
   /// corpse, and no longer a unit anything should drive. `reap_departed` reads
   /// it to end the corpse's own scripts.

@@ -718,6 +718,8 @@ HostOutcome fn_run_sequence(CallContext& ctx) {
   }
   const script::ScriptId id = scheduler->spawn(chunk);
   if (id == script::kNoScript) return HostOutcome::ok_void();
+  // The new thread's context is `/` (0x005b9da7 .. 0x005b9db7).
+  (void)scheduler->set_context(id, kSequenceContext);
   entry->running = id;
   write_status(*world, name, kStatusRunning);
   return HostOutcome::ok_void();

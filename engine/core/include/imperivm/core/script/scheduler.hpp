@@ -109,6 +109,28 @@ struct ScriptRecord {
   /// pair a script with an object id, so this is state, not bookkeeping.
   ObjectRef owner;
   ScriptId parent = kNoScript;
+  /// The thread's **context**: the string `gbr.exe` keeps at `+0x44` of a
+  /// script thread (serialised as `Context`, 0x0069cc58), null when a thread
+  /// is made (0x0069d090) and set only by a launcher, through 0x0069d040,
+  /// after it has started the thread. Empty here is that null: no launcher
+  /// sets an empty string. Two readers in the original, and both are this
+  /// engine's too: `MakePath` (0x006ab0e0) prepends it to a root `Env*` key
+  /// that does not start with `/` (`sim/env.cpp`), and 0x0043caa0 reads it
+  /// back as the running thread's AI seat (`atol`, -1 when null), which is
+  /// how `AIGetPlayer`, the free `AIRun` and `AIBreakScript` know whose
+  /// thread is calling (`sim/ai.cpp`). The launchers, and what they write:
+  ///
+  ///   * the AI's own (0x0041cd00, and 0x0041ccb0 for its order scripts) --
+  ///     the AI's seat, `[ai+0x24]`, formatted `%d`;
+  ///   * the sequence runner (0x005b9d40) -- `/`;
+  ///   * a conversation's phrase scripts (0x0050aa90, 0x0050b070) -- `/`, the
+  ///     conversation's name and `/`; those run as calls, so theirs is
+  ///     `call`'s argument and never a record's.
+  ///
+  /// Nothing inherits it: a thread a script spawns some other way, a command
+  /// script, a class hook, and every synchronous call start with none.
+  /// Saved: a thread keeps it across a load.
+  std::string context;
   Execution execution;
   /// When this script was last put on the wheel, as a position in the
   /// scheduler's arming sequence: its spawn, or the end of its last slice if
@@ -276,6 +298,14 @@ class Scheduler {
   void set_step_hook(StepHook hook) noexcept { step_hook_ = hook; }
   [[nodiscard]] StepHook step_hook() const noexcept { return step_hook_; }
 
+  /// Set a live thread's context (`ScriptRecord::context`), as a launcher
+  /// does through 0x0069d040 once the thread exists. False for a script that
+  /// is not alive.
+  bool set_context(ScriptId id, std::string_view context);
+  /// A live thread's context, empty for none and for a script that is not
+  /// alive.
+  [[nodiscard]] std::string_view context(ScriptId id) const;
+
   /// `AIBreakScript`. Safe to call on a script that is running right now.
   bool kill(ScriptId id);
   [[nodiscard]] bool alive(ScriptId id) const;
@@ -329,7 +359,14 @@ class Scheduler {
   /// from a host call already does. `chunks_` is a deque so that a chunk
   /// compiled on demand from inside the nested run moves nothing a running
   /// interpreter holds a reference to.
-  CallReport call(std::uint32_t chunk_index, std::span<const Value> args = {});
+  ///
+  /// **`context` is the context the launcher gives the call's thread**:
+  /// empty, which is what 0x0069dca0's fresh thread has, for every hook and
+  /// every `Run` and member `AIRun`; a conversation's phrase scripts pass
+  /// theirs (`ScriptRecord::context`). The caller owns the storage, which
+  /// outlives the call.
+  CallReport call(std::uint32_t chunk_index, std::span<const Value> args = {},
+                  std::string_view context = {});
 
   /// A trap in something `call` ran on a script's behalf, reported with the
   /// pass that is running: the next `advance` or `run_ready` hands it out in

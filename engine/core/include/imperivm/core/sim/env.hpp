@@ -85,11 +85,19 @@
 /// this note took the context to be null for sequences and concluded the three
 /// bonuses were dead; the runner's own store settles it the other way.)
 ///
-/// The other two launchers that set a context -- the object-attached one
-/// (0x0041ccb0, the object's id as `%d`) and the conversation phrase runner
-/// (0x0050aa90) -- are not modelled, because no root-form call is reachable
-/// from either in the installation. `thread_context` in env.cpp says how a
-/// sequence's thread is recognised.
+/// **Two other launchers set a context, and both are modelled.** The AI's own
+/// (0x0041cd00, and 0x0041ccb0 for its order scripts) gives every thread it
+/// starts the AI's seat as `%d` -- a relative root key inside an AI script
+/// would read `"0Bonus"`; none is written -- and a conversation's phrase
+/// scripts (0x0050aa90 for an action and a return, 0x0050b070 for a
+/// condition) run with `/`, the conversation's name and `/`. That one is
+/// reached: five of the tutorial's conversations (`Adventures/Tutorial.BFHP`
+/// map 1, the files `cnv3`, `cnv8`, `cnv11`, `cnv14` and `cnv16`) keep a
+/// once-only flag under one relative key, written by an action and read by a
+/// condition, which is therefore one key per conversation, `/<its name>/<key>`,
+/// and not one key the five share. The context is
+/// the thread's own (`script::ScriptRecord::context`), handed to every host
+/// call as `CallContext::context`.
 ///
 /// ## Iteration order is state
 ///

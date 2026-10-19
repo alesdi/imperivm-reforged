@@ -1244,10 +1244,10 @@ std::size_t GameSession::start_sequences(std::span<const SequenceRef> manifest,
     // No receiver and no arguments. Every shipped sequence opens `//void` with
     // an empty parameter list. The retail runner then sets the new thread's
     // environment `Context` to `/` (0x005b9db7), which makes a relative
-    // root-scope `Env*` key absolute; the env host recognises a sequence's
-    // thread by the `running` id recorded below. See `sim/env.hpp`.
+    // root-scope `Env*` key absolute (`ScriptRecord::context`, `sim/env.hpp`).
     const script::ScriptId id = impl.scheduler.spawn(chunk);
     if (id == script::kNoScript) continue;
+    (void)impl.scheduler.set_context(id, kSequenceContext);
     ++started;
     if (campaign != nullptr) {
       if (CampaignSystem::SequenceEntry* entry = campaign->find_sequence(sequence.name)) {

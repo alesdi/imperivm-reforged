@@ -394,14 +394,14 @@ Five of those deserve their reasons written down.
 
 ### `script`
 
-`script::Scheduler::serialize`, at its own version **2**. Scripts are stored **by source name**,
+`script::Scheduler::serialize`, at its own version **3**. Scripts are stored **by source name**,
 not by chunk index: the library is rebuilt from `data.pak` on load, and a rebuild that disagrees
 must be caught rather than silently resumed against the wrong script. The original does the same
 and fails the same way — `sequence from savegame does not compile : %s`.
 
 ```
     u32     magic          "SCHD"
-    u32     version        2
+    u32     version        3
     i64     now            the scripts' clock, milliseconds
     u32     next_id        the next script id to issue
     i64     next_arm       the next position in the arming order
@@ -416,12 +416,16 @@ and fails the same way — `sequence from savegame does not compile : %s`.
       u32   owner id
       u32   parent
       i64   armed          when it was last put on the wheel; orders scripts due together
+      str   context        the thread's context string, empty for none
       u32   length, then the coroutine (`script::serialize`)
 ```
 
 Version 2 added `next_arm`, `armed` and the player-script slots: scripts due on the same
 millisecond run in the order they were armed, as the original's timing wheel runs them, and a
-player script started once is refused a second start.
+player script started once is refused a second start. Version 3 added `context`, the string the
+original keeps on a thread and saves as `Context` (0x0069cc58): `/` for a sequence, the AI's seat
+for an AI's thread, and none for anything else (`script::ScriptRecord::context`). It decides how a
+relative root `Env*` key resolves and whose AI the thread belongs to.
 
 ### `selection`
 
@@ -546,7 +550,7 @@ the map identity, the system run order.
 | `env` | the environment store (nested `INVS`) and the AI-variable store (nested `IVAR`) | the research catalog, the unit catalog, the AI-variable name table, the `CONST.INI` constants |
 | `command` | every object's queue in id order, and the default verb | the `CommandTable`, the scheduler pointer, `method_cache_` |
 | `match` | the rules, the sixteen player rows — each its control, race, participation, outcome, and thirteen counters: the five score counters the team-score entry points read, and the eight the Statistics screen shows (food spent, units produced, killed, lost and most at once, gold captured, produced and converted) — the human, the multiplayer flag, the difficulty, `end_message_` | nothing |
-| `ai` | the sixteen per-player rows, the script-owner table, per-settlement economy/tactic bindings, the prune counter, the AI-helper name→script table | the profile table, whose entries hold borrowed `const AiProfile*` |
+| `ai` | the sixteen per-player rows, each with its node view, its `AIRun` ids 3..51 and its own per-settlement economy/tactic bindings, then the AI-helper name→script table (whose AI a thread is, is the thread's context, in the `scripts` section) | the profile table, whose entries hold borrowed `const AiProfile*` |
 | `campaign` | `CampaignProgress`, applied through `CampaignSystem::restore` so a save from a different conquest is refused; the note board (nested `NOTS`); the conversation results (nested `CRES`) | the territory id and bonus tables, from `configure(ConquestMap)`; the note catalogue and the conversation catalogue, both rebuilt from the container |
 | `areas` | the area table | nothing — but see below |
 | `fog` | the explored map as the original packs it: one `u16` per 1024-unit cell, two bits per player for eight players, then the partially explored cells' fine records — slot, cell index, and 32 × 32 nibbles packed two to a byte — in slot order and cell order | the grid's size, which `start` takes from the match's map extent, and the "already stamped" table the sweep keeps — but the *contents* are saved, see below |

@@ -22,6 +22,7 @@
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/world.hpp"
+#include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "test.hpp"
 
@@ -813,4 +814,81 @@ TEST(build_frame_row_skips_the_entry_marker_and_clamps_to_the_sheet) {
   CHECK(build_frame_row(*shot, shot_line, 2) == 2);
   CHECK(build_frame_row(*shot, shot_line, 3) == 2);
   CHECK(build_frame_row(*build, AnimTimeline(), 4) == 0);
+}
+
+/// **The idle activity spends draws and plays its fidget** (0x005d2ca0 behind
+/// `Unit::Idle`, 0x005d6030). This fixture declares the idle base (`idx` 13,
+/// 264 ms) and no variant after it, so there is no variant draw; then for
+/// `t` = 0, 100, ... up to the budget less 264 the activity draws
+/// `rand(1, 15)` from the world's generator until one is 1, starts the fidget
+/// `t` ms on and waits it out; with no 1 it holds its pose for the whole
+/// budget. Every step after is a re-entry, and the call is done when the
+/// budget is spent. A unit walking on another slot draws nothing.
+TEST(idle_draws_for_a_fidget_every_hundred_ms_and_spends_its_whole_budget) {
+  AnimBench b;
+  CommandSystem commands;
+  REQUIRE(b.world.add_system(&commands));
+  const ObjectId unit = b.spawn();
+  b.world.rng().seed(12345);
+  std::int32_t word = 0;
+  std::vector<script::Value> args{script::Value::object(kTypeObj, unit),
+                                  script::Value::integer(1000)};
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &b.context;
+  ctx.name = "Idle";
+  ctx.kind = script::CallKind::member;
+  ctx.scratch = &word;
+  const std::uint32_t index = b.registry.find(script::CallKind::member, "Idle", 1);
+  REQUIRE(index != script::kUnresolvedHost);
+  const script::HostFn idle = b.registry.entry(index).fn;
+
+  // What the first step must do, computed beside it.
+  Rng probe(12345);
+  std::int64_t first_t = -1;
+  for (std::int64_t t = 0; t <= 1000 - 264; t += 100) {
+    if (probe.between(1, 15) == 1) {
+      first_t = t;
+      break;
+    }
+  }
+  const script::HostOutcome first = idle(ctx);
+  CHECK(first.status == script::HostStatus::retry);
+  CHECK(b.world.rng().state() == probe.state());
+  if (first_t < 0) {
+    CHECK(first.suspend_for == 1000);
+  } else if (first_t == 0) {
+    CHECK(first.suspend_for == 264);
+  } else {
+    CHECK(first.suspend_for == first_t);
+  }
+
+  // Run the steps out: the waits add up to the budget, and the call ends.
+  std::int64_t waited = first.suspend_for;
+  ctx.first_call = false;
+  for (int i = 0; i < 50; ++i) {
+    const script::HostOutcome next = idle(ctx);
+    if (next.status != script::HostStatus::retry) {
+      CHECK(next.status == script::HostStatus::ok);
+      break;
+    }
+    waited += next.suspend_for;
+  }
+  CHECK(waited == 1000);
+
+  // On another walk slot -- a villager with its bundle -- no draw at all.
+  const ObjectId carrier = b.spawn();
+  b.movement.state(carrier).walk_anim = 18;
+  const std::uint32_t before = b.world.rng().state();
+  std::vector<script::Value> other{script::Value::object(kTypeObj, carrier),
+                                   script::Value::integer(1000)};
+  script::CallContext cctx = ctx;
+  cctx.arguments = other;
+  cctx.first_call = true;
+  std::int32_t cword = 0;
+  cctx.scratch = &cword;
+  const script::HostOutcome held = idle(cctx);
+  CHECK(held.status == script::HostStatus::retry);
+  CHECK(held.suspend_for == 1000);
+  CHECK(b.world.rng().state() == before);
 }

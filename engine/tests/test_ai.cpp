@@ -5,11 +5,9 @@
 // is the whole of what was missing. `MAIN.VS` is six `AIRun` calls and a
 // return, and the six monitors it starts each ask `AIGetPlayer` before they do
 // anything at all. Four of the six `Sleep` first, so by the time they ask,
-// `Main.vs` has finished and been compacted out of the scheduler: the parent
-// link they would resolve through is gone. `ai_get_player_survives_a_dead_main`
-// pins that, and `ai_get_player_survives_a_prune` pins the other half of it:
-// that a prune of the ownership table never throws a root away. Both were
-// checked by breaking them on purpose.
+// `Main.vs` has finished and been compacted out of the scheduler.
+// `ai_get_player_survives_a_dead_main` pins that the answer does not need it:
+// it is the monitor's own context, the seat `AIRun` tagged it with.
 //
 // The rest fence the two refusals that matter -- an unknown profile is refused
 // the way `gbr.exe` refuses it, and this domain's registration overwrites
@@ -211,6 +209,10 @@ struct Fixture {
     ctx.host = &host;
     ctx.scheduler = &scheduler;
     ctx.script = from;
+    // The calling thread's context, copied: a host call that spawns may move
+    // the record it lives in.
+    const std::string thread_context(scheduler.context(from));
+    ctx.context = thread_context;
     ctx.user = &context;
     ctx.name = name;
     ctx.kind = kind;
@@ -389,12 +391,21 @@ TEST(ai_stop_kills_everything_under_the_player) {
 
   CHECK(f.ai.start(3, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
   const script::ScriptId root = f.ai.player_ai(3)->root;
-  const script::ScriptId child = f.scheduler.spawn(monitor, {}, script::ObjectRef{}, root);
+  // One thread the AI started, and one it did not: spawned by its root, but
+  // through no launcher of the AI's, so it carries no seat and is not in the
+  // AI's thread manager.
+  const std::int32_t handle = f.ai.run(3, monitor, {}, f.scheduler, root);
+  CHECK(handle == kFirstAiRunSlot + 1);  // `Main.vs` holds the first id
+  const script::ScriptId child = f.ai.run_script(3, handle, f.scheduler);
   CHECK(f.ai.script_player(child, f.scheduler) == 4);  // 1-based, as AIGetPlayer returns
+  const script::ScriptId stray = f.scheduler.spawn(monitor, {}, script::ObjectRef{}, root);
+  CHECK(f.ai.script_player(stray, f.scheduler) == -1);
 
   CHECK(f.ai.stop(3, f.scheduler));
   CHECK(!f.scheduler.alive(root));
   CHECK(!f.scheduler.alive(child));
+  CHECK(f.scheduler.alive(stray));
+  CHECK(f.ai.run_script(3, handle, f.scheduler) == script::kNoScript);
   CHECK(!f.ai.player_ai(3)->active);
   CHECK(!f.ai.stop(3, f.scheduler));  // idempotent: nothing to stop twice
 }
@@ -439,34 +450,112 @@ TEST(ai_get_player_survives_a_dead_main) {
   CHECK(out.value.as_integer() == 1);  // player 0, 1-based
 }
 
-TEST(ai_get_player_survives_a_prune) {
-  // `prune_owners` drops entries whose coroutine is gone, and **exempts the
-  // roots**. Without that exemption the table is correct only until the 4,096th
-  // resolution, at which point every monitor in the game silently starts
-  // answering -1. Deleting the `owned.root ||` clause makes this case fail and
-  // nothing else in the suite notice.
+/// **`AIRun` answers an id in the caller's AI, not a script.** 0x00422f90
+/// reads the calling thread's seat (0x0043caa0), and 0x0041cd00 takes the
+/// first of ids 3 .. 51 its AI's thread manager does not hold. `Main.vs` holds
+/// 3 while it runs; an id whose thread has ended is taken again; and
+/// `AIBreakScript` (0x00421cd0 -> 0x0041cdc0) stops whatever holds the id now,
+/// in the caller's own AI and only in 3 .. 51.
+TEST(ai_run_answers_an_id_in_the_callers_ai_and_the_id_is_reused) {
   Fixture f;
-  REQUIRE(build(f.scheduler, f.registry, "// void\nAIRun('DATA/AI/MON.VS');\n",
-                "DATA/AI/MAIN.VS") != script::kNoChunk);
-  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MON.VS") !=
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
           script::kNoChunk);
+  const std::uint32_t mon =
+      build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MON.VS");
+  REQUIRE(mon != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(f.ai.start(2, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root1 = f.ai.player_ai(1)->root;
+  const script::ScriptId root2 = f.ai.player_ai(2)->root;
+  CHECK(f.ai.run_script(1, kFirstAiRunSlot, f.scheduler) == root1);
+  const auto ai_run = [&](script::ScriptId from) {
+    return f.call(script::CallKind::free_function, "AIRun", {script::Value::string("MON.VS")},
+                  from)
+        .value.as_integer();
+  };
+  const auto ai_break = [&](script::ScriptId from, std::int32_t handle) {
+    return f.call(script::CallKind::free_function, "AIBreakScript",
+                  {script::Value::integer(handle)}, from)
+        .status;
+  };
 
-  CHECK(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
-  f.scheduler.run_ready();
-  REQUIRE(f.scheduler.live_count() == 1);
-  const script::ScriptId monitor = f.scheduler.scripts().front().id;
+  // Each seat counts from its own 4: 3 is its `Main.vs`.
+  CHECK(ai_run(root1) == 4);
+  CHECK(ai_run(root1) == 5);
+  CHECK(ai_run(root2) == 4);
+  const script::ScriptId at4 = f.ai.run_script(1, 4, f.scheduler);
+  CHECK(f.ai.script_player(at4, f.scheduler) == 2);
 
-  // Past the prune threshold, several times over. Accumulated rather than
-  // checked per iteration so the case costs the suite one assertion, not 20,000.
-  bool always_one = true;
-  for (int i = 0; i < 20000; ++i) {
-    if (f.ai.script_player(monitor, f.scheduler) != 1) always_one = false;
+  // A break acts in the caller's AI: seat 2's 4 is not seat 1's.
+  CHECK(ai_break(root2, 4) == script::HostStatus::ok);
+  CHECK(f.scheduler.alive(at4));
+  CHECK(ai_break(root1, 4) == script::HostStatus::ok);
+  CHECK(!f.scheduler.alive(at4));
+  // The freed id is the next one taken.
+  CHECK(ai_run(root1) == 4);
+  // Outside 3 .. 51 is nothing, and so is a caller with no seat.
+  CHECK(ai_break(root1, 2) == script::HostStatus::ok);
+  CHECK(ai_break(root1, 52) == script::HostStatus::ok);
+  const script::ScriptId loose = f.scheduler.spawn(mon);
+  CHECK(ai_break(loose, 5) == script::HostStatus::ok);
+  CHECK(f.ai.run_script(1, 5, f.scheduler) != script::kNoScript);
+  // A thread no AI started cannot `AIRun` at all: "Cannot run", -1.
+  CHECK(ai_run(loose) == -1);
+  // Nor can anyone run a name the library does not hold -- four of the
+  // shipped class tree's bindings name such files -- and it is no trap.
+  const script::HostOutcome missing = f.call(script::CallKind::free_function, "AIRun",
+                                             {script::Value::string("NOT_SHIPPED.VS")}, root1);
+  CHECK(missing.status == script::HostStatus::ok);
+  CHECK(missing.value.as_integer() == -1);
+
+  // The ids are the AI object's and ride in its section.
+  std::vector<std::byte> saved;
+  f.ai.serialize(saved);
+  AiSystem loaded;
+  REQUIRE(loaded.deserialize(saved).ok());
+  CHECK(loaded.run_script(1, 5, f.scheduler) == f.ai.run_script(1, 5, f.scheduler));
+  CHECK(loaded.run_script(2, 4, f.scheduler) == f.ai.run_script(2, 4, f.scheduler));
+
+  // The range is 49 ids wide.
+  std::int32_t last = 0;
+  for (int i = 0; i < 60 && last != -1; ++i) last = ai_run(root1);
+  CHECK(last == -1);
+  for (std::int32_t id = kFirstAiRunSlot; id < kAiRunSlotEnd; ++id) {
+    CHECK(f.ai.run_script(1, id, f.scheduler) != script::kNoScript);
   }
-  CHECK(always_one);
-  // A script the table has never seen still resolves through the root, which is
-  // the thing a prune must not throw away.
-  f.ai.forget(monitor);
-  CHECK(f.ai.script_player(monitor, f.scheduler) == 1);
+}
+
+/// **`AIRun` resolves the name on the caller's AI search path** (0x0043d030
+/// through 0x0041cd00): a profile's own copy before the root one, which is
+/// what a `DEFENSIVE` AI's `Main.vs` needs to start its own `GAIKAMonitor.vs`.
+TEST(ai_run_searches_the_callers_profile_first) {
+  Fixture f;
+  AiProfile defensive;
+  const auto parsed = AiProfile::parse(bytes_of(kProfileIni));
+  REQUIRE(parsed.ok());
+  defensive = parsed.value();
+  f.ai.add_profile("DEFENSIVE", &defensive, "DATA\\AI\\DEFENSIVE\\");
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  const std::uint32_t root_copy =
+      build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MON.VS");
+  const std::uint32_t own_copy =
+      build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/DEFENSIVE/MON.VS");
+  REQUIRE(root_copy != script::kNoChunk);
+  REQUIRE(own_copy != script::kNoChunk);
+  CHECK(f.ai.start(1, "DEFENSIVE", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(f.ai.start(2, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const auto chunk_of = [&](PlayerId seat) {
+    const script::HostOutcome out =
+        f.call(script::CallKind::free_function, "AIRun", {script::Value::string("Mon.vs")},
+               f.ai.player_ai(seat)->root);
+    const script::ScriptId id =
+        f.ai.run_script(seat, static_cast<std::int32_t>(out.value.as_integer()), f.scheduler);
+    const script::ScriptRecord* record = f.scheduler.find(id);
+    return record == nullptr ? script::kNoChunk : record->chunk_index;
+  };
+  CHECK(chunk_of(1) == own_copy);
+  CHECK(chunk_of(2) == root_copy);
 }
 
 /// 0x0043caa0 answers -1 for a script with no owner tag and 0x00421cb0 adds
@@ -487,7 +576,12 @@ TEST(ai_get_player_answers_zero_outside_any_ai) {
   CHECK(f.ai.script_player(script::kNoScript, f.scheduler) == -1);
 }
 
-TEST(ai_get_player_walks_a_chain_and_caches_it) {
+/// **Whose AI a thread is, is its context and nothing else** (0x0043caa0):
+/// a thread spawned by an AI's thread through no launcher of the AI's has no
+/// seat, however deep under the AI it sits, and a synchronous call from an AI
+/// thread runs on a fresh thread with none (0x0069dca0). A sequence's `/`
+/// reads as seat 0 -- `atol` -- so `AIGetPlayer` there is 1.
+TEST(ai_get_player_reads_the_threads_context_and_not_its_ancestry) {
   Fixture f;
   REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
           script::kNoChunk);
@@ -496,15 +590,21 @@ TEST(ai_get_player_walks_a_chain_and_caches_it) {
   REQUIRE(chunk != script::kNoChunk);
 
   CHECK(f.ai.start(5, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
-  script::ScriptId parent = f.ai.player_ai(5)->root;
-  const std::size_t before = f.ai.owner_entries();
+  const script::ScriptId root = f.ai.player_ai(5)->root;
+  const auto get_player = [&](script::ScriptId who) {
+    return f.call(script::CallKind::free_function, "AIGetPlayer", {}, who).value.as_integer();
+  };
+  CHECK(get_player(root) == 6);
+  script::ScriptId parent = root;
   for (int depth = 0; depth < 4; ++depth) {
     parent = f.scheduler.spawn(chunk, {}, script::ObjectRef{}, parent);
   }
-  CHECK(f.ai.owner_entries() == before);  // nothing attributed until it is asked
-  CHECK(f.ai.script_player(parent, f.scheduler) == 6);
-  // The whole chain is adopted in one walk, not one level per question.
-  CHECK(f.ai.owner_entries() == before + 4);
+  CHECK(get_player(parent) == 0);
+  CHECK(f.scheduler.set_context(parent, "/"));
+  CHECK(get_player(parent) == 1);
+  CHECK(AiSystem::thread_seat("") == -1);
+  CHECK(AiSystem::thread_seat("12") == 12);
+  CHECK(AiSystem::thread_seat("/T_Conv/") == 0);
 }
 
 // --------------------------------------------------------------------------
@@ -637,7 +737,7 @@ TEST(run_economy_script_spawns_the_file_the_profile_names) {
   const std::int32_t es_village = f.profile.constant(AiEnum::economy_script, "ES_Village");
   CHECK(es_village == 2);
 
-  CHECK(f.ai.economy_script(set, f.scheduler) == 0);  // ES_NONE before anything runs
+  CHECK(f.ai.economy_script(1, set, f.scheduler) == 0);  // ES_NONE before anything runs
   const script::HostOutcome ran =
       f.call(script::CallKind::member, "RunEconomyScript",
              {handle, script::Value::integer(es_village)}, root);
@@ -775,6 +875,14 @@ TEST(economy_script_slots_belong_to_the_settlements_current_owner) {
   const script::ScriptId second = f.scheduler.scripts().back().id;
   CHECK(f.ai.script_player(second, f.scheduler) == 3);
   CHECK(slot(root1) == es_village);
+
+  // **And a seat that takes it back finds its own entry as it left it**: its
+  // first script still runs, and seat 2's start went into seat 2's array.
+  // With one slot per settlement the second start had overwritten it.
+  f.economy.settlements().find(set)->owner = 1;
+  CHECK(slot(root1) == es_village);
+  CHECK(f.ai.economy_thread(1, set, f.scheduler) == first);
+  CHECK(f.ai.economy_thread(2, set, f.scheduler) == second);
 
   // A settlement whose owner has no AI has no slot, whatever runs on it.
   f.economy.settlements().find(set)->owner = 4;
@@ -1749,6 +1857,69 @@ TEST(ts_recruit_hero_hands_back_an_unbound_handle_when_the_helper_assigns_nothin
   CHECK(out.status == script::HostStatus::ok);
   REQUIRE(out.value.is_object());
   CHECK(f.world.find(out.value.as_object().id) == nullptr);
+}
+
+/// **A helper that fails is the original's "Error running script!", not a
+/// trap.** 0x00431b30 (and its three siblings) print through the retail no-op
+/// sink when 0x006a0360 answers non-zero -- a run that broke, or a file the
+/// library does not hold (`NOTFOUND`) -- and answer what they have: the list
+/// as the helper left it, or for `TSRecruitHero` whatever the by-reference
+/// slot holds. The failure goes to the pass's report instead
+/// (`run_script_or_report`), where the trap sweep still counts it.
+TEST(ts_recruiters_answer_what_they_have_when_the_helper_fails) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(1)->root;
+  const ObjectId hero = f.make_hero(1, 0);
+  SettlementInit init;
+  init.settlement_object = hero;
+  init.anchor = hero;
+  init.owner = 1;
+  init.kind = SettlementKind::stronghold;
+  const SettlementId id = f.economy.settlements().create(init);
+  const auto army = [&] {
+    return f.call(
+        script::CallKind::member, "TSRecruitArmy",
+        {f.settlement_value(id), script::Value::string("Legionary"), script::Value::integer(3)},
+        root);
+  };
+
+  // No helper at all: an empty list, and nothing reported.
+  const script::HostOutcome none = army();
+  CHECK(none.status == script::HostStatus::ok);
+  REQUIRE(is_objlist(none.value));
+  CHECK(f.world.objlists().items(objlist_of(none.value)).empty());
+  CHECK(f.scheduler.run_ready().failed == 0);
+
+  // A helper that fills the list and then breaks: the list as it stands.
+  REQUIRE(build(f.scheduler, f.registry,
+                "// void, Settlement set, str class, int num, ObjList ol\n"
+                "int z;\n"
+                "ol.Add(set.GetCentralBuilding);\n"
+                "z = 1 / z;\n",
+                "DATA/AI/TSH_RECRUITARMY.VS") != script::kNoChunk);
+  const script::HostOutcome broke = army();
+  CHECK(broke.status == script::HostStatus::ok);
+  REQUIRE(is_objlist(broke.value));
+  CHECK(f.world.objlists().items(objlist_of(broke.value)).size() == 1);
+
+  // The hero: the slot as the helper left it.
+  REQUIRE(build(f.scheduler, f.registry,
+                "// void, Settlement set, Hero *h\n"
+                "int z;\n"
+                "h = set.GetCentralBuilding.AsHero;\n"
+                "z = 1 / z;\n",
+                "DATA/AI/TSH_HERORECRUIT.VS") != script::kNoChunk);
+  const script::HostOutcome got =
+      f.call(script::CallKind::member, "TSRecruitHero", {f.settlement_value(id)}, root);
+  CHECK(got.status == script::HostStatus::ok);
+  REQUIRE(got.value.is_object());
+  CHECK(got.value.as_object().id == hero);
+
+  // Both failures are in the next pass's report.
+  CHECK(f.scheduler.run_ready().failed == 2);
 }
 
 /// **The synchronous callee's pooled state is released when the call ends, and
@@ -2869,8 +3040,10 @@ TEST(ai_registration_overwrites_nothing) {
   // `PrepareAiTransportShip/5`, + the seven `RunAIHelper` arities beside the
   // shipped 4 (2, 3, 5..9), which `gbr.exe` registers and the tenth round
   // binds as `AIRun` and `Run` bind theirs, + `LSA/1`, `LSA/2` and
-  // `GetGAIKA/2`, the point forms no shipped script calls.
-  CHECK(solo == 87);
+  // `GetGAIKA/2`, the point forms no shipped script calls, + the five free
+  // `AIRun` arities and `AIBreakScript/1`, the AI's own launcher, which the
+  // eleventh round moved here from the scheduler's builtins.
+  CHECK(solo == 93);
   CHECK(with_ai == solo);
   CHECK(everyone > 0);
 

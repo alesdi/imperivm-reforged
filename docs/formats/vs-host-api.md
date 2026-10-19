@@ -450,21 +450,19 @@ and it is called **403 times** — 191 `EnvReadInt/1`, 164 `EnvWriteInt/2`, 34 `
 `data.pak`. `EnvReadObj/1` and `EnvWriteObj/2` are declared and called by nothing.
 
 A scoped call's key is a bare name and the engine builds the path (`/<map>/Player%d/<key>`). A
-root call's key **is** the path, and the leading slash is significant, not decoration:
-`MakePath` at 0x006ab0e0 returns the string unchanged when it starts with `/` and otherwise
-prepends the running script thread's `Context` — a `char*` the thread serialises under that name
-(0x0069cc58), null unless the script was launched attached to an object, in which case it is that
-object's id formatted `"%d"` (0x0041ccb0). So `"/Bonus"` and `"Bonus"` are two different slots
-under every possible context, and nothing normalises either.
+root call's key **is** the path, and the leading slash is significant: `MakePath` at 0x006ab0e0
+returns the string unchanged when it starts with `/` or the running thread has no context, and
+otherwise prepends the thread's context with no separator. The context is a string on the
+thread (see *Script threads* below): `/` for every sequence, so inside a sequence `"Bonus"` and
+`"/Bonus"` are one slot; the AI's seat for an AI's thread; `/<name>/` for a conversation's phrase
+scripts.
 
 The corpus agrees: 75 of the 77 distinct root literals use one spelling for every read and every
 write. The two that do not — `Bonus` in `Conquests/mediterranean.BFHP` and `En_Direction` in
-`3_Great_Losses_Egypt.bfhp` — mix one-sidedly, which is a typo and not a convention. The cost of
-the first is real and is reproduced rather than repaired: `Sequences/seq0.vs` writes `/Bonus` and
-dispatches on it correctly, but `seq1.vs`, `seq3.vs` and `seq6.vs` guard their loops on
-`EnvReadString("Bonus")`, so three of the seven conquest bonuses never run in the retail game.
-Pinned by `tests/test_corpus_env_paths.py`.
-
+`3_Great_Losses_Egypt.bfhp` — are sequence code, where the context makes the two spellings one
+key, so `seq1.vs`, `seq3.vs` and `seq6.vs` do read what `seq0.vs` wrote. A conversation's
+relative key is the conversation's own: five tutorial conversations keep a once-only flag under
+one relative key, and each has its own.
 
 ## Members (methods and read-only properties)
 
@@ -1614,6 +1612,53 @@ How the host reaches a script, and what the first parameter is.
 `data/subai/stonehenge_wind_of_wisdom.vs` are named by `<behavior>` / `<method>` attributes but
 are not present in `data.pak`. The retail engine evidently tolerates this, so a reimplementation
 must too.
+
+## Script threads
+
+How `gbr.exe` launches a script, and what a thread carries. The addresses are where each rule can
+be checked; `engine/core` implements them (`script::ScriptRecord::context`, `sim::AiSystem`,
+`sim::run_goto`).
+
+**A thread's context.** Every script thread has a string, `Context` in its serialised form
+(0x0069cc58), null when the thread is made (0x0069d090) and set once by whoever launched it,
+through 0x0069d040. Nothing inherits it: a thread a script starts any other way, a command's
+script, a class hook and every synchronous run (0x0069dca0, which makes a fresh thread for the
+call) start with none. The writers:
+
+| Launcher | Context |
+|---|---|
+| the sequence runner (`Start`, 0x005b9d40) | `/` |
+| the AI's launcher (0x0041cd00; 0x0041ccb0 for its order scripts) | the AI's seat, 0-based, as `%d` |
+| a conversation's phrase scripts (0x0050aa90 action and return, 0x0050b070 condition) | `/`, the conversation's name, `/` |
+
+Two readers. `MakePath` (above). And 0x0043caa0, which is how the original knows **whose AI a
+thread is**: `atol` of the context, -1 for none. `AIGetPlayer` answers that plus one; the free
+`AIRun`, `AIBreakScript`, `IsAIShow`, `AIO_SendSquad` and `ScrollTo` act on that seat's AI. A
+sequence's `/` reads as seat 0.
+
+**The AI's thread manager.** Each AI object keeps its own table of threads by id. `Main.vs` and
+every free `AIRun` take the first id from 3 to 51 that holds no thread (0x0041cd00; -1 when all
+49 are taken), and `AIRun` answers that id; `AIBreakScript` stops what holds an id of that range
+in the caller's AI (0x0041cdc0). An id is free again the moment its thread ends. The order
+scripts run in id 2; the GAIKA strategies, the economy and the tactic scripts in fixed ids past
+the range, beside two arrays on the AI object (`[ai+0x70]`, `[ai+0x80]`) indexed by settlement
+that `RunEconomyScript` and `EconomyScript` read and write. `AIStop` deletes the AI object and
+every thread in it. `AIRun` resolves its name on the seat's search path, the profile's own
+directory first (0x0043d030).
+
+**A suspending call answers at its re-entry.** A host function registered through the
+suspending registrar returns 0 (done), 1 (suspend, then run the whole call again), 2 (end the
+script) or 3 (done, end the slice; the thread waits for an object to wake it). Its frame carries a
+first-run byte and a word of its own below the arguments, the byte set on a fresh call and clear
+on every re-entry. The `Goto` family (0x005d61b0, 0x005d6620, and 0x005d40c0 under `Goto(Obj)`
+and `GotoAttack`) uses both: the first run lays the route, writes whether it did into the word
+and suspends for **the whole slice** (the longer of it and a look-around animation); the re-entry
+measures nothing new and answers true only when the first run laid a route and the unit has now
+arrived (0x00417c10), dropping the route, and false otherwise. A re-entry that finds no route
+record runs as a first run. `FormKeepMoving` (0x0052eaf0, 0x005d7a40) suspends for its argument
+and its re-entry drops an arrived route. `Idle` and `Taunt` return 3: the unit's idle or taunt
+activity (0x005d2ca0) then spends the popped argument -- fidget animations chosen with draws from
+the synchronised generator every 100 ms -- and wakes the thread when it is spent.
 
 ## Implementation order
 

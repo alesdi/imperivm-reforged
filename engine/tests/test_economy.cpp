@@ -30,6 +30,7 @@
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/globals.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/item.hpp"
@@ -5152,6 +5153,61 @@ TEST(economy_a_rows_onaddremovescript_runs_between_the_payment_and_the_refund) {
   CHECK(b.commands.cancel_command(b.world, tavern, id));
   CHECK(s->warehouse.gold == 9000);
   CHECK(b.world.find(tavern)->state.user == 9000);
+}
+
+/// **`Building::Research` runs the building's own `research` method now**
+/// (0x004dfcd0 -> 0x0059af00), with the row's parameter and costs ambient
+/// for the call and put back after: no affordability test, no lab search, no
+/// queue, no payment. The 22 campaign sites that grant an AI its researches
+/// this way used to take the settlement's path, refused here for want of
+/// gold and, with it, paid for and queued.
+TEST(building_research_runs_the_buildings_method_outside_the_queue) {
+  LabBench b;
+  const ObjectId arena = b.add_building(b.classes.arena1);
+  b.set_store(/*gold=*/1000, /*food=*/1000, /*population=*/50);  // Fights costs 2000
+  const Settlement* s = b.economy.settlements().find(b.town);
+  REQUIRE(s != nullptr);
+
+  script::Scheduler scheduler;
+  WorldHost host{b.world};
+  HostContext context;
+  context.world = &b.world;
+  script::register_scheduler_builtins(b.registry);
+  (void)register_global_hosts(b.registry);
+  scheduler.set_registry(&b.registry);
+  scheduler.set_host(&host);
+  scheduler.set_user(&context);
+  b.commands.set_scheduler(&scheduler);
+  const std::string_view source =
+      "// void, Obj This\n"
+      "int k;\n"
+      "if (cmdparam == \"SetsSet, levels/GSwordsman, 4, NameSet, Fights, default,\") k = 1;\n"
+      "This.SetUser(cmdcost_gold + 10000 * k);\n";
+  script::Diagnostic diagnostic;
+  const auto parsed = script::parse(bytes_of(source), "data/subai/research.vs", &diagnostic);
+  REQUIRE(parsed.ok());
+  script::CompileError error;
+  auto chunk = script::compile(parsed.value(), &b.registry, &error);
+  REQUIRE(chunk.ok());
+  REQUIRE(scheduler.add_chunk(std::move(chunk.value())) != script::kNoChunk);
+
+  const script::HostOutcome out =
+      b.call("Research", 1, {script::Value::object(kTypeObj, arena), script::Value::string("Fights")});
+  CHECK(out.status == script::HostStatus::ok);
+  const CommandDef* fights = b.commands.table().find("Fights");
+  REQUIRE(fights != nullptr);
+  CHECK(b.world.find(arena)->state.user == 12000);
+  CHECK(s->warehouse.gold == 1000);
+  CHECK(b.commands.command_count(arena, "research") == 0);
+  // An unknown row, and a building naming nothing, do nothing.
+  b.world.find(arena)->state.user = 0;
+  CHECK(b.call("Research", 1, {script::Value::object(kTypeObj, arena),
+                               script::Value::string("Chariots")})
+            .status == script::HostStatus::ok);
+  CHECK(b.world.find(arena)->state.user == 0);
+  CHECK(b.call("Research", 1, {script::Value::object(kTypeObj, 999999),
+                               script::Value::string("Fights")})
+            .status == script::HostStatus::ok);
 }
 
 /// `AllowCapture` writes the field `CanBeCaptured` reads. One word, a setter
