@@ -2732,7 +2732,10 @@ std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroe
     end_march(world, movement, *form);
   }
   hand_out_form_move(world, joined);
-  if (form->samples == 0) return 0;
+  // A command started above may have run a script that made another hero's
+  // formation, which moves the formations in memory: look this one up again.
+  form = movement.formation(hero);
+  if (form == nullptr || form->samples == 0) return 0;
 
   // The march is one party: its members and the hero leading it do not block
   // one another's steps (`sim/movement.hpp`, inference 3).
