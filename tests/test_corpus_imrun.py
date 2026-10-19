@@ -812,8 +812,10 @@ ORDER_TURN = 300
 #: p1's gates stands closed with nobody near, so the gate it walks through is
 #: shut when it is sent. At 300 on the tenth round's tree p1's two swordsmen
 #: stand within 350 of the south and the west gate and hold both open; at 400
-#: all four are shut and three swordsmen stand clear of them.
-GATE_ORDER_TURN = 400
+#: all four were shut and three swordsmen stood clear of them. On the eleventh
+#: round's (the idle activity's draws, the `Goto` family's re-entry) a friend
+#: opens the west gate at 311 and leaves it at 401, so the order is at 420.
+GATE_ORDER_TURN = 420
 
 
 def _inside(x: int, y: int) -> bool:
@@ -1091,12 +1093,13 @@ SIEGE_TURN = 10
     # (0x005b9f50), `seq3.vs`'s 28 `BestTarget` runs take a few turns rather
     # than 28, so the Iberians' attackers are already advancing on their own
     # outposts' ground there, and the archer's `unit_advance.vs` takes the
-    # first of them in squad sight for its target instead of the fort. Not due
-    # west either, since the tenth round's tree: an Iberian archer (p3) kills
-    # it there within three turns, before its first shot. From here it lands
-    # its shots before it falls (10,000 -> 9,940 on that tree and on the one
-    # before it).
-    ("RArcher", (NUMANTIA_OUTPOST[0] - 354, NUMANTIA_OUTPOST[1] - 354), True),
+    # first of them in squad sight for its target instead of the fort. Not
+    # south-west either, since the eleventh round's tree (the `Goto` family's
+    # re-entry): the Iberians reach it there first, it takes one of them for
+    # its target and falls without a shot at the fort, where it used to land
+    # its shots (10,000 -> 9,940). From the north-west it does: 10,000 ->
+    # 9,920, measured on that tree, as from due west and due north.
+    ("RArcher", (NUMANTIA_OUTPOST[0] - 354, NUMANTIA_OUTPOST[1] + 354), True),
 ])
 def test_the_attack_button_on_a_fort_hurts_it_from_an_archer_and_not_from_a_sword(
         imrun, game_dir, cls, stand, hurts):
