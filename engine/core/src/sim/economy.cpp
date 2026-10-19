@@ -162,8 +162,6 @@ bool EconomySystem::add_building(World& world, SettlementId id, ObjectId buildin
   return true;
 }
 
-namespace {
-
 /// A settlement's buildings in the order of its member deque: `gbr.exe` keeps
 /// them in an `ObjList` at `[settlement+0x60]` (deque `+0x6c..+0x78`), appended
 /// as each joins, and every walk over them -- `BestGate` 0x004284e0 through
@@ -184,6 +182,8 @@ void settlement_buildings(const World& world, const Settlement& s, std::vector<O
   std::stable_sort(out.begin(), out.end(),
                    [&](ObjectId a, ObjectId b) { return place(a) < place(b); });
 }
+
+namespace {
 
 /// Where `Settlement::Units`'s aliased handle points.
 ///
@@ -5719,31 +5719,6 @@ ObjectId make_mule(World& world, SettlementId id, Resource kind, std::int32_t am
   world.set_owner(carrier, s->owner);
   (void)world.put_in_holder(carrier, s->holder.object);
   return carrier;
-}
-
-std::int32_t draw_from_food_wagon(World& world, std::span<const ObjectId> members,
-                                  std::int32_t want) {
-  if (want <= 0 || members.empty()) return 0;
-  const CommandSystem* commands = command_system(world);
-  if (commands == nullptr) return 0;
-  const WorldObject* fullest = nullptr;
-  for (const WorldObject& slot : world.objects()) {
-    if (slot.object == nullptr || !slot.object->is_a(NativeClass::wagon)) continue;
-    if (slot.state.health <= 0 || slot.state.cargo <= 0) continue;
-    if (slot.state.cargo_resource != static_cast<std::int32_t>(Resource::food)) continue;
-    const CommandQueue* queue = commands->find(slot.id);
-    const Command* running = queue == nullptr ? nullptr : queue->running();
-    if (running == nullptr || running->arg_kind != CommandArgKind::object) continue;
-    if (std::find(members.begin(), members.end(), running->object) == members.end()) continue;
-    // The fullest, and the first met of two that are equally full: 0x005d58d0
-    // replaces its pick only with a wagon carrying strictly more.
-    if (fullest != nullptr && slot.state.cargo <= fullest->state.cargo) continue;
-    fullest = &slot;
-  }
-  if (fullest == nullptr) return 0;
-  const std::int32_t taken = std::min(want, fullest->state.cargo);
-  set_wagon_cargo(world, fullest->id, fullest->state.cargo - taken);
-  return taken;
 }
 
 void set_wagon_cargo(World& world, ObjectId wagon, std::int32_t value) {

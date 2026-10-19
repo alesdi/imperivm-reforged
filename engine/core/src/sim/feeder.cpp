@@ -377,28 +377,191 @@ void FeederSystem::run_searches(World& world, GameTime now) {
           }
         }
       }
-      // The second path: a food wagon following one of the unit's
-      // squad-mates -- the mule `Squad::SendFoodWagon` sends after the army.
-      // The original's hungry unit finds it the way it finds any food within
-      // reach; here "within reach" is "following my squad"
-      // (`draw_from_food_wagon`).
-      if (want > 0) {
-        if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
-          const SquadKey key = heroes->squads().squad_of(id);
-          const Squad* squad = key.valid() ? heroes->squads().find(key) : nullptr;
-          if (squad != nullptr) {
-            const std::int32_t got = draw_from_food_wagon(world, squad->members, want);
-            if (got > 0) {
-              link->food += got;
-              clear_hungry(id);
-              continue;
-            }
+    }
+    // The open field: a unit in no holder searches around itself (0x005dbba0).
+    // `want` is the class's food capacity, the unit being at zero.
+    if (draws_from_warehouse_) {
+      const ObjectState* state = world.state(id);
+      const std::int32_t want = link->max_food - link->food;
+      if (state != nullptr && state->holder == kNoObject && want > 0) {
+        const std::int32_t got = search_open_field(world, economy, id, want);
+        // The unit can have been moved by the draw: `find` again.
+        if (got > 0) {
+          if (FeedingUnit* fed = find(id); fed != nullptr) {
+            fed->food += got;
+            if (fed->food > 0) clear_hungry(id);
           }
+          continue;  // fed: no next search to schedule
         }
       }
     }
-    schedule_search(world, *link, now);
+    if (FeedingUnit* again = find(id); again != nullptr) schedule_search(world, *again, now);
   }
+}
+
+/// The hungry unit's open-field search, 0x005dbba0, with its visitor
+/// 0x005d58d0 and its draw 0x005d3700. Three candidates are kept -- a store, a
+/// food wagon, a fed unit -- and the draw takes from the first of them that
+/// has anything:
+///
+///   1. **The settlements' buildings.** Every settlement in the store's order
+///      whose owner grants the unit's player share-support (bit 2 of the
+///      owner's relation word to the unit's player), and which is not a
+///      Teuton tent's (0x00440100), offers each of its buildings in its deque's
+///      order (`settlement_buildings`) that stands within the radius --
+///      `isqrt` of the centre distance less the building's class radius, at
+///      most the unit's sight plus 512 -- to the visitor.
+///   2. **The grid.** The world's grid over the circle of that radius about
+///      the unit, in its walk order (`SweepOrder::grid`), offers every object
+///      carrying food (`0x20000000`: a unit with food, a wagon carrying food;
+///      a building never carries it) to the visitor.
+///
+/// The visitor takes an object whose owner the unit's player grants
+/// share-support (the mask at `[player+0x1c]`, kept by the relation setter
+/// 0x005652f0 from bit 2) and that the unit can see (0x005a7870: a non-zero
+/// sight at least the centre distance less both class radii). Then:
+///
+///   * a **building**: its settlement's store. One holding at least `want`
+///     is taken (and ends the grid walk); a smaller one only when it holds
+///     strictly more than the store kept so far. In the walk over the
+///     settlements nothing ends, so the *last* store holding enough wins;
+///   * a **wagon**: when it carries food and strictly more than the wagon kept
+///     so far;
+///   * a **unit**, until one with enough has been found: alive, holding more
+///     than 1. One holding at least `want` is kept and no later unit replaces
+///     it; otherwise one holding strictly more than the unit kept so far.
+///
+/// The draw: the store, when it holds anything (`min(want, food)` out of the
+/// warehouse); else the wagon, `min(want, cargo)` through the cargo setter, so
+/// a wagon that gives its last food dies; else **half the unit's food** at
+/// most, which leaves it at least 1.
+///
+/// **Not modelled:** the catapult crew's arm (a unit inside a manned
+/// catapult's holder searches from the catapult), and 0x00440100's exception
+/// for a tent whose holder names an object at `+0xe`: every Teuton tent's
+/// settlement is passed over here.
+std::int32_t FeederSystem::search_open_field(World& world, EconomySystem* economy, ObjectId unit,
+                                             std::int32_t want) {
+  const WorldObject* self = world.find(unit);
+  if (self == nullptr || want <= 0) return 0;
+  const Point at = self->state.position;
+  const PlayerId owner = self->state.owner;
+  const std::int32_t sight = self->sight;
+  const std::int32_t reach = sight + 512;
+  const PlayerTable& players = world.players();
+  const std::int64_t own_radius = to_int(class_property(world, unit, "radius"), 0);
+
+  const auto distance = [&](Point p) {
+    const std::int64_t dx = std::int64_t{p.x} - at.x;
+    const std::int64_t dy = std::int64_t{p.y} - at.y;
+    return isqrt(dx * dx + dy * dy);
+  };
+  // The visitor's two gates: the share-support mask and 0x005a7870.
+  const auto offered = [&](const WorldObject& other) {
+    if (!PlayerTable::is_valid(owner) || !PlayerTable::is_valid(other.state.owner)) return false;
+    if (!players.has(owner, other.state.owner, Relation::share_support)) return false;
+    if (sight == 0) return false;
+    const std::int64_t edge = distance(other.state.position) -
+                              to_int(class_property(world, other.id, "radius"), 0) - own_radius;
+    return edge <= sight;
+  };
+
+  Settlement* store = nullptr;
+  ObjectId wagon = kNoObject;
+  ObjectId donor = kNoObject;
+  bool donor_enough = false;
+  const auto cargo_of = [&](ObjectId id) {
+    const WorldObject* slot = world.find(id);
+    return slot == nullptr ? 0 : slot->state.cargo;
+  };
+  // 0x005d58d0. Answers false when the walk ends.
+  const auto visit = [&](const WorldObject& other) {
+    if (!offered(other)) return true;
+    if (other.state.flags.is_building) {
+      Settlement* s = economy == nullptr ? nullptr : economy->settlements().for_object(other.id);
+      if (s == nullptr) return true;
+      if (s->warehouse.food < want) {
+        if (store == nullptr || s->warehouse.food > store->warehouse.food) store = s;
+        return true;
+      }
+      store = s;
+      return false;
+    }
+    if (other.object != nullptr && other.object->is_a(NativeClass::wagon)) {
+      if (other.state.cargo_resource != static_cast<std::int32_t>(Resource::food)) return true;
+      if (wagon != kNoObject && other.state.cargo <= cargo_of(wagon)) return true;
+      wagon = other.id;
+      return true;
+    }
+    if (!donor_enough && other.state.flags.is_unit && other.state.health > 0) {
+      const std::int32_t has = food(other.id);
+      if (has > 1) {
+        if (has >= want) {
+          donor = other.id;
+          donor_enough = true;
+        }
+        if (donor == kNoObject || food(donor) < has) donor = other.id;
+      }
+    }
+    return true;
+  };
+
+  // 1. The settlements' buildings.
+  if (economy != nullptr) {
+    const ClassGraph* graph = world.class_graph();
+    const ClassFilter tent = ClassFilter::parse("TTent", graph);
+    std::vector<ObjectId> buildings;
+    for (Settlement& s : economy->settlements().all()) {
+      if (!PlayerTable::is_valid(s.owner) || !PlayerTable::is_valid(owner)) continue;
+      if (!players.has(s.owner, owner, Relation::share_support)) continue;
+      if (const WorldObject* anchor = world.find(s.anchor);
+          anchor != nullptr && !tent.match_all && world.matches_filter(*anchor, tent)) {
+        continue;
+      }
+      settlement_buildings(world, s, buildings);
+      for (const ObjectId id : buildings) {
+        const WorldObject* building = world.find(id);
+        if (building == nullptr) continue;
+        const std::int64_t gap =
+            distance(building->state.position) - to_int(class_property(world, id, "radius"), 0);
+        if (gap > reach) continue;
+        (void)visit(*building);
+      }
+    }
+  }
+
+  // 2. The grid, for whatever carries food.
+  std::vector<ObjectId> around;
+  world.objects_in_radius(at, reach, ClassFilter{}, around, SweepOrder::grid);
+  for (const ObjectId id : around) {
+    const WorldObject* other = world.find(id);
+    if (other == nullptr || id == unit) continue;
+    const bool carries =
+        (other->object != nullptr && other->object->is_a(NativeClass::wagon))
+            ? other->state.cargo > 0 &&
+                  other->state.cargo_resource == static_cast<std::int32_t>(Resource::food)
+            : (!other->state.flags.is_building && food(id) >= 1);
+    if (!carries) continue;
+    if (!visit(*other)) break;
+  }
+
+  // 0x005d3700.
+  if (store != nullptr && store->warehouse.food != 0) {
+    return economy->withdraw(store->id, Resource::food, want);
+  }
+  if (wagon != kNoObject && cargo_of(wagon) != 0) {
+    const std::int32_t cargo = cargo_of(wagon);
+    const std::int32_t taken = std::min(want, cargo);
+    set_wagon_cargo(world, wagon, cargo - taken);
+    return taken;
+  }
+  if (donor != kNoObject) {
+    const std::int32_t has = food(donor);
+    const std::int32_t taken = std::clamp(want, 0, has / 2);
+    (void)write_food(donor, has - taken);
+    return taken;
+  }
+  return 0;
 }
 
 // --------------------------------------------------------------------------

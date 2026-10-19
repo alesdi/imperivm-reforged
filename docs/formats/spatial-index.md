@@ -54,8 +54,9 @@ linked as they load, in the map's order.
 Every area search walks the grid the same way. The query sweeps (the class-player circle
 0x004fd060 and rectangle 0x004fd2d0, sight 0x004fd9c0, the map-area rectangle 0x004fdc20 and
 circle 0x004fde60), the nearest-by-grid search 0x0053e290, and the forty-odd sweeps that share
-the cell-against-circle test 0x00416810 (0x004233b0, 0x0051b840, 0x005d5bf0's, the food
-search 0x005db8c0 among them):
+the cell-against-circle test 0x00416810 (the defender sweep 0x004233b0, 0x0051b840, the
+training ground's 0x005d4cd0 under 0x005d5bf0, and the hungry unit's food sweep 0x005d92d0
+under 0x005dbba0 among them):
 
 1. take the box of half-side `r` about the centre, clamped to the map's rectangle
    (`[world+0xb4..+0xc0]`);

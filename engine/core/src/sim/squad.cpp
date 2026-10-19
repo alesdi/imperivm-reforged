@@ -4049,7 +4049,8 @@ HostOutcome eval_attach_impl(CallContext& ctx) {
 ///      `follow` is false. Otherwise true.
 ///
 /// The mule then follows its army as any unit follows (`WAGON_FOLLOW.VS`),
-/// and the feeder's second path draws on it (`draw_from_food_wagon`).
+/// and a hungry soldier that can see it eats from it (the feeder's open-field
+/// search, `FeederSystem::search_open_field`).
 template <typename Fn>
 void each_peaceful_wagon(World& world, const HeroSystem& heroes, PlayerId player, Fn&& fn) {
   for (const Squad& squad : heroes.squads().squads()) {
