@@ -1158,7 +1158,13 @@ TEST(a_settlements_unit_list_is_the_garrison_rather_than_a_copy_of_it) {
   const Settlement* row = economy.find(town);
   ObjListPool& pool = objlist_pool_of(world);
   CHECK(pool.items(pool.acquire_alias(script::kNoScript, row->holder.object)).size() == 1);
-  CHECK(pool.items(pool.acquire_alias(script::kNoScript, row->object)).empty());
+  // The settlement object owns the other alias, `Settlement::Buildings`: its
+  // buildings, never the garrison.
+  {
+    const std::span<const ObjectId> built =
+        pool.items(pool.acquire_alias(script::kNoScript, row->object));
+    CHECK(std::find(built.begin(), built.end(), a) == built.end());
+  }
   CHECK(pool.items(pool.acquire_alias(script::kNoScript, row->warehouse.object)).empty());
   CHECK(pool.items(pool.acquire_alias(script::kNoScript, row->anchor)).empty());
 
@@ -1177,7 +1183,9 @@ TEST(a_settlements_unit_list_is_the_garrison_rather_than_a_copy_of_it) {
     REQUIRE(world.deserialize(bytes).ok());
     ObjListPool& after = objlist_pool_of(world);
     CHECK(after.items(after.acquire_alias(script::kNoScript, row->holder.object)).size() == 1);
-    CHECK(after.items(after.acquire_alias(script::kNoScript, row->object)).empty());
+    const std::span<const ObjectId> built =
+        after.items(after.acquire_alias(script::kNoScript, row->object));
+    CHECK(std::find(built.begin(), built.end(), a) == built.end());
   }
 }
 
@@ -2469,11 +2477,18 @@ TEST(economy_buildings_lists_the_settlements_buildings_and_no_units) {
   CHECK(std::find(got.begin(), got.end(), elsewhere) == got.end());
 }
 
-/// The list is a **snapshot**, which is where this engine parts company with
-/// the original -- and it is mutable, which is what makes the divergence safe
-/// to have: clearing it leaves the settlement's own roll alone.
-TEST(economy_buildings_hands_back_a_list_the_script_owns) {
+/// The list is an **alias** of the settlement's member deque, as the original's
+/// is (0x005c3d40 points at the `ObjList` at `[settlement+0x60]` and bumps its
+/// refcount): in the order the buildings joined, and live -- a list taken
+/// before a building joins lists it after. The order is the one every walk over
+/// a settlement's buildings takes (`BestGate` 0x004284e0, `MostDamagedBuilding`
+/// 0x005c38d0), and it survives a save.
+TEST(economy_buildings_is_a_live_alias_in_the_order_the_buildings_joined) {
   AroundBench b;
+  // `late` is spawned first and joins last: id order and join order disagree.
+  const ObjectId late = b.world.spawn(NativeClass::building, nullptr, b.classes.tower);
+  b.world.set_position(late, Point{1300, 1000});
+  b.world.set_health(late, 4000);
   const ObjectId shed = b.building_at(Point{1200, 1000});
 
   const script::HostOutcome out = call_host(b.registry, b.world, script::CallKind::member,
@@ -2481,17 +2496,22 @@ TEST(economy_buildings_hands_back_a_list_the_script_owns) {
   REQUIRE(out.status == script::HostStatus::ok);
   REQUIRE(is_objlist(out.value));
   const ObjListId id = objlist_of(out.value);
-  REQUIRE(objlist_pool_of(b.world).items(id).size() == 2);
-  // No alias: the pool owns this storage. `Units` above answers `holder` here.
-  CHECK(objlist_pool_of(b.world).alias_of(id) == kNoObject);
+  CHECK(objlist_pool_of(b.world).alias_of(id) == b.settlement_object);
+  const auto listed = [&](World& world) {
+    const std::span<const ObjectId> items = objlist_pool_of(world).items(id);
+    return std::vector<ObjectId>(items.begin(), items.end());
+  };
+  CHECK((listed(b.world) == std::vector<ObjectId>{b.anchor, shed}));
 
-  objlist_pool_of(b.world).mutable_items(id)->clear();
-  const Settlement* s = b.economy.settlements().find(b.town);
-  REQUIRE(s != nullptr);
-  CHECK(s->buildings.size() == 2);
-  // And a second call is a second list, seeing the roll unharmed.
-  CHECK(b.members("Buildings", {b.settlement_value()}).size() == 2);
-  CHECK(shed != kNoObject);
+  REQUIRE(b.economy.add_building(b.world, b.town, late, 4000));
+  CHECK((listed(b.world) == std::vector<ObjectId>{b.anchor, shed, late}));
+  CHECK((b.members("Buildings", {b.settlement_value()}) ==
+         std::vector<ObjectId>{b.anchor, shed, late}));
+
+  std::vector<std::byte> bytes;
+  b.world.serialize(bytes);
+  REQUIRE(b.world.deserialize(bytes).ok());
+  CHECK((listed(b.world) == std::vector<ObjectId>{b.anchor, shed, late}));
 }
 
 /// A settlement handle that resolves to nothing is an **empty list**, not a

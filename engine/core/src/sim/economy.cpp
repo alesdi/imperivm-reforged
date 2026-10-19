@@ -164,6 +164,27 @@ bool EconomySystem::add_building(World& world, SettlementId id, ObjectId buildin
 
 namespace {
 
+/// A settlement's buildings in the order of its member deque: `gbr.exe` keeps
+/// them in an `ObjList` at `[settlement+0x60]` (deque `+0x6c..+0x78`), appended
+/// as each joins, and every walk over them -- `BestGate` 0x004284e0 through
+/// the gate filter 0x00428360, `MostDamagedBuilding` 0x005c38d0,
+/// `Settlement::Buildings` 0x005c3d40 -- reads it front to back. Here the
+/// membership is the back-link (`World::buildings_in_settlement`) and the
+/// order is the roll's, `Settlement::buildings`, which `add_building` appends
+/// to in the same way; a back-linked building the roll does not list (none on
+/// a loaded map) comes after, in id order.
+void settlement_buildings(const World& world, const Settlement& s, std::vector<ObjectId>& out) {
+  world.buildings_in_settlement(s.object, ClassFilter{}, out);
+  const auto place = [&s](ObjectId id) {
+    for (std::size_t i = 0; i < s.buildings.size(); ++i) {
+      if (s.buildings[i].object == id) return i;
+    }
+    return s.buildings.size();
+  };
+  std::stable_sort(out.begin(), out.end(),
+                   [&](ObjectId a, ObjectId b) { return place(a) < place(b); });
+}
+
 /// Where `Settlement::Units`'s aliased handle points.
 ///
 /// `owner` is the settlement's holder object -- the handle `gbr.exe` reads at
@@ -173,13 +194,28 @@ namespace {
 /// move every row it holds.
 ///
 /// Null for a settlement that has gone, which the pool reads as an empty list.
+///
+/// The settlement object itself is the owner of the second alias,
+/// `Settlement::Buildings` (0x005c3d40 aliases the `ObjList` at
+/// `[settlement+0x60]`, the member deque): that resolves to the settlement's
+/// buildings in roll order (`settlement_buildings`), refreshed here on every
+/// access so it is as live as the roll it reads.
 std::vector<ObjectId>* resolve_holder_roster(void* user, ObjectId owner) {
   World* world = static_cast<World*>(user);
   if (world == nullptr) return nullptr;
   EconomySystem* economy = economy_of(*world);
   if (economy == nullptr) return nullptr;
   Settlement* settlement = economy->settlements().for_object(owner);
-  if (settlement == nullptr || settlement->holder.object != owner) return nullptr;
+  if (settlement == nullptr) return nullptr;
+  if (settlement->object == owner) {
+    std::vector<ObjectId> now;
+    settlement_buildings(*world, *settlement, now);
+    // Rewritten only on a change, so a span taken from an earlier access is
+    // not moved under its reader by a later one that reads the same.
+    if (now != settlement->buildings_view) settlement->buildings_view = std::move(now);
+    return &settlement->buildings_view;
+  }
+  if (settlement->holder.object != owner) return nullptr;
   return &settlement->holder.units;
 }
 
@@ -3482,7 +3518,7 @@ void give_object_to(CallContext& ctx, EconomySystem* economy, World& world, Obje
 
 [[nodiscard]] std::vector<ObjectId> settlement_gates(const World& world, const Settlement& s) {
   std::vector<ObjectId> buildings;
-  world.buildings_in_settlement(s.object, ClassFilter{}, buildings);
+  settlement_buildings(world, s, buildings);
   std::vector<ObjectId> gates;
   for (const ObjectId id : buildings) {
     const WorldObject* slot = world.find(id);
@@ -4080,29 +4116,18 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // too, and its miss path is the same shape as `Units`' -- a printed
     // diagnostic and a **fresh empty list**, never a refusal.
     //
-    // **This one snapshots, and the divergence is deliberate.** Three reasons,
-    // in the order they decided it:
-    //
-    //   1. No shipped site can tell. All nine take the list and read it --
-    //      `for (i=0; i<olBuildings.count; i+=1)` in five village and mule
-    //      verifiers, `blds = sett.Buildings` in the two outpost scripts. Not
-    //      one calls `Clear`, `Add`, `Remove` or `ClearDead` on it. `Units`
-    //      aliases because `TOWNHALL_BEHAVIOR_GUARD.VS` *can* tell and the
-    //      faithful reading is what that file gets; there is no such file here.
-    //   2. `ObjListPool::AliasResolver` hands back a `std::vector<ObjectId>*`,
-    //      and a settlement's roll is `std::vector<SettlementBuilding>` -- rows
-    //      carrying a per-building `max_health` the anchor's capture arithmetic
-    //      reads. Aliasing would mean keeping a parallel `vector<ObjectId>`
-    //      beside it, which puts one fact in two places: exactly the drift the
-    //      alias exists to prevent.
-    //   3. The membership here is the **back-link**, not the roll. That was
-    //      chosen while `Settlement::buildings` was empty at load; the loader
-    //      now files every member building into the roll (sim/session.cpp, in
-    //      document order), so the two agree on a loaded map and differ only
-    //      for a building that gained a back-link without `add_building`.
-    //      (The economy-1 audit read 0x005c3d40: the list it aliases is the
-    //      ObjList embedded at `+0x60`, whose deque is the `+0x6c..+0x78` one
-    //      `BestBarrack` walks -- the roll.)
+    // **So does this one.** The alias's owner is the settlement object, and
+    // `EconomySystem`'s resolver answers it with the settlement's buildings in
+    // the deque's order (`settlement_buildings`: the roll's order, the
+    // back-link's membership), refreshed on every access. So a list held
+    // across a building's joining sees it, as the original's does. What is not
+    // carried is a write *through* the handle: the view is rebuilt from the
+    // roll on the next access, where the original's `Add` or `Remove` would
+    // change the settlement's own deque. Every one of the nine shipped sites
+    // only reads it -- `for (i=0; i<olBuildings.count; i+=1)` in five village
+    // and mule verifiers, `blds = sett.Buildings` in the two outpost scripts
+    // -- and the roll is rows carrying a per-building `max_health`, which a
+    // script's bare handle could not supply.
     //
     // The filter is match-all: the registration is `[23, 1, 27]`, one argument
     // and it is the receiver, so there is no class to filter on.
@@ -4111,15 +4136,12 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        World* world = world_of(ctx);
        if (world == nullptr) return HostOutcome::failed("Buildings: no world");
        ObjListPool& pool = objlist_pool_of(*world);
-       const ObjListId id = pool.acquire_temporary(ctx.script);
        const Settlement* s = receiver(ctx);
        // The diagnostic-and-empty-list path, not a refusal.
-       if (s != nullptr) {
-         if (std::vector<ObjectId>* out = pool.mutable_items(id)) {
-           world->buildings_in_settlement(s->object, ClassFilter{}, *out);
-         }
+       if (s == nullptr || s->object == kNoObject) {
+         return HostOutcome::ok_with(make_objlist_value(pool.acquire_temporary(ctx.script)));
        }
-       return HostOutcome::ok_with(make_objlist_value(id));
+       return HostOutcome::ok_with(make_objlist_value(pool.acquire_alias(ctx.script, s->object)));
      }},
     // `set.ObjectsAround("Military")` -- 16 sites in 11 scripts, the sole
     // blocker of seven, and **a fourth name for a collector this engine
@@ -5416,9 +5438,8 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // A settlement's gates are the members of its building list that are
     // `CVXGate`s: 0x00428360 walks the deque at `[settlement+0x68]` and asks
     // each member through a dynamic type query. Here that is
-    // `World::buildings_in_settlement` filtered on `NativeClass::gate`, which
-    // answers in ascending id where the original answers in the order the
-    // buildings joined -- observable only through `BestGate`'s tie, which
+    // `settlement_buildings` filtered on `NativeClass::gate`, in the order the
+    // buildings joined, as the deque's -- which `BestGate`'s tie reads: it
     // keeps the earlier of two equal scores.
     //
     // `Gate::Inside(squad)` (0x00429310) is below, beside `NumGates`.
@@ -5437,7 +5458,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
            ctx.arg(0).is_object() && ctx.arg(0).as_object().type == kTypeSettlement;
        if (Settlement* s = settlement ? receiver(ctx) : nullptr) {
          std::vector<ObjectId> buildings;
-         world->buildings_in_settlement(s->object, ClassFilter{}, buildings);
+         settlement_buildings(*world, *s, buildings);
          for (const ObjectId id : buildings) {
            if (ObjectState* state = world->mutable_state(id)) state->damage_taken = 0;
          }
@@ -5462,7 +5483,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        if (s == nullptr) return HostOutcome::ok_with(invalid_handle());
        World& world = *world_of(ctx);
        std::vector<ObjectId> buildings;
-       world.buildings_in_settlement(s->object, ClassFilter{}, buildings);
+       settlement_buildings(world, *s, buildings);
        ObjectId best = kNoObject;
        std::int32_t most = 0;
        for (const ObjectId id : buildings) {

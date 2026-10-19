@@ -188,11 +188,13 @@ never collected, and neither is a query the embedder made with `create_query`.
 Two getters answer a list that is another object's own rather than a copy: `Hero::army`
 (0x00530580) pushes the hero's army list at `[hero+0x1cc]` with its count bumped, and
 `Settlement::Buildings` (0x005c3d40) pushes the settlement's building list at `[s+0x60]`.
-The engine's `ObjListPool` resolves an alias through two seams, a settlement's holder (for
-`Settlement::Units`) and a hero (for `Hero::army`, `HeroRecord::army`), so `army` is live.
-`Settlement::Buildings` still answers a snapshot: the settlement's roll here is a vector of
-rows carrying per-building figures, not a list of handles the pool could alias, and no shipped
-site writes through the list.
+The engine's `ObjListPool` resolves an alias through two seams: the settlement seam answers a
+settlement's holder (for `Settlement::Units`) and the settlement object itself (for
+`Settlement::Buildings`), and the hero seam answers `Hero::army` (`HeroRecord::army`). So all
+three are live. `Settlement::Buildings` reads the settlement's buildings in the order they
+joined (the roll's order, which is the deque's), rebuilt from the roll on each access: the roll
+here is rows carrying per-building figures, so a write *through* that handle does not reach it,
+where the original's would. No shipped site writes through the list.
 
 ## What is still unknown
 

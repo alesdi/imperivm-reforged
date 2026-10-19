@@ -25,7 +25,7 @@
 0x00563e80	verified	slot 1 +0x250 (end_level_1), slot 2 +0x254, else 0
 0x00563df0	verified	slot 1 +0x248 (start_level_1), slot 2 +0x24c, else 0
 0x0042cba0	verified	last settlement passing: unsigned isqrt < dist, central heir BaseRuins, Bld minlevel <= level, items, same LSA, rand(0,1)==1 (one draw per candidate reaching it) (fixed: signed distance compare; test find_ruins_walks_the_settlements_and_flips_a_coin_per_candidate)
-0x004284e0	partial	gates of the deque, isqrt + health/5 strictly least from 0x7fffffff; invalid receiver/point invalid handle. Walk is ascending id (World::buildings_in_settlement), the deque is join order: they differ only for a building re-filed into a settlement after creation (ids are monotonic)
+0x004284e0	verified	gates of the deque, isqrt + health/5 strictly least from 0x7fffffff; invalid receiver/point invalid handle. FIXED (spatial-index round): the walk is the deque's order, the order the buildings joined (settlement_buildings: the roll's order over the back-link's membership), where it was ascending id; test economy_buildings_is_a_live_alias_in_the_order_the_buildings_joined (the shared walk)
 0x0042ca20	verified	0x0042c800 (shared with SupplyCount, described at supply_target): GAIKA node LSA nonzero, same owner record, BaseTownhall heir (0x0043ffc0), same LSA, least centre distance strictly; invalid receiver prints and pushes nothing in the original (stack fault), invalid handle here
 0x00424ff0	verified	[set+0x3c], overridden to false for an outpost of zero-based player 14 (0x00425030, 14 only); no receiver check (fixed: the override was missing; test economy_settlement_members_answer_as_their_bodies)
 0x005c1c40	partial	CanBeCaptured(obj): invalid argument or receiver true, else 0x005c19d0 (IsValidCaptureTarget's helper). Not bound: no shipped site passes an argument
@@ -53,7 +53,7 @@
 0x005c29f0	verified	owner's score block +0x38 += n, no sign check; invalid prints
 0x005c2890	verified	central class name exactly GTownhall or RTownhall (10-byte repe cmpsb)
 0x00428a10	verified	unknown row prints, 0; 0x00425a10 with the row's gold/food/pop and the reserve exempted when ReserveFor equals the argument exactly (fixed: compared row identity with the row's spelling; shared helper reserved_gold_for; test max_afford_count_and_can_afford_hold_the_reserve_back_from_gold)
-0x005c38d0	partial	strictly most [+0x1f8] from 0 among deque buildings whose entity has bit 12 (type-12 point); invalid receiver prints, invalid handle. Walk is ascending id, the deque join order (as BestGate)
+0x005c38d0	verified	strictly most [+0x1f8] from 0 among deque buildings whose entity has bit 12 (type-12 point); invalid receiver prints, invalid handle. FIXED (spatial-index round): the walk is the deque's join order (settlement_buildings, as BestGate), where it was ascending id; test economy_buildings_is_a_live_alias_in_the_order_the_buildings_joined (the shared walk)
 0x00428710	verified	gates whose target state [+0x208] != 1 get vtbl+0xc0(1) and opengate via 0x004efc00 with replace, as the settlement's owner; missing opengate row prints and stops; prose corrected (no mid-swing divergence)
 0x005c2930	verified	reads [set+0xf0], which nothing writes: always 0
 0x005c4a10	verified	no receiver check; pool +1 via 0x005c4930 and [set+0x100] += 1, no ceiling
