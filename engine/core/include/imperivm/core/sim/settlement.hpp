@@ -317,6 +317,10 @@ struct Settlement {
   /// The dumps show it taking 11 values in 0..40 and moving over a session,
   /// which is what a cursor does and what a fixed target would not.
   std::int32_t first_to_repair = 0;
+  /// `[settlement+0x98]`, the dumps' `last tower fire time`: when any tower
+  /// of this settlement last shot. `Building::Attack` stamps it (0x005c1050)
+  /// and waits until `1000 / rate` has passed since it (0x005c3050), so a
+  /// settlement's towers share one cadence (`docs/formats/siege-fire.md`).
   GameTime last_tower_fire_time = 0;
   GameTime last_unit_exit_time = 0;
   /// 0 in all 328 blocks. Reproduced because it is in the sync set; nothing

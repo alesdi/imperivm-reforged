@@ -2,6 +2,7 @@
 #include "imperivm/core/sim/player_host.hpp"
 
 #include "imperivm/core/sim/squad.hpp"
+#include "imperivm/core/sim/stats.hpp"
 
 #include <algorithm>
 
@@ -275,7 +276,27 @@ void HeroSystem::forget(World& world, ObjectId id) {
   squads_.prune_empty();
 }
 
+namespace {
+
+/// Where `Hero::army`'s aliased handle points: the hero's own army
+/// (`[hero+0x1cc]`, `HeroRecord::army`), or null for an object that is not a
+/// hero, which the pool reads as an empty list. Resolved through the system
+/// on every access, since `heroes_` is a vector that grows.
+std::vector<ObjectId>* resolve_hero_army(void* user, ObjectId owner) {
+  World* world = static_cast<World*>(user);
+  if (world == nullptr) return nullptr;
+  HeroSystem* heroes = hero_system_of(*world);
+  if (heroes == nullptr) return nullptr;
+  HeroRecord* record = heroes->hero(owner);
+  return record == nullptr ? nullptr : &record->army;
+}
+
+}  // namespace
+
 void HeroSystem::start(World& world) {
+  // The seam `Hero::army` needs (sim/objlist.cpp's `m_army`), installed here
+  // for `EconomySystem::start`'s reason: the pool must not learn what a hero is.
+  objlist_pool_of(world).set_army_resolver(&resolve_hero_army, &world);
   // Adopt whatever the world was populated with: heroes first, so that a unit
   // registered afterwards can already find its hero's squad.
   for (const WorldObject& slot : world.objects()) {
@@ -376,6 +397,8 @@ bool HeroSystem::attach(World& world, ObjectId unit_id, ObjectId hero_id) {
   record->squad = leader->squad;
   leader->army.push_back(unit_id);
   squads_.join(leader->squad, unit_id);
+  // `AttachHero` (0x005ddf50) rebuilds the unit: its new leader's skills.
+  recalc_bonuses(world, unit_id);
   return true;
 }
 
@@ -390,6 +413,8 @@ bool HeroSystem::detach(World& world, ObjectId unit_id) {
   }
   record->hero = kNoObject;
   record->squad = kNoSquad;
+  // `DetachHero` (0x005db190) rebuilds it without them.
+  recalc_bonuses(world, unit_id);
   return true;
 }
 
@@ -500,6 +525,20 @@ bool HeroSystem::write_skill(World* world, ObjectId hero_id, HeroSkill which,
         }
       }
       slot->sight = sight;
+    }
+  }
+  // The rebuilds the writer makes: the whole party for the Team skills and
+  // Discipline, the hero alone for the Epic ones. Leadership waits for the
+  // hero's tick, which carries it through the army addend.
+  if (world != nullptr) {
+    switch (which) {
+      case HeroSkill::team_attack:
+      case HeroSkill::team_defense:
+      case HeroSkill::discipline: recalc_party(*world, hero_id); break;
+      case HeroSkill::epic_endurance:
+      case HeroSkill::epic_attack:
+      case HeroSkill::epic_armor: recalc_bonuses(*world, hero_id); break;
+      default: break;
     }
   }
   return true;
@@ -644,6 +683,10 @@ bool HeroSystem::use_skill(World& world, ObjectId hero_id, HeroSkill which) {
       default: break;  // battle_cry, ceasefire, assault, defensive_cry: the slot is the effect
     }
   }
+  // A timed skill's stamp (0x0052d8f0) comes after its walk and rebuilds the
+  // party, which is how Defensive Cry's armour and Frenzy's doubled attack
+  // reach the stored stats.
+  if (duration > 0) recalc_party(world, hero_id);
   return true;
 }
 
@@ -719,6 +762,13 @@ bool HeroSystem::set_experience(ObjectId id, std::int32_t value) {
 }
 
 bool HeroSystem::set_experience(World& world, ObjectId id, std::int32_t value) {
+  // Every unit has `[unit+0x180]` from construction; a record is minted for
+  // one this system has not met yet, as `attach` mints one.
+  if (unit(id) == nullptr) {
+    const ObjectState* flags = world.state(id);
+    if (flags == nullptr || !flags->flags.is_unit) return false;
+    (void)register_unit(world, id);
+  }
   UnitRecord* record = unit(id);
   if (record == nullptr) return false;
   if (record->experience == value) return true;
@@ -739,6 +789,9 @@ bool HeroSystem::set_experience(World& world, ObjectId id, std::int32_t value) {
     }
   }
   record->experience = value;
+  // The virtual's refresh flag, which its callers here set: the rebuild,
+  // whose Toughness and Statue of Amon-Ra terms read the new level.
+  recalc_bonuses(world, id);
   return true;
 }
 
@@ -761,6 +814,15 @@ bool HeroSystem::set_level(World& world, ObjectId id, std::int32_t value) {
   const std::int32_t level = std::clamp(value, 1, kMaxLevel);
   if (level == level_for_experience(record->experience)) return true;
   return set_experience(world, id, experience_for_level(level));
+}
+
+namespace {
+[[nodiscard]] const Combatant* stored_stats(const World& world, ObjectId id);
+}  // namespace
+
+std::int32_t HeroSystem::level(const World& world, ObjectId id) const {
+  if (const Combatant* stored = stored_stats(world, id); stored != nullptr) return stored->level;
+  return level(id);
 }
 
 std::int32_t HeroSystem::level(ObjectId id) const {
@@ -889,7 +951,25 @@ UnitModifiers HeroSystem::hero_modifiers(ObjectId hero_id) const {
   return out;
 }
 
+namespace {
+
+/// The stored stats of `id`, when a combat system holds it: the numbers the
+/// original's readers take (`[obj+0xc8]`, `[obj+0xcc]`). The lookup is by
+/// name and changes nothing, so the const world is honoured.
+[[nodiscard]] const Combatant* stored_stats(const World& world, ObjectId id) {
+  const CombatSystem* combat = combat_system_of(const_cast<World&>(world));
+  return combat != nullptr ? combat->find(id) : nullptr;
+}
+
+}  // namespace
+
 std::int32_t HeroSystem::max_health_of(const World& world, ObjectId id) const {
+  if (const Combatant* unit = stored_stats(world, id); unit != nullptr) {
+    return unit->stats.max_health;
+  }
+  // A world with no combat system -- the synthetic ones -- has nothing
+  // stored; the class and this system's own view of the skills and items
+  // stand in for the rebuild.
   const std::int32_t base = class_int_property(world, id, "maxhealth", 0);
   if (base <= 0) return 0;
   const UnitModifiers mods = is_hero(id) ? hero_modifiers(id) : modifiers_for(id);
@@ -898,6 +978,9 @@ std::int32_t HeroSystem::max_health_of(const World& world, ObjectId id) const {
 
 std::int32_t HeroSystem::max_stamina_of(const World& world, ObjectId id,
                                         std::int32_t fallback) const {
+  if (const Combatant* unit = stored_stats(world, id); unit != nullptr) {
+    return unit->stats.max_stamina;
+  }
   return class_int_property(world, id, "maxstamina", fallback);
 }
 
@@ -905,12 +988,60 @@ std::int32_t HeroSystem::max_stamina_of(const World& world, ObjectId id,
 // the turn
 // --------------------------------------------------------------------------
 
-void HeroSystem::expire_effects(GameTime now) {
-  for (HeroRecord& record : heroes_) {
-    for (GameTime& until : record.effect_until) {
-      if (until != 0 && until <= now) until = 0;
+void HeroSystem::run_hero_ticks(World& world, GameTime from, GameTime to) {
+  // The anchor is the world clock's multiples, as Egoism's is and for its
+  // reason: the original's timer runs from when the hero was made, which a
+  // turn-partitioned engine would have to save per hero to reproduce; the
+  // multiples cover the same instants however the turns are cut. INFERRED.
+  //
+  // The tick's first half -- converting the accumulator `[hero+0x2c4]` into
+  // experience, one point per `ExpFromArmyDivider` -- has nothing to convert
+  // here: the one writer this engine models (Wisdom) pays at once.
+  const CombatSystem* combat = combat_system_of(world);
+  if (combat == nullptr || to <= from) return;
+  const HeroConstants& c = constants_;
+  for (GameTime at = (from / kHeroTickInterval + 1) * kHeroTickInterval; at <= to;
+       at += kHeroTickInterval) {
+    std::vector<ObjectId> changed;
+    for (HeroRecord& record : heroes_) {
+      const Combatant* self = combat->find(record.id);
+      if (self == nullptr) continue;
+      // `vtbl+0x114`, the hero's stored level, through the table (0x005d2910).
+      const std::int32_t leadership = record.skills[idx(HeroSkill::leadership)];
+      const std::int32_t percent =
+          c.army_bonus_experience_percent +
+          (record.offered[idx(HeroSkill::leadership)] ? c.exp_percent_per_leadership_level *
+                                                            leadership
+                                                      : 0);
+      const std::int32_t addend = static_cast<std::int32_t>(
+          static_cast<std::int64_t>(percent) * experience_for_level(self->level) / 100 + 1);
+      if (addend == record.army_addend) continue;
+      record.army_addend = addend;
+      changed.push_back(record.id);
+    }
+    for (const ObjectId hero_id : changed) {
+      const HeroRecord* record = hero(hero_id);
+      if (record == nullptr) continue;
+      const std::vector<ObjectId> army = record->army;
+      for (const ObjectId member : army) recalc_bonuses(world, member);
     }
   }
+}
+
+void HeroSystem::expire_effects(World& world, GameTime now) {
+  // The expiry message (0x0052de70) clears every slot whose time has come
+  // and rebuilds the party for each. Here at the turn's end rather than on
+  // the millisecond; heroes in id order, slots in skill order.
+  std::vector<ObjectId> ended;
+  for (HeroRecord& record : heroes_) {
+    for (GameTime& until : record.effect_until) {
+      if (until != 0 && until <= now) {
+        until = 0;
+        ended.push_back(record.id);
+      }
+    }
+  }
+  for (const ObjectId hero_id : ended) recalc_party(world, hero_id);
 }
 
 void HeroSystem::clear_dead(World& world) {
@@ -995,11 +1126,15 @@ void HeroSystem::advance(World& world, const Turn& turn) {
   // manager exists: 0x0041e820's job, done once a turn. See sim/squad.hpp.
   squad_watermark_ = enrol_new_units_in_squads(world, *this, squad_watermark_);
   run_egoism(world, from, now_);
-  expire_effects(now_);
+  run_hero_ticks(world, from, now_);
+  expire_effects(world, now_);
   squads_.prune_empty();
   // The two AI fields nothing used to write. `sim/squad.hpp` carries the two
   // chains this stands in for and why once a turn is the same answer.
   revalue_squads(world, squads_);
+  // Each squad's look, timer 0x28 (`squad_look`): what its members see of the
+  // players it is at war with, the list its members' sight searches walk.
+  (void)run_squad_looks(world, squads_, now_);
 }
 
 void HeroSystem::hash(std::uint64_t& accumulator) const {
@@ -1026,6 +1161,7 @@ void HeroSystem::hash(std::uint64_t& accumulator) const {
     // send a hero two different ways.
     fold(accumulator, static_cast<std::uint64_t>(record.army_attacked_at));
     fold(accumulator, record.army_attacked_unit);
+    fold_i32(accumulator, record.army_addend);
     // The party orientations. Hashed because three shipped sub-AI scripts
     // branch on the settled one and a fourth writes the request, so two peers
     // that disagree form two different battle lines.
@@ -1667,11 +1803,10 @@ HostOutcome fn_find_unit_to_learn(CallContext& ctx) {
 //     the circle found nobody -- `fallback_squad`, which the first three now
 //     do; hide's predicate wants an enemy, which a squadmate never is, so its
 //     pass is left out as it cannot answer;
-//   * curse and cripple search the squad's **second** handle deque
-//     (`[squad+0x70]`..`+0x7c`, 0x005d94f0 / 0x005138c0) **instead of** the
-//     circle. This engine's `Squad` carries no such list, so a squadded
-//     caster still scans its circle there -- a known gap, and the one reason
-//     curse and cripple stay partial.
+//   * curse and cripple search the squad's **second** list, `Enemies`
+//     (`[squad+0x64]`, its deque at `+0x6c`; 0x005d94f0 / 0x005138c0)
+//     **instead of** the circle: what the squad's look last saw of the
+//     players it is at war with (`Squad::enemies`, `squad_look`).
 //
 // **The retail caster/candidate mix-up in curse is not reproduced.** Four
 // consecutive clauses of `0x005d4760` test `pred[8]` -- the caster -- where the
@@ -1691,13 +1826,15 @@ struct Candidate {
   std::int32_t radius = 0;
 };
 
+/// `stealth` false for a walk of a squad's `Enemies`, which has no stealth
+/// clause of its own (the look applied one when it wrote the list).
 [[nodiscard]] bool caster_candidate_basics(const World& world, const WorldObject& other,
-                                           ObjectId self) {
+                                           ObjectId self, bool stealth = true) {
   if (other.id == self) return false;
   if (other.internal != InternalKind::none) return false;
   if (other.state.health <= 0) return false;            // `vtbl[0x50]`
   if (other.state.holder != kNoObject) return false;    // `[obj+0x154] != 0xffff`
-  if (other.state.flags.hidden) return false;           // see the section note
+  if (stealth && other.state.flags.hidden) return false;  // see the section note
   if (other.object != nullptr && other.object->is_a(NativeClass::ship)) return false;
   return true;
 }
@@ -1734,7 +1871,8 @@ HostOutcome fn_find_unit_to_heal(CallContext& ctx) {
     (void)env->constant("HealAmount", heal_amount);
   }
   HeroSystem* heroes = hero_system_of(*world);
-  const std::int32_t threshold = (heroes != nullptr ? heroes->level(self) : 0) + heal_amount;
+  const std::int32_t threshold =
+      (heroes != nullptr ? heroes->level(*world, self) : 0) + heal_amount;
   const std::int32_t range = class_int_property(*world, self, "range", 0);
   const std::int32_t sight = caster_sight(*world, self);
 
@@ -2017,11 +2155,37 @@ HostOutcome fn_find_unit_to_hide(CallContext& ctx) {
   return HostOutcome::ok_with(Value::object(receiver_type(ctx), best));
 }
 
+/// Where curse and cripple look: the caster's squad's `Enemies` when the
+/// caster takes the squad path (`squad_sight_squad`: in a squad, and outside
+/// any holder or in an `SF_ADVCHOOSER` squad -- 0x005d9d2a, 0x00513e8a), else
+/// the circle of its sight. `from_squad` says which, because the circle's
+/// sweep applies the enemy mask and the stealth clause and the squad's walk
+/// (0x005d94f0, 0x005138c0) applies neither: the look already did, when it
+/// wrote the list.
+[[nodiscard]] std::vector<ObjectId> enemy_sight_candidates(World& world, ObjectId self,
+                                                           bool& from_squad) {
+  std::vector<ObjectId> found;
+  from_squad = false;
+  if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+    if (const Squad* squad = squad_sight_squad(world, *heroes, self); squad != nullptr) {
+      from_squad = true;
+      return squad->enemies;
+    }
+  }
+  world.objects_in_radius(world.resolve_position(self), caster_sight(world, self), ClassFilter{},
+                          found);
+  return found;
+}
+
 /// `Unit::GetBestCurseTarget` -- the enemy with the highest `attack`.
 ///
 /// No aliveness test, no health, no distance beyond the scan's own radius. The
 /// only thing that can lose is an `attack` of zero, because the best starts
-/// there and the comparison is strictly greater.
+/// there and the comparison is strictly greater. The predicate (0x005d4760)
+/// opens on the unit bit, so a building is never a candidate.
+///
+/// A caster in a squad walks the squad's `Enemies` instead of its circle
+/// (0x005d94f0; `enemy_sight_candidates`).
 HostOutcome fn_get_best_curse_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetBestCurseTarget: no world");
@@ -2033,19 +2197,21 @@ HostOutcome fn_get_best_curse_target(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int32_t best_attack = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
+  bool from_squad = false;
+  const std::vector<ObjectId> found = enemy_sight_candidates(*world, self, from_squad);
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
     if (other == nullptr || other->id == self) continue;
     if (other->internal != InternalKind::none) continue;
-    if (other->state.flags.hidden) continue;
-    if (!world->players().is_enemy(caster->state.owner, other->state.owner)) continue;
+    if (!other->state.flags.is_unit) continue;
+    // The sweep's two clauses; the squad's list was filtered by its look.
+    if (!from_squad) {
+      if (other->state.flags.hidden) continue;
+      if (!world->players().is_enemy(caster->state.owner, other->state.owner)) continue;
+    }
     if (is_a(*world, *other, "BaseMage")) continue;
     const Combatant* stats = combat == nullptr ? nullptr : combat->find(id);
-    const std::int32_t attack =
-        stats == nullptr ? 0 : combat->profile(stats->class_index).damage + stats->attack_bonus;
+    const std::int32_t attack = stats == nullptr ? 0 : combat->attack_of(*stats);
     if (attack <= best_attack) continue;
     best = id;
     best_attack = attack;
@@ -2059,7 +2225,10 @@ HostOutcome fn_get_best_curse_target(CallContext& ctx) {
 ///
 /// Curse's twin and evidently the function it was copied from or to: the same
 /// dispatch, the same failure value, a different stat, and -- unlike curse -- a
-/// predicate that tests the candidate on every clause.
+/// predicate that tests the candidate on every clause. A caster in a squad
+/// walks the squad's `Enemies` instead of its circle (0x005138c0, which hands
+/// the predicate nothing for an entry that is not a unit), where the
+/// circle's stealth clause does not apply.
 HostOutcome fn_get_best_cripple_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetBestCrippleTarget: no world");
@@ -2070,12 +2239,13 @@ HostOutcome fn_get_best_cripple_target(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int32_t best_stamina = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
+  bool from_squad = false;
+  const std::vector<ObjectId> found = enemy_sight_candidates(*world, self, from_squad);
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
-    if (other == nullptr || !caster_candidate_basics(*world, *other, self)) continue;
+    if (other == nullptr) continue;
+    if (from_squad && !other->state.flags.is_unit) continue;
+    if (!caster_candidate_basics(*world, *other, self, /*stealth=*/!from_squad)) continue;
     // **Mutually redundant with the score's own floor, knowingly.**
     // `best_stamina` starts at zero and the comparison below is strictly
     // greater, so an object with no stamina cannot be selected even without
@@ -2341,14 +2511,15 @@ HostOutcome fn_inherent_level(CallContext& ctx) {
 }
 
 /// `Unit::level` (0x005d7740): the unit's level virtual (`vtbl+0x114`), which
-/// for a unit is the stored `[unit+0x184]` that `RecalcBonuses` rebuilds --
-/// `HeroSystem::level` computes the same rebuild on demand. An unresolvable
-/// receiver prints and answers **1**, not 0.
+/// for a unit is the stored `[unit+0x184]` that the rebuild writes
+/// (`recalc_bonuses`, `Combatant::level`) -- as of the last rebuild, which is
+/// the original's timing. An unresolvable receiver prints and answers **1**,
+/// not 0.
 HostOutcome fn_level(CallContext& ctx) {
   HERO_STATE(ctx);
   const ObjectId id = receiver(ctx);
   if (host->world->find(id) == nullptr) return HostOutcome::ok_with(Value::integer(1));
-  return HostOutcome::ok_with(Value::integer(host->heroes->level(id)));
+  return HostOutcome::ok_with(Value::integer(host->heroes->level(*host->world, id)));
 }
 
 /// `Unit::SetLevel(n)` (0x005d7690): the two refusals of `writable_unit`; then
@@ -2728,8 +2899,10 @@ HostOutcome fn_exchange_item(CallContext& ctx) {
   if (host->world->find(me) == nullptr) return HostOutcome::ok_with(Value::boolean(false));
   const ItemInstance* held = host->heroes->items().find(item);
   if (held == nullptr || held->owner != me) return HostOutcome::ok_with(Value::boolean(false));
-  return HostOutcome::ok_with(
-      Value::boolean(host->heroes->items().exchange(item, string_arg(ctx, 2))));
+  const bool exchanged = host->heroes->items().exchange(item, string_arg(ctx, 2));
+  // The slot write (0x005ae3c0) rebuilds the holder.
+  if (exchanged) recalc_bonuses(*host->world, me);
+  return HostOutcome::ok_with(Value::boolean(exchanged));
 }
 
 /// `Obj::DropItem(item, pt)` (0x005acdf0): an unresolvable or dead receiver

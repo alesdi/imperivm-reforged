@@ -9,7 +9,7 @@
 0x0057a7c0	verified	GetObjList: Refresh then ordered copy (0x00438230); invalid receiver is a fresh empty list
 0x005601a0	verified	ObjList::Add: FIXED -- dedup by handle (0x0050e2a0) and no validity test; test objlist_add_appends_once_and_takes_the_handle_as_it_stands
 0x004379b0	verified	SquadList::Add: FIXED -- plain append, no dedup (0x00437870 -> 0x00435d90); test squadlist_add_goes_through_the_objlist_domain
-0x00530580	partial	Hero::army: original pushes a live reference to [hero+0x1cc]; engine snapshots. Design: the pool's single AliasResolver serves settlement holders only
+0x00530580	verified	Hero::army: a live alias of the hero's army ([hero+0x1cc], HeroRecord::army) through the pool's second alias seam, installed by HeroSystem::start -- FIXED: snapshotted (query-model round); test a_heros_army_comes_back_as_a_list_in_attach_order; an invalid receiver is a fresh empty list
 0x005ab210	verified	Obj::Clear: writes the invalid handle through a by-reference receiver; prose corrected from "writes into the object"
 0x0055f590	verified	ObjList::Clear: empties the deque (0x006a3cc0), handle kept
 0x0055ff00	verified	AddList: FIXED -- ordered union, push only when absent; test objlist_addlist_and_removelist_are_set_moves_not_copies
@@ -29,10 +29,10 @@
 0x005609e0	verified	ObjAlly: complement of ObjEnemy's bit test
 0x00561090	verified	ObjInjured: FIXED -- per-object maximum (+0xc8, object_max_health) not the class's; test objlist_obj_injured_measures_against_the_objects_own_maximum
 0x006945e0	verified	Sleep: two-phase suspend, wait stored for the runner, re-armed at clock + wait (0x00688220); scheduler order FIXED to the wheel's arming order (0x00688060/0x006879a0), test vs_scripts_due_together_run_in_the_order_they_were_armed. Interpreter's 15,000-instruction yield is a separate VM gap, noted
-0x00421cd0	partial	AIBreakScript: stops the caller-player's thread id 3..51 (0x0041cdc0/0x0069fee0); engine kills by global script id. Design: AIRun handles are per-AI-player recycled ids the scheduler does not keep
+0x00421cd0	verified	AIBreakScript: the calling thread's seat (0x0043caa0, its context) and that seat's AI; 0x0041cdc0 stops the thread holding id 3..51 in that AI's thread manager (0x0069fee0), anything else nothing. FIXED round 11: the handle is the per-AI id (AiPlayer::runs), not a global script id, and only the caller's AI is reached; test ai_run_answers_an_id_in_the_callers_ai_and_the_id_is_reused
 0x00421d20	partial	AIBreakScript(player, handle): as 0x00421cd0 with the player explicit; not bound, no shipped site
-0x00422f90	partial	AIRun(name): FIXED failure answers -1 (test vs_a_missing_script_is_survivable). Gap: per-player recycled handle 3..51 (design) and the caller's AI-player tag not checked
-0x00424a20	partial	AIRun(name, set, ol, obj, n): as 0x00422f90; binds four parameters; same handle gap
+0x00422f90	verified	AIRun(name): failure answers -1 (r10). FIXED round 11: the calling thread's seat from its context (no seat or no AI -> -1), the name on that seat's AI search path (0x0043d030, profile dir first), first free id 3..51 of that AI's thread manager (0x0041cd00, -1 when all 49 held), new thread tagged with the seat, the id answered; tests ai_run_answers_an_id_in_the_callers_ai_and_the_id_is_reused, ai_run_searches_the_callers_profile_first
+0x00424a20	verified	AIRun(name, set, ol, obj, n): as 0x00422f90 (fixed alike); binds the four parameters
 0x00424c30	partial	AIRun(player, name, ...): read; not bound (engine binds free arity <= 5); no shipped site
 0x005098c0	partial	Conversation::Run: original polls with 1 ms suspends until finished, then deletes and clears the variable; engine plays inside the call (documented design in conversation.cpp)
 0x004c6e30	verified	Run(name): FIXED -- compile and run synchronously (0x006a0360), was a spawned peer; test vs_run_calls_the_script_to_its_end_and_answers_nothing

@@ -703,12 +703,19 @@ def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game
     than at the hero's own, p3's armies met p1's and p2's in other places and
     at other times, and 37 line units stood here on seed 1 where 63 had: the
     floor is 30, which is still a sample.
+
+    On the eleventh round's tree seed 1's p1 storms a p15 village, its
+    slingers on the wall, from turn 320 and loses its hero and 117 footmen
+    there by 2,200, where main lost ten and drew back: 16 line units are
+    left. The census is taken on seed 3, where 35 stand and none of them on
+    `advance` at home.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
         pytest.skip("Crossroads.BFHP is not in this installation")
     result = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS), "800"],
+        [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS), "800",
+         "--seed", "3"],
         capture_output=True, text=True, timeout=1800,
         env={**os.environ, "IMRUN_OBJECTS": AI_ARMIES},
     )
@@ -812,8 +819,10 @@ ORDER_TURN = 300
 #: p1's gates stands closed with nobody near, so the gate it walks through is
 #: shut when it is sent. At 300 on the tenth round's tree p1's two swordsmen
 #: stand within 350 of the south and the west gate and hold both open; at 400
-#: all four are shut and three swordsmen stand clear of them.
-GATE_ORDER_TURN = 400
+#: all four were shut and three swordsmen stood clear of them. On the eleventh
+#: round's (the idle activity's draws, the `Goto` family's re-entry) a friend
+#: opens the west gate at 311 and leaves it at 401, so the order is at 420.
+GATE_ORDER_TURN = 420
 
 
 def _inside(x: int, y: int) -> bool:
@@ -1086,17 +1095,15 @@ SIEGE_TURN = 10
 @pytest.mark.parametrize("cls, stand, hurts", [
     # 20 beyond the outpost's edge, inside a sword's 17 + 15 + 345.
     ("RHastatus", (NUMANTIA_OUTPOST[0] + 365, NUMANTIA_OUTPOST[1]), False),
-    # 500 from its centre to the south-west, inside a bow's reach. Not the
-    # east side: since a sequence reads Finished the moment its script ends
-    # (0x005b9f50), `seq3.vs`'s 28 `BestTarget` runs take a few turns rather
-    # than 28, so the Iberians' attackers are already advancing on their own
-    # outposts' ground there, and the archer's `unit_advance.vs` takes the
-    # first of them in squad sight for its target instead of the fort. Not due
-    # west either, since the tenth round's tree: an Iberian archer (p3) kills
-    # it there within three turns, before its first shot. From here it lands
-    # its shots before it falls (10,000 -> 9,940 on that tree and on the one
-    # before it).
-    ("RArcher", (NUMANTIA_OUTPOST[0] - 354, NUMANTIA_OUTPOST[1] - 354), True),
+    # 500 from its centre to the south-east, inside a bow's reach. Where it
+    # stands is the war's to decide, not the rule's: an Iberian archer (p3)
+    # kills it within a few turns wherever it waits, and the stand is one
+    # where it lands its shots first. Due west fell to that in the tenth
+    # round's tree; the south-west, which held then, fell in the eleventh,
+    # once a settlement's mules became objects walking the roads and moved the
+    # Iberians' first turns (turn 12, before its first shot). From here it
+    # shoots before it falls on both (10,000 -> 9,940), measured.
+    ("RArcher", (NUMANTIA_OUTPOST[0] + 354, NUMANTIA_OUTPOST[1] + 354), True),
 ])
 def test_the_attack_button_on_a_fort_hurts_it_from_an_archer_and_not_from_a_sword(
         imrun, game_dir, cls, stand, hurts):

@@ -140,6 +140,9 @@ struct Execution {
   bool retrying = false;
   /// Game time at which that sequence began. Meaningless unless `retrying`.
   std::int64_t retry_since = 0;
+  /// The retrying call's own word of state: `CallContext::scratch`. Zero on a
+  /// fresh call, kept across its re-entries, cleared with `retrying`.
+  std::int32_t retry_scratch = 0;
   Value result;
   Trap trap;
 };
@@ -161,6 +164,10 @@ struct VmEnv {
   Scheduler* scheduler = nullptr;
   void* user = nullptr;
   ScriptId script = kNoScript;
+  /// The running thread's context (`ScriptRecord::context`), handed to every
+  /// host call as `CallContext::context`. Borrowed: whoever runs the script
+  /// keeps the string alive for the run.
+  std::string_view context;
   CallTrace call_trace = nullptr;
   void* trace_user = nullptr;
   /// Game time now, in milliseconds. Used to compute a suspension's wake time.

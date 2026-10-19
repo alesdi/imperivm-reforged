@@ -120,9 +120,11 @@ def test_a_crow_in_the_air_is_drawn_above_its_shadow(app, game_dir):
 
 
 #: p14's walled town in the middle of Balcans, with its four gates in one view.
-#: Gate 684 opens at turn 151 and closes at 206, and
-#: gate 704 opens at 241 (`IMRUN_GATES=1`) -- the scan counts units only
-#: (playtest #16), so a gate with nobody near it stands closed. p1's town in
+#: The scan counts units only (playtest #16), so a gate with nobody near it
+#: stands closed. Through the tenth round gate 684 opened inside the first
+#: 1,500 frames; since the eleventh, whose squads, wagons and script threads
+#: moved p14's first walks, no gate in view opens before frame 3,000 and one
+#: does by 3,500, measured -- hence the 3,600 frames below. p1's town in
 #: the south-west, which this watched before `rand` became `gbr.exe`'s, opens
 #: no gate in this run since: the draws that lay the towns out moved.
 BALCANS_TOWN = "17150,14900"
@@ -144,12 +146,12 @@ def test_an_open_gate_draws_its_portcullis_raised(app, game_dir):
     is the same for all of them -- except the portcullis's, which sits higher
     by its rise.
     `GATE_IDLE.VS` opens a gate with friends around it, and over the first
-    twenty-five seconds of Balcans some gate in this town does, all the way and
+    minute of Balcans some gate in this town does, all the way and
     through the positions between. Before the fix no layer ever left its origin.
     """
     done = subprocess.run(
         [str(app), "--game", str(game_dir), "--map", BALCANS, "--play", "--no-fog",
-         "--width", "2000", "--height", "1500", "--at", BALCANS_TOWN, "--frames", "1500"],
+         "--width", "2000", "--height", "1500", "--at", BALCANS_TOWN, "--frames", "3600"],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "IMPERIVM_DEBUG_VIEW": "1"},
     )

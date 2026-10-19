@@ -136,6 +136,16 @@ inline constexpr SquadKey kNoSquad{};
   return a.index < b.index;
 }
 
+/// `Squad::look_due` for a squad whose look is not armed: never joined, or
+/// stood down (`SquadTable::stand_down` kills its timer).
+inline constexpr GameTime kSquadLookUnarmed = -1;
+
+/// `[GamePlay] SquadLookIvl`, the look's period, as `DATA\CONST.INI` ships it.
+/// The squad constructor (0x00444310) reads the key into a global each time
+/// a squad is made, with 0 for a missing key; this is what a world with no
+/// constants table uses.
+inline constexpr GameTime kSquadLookIntervalShipped = 1000;
+
 /// One squad: its key, its leader, and its members in join order.
 ///
 /// `leader` is the hero for a hero squad and `kNoObject` for the leaderless AI
@@ -235,6 +245,24 @@ struct Squad {
   /// the alternative is a trap that stops `SQUADMONITOR.VS` at its 479 call
   /// sites instead of letting it run and choose. See `eval_impl`.
   std::int32_t eval = 0;
+
+  /// `Enemies` -- the squad's second object list (`[squad+0x64]`, its deque at
+  /// `+0x6c` and size at `+0x7c`), what its members see of the players it is
+  /// at war with, as of its last **look** (`squad_look`).
+  ///
+  /// `Squad::Persist` (0x00445870) saves it under that name beside `Units`,
+  /// and the look (0x00447700) is its one writer: it clears the list and
+  /// copies a fresh one in, every `SquadLookIvl` milliseconds. Four readers
+  /// take it as it was left: the squad path of the `BestTargetInSquadSight`
+  /// core (0x005dc950, walked by 0x005dbb20), `IsEnemyInSquadSight`
+  /// (0x005d7400, its size), `GetBestCurseTarget` and `GetBestCrippleTarget`
+  /// (0x005d94f0, 0x005138c0). In the look's order; see `squad_look` for which
+  /// order that is here.
+  std::vector<ObjectId> enemies;
+  /// When the look next fires, or `kSquadLookUnarmed`. The look is the
+  /// squad's object timer 0x28 (`squad_look` has the reading); 0 is "at the
+  /// next pass", the state a first member's join arms it in.
+  GameTime look_due = kSquadLookUnarmed;
 
   [[nodiscard]] std::size_t size() const noexcept { return members.size(); }
   [[nodiscard]] bool empty() const noexcept { return members.empty(); }
@@ -549,9 +577,12 @@ class SquadTable {
   ///
   ///   * its timers are killed (0x00687c80). The one timer a squad arms is
   ///     0x28, on its first member's join (0x00445b4b), and its handler
-  ///     (0x00444590) calls `vtbl+0x1c`, which in the squad's vtable
-  ///     (0x007b13c0) is a bare return (0x004a3d70) -- so there is nothing
-  ///     to kill here and nothing is modelled;
+  ///     (0x00444590) calls `vtbl+0x1c` of the squad's own table (0x007b13c8,
+  ///     the one the constructor 0x00444310 stores at `[squad]`), which is the
+  ///     look, 0x00447700 -- so the look stops (`look_due` unarmed) and
+  ///     `Enemies` stays as it was last written. This used to read the slot
+  ///     out of 0x007b13c0, the table of the squad's virtual base, where it is
+  ///     a bare return, and so found nothing to kill;
   ///   * its AI order is freed (0x0041e9c0, reaching 0x00448a80 on the
   ///     player's queue when the player has an AI);
   ///   * it is filed under no node (0x0041eac0 with 0): `GAIKAIn` is 0, and
@@ -628,6 +659,72 @@ void revalue_squads(World& world, SquadTable& squads);
 /// `SquadTable::leave` so the two cannot disagree; a member the world no longer
 /// has is worth nothing.
 [[nodiscard]] std::int32_t squad_worth(World& world, const Squad& squad);
+
+/// The squad's **look**: what its members can see of the players it is at war
+/// with, written into `Squad::enemies`. `docs/formats/squad.md` has the whole
+/// reading; this is the rule as implemented.
+///
+/// ## When it runs
+///
+/// The look is the squad's object timer 0x28. A join that leaves the squad
+/// with exactly one member arms it with no delay (0x00445b4b, behind a test of
+/// the node table `[0x008c8e54]`); its handler (0x00444590) calls the squad's
+/// `vtbl+0x1c`, which in the squad's own table (0x007b13c8) is the look,
+/// 0x00447700; and the look re-arms itself for `SquadLookIvl` (0x00447a47,
+/// 0x00688220, which adds the delay to the clock now). The squad's strength
+/// reaching 0 at a leave kills it (`SquadTable::stand_down`).
+///
+/// ## What it does
+///
+///   1. **The eyes.** A copy of the members, front to back, loses every member
+///      that does not resolve or is dead (`vtbl+0x50`). Walking it, the member
+///      with the largest sight (`[unit+0xd0]`, strictly larger) so far is the
+///      best; a later member whose circle lies inside the best one's --
+///      floored root of the squared distance between their `posRH`
+///      (`vtbl+0xc8`, `unit_pos_rh`) plus its own sight at most the best's
+///      sight -- is dropped. A second walk from the front, stopping at the
+///      best, drops the earlier members the same way.
+///   2. **The sweep.** Each eye is a circle of its sight about its `posRH`.
+///      Every object of the grid inside some circle (squared distance at most
+///      the squared sight, 0x00443d60), owned by a player in the mask
+///      0x00514080 builds from `~seeflags | enemyflags` of the squad's owner
+///      (`[record+0x18]`, the players who share their view with it, itself
+///      among them; `[record+0x10]`, the players it is at war with), and not
+///      hidden unless its owner is in `seeflags` (0x00445d10), is offered to
+///      the accumulator (0x004459c0).
+///   3. **The list.** A living **unit** of a player the owner is at war with
+///      that is neither a messenger (`[obj+0x2c] & 0x4000000`) nor an heir of
+///      `Animal` (0x00540280) goes on `Enemies`; so does a **building** of
+///      such a player. Every other offered unit or building goes on the
+///      squad's third list (`[squad+0x90]`), which nothing reads and which is
+///      not kept here.
+///   4. `Enemies` is replaced by the new list (0x00447a17), and the timer
+///      re-armed.
+///
+/// ## What is approximated, labelled
+///
+///   * **Order.** The original appends in grid order -- cell rows, then cells,
+///     then each cell's chain. This engine's grid answers in ascending id, so
+///     the list is in ascending id, as every other area query here is.
+///   * **When in a turn.** This engine has no timer queue: a due look fires
+///     once a turn from `HeroSystem::advance`, at the turn's end time, after
+///     the squads are revalued. A look due several times inside one long turn
+///     fires once.
+///   * **The arming gate.** A join arms the look whatever the node table, and
+///     a look fires only once the AI manager exists
+///     (`AiSystem::manager_started`, raised in the same bootstrap that builds
+///     the table). The two differ only for a squad that took its first member
+///     before the bootstrap, which here is a map-placed hero's squad
+///     (`HeroSystem::start`); the original squads those through the placement
+///     hook, after the bootstrap, so they look.
+///   * Spawn templates and internal objects are not offered: the grid holds
+///     neither here.
+void squad_look(World& world, Squad& squad);
+
+/// Every squad of `squads` whose look is armed and due at `now`: look, and
+/// re-arm for `now + SquadLookIvl`. Nothing while the AI manager does not
+/// exist (see `squad_look`). Returns how many looked.
+std::size_t run_squad_looks(World& world, SquadTable& squads, GameTime now);
 
 class ScriptLibrary;
 
@@ -935,6 +1032,22 @@ class HeroSystem;
 /// hook share; `sim/squad.cpp` carries the seven arms. Answers the squad the
 /// unit is in afterwards, or `kNoSquad` for a unit that belongs nowhere.
 SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest);
+
+/// The squad `unit` is a member of, or null: what `[unit+0x174]` resolves to
+/// through 0x00444190. The unit's record is asked first and the table
+/// (`SquadTable::squad_of`) when the record names no squad holding it.
+[[nodiscard]] const Squad* squad_containing(const HeroSystem& heroes, ObjectId unit);
+
+/// The squad whose `Enemies` a unit's sight searches walk, or null.
+///
+/// The gate 0x005dc950 (the `BestTargetInSquadSight` core), 0x005d9cb0
+/// (`GetBestCurseTarget`) and 0x00513e10 (`GetBestCrippleTarget`) share: the
+/// unit is in a squad (`[unit+0x174]` resolving through 0x00444190) and
+/// either stands outside any holder (`[unit+0x154] == 0xffff`) or its squad
+/// carries `SF_ADVCHOOSER`. Such a unit searches its squad's `Enemies` and
+/// draws no circle of its own; any other takes the entry point's other path.
+[[nodiscard]] const Squad* squad_sight_squad(const World& world, const HeroSystem& heroes,
+                                             ObjectId unit);
 
 /// 0x0041e820, the hook the object manager runs when a unit enters the world,
 /// run over every unit with an id above `after` that is alive, owned, not

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/feeder.hpp"
 #include "imperivm/core/sim/hero.hpp"
@@ -341,23 +342,23 @@ TEST(feeder_does_not_feed_a_unit_standing_in_the_open) {
   (void)id;
 }
 
-/// A unit in the open **is** fed from a wagon its squad was sent, once the
-/// wagon is built: `Squad::SendFoodWagon`'s mule follows the army there, and
-/// here it is the larder `draw_from_larder` empties. The holder path still
-/// comes first, and a unit in no squad, or in a squad the wagon does not
-/// follow, gets nothing.
+/// A unit in the open **is** fed from a food wagon following its squad --
+/// the mule `Squad::SendFoodWagon` sends after the army -- through the cargo
+/// setter, a draw at a time (`draw_from_food_wagon`). A unit in no squad, or
+/// in a squad the wagon does not follow, gets nothing; a wagon that is not
+/// following anybody feeds nobody.
 TEST(feeder_draws_a_units_food_from_the_wagon_its_squad_was_sent) {
   World world;
   EconomySystem economy;
   HeroSystem heroes;
   FeederSystem feeder;
+  CommandSystem commands;
   feeder.set_world_bound(false);
   REQUIRE(world.add_system(&economy));
   REQUIRE(world.add_system(&heroes));
   REQUIRE(world.add_system(&feeder));
+  REQUIRE(world.add_system(&commands));
 
-  const SettlementId id = economy.create(world, town_hall());
-  economy.set_resource(id, Resource::food, 1000);
   const ObjectId leader = world.spawn(NativeClass::unit, nullptr);
   const ObjectId mate = world.spawn(NativeClass::unit, nullptr);
   const ObjectId stranger = world.spawn(NativeClass::unit, nullptr);
@@ -369,23 +370,35 @@ TEST(feeder_draws_a_units_food_from_the_wagon_its_squad_was_sent) {
   }
   const SquadKey key = heroes.squads().create(1, leader);
   REQUIRE(heroes.squads().join(key, mate));
+  const auto wagon_of = [&](std::int32_t cargo) {
+    const ObjectId wagon = world.spawn(NativeClass::wagon, nullptr);
+    world.set_health(wagon, 400);
+    world.find(wagon)->state.cargo = cargo;
+    world.find(wagon)->state.cargo_resource = static_cast<std::int32_t>(Resource::food);
+    return wagon;
+  };
+  // One standing idle with plenty, one following the leader with 30.
+  const ObjectId idle = wagon_of(500);
+  const ObjectId mule = wagon_of(30);
+  Command follow;
+  follow.verb = "follow";
+  follow.arg_kind = CommandArgKind::object;
+  follow.object = leader;
+  follow.started = true;  // running: no scheduler here to start it
+  commands.queue(mule).entries.push_back(follow);
   economy.start(world);
   feeder.start(world);
 
-  // Sent after the leader, worth 30: built at 7000, and not before.
-  REQUIRE(economy.create_feeding_mule(id, leader, 30) != 0);
-  run(world, 400, 6800);
-  CHECK(feeder.food(leader) == 0);
-  CHECK(feeder.food(mate) == 0);
-  // Each unit's next search is due within two seconds of the build; whichever
-  // of the two squad-mates searches first takes its 20 and the other the 10
-  // left, and the stranger starves.
+  // Each unit's next search is due within two seconds; whichever of the two
+  // squad-mates searches first takes its 20 and the other the 10 left, and
+  // the stranger starves.
   run(world, 400, 3200);
   CHECK(feeder.food(leader) + feeder.food(mate) == 30);
   CHECK(feeder.food(leader) > 0);
   CHECK(feeder.food(mate) > 0);
   CHECK(feeder.food(stranger) == 0);
-  CHECK(economy.wagons().empty());
+  CHECK(world.find(mule)->state.cargo == 0);
+  CHECK(world.find(idle)->state.cargo == 500);
 }
 
 /// The search delay is drawn from `World::rng()` and from nowhere else: one

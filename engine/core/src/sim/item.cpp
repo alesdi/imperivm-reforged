@@ -1,4 +1,5 @@
 #include "imperivm/core/sim/item.hpp"
+#include "imperivm/core/sim/stats.hpp"
 
 #include <algorithm>
 
@@ -161,7 +162,11 @@ ObjectId ItemStore::insert(World& world, ItemTypeIndex type, ObjectId owner) {
   }
   // Ids ascend, so a new item always belongs at the end.
   items_.push_back(instance);
-  if (owner != kNoObject) world.put_in_holder(id, owner);
+  if (owner != kNoObject) {
+    world.put_in_holder(id, owner);
+    // The add virtual (0x005b60a0) rebuilds the holder's stats.
+    recalc_bonuses(world, owner);
+  }
   return id;
 }
 
@@ -188,24 +193,34 @@ bool ItemStore::give(World& world, ObjectId item, ObjectId to) {
   if (instance->owner == to) return true;
   if (world.find(to) == nullptr) return false;
   if (count_for(to) >= capacity_of(world, to)) return false;
+  const ObjectId from = instance->owner;
   instance->owner = to;
   world.put_in_holder(item, to);
+  // Out of one inventory (0x005afc50) and into the other (0x005b60a0): each
+  // holder is rebuilt.
+  if (from != kNoObject) recalc_bonuses(world, from);
+  recalc_bonuses(world, to);
   return true;
 }
 
 bool ItemStore::drop(World& world, ObjectId item, Point at) {
   ItemInstance* instance = find(item);
   if (instance == nullptr) return false;
+  const ObjectId from = instance->owner;
   instance->owner = kNoObject;
   world.remove_from_holder(item, at);
+  if (from != kNoObject) recalc_bonuses(world, from);
   return true;
 }
 
 bool ItemStore::remove(World& world, ObjectId item) {
   const std::size_t at = lower_bound(item);
   if (at >= items_.size() || items_[at].id != item) return false;
+  const ObjectId from = items_[at].owner;
   items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(at));
   world.despawn(item);
+  // Leaving the inventory rebuilds the holder, unless it is dead (0x005afc50).
+  if (from != kNoObject) recalc_bonuses(world, from);
   return true;
 }
 

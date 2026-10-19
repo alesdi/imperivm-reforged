@@ -74,7 +74,8 @@ script::HostOutcome call_host(script::HostRegistry& registry, World* world,
                               script::CallKind kind, const char* name, std::uint16_t arity,
                               std::vector<script::Value> arguments,
                               std::vector<script::Value>* out = nullptr,
-                              script::ScriptId script_id = script::kNoScript) {
+                              script::ScriptId script_id = script::kNoScript,
+                              std::string_view thread_context = {}) {
   const std::uint32_t index = registry.find(kind, name, arity);
   if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
   const script::HostEntry& entry = registry.entry(index);
@@ -89,6 +90,7 @@ script::HostOutcome call_host(script::HostRegistry& registry, World* world,
   ctx.name = name;
   ctx.kind = kind;
   ctx.script = script_id;
+  ctx.context = thread_context;
   const script::HostOutcome outcome = entry.fn(ctx);
   // The argument window is the out-parameter mechanism; `CheckUEnabled` writes
   // through argument 0.
@@ -1059,24 +1061,22 @@ TEST(env_host_functions_resolve_the_scope_from_the_value_shape) {
 // `"/Bonus"` are one slot -- which is what makes `mediterranean.BFHP`'s three
 // `while (EnvReadString("Bonus") == ...)` bonus sequences see what `seq0.vs`
 // wrote with `EnvWriteString("/Bonus", ...)`. Outside a sequence the key is
-// used as it is.
+// used as it is. The context is the call's own thread's (`CallContext::context`);
+// `campaign_a_sequence_thread_runs_with_the_context_slash` checks the runner
+// gives a sequence that one.
 TEST(env_root_scope_resolves_a_relative_key_against_the_sequence_context) {
   script::HostRegistry registry;
   script::declare_shipped_surface(registry);
   register_env_host(registry);
   World world;
   EnvSystem env;
-  CampaignSystem campaign;
   REQUIRE(world.add_system(&env));
-  REQUIRE(world.add_system(&campaign));
-  campaign.add_sequence("Seq1", "Sequences/seq1.vs");
-  campaign.find_sequence("Seq1")->running = 42;
   constexpr script::ScriptId kSequence = 42;
   constexpr script::ScriptId kOther = 43;
   const auto call = [&](const char* name, std::uint16_t arity,
                         std::vector<script::Value> args, script::ScriptId who) {
     return call_host(registry, &world, script::CallKind::free_function, name, arity,
-                     std::move(args), nullptr, who);
+                     std::move(args), nullptr, who, who == kSequence ? "/" : "");
   };
 
   // `Conquests/mediterranean.BFHP:Sequences/seq0.vs` writes the absolute key.

@@ -191,6 +191,8 @@ void populate(World& world, std::uint32_t seed) {
     slot->state.flags.commands_disabled = phase(17);
     slot->state.flags.half_damage = phase(18);
     slot->state.flags.training = phase(19);
+    slot->state.flags.towers_posted = phase(20);
+    slot->state.flags.has_towers = phase(21);
     // The flight altitudes, for the same reason: two ints that only
     // `Flying::PlayAnim` writes, and a build that dropped either would
     // round-trip clean over a fixture that left them at zero.
@@ -203,6 +205,8 @@ void populate(World& world, std::uint32_t seed) {
     // which is what a build that dropped either would have to get wrong.
     slot->state.mist = 500 + static_cast<ObjectId>(i);
     slot->state.sheltered_by = 700 + static_cast<ObjectId>(i);
+    // A catapult's own target (version 38), for the same reason.
+    slot->state.catapult_target = 900 + static_cast<ObjectId>(i);
   }
   const World::SingletonIds singletons = world.spawn_singletons();
   (void)singletons;
@@ -409,6 +413,8 @@ TEST(save_the_fixture_sets_and_clears_every_writable_flag) {
       {"cursed", &ObjectFlags::cursed},
       {"ondie_fired", &ObjectFlags::ondie_fired},
       {"diseased", &ObjectFlags::diseased},
+      {"towers_posted", &ObjectFlags::towers_posted},
+      {"has_towers", &ObjectFlags::has_towers},
   };
 
   for (const Named& named : kWritable) {
@@ -493,6 +499,9 @@ TEST(save_world_restores_every_field_it_claims) {
     CHECK(x.state.flags.commands_disabled == y.state.flags.commands_disabled);
     CHECK(x.state.flags.half_damage == y.state.flags.half_damage);
     CHECK(x.state.flags.training == y.state.flags.training);
+    CHECK(x.state.flags.towers_posted == y.state.flags.towers_posted);
+    CHECK(x.state.flags.has_towers == y.state.flags.has_towers);
+    CHECK(x.state.catapult_target == y.state.catapult_target);
     CHECK(x.state.z_from == y.state.z_from);
     CHECK(x.state.damage_taken == y.state.damage_taken);
     CHECK(x.state.z_to == y.state.z_to);
@@ -1053,7 +1062,6 @@ TEST(save_combat_section_round_trips) {
   first.owner = 1;
   first.position = Point{300, 400};
   first.health = 57;
-  first.experience = 900;
   first.level = 4;
   first.target = 12;
   first.action = Action::engaging;
@@ -1144,11 +1152,9 @@ TEST(save_economy_section_round_trips) {
   (void)economy.set_loyalty(town, 77);
   (void)economy.decrease_loyalty(town, 2);
   (void)economy.set_supplied(village, town);
-  const std::uint32_t mule = economy.create_mule(village, town, Resource::food, 60);
-  CHECK(mule != 0);
-  // And a wagon sent after a unit rather than to a settlement.
-  const std::uint32_t larder = economy.create_feeding_mule(town, 77, 30);
-  CHECK(larder != 0);
+  // Two wagons' loyalty: one mid-capture, timers armed, and one only set.
+  CHECK(economy.set_wagon_loyalty(88, 4));
+  CHECK(economy.decrease_wagon_loyalty(70, 3, 100));
 
   EconomySystem fresh;
   const std::vector<std::byte> bytes = section_round_trips(economy, fresh);
@@ -1161,14 +1167,20 @@ TEST(save_economy_section_round_trips) {
   CHECK(restored->loyalty_pending == -20);
   CHECK(restored->warehouse.gold == 400);
   CHECK(restored->holder.units.size() == 1);
-  REQUIRE(fresh.wagons().size() == 2);
-  CHECK(fresh.wagons()[0].follow == kNoObject);
-  CHECK(fresh.wagons()[1].follow == 77);
-  CHECK(fresh.wagons()[1].destination == kNoSettlement);
   CHECK(fresh.settlements().size() == 2);
   // The ten interval timers are what makes a turn splittable, and the bug that
   // found them was every settlement on every retail map starting at zero.
   CHECK(restored->timers == economy.find(town)->timers);
+  REQUIRE(fresh.wagon_loyalties().size() == 2);
+  const WagonLoyalty* taunted = fresh.find_wagon_loyalty(70);
+  REQUIRE(taunted != nullptr);
+  CHECK(taunted->capturing);
+  CHECK(taunted->pending == -30);
+  CHECK(taunted->gain_remaining == 900);
+  CHECK(taunted->cap_remaining == 400);
+  CHECK(fresh.wagon_loyalty_tenths(70) == 100);
+  CHECK(fresh.wagon_loyalty_tenths(88) == 40);
+  CHECK(!fresh.find_wagon_loyalty(88)->capturing);
 }
 
 TEST(save_feeder_section_round_trips) {
@@ -1504,12 +1516,12 @@ TEST(save_match_section_round_trips) {
 
 TEST(save_ai_section_round_trips) {
   AiSystem ai;
-  ai.adopt(11, /*player=*/2, /*root=*/true);
-  ai.adopt(19, /*player=*/2);
-  ai.adopt(23, /*player=*/5);
-  ai.set_economy_script(4, 6, 31);
-  ai.set_tactic_script(4, 9, 37);
-  ai.set_economy_script(1, 2, 41);
+  // Each seat's slots are its own: seat 2 holds two settlements, seat 5 one
+  // of the same.
+  ai.set_economy_script(2, 4, 6, 31);
+  ai.set_tactic_script(2, 4, 9, 37);
+  ai.set_economy_script(2, 1, 2, 41);
+  ai.set_economy_script(5, 4, 3, 43);
   // The ship transport orders, out of order on the way in so that the table's
   // own sort is what the save writes.
   ai.set_ship_transport(9, "advance", Point{640, 960});
@@ -1522,12 +1534,14 @@ TEST(save_ai_section_round_trips) {
   CHECK(!bytes.empty());
   CHECK(bytes != default_section<AiSystem>());
   CHECK(fresh.manager_started());
-  CHECK(fresh.owner_entries() == 3);
-  REQUIRE(fresh.settlement_scripts().size() == 2);
+  REQUIRE(fresh.settlement_scripts(2).size() == 2);
   // Sorted by settlement id: the vector's order is what `slot` binary-searches.
-  CHECK(fresh.settlement_scripts()[0].settlement == 1);
-  CHECK(fresh.settlement_scripts()[1].economy == 6);
-  CHECK(fresh.settlement_scripts()[1].tactic_script == 37);
+  CHECK(fresh.settlement_scripts(2)[0].settlement == 1);
+  CHECK(fresh.settlement_scripts(2)[1].economy == 6);
+  CHECK(fresh.settlement_scripts(2)[1].tactic_script == 37);
+  REQUIRE(fresh.settlement_scripts(5).size() == 1);
+  CHECK(fresh.settlement_scripts(5)[0].economy_script == 43);
+  CHECK(fresh.settlement_scripts(1).empty());
 
   // **The transport orders survive, ascending by ship id**, which is the order
   // the table keeps and therefore the order the bytes have to come back in.
@@ -1812,7 +1826,7 @@ TEST(save_command_and_ai_are_invisible_to_the_hash_and_caught_by_the_bytes) {
   move.arg_kind = CommandArgKind::point;
   move.point = Point{100, 200};
   command.queue(unit).entries.push_back(move);
-  ai.adopt(/*script=*/13, /*player=*/2, /*root=*/true);
+  ai.set_economy_script(/*seat=*/2, /*settlement=*/1, /*id=*/6, /*script=*/13);
 
   // Half of the claim: the world hash is the same with the state and without.
   const std::uint64_t with_state = world.state_hash();
@@ -1852,7 +1866,7 @@ TEST(save_command_and_ai_are_invisible_to_the_hash_and_caught_by_the_bytes) {
   CHECK(report->unrestored_systems.empty());  // the sections are there
   CHECK(verify_hashes(target, reader->meta()).ok);
   CHECK(lost_command.tracked() == 0);  // ...and were not applied
-  CHECK(lost_ai.owner_entries() == 0);
+  CHECK(lost_ai.settlement_scripts(2).empty());
 
   // The other half: re-saving the target and comparing the bytes does catch it.
   // This is the mechanism `engine/tools/imsave.cpp` uses over a real map, and

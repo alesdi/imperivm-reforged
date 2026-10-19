@@ -411,8 +411,10 @@ HostOutcome order_query_to_area(CallContext& ctx, std::string_view verb) {
   CommandSystem* commands = command_system(*world);
   if (commands == nullptr) return HostOutcome::failed(kNoCommands);
 
+  // Purged and read (0x0057a2e0's `vtbl + 0x1c`, `vtbl + 0x20`): the cached
+  // list, refreshed when due.
   std::vector<ObjectId> members;
-  world->evaluate_query(ctx.arg(0).as_object().id, members);
+  world->read_query(ctx.arg(0).as_object().id, script_clock(ctx, *world), members);
 
   const AreaShape region = *shape;
   for (const ObjectId member : members) {
@@ -495,7 +497,7 @@ HostOutcome fn_area_objs(CallContext& ctx) {
                              ? objs_in_circle(shape->centre(), shape->radius, filter)
                              : objs_in_rect(shape->left, shape->top, shape->right,
                                             shape->bottom, filter);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ClassPlayerAreaObjs("class", player, "area")`. 274 sites.
@@ -537,7 +539,7 @@ HostOutcome fn_class_player_area_objs(CallContext& ctx) {
           ? class_player_area(filter, player, shape->centre(), shape->radius)
           : class_player_area_rect(filter, player, shape->left, shape->top, shape->right,
                                    shape->bottom);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// The number of `define` calls `register_area_host` makes. Kept next to the

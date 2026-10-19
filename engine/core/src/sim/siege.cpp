@@ -537,10 +537,10 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
   std::int32_t placed = 0;
   std::int32_t inside = 0;
   CombatSystem* combat = combat_system_of(world);
+  // The engine's own target slot, `[cat+0x228]` (`ObjectState::catapult_target`).
   const auto aimed_at = [&](ObjectId catapult) {
-    if (combat == nullptr) return false;
-    const Combatant* record = combat->find(catapult);
-    return record != nullptr && record->target == target;
+    const ObjectState* state = world.state(catapult);
+    return state != nullptr && state->catapult_target == target;
   };
   if (wanted && !plan.empty() && economy != nullptr) {
     for (const Settlement& s : economy->settlements().all()) {
@@ -567,9 +567,10 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
         const ObjectId engine = place_catapult(world, catapult_class, site, player + 1);
         if (engine == kNoObject) break;
         ++report.placed;
-        if (combat != nullptr) {
-          (void)combat->reconcile(world);
-          (void)combat->order_attack(engine, target);
+        if (combat != nullptr) (void)combat->reconcile(world);
+        // 0x004389d5 writes the slot directly: no validation, no tower walk.
+        if (ObjectState* state = world.mutable_state(engine); state != nullptr) {
+          state->catapult_target = target;
         }
         rally = site;
         have_rally = true;
@@ -702,7 +703,7 @@ HostOutcome objlist_siege_impl(CallContext& ctx) {
   if (!ctx.arg(1).is_object() || world->find(ctx.arg(1).as_object().id) == nullptr) {
     return HostOutcome::ok_void();
   }
-  const std::vector<ObjectId> members = receiver_objects(*world, ctx.arg(0), false);
+  const std::vector<ObjectId> members = receiver_objects(ctx, *world, ctx.arg(0), false);
   (void)run_siege_plan(*world, members, ctx.arg(1).as_object().id, int_arg(ctx, 2),
                        int_arg(ctx, 3), world->time());
   return HostOutcome::ok_void();

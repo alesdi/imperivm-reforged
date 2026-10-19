@@ -210,8 +210,24 @@ class WorldHost : public script::Host {
 /// The ids are **copied**, never viewed: issuing a command can spawn, despawn
 /// or re-group, and a span into a container that moves is a use-after-free
 /// waiting for a bigger list.
+///
+/// **A query receiver is read the way its members read it** (`World::
+/// read_query`, purged): its cached list, refreshed only when due, at the
+/// clock `script_clock` answers for the call. Every caller is a host function
+/// and should pass its `ctx`; the context-free form reads at the world's time,
+/// the turn's end, and is kept for code with no call to hand.
+[[nodiscard]] std::vector<ObjectId> receiver_objects(script::CallContext& ctx, World& world,
+                                                     const script::Value& receiver,
+                                                     bool accept_query = true);
 [[nodiscard]] std::vector<ObjectId> receiver_objects(World& world, const script::Value& receiver,
                                                      bool accept_query = true);
+
+/// The clock a query is read at from a host call: the millisecond the
+/// running script woke on (`[0x00996ff4] + 0x1258`, which the original's
+/// millisecond loop moves while the scripts' wheel fires -- the clock its
+/// queries stamp their due times with and its waits measure from), or the
+/// world's time for a call with no scheduler. `GetTime`'s rule.
+[[nodiscard]] GameTime script_clock(const script::CallContext& ctx, const World& world) noexcept;
 
 /// Whether `receiver` is a shape a receiver-taking member accepts at all.
 ///
@@ -262,6 +278,12 @@ std::size_t reap_departed(script::Scheduler& scheduler, World& world);
 
 /// `object_is_dead` -- `vtbl + 0x50` -- is in sim/world.hpp.
 
+
+/// Whether bit `index` of object `id`'s specials word (`[obj+0x198]`) is set:
+/// `Unit::HasSpecial`'s test without its receiver check -- the class's
+/// `unit_specials`, plus `freedom` on every hero (see `m_has_special`). False
+/// for an index outside the 36-entry table and for an unknown id.
+[[nodiscard]] bool object_has_special(World& world, ObjectId id, std::int32_t index);
 
 /// `Unit::HasFreedom` (0x005d7d30): bit 30 of the unit's specials word
 /// (`[obj+0x198] & 0x40000000`, the `freedom` special, which the class's

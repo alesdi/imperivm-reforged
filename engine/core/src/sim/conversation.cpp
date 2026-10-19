@@ -579,8 +579,26 @@ enum class SnippetResult {
   trapped,
 };
 
+/// The context a phrase's scripts run with: `/`, the conversation's name and
+/// `/`. 0x0050aa90 (the action and the return) and 0x0050b070 (the condition)
+/// each make the script's thread, bind the two actors, build this string from
+/// the conversation's name and the `/` at 0x007b0cec on both sides, and set it
+/// as the thread's context (0x0069d040) before running it to its end. So a
+/// relative root `Env*` key in a phrase is the conversation's own --
+/// `EnvWriteInt('flag', 1)` writes `/<name>/flag` -- and the `Return Value`
+/// key `ConvResult` reads (0x0050a3b0) sits under the same prefix.
+[[nodiscard]] std::string phrase_context(const ConversationDefinition& definition) {
+  std::string context;
+  context.reserve(definition.name.size() + 2);
+  context += '/';
+  context += definition.name;
+  context += '/';
+  return context;
+}
+
 [[nodiscard]] SnippetResult evaluate(script::CallContext& ctx, const ConversationSnippet& snippet,
-                                     std::string_view result_type, script::Value& out) {
+                                     std::string_view result_type, std::string_view context,
+                                     script::Value& out) {
   if (snippet.empty()) return SnippetResult::did_not_compile;
   const std::string source = snippet.wrap(result_type);
   const std::span<const std::byte> bytes{reinterpret_cast<const std::byte*>(source.data()),
@@ -600,6 +618,7 @@ enum class SnippetResult {
   env.registry = registry;
   env.user = ctx.user;
   env.script = script::kNoScript;
+  env.context = context;
   env.now = ctx.now;
   env.call_trace = env.scheduler != nullptr ? env.scheduler->call_trace() : nullptr;
   env.trace_user = env.scheduler != nullptr ? env.scheduler->trace_user() : nullptr;
@@ -612,13 +631,17 @@ enum class SnippetResult {
 }
 
 /// Is this phrase eligible? A phrase with no `condition` always is.
-[[nodiscard]] bool eligible(script::CallContext& ctx, const ConversationPhrase& phrase) {
+[[nodiscard]] bool eligible(script::CallContext& ctx, const ConversationDefinition& definition,
+                            const ConversationPhrase& phrase) {
   if (phrase.condition.empty()) return true;
   script::Value answer;
   // A condition that will not compile or traps is **false**, not true. A
   // conversation whose gate cannot be evaluated should fall through to whatever
   // comes next rather than assert a branch nobody could check.
-  if (evaluate(ctx, phrase.condition, "bool", answer) != SnippetResult::ok) return false;
+  if (evaluate(ctx, phrase.condition, "bool", phrase_context(definition), answer) !=
+      SnippetResult::ok) {
+    return false;
+  }
   return answer.truthy_scalar();
 }
 
@@ -686,7 +709,7 @@ enum class SnippetResult {
                                  std::vector<std::size_t>& taken) {
   std::vector<std::size_t> ok;
   for (const std::size_t index : pool) {
-    if (eligible(ctx, definition.phrases[index])) ok.push_back(index);
+    if (eligible(ctx, definition, definition.phrases[index])) ok.push_back(index);
   }
   if (ok.empty()) return static_cast<std::size_t>(-1);
   switch (mode) {
@@ -734,6 +757,7 @@ ConversationRun play_conversation(script::CallContext& ctx,
 
   // The options this run has already taken; see `choose`.
   std::vector<std::size_t> taken;
+  const std::string context = phrase_context(definition);
   std::size_t at =
       choose(ctx, *world, definition,
              candidates(definition, definition.startup_phrases, definition.startup, 0, true),
@@ -764,7 +788,7 @@ ConversationRun play_conversation(script::CallContext& ctx,
       // one that silently did not run leaves a player with no objective and no
       // diagnostic, which is this project's signature failure. A condition that
       // cannot be evaluated only picks a different line.
-      switch (evaluate(ctx, phrase.action, "void", ignored)) {
+      switch (evaluate(ctx, phrase.action, "void", context, ignored)) {
         case SnippetResult::ok:
           break;
         case SnippetResult::did_not_compile:
@@ -781,7 +805,7 @@ ConversationRun play_conversation(script::CallContext& ctx,
     // whatever it answered before.
     if (!phrase.result.empty()) {
       script::Value produced;
-      if (evaluate(ctx, phrase.result, "str", produced) == SnippetResult::ok &&
+      if (evaluate(ctx, phrase.result, "str", context, produced) == SnippetResult::ok &&
           produced.is_string()) {
         run.result = std::string(produced.as_string());
       }

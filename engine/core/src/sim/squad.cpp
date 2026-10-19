@@ -83,7 +83,11 @@ bool SquadTable::create_at(SquadKey key, ObjectId leader) {
   Squad squad;
   squad.key = key;
   squad.leader = leader;
-  if (leader != kNoObject) squad.members.push_back(leader);
+  if (leader != kNoObject) {
+    squad.members.push_back(leader);
+    // The first member's join arms the look (0x00445b4b); `squad_look`.
+    squad.look_due = 0;
+  }
   squads_.insert(squads_.begin() + static_cast<std::ptrdiff_t>(at), std::move(squad));
   return true;
 }
@@ -93,6 +97,9 @@ bool SquadTable::join(SquadKey key, ObjectId id) {
   if (squad == nullptr || id == kNoObject) return false;
   if (squad->contains(id)) return true;
   squad->members.push_back(id);
+  // 0x00445b4b: a join that leaves the squad with exactly one member arms its
+  // look, timer 0x28, with no delay -- `squad_look` has the reading.
+  if (squad->members.size() == 1) squad->look_due = 0;
   return true;
 }
 
@@ -110,6 +117,8 @@ Squad* SquadTable::remove_member(SquadKey key, ObjectId id) {
 
 void SquadTable::stand_down(Squad& squad) noexcept {
   squad.eval = 0;
+  // 0x00687c80 kills the squad's timers, and the one it arms is the look.
+  squad.look_due = kSquadLookUnarmed;
   free_order(squad);
   squad.gaika_in = kNoGaika;
   squad.dest_gaika = kNoGaika;
@@ -316,6 +325,188 @@ void revalue_squads(World& world, SquadTable& squads) {
     // the squad was ever filed under, written once and never again.
     if (squad.src_gaika == kNoGaika) squad.src_gaika = squad.gaika_in;
   }
+}
+
+// -- the look -----------------------------------------------------------------
+//
+// `squad_look` in `sim/squad.hpp` is the rule; docs/formats/squad.md the
+// reading it comes from.
+
+namespace {
+
+/// One eye of the look: a member's `posRH` and its sight.
+struct LookEye {
+  ObjectId id = kNoObject;
+  Point at{};
+  std::int32_t sight = 0;
+};
+
+/// The floored root of a squared distance, the integer square root every
+/// distance in the look goes through.
+[[nodiscard]] std::int64_t floor_root(std::int64_t value) noexcept {
+  if (value <= 0) return 0;
+  std::int64_t root = 0;
+  std::int64_t bit = std::int64_t{1} << 62;
+  while (bit > value) bit >>= 2;
+  while (bit != 0) {
+    if (value >= root + bit) {
+      value -= root + bit;
+      root = (root >> 1) + bit;
+    } else {
+      root >>= 1;
+    }
+    bit >>= 2;
+  }
+  return root;
+}
+
+/// Whether `inner`'s circle lies inside `best`'s, as the look measures it: the
+/// floored distance between the two plus the inner sight, against the best's.
+[[nodiscard]] bool circle_inside(const LookEye& inner, const LookEye& best) noexcept {
+  const std::int64_t dx = static_cast<std::int64_t>(inner.at.x) - best.at.x;
+  const std::int64_t dy = static_cast<std::int64_t>(inner.at.y) - best.at.y;
+  return floor_root(dx * dx + dy * dy) + inner.sight <= best.sight;
+}
+
+/// The eyes: the live members, less every one whose circle the member with
+/// the largest sight already covers. Two walks, as the look makes them.
+[[nodiscard]] std::vector<LookEye> look_eyes(World& world, const Squad& squad) {
+  std::vector<LookEye> eyes;
+  for (const ObjectId member : squad.members) {
+    const WorldObject* slot = world.find(member);
+    if (slot == nullptr || object_is_dead(*slot)) continue;
+    eyes.push_back(LookEye{member, unit_pos_rh(world, member), slot->sight});
+  }
+  // The first walk: a strictly larger sight takes the lead; anything else is
+  // dropped when the leader's circle holds it.
+  std::size_t best = eyes.size();
+  std::vector<LookEye> kept;
+  for (const LookEye& eye : eyes) {
+    if (best == eyes.size() || kept[best].sight < eye.sight) {
+      best = kept.size();
+      kept.push_back(eye);
+      continue;
+    }
+    if (circle_inside(eye, kept[best])) continue;
+    kept.push_back(eye);
+  }
+  if (best == eyes.size()) return kept;
+  // The second walk, from the front to the leader: the members kept before it
+  // took the lead, measured against it now.
+  const LookEye leader = kept[best];
+  std::vector<LookEye> out;
+  for (std::size_t i = 0; i < kept.size(); ++i) {
+    if (i < best && circle_inside(kept[i], leader)) continue;
+    out.push_back(kept[i]);
+  }
+  return out;
+}
+
+}  // namespace
+
+void squad_look(World& world, Squad& squad) {
+  const PlayerId player = squad.key.player;
+  const std::vector<LookEye> eyes = look_eyes(world, squad);
+  std::vector<ObjectId> found;
+  if (!eyes.empty() && PlayerTable::is_valid(player)) {
+    const PlayerTable& players = world.players();
+    // `seeflags`, `[record+0x18]`: the player itself and every player who
+    // shares its view with it (`SetRelation`, 0x005652f0, bit 4 of the other
+    // player's word for this one). `enemyflags`, `[record+0x10]`: every
+    // player this one's row is not at peace with.
+    const auto sees_with = [&](PlayerId other) {
+      return other == player || players.has(other, player, Relation::share_view);
+    };
+    const auto at_war = [&](PlayerId other) {
+      return other != player && players.is_enemy(player, other);
+    };
+    // The box the eyes' circles span, and every object of the grid in it.
+    std::int32_t left = eyes.front().at.x - eyes.front().sight;
+    std::int32_t top = eyes.front().at.y - eyes.front().sight;
+    std::int32_t right = eyes.front().at.x + eyes.front().sight;
+    std::int32_t bottom = eyes.front().at.y + eyes.front().sight;
+    for (const LookEye& eye : eyes) {
+      left = std::min(left, eye.at.x - eye.sight);
+      top = std::min(top, eye.at.y - eye.sight);
+      right = std::max(right, eye.at.x + eye.sight);
+      bottom = std::max(bottom, eye.at.y + eye.sight);
+    }
+    std::vector<ObjectId> near;
+    (void)world.objects_in_rect(left, top, right, bottom, ClassFilter{}, near);
+    const ClassGraph* graph = world.class_graph();
+    const ClassIndex animal = graph != nullptr ? graph->find("Animal") : kNoClass;
+    for (const ObjectId id : near) {
+      const WorldObject* slot = world.find(id);
+      if (slot == nullptr || slot->internal != InternalKind::none) continue;
+      const PlayerId owner = slot->state.owner;
+      // The mask: an object nobody owns has no owner bit to match.
+      if (!PlayerTable::is_valid(owner)) continue;
+      if (sees_with(owner) && !at_war(owner)) continue;
+      // 0x00445d10's stealth clause: a hidden object only from a player whose
+      // view this one shares.
+      if (slot->state.flags.hidden && !sees_with(owner)) continue;
+      // 0x00443d60: inside some eye's circle.
+      bool inside = false;
+      for (const LookEye& eye : eyes) {
+        const std::int64_t dx = static_cast<std::int64_t>(slot->state.position.x) - eye.at.x;
+        const std::int64_t dy = static_cast<std::int64_t>(slot->state.position.y) - eye.at.y;
+        const std::int64_t r = eye.sight;
+        if (dx * dx + dy * dy <= r * r) {
+          inside = true;
+          break;
+        }
+      }
+      if (!inside) continue;
+      // 0x004459c0: the accumulator.
+      if (!at_war(owner)) continue;  // the third list, not kept
+      if (slot->state.flags.is_unit) {
+        if (object_is_dead(*slot)) continue;
+        if (slot->state.flags.messenger) continue;  // the third list
+        if (animal != kNoClass && world.class_is_a(id, animal)) continue;  // the third list
+        found.push_back(id);
+      } else if (slot->state.flags.is_building) {
+        found.push_back(id);
+      }
+    }
+  }
+  squad.enemies = std::move(found);
+}
+
+std::size_t run_squad_looks(World& world, SquadTable& squads, GameTime now) {
+  const AiSystem* ai = ai_system_of(world);
+  if (ai == nullptr || !ai->manager_started()) return 0;
+  // `SquadLookIvl`, which the squad constructor reads with 0 for a missing
+  // key; a world with no constants table at all takes the shipped value.
+  GameTime interval = kSquadLookIntervalShipped;
+  if (EnvSystem* env = env_of(world); env != nullptr) {
+    std::int32_t value = 0;
+    interval = env->constant("SquadLookIvl", value) ? value : 0;
+  }
+  std::size_t looked = 0;
+  for (Squad& squad : squads.mutable_squads()) {
+    if (squad.look_due == kSquadLookUnarmed || squad.look_due > now) continue;
+    squad_look(world, squad);
+    squad.look_due = now + interval;
+    ++looked;
+  }
+  return looked;
+}
+
+const Squad* squad_containing(const HeroSystem& heroes, ObjectId unit) {
+  // The unit record's key first, as `[unit+0x174]` is read; the table is the
+  // membership's truth, so a record that disagrees with it is passed over.
+  const Squad* squad = heroes.squads().find(heroes.squad_of(unit));
+  if (squad != nullptr && squad->contains(unit)) return squad;
+  return heroes.squads().find(heroes.squads().squad_of(unit));
+}
+
+const Squad* squad_sight_squad(const World& world, const HeroSystem& heroes, ObjectId unit) {
+  const WorldObject* slot = world.find(unit);
+  if (slot == nullptr) return nullptr;
+  const Squad* squad = squad_containing(heroes, unit);
+  if (squad == nullptr) return nullptr;
+  if (slot->state.holder != kNoObject && (squad->flags & kSquadFlagAdvChooser) == 0) return nullptr;
+  return squad;
 }
 
 
@@ -1373,34 +1564,36 @@ HostOutcome gaika_id_impl(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(gaika_of(ctx.arg(0))));
 }
 
-/// `Unit::IsEnemyInSquadSight()` -- 20 sites, **132 of this engine's 197
-/// remaining trap hits**, and it is always false.
+/// `Unit::IsEnemyInSquadSight()` -- 20 sites: whether the receiver's squad's
+/// look saw anybody it is at war with.
 ///
-/// 0x005d7400 resolves the receiver's squad through 0x00444190 -- which reads
-/// the packed handle at `[unit+0x174]` and indexes the per-player squad table
-/// -- and then answers `[squad+0x7c] != 0`. **That field has no setter in
-/// `gbr.exe`.** A byte-pattern sweep of the whole `.text` for writes to
-/// `[reg+0x7c]` finds seven, of which exactly two are on a squad and both are
-/// constructors writing zero (0x0044440b, in a run of `edi = 0` stores either
-/// side of it, and 0x0045402f, which writes the literal 0 beside `[esi+0x28]`
-/// -- the state field, which is what identifies the object). The only reader is
-/// this entry point.
+/// 0x005d7400 logs and answers the invalid handle for a receiver that does not
+/// resolve, and again (through `vtbl+0x50`) for a dead one. Otherwise it
+/// resolves the squad through 0x00444190 -- the packed handle at
+/// `[unit+0x174]` indexing the player's squad vector -- and answers
+/// `[squad+0x7c] != 0`: the size of the squad's `Enemies` (`Squad::enemies`),
+/// which its look rewrites every `SquadLookIvl` (`squad_look`). A unit in no
+/// squad answers false. No holder test: a garrisoned member asks its squad
+/// like any other.
 ///
-/// So the original answers false too, on every unit, in every session -- the
-/// same shape of failure this project keeps finding in its own tree, here in
-/// the game's. The four scripts that ask (`rpriest_idle.vs` 88 hits,
-/// `shaman_idle.vs` 33, and two more) take their else branch on the original
-/// exactly as they will here.
-///
-/// **No field is added for it.** `Unit::user` is stored because a script can
-/// read it back through a registered getter; this has no getter and no writer,
-/// so storing it would be a hashed, serialised bit that nothing could ever
-/// observe. If a setter turns up that the sweep missed -- a dword-displacement
-/// encoding, or a write through a computed address -- this is where it goes.
+/// **This answered false for every unit until the look was read.** The field
+/// was taken for one nothing writes but the constructors, because its writer
+/// is a deque copy reaching it through the list object at `[squad+0x64]`
+/// (0x00447a17), and a sweep for writes at `+0x7c` cannot see that. The
+/// scripts that ask -- `rpriest_idle.vs`, `shaman_idle.vs` and two more --
+/// now take the branch the original takes when an enemy is near.
 HostOutcome is_enemy_in_squad_sight_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  return HostOutcome::ok_with(Value::boolean(false));
+  const auto invalid = HostOutcome::ok_with(Value::object(script::kNoType, 0));
+  if (ctx.count() == 0) return invalid;
+  const ObjectId id =
+      ctx.arg(0).is_object() ? static_cast<ObjectId>(ctx.arg(0).as_object().id) : kNoObject;
+  const WorldObject* slot = world->find(id);
+  if (slot == nullptr || object_is_dead(*slot)) return invalid;
+  const HeroSystem* heroes = hero_system_of(*world);
+  const Squad* squad = heroes != nullptr ? squad_containing(*heroes, id) : nullptr;
+  return HostOutcome::ok_with(Value::boolean(squad != nullptr && !squad->enemies.empty()));
 }
 
 // --------------------------------------------------------------------------
@@ -3817,77 +4010,88 @@ HostOutcome eval_attach_impl(CallContext& ctx) {
 ///     if (food + 100 < needed)
 ///     if (sq.SendFoodWagon(needed - food, 3000)) …
 ///
-/// ## What the original keeps, and what this engine keeps instead
+/// A food wagon is a **unit**: a `CVXWagon` with a cargo (`[obj+0x1cc]`) and a
+/// kind (`[obj+0x1d4]`, 1 for food), standing in one of its player's peaceful
+/// squads, running `follow` on the soldier it was sent after
+/// (`docs/formats/wagon.md`). Both walks below go over the player's squads in
+/// index order from 1 (`each_peaceful_wagon`), keep the `SF_PEACEFUL` ones,
+/// and look at every member that is a wagon.
 ///
-/// There a food wagon is a **unit**: a `Wagon`-class peasant with a cargo
-/// (`[obj+0x1cc]`) and a kind (`[obj+0x1d4]`, 1 for food), standing in one of
-/// its player's peaceful squads, running `follow` on the soldier it was sent
-/// after. `FoodComing` (0x0042a5b0) walks the player's squads, takes the
-/// peaceful ones, and for every member that is a wagon carrying food whose
-/// running command is an object-command aimed at a **unit in the asking
-/// squad** (`[unit+0x174]` against the handle), adds the cargo.
-///
-/// Here a wagon in flight is a row in `EconomySystem::wagons()` with a build
-/// timer and no object -- the journey is abstracted away for every wagon the
-/// economy moves -- and `Wagon::follow` is the unit it was sent after. So the
-/// walk is over that table: every food wagon whose `follow` is currently a
-/// member of this squad, built or not, counts its cargo. That is the same
-/// membership test, read off the squad rather than off the unit, and the same
-/// sum.
+/// `FoodComing` (0x0042a5b0) adds the cargo of every such wagon carrying food
+/// whose **running command** is an object command aimed at a live-handled
+/// **unit** (`[obj+0x2c] & 0x400000`) whose squad (`[unit+0x174]`) is the
+/// asking one. A wagon with no command, or one walking to a building, is not
+/// coming.
 ///
 /// ## `SendFoodWagon`, in the original's order
 ///
 /// 0x0042a750 answers false for a receiver naming no squad or a squad with no
-/// front member. Then, with the front member's position:
+/// front member. Then, measured from the front member's stored position:
 ///
-///   1. **an existing wagon to redirect.** The same walk as above, keeping a
-///      food wagon whose cargo is **not more than `amount`**, whose running
-///      command is not aimed at a unit -- one already following somebody is
-///      left alone -- and, when aimed at a building, only one whose settlement's
-///      central building is a heir of `BaseTownhall` (0x0043ffc0); within
-///      `range` of the leader, nearest first, strictly. **Not reproduced**: a
-///      wagon here has no object and no command, so nothing could pass the
-///      command test, and a phase that can select nothing is written down
-///      rather than written;
+///   1. **an existing wagon to redirect.** The same walk, keeping a food
+///      wagon whose cargo is **not more than `amount`** and that has a running
+///      command, unless that command is aimed at a unit -- one already
+///      following somebody is left alone -- or at a building whose settlement
+///      is not a stronghold (0x0043ffc0); within `range` of the leader
+///      (`<=`), nearest strictly;
 ///   2. **a settlement to load one at.** Every settlement the player owns
 ///      whose store holds **100 food or more** and whose central building is
 ///      within `range` of the leader; the nearest, strictly. No class test on
 ///      this pass -- a village will do;
-///   3. **which.** No settlement: the wagon, if there was one. Both: the wagon
-///      when the settlement is at least **1,200** further than it; otherwise
-///      the settlement. With phase 1 empty the settlement always wins here,
-///      and that arm of the decision is named rather than written;
-///   4. the mule is loaded with `amount` **clamped to the store's food**
-///      through the same body `CreateMuleFood` is (0x005eed90 with kind 1 and
-///      the flag that picks the race's mule), and a load of nothing is false;
-///   5. it is ordered **`follow`** on the leader (0x005aef20 with the unit
-///      handle; a class binding no `follow` is false), the way every walker
-///      here orders -- `vtbl+0xc0(0)`, `vtbl+0xbc`, 0x005b07d0 -- and the
-///      answer is true.
+///   3. **which.** No settlement: the wagon, if there was one. Both: the
+///      settlement unless it is **1,200 or more** further than the wagon;
+///   4. a settlement chosen, a mule is loaded with `amount` **clamped to the
+///      store's food** through `make_mule` (0x005eed90 with kind 1 and the
+///      race's mule), and a load of nothing is false;
+///   5. the wagon -- found or made -- is ordered **`follow`** on the leader in
+///      place of whatever it ran (0x005aef20, `vtbl+0xc0(0)`, `vtbl+0xbc`,
+///      0x005b07d0: `CommandSystem::set_command`); a class binding no
+///      `follow` is false. Otherwise true.
 ///
-/// Here step 4 is `create_feeding_mule`, which is `create_mule` with
-/// `Wagon::follow` set and no destination, and step 5 is that field: the
-/// wagon "follows" by being drawn down by the squad's hungry members once it
-/// is built, through the feeder's second path. `max_load` is not applied,
-/// which is `CreateMuleFood`'s standing here and is named there.
+/// The mule then follows its army as any unit follows (`WAGON_FOLLOW.VS`),
+/// and the feeder's second path draws on it (`draw_from_food_wagon`).
+template <typename Fn>
+void each_peaceful_wagon(World& world, const HeroSystem& heroes, PlayerId player, Fn&& fn) {
+  for (const Squad& squad : heroes.squads().squads()) {
+    if (squad.key.player != player || !squad.key.valid()) continue;
+    if ((squad.flags & kSquadFlagPeaceful) == 0) continue;
+    for (const ObjectId id : squad.members) {
+      WorldObject* slot = world.find(id);
+      if (slot == nullptr || slot->object == nullptr || !slot->object->is_a(NativeClass::wagon)) {
+        continue;
+      }
+      fn(*slot);
+    }
+  }
+}
+
+/// The object a wagon's running command is aimed at, or null: no command, a
+/// command that is not an object command, or a target the world no longer has.
+const WorldObject* running_target(World& world, ObjectId wagon) {
+  const CommandSystem* commands = command_system(world);
+  if (commands == nullptr) return nullptr;
+  const CommandQueue* queue = commands->find(wagon);
+  const Command* running = queue == nullptr ? nullptr : queue->running();
+  if (running == nullptr || running->arg_kind != CommandArgKind::object) return nullptr;
+  return world.find(running->object);
+}
+
 HostOutcome food_coming_impl(CallContext& ctx) {
   Self self = resolve(ctx);
   if (!self.ok()) {
     if (self.error == kNoSquadFound) return HostOutcome::ok_with(Value::integer(0));
     return HostOutcome::failed(self.error);
   }
-  const EconomySystem* economy = economy_of(*self.world);
-  if (economy == nullptr) return HostOutcome::ok_with(Value::integer(0));
-  const std::vector<ObjectId>& members = self.squad->members;
+  World& world = *self.world;
+  const SquadKey asking = self.squad->key;
   std::int32_t total = 0;
-  for (const Wagon& w : economy->wagons()) {
-    // The kind test is the original's (`[wagon+0x1d4] == 1`) and an
-    // invariant here: `create_feeding_mule` is the only writer of `follow`
-    // and loads food. Injected as a fault it survives, which is what says so.
-    if (!w.follows() || w.resource != Resource::food) continue;
-    if (std::find(members.begin(), members.end(), w.follow) == members.end()) continue;
-    total += w.amount;
-  }
+  each_peaceful_wagon(world, *self.heroes, asking.player, [&](const WorldObject& wagon) {
+    if (wagon.state.cargo_resource != static_cast<std::int32_t>(Resource::food)) return;
+    const WorldObject* target = running_target(world, wagon.id);
+    if (target == nullptr || !target->state.flags.is_unit) return;
+    if (!(self.heroes->squads().squad_of(target->id) == asking)) return;
+    total += wagon.state.cargo;
+  });
   return HostOutcome::ok_with(Value::integer(total));
 }
 
@@ -3900,45 +4104,78 @@ HostOutcome send_food_wagon_impl(CallContext& ctx) {
   }
   World& world = *self.world;
   const Squad& squad = *self.squad;
-  // Both are the original's early-outs (0x0042a7cf) and both are covered by
-  // `create_feeding_mule` refusing to follow nothing; an empty squad would
-  // fall out false there too. Kept for the order of refusals, not for the
-  // answer.
   if (squad.members.empty()) return no;
   const ObjectId leader = squad.members.front();
   if (world.find(leader) == nullptr) return no;
   EconomySystem* economy = economy_of(world);
-  if (economy == nullptr) return no;
+  CommandSystem* commands = command_system(world);
+  if (economy == nullptr || commands == nullptr) return no;
   const std::int32_t amount = ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
   const std::int32_t range = ctx.count() > 2 && ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
   // The leader's **stored** position, `vtbl+0x3c` (0x0042a7fc; 0x0063d900
-  // reads `[obj+0x24/0x28]`): `(-1, -1)` for a garrisoned leader, which then
-  // finds no store in range. `resolve_position` measured from its holder.
+  // reads `[obj+0x24/0x28]`): `(-1, -1)` for a garrisoned leader.
   const Point at = world.find(leader)->state.position;
-  constexpr std::int32_t kLoadableFood = 100;
+  const auto distance_to = [&](Point there) {
+    const std::int64_t dx = static_cast<std::int64_t>(there.x) - at.x;
+    const std::int64_t dy = static_cast<std::int64_t>(there.y) - at.y;
+    return isqrt(dx * dx + dy * dy);
+  };
+
+  // Phase 1: a wagon already on the road to redirect.
+  ObjectId wagon = kNoObject;
+  std::int64_t wagon_distance = 0;
+  each_peaceful_wagon(world, *self.heroes, squad.key.player, [&](const WorldObject& w) {
+    if (w.state.cargo_resource != static_cast<std::int32_t>(Resource::food)) return;
+    if (w.state.cargo > amount) return;
+    const CommandQueue* queue = commands->find(w.id);
+    const Command* running = queue == nullptr ? nullptr : queue->running();
+    if (running == nullptr) return;
+    if (running->arg_kind == CommandArgKind::object) {
+      if (const WorldObject* target = world.find(running->object); target != nullptr) {
+        if (target->state.flags.is_unit) return;
+        if (target->state.flags.is_building) {
+          const Settlement* s = economy->settlements().for_object(target->settlement);
+          if (s == nullptr || !s->is_stronghold()) return;
+        }
+      }
+    }
+    const std::int64_t d = distance_to(w.state.position);
+    if (d > range) return;
+    if (wagon != kNoObject && d >= wagon_distance) return;
+    wagon = w.id;
+    wagon_distance = d;
+  });
 
   // Phase 2: the nearest own settlement with food to spare within range.
+  constexpr std::int32_t kLoadableFood = 100;
   const Settlement* source = nullptr;
   std::int64_t nearest = 0;
   for (const Settlement& set : economy->settlements().all()) {
     if (set.owner != squad.key.player) continue;
     if (set.warehouse.food < kLoadableFood) continue;
-    const Point there = world.resolve_position(set.anchor);
-    const std::int64_t dx = there.x - at.x;
-    const std::int64_t dy = there.y - at.y;
-    const std::int64_t distance = isqrt(dx * dx + dy * dy);
-    if (distance > range) continue;
-    if (source != nullptr && distance >= nearest) continue;
+    const std::int64_t d = distance_to(world.resolve_position(set.anchor));
+    if (d > range) continue;
+    if (source != nullptr && d >= nearest) continue;
     source = &set;
-    nearest = distance;
+    nearest = d;
   }
-  if (source == nullptr) return no;
-  // The original's clamp, kept as its own step: `create_mule` takes what the
-  // warehouse can pay anyway, so a fault here changes nothing, and the sweep
-  // says so.
-  const std::int32_t load = std::min(amount, source->warehouse.food);
-  return HostOutcome::ok_with(
-      Value::boolean(economy->create_feeding_mule(source->id, leader, load) != 0));
+
+  // Phases 3 and 4: the settlement unless the wagon is 1,200 nearer.
+  constexpr std::int64_t kWagonPreference = 1200;
+  if (source != nullptr && (wagon == kNoObject || nearest < wagon_distance + kWagonPreference)) {
+    const std::int32_t load = std::min(amount, source->warehouse.food);
+    wagon = make_mule(world, source->id, Resource::food, load, /*boat=*/false);
+  }
+  if (wagon == kNoObject) return no;
+
+  // Phase 5: `follow` the leader, in place of whatever it was doing -- if
+  // the wagon's class binds `follow` on an object (0x005aef20 finds the
+  // method by name and signature, and answers nothing otherwise).
+  if (!commands->binds(world, wagon, "follow", CommandArgKind::object)) return no;
+  Command follow;
+  follow.arg_kind = CommandArgKind::object;
+  follow.object = leader;
+  return HostOutcome::ok_with(Value::boolean(commands->set_command(world, wagon, "follow", follow) != 0));
 }
 
 /// `Squadize(ObjList ol, SquadList sl, int nState)` -- 2 sites, both in
@@ -4644,8 +4881,8 @@ bool execute_order(World& world, script::Scheduler& scheduler, ScriptLibrary* li
   pool.hand_to(handle, runner, kOrderListSlot);
   queue.runner = runner;
   // A script of the AI object's: `AIGetPlayer` answers its player, and
-  // `AIStop` takes it with the rest.
-  if (ai != nullptr) ai->adopt(runner, player);
+  // `AIStop` takes it with the rest. 0x0041ccb0 tags it with the seat.
+  (void)scheduler.set_context(runner, ai_thread_context(player));
   return true;
 }
 

@@ -162,8 +162,8 @@
 //     `(trunc(r sin a), trunc(r cos a))` with `Rot`'s constant (`0x007ac490`);
 //   * up to forty probes from the band's centre outward, the first passable
 //     free spot (`0x0040a990`) the answer; a probe off the map ends it. Its
-//     opening test, on `[squad+0x7c]`, reads a field nothing sets but to 0
-//     and never refuses.
+//     opening test refuses, with no draw, a unit that has a target and whose
+//     squad's look saw more than 10 enemies (`[squad+0x7c]`, `kFreeSpotCrowd`).
 //
 // A spot more than 200 units nearer the centre than the unit stands
 // (`0x00419230`, both distances through the integer square root) becomes the
@@ -173,12 +173,33 @@
 // walked to its end (`0x0041a097`). So a unit queued behind a full band is
 // sent round it once, and one already at its edge draws and stays.
 //
+// ### When the search lays nothing
+//
+// A route cut back to where the unit stands, with no free spot to re-aim at
+// -- or refused one, in a big fight -- is a search that laid nothing
+// (0x00419110 answers 0). `RecastPathfind` (0x00419730) does not then drop
+// the route the unit was walking: it deletes only the path it built
+// (0x00419a0f), and for a retry not aimed at a formation sets bit 2 of the
+// retry's flags (0x00419a1e) and steps through the path follower, whose stop
+// branch -- `Unit::Stop`'s, which tests bits 1 and 2 together (0x00419ee9)
+// -- walks the old route on to the first passable free spot. A unit already
+// on one stops where it is. `MoveState::route_failed`,
+// `MovementSystem::stop_branch_halts`.
+//
+// It is what keeps a column apart that walked out of one door on top of
+// itself: sent at a target whose ring is taken, every member's search lays
+// nothing, the first stands free where it is, and each of the others walks on
+// down the old route past the ones before. Dropping the route instead stood
+// all of them on one point -- Alesia's Gaul reinforcements, 45 of them, from
+// turn 379 (197 touching pairs and 118 stacked at turn 400, against 13 and 2).
+//
 // An earlier reading -- re-aim or refuse an order to an occupied point up front
 // -- refused 298 orders in 300 turns on Balcans, almost all deer grazing a few
 // dozen units from a herd-mate. That is not what these do: an order is never
 // refused, a route is cut short, and a unit on a taken spot stays there, not
 // arrived, until its script asks again.
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -226,6 +247,9 @@ inline constexpr std::int32_t kFormationStride = 200;
 /// (`0x00419230`).
 inline constexpr std::int32_t kFreeSpotHeadings = 360;
 inline constexpr std::int32_t kFreeSpotProbes = 40;
+/// More than this many entries on a targeting unit's squad's `Enemies` and
+/// the free-spot search refuses (0x004180c5: `cmp 10, [squad+0x7c]`).
+inline constexpr std::size_t kFreeSpotCrowd = 10;
 inline constexpr std::int32_t kFreeSpotGain = 200;
 
 /// The `<point>` types that make ownerless locks, and their radii

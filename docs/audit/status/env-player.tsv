@@ -3,27 +3,27 @@
 0x006adb20	verified	EnvReadInt(int plr): Player%d with the integer verbatim; atol of the stored text (0x006ac740, CRT 0x00763919)
 0x006ad3e0	verified	EnvReadInt(Settlement): invalid handle answers 0, no trap (fixed)
 0x006acc60	verified	EnvReadInt(Building): keyed by object id, not Settlement/Bld (invisible to script); invalid or dead handle answers 0 (fixed)
-0x006acb60	partial	EnvReadInt(str): MakePath context modelled for sequence threads only (0x005b9d40 sets '/'; fixed); object-attached and conversation contexts unmodelled, no root call reaches them
+0x006acb60	verified	EnvReadInt(str): MakePath (0x006ab0e0) prepends the running thread's context unless the key starts with '/'; every launcher's context now modelled on the thread (ScriptRecord::context, saved): sequence '/' (0x005b9d40), AI seat %d (0x0041cd00/0x0041ccb0), conversation phrase '/<name>/' (0x0050aa90/0x0050b070, FIXED: the tutorial's relative once-only keys were shared); tests conversation_a_relative_env_key_in_a_phrase_is_the_conversations_own, campaign_a_sequence_thread_runs_with_the_context_slash, vs_a_thread_carries_the_context_its_launcher_gave_it_across_a_save
 0x006adeb0	verified	EnvWriteInt(int plr): ltoa(value,10) and map set (0x006ac4a0)
 0x006ad900	verified	EnvWriteInt(Settlement): invalid handle stores nothing, no trap (fixed)
 0x006ad1a0	verified	EnvWriteInt(Building): invalid or dead handle stores nothing (fixed)
-0x006ac920	partial	EnvWriteInt(str): sequence context modelled (fixed); other launchers' contexts not
+0x006ac920	verified	EnvWriteInt(str): ltoa and set through MakePath with the thread's own context, every launcher's modelled (as EnvReadInt(str), fixed)
 0x006adbd0	verified	EnvReadString(int plr): missing key is "" (0x007ab85a)
 0x006ad4d0	verified	EnvReadString(Settlement): invalid handle answers "" (fixed)
 0x006acd70	verified	EnvReadString(Building): invalid or dead handle answers "" (fixed)
-0x006aca60	partial	EnvReadString(str): sequence context modelled (fixed); other launchers' contexts not
+0x006aca60	verified	EnvReadString(str): get through MakePath with the thread's own context, every launcher's modelled (as EnvReadInt(str), fixed)
 0x006adde0	verified	EnvWriteString(int plr): value stored as is, empty included
 0x006ad7e0	verified	EnvWriteString(Settlement): invalid handle stores nothing (fixed)
 0x006ad070	verified	EnvWriteString(Building): invalid or dead handle stores nothing (fixed)
-0x006ac890	partial	EnvWriteString(str): sequence context modelled (fixed); other launchers' contexts not
+0x006ac890	verified	EnvWriteString(str): set through MakePath with the thread's own context, every launcher's modelled (as EnvReadInt(str), fixed)
 0x006add10	partial	EnvReadObj(int plr): sscanf $$%d$$ rules and dead object -> invalid (fixed); original's 0..65535 index range not carried (32-bit never-reused ids, design)
 0x006ad6c0	partial	EnvReadObj(Settlement): as the int form; invalid scope -> invalid handle (fixed)
 0x006acf40	partial	EnvReadObj(Building): as the int form; invalid scope -> invalid handle (fixed)
-0x006acbd0	partial	EnvReadObj(str): root form now registered (fixed); context and id-space gaps as above
+0x006acbd0	partial	EnvReadObj(str): root form registered; MakePath context now the thread's own for every launcher (fixed, as EnvReadInt(str)); id-space gap as the int form (0..65535 slot index vs 32-bit never-reused ids, design)
 0x006adf70	partial	EnvWriteObj(int plr): invalid object stored as $$0$$ where the original writes $$65535$$ (both read back as nothing; id-space design)
 0x006ada00	partial	EnvWriteObj(Settlement): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
 0x006ad2b0	partial	EnvWriteObj(Building): invalid scope stores nothing (fixed); $$0$$ vs $$65535$$ as above
-0x006ac9b0	partial	EnvWriteObj(str): root form now registered (fixed); context and $$65535$$ gaps as above
+0x006ac9b0	partial	EnvWriteObj(str): root form registered; MakePath context now the thread's own for every launcher (fixed, as EnvReadInt(str)); $$0$$ vs $$65535$$ for an invalid object as the int form (id-space design)
 0x00433790	verified	IsResearched(Settlement): command row by name, first NamePlr/NameSet triple of its param (tokenizer 0x006ab970), owner+1 or settlement id; no row/no triple/invalid receiver -> false (fixed: was the research catalog, last triple, trap)
 0x00433b70	verified	IsResearched(int): Player%d verbatim (0x00433be6 -> 0x00433e39); NameSet row -> false (fixed)
 0x00434000	verified	IsResearching(Settlement): as IsResearched with "researching" (fixed)
@@ -57,12 +57,12 @@
 0x00425250	verified	Settlement::IsEnemy: row idPlayer-1, column owner, bit 0 clear; the original has no range check (out of range answers false here)
 0x004252c0	verified	Settlement::IsOwn: owner id == idPlayer-1
 0x004251e0	verified	Settlement::IsAlly: row idPlayer-1, column owner, bit 0 set
-0x005756b0	partial	EnemyObjs: 1..16, one class by registry lookup, unknown class -> invalid handle (fixed); the factory 0x004fe990 interns (same player/type/class string returns the existing query) where this mints one per call (query-lifetime design); query evaluation is the query batch's
+0x005756b0	partial	EnemyObjs: 1..16, one class by registry lookup, unknown class -> invalid handle (fixed); interned on (player, type, class) as 0x004fe990 does, 4000 ms cache, stale Contains/IsEmpty live, swept when unreachable (FIXED, query-model round). Left: bit 26 of [obj+0x2c] refuses an object for type 2 (0x004f8b16), not modelled
 0x00575ab0	partial	FriendlyObjs: type 1, as EnemyObjs
 0x005758b0	partial	ControllableObjs: type 3, as EnemyObjs
-0x005dea90	partial	GetPlayerUnits(player, class): members of the squads on the player's AI record (0x005de750, count gate 0x004441e0, Hero/BaseMage arms); this engine lists world objects of the class (squad-roster design)
-0x005debe0	partial	GetPlayerUnits(player): every member of every squad on the player's AI record; this engine lists Unit-class objects (squad-roster design)
-0x00421ee0	partial	MilUnits: members of squads with Squad::Eval != 0 and no 0x25 flag, neither Peaceful nor Animal (0x00443eb0); kept as a Military-class census because Squad::Eval is never written (squad design)
+0x005dea90	partial	GetPlayerUnits(player, class): FIXED -- the squads' members by 0x005de750's three arms (Hero heir: each squad's hero front member; BaseMage heir: heirs in squads a mage or hero leads; else every heir); test get_player_units_by_class_takes_the_three_arms; gap: the ClassCount tally gate 0x004441e0 is taken as 'some member descends from the class', which differs for members the AI never registered (bit 0x800000 of [unit+0x194])
+0x005debe0	verified	GetPlayerUnits(player): FIXED -- every member of every squad of the player, squads in index order, members front to back (0x005de750); was a census of Unit-class objects; test get_player_units_returns_an_objlist_of_the_players_squad_members
+0x00421ee0	verified	MilUnits: FIXED -- over the player's squads in index order ([record+0x8c] via 0x00443eb0), members still in the object table of squads with Squad::Eval != 0 (revalue_squads) and no 0x25 flag, less Peaceful/Animal heirs (0x005402f0); was a Military-class census; test mil_units_counts_the_members_of_the_players_fielded_squads
 0x0042d2f0	verified	Strongholds: settlements of idPlayer-1 whose central building's class is_a BaseTownhall now (0x0043ffc0) (fixed: was the creation-time kind)
 0x0042d770	verified	Outposts: as Strongholds with is_a Outpost (0x00440060); a negative decremented number counts every owner
 0x00436f50	verified	GetSettlements: one class lookup, is_a on the central building (0x0059c020); a decremented player below 0 is the wildcard (fixed: only 0 was); pushes central-building handles

@@ -735,12 +735,16 @@ TEST(objlist_getobjlist_is_a_snapshot_and_a_query_is_not) {
   CHECK(is_objlist(list));
   CHECK(f.call(script::CallKind::member, "count", {list}).value.as_integer() == 1);
 
-  // The whole distinction between the two types: the query re-evaluates, the
+  // The whole distinction between the two types: the query refreshes, the
   // list does not. This is why GUARD.VS re-reads `ol = qryDef.GetObjList();` at
-  // the top of every pass of its loop.
+  // the top of every pass of its loop -- a `Sleep(1000)` loop, which is the
+  // circle query's period: inside it the query answers the list its last
+  // refresh made (0x004f949f), and at it the next read refreshes.
   const ObjectId b = f.world.spawn(NativeClass::unit, nullptr);
   (void)f.world.set_health(b, 100);  // alive: see object_is_dead
   f.world.set_position(b, pt(11, 11));
+  CHECK(f.call(script::CallKind::member, "count", {query_value}).value.as_integer() == 1);
+  f.world.advance(1000);
   CHECK(f.call(script::CallKind::member, "count", {query_value}).value.as_integer() == 2);
   CHECK(f.call(script::CallKind::member, "count", {list}).value.as_integer() == 1);
 

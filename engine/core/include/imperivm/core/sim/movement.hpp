@@ -387,6 +387,32 @@ struct MoveState {
   /// Cleared by every new order and by `stop`. **Saved, and not hashed**:
   /// path media, and what it decides -- where the unit comes to rest -- is.
   bool stop_requested = false;
+  /// `CVXPathRetry`'s flag bit 2 (`[retry+0x20] & 4`): the last search laid
+  /// no route. `RecastPathfind` (0x00419730) clears bits 1 and 2 when it
+  /// starts; when its search fails (0x00419110 answers 0) it deletes the path
+  /// it built, **keeps the media the retry already had** -- the route being
+  /// walked, if there is one -- and, for a retry not aimed at a formation
+  /// (`[retry+0xc]` clear, 0x00419a17), sets this bit (0x00419a1e) and answers
+  /// with the path follower's own step (0x00419a48 .. 0x00419a5d). The
+  /// follower (0x00419ee0) tests bits 1 and 2 together (`test al, 6` at
+  /// 0x00419ee9), so a failed search walks the old route on exactly as
+  /// `Unit::Stop` does -- to the first passable free spot, for an order that
+  /// owns a lock, and not a step for one that does not -- instead of
+  /// stopping where it is. `IsArrived` (0x00417c10) is false while either bit
+  /// is set. (`SetDest` also searches again whenever one is set, 0x0041a4da;
+  /// **not reproduced**, see `run_goto`.)
+  ///
+  /// When the walk ends the order stays: the unit's step (0x005d3b50) deletes
+  /// a route with no next step only when no `Goto`-family call is waiting on
+  /// it (bit 0x10000 of `[unit+0x194]`, which the call sets as it suspends),
+  /// and a walk on after a failed search is inside the very call whose
+  /// `SetDest` failed, so its re-entry finds the order and answers not
+  /// arrived. **Inferred** for a halt with no call waiting, which this engine
+  /// keeps too. `Unit::Stop`'s halt drops the order, as its re-entry does.
+  /// **Saved, and not hashed**: path media, like `stop_requested`.
+  bool route_failed = false;
+  /// Either of the follower's stop bits (`[retry+0x20] & 6`).
+  [[nodiscard]] bool stopping() const noexcept { return stop_requested || route_failed; }
   /// `CVXPathRetry`'s flag bit 3 (`[retry+0x20] & 8`): the free-spot search
   /// (`0x004180b0`) has run for this destination. Set when it runs
   /// (`0x004191ab`), whether or not it re-aims; cleared only by `SetDest` to
@@ -691,6 +717,11 @@ class MovementSystem : public System {
   /// Game time until arrival at the current rate, rounded up. `-1` when the
   /// unit is not moving or its rate is zero.
   [[nodiscard]] std::int64_t eta(ObjectId id) const noexcept;
+  /// `CVXPathRetry::IsArrived` (0x00417c10) on the order the unit holds: in
+  /// its band round its goal -- the target's position for an object goal --
+  /// and, for an order that owns a lock, on a free spot. False with no order
+  /// (`goto_active`). What the `Goto` family answers at its re-entry.
+  [[nodiscard]] bool is_arrived(const World& world, ObjectId id) const;
 
   /// The pathfinder. Scratch state only, never hashed, never serialised.
   [[nodiscard]] PathFinder& pathfinder() noexcept { return finder_; }
@@ -863,6 +894,16 @@ class MovementSystem : public System {
   /// stands (`RecastPathfind`, `0x00419730`). A route that cannot move it
   /// stops it there, not arrived.
   void recast(World& world, std::size_t entry, Point here, GameTime now);
+  /// The path follower's stop branch (0x00419ee0 with `[retry+0x20] & 6`):
+  /// whether the unit stops at `here` rather than take its route's next step
+  /// -- an order that owns no lock, a route with nothing left, a passable free
+  /// spot, or a gate ahead that bars it.
+  [[nodiscard]] bool stop_branch_halts(const World& world, ObjectId id, const MoveState& move,
+                                       Point here, std::int64_t travelled) const;
+  /// And the stop: `Unit::Stop`'s (bit 1) ends the order with the route, as
+  /// its re-entry deletes the retry; a failed search's (bit 2 alone) ends the
+  /// walk and keeps the order.
+  void halt(World& world, ObjectId id, MoveState& move);
   /// The turn-start housekeeping every route gets: a dead owner, a drifting
   /// target, a grid that changed under the route.
   void prepare(World& world, Entry& entry, GameTime now);
@@ -958,8 +999,8 @@ struct GotoOrder {
   /// only supplied by `GotoAttack` and `FormSetupAndMoveTo`.
   std::int32_t range = 0;
   std::int32_t min_range = 0;
-  /// How long one call may wait before returning to the caller's loop. The
-  /// call suspends for the lesser of this and the time to arrival.
+  /// How long the first run of the call waits before its re-entry answers:
+  /// the whole of it (0x005d65e8), whatever the route. See `run_goto`.
   std::int64_t slice = 0;
   /// **How long the call may go without a route before it ends the script.**
   /// `0` ends it at the first search that lays none, a negative value never
@@ -990,7 +1031,9 @@ struct GotoOrder {
   ///     which for an unchanged goal skips the search and answers from the
   ///     route the record already has (0x0041a513, 0x0041a53c). A unit five
   ///     seconds stuck searches one call in five, and one stuck for 21
-  ///     seconds or more one call in twenty-one.
+  ///     seconds or more one call in twenty-one. (In the original only when
+  ///     no stop bit is set, which a search that laid nothing leaves set --
+  ///     `MoveState::route_failed`; **not reproduced**, see `run_goto`.)
   ///   * **the end of the unit's command clears the stamp**, inferred: slot 9
   ///     of the seven unit vtables (0x005d2940) clears it, with the walking
   ///     flags, before the base (0x005b5160) pops the command queue's head.
@@ -1013,7 +1056,32 @@ struct GotoOrder {
   /// original's; set by `Goto` and `GotoEnter` (0x005d6810), not by
   /// `GotoAttack`, whose entry point sets the target instead (0x005d6b20).
   bool drop_target = false;
+  /// The object forms' worker (0x005d40c0): `Goto(Obj)` and `GotoAttack`.
+  /// A target that is the mover answers true at once; one the mover may not
+  /// approach (`goto_may_approach`) lays no route and waits the slice, and so
+  /// does a target naming nothing (`target` is then `kNoObject` with this set).
+  bool object_form = false;
 };
+
+/// The range `SetDest` keeps for a point goal (0x0041a4c0): at most 999.
+[[nodiscard]] constexpr std::int32_t point_route_range(std::int32_t range) noexcept {
+  return range > 999 ? 999 : range;
+}
+
+/// The range `SetDest` keeps for an object goal (0x0041a5c0): clamped to 999
+/// and then, above 919, stored as 920 -- so 920 is the most an object
+/// route's band ever is.
+[[nodiscard]] constexpr std::int32_t object_route_range(std::int32_t range) noexcept {
+  if (range > 999) range = 999;
+  return range > 919 ? 920 : range;
+}
+
+/// Whether `mover` may route to `target` (0x005d40c0 at 0x005d4291 ..
+/// 0x005d42d7): anything that is not a unit, and a unit in no holder that is
+/// either not hidden or hidden from nobody on the mover's side. **Approximated:**
+/// the side mask `[record+0x18]` is not modelled, so a hidden unit is
+/// approached only by its own player's units.
+[[nodiscard]] bool goto_may_approach(const World& world, ObjectId mover, ObjectId target);
 
 /// The shared body of the `Goto` family. Returns the host outcome the entry
 /// point should return: `true` on arrival, `false` with a suspension while
@@ -1064,10 +1132,11 @@ struct GotoOrder {
 /// The first two are established: the shipped call sites pass `.range`,
 /// `.sight`, `other.sight/3` and `GetConst("GiveDistance")` in the second
 /// position, which are all distances, and the dumps print exactly such a
-/// tolerance as `Range`. `slice` is the game-time budget one call may wait
-/// for -- the call suspends for the lesser of it and the time to arrival, and
-/// the loop re-tests -- inferred from the loop the calls sit inside, `while
-/// (!.Goto(pt, 0, 2000, true, 0) && .HasPath)`. `give_up` is read from
+/// tolerance as `Range`. `slice` is how long the call's first run waits
+/// before its re-entry answers whether the unit has arrived -- the whole of
+/// it, whatever the route (0x005d65e8; `run_goto` has the protocol) -- and the
+/// loop it sits in, `while (!.Goto(pt, 0, 2000, true, 0) && .HasPath)`, calls
+/// again on a false. `give_up` is read from
 /// `gbr.exe` (0x005d61b0): how long the call may go without a route before the
 /// script ends, never when negative; `GotoOrder::give_up` has the addresses
 /// and what the earlier reading of it as a total timeout cost. The boolean is

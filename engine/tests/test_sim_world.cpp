@@ -6030,9 +6030,10 @@ TEST(attack_wait_is_the_shot_interval_for_the_crew_less_the_attack_animation) {
 }
 
 /// **`ClearTowerTarget` takes the target off every `CatapultTower` heir in
-/// the catapult's own settlement, and nothing else.** 0x004e37f0's walk over
-/// the settlement roll at `+0x68`, the `IsHeirOf("CatapultTower")` test, and
-/// the `0xffff` written to `[bld+0x1fc]`, which is `ui_target`.
+/// the catapult's own settlement, and nothing else -- and only from an engine
+/// that has towers.** 0x004e37f0's gate on `[cat+0x22c]`, `HasTowers`; its
+/// walk over the settlement roll at `+0x68`, the `IsHeirOf("CatapultTower")`
+/// test, and the `0xffff` written to `[bld+0x1fc]`, which is `ui_target`.
 TEST(clear_tower_target_clears_the_settlements_catapult_towers) {
   ClassGraph graph;
   graph.add(bytes_of(R"(<class id="RCatapult" cpp_class="CVXCatapult"><properties sight="150" maxhealth="400" max_units="10"/></class>)"),
@@ -6090,6 +6091,10 @@ TEST(clear_tower_target_clears_the_settlements_catapult_towers) {
     return b.call(script::CallKind::member, "ClearTowerTarget", 0, {receiver}).status ==
            script::HostStatus::ok;
   };
+  // No towers placed for it: the gate holds and nothing is touched.
+  CHECK(clear(PredicateBench::obj(cat)));
+  CHECK(b.world.state(tower)->ui_target == prey);
+  b.world.mutable_state(cat)->flags.has_towers = true;
   CHECK(clear(PredicateBench::obj(cat)));
   CHECK(b.world.state(tower)->ui_target == kNoObject);
   CHECK(b.world.state(roman)->ui_target == kNoObject);   // an heir counts
@@ -6939,8 +6944,8 @@ TEST(mutate_clears_the_squad_and_the_commands_and_re_classes_the_combatant) {
 
   Combatant* before = const_cast<Combatant*>(b.combat.find(who));
   REQUIRE(before != nullptr);
-  before->experience = 4200;
-  before->level = 5;
+  REQUIRE(b.heroes.set_experience(b.world, who, b.heroes.experience_for_level(5)));
+  REQUIRE(before->level == 5);
   before->target = prey;
   before->attacks = 3;
 
@@ -6953,7 +6958,7 @@ TEST(mutate_clears_the_squad_and_the_commands_and_re_classes_the_combatant) {
   CHECK(after->class_index == b.archer);
   // `[obj+0x180]` is one of the copied fields, so a converted Teuton keeps
   // what it has learnt; a combatant rebuilt from scratch would start at 1.
-  CHECK(after->experience == 4200);
+  CHECK(b.heroes.experience(who) == b.heroes.experience_for_level(5));
   CHECK(after->level == 5);
   // And everything the destroyed object was in the middle of is gone.
   CHECK(after->target == kNoObject);

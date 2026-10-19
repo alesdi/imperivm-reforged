@@ -84,7 +84,18 @@ ClassGraph fixture_graph() {
   // Two descendants, so that "how many of this class" is a different question
   // from "how many members". `Count` is the only entry point here that needs it.
   graph.add(bytes(R"(<class id="Horse" cpp_class="CVXUnit" parent="Unit"/>)"), "horse.sc.xml");
+  // A mule: `SendFoodWagon` loads one and orders it to follow.
+  graph.add(bytes(R"(<class id="Trader" cpp_class="CVXWagon" parent="Unit">
+      <properties max_load="1000"/>
+      <method sig="follow" vs="data/subai/wagon_follow.vs"/>
+    </class>)"),
+            "trader.sc.xml");
   graph.add(bytes(R"(<class id="GDruid" cpp_class="CVXUnit" parent="Unit"/>)"), "druid.sc.xml");
+  // An animal, which a squad's look leaves off its `Enemies`.
+  graph.add(bytes(R"(<class id="Animal" cpp_class="CVXUnit" parent="Unit"/>)"), "animal.sc.xml");
+  // A hero and a mage, which `GetPlayerUnits` lists by arms of their own.
+  graph.add(bytes(R"(<class id="Hero" cpp_class="CVXHero" parent="Unit"/>)"), "hero.sc.xml");
+  graph.add(bytes(R"(<class id="BaseMage" cpp_class="CVXUnit" parent="Unit"/>)"), "mage.sc.xml");
   // A sentry's specials: `Unit::HasFreedom` answers from the class's
   // `freedom` bit whatever the unit record says.
   graph.add(bytes(R"(<class id="Sentry" cpp_class="CVXUnit" parent="Unit">
@@ -1410,10 +1421,13 @@ TEST(eval_attach_scores_a_heros_squad_by_its_standing_against_min_and_its_level)
   }
 }
 
-/// `sq.SendFoodWagon(amount, range)` and `sq.FoodComing`: the nearest own
-/// settlement with food to spare within range loads a mule that follows the
-/// leader, and the squad reads the cargo of every wagon following one of its
-/// members as food on its way.
+/// `sq.SendFoodWagon(amount, range)` and `sq.FoodComing` (0x0042a750,
+/// 0x0042a5b0): the nearest own settlement with food to spare within range
+/// loads its race's mule, which is ordered to follow the leader; the squad
+/// reads the cargo of every food wagon in its player's peaceful squads whose
+/// running command is aimed at one of its members as food on its way. A wagon
+/// already on the road -- not following anybody -- is redirected instead when
+/// the settlement is 1,200 or more further.
 TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
   Fixture f;
   EconomySystem economy;
@@ -1455,27 +1469,52 @@ TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
     CHECK(out.status == HostStatus::ok);
     return out.value.is_integer() ? out.value.as_integer() : -1;
   };
+  // The newest object, which is the mule a send just made.
+  const auto newest = [&] { return f.world.next_id() - 1; };
+  // A wagon's own peaceful squad, as the AI's new-unit hook files it.
+  const auto file = [&](ObjectId wagon) {
+    const SquadKey own = f.heroes.squads().create(1);
+    f.heroes.squads().find(own)->flags |= kSquadFlagPeaceful;
+    CHECK(f.heroes.squads().join(own, wagon));
+  };
+  const auto following = [&](ObjectId wagon) {
+    const CommandQueue* q = f.commands.find(wagon);
+    const Command* run = q == nullptr ? nullptr : q->running();
+    return run != nullptr && run->verb == "follow" && run->arg_kind == CommandArgKind::object
+               ? run->object
+               : kNoObject;
+  };
 
   CHECK(coming(key) == 0);
-  // Out of range of everything own with food: nothing.
+  // Out of range of everything own with food: nothing, and no mule.
+  const ObjectId before = f.world.next_id();
   CHECK(!send(key, 300, 400));
-  CHECK(economy.wagons().empty());
-  // 500 is within 500: the near store loads 300 and the mule follows the
-  // leader; the food is out of the store at once and counts as coming.
+  CHECK(f.world.next_id() == before);
+  // 500 is within 500: the near store loads 300 into a mule in its holder,
+  // ordered to follow the leader.
   CHECK(send(key, 300, 500));
-  REQUIRE(economy.wagons().size() == 1);
-  CHECK(economy.wagons()[0].follow == leader);
-  CHECK(economy.wagons()[0].amount == 300);
-  CHECK(economy.wagons()[0].resource == Resource::food);
+  const ObjectId first = newest();
+  REQUIRE(f.world.find(first) != nullptr);
+  CHECK(f.world.find(first)->class_index == f.graph.find("Trader"));
+  CHECK(f.world.find(first)->state.cargo == 300);
+  CHECK(f.world.find(first)->state.cargo_resource == 1);
+  CHECK(f.world.find(first)->state.holder == economy.find(near)->holder.object);
+  CHECK(following(first) == leader);
   CHECK(economy.find(near)->warehouse.food == 700);
+  // Coming once it stands in a peaceful squad, and not before.
+  CHECK(coming(key) == 0);
+  file(first);
   CHECK(coming(key) == 300);
 
-  // 100 food exactly is enough to load at, and the load is clamped to it.
+  // 100 food exactly is enough to load at, and the load is clamped to it. The
+  // first mule follows a unit, so it is not redirected.
   economy.set_resource(hungry, Resource::food, 100);
   CHECK(send(key, 300, 500));
-  REQUIRE(economy.wagons().size() == 2);
-  CHECK(economy.wagons()[1].amount == 100);
+  const ObjectId second = newest();
+  REQUIRE(second != first);
+  CHECK(f.world.find(second)->state.cargo == 100);
   CHECK(economy.find(hungry)->warehouse.food == 0);
+  file(second);
   CHECK(coming(key) == 400);
 
   // Nothing to load is false, and a store that cannot pay is not chosen over
@@ -1483,10 +1522,42 @@ TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
   economy.set_resource(near, Resource::food, 0);
   CHECK(!send(key, 300, 500));
   CHECK(send(key, 50, 1000));
-  CHECK(economy.wagons().size() == 3);
+  const ObjectId third = newest();
   CHECK(economy.find(far)->warehouse.food == 950);
+  file(third);
+  const ObjectId none_yet = f.world.next_id();
   CHECK(!send(key, 0, 1000));
-  CHECK(economy.wagons().size() == 3);
+  CHECK(f.world.next_id() == none_yet);
+
+  // A wagon on the road to a point, 50 from the leader, carrying no more than
+  // asked: redirected when every store is at least 1,200 further, and its
+  // load and the stores untouched.
+  economy.set_resource(far, Resource::food, 0);
+  const ObjectId roadside = f.world.spawn(NativeClass::wagon, nullptr, f.graph.find("Trader"));
+  f.world.set_position(roadside, Point{150, 100});
+  f.world.set_owner(roadside, 1);
+  f.world.set_health(roadside, 400);
+  f.world.find(roadside)->state.cargo = 200;
+  f.world.find(roadside)->state.cargo_resource = 1;
+  file(roadside);
+  Command move;
+  move.verb = "move";
+  move.arg_kind = CommandArgKind::point;
+  move.point = Point{3000, 3000};
+  move.started = true;
+  f.commands.queue(roadside).entries.push_back(move);
+  const SettlementId distant = town(Point{1350, 100}, 1, 1000);  // 1,250 out
+  CHECK(send(key, 150, 2000));  // carrying more than asked: not a candidate
+  CHECK(economy.find(distant)->warehouse.food == 1000 - 150);
+  CHECK(following(roadside) == kNoObject);
+  economy.set_resource(distant, Resource::food, 1000);
+  const ObjectId plain = f.world.next_id();
+  CHECK(send(key, 300, 2000));
+  CHECK(f.world.next_id() == plain);
+  CHECK(following(roadside) == leader);
+  CHECK(f.world.find(roadside)->state.cargo == 200);
+  CHECK(economy.find(distant)->warehouse.food == 1000);
+  CHECK(coming(key) == 650);
 
   // Coming is by membership at the time of asking: a wagon after a member who
   // has left no longer counts, and another squad never counted it.
@@ -1495,16 +1566,16 @@ TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
   CHECK(f.heroes.squads().leave(key, leader));
   CHECK(coming(key) == 0);
   CHECK(f.heroes.squads().join(others, leader));
-  CHECK(coming(others) == 450);
+  CHECK(coming(others) == 650);
 
   // **A held leader is measured from its stored `(-1, -1)`** (`vtbl+0x3c`,
-  // 0x0042a7fc), not from what holds it: the far store, 50 from the keep the
-  // leader stands in, is out of a range of 200.
+  // 0x0042a7fc), not from what holds it: the distant store, 50 from the keep
+  // the leader stands in, is out of a range of 200.
   const ObjectId keep = f.world.spawn(NativeClass::building, nullptr);
-  f.world.set_position(keep, Point{1100, 150});
+  f.world.set_position(keep, Point{1350, 150});
   const ObjectId front = f.heroes.squads().find(others)->members.front();
   REQUIRE(f.world.put_in_holder(front, keep));
-  REQUIRE(f.world.resolve_position(front) == (Point{1100, 150}));
+  REQUIRE(f.world.resolve_position(front) == (Point{1350, 150}));
   CHECK(!send(others, 50, 200));
 
   // An empty squad and a handle naming none answer false and 0.
@@ -1652,13 +1723,152 @@ TEST(squad_del_order_clears_the_order_and_the_ai_destination_it_carried) {
   CHECK(!f.heroes.squads().delete_order(key));
 }
 
-/// **`IsEnemyInSquadSight` is always false, and so is the original's.**
-///
-/// 0x005d7400 reads `[squad+0x7c]`, and that field's only writers in the whole
-/// executable are two squad constructors, both writing zero. 20 shipped sites
-/// and 132 of this engine's remaining trap hits ask it; every one of them takes
-/// the same branch here that it takes on the original.
-TEST(squad_is_enemy_in_squad_sight_is_false_for_everyone) {
+// --------------------------------------------------------------------------
+// the look: `Enemies`
+// --------------------------------------------------------------------------
+
+/// **A squad's look lists what its members see of the players it is at war
+/// with** (0x00447700): every living unit or building of such a player inside
+/// some member's sight circle, in ascending id here, less messengers and
+/// animals (0x004459c0), less a hidden object of a player who does not share
+/// its view (0x00445d10) -- and nothing of a player the squad's owner is not
+/// at war with, however near.
+TEST(a_squads_look_lists_the_living_enemy_units_and_buildings_its_members_see) {
+  Fixture f;
+  const SquadKey key = f.heroes.squads().create(1);
+  const ObjectId near_eye = f.spawn(Point{100, 100}, 1);
+  const ObjectId far_eye = f.spawn(Point{2000, 100}, 1);
+  REQUIRE(f.heroes.squads().join(key, near_eye));
+  REQUIRE(f.heroes.squads().join(key, far_eye));
+  // Both see 500, the class's sight.
+  REQUIRE(f.world.find(near_eye)->sight == 500);
+
+  const ObjectId by_near = f.spawn(Point{400, 100}, 2);
+  const ObjectId by_far = f.spawn(Point{2400, 100}, 2);
+  const ObjectId between = f.spawn(Point{1200, 100}, 2);  // nobody's circle
+  const ObjectId edge = f.spawn(Point{100, 600}, 2);      // exactly on it
+  const ObjectId hall = f.world.spawn(NativeClass::building, nullptr, f.unit_class);
+  f.world.set_position(hall, Point{1900, 300});
+  f.world.set_owner(hall, 2);
+  const ObjectId corpse = f.spawn(Point{150, 100}, 2);
+  f.world.set_health(corpse, 0);
+  const ObjectId runner = f.spawn(Point{160, 100}, 2);
+  f.world.find(runner)->state.flags.messenger = true;
+  const ObjectId deer = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Animal"));
+  f.world.set_position(deer, Point{170, 100});
+  f.world.set_owner(deer, 2);
+  f.world.set_health(deer, 10);
+  const ObjectId sneak = f.spawn(Point{180, 100}, 2);
+  f.world.find(sneak)->state.flags.hidden = true;
+  // Player 3 is at peace with player 1 (bit 0 of 1's row), so nothing of
+  // its is an enemy, standing on the squad or not.
+  f.world.players().set_relation_word(1, 3, kRelationCeasefireOnly);
+  (void)f.spawn(Point{120, 100}, 3);
+  // Nor is the squad's own player.
+  (void)f.spawn(Point{130, 100}, 1);
+
+  Squad* squad = f.heroes.squads().find(key);
+  squad_look(f.world, *squad);
+  CHECK((squad->enemies == std::vector<ObjectId>{by_near, by_far, edge, hall}));
+  (void)between;
+
+  // A hidden unit is seen when its player shares its view with the squad's,
+  // and at war with it still.
+  f.world.players().set(2, 1, Relation::share_view, true);
+  squad_look(f.world, *squad);
+  CHECK((squad->enemies == std::vector<ObjectId>{by_near, by_far, edge, hall, sneak}));
+
+  // A dead member is no eye: its circle goes with it.
+  f.world.set_health(far_eye, 0);
+  squad_look(f.world, *squad);
+  CHECK((squad->enemies == std::vector<ObjectId>{by_near, edge, sneak}));
+}
+
+/// **The eyes are pruned before the sweep**: a member whose circle lies inside
+/// the widest-seeing member's (floored distance plus its sight, against that
+/// sight) is dropped, by two walks either side of the leader. The answer
+/// cannot tell -- a dropped circle adds nothing -- except where the floored
+/// root rounds a circle in that pokes out by less than a unit, which is what
+/// this test stands on: the narrow eye is 1.41 from the wide one, floored to
+/// 1, and 1 + 59 is the wide eye's 60, so it is dropped -- by the second walk,
+/// since it joined first -- and the point only it reaches goes unseen.
+TEST(a_squads_look_drops_the_eyes_the_widest_sees_round) {
+  Fixture f;
+  const SquadKey key = f.heroes.squads().create(1);
+  const ObjectId narrow = f.spawn(Point{1001, 1001}, 1);
+  const ObjectId wide = f.spawn(Point{1000, 1000}, 1);
+  f.world.find(narrow)->sight = 59;
+  f.world.find(wide)->sight = 60;
+  REQUIRE(f.heroes.squads().join(key, narrow));
+  REQUIRE(f.heroes.squads().join(key, wide));
+  // 60.008 from the wide eye, exactly 59 from the narrow one.
+  const ObjectId sliver = f.spawn(Point{1001, 1060}, 2);
+  Squad* squad = f.heroes.squads().find(key);
+  squad_look(f.world, *squad);
+  CHECK(squad->enemies.empty());
+  // The other order: the wide eye leads from the start, and the first walk
+  // drops the narrow one.
+  const SquadKey other = f.heroes.squads().create(1);
+  const ObjectId wide2 = f.spawn(Point{1000, 1000}, 1);
+  const ObjectId narrow2 = f.spawn(Point{1001, 1001}, 1);
+  f.world.find(wide2)->sight = 60;
+  f.world.find(narrow2)->sight = 59;
+  REQUIRE(f.heroes.squads().join(other, wide2));
+  REQUIRE(f.heroes.squads().join(other, narrow2));
+  squad_look(f.world, *f.heroes.squads().find(other));
+  CHECK(f.heroes.squads().find(other)->enemies.empty());
+  // Widen the narrow eye past the containment and it is kept.
+  f.world.find(narrow)->sight = 60;
+  squad = f.heroes.squads().find(key);  // the table moved when `other` was made
+  squad_look(f.world, *squad);
+  CHECK((squad->enemies == std::vector<ObjectId>{sliver}));
+}
+
+/// **The look is a timer**: the first member's join arms it with no delay
+/// (0x00445b4b), it fires once the AI manager exists, and it re-arms itself
+/// for `SquadLookIvl` (0x00447a47) -- so `Enemies` is what the squad saw at
+/// its last look, not what stands there now. A leave that brings the
+/// strength to 0 kills it (`stand_down`).
+TEST(a_squads_look_fires_on_its_timer_once_the_manager_exists) {
+  Fixture f;
+  AiSystem ai;
+  f.world.add_system(&ai);
+  const SquadKey key = f.heroes.squads().create(1);
+  CHECK(f.heroes.squads().find(key)->look_due == kSquadLookUnarmed);
+  const ObjectId eye = f.spawn(Point{100, 100}, 1);
+  REQUIRE(f.heroes.squads().join(key, eye));
+  CHECK(f.heroes.squads().find(key)->look_due == 0);
+  const ObjectId foe = f.spawn(Point{300, 100}, 2);
+
+  CHECK(run_squad_looks(f.world, f.heroes.squads(), 100) == 0);  // no manager yet
+  CHECK(f.heroes.squads().find(key)->enemies.empty());
+  ai.start_manager();
+  CHECK(run_squad_looks(f.world, f.heroes.squads(), 100) == 1);
+  CHECK((f.heroes.squads().find(key)->enemies == std::vector<ObjectId>{foe}));
+  // No constants table: the shipped interval.
+  CHECK(f.heroes.squads().find(key)->look_due == 100 + kSquadLookIntervalShipped);
+
+  // The foe walks off; the list stays until the next look.
+  f.world.set_position(foe, Point{3000, 100});
+  CHECK(run_squad_looks(f.world, f.heroes.squads(), 1099) == 0);
+  CHECK((f.heroes.squads().find(key)->enemies == std::vector<ObjectId>{foe}));
+  CHECK(run_squad_looks(f.world, f.heroes.squads(), 1100) == 1);
+  CHECK(f.heroes.squads().find(key)->enemies.empty());
+
+  // A second member's join does not re-arm it; the strength reaching 0 at a
+  // leave kills it.
+  const ObjectId mate = f.spawn(Point{120, 100}, 1);
+  REQUIRE(f.heroes.squads().join(key, mate));
+  CHECK(f.heroes.squads().find(key)->look_due == 2100);
+  REQUIRE(f.heroes.squads().leave(f.world, key, mate));
+  REQUIRE(f.heroes.squads().leave(f.world, key, eye));
+  CHECK(f.heroes.squads().find(key)->look_due == kSquadLookUnarmed);
+}
+
+/// `IsEnemyInSquadSight` (0x005d7400) is `[squad+0x7c] != 0`: whether the
+/// receiver's squad's `Enemies` holds anybody. A unit in no squad answers
+/// false; an invalid or dead receiver the invalid handle.
+TEST(squad_is_enemy_in_squad_sight_reads_the_squads_enemies) {
   Fixture f;
   HostRegistry registry;
   register_squad_host(registry);
@@ -1668,16 +1878,111 @@ TEST(squad_is_enemy_in_squad_sight_is_false_for_everyone) {
   const HostOutcome no_squad =
       invoke(registry, CallKind::member, "IsEnemyInSquadSight", 0, outside);
   CHECK(no_squad.status == HostStatus::ok);
-  CHECK(no_squad.value.as_integer() == 0);
+  CHECK(no_squad.value.is_integer() && no_squad.value.as_integer() == 0);
 
-  // And a unit that is in a squad, with enemies of another player standing on
-  // top of it, answers the same.
   const SquadKey key = f.squad_of(1, 2);
   const ObjectId member = f.heroes.squads().find(key)->members.front();
-  for (int i = 0; i < 3; ++i) (void)f.spawn(Point{100, 100}, 2);
+  const ObjectId foe = f.spawn(Point{100, 100}, 2);
   HostCall inside(f.world, {obj(member)});
-  CHECK(invoke(registry, CallKind::member, "IsEnemyInSquadSight", 0, inside).value.as_integer() ==
-        0);
+  // Enemies standing on it, but the squad has not looked.
+  CHECK(!invoke(registry, CallKind::member, "IsEnemyInSquadSight", 0, inside)
+             .value.truthy_scalar());
+  squad_look(f.world, *f.heroes.squads().find(key));
+  CHECK(invoke(registry, CallKind::member, "IsEnemyInSquadSight", 0, inside)
+            .value.truthy_scalar());
+  // Every member asks the same list.
+  HostCall other(f.world, {obj(f.heroes.squads().find(key)->members.back())});
+  CHECK(invoke(registry, CallKind::member, "IsEnemyInSquadSight", 0, other)
+            .value.truthy_scalar());
+  (void)foe;
+
+  f.world.set_health(member, 0);
+  const HostOutcome dead = invoke(registry, CallKind::member, "IsEnemyInSquadSight", 0, inside);
+  CHECK(dead.status == HostStatus::ok);
+  CHECK(dead.value.is_object() && dead.value.as_object().id == 0);
+}
+
+/// **`MilUnits` counts the members of a player's fielded squads** (0x00421ee0
+/// -> 0x00443eb0): squads with a strength (`Squad::Eval`) and none of
+/// no-AI, peaceful, sentries; members still in the world that are neither
+/// `Peaceful` nor `Animal` heirs, dead or alive. Units in no squad, and
+/// other players' squads, are nobody's army here.
+TEST(mil_units_counts_the_members_of_the_players_fielded_squads) {
+  Fixture f;
+  HostRegistry registry;
+  register_player_host(registry);
+  const auto mil = [&](std::int32_t player) {
+    HostCall call(f.world, {Value::integer(player)});
+    return invoke(registry, CallKind::free_function, "MilUnits", 1, call).value.as_integer();
+  };
+  const SquadKey army = f.squad_of(1, 3);
+  const SquadKey peaceful = f.squad_of(1, 2);
+  const SquadKey guards = f.squad_of(1, 2);
+  (void)f.squad_of(2, 4);
+  (void)f.spawn(Point{500, 500}, 1);  // in no squad
+  const ObjectId deer = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Animal"));
+  f.world.set_owner(deer, 1);
+  REQUIRE(f.heroes.squads().join(army, deer));
+  revalue_squads(f.world, f.heroes.squads());
+  f.heroes.squads().find(peaceful)->flags = kSquadFlagPeaceful;
+  f.heroes.squads().find(guards)->flags = kSquadFlagSentries;
+  // The plain squad's three; the deer, the flagged squads and the loner not.
+  CHECK(mil(2) == 3);
+  // A dead member still counts while it is in the squad.
+  f.world.set_health(f.heroes.squads().find(army)->members.front(), 0);
+  CHECK(mil(2) == 3);
+  // A squad with no strength is skipped whole.
+  f.heroes.squads().find(army)->eval = 0;
+  CHECK(mil(2) == 0);
+  CHECK(mil(3) == 4);
+}
+
+/// `GetPlayerUnits(player, class)` by its three arms (0x005de750): a class
+/// under `Hero` lists each squad's front member that is a hero and an heir
+/// (not its army); a class under `BaseMage` lists its heirs in the squads a
+/// mage or a hero leads; any other class every heir in every squad. A class
+/// nobody in the squads descends from lists nothing.
+TEST(get_player_units_by_class_takes_the_three_arms) {
+  Fixture f;
+  HostRegistry registry;
+  register_player_host(registry);
+  const auto listed = [&](const char* name) {
+    HostCall call(f.world, {Value::integer(2), Value::string(name)});
+    const HostOutcome out = invoke(registry, CallKind::free_function, "GetPlayerUnits", 2, call);
+    const std::span<const ObjectId> items =
+        objlist_pool_of(f.world).items(objlist_of(out.value));
+    return std::vector<ObjectId>(items.begin(), items.end());
+  };
+  const auto spawn_as = [&](const char* name) {
+    const ObjectId id = f.world.spawn(NativeClass::unit, nullptr, f.graph.find(name));
+    f.world.set_owner(id, 1);
+    f.world.set_health(id, 100);
+    return id;
+  };
+  const ObjectId hero = spawn_as("Hero");
+  f.world.find(hero)->state.flags.is_hero = true;
+  const ObjectId guard = spawn_as("Unit");
+  const ObjectId mage = spawn_as("BaseMage");
+  const ObjectId apprentice = spawn_as("BaseMage");
+  const ObjectId stray = spawn_as("BaseMage");
+  const ObjectId soldier = spawn_as("Unit");
+  const SquadKey army = f.heroes.squads().create(1);
+  REQUIRE(f.heroes.squads().join(army, hero));
+  REQUIRE(f.heroes.squads().join(army, guard));
+  REQUIRE(f.heroes.squads().join(army, apprentice));
+  const SquadKey circle = f.heroes.squads().create(1);
+  REQUIRE(f.heroes.squads().join(circle, mage));
+  const SquadKey line = f.heroes.squads().create(1);
+  REQUIRE(f.heroes.squads().join(line, soldier));
+  REQUIRE(f.heroes.squads().join(line, stray));
+
+  CHECK((listed("Hero") == std::vector<ObjectId>{hero}));
+  // The stray mage is in a squad a soldier leads.
+  CHECK((listed("BaseMage") == std::vector<ObjectId>{apprentice, mage}));
+  CHECK((listed("Unit") ==
+         std::vector<ObjectId>{hero, guard, apprentice, mage, soldier, stray}));
+  CHECK(listed("Horse").empty());
+  CHECK(listed("NoSuchClass").empty());
 }
 
 // --------------------------------------------------------------------------

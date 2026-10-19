@@ -748,11 +748,12 @@ TEST(vs_the_shipped_surface_is_wired_even_though_it_is_not_written) {
   CHECK(registry.find(CallKind::member, "AddCommand", 3) != kUnresolvedHost);
   CHECK(shipped_global_names().size() == 245);
 
-  // The runtime implements twenty-one of them itself: `Sleep`, `AIBreakScript`,
-  // `KillScript`, `StartPlayerScript`, `Run` in six free arities and the
-  // settlement's member one, and `AIRun` in five free and five member arities.
+  // The runtime implements fifteen of them itself: `Sleep`, `KillScript`,
+  // `StartPlayerScript`, `Run` in six free arities and the settlement's member
+  // one, and the member `AIRun` in five arities. The free `AIRun` and
+  // `AIBreakScript` are the AI's launcher and live with it (`sim/ai.cpp`).
   register_scheduler_builtins(registry);
-  CHECK(registry.implemented() == 21);
+  CHECK(registry.implemented() == 15);
 }
 
 TEST(vs_a_runaway_loop_traps_instead_of_hanging) {
@@ -1007,59 +1008,10 @@ TEST(vs_member_airun_runs_the_helper_before_the_callers_next_statement) {
   CHECK(stage.scheduler.live_count() == 0);
 }
 
-TEST(vs_airun_spawns_a_peer_and_aibreakscript_kills_it) {
-  Stage stage;
-  // The child is the standard behaviour shape: an infinite loop around a sleep.
-  // 101 shipped scripts look exactly like this.
-  REQUIRE(stage.add("// void\nwhile (1) {\n  Tick();\n  Sleep(10);\n}\n", "child.vs"));
-  REQUIRE(stage.add(
-      "// void\n"
-      "int handle;\n"
-      "handle = AIRun(\"child.vs\");\n"
-      "Note(handle);\n"
-      "Sleep(35);\n"
-      "AIBreakScript(handle);\n",
-      "parent.vs"));
-
-  const ScriptId parent = stage.scheduler.spawn(1);
-  CHECK(parent == 1);
-
-  // The child is spawned during the parent's first slice and runs in the same
-  // pass, because ids only increase and the walk is over a growing vector.
-  stage.scheduler.run_ready();
-  REQUIRE(stage.world.log.size() == 1);
-  CHECK(stage.world.log[0] == "2");
-  CHECK(stage.scheduler.alive(2));
-  CHECK(stage.world.ticks == 1);
-
-  for (int i = 0; i < 3; ++i) stage.scheduler.advance(10);
-  CHECK(stage.world.ticks == 4);
-
-  // At t = 35 the parent wakes and kills the child.
-  stage.scheduler.advance(5);
-  CHECK(!stage.scheduler.alive(2));
-  CHECK(!stage.scheduler.alive(1));
-  CHECK(stage.scheduler.live_count() == 0);
-
-  const int ticks_at_death = stage.world.ticks;
-  for (int i = 0; i < 5; ++i) stage.scheduler.advance(10);
-  CHECK(stage.world.ticks == ticks_at_death);
-}
-
-TEST(vs_a_missing_script_is_survivable) {
-  Stage stage;
-  // Four `<behavior script=...>` bindings in the shipped class tree name files
-  // that are not in the pack at all, so this must not be fatal.
-  REQUIRE(stage.add("// void\nint handle;\nhandle = AIRun(\"not_shipped.vs\");\nNote(handle);\n",
-                    "orphan.vs"));
-  stage.scheduler.spawn(0);
-  const RunReport report = stage.scheduler.run_ready();
-  CHECK(report.failed == 0);
-  REQUIRE(stage.world.log.size() == 1);
-  // "Cannot run '%s' script", and the handle every failed `AIRun` answers:
-  // 0x00422f90 starts from -1 and keeps it.
-  CHECK(stage.world.log[0] == "-1");
-}
+// The free `AIRun` and `AIBreakScript` -- a thread in the caller's AI and an
+// id in its range -- are tested with the AI they belong to:
+// `ai_run_answers_an_id_in_the_callers_ai_and_the_id_is_reused` in
+// test_ai.cpp, which also covers a name the library does not hold.
 
 /// Two scripts due on the same millisecond run in the order they went to
 /// sleep, not by id: the original's wheel appends each armed thread at the
@@ -1101,6 +1053,57 @@ TEST(vs_scripts_due_together_run_in_the_order_they_were_armed) {
     CHECK(loaded.world.log[0] == "2");
     CHECK(loaded.world.log[1] == "1");
   }
+}
+
+/// What a host call is told about its thread's context: `[thread+0x44]`.
+HostOutcome host_context_note(CallContext& context) {
+  world_of(context).log.push_back("[" + std::string(context.context) + "]");
+  return HostOutcome::ok_void();
+}
+
+/// **A thread's context is its own, a launcher's to set, and saved.** A
+/// spawned thread has none (0x0069d090 leaves `+0x44` null); `set_context` is
+/// 0x0069d040, which the launchers call once the thread exists, and every host
+/// call the thread makes is handed it. A synchronous call runs on a fresh
+/// thread with the context its launcher gives it -- none, unless it is a
+/// conversation's phrase -- and a script it spawns starts with none. Saved as
+/// the thread's `Context` (0x0069cc58).
+TEST(vs_a_thread_carries_the_context_its_launcher_gave_it_across_a_save) {
+  const char* source = "// void\nCtx();\nSleep(10);\nCtx();\n";
+  Stage stage;
+  stage.registry.define(CallKind::free_function, "Ctx", 0, &host_context_note);
+  REQUIRE(stage.add(source, "ctx.vs"));
+  const ScriptId plain = stage.scheduler.spawn(0);
+  const ScriptId tagged = stage.scheduler.spawn(0);
+  CHECK(stage.scheduler.set_context(tagged, "3"));
+  CHECK(stage.scheduler.context(plain).empty());
+  CHECK(stage.scheduler.context(tagged) == "3");
+  stage.scheduler.run_ready();
+  REQUIRE(stage.world.log.size() == 2);
+  CHECK(stage.world.log[0] == "[]");
+  CHECK(stage.world.log[1] == "[3]");
+
+  // A call is handed what its launcher passes, and nothing otherwise.
+  (void)stage.scheduler.call(0, {}, "/T_Conv/");
+  (void)stage.scheduler.call(0);
+  REQUIRE(stage.world.log.size() == 4);
+  CHECK(stage.world.log[2] == "[/T_Conv/]");
+  CHECK(stage.world.log[3] == "[]");
+
+  std::vector<std::byte> saved;
+  stage.scheduler.serialize(saved);
+  Stage loaded;
+  loaded.registry.define(CallKind::free_function, "Ctx", 0, &host_context_note);
+  REQUIRE(loaded.add(source, "ctx.vs"));
+  REQUIRE(loaded.scheduler.deserialize(saved).ok());
+  CHECK(loaded.scheduler.context(tagged) == "3");
+  loaded.scheduler.advance(10);
+  REQUIRE(loaded.world.log.size() == 2);
+  CHECK(loaded.world.log[0] == "[]");
+  CHECK(loaded.world.log[1] == "[3]");
+  // A dead thread has no context to set or read.
+  CHECK(!loaded.scheduler.set_context(tagged, "4"));
+  CHECK(loaded.scheduler.context(tagged).empty());
 }
 
 /// `StartPlayerScript` starts a name once per player: 0x0056f720 refuses a

@@ -327,7 +327,52 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (0x005d28c0) rather than kept beside it. A version-36 file holds progress
 /// within the level and the level as a second word; read as a total, every
 /// veteran would load at level 1.
-inline constexpr std::uint32_t kStateVectorVersion = 37;
+/// 38: a squad carries its `Enemies` list (`Squad::enemies`, what its look
+/// last saw, `[squad+0x64]`) and when its look next fires (`look_due`). Not
+/// hashed; a version-37 file would load every squad blind and never looking,
+/// and its members would find no target until a new member joined.
+/// 39: a combatant carries its stored stats (`Combatant::stats`: maximum
+/// health and stamina, range, attack and both armours, `[obj+0xc8..0xe8]`),
+/// which the rebuild `recalc_bonuses` (0x005d9df0) writes, in place of the
+/// three modifier words `attack_bonus`, `armour_bonus` and `level_floor`
+/// nothing wrote. A version-38 file has no stats to load, and every unit
+/// would fight with zero attack until something rebuilt it. The combatant
+/// also loses its own `experience` word: the running total is the hero
+/// section's `UnitRecord::experience` alone, and `Combatant::level` is the
+/// stored level the rebuild writes. A hero record carries its army addend
+/// (`HeroRecord::army_addend`, `[hero+0x2c0]`).
+/// 40: the world section carries each query's cache after the query specs
+/// (`World::QueryCache`: the list its last refresh made and when the next one
+/// falls due, `[query+0x4c]`). A version-39 file has neither, and a query
+/// is no longer evaluated on every read: docs/formats/query-model.md.
+/// 41: the economy section grew the wagons' loyalty rows -- a wagon's
+/// loyalty, pending change, capture flag and its two capture timers
+/// (`WagonLoyalty`), which `Wagon::loyalty`, `SetLoyalty` and
+/// `DecreaseLoyalty` read and write -- and lost its shipment table: a
+/// settlement's mule and a squad's food wagon are wagon objects in the world
+/// section now, not rows with a build timer. Hashed, so a version-40 file
+/// would load a caravan mid-capture as one nobody had touched, and its mules
+/// in transit as loads nobody carried.
+/// 42: siege fire is the scripts' (`docs/formats/siege-fire.md`). Every
+/// object carries a catapult's own target (`ObjectState::catapult_target`,
+/// `[cat+0x228]`) and two more flag bits, `towers_posted` and `has_towers`;
+/// a version-41 file would load every engine with no target and every
+/// outpost and Roman tower still owed its fake towers, which would be
+/// placed a second time.
+/// 43: every script thread carries its context string
+/// (`script::ScriptRecord::context`, the scheduler section's version 3): `/` on
+/// a sequence's, the seat on an AI's. A version-42 file would load every
+/// thread with none, and a relative root `Env*` key in a sequence would stop
+/// meaning the absolute one. The same round keeps each AI seat's `AIRun` ids
+/// and settlement slots on its row (system section version 37), and a
+/// retrying call's word of state (`Execution::retry_scratch`, the coroutine
+/// payload's version 5), which the `Goto` family's re-entry answers on.
+/// 44: the movement section carries each route's failed-search bit
+/// (`MoveState::route_failed`, `[retry+0x20] & 4`; system section version
+/// 38). A version-43 file would load a unit walking on from a failed search
+/// as one walking to the end of its old route, and one stopped after it as
+/// arrived when it stands in its band.
+inline constexpr std::uint32_t kStateVectorVersion = 44;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

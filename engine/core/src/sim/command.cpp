@@ -2,6 +2,7 @@
 // See include/imperivm/core/sim/command.hpp.
 
 #include "imperivm/core/sim/command.hpp"
+#include "imperivm/core/sim/stats.hpp"
 
 #include "imperivm/core/sim/host_context.hpp"
 
@@ -630,7 +631,27 @@ void CommandSystem::advance(World& world, const Turn& turn) {
   }
   // Ascending id, which is spawn order. `service` never inserts a queue, so the
   // vector cannot move under this walk.
-  for (Entry& entry : queues_) service(world, entry, turn.time);
+  for (Entry& entry : queues_) {
+    service(world, entry, turn.time);
+    track_formation(world, entry);
+  }
+}
+
+void CommandSystem::track_formation(World& world, ObjectId id) {
+  const std::size_t at = lower_bound(id);
+  if (at < queues_.size() && queues_[at].id == id) track_formation(world, queues_[at]);
+}
+
+void CommandSystem::track_formation(World& world, Entry& entry) {
+  const Command* head = entry.queue.running();
+  const bool standing =
+      head != nullptr && head->started && head->verb == kStandPositionCommand;
+  if (standing == entry.standing) return;
+  entry.standing = standing;
+  // 0x005b4f20: the command advance rebuilds a unit whose command named
+  // `stand_position` as it ends, and again as one starts, which is when the
+  // party formation's bonus comes and goes (`docs/formats/unit-stats.md`).
+  recalc_bonuses(world, entry.id);
 }
 
 namespace {
@@ -840,6 +861,7 @@ bool CommandSystem::remove_at(World& world, ObjectId id, std::size_t index) {
     retire(q->entries[at]);
   }
   q->entries.erase(q->entries.begin() + static_cast<std::ptrdiff_t>(at));
+  if (at == 0) track_formation(world, id);
   return true;
 }
 
@@ -907,6 +929,7 @@ std::uint32_t CommandSystem::set_command(World& world, ObjectId id, std::string_
       }
     }
   }
+  track_formation(world, id);
   return issued;
 }
 
@@ -1114,6 +1137,27 @@ bool CommandSystem::dispatch(World& world, std::span<const ObjectId> actors, con
   return ran.id != script::kNoScript;
 }
 
+bool CommandSystem::run_method(World& world, ObjectId id, std::string_view verb,
+                               const CommandDef& row) {
+  if (scheduler_ == nullptr || world.find(id) == nullptr) return false;
+  const std::string path(script_for(world, id, verb));
+  const std::uint32_t chunk = path.empty()                ? script::kNoChunk
+                              : library_ != nullptr ? library_->chunk_for(path)
+                                                    : scheduler_->find_chunk(path);
+  if (chunk == script::kNoChunk || chunk >= scheduler_->chunk_count()) return false;
+  const script::Value self = script::Value::object(kTypeObj, id);
+  const Command ambient = row_command(row);
+  const Command* outer = hooked_;
+  hooked_ = &ambient;
+  const script::CallReport ran = scheduler_->call(chunk, std::span<const script::Value>(&self, 1));
+  hooked_ = outer;
+  if (ran.status == script::ExecStatus::failed) {
+    scheduler_->report_trap(
+        script::FailedScript{ran.id, scheduler_->chunk(chunk).source_name, ran.trap});
+  }
+  return true;
+}
+
 void CommandSystem::run_immediate(World& world, ObjectId id, Command command) {
   // The command was built, so it has its id (0x00599302), whatever follows.
   command.id = world.next_command_id();
@@ -1169,6 +1213,7 @@ bool CommandSystem::issue_research(World& world, ObjectId id, Command command) {
   runner.started = false;
   runner.script = script::kNoScript;
   queue_ref.entries.insert(queue_ref.entries.begin(), std::move(command));
+  track_formation(world, id);
   return true;
 }
 
@@ -1320,7 +1365,7 @@ struct Receivers {
     out.error = kNoReceiver;
     return out;
   }
-  out.ids = receiver_objects(*out.world, receiver, accept_query);
+  out.ids = receiver_objects(ctx, *out.world, receiver, accept_query);
   return out;
 }
 
@@ -2021,38 +2066,161 @@ HostOutcome get_cmd_stamina_cost_impl(CallContext& ctx) {
 /// back to 0. So an `Idle(1900)` on the map costs about 1,900 ms of game time
 /// in both branches, and the difference between them is the target.
 ///
-/// **Here:** the held branch is the timed wait it was; the other drops the
-/// target and is a suspension of `ms`, which is what the activity's budget
-/// amounts to. `CombatSystem::stop` is the drop, as it is for `Taunt`: it also
-/// moves an engaging unit out of the engaging state, which the activity write
-/// does too. A non-positive `ms` still ends the slice, as a 3 always does --
-/// one pass, the shortest wait this scheduler has -- and no shipped site
-/// passes one.
+/// **The activity, step by step** (0x005d2ca0). It runs when it is set and
+/// again each time the animation it started or the pose it held has run out,
+/// with the budget `B` that is left:
 ///
-/// **Not reproduced, recorded:** the fidget animations are drawn from the
-/// synchronised generator (`[0x996ff4] + 0x12a0`, its `vtbl+0x14`, a one in 15
-/// chance per 100 ms step for an idle, one in 3 for a taunt), so in `gbr.exe`
-/// an idle on the map spends random draws that this engine does not. The
-/// activity write itself is absent for the reasons `Taunt` gives below.
+///   1. The base animation is table index 12 for an idle and 19 for a taunt
+///      (the entity's `idx` 13 and 20). With none, go to 3.
+///   2. An idle picks its variant first: `n` is 1, 2, 3 or 4 as the indices
+///      13, 14 and 15 after the base are present in turn (0x005a81b0), and it
+///      plays index `12 + rand(0, n - 1)` from the synchronised generator --
+///      no draw at all when `n` is 1. If that animation's length `L` is at
+///      most `B`, then for `t` = 0, 100, ... up to `B - L`: when the unit's
+///      walk index is 0 (here walk slot 1) and `rand(1, 15)` -- `rand(1, 3)`
+///      for a taunt -- is 1, or the force flag is up, the flag drops, the
+///      animation starts `t` ms on, `B` loses `t + L` (0x0053e6c0's answer)
+///      and the step is over until it ends. A unit on another walk index
+///      draws nothing.
+///   3. Otherwise, with budget left the unit holds its pose for all of it
+///      (0x0053ced0) and the budget is 0; with none left, the activity wakes
+///      the script (0x0069f8f0) and goes back to 0.
+///
+/// So an idle on the map costs its whole `ms` and spends a draw per 100 ms of
+/// it until a fidget plays, and one per variant choice at every step,
+/// including the last. **Here** the steps are the call's re-entries: the
+/// first run drops the target and takes the first step, and each step that
+/// waits answers `retry` for the time to the next one, keeping the budget
+/// and a fidget still to start in the call's word (`CallContext::scratch`);
+/// the step that wakes the script answers done. **Approximated:** the
+/// original holds the first step while an animation the unit was already
+/// playing runs out (its timer 0x1b); here it is taken at once. The fidget
+/// starts on the world's clock, not the script's millisecond.
+///
 /// A handle that names no object is held for `ms` as before: the original
 /// dereferences null there, which is a fault rather than a behaviour, and a
 /// wait is what keeps an idle loop from spinning on one.
-HostOutcome idle_activity(const Self& self, std::int64_t ms) {
-  const HostOutcome wait = HostOutcome::sleep_for(ms > 0 ? ms : 0);
+enum class IdleKind : std::uint8_t { idle, taunt };
+
+/// The call's word: the budget left in the low 24 bits, and the `idx` of a
+/// fidget still to start above them, 0 for none.
+constexpr std::uint32_t kIdleBudgetMask = 0x00FFFFFFu;
+constexpr std::uint32_t kIdleAnimShift = 24;
+
+[[nodiscard]] std::uint32_t idle_word(std::int64_t budget, std::int32_t pending) noexcept {
+  const std::int64_t clamped = std::clamp<std::int64_t>(budget, 0, kIdleBudgetMask);
+  return static_cast<std::uint32_t>(clamped) |
+         (static_cast<std::uint32_t>(pending) << kIdleAnimShift);
+}
+
+[[nodiscard]] HostOutcome idle_wait(CallContext& ctx, std::int64_t wait, std::int64_t budget,
+                                    std::int32_t pending) {
+  if (ctx.scratch != nullptr) *ctx.scratch = static_cast<std::int32_t>(idle_word(budget, pending));
+  HostOutcome out;
+  out.status = script::HostStatus::retry;
+  out.suspend_for = wait > 0 ? wait : 0;
+  return out;
+}
+
+/// The declared length of the entity's animation `idx`, or -1 without one.
+[[nodiscard]] std::int32_t entity_anim_length(const WorldObject& slot, std::int32_t idx) {
+  if (slot.object == nullptr || slot.object->entity == nullptr) return -1;
+  const EntityAnim* anim = slot.object->entity->anim(idx);
+  return anim == nullptr ? -1 : anim->duration;
+}
+
+/// One step of the activity with `budget` left; see above.
+HostOutcome idle_step(CallContext& ctx, const Self& self, IdleKind kind, std::int64_t budget,
+                      bool force) {
+  World& world = *self.world;
+  const WorldObject* slot = world.find(self.id);
+  // Table index + 1 is the entity's `idx`.
+  const std::int32_t base = kind == IdleKind::idle ? 13 : 20;
+  if (slot != nullptr && entity_anim_length(*slot, base) >= 0) {
+    std::int32_t chosen = base;
+    if (kind == IdleKind::idle) {
+      std::int32_t variants = 1;
+      if (entity_anim_length(*slot, base + 1) >= 0) {
+        variants = 2;
+        if (entity_anim_length(*slot, base + 2) >= 0) {
+          variants = entity_anim_length(*slot, base + 3) >= 0 ? 4 : 3;
+        }
+      }
+      chosen = base + world.rng().between(0, variants - 1);
+    }
+    const std::int32_t length = entity_anim_length(*slot, chosen);
+    const MovementSystem* movement = movement_system(world);
+    const MoveState* move = movement == nullptr ? nullptr : movement->find(self.id);
+    const bool walk_index_zero = move == nullptr || move->walk_anim == 1;
+    if (length >= 0 && length <= budget) {
+      for (std::int64_t t = 0; t <= budget - length; t += 100) {
+        if (!walk_index_zero) continue;
+        const bool fidget =
+            world.rng().between(1, kind == IdleKind::idle ? 15 : 3) == 1 || force;
+        if (!fidget) continue;
+        const std::int64_t left = budget - (t + length);
+        if (t > 0) return idle_wait(ctx, t, left, chosen);
+        (void)world.play_anim(self.id, chosen, AnimRepeat::hold);
+        return idle_wait(ctx, length, left, 0);
+      }
+    }
+  }
+  if (budget > 0) return idle_wait(ctx, budget, 0, 0);
+  // The wake. On a re-entry the script goes on; on the first run the call
+  // still answered 3, which ends the slice (0x0069d5fb), and the wake at once
+  // runs the script again on the next pass here.
+  if (ctx.first_call) return HostOutcome::sleep_for(0);
+  return HostOutcome::ok_void();
+}
+
+/// `Unit::Idle(ms)`, `Unit::Taunt(ms)` and `Ship::Idle()`; see above.
+HostOutcome idle_activity(CallContext& ctx, const Self& self, std::int64_t ms, IdleKind kind,
+                          bool force = false) {
   const WorldObject* slot = self.world->find(self.id);
-  if (slot == nullptr || slot->state.position == kHeldPosition) return wait;
+  if (slot == nullptr || slot->state.position == kHeldPosition) {
+    // The held branch: `ms` in the wait cell and return 1; its re-entry pops
+    // the arguments and is done, which is a timed wait.
+    if (!ctx.first_call) return HostOutcome::ok_void();
+    return HostOutcome::sleep_for(ms > 0 ? ms : 0);
+  }
+  if (!ctx.first_call && ctx.scratch != nullptr) {
+    const auto word = static_cast<std::uint32_t>(*ctx.scratch);
+    const std::int64_t budget = word & kIdleBudgetMask;
+    const auto pending = static_cast<std::int32_t>(word >> kIdleAnimShift);
+    if (pending != 0) {
+      (void)self.world->play_anim(self.id, pending, AnimRepeat::hold);
+      return idle_wait(ctx, entity_anim_length(*slot, pending), budget, 0);
+    }
+    return idle_step(ctx, self, kind, budget, false);
+  }
   if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
     (void)combat->stop(self.id);
   }
-  return wait;
+  return idle_step(ctx, self, kind, ms > 0 ? ms : 0, force);
 }
 
 HostOutcome idle_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
+  if (ctx.count() > 1) {
+    const std::int64_t ms = ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
+    return idle_activity(ctx, self, ms, IdleKind::idle);
+  }
+  // `Ship::Idle()` (0x005c6ea0): the budget is the length of the ship's own
+  // idle animation (table index 12, `[entity+0x149c]` -> `+0x4c`) and the
+  // force flag `[ship+0x1b8]` goes up, so its first step plays the fidget
+  // whatever the draw. **Not read:** the `[ship+0x1cc]` gate under which it
+  // sets no activity at all.
+  // A ship with no such animation is a null dereference in the original;
+  // here it idles `kDefaultIdleSlice`, which keeps `SHIP_IDLE.VS`'s loop from
+  // spinning.
+  const WorldObject* slot = self.world->find(self.id);
   std::int64_t ms = kDefaultIdleSlice;
-  if (ctx.count() > 1 && ctx.arg(1).is_integer()) ms = ctx.arg(1).as_integer();
-  return idle_activity(self, ms);
+  if (slot != nullptr) {
+    const std::int32_t own = entity_anim_length(*slot, 13);
+    if (own >= 0) ms = own;
+  }
+  return idle_activity(ctx, self, ms, IdleKind::idle, /*force=*/true);
 }
 
 /// `ForceIdle()` -- one shipped site, `HEN_IDLE.VS`, on the line before its
@@ -2066,14 +2234,11 @@ HostOutcome idle_impl(CallContext& ctx) {
 /// writes the same 1 into the same slot, which is the second reading of it and
 /// agrees.
 ///
-/// **There is nothing here for it to cut short**, and that is why it stores
-/// nothing. `Idle` above is a suspension and only a suspension: it starts no
-/// animation, so there is no pose to replace and no wait to interrupt, and the
-/// section comment on `Idle` already says why -- *"whether it also selects an
-/// idle animation is unknown; the deer's `SetWalkAnim(13)` suggests the slot
-/// exists but nothing ties it to this entry point"*. A flag written here and
-/// read by nobody would be state two peers could disagree about for no reason.
-/// The day `Idle` animates, this is the other half of it.
+/// **Not reproduced:** the flag. `Idle` now takes the activity's steps
+/// (`idle_activity`), and the flag would make the next step's first draw
+/// play its fidget whatever it says; but a flag kept on the unit is state to
+/// save and to agree on, and its one shipped writer is a hen. `Ship::Idle`'s
+/// own force is the call's, and is passed to its first step directly.
 ///
 /// It still resolves its receiver, because the original does and because
 /// answering without looking is how an entry point stops being a test of
@@ -2132,7 +2297,7 @@ HostOutcome taunt_impl(CallContext& ctx) {
   if (!self.ok()) return HostOutcome::failed(self.error);
   std::int64_t ms = 0;
   if (ctx.count() > 1 && ctx.arg(1).is_integer()) ms = ctx.arg(1).as_integer();
-  return idle_activity(self, ms);
+  return idle_activity(ctx, self, ms, IdleKind::taunt);
 }
 
 // -- the cross-domain orders -----------------------------------------------
@@ -2165,7 +2330,8 @@ struct Mover {
   return self;
 }
 
-/// `GotoAttack(target, slice, flag[, give_up])`.
+/// `GotoAttack(target, slice, flag[, give_up])` -- `Unit::GotoAttack`
+/// (0x005d6a90).
 ///
 /// `Goto` with the arrival annulus taken from the attacker's own weapon instead
 /// of from an argument -- which is exactly what its signature is missing next to
@@ -2174,36 +2340,67 @@ struct Mover {
 ///     while (!.GotoAttack(u, 1500, true, 15000)) { ...retarget... }
 ///     while (.Attack(u));
 ///
-/// So this returns true precisely when `Attack` would connect, and it gets
-/// there by asking combat for the same numbers `in_attack_range` uses: the
-/// attacker's `range` plus both radii for the outer bound, its `min_range` for
-/// the inner. With no combat system registered it degrades to walking onto the
-/// target, which is what a `range` of zero means.
+/// The body: a receiver naming nothing answers **false** and does nothing
+/// else. Otherwise, **on every run, first or re-entry, the unit's combat
+/// target becomes the argument** (`[unit+0x1a8]`, the count zeroed when it
+/// changes; `CombatSystem::hand_target`) -- the empty handle for an argument
+/// naming nothing -- and the call is the object worker 0x005d40c0 with the
+/// unit's own `range` and `min_range` (`[unit+0xd4]`, `[unit+0xd8]`): a target
+/// that is the attacker answers true, one it may not approach (a garrisoned or
+/// concealed enemy unit, or nothing at all) lays no route and waits the slice
+/// (`goto_may_approach`), a unit is an object goal whose band (capped at 920,
+/// `object_route_range`) is measured between the edges, and anything else is
+/// a point goal at its centre with both radii added before the cap of 999.
+/// The answer comes at the re-entry (`run_goto`).
+///
+/// **Approximated:** the inner bound is the class profile's and is carried
+/// and not acted on, as for every `Goto`. A point argument, which no
+/// shipped site passes, walks to the point as `Goto` would.
 HostOutcome goto_attack_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
+  if (self.error == kNoReceiver && ctx.count() > 0 && self.world != nullptr &&
+      receiver_departed(*self.world, ctx.arg(0))) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
   if (!self.ok()) return HostOutcome::failed(self.error);
-  const ObjectId target = object_of(ctx.arg(1));
+  if (self.world->find(self.id) == nullptr) return HostOutcome::ok_with(Value::boolean(false));
   GotoOrder order;
-  if (target != kNoObject) {
-    order.target = target;
-    order.dest = self.world->resolve_position(target);
-  } else if (is_point(ctx.arg(1))) {
-    order.dest = unpack_point(ctx.arg(1));
-  } else {
+  const ObjectId named = object_of(ctx.arg(1));
+  const bool object_argument = !is_point(ctx.arg(1));
+  if (object_argument && named == kNoObject && !receiver_departed(*self.world, ctx.arg(1))) {
     return HostOutcome::failed(kNoPoint);
   }
+  const ObjectId target =
+      named != kNoObject && self.world->find(named) != nullptr ? named : kNoObject;
+  CombatSystem* combat = combat_system_of(*self.world);
+  if (object_argument && combat != nullptr) (void)combat->hand_target(self.id, target);
 
-  if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
-    const Combatant* attacker = combat->find(self.id);
-    if (attacker != nullptr) {
+  std::int32_t weapon = 0;
+  std::int32_t reach = 0;
+  if (combat != nullptr) {
+    if (const Combatant* attacker = combat->find(self.id); attacker != nullptr) {
       const CombatProfile profile = combat->profile(attacker->class_index);
-      order.range = profile.range + profile.radius;
+      // The stored range, as `in_attack_range` measures it (0x005a7800).
+      weapon = combat->range_of(*attacker);
+      reach = profile.radius;
       order.min_range = profile.min_range;
       const Combatant* defender = target == kNoObject ? nullptr : combat->find(target);
-      if (defender != nullptr) {
-        order.range += combat->profile(defender->class_index).radius;
-      }
+      if (defender != nullptr) reach += combat->profile(defender->class_index).radius;
     }
+  }
+  if (object_argument) {
+    order.object_form = true;
+    order.target = target;
+    if (target != kNoObject) {
+      order.dest = self.world->resolve_position(target);
+      const WorldObject* other = self.world->find(target);
+      order.range = other != nullptr && other->state.flags.is_unit
+                        ? object_route_range(weapon) + reach
+                        : point_route_range(weapon + reach);
+    }
+  } else {
+    order.dest = unpack_point(ctx.arg(1));
+    order.range = point_route_range(weapon + reach);
   }
 
   order.slice = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
@@ -2212,22 +2409,34 @@ HostOutcome goto_attack_impl(CallContext& ctx) {
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
 }
 
-/// `GotoEnter(dest, range, slice, flag, give_up)`: `Goto`'s signature exactly,
-/// and `UNIT_ENTER.VS` puts the two in the arms of one `if`. The one
-/// difference is the lock flag -- see the header and `GotoOrder::give_up`.
+/// `GotoEnter(dest, range, slice, flag, give_up)` -- `Unit::GotoEnter`
+/// (0x005d6620): `Goto`'s point form exactly, and `UNIT_ENTER.VS` puts the
+/// two in the arms of one `if`. A receiver naming nothing answers **true**;
+/// the destination is clamped to the map and written back into the call's own
+/// argument (0x005d6675 ..); the range is `SetDest`'s, at most 999; the one
+/// difference from `Goto` is the lock flag -- see the header and
+/// `GotoOrder::give_up` -- and the answer comes at the re-entry (`run_goto`).
+/// An object argument, which no shipped site passes, routes to where the
+/// object stands.
 HostOutcome goto_enter_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
+  if (self.error == kNoReceiver && ctx.count() > 0 && self.world != nullptr &&
+      receiver_departed(*self.world, ctx.arg(0))) {
+    return HostOutcome::ok_with(Value::boolean(true));
+  }
   if (!self.ok()) return HostOutcome::failed(self.error);
+  if (self.world->find(self.id) == nullptr) return HostOutcome::ok_with(Value::boolean(true));
   GotoOrder order;
   if (is_point(ctx.arg(1))) {
-    order.dest = unpack_point(ctx.arg(1));
+    order.dest = self.movement->grid().clamp_to_map(unpack_point(ctx.arg(1)));
+    ctx.out(1) = pack_point(order.dest);
   } else if (const ObjectId target = object_of(ctx.arg(1)); target != kNoObject) {
     order.target = target;
     order.dest = self.world->resolve_position(target);
   } else {
     return HostOutcome::failed(kNoPoint);
   }
-  order.range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
+  order.range = point_route_range(ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0);
   order.slice = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
   order.give_up = ctx.count() > 5 && ctx.arg(5).is_integer() ? ctx.arg(5).as_integer() : -1;
   // 0x005d6620 drops the combat target on its first pass, once the unit is
@@ -2548,7 +2757,10 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   } else {
     return HostOutcome::failed(kNoPoint);
   }
-  const std::int32_t range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
+  // The formation's route is laid by `SetDest` (0x005f2cc0 -> 0x0041a4c0),
+  // which keeps at most 999 of the range.
+  const std::int32_t range =
+      point_route_range(ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0);
   const std::int32_t min_range = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
 
   // **The hero steps out of his holder first, and waits his turn to**
@@ -2716,9 +2928,30 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
 /// declared type; this registry keys on name and arity alone, so **the
 /// receiver being a registered hero is read as the `Hero` form** -- an
 /// inference that agrees with all 29 sites.
+///
+/// **The re-entry drops an arrived route** (0x0052eb5b, 0x005d7ab5): run
+/// again after its wait, either form steps nothing and, when the unit holds a
+/// route that is arrived (`IsArrived`, 0x00417c10), deletes it (0x005d3830
+/// with 0), so the script's `while (.HasPath())` ends there rather than a
+/// slice later. A member's route is aimed at the formation, and is arrived
+/// only once the formation's own path is spent (0x00417c10's third mode,
+/// 0x005f22f0): here, only once the march is over (`MovementSystem::marching`)
+/// and the member stands in its station's band. **Approximated** like the
+/// rest of the march: the station is `place_army`'s, not the formation's
+/// sample.
 HostOutcome form_keep_moving_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
+  if (!ctx.first_call) {
+    if (self.world->find(self.id) != nullptr) {
+      const MoveState* move = self.movement->find(self.id);
+      if (move != nullptr && move->goto_active && !self.movement->marching(self.id, *move) &&
+          self.movement->is_arrived(*self.world, self.id)) {
+        self.movement->stop(*self.world, self.id);
+      }
+    }
+    return HostOutcome::ok_void();
+  }
   HeroSystem* heroes = hero_system_of(*self.world);
   if (heroes == nullptr || heroes->hero(self.id) == nullptr) {
     if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
@@ -2755,22 +2988,32 @@ HostOutcome form_keep_moving_impl(CallContext& ctx) {
   // disassembly's evidence alone. What spins in `hero_idle.vs` is still open.
   const std::int64_t wait =
       ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
-  if (wait <= 0) return HostOutcome::ok_void();
-
   HostOutcome out;
-  out.status = script::HostStatus::suspend;
-  out.suspend_for = wait;
+  out.status = script::HostStatus::retry;
+  out.suspend_for = wait > 0 ? wait : 0;
   return out;
 }
+
+/// What 0x004185a0 adds to an incomplete path's length.
+constexpr std::int64_t kIncompletePathLeft = 32000;
 
 /// `FormPathLeft()`: world units still to walk on the hero's own route.
 ///
 /// Both sites compare it against a radius -- `if (.FormPathLeft() <
 /// .FormRadius() + s.radius) break;` -- so it is a distance and not a time.
+///
+/// 0x0052ebc0 asks the formation's route record (`[[hero+0x2b0]+0x84]`) and
+/// answers 0 without one; with one, 0x004185a0 answers what is left of its
+/// path **plus 32,000 when the path is incomplete** -- a route that stops
+/// short of its goal never reads as nearly there. Here the hero's own route
+/// stands for the formation's (approximated, as the march is).
 HostOutcome form_path_left_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
-  const std::int64_t left = self.movement->remaining(self.id);
+  const MoveState* move = self.movement->find(self.id);
+  if (move == nullptr || !move->has_path) return HostOutcome::ok_with(Value::integer(0));
+  std::int64_t left = self.movement->remaining(self.id);
+  if (!move->path_complete) left += kIncompletePathLeft;
   return HostOutcome::ok_with(
       Value::integer(static_cast<std::int32_t>(std::min<std::int64_t>(left, 0x7FFFFFFF))));
 }

@@ -377,17 +377,17 @@ void FeederSystem::run_searches(World& world, GameTime now) {
           }
         }
       }
-      // The second path: a wagon `Squad::SendFoodWagon` sent after one of
-      // the unit's squad-mates, once built, is the squad's larder. The
-      // original's mule follows the army and a hungry unit finds it the way
-      // it finds any food within reach; here the journey is abstracted away
-      // as it is for every wagon, and "within reach" is "in my squad".
+      // The second path: a food wagon following one of the unit's
+      // squad-mates -- the mule `Squad::SendFoodWagon` sends after the army.
+      // The original's hungry unit finds it the way it finds any food within
+      // reach; here "within reach" is "following my squad"
+      // (`draw_from_food_wagon`).
       if (want > 0) {
         if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
           const SquadKey key = heroes->squads().squad_of(id);
           const Squad* squad = key.valid() ? heroes->squads().find(key) : nullptr;
           if (squad != nullptr) {
-            const std::int32_t got = economy->draw_from_larder(squad->members, want);
+            const std::int32_t got = draw_from_food_wagon(world, squad->members, want);
             if (got > 0) {
               link->food += got;
               clear_hungry(id);
@@ -535,7 +535,7 @@ constexpr FeederHostDef kFeederHosts[] = {
        if (ctx.count() == 0 || !ctx.arg(0).is_object()) return HostOutcome::ok_void();
        const bool feeding = feeding_arg(ctx);
        if (ctx.arg(0).as_object().type == kTypeQuery) {
-         for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+         for (const ObjectId id : receiver_objects(ctx, *world, ctx.arg(0))) {
            const WorldObject* slot = world->find(id);
            if (slot == nullptr || !slot->state.flags.is_unit || slot->state.health <= 0) continue;
            if (FeedingUnit* link = link_of(*world, *feeder, id); link != nullptr) {

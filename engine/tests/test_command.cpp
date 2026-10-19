@@ -167,11 +167,21 @@ struct HostCall {
   CallContext context;
   imperivm::core::sim::HostContext context_state;
 
+  /// The call's word of state (`CallContext::scratch`), as the VM keeps it.
+  std::int32_t scratch = 0;
+
   HostCall(World& world, std::initializer_list<Value> args, bool bind = true)
       : arguments(args) {
     context_state.world = &world;
     context.arguments = arguments;
     context.user = bind ? &context_state : nullptr;
+    context.scratch = &scratch;
+  }
+
+  /// Run the same call again after its wait, as the VM does after a `retry`.
+  HostCall& reenter() {
+    context.first_call = false;
+    return *this;
   }
 };
 
@@ -1216,12 +1226,12 @@ TEST(idle_is_an_order_that_costs_game_time) {
 
   HostCall timed(f.world, {obj(u), Value::integer(1900)});
   const HostOutcome slept = invoke(registry, CallKind::member, "Idle", 1, timed);
-  CHECK(slept.status == HostStatus::suspend);
+  CHECK(slept.status == HostStatus::retry);  // the activity's steps are re-entries
   CHECK(slept.suspend_for == 1900);
 
   HostCall bare(f.world, {obj(u)});
   const HostOutcome fallback = invoke(registry, CallKind::member, "Idle", 0, bare);
-  CHECK(fallback.status == HostStatus::suspend);
+  CHECK(fallback.status == HostStatus::retry);
   CHECK(fallback.suspend_for == kDefaultIdleSlice);
   CHECK(fallback.suspend_for > 0);  // or SHIP_IDLE.VS spins
 
@@ -1259,7 +1269,7 @@ TEST(idle_on_the_map_drops_the_target_and_still_waits_its_argument) {
 
   HostCall standing(f.world, {obj(u), Value::integer(1900)});
   const HostOutcome idled = invoke(registry, CallKind::member, "Idle", 1, standing);
-  CHECK(idled.status == HostStatus::suspend);
+  CHECK(idled.status == HostStatus::retry);
   CHECK(idled.suspend_for == 1900);
   REQUIRE(combat.find(u) != nullptr);
   CHECK(combat.find(u)->target == kNoObject);
@@ -1325,7 +1335,7 @@ TEST(taunt_drops_the_target_on_the_map_and_waits_in_a_holder) {
   const HostOutcome yielded = invoke(registry, CallKind::member, "Taunt", 1, standing);
   // Two seconds of taunting, not one scheduler step: `UNIT_CAPTURE.VS` takes
   // a point of loyalty after each.
-  CHECK(yielded.status == HostStatus::suspend);
+  CHECK(yielded.status == HostStatus::retry);
   CHECK(yielded.suspend_for == 2000);
   // "A new order supersedes combat" -- the prologue this shares with `Stop`,
   // both `Goto`s, `Attack` and `AttackEveryone`.
@@ -1373,7 +1383,7 @@ TEST(taunt_without_a_combat_system_still_yields) {
   const ObjectId u = f.spawn(f.unit_class);
 
   HostCall standing(f.world, {obj(u), Value::integer(2000)});
-  CHECK(invoke(registry, CallKind::member, "Taunt", 1, standing).status == HostStatus::suspend);
+  CHECK(invoke(registry, CallKind::member, "Taunt", 1, standing).status == HostStatus::retry);
 
   // No receiver at all refuses, which is `resolve`'s answer and `Idle`'s too.
   HostCall nobody(f.world, {obj(kNoObject), Value::integer(2000)});
@@ -2016,7 +2026,10 @@ TEST(goto_attack_arrives_exactly_when_the_attack_would_connect) {
                           Value::integer(15000)});
   const HostOutcome first = invoke(registry, CallKind::member, "GotoAttack", 4, call);
   CHECK(first.value.as_integer() == 0);  // 500 apart, reach is 330
-  CHECK(first.status == HostStatus::suspend);
+  CHECK(first.status == HostStatus::retry);
+  // The combat target is the argument from the first run (0x005d6b10).
+  REQUIRE(combat.find(archer) != nullptr);
+  CHECK(combat.find(archer)->target == target);
   // The order it laid stops at the weapon's reach, not on top of the target.
   const MoveState* move = movement.find(archer);
   REQUIRE(move != nullptr);
@@ -2140,7 +2153,7 @@ TEST(goto_enter_does_not_call_the_end_of_a_partial_route_arrival) {
     HostCall never(f.world, {obj(walled), away, Value::integer(0), Value::integer(1000),
                              Value::boolean(false), Value::integer(-1)});
     const HostOutcome out = invoke(registry, CallKind::member, "GotoEnter", 5, never);
-    CHECK(out.status == HostStatus::suspend);
+    CHECK(out.status == HostStatus::retry);
     CHECK(out.suspend_for == 1000);
     CHECK(out.value.as_integer() == 0);
     f.world.advance(1000);
@@ -2223,8 +2236,9 @@ TEST(form_setup_moves_the_hero_and_keep_moving_carries_the_army) {
     HostCall keep(f.world, {obj(hero), Value::integer(1500)});
     const HostOutcome outcome = invoke(registry, CallKind::member, "FormKeepMoving", 1, keep);
     CHECK(outcome.value.is_nil());
-    const std::int64_t wait = outcome.status == HostStatus::suspend ? outcome.suspend_for : 400;
+    const std::int64_t wait = outcome.status == HostStatus::retry ? outcome.suspend_for : 400;
     f.world.advance(static_cast<std::int32_t>(wait > 0 ? wait : 400));
+    (void)invoke(registry, CallKind::member, "FormKeepMoving", 1, keep.reenter());
     ++calls;
   }
   CHECK(calls < 200);
@@ -2611,14 +2625,88 @@ TEST(form_keep_moving_waits_for_its_whole_argument_and_never_for_the_eta) {
 
   HostCall keep(f.world, {obj(hero), Value::integer(5000)});
   const HostOutcome outcome = invoke(registry, CallKind::member, "FormKeepMoving", 1, keep);
-  CHECK(outcome.status == HostStatus::suspend);
+  CHECK(outcome.status == HostStatus::retry);
   CHECK(outcome.suspend_for == 5000);  // not `eta`
 
-  // A zero or absent duration is the one case that does not suspend: there is
-  // nothing to wait for, and a zero-length suspension is a yield the original
-  // does not make.
+  // A zero duration suspends too: the first run writes its argument to the
+  // wait cell and returns 1 whatever it is, and the re-entry is what returns.
   HostCall zero(f.world, {obj(hero), Value::integer(0)});
-  CHECK(invoke(registry, CallKind::member, "FormKeepMoving", 1, zero).status == HostStatus::ok);
+  const HostOutcome none = invoke(registry, CallKind::member, "FormKeepMoving", 1, zero);
+  CHECK(none.status == HostStatus::retry);
+  CHECK(none.suspend_for == 0);
+  CHECK(invoke(registry, CallKind::member, "FormKeepMoving", 1, zero.reenter()).status ==
+        HostStatus::ok);
+}
+
+/// **The re-entry of `FormKeepMoving` drops an arrived route** (0x0052eb5b,
+/// 0x005d7ab5: the route record asked `IsArrived`, and deleted when it is),
+/// and steps nothing: `while (.HasPath()) .FormKeepMoving(1500);` ends on the
+/// call that finds the hero there, not a slice later. A route not arrived is
+/// kept.
+TEST(form_keep_moving_drops_an_arrived_route_at_its_reentry) {
+  Fixture f;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(64, 64));
+  f.world.add_system(&movement);
+  HeroSystem heroes;
+  f.world.add_system(&heroes);
+  HostRegistry registry;
+  register_movement_host(registry);
+  register_command_host(registry);
+
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.hero_class);
+  f.world.set_position(hero, Point{100, 100});
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 1000);
+  heroes.register_hero(f.world, hero);
+  movement.state(hero).speed = 100;
+  HostCall setup(f.world, {obj(hero), pack_point(Point{500, 100}), Value::integer(0),
+                           Value::integer(0), Value::boolean(true)});
+  REQUIRE(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, setup).status ==
+          HostStatus::ok);
+  REQUIRE(movement.find(hero)->goto_active);
+
+  HostCall keep(f.world, {obj(hero), Value::integer(1500)});
+  REQUIRE(invoke(registry, CallKind::member, "FormKeepMoving", 1, keep).status ==
+          HostStatus::retry);
+  CHECK(invoke(registry, CallKind::member, "FormKeepMoving", 1, keep.reenter()).status ==
+        HostStatus::ok);
+  CHECK(movement.find(hero)->goto_active);  // not there: kept
+
+  // Put him in the band by hand: the re-entry deletes the route.
+  REQUIRE(f.world.set_position(hero, Point{500, 100}));
+  HostCall last(f.world, {obj(hero), Value::integer(1500)});
+  REQUIRE(invoke(registry, CallKind::member, "FormKeepMoving", 1, last).status ==
+          HostStatus::retry);
+  REQUIRE(f.world.set_position(hero, Point{500, 100}));
+  CHECK(invoke(registry, CallKind::member, "FormKeepMoving", 1, last.reenter()).status ==
+        HostStatus::ok);
+  CHECK(!movement.find(hero)->goto_active);
+}
+
+/// `FormSetupAndMoveTo`'s route is laid by `SetDest` (0x005f2cc0 ->
+/// 0x0041a4c0), which keeps at most 999 of the range.
+TEST(form_setup_keeps_setdests_range_cap) {
+  Fixture f;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(128, 128));
+  f.world.add_system(&movement);
+  HeroSystem heroes;
+  f.world.add_system(&heroes);
+  HostRegistry registry;
+  register_movement_host(registry);
+  register_command_host(registry);
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.hero_class);
+  f.world.set_position(hero, Point{100, 100});
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 1000);
+  heroes.register_hero(f.world, hero);
+  movement.state(hero).speed = 100;
+  HostCall setup(f.world, {obj(hero), pack_point(Point{1900, 100}), Value::integer(1500),
+                           Value::integer(0), Value::boolean(true)});
+  REQUIRE(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, setup).status ==
+          HostStatus::ok);
+  CHECK(movement.find(hero)->range == 999);
 }
 
 TEST(a_members_form_keep_moving_drops_its_target_and_a_heros_does_not) {
@@ -2655,7 +2743,7 @@ TEST(a_members_form_keep_moving_drops_its_target_and_a_heros_does_not) {
 
   HostCall member_keep(f.world, {obj(member), Value::integer(1000)});
   const HostOutcome kept = invoke(registry, CallKind::member, "FormKeepMoving", 1, member_keep);
-  CHECK(kept.status == HostStatus::suspend);
+  CHECK(kept.status == HostStatus::retry);
   CHECK(kept.suspend_for == 1000);
   CHECK(combat.find(member)->target == kNoObject);
   CHECK(combat.find(member)->attacks == 0);
@@ -2688,6 +2776,15 @@ TEST(form_path_left_is_a_distance) {
       invoke(registry, CallKind::member, "FormPathLeft", 0, walking).value.as_integer();
   CHECK(left > 700);
   CHECK(left < 900);
+
+  // **An incomplete path reads 32,000 longer** (0x004185a0): a route cut short
+  // of its goal is never nearly there.
+  MoveState& move = movement.state(hero);
+  REQUIRE(move.has_path);
+  move.path_complete = false;
+  HostCall partial(f.world, {obj(hero)});
+  CHECK(invoke(registry, CallKind::member, "FormPathLeft", 0, partial).value.as_integer() ==
+        left + 32000);
 }
 
 // --------------------------------------------------------------------------

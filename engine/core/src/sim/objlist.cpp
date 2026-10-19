@@ -147,22 +147,36 @@ std::span<const ObjectId> ObjListPool::items(ObjListId id) const noexcept {
   // in a vector somebody else may have grown since. A resolver that answers
   // null -- no resolver installed, or an owner that has gone -- reads as an
   // empty list, which is what a stale handle already reads as here.
-  if (alias_resolver_ == nullptr) return {};
-  const std::vector<ObjectId>* items = alias_resolver_(alias_user_, entry.alias);
+  const std::vector<ObjectId>* items = resolve_alias(entry.alias);
   return items == nullptr ? std::span<const ObjectId>{} : std::span<const ObjectId>(*items);
+}
+
+std::vector<ObjectId>* ObjListPool::resolve_alias(ObjectId owner) const noexcept {
+  // Two owner kinds, and an object is at most one of them -- a settlement's
+  // holder record or a hero -- so asking each in turn cannot pick the wrong
+  // collection.
+  if (alias_resolver_ != nullptr) {
+    if (std::vector<ObjectId>* items = alias_resolver_(alias_user_, owner)) return items;
+  }
+  if (army_resolver_ != nullptr) return army_resolver_(army_user_, owner);
+  return nullptr;
 }
 
 std::vector<ObjectId>* ObjListPool::mutable_items(ObjListId id) noexcept {
   if (!contains(id)) return nullptr;
   Entry& entry = entries_[index_of_id(id)];
   if (entry.alias == kNoObject) return &entry.items;
-  if (alias_resolver_ == nullptr) return nullptr;
-  return alias_resolver_(alias_user_, entry.alias);
+  return resolve_alias(entry.alias);
 }
 
 void ObjListPool::set_alias_resolver(AliasResolver resolver, void* user) noexcept {
   alias_resolver_ = resolver;
   alias_user_ = user;
+}
+
+void ObjListPool::set_army_resolver(AliasResolver resolver, void* user) noexcept {
+  army_resolver_ = resolver;
+  army_user_ = user;
 }
 
 ObjectId ObjListPool::alias_of(ObjListId id) const noexcept {
@@ -373,10 +387,12 @@ constexpr script::CallKind kMember = script::CallKind::member;
 ///     drops the reference the call held (`[+0x1c]`), deleting a temporary
 ///     whose count reaches zero. It does not test the receiver: a list that
 ///     does not resolve is a null dereference there and a zero here.
-///   * `Query::count` (0x00577b90) resolves the query, calls its `Refresh`
-///     (`vtbl+0x1c`) and its result accessor (`vtbl+0x20`, the embedded list at
-///     `+0x1c`, 0x005716f0) and answers that list's size, so a query is
-///     re-evaluated by every `count`. An unresolvable receiver prints
+///   * `Query::count` (0x00577b90) resolves the query, purges its cached list
+///     (`vtbl+0x1c`, 0x00572c10: the gone and the dead leave it), asks its
+///     list accessor (`vtbl+0x20`, 0x004f9490, which refreshes the list only
+///     when its due time has come) and answers that list's size -- so a
+///     `count` a second after the last refresh of a sight query answers the
+///     list that refresh made, less its dead. An unresolvable receiver prints
 ///     `The function 'Query::count' called for an uninitialized or invalid
 ///     object.` and answers **0** (0x00577be4).
 ///   * `ItemHolder::count` (0x0053c660) is a third registration of the name: an
@@ -419,9 +435,11 @@ HostOutcome m_count(CallContext& ctx) {
   if (slot->internal != InternalKind::query) {
     return HostOutcome::failed("count: receiver is neither an ObjList nor a Query");
   }
+  // The purge and the list accessor (0x00577b90): the cached list, refreshed
+  // only when due, less what has died since.
   std::vector<ObjectId> found;
-  return HostOutcome::ok_with(
-      Value::integer(static_cast<std::int32_t>(world->evaluate_query(id, found))));
+  return HostOutcome::ok_with(Value::integer(
+      static_cast<std::int32_t>(world->read_query(id, script_clock(ctx, *world), found))));
 }
 
 /// `q.GetObjList()` -- 103 sites, and the only way a script turns a live query
@@ -436,12 +454,12 @@ HostOutcome m_count(CallContext& ctx) {
 /// `DATA\AI HELPERS\GUARD.VS` re-reads `ol = qryDef.GetObjList();` at the top of
 /// every pass of its `while (1)` loop.
 ///
-/// 0x0057a7c0: resolve the query, `Refresh` it (`vtbl+0x1c`), allocate a fresh
-/// list (0x0041edd0) and copy the query's result deque into it whole and in
-/// order (0x00438230 over the accessor's `+8`), then push it as a new value
-/// with no owning handle. No member is tested, so the copy is exactly the
-/// query's own order -- `World::evaluate_query`'s, which is the query system's
-/// to answer for.
+/// 0x0057a7c0: resolve the query, purge it (`vtbl+0x1c`) and read its list
+/// (`vtbl+0x20`, refreshed when due), allocate a fresh list (0x0041edd0) and
+/// copy the query's cached deque into it whole and in order (0x00438230 over
+/// the accessor's `+8`), then push it as a new value with no owning handle. No
+/// member is tested, so the copy is exactly the query's own order --
+/// `World::read_query`'s, which is the query system's to answer for.
 HostOutcome m_get_objlist(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetObjList: no world");
@@ -465,7 +483,7 @@ HostOutcome m_get_objlist(CallContext& ctx) {
     if (slot != nullptr && slot->internal != InternalKind::query) {
       return HostOutcome::failed("GetObjList: receiver is not a Query");
     }
-    if (slot != nullptr) world->evaluate_query(id, found);
+    if (slot != nullptr) world->read_query(id, script_clock(ctx, *world), found);
   }
   ObjListPool& pool = objlist_pool_of(*world);
   const ObjListId list = pool.acquire_temporary(ctx.script);
@@ -582,39 +600,33 @@ HostOutcome m_get_units_in_same_holder(CallContext& ctx) {
 /// `gbr.exe` (0x00530580) returns a **live reference** rather than a snapshot:
 /// the value it pushes is `{hero handle, 0x1cc, hero + 0x1cc}`, the hero's own
 /// army vector with its refcount bumped, so a mutation through the handle
-/// reaches the hero. This returns a snapshot, like `GetObjList` above.
+/// reaches the hero, and a list held across a recruitment sees the recruit.
+/// This is the alias `Settlement::Units` already is (`acquire_alias`), with the
+/// hero as the owner: `HeroSystem::start` installs the pool's army resolver,
+/// which answers `HeroRecord::army` on every access.
 ///
-/// The difference is observable in exactly one member. Of the corpus's uses --
-/// `SetCommand` (18), bare `.army` in a count or a condition (26), `count` (15),
-/// `AddToGroup`/`RemoveFromGroup`/`RemoveFromAllGroups` (6), `KillCommand`,
-/// `AddCommand` -- every one either reads the membership or commands the units
-/// it names, and both read the same ids from either representation. Only
-/// `.army.ClearDead` (4 sites) writes the list itself, and `HeroSystem::advance`
-/// already prunes the dead out of every army once a turn, which is what those
-/// four sites are asking for. So the divergence is bounded by one turn, and it
-/// is written down here rather than papered over.
+/// Of the corpus's uses -- `SetCommand` (18), bare `.army` in a count or a
+/// condition (26), `count` (15), `AddToGroup`/`RemoveFromGroup`/
+/// `RemoveFromAllGroups` (6), `KillCommand`, `AddCommand` -- the one that writes
+/// is `.army.ClearDead` (4 sites), which now takes the dead out of the hero's
+/// army at once rather than at `HeroSystem::advance`'s next prune.
 ///
 /// An invalid receiver is **not** a refusal: 0x005305ad diagnoses and then
 /// allocates a fresh empty list, so `h.army.count` on a dead hero is 0.
 ///
-/// **Why it is still a snapshot.** Making it the live list is the alias
-/// `Settlement::Units` already is, and the pool's one `AliasResolver` is
-/// installed by `EconomySystem` and knows settlement holders only. A hero's
-/// army needs that seam to serve a second kind of owner -- a resolver per
-/// owner kind, or one that asks each system in turn -- which is a change to
-/// the pool's design rather than to this entry point.
 HostOutcome m_army(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("army: no world");
   ObjListPool& pool = objlist_pool_of(*world);
-  const ObjListId list = pool.acquire_temporary(ctx.script);
-  std::vector<ObjectId>* items = pool.mutable_items(list);
-  if (items == nullptr) return HostOutcome::failed("army: the pool refused a new list");
-
   HeroSystem* heroes = hero_system_of(*world);
   const ObjectId id = live_object_of(*world, ctx.arg(0));
   const HeroRecord* record = heroes == nullptr || id == kNoObject ? nullptr : heroes->hero(id);
-  if (record != nullptr) *items = record->army;
+  // The live list: an alias the hero owns, resolved on every access.
+  if (record != nullptr) return HostOutcome::ok_with(make_objlist_value(pool.acquire_alias(ctx.script, id)));
+  const ObjListId list = pool.acquire_temporary(ctx.script);
+  if (pool.mutable_items(list) == nullptr) {
+    return HostOutcome::failed("army: the pool refused a new list");
+  }
   return HostOutcome::ok_with(make_objlist_value(list));
 }
 
@@ -890,9 +902,12 @@ HostOutcome m_remove(CallContext& ctx) {
 ///     argument's handle word and answers whether it met it. The argument is
 ///     not resolved, so a dead unit's handle and the invalid handle are found
 ///     when the list holds them.
-///   * `Query::Contains` (0x00578d20) resolves the query, `Refresh`es it
-///     (`vtbl+0x1c`) and asks its `vtbl+0x24`, which is 0x00571870: the same
-///     front-to-back handle scan over the freshly evaluated result. An
+///   * `Query::Contains` (0x00578d20) resolves the query, purges it
+///     (`vtbl+0x1c`) and asks its `vtbl+0x24`: for a cached kind 0x004f9550,
+///     the front-to-back handle scan of the cached list while it is fresh, and
+///     once it is due the kind's one-object slot -- a refresh and the scan
+///     (0x00571870) for most, a live test of the object that stores nothing for
+///     the area, sight, player-flags and party kinds. An
 ///     unresolvable query prints `The function 'Query::Contains' called for an
 ///     uninitialized or invalid object.` and answers **false**.
 ///
@@ -920,7 +935,14 @@ HostOutcome m_contains(CallContext& ctx) {
     if (slot->internal != InternalKind::query) {
       return HostOutcome::failed("Contains: receiver is neither an ObjList nor a Query");
     }
-    world->evaluate_query(id, members);
+    // The purge, then the query's own membership slot (`vtbl + 0x24`): the
+    // cached list when fresh; when due, a refresh or -- for the area, sight,
+    // player-flags and party kinds -- a live test of the one object, which
+    // stores nothing (`World::query_contains`).
+    world->purge_query(id);
+    if (!wanted.has_value()) return HostOutcome::ok_with(Value::boolean(false));
+    return HostOutcome::ok_with(
+        Value::boolean(world->query_contains(id, *wanted, script_clock(ctx, *world))));
   }
   if (!wanted.has_value()) return HostOutcome::ok_with(Value::boolean(false));
   return HostOutcome::ok_with(
@@ -1038,8 +1060,8 @@ HostOutcome m_obj_injured(CallContext& ctx) {
 /// argument instead -- which is what the compiler did at the call site anyway.
 ///
 /// The receiver is a **`Query`**, never an `ObjList`: both bodies begin by
-/// calling the receiver's `Refresh` (`vtbl + 0x1c`) and then its accessor
-/// (`vtbl + 0x20`), so they re-evaluate before they scan. Every one of the 19
+/// purging the receiver (`vtbl + 0x1c`) and then reading its list (`vtbl +
+/// 0x20`, refreshed when due), so they scan the cached list. Every one of the 19
 /// shipped receivers is a query variable -- `Q_HannibalArmy.NearestObj(...)`,
 /// `EnemyObjs(5, cMilitary).NearestObj(AreaCenter("A_Battle"))`.
 ///
@@ -1068,7 +1090,7 @@ HostOutcome m_obj_injured(CallContext& ctx) {
 ///     An unresolvable object argument is the same, with `Parameter #1 in
 ///     function 'Query::NearestObj' is uninitialized or invalid object.`
 ///     (0x00579620 tests the receiver first, then the argument).
-///   * the receiver is `Refresh`ed before the scan (`vtbl+0x1c`) and the
+///   * the receiver is purged before the scan (`vtbl+0x1c`) and the
 ///     reference the call held on it is dropped after (0x00571680).
 HostOutcome m_nearest_obj(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -1100,7 +1122,7 @@ HostOutcome m_nearest_obj(CallContext& ctx) {
       // Not a refusal: the original prints and pushes the invalid object.
       return HostOutcome::ok_with(invalid_object());
     }
-    world->evaluate_query(id, members);
+    world->read_query(id, script_clock(ctx, *world), members);
   }
 
   // 0x00579576. Named rather than inlined because the value is the whole of
@@ -1400,12 +1422,38 @@ std::size_t sweep_objlists(const script::Scheduler& scheduler, ObjListPool& pool
   return pool.release_unmarked(keep);
 }
 
+std::size_t sweep_queries(const script::Scheduler& scheduler, World& world) {
+  // The roots are the query handles a live coroutine holds, in the same three
+  // places `sweep_objlists` marks. A query handle travels as a `Query` value,
+  // and an `Obj` value can carry one too (`object_of` accepts either tag).
+  std::vector<ObjectId> roots;
+  const auto mark = [&roots, &world](const script::Value& value) {
+    if (!value.is_object()) return;
+    const script::ObjectRef ref = value.as_object();
+    if (ref.type != kTypeQuery && ref.type != kTypeObj) return;
+    const auto id = static_cast<ObjectId>(ref.id);
+    if (world.query_spec(id) != nullptr) roots.push_back(id);
+  };
+  for (const script::ScriptRecord& record : scheduler.scripts()) {
+    if (record.dead) continue;
+    for (const script::Frame& frame : record.execution.frames) {
+      for (const script::Value& value : frame.locals) mark(value);
+      for (const script::Value& value : frame.stack) mark(value);
+    }
+    mark(record.execution.result);
+  }
+  return world.collect_queries(roots);
+}
+
 void install_objlist_lifetime(script::Scheduler& scheduler) noexcept {
   install_objlist_teardown(scheduler);
   scheduler.set_pass_hook([](void* user, const script::Scheduler& sched) {
     auto* context = static_cast<HostContext*>(user);
     if (context == nullptr || context->world == nullptr) return;
     (void)sweep_objlists(sched, objlist_pool_of(*context->world));
+    // And the scripts' queries, by the same reachability: the original's
+    // reference count (`[query+0x48]`) brought to zero, from the other side.
+    (void)sweep_queries(sched, *context->world);
   });
 }
 

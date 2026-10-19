@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/player.hpp"
 #include "imperivm/core/sim/player_host.hpp"
@@ -1028,22 +1029,30 @@ TEST(party_lists_the_flagged_objects_in_id_order) {
   CHECK(objlist_of(again.value) != list);
 }
 
-TEST(get_player_units_returns_an_objlist) {
+/// `GetPlayerUnits` (0x005debe0 -> 0x005de750) lists the members of the
+/// player's squads, squad by squad in index order and each front to back --
+/// not what the player owns: a unit in no squad is not on it.
+TEST(get_player_units_returns_an_objlist_of_the_players_squad_members) {
   Bench bench;
+  HeroSystem heroes;
+  bench.world.add_system(&heroes);
   const ObjectId a = bench.world.spawn(NativeClass::unit, nullptr);
   const ObjectId b = bench.world.spawn(NativeClass::unit, nullptr);
-  bench.world.set_owner(a, 4);
-  bench.world.set_owner(b, 5);
+  const ObjectId c = bench.world.spawn(NativeClass::unit, nullptr);
+  const ObjectId loner = bench.world.spawn(NativeClass::unit, nullptr);
+  for (const ObjectId id : {a, b, c, loner}) bench.world.set_owner(id, 4);
+  const SquadKey first = heroes.squads().create(4);
+  const SquadKey second = heroes.squads().create(4);
+  REQUIRE(heroes.squads().join(second, a));
+  REQUIRE(heroes.squads().join(first, c));
+  REQUIRE(heroes.squads().join(first, b));
 
   const script::HostOutcome out =
       bench.call(kFree, "GetPlayerUnits", {script::Value::integer(5)});
   CHECK(out.status == script::HostStatus::ok);
   CHECK(is_objlist(out.value));
   const std::span<const ObjectId> items = objlist_pool_of(bench.world).items(objlist_of(out.value));
-  // No class graph is loaded, so the filter matches everything the player owns:
-  // exactly the one object.
-  CHECK(items.size() == 1);
-  if (items.size() == 1) CHECK(items[0] == a);
+  CHECK((std::vector<ObjectId>(items.begin(), items.end()) == std::vector<ObjectId>{c, b, a}));
 
   // Out of range still yields a real, empty list rather than an invalid handle:
   // every call site indexes it immediately.

@@ -1,6 +1,7 @@
 // The object-model half of the .vs host API.
 // See include/imperivm/core/sim/world_host.hpp.
 
+#include "imperivm/core/sim/siege_fire.hpp"
 #include "imperivm/core/sim/gaika.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "imperivm/core/game/entity.hpp"
@@ -353,7 +354,7 @@ HostOutcome fn_objs_in_sight(CallContext& ctx) {
   if (!class_arg_resolves(*world, ctx.arg(1), true)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_sight(observer->id, sight_query_radius(*observer, -1),
                                        filter_arg(*world, ctx.arg(1)), kVisible);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ObjsInCircle(point, radius, "class")` (0x005775e0).
@@ -372,7 +373,7 @@ HostOutcome fn_objs_in_circle(CallContext& ctx) {
   if (!class_arg_resolves(*world, ctx.arg(2), true)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_circle(unpack_point(ctx.arg(0)), ctx.arg(1).as_integer(),
                                         filter_arg(*world, ctx.arg(2)));
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ObjsInRange(object, "class", radius)` (0x00576130) -- **a sight query with
@@ -392,7 +393,7 @@ HostOutcome fn_objs_in_range(CallContext& ctx) {
   if (!class_arg_resolves(*world, ctx.arg(1), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = objs_in_range(anchor->id, sight_query_radius(*anchor, ctx.arg(2).as_integer()),
                                        filter_arg(*world, ctx.arg(1)));
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `ClassPlayerObjs("class", player)` (0x005754b0).
@@ -415,7 +416,7 @@ HostOutcome fn_class_player_objs(CallContext& ctx) {
   if (player == kNoPlayer) return HostOutcome::ok_with(invalid_object());
   if (!class_arg_resolves(*world, ctx.arg(0), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = class_player_area(filter_arg(*world, ctx.arg(0)), player, Point{}, 0);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `UnitsInSettlement`, `UnitsAroundSettlement` and `UnitsGuardingSettlement`.
@@ -471,7 +472,7 @@ HostOutcome fn_units_in_settlement(CallContext& ctx) {
 
   if (!class_arg_resolves(*world, ctx.arg(1), false)) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = units_in_settlement(settlement, filter_arg(*world, ctx.arg(1)), kScope);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `Group(n)` (0x005765a0).
@@ -503,10 +504,10 @@ HostOutcome fn_group(CallContext& ctx) {
     // by name in first-mention order, which is deterministic because script
     // execution order is. See `docs/formats/map.md`.
     return HostOutcome::ok_with(query_value(
-        world->create_query(group_query(world->group_index(ctx.arg(0).as_string())))));
+        world->intern_query(group_query(world->group_index(ctx.arg(0).as_string())))));
   }
   if (!ctx.arg(0).is_integer()) return HostOutcome::failed("Group: expected an integer");
-  return HostOutcome::ok_with(query_value(world->create_query(group_query(ctx.arg(0).as_integer()))));
+  return HostOutcome::ok_with(query_value(world->intern_query(group_query(ctx.arg(0).as_integer()))));
 }
 
 /// `GetInnState(inn)` / `SetInnState(inn, state)` -- 3 sites and 1, and the
@@ -603,7 +604,7 @@ struct MembershipReceiver {
   const Value& receiver = ctx.arg(0);
   if (is_objlist(receiver)) {
     out.found = true;
-    for (const ObjectId id : receiver_objects(world, receiver)) {
+    for (const ObjectId id : receiver_objects(ctx, world, receiver)) {
       const WorldObject* slot = world.find(id);
       if (slot != nullptr && !object_is_dead(*slot)) out.members.push_back(id);
     }
@@ -611,7 +612,7 @@ struct MembershipReceiver {
   }
   if (object_of(world, receiver) == nullptr) return out;
   out.found = true;
-  out.members = receiver_objects(world, receiver);
+  out.members = receiver_objects(ctx, world, receiver);
   return out;
 }
 
@@ -1531,18 +1532,19 @@ HostOutcome m_set_no_ai_flag(CallContext& ctx) { return set_no_ai_flag<false>(ct
 ///     player 0x00996a44, sight 0x00996a84 on `(observer, class, radius,
 ///     visible)`, circle 0x00996aa4 on `(x, y, r, class)`, settlement 0x00996a70);
 ///   * **a timed cache**: a query refreshes its list only when the game clock
-///     passes its next-due time (`+0x4c`), every 2000 ms for a set-op or
-///     settlement query and 1000 ms for the others (`GetList`, 0x004f9490), so
-///     a read can be a second or two stale; and
+///     reaches its next-due time (`+0x4c`), every 4000 ms for a player-flags
+///     query, 2000 for a set-op or units-in-settlement query and 1000 for the
+///     others (`GetList`, 0x004f9490), so a read can be seconds stale; and
 ///   * **a refcounted lifetime** (0x00571670 adds, 0x00571680 releases and
 ///     destroys at zero).
 ///
-/// Here every call mints a fresh query object, evaluated afresh on every read
-/// and never freed (`World::create_query`). The answers agree except for the
-/// staleness, and the handles a script sees are allocated differently. That is
-/// a design of its own -- a query pool keyed as the original keys it, a clock
-/// on each query, and a reference count the script VM maintains -- and is left
-/// for a round of its own. Results also come in ascending id order rather than
+/// The timed cache is modelled (`World::read_query`, docs/formats/
+/// query-model.md); interning and the reference count are not yet: every call
+/// mints a fresh query object, refreshed on its first read and never freed
+/// (`World::create_query`). A temporary therefore reads as fresh, as the
+/// original's freshly made one does; what differs is that two equal calls
+/// share one cache there and two here, and that the handles a script sees are
+/// allocated differently. Results also come in ascending id order rather than
 /// the original's grid order (`sim/spatial_index.hpp`).
 template <SetOp kOp>
 HostOutcome fn_set_op(CallContext& ctx) {
@@ -1552,7 +1554,7 @@ HostOutcome fn_set_op(CallContext& ctx) {
   const WorldObject* rhs = object_of(*world, ctx.arg(1));
   if (lhs == nullptr || rhs == nullptr) return HostOutcome::ok_with(invalid_object());
   const QuerySpec spec = set_op(kOp, lhs->id, rhs->id);
-  return HostOutcome::ok_with(query_value(world->create_query(spec)));
+  return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
 /// `Count(player, "class")` -- how many objects of a class a player owns.
@@ -3033,28 +3035,17 @@ HostOutcome m_get_stamina_dec_time(CallContext& ctx) {
 /// `TOWER_ATTACK.VS` writes with `Bld.SetUITarget(target)`: the fake towers
 /// are the engine's guns, and taking their target away is what stops them.
 ///
-/// **The gate is not reproduced.** `[cat+0x22c]` is the slot `RotateTo` reads
-/// as a turn in progress, and this engine keeps no such slot -- its `RotateTo`
-/// turns at once -- so the clear here is unconditional. The divergence is a
-/// stopped catapult that was not mid-swing, whose towers keep their target
-/// in the original; the target the catapult itself keeps is left alone in
-/// both readings, which is what the script's comment asks for.
+/// **The gate is `has_towers`.** `[cat+0x22c]` is the engine's `HasTowers`
+/// (the persist stream names it, 0x004e1c90), raised when the tower
+/// placement put a `CatapultTower` down -- not a turn in progress, as this
+/// note once read it. An engine with no towers has nothing to silence. The
+/// walk is `catapult_clear_tower_target` (`sim/siege_fire.cpp`).
 HostOutcome m_clear_tower_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("ClearTowerTarget: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_void();
-  const EconomySystem* economy = economy_of(*world);
-  const Settlement* set =
-      economy == nullptr ? nullptr : economy->settlements().for_object(slot->id);
-  if (set == nullptr) return HostOutcome::ok_void();
-  for (const SettlementBuilding& building : set->buildings) {
-    const WorldObject* member = world->find(building.object);
-    if (member == nullptr || !class_is(*world, *member, "CatapultTower")) continue;
-    if (ObjectState* state = world->mutable_state(building.object); state != nullptr) {
-      state->ui_target = kNoObject;
-    }
-  }
+  catapult_clear_tower_target(*world, slot->id);
   return HostOutcome::ok_void();
 }
 
@@ -3088,12 +3079,11 @@ HostOutcome m_is_built(CallContext& ctx) {
 /// the start of the next, and a full crew of ten waits 1,000 less than
 /// `600000 / 292`.
 ///
-/// **One term is not reproduced and is named.** When the catapult's action
-/// state (`[obj+0x44]`) is between 4 and 7 -- a shot still in progress -- the
-/// original (0x004e3326..0x004e3365) adds the time left on that state to the
-/// answer. This engine keeps no such action state on a catapult, and the
-/// three callers ask from idle, so the answer here is the interval less the
-/// animation, floored at 0. A negative result is 0 there too (0x004e330c).
+/// **One term cannot arise here.** When the catapult's action state is
+/// between 4 and 7 the original (0x004e3326..0x004e3365) adds the time left
+/// on it to the answer. `Catapult::Attack` suspends its script to the end of
+/// the throw and `RotateTo` turns at once, so none of the three callers can
+/// ask with a state in progress. A negative result is 0 (0x004e330c).
 /// One cycle of the entity's `attack` state, in game-time milliseconds, or 0
 /// for an object with no entity or no such state. What `AttackWait` takes off
 /// the shot interval, and how long `TrainAttack`'s swing lasts.
@@ -3133,7 +3123,12 @@ HostOutcome m_attack_wait(CallContext& ctx) {
   if (rate <= 0) return HostOutcome::ok_with(Value::integer(0));
   std::int32_t wait = 600000 / rate;
 
-  wait -= attack_animation_ms(*slot);
+  // The attack animation's `duration` attribute: the record at
+  // `[entity+0x147c]` is `<anim idx="5">` (the table at `+0x146c` is indexed
+  // by `idx - 1`) and its `+0x4c` is `duration` (the writer 0x005fd720 prints
+  // the fields in that order). Not the `attack` *state*, which only one
+  // shipped catapult entity names.
+  wait -= catapult_throw_ms(*world, slot->id);
   return HostOutcome::ok_with(Value::integer(wait < 0 ? 0 : wait));
 }
 
@@ -3168,6 +3163,9 @@ HostOutcome m_rotate_to(CallContext& ctx) {
   // fault that drops it survives the suite. The original writes the test
   // here (0x004e2ca7), so this does too.
   if (towards == world->resolve_position(slot->id)) return HostOutcome::ok_void();
+  // And an engine with towers does not turn: the same `[cat+0x22c]` gate
+  // `Catapult::Attack` has, read in the same place (0x004e2c50).
+  if (slot->state.flags.has_towers) return HostOutcome::ok_void();
   if (MovementSystem* movement = movement_system(*world); movement != nullptr) {
     movement->face(*world, slot->id, towards);
   }
@@ -5404,7 +5402,7 @@ HostOutcome m_set_messenger_status(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed("SetMessengerStatus: no world");
   const bool on = ctx.count() > 1 && ctx.arg(1).is_integer() && ctx.arg(1).as_integer() != 0;
   const bool query = ctx.arg(0).is_object() && ctx.arg(0).as_object().type == kTypeQuery;
-  for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+  for (const ObjectId id : receiver_objects(ctx, *world, ctx.arg(0))) {
     const WorldObject* slot = world->find(id);
     if (slot == nullptr || (query && object_is_dead(*slot))) continue;
     if (ObjectState* state = world->mutable_state(id); state != nullptr) {
@@ -6089,17 +6087,18 @@ HostOutcome m_erase(CallContext& ctx) {
   // -- as a `continue` and not an abort. So a query holding six units and a
   // wall loses the six.
   //
-  // It also reads before it refreshes, where every other `Query` member
-  // refreshes first. That inversion is unobservable here: this engine caches no
-  // query result at all (`World::evaluate_query`'s note says why), so there is
-  // no stale list for the order to matter to.
+  // It also reads before it purges, where every other `Query` member purges
+  // first: the list accessor (`vtbl + 0x20`, refreshed when due) and only then
+  // `vtbl + 0x1c`. So a stale list hands the walk its dead too, which the
+  // building test above lets through to `erase_one`.
   std::vector<ObjectId> found;
-  world->evaluate_query(slot->id, found);
+  world->read_query(slot->id, script_clock(ctx, *world), found, World::QueryRead::as_cached);
   for (const ObjectId id : found) {
     const WorldObject* target = world->find(id);
     if (target == nullptr || target->state.flags.is_building) continue;
     erase_one(ctx, *world, id);
   }
+  world->purge_query(slot->id);
   // And the query itself survives. `0x00578c40` releases one reference on it and
   // erases nothing.
   return HostOutcome::ok_void();
@@ -6122,8 +6121,9 @@ HostOutcome m_erase(CallContext& ctx) {
 ///     answers **true** -- then the query's refresh (`vtbl + 0x1c`, which for
 ///     a group or named query purges the dead) and its emptiness test
 ///     (`vtbl + 0x28`, count == 0; a sight query refreshes first if stale).
-///     Here the query is evaluated on the spot; how stale the original's
-///     cached answer may be is the query model's (see `fn_set_op`).
+///     Here that is `World::purge_query` and `World::query_is_empty`: the
+///     cached list while it is fresh, and once due a refresh -- or, for the
+///     area, sight, player-flags and party kinds, a sweep that only counts.
 ///   * `Sacrifice::IsEmpty` (0x00594eb0): the handle check -- a miss answers
 ///     true -- then the stop flag at `[sacrifice+0x15c]`, the one `Consume`'s
 ///     core (0x00596050) reads. Nothing in this engine sets it (there is no
@@ -6140,8 +6140,9 @@ HostOutcome m_query_is_empty(CallContext& ctx) {
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_with(Value::boolean(true));
   if (slot->internal != InternalKind::query) return HostOutcome::ok_with(Value::boolean(false));
-  std::vector<ObjectId> found;
-  return HostOutcome::ok_with(Value::boolean(world->evaluate_query(slot->id, found) == 0));
+  world->purge_query(slot->id);
+  return HostOutcome::ok_with(
+      Value::boolean(world->query_is_empty(slot->id, script_clock(ctx, *world))));
 }
 
 // --------------------------------------------------------------------------
@@ -6537,6 +6538,13 @@ std::int32_t object_max_health(World& world, const WorldObject& slot) {
   return max_health_of_object(world, slot);
 }
 
+bool object_has_special(World& world, ObjectId id, std::int32_t index) {
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr || index < 0 || index >= kUnitSpecialsCount) return false;
+  if (index == kSpecialFreedom && slot->state.flags.is_hero) return true;
+  return class_has_special(world, *slot, index);
+}
+
 bool unit_has_freedom(World& world, ObjectId id) {
   const WorldObject* slot = world.find(id);
   if (slot == nullptr) return false;
@@ -6909,8 +6917,31 @@ std::size_t stop_behaviors(script::Scheduler& scheduler, ScriptLibrary& library,
   return doomed.size();
 }
 
+GameTime script_clock(const script::CallContext& ctx, const World& world) noexcept {
+  return ctx.scheduler != nullptr ? ctx.scheduler->now() : world.time();
+}
+
+namespace {
+
+std::vector<ObjectId> receiver_objects_at(World& world, const script::Value& receiver,
+                                          bool accept_query, GameTime now);
+
+}  // namespace
+
+std::vector<ObjectId> receiver_objects(script::CallContext& ctx, World& world,
+                                      const script::Value& receiver, bool accept_query) {
+  return receiver_objects_at(world, receiver, accept_query, script_clock(ctx, world));
+}
+
 std::vector<ObjectId> receiver_objects(World& world, const script::Value& receiver,
                                       bool accept_query) {
+  return receiver_objects_at(world, receiver, accept_query, world.time());
+}
+
+namespace {
+
+std::vector<ObjectId> receiver_objects_at(World& world, const script::Value& receiver,
+                                          bool accept_query, GameTime now) {
   std::vector<ObjectId> ids;
   if (is_objlist(receiver)) {
     const std::span<const ObjectId> items = objlist_pool_of(world).items(objlist_of(receiver));
@@ -6924,12 +6955,16 @@ std::vector<ObjectId> receiver_objects(World& world, const script::Value& receiv
   const WorldObject* slot = object_of(world, receiver);
   if (slot == nullptr) return ids;
   if (slot->internal == InternalKind::query) {
-    if (accept_query) world.evaluate_query(slot->id, ids);
+    // The `Query` registrations' opening pair: purge, then the list accessor,
+    // which refreshes only when due (`World::read_query`).
+    if (accept_query) world.read_query(slot->id, now, ids);
     return ids;
   }
   ids.push_back(slot->id);
   return ids;
 }
+
+}  // namespace
 
 void install_deferred_erase(script::Scheduler& scheduler) noexcept {
   scheduler.set_step_hook([](void* user, script::Scheduler& sched, script::ScriptId) {

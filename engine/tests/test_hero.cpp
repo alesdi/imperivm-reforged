@@ -2423,6 +2423,8 @@ TEST(a_heros_army_comes_back_as_a_list_in_attach_order) {
 
   sim::HostContext context_state;
   context_state.world = &f.world;
+  // What a session does: the system's start installs the pool's army seam.
+  f.heroes.start(f.world);
 
   const auto call = [&](script::CallKind kind, std::string_view name,
                         std::vector<script::Value> args) -> script::HostOutcome {
@@ -2473,15 +2475,16 @@ TEST(a_heros_army_comes_back_as_a_list_in_attach_order) {
   CHECK(items[0] == first);
   CHECK(items[1] == second);
 
-  // A snapshot, not the hero's own vector. `gbr.exe` 0x00530580 returns a live
-  // reference -- `{handle, 0x1cc, hero + 0x1cc}` -- and the divergence is
-  // recorded at `m_army`; this pins which of the two this engine does, so that
-  // changing it is a decision rather than an accident.
+  // The hero's own vector, not a snapshot: `gbr.exe` 0x00530580 pushes a live
+  // reference -- `{handle, 0x1cc, hero + 0x1cc}` -- so a list taken before a
+  // detach sees it, and the list taken before the attaches sees them.
   REQUIRE(f.heroes.detach(f.world, first));
-  CHECK(call(script::CallKind::member, "count", {full.value}).value.as_integer() == 2);
-  CHECK(call(script::CallKind::member, "count",
-             {call(script::CallKind::member, "army", {hero_ref}).value})
-            .value.as_integer() == 1);
+  CHECK(call(script::CallKind::member, "count", {full.value}).value.as_integer() == 1);
+  CHECK(call(script::CallKind::member, "count", {empty.value}).value.as_integer() == 1);
+  // And a write through it reaches the hero: `.army.ClearDead` (4 sites).
+  (void)f.world.set_health(second, 0);
+  (void)call(script::CallKind::member, "ClearDead", {full.value});
+  CHECK(f.heroes.hero(hero)->army.empty());
 
   // An invalid receiver is a fresh empty list, not a refusal: 0x005305ad
   // diagnoses and allocates one, so `h.army.count` on a dead hero is 0.
@@ -3187,7 +3190,7 @@ TEST(hero_curse_takes_the_hardest_hitter_and_cripple_the_freshest) {
     c.health = 200;
     return c;
   }());
-  b.combat.find(friend_)->attack_bonus = 900;
+  b.combat.find(friend_)->stats.attack = 900;
   CHECK(b.found("GetBestCurseTarget", caster) == kNoObject);
   CHECK(b.found("GetBestCrippleTarget", caster) == kNoObject);
 
@@ -3284,6 +3287,48 @@ TEST(hero_curse_takes_the_hardest_hitter_and_cripple_the_freshest) {
   CHECK(b.found("GetBestCrippleTarget", caster) == soldier);
   (void)fresh_ram;
   (void)quiet;
+}
+
+/// **A caster in a squad curses and cripples off its squad's `Enemies`**
+/// (0x005d94f0, 0x005138c0) and draws no circle: before the squad has looked
+/// it finds nobody, with an enemy at its elbow; after, it finds one only a
+/// squadmate sees. A hidden enemy the look listed stays a candidate -- the
+/// list's walk has no stealth clause.
+TEST(hero_curse_and_cripple_walk_the_casters_squads_enemies) {
+  CasterBench b;
+  const ObjectId caster = b.spawn(b.caster_class, Point{0, 0}, 1, 100);
+  const ObjectId scout = b.spawn(b.caster_class, Point{3000, 0}, 1, 100);
+  const SquadKey key = b.heroes.squads().create(1);
+  REQUIRE(b.heroes.squads().join(key, caster));
+  REQUIRE(b.heroes.squads().join(key, scout));
+  CombatProfile hitter;
+  hitter.damage = 7;
+  hitter.max_health = 200;
+  b.combat.set_profile(b.plain_class, hitter);
+  const auto fighter = [&](Point at, std::int32_t stamina) {
+    const ObjectId id = b.spawn(b.plain_class, at, 2, 200, stamina);
+    Combatant c;
+    c.id = id;
+    c.class_index = b.plain_class;
+    c.owner = 2;
+    c.health = 200;
+    b.combat.add(c);
+    return id;
+  };
+  const ObjectId near = fighter(Point{100, 0}, 10);
+  const ObjectId far = fighter(Point{3300, 0}, 50);  // 3300 from the caster's 900
+
+  CHECK(b.found("GetBestCurseTarget", caster) == kNoObject);
+  CHECK(b.found("GetBestCrippleTarget", caster) == kNoObject);
+
+  squad_look(b.world, *b.heroes.squads().find(key));
+  CHECK(b.found("GetBestCrippleTarget", caster) == far);  // the most stamina
+  b.combat.find(near)->stats.attack += 5;
+  CHECK(b.found("GetBestCurseTarget", caster) == near);  // the hardest hitter
+
+  // Hidden after the look: still on the list, still a candidate.
+  b.world.mutable_state(far)->flags.hidden = true;
+  CHECK(b.found("GetBestCrippleTarget", caster) == far);
 }
 
 /// `FindUnitBelowILevel(n)` wants an ally whose **inherent** level is strictly

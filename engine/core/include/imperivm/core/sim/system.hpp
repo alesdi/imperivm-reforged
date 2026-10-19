@@ -402,6 +402,24 @@ struct ObjectFlags {
   /// write is at the tail and is not conditional on the launch. See
   /// `sim/hooks.hpp`.
   bool ondie_fired = false;
+  /// Whether this object's fake towers have been placed: the deferred step
+  /// a `CVXOutpost` and a `CVXCatapult` take once, just after they are
+  /// created (`docs/formats/siege-fire.md`, "The fake towers"). The original
+  /// has no such bit: its construction virtual (`vtbl+0x2c`, 0x004e1b30)
+  /// posts the object message 0x3d to itself unless a saved game is being
+  /// restored, and the handler places the towers. Here the post is this bit
+  /// standing clear, and `place_fake_towers` raises it. **Hashed and saved**:
+  /// a reload that placed the towers a second time would double every
+  /// outpost's guns.
+  bool towers_posted = false;
+  /// `Catapult`'s `HasTowers`, the int at `[cat+0x22c]` (the persist stream
+  /// names it, 0x004e1c90): raised by the tower placement (0x004e38d0) when
+  /// it put at least one `CatapultTower` down -- on the shipped data, the
+  /// Roman tower `RCatapult` and nothing else. It refuses the engine's own
+  /// shot and turn (`Catapult::Attack`, `RotateTo`), lets `BestTarget` fall
+  /// back on a unit, and gates the mirror of the target onto the towers
+  /// (`SetTarget`, `ClearTarget`, `ClearTowerTarget`). **Hashed and saved.**
+  bool has_towers = false;
 };
 
 /// The common header every simulated object carries.
@@ -470,12 +488,12 @@ struct ObjectState {
   ///
   /// **On the object, not on a trade record.** `Wagon::amount` (0x005ebdb0) and
   /// `Wagon::restype` (0x005ebe10) are plain reads of those two fields, and
-  /// `Wagon::LoadGold`/`LoadFood` (0x005ebfd0, 0x005ebf10) are the only writers
-  /// a script has. `EconomySystem::Wagon` is a different thing -- a settlement
-  /// -to-settlement shipment with a build timer and no world object -- and the
-  /// two must not be confused: a mule the AI walks around with is this, and
-  /// `ES_OUTPOSTSELLGOLD.VS` sums `AsWagon(o).amount` over a *group of objects*
-  /// to find out how much gold is on the road.
+  /// every write goes through the cargo setter (`set_wagon_cargo`, 0x005eb0a0,
+  /// which kills a wagon emptied to zero). Every carrier a settlement sends --
+  /// `CreateMuleGold`, `CreateBoatFood`, `SendFoodWagon` -- is such an object
+  /// (`make_mule`), and `ES_OUTPOSTSELLGOLD.VS` sums `AsWagon(o).amount` over
+  /// a *group of objects* to find out how much gold is on the road.
+  /// `docs/formats/wagon.md` is the model.
   ///
   /// `cargo_resource` uses `Resource`'s own numbering, and that is measured
   /// rather than assumed: `LoadFood` writes the literal 1 into `[+0x1d4]` and
@@ -604,6 +622,17 @@ struct ObjectState {
   /// what would be per-screen is the *selection*, which lives on
   /// `SelectionTable` for exactly the opposite reason.
   ObjectId ui_target = kNoObject;
+
+  /// `Catapult::GetCurrentTarget` / `SetTarget` / `ClearTarget` -- the
+  /// engine's own target, the 16-bit handle at `[cat+0x228]` (the persist
+  /// stream's `target`, 0x004e1c90; the constructor writes 0xffff,
+  /// 0x004e1e10). A slot, not an engagement: `SetTarget` stores whatever it
+  /// is handed, unvalidated, and nothing but the scripts reads it -- the
+  /// autofire loop takes it back with `GetCurrentTarget` to decide what to
+  /// shoot at, and the siege planner (0x004389d5) writes it to say which
+  /// building an engine was placed for. Kept on every object for the reason
+  /// `cargo` is; only a catapult's is ever written. **Hashed and saved.**
+  ObjectId catapult_target = kNoObject;
 
   /// `Obj::MistAction`'s tag: the mist that has this unit, or none.
   ///

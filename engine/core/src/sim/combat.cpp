@@ -17,6 +17,9 @@
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/movement.hpp"
+#include "imperivm/core/sim/settlement.hpp"
+#include "imperivm/core/sim/siege_fire.hpp"
+#include "imperivm/core/sim/stats.hpp"
 #include "imperivm/core/sim/world.hpp"
 // `unpack_point`: `BestTargetInRange/2` takes a `point`, and the object model
 // owns how one is packed into a `Value`.
@@ -267,6 +270,8 @@ CombatConstants CombatConstants::from_const_ini(std::span<const std::byte> bytes
       out.catapult_base_fire_rate = to_int(value, out.catapult_base_fire_rate);
     } else if (equal_ignoring_case(key, "CatapultAddFireRate")) {
       out.catapult_add_fire_rate = to_int(value, out.catapult_add_fire_rate);
+    } else if (equal_ignoring_case(key, "BaseFireRate")) {
+      out.base_fire_rate = to_int(value, out.base_fire_rate);
     } else if (equal_ignoring_case(key, "CatapultMaxUnits")) {
       out.catapult_max_units = to_int(value, out.catapult_max_units);
     } else if (equal_ignoring_case(key, "SquadLookIvl")) {
@@ -638,14 +643,18 @@ CombatProfile CombatSystem::profile(ClassIndex index) const {
 }
 
 Combatant& CombatSystem::add(const Combatant& combatant) {
+  // Built from its class, as an object is: the stored stats start as the
+  // class's numbers (and the record's, should the caller have given one).
+  Combatant built = combatant;
+  built.stats = class_stats(built);
   const auto it = std::lower_bound(
-      units_.begin(), units_.end(), combatant.id,
+      units_.begin(), units_.end(), built.id,
       [](const Combatant& c, ObjectId id) { return c.id < id; });
-  if (it != units_.end() && it->id == combatant.id) {
-    *it = combatant;
+  if (it != units_.end() && it->id == built.id) {
+    *it = built;
     return *it;
   }
-  return *units_.insert(it, combatant);
+  return *units_.insert(it, built);
 }
 
 Combatant* CombatSystem::mutable_find(ObjectId id) noexcept {
@@ -704,7 +713,7 @@ bool is_combat_object(const WorldObject& slot) noexcept {
   return slot.state.flags.is_unit || slot.state.flags.is_building;
 }
 
-bool CombatSystem::reclass(ObjectId id, ClassIndex to) noexcept {
+bool CombatSystem::reclass(ObjectId id, ClassIndex to) {
   Combatant* unit = mutable_find(id);
   if (unit == nullptr) return false;
   unit->class_index = to;
@@ -714,12 +723,14 @@ bool CombatSystem::reclass(ObjectId id, ClassIndex to) noexcept {
   unit->attacks = 0;
   unit->last_attack_time = 0;
   unit->next_action_time = 0;
-  unit->attack_bonus = 0;
-  unit->armour_bonus = 0;
-  unit->level_floor = 0;
   unit->damage_multiplier_percent = 100;
   unit->ignores_armour = false;
   unit->bonus = StatBonus{};
+  // The fresh object is built from its class and rebuilt (0x005deef0): its
+  // stats start as the new class's, with no rescale, and the rebuild then
+  // adds what the unit's hero, items and formation give it.
+  unit->stats = class_stats(*unit);
+  recalc(id);
   return true;
 }
 
@@ -727,6 +738,8 @@ std::size_t CombatSystem::reconcile(World& world) {
   // Without world ids there is nothing to reconcile against, and reconciling
   // anyway would delete every combatant a synthetic test registered.
   if (!world_bound_) return units_.size();
+  // The rebuild of what enrols below reads the rest of the world through it.
+  world_ = &world;
 
   const std::span<const WorldObject> objects = world.objects();
 
@@ -738,6 +751,7 @@ std::size_t CombatSystem::reconcile(World& world) {
   // what makes iteration order reproducible.
   std::vector<Combatant> merged;
   merged.reserve(units_.size());
+  std::vector<ObjectId> enrolled;
 
   std::size_t mine = 0;
   for (const WorldObject& slot : objects) {
@@ -774,12 +788,17 @@ std::size_t CombatSystem::reconcile(World& world) {
     // if the ranges agreed there would be no evidence for which one the
     // attribute is. `effective_level` feeds the damage formula on every strike
     // on every map, so a plausible number here would be worse than none.
-    fresh.experience = 0;
     fresh.level = 1;
+    // Built from the class, then rebuilt once it is in place (0x005d3090: the
+    // object start, then `vtbl+0xc4`), so a unit that already has a hero, an
+    // item or a skill when it joins the population starts with them.
+    fresh.stats = class_stats(fresh);
+    enrolled.push_back(fresh.id);
     merged.push_back(fresh);
   }
 
   units_ = std::move(merged);
+  for (const ObjectId id : enrolled) recalc(id);
   return units_.size();
 }
 
@@ -822,11 +841,12 @@ bool CombatSystem::in_attack_range(const Combatant& attacker, const Combatant& d
   const CombatProfile mine = profile(attacker.class_index);
   const CombatProfile theirs = profile(defender.class_index);
   const std::int64_t d2 = distance_squared(attacker.position, defender.position);
-  // Reach is measured surface to surface: the class `range` plus both radii.
-  // INFERRED -- the dumps' `Min Range`/`Range` are path arrival tolerances and
-  // cluster at exactly these class numbers, but nothing states the sum.
+  // Reach is measured surface to surface: the stored range plus both radii.
+  // The far edge is the attacker's `[obj+0xd4]` (0x005a7800), so a formation's
+  // `BonusRange` lengthens it; the minimum below is the class's `[obj+0xd8]`,
+  // which no rebuild touches.
   const std::int64_t reach =
-      static_cast<std::int64_t>(mine.range) + mine.radius + theirs.radius;
+      static_cast<std::int64_t>(range_of(attacker)) + mine.radius + theirs.radius;
   if (d2 > squared(reach)) return false;
   if (mine.min_range > 0) {
     // A catapult's `min_range` of 301 really is a dead zone. Measured centre to
@@ -871,6 +891,10 @@ ObjectId CombatSystem::best_target(ObjectId id, const TargetFilter& filter) cons
   // rather than as a term inside it. See `TargetFilter::prefer_class`.
   bool best_preferred = false;
   for (const Combatant& other : units_) {
+    // The circle first: every test here is a filter, so the order changes no
+    // answer, and the circle is the cheap one -- `targetable` asks the
+    // `CanAttack` virtual, which looks a building's settlement up.
+    if (distance_squared(centre, other.position) > reach2) continue;
     if (!targetable(*self, other)) continue;
     // `BestTargetInSquadSightExclusive`. Exact class, not ancestry.
     if (filter.only_class != kNoClass && other.class_index != filter.only_class) continue;
@@ -931,6 +955,37 @@ ObjectId CombatSystem::best_target_among(ObjectId id,
   return best;
 }
 
+ObjectId CombatSystem::best_target_in_list(ObjectId id, std::span<const ObjectId> candidates,
+                                           const TargetFilter& filter) const {
+  const Combatant* self = find(id);
+  if (self == nullptr || !self->alive || self->action == Action::dying) return kNoObject;
+  if (!profile(self->class_index).can_attack()) return kNoObject;
+
+  ObjectId best = kNoObject;
+  std::int64_t best_score = 0;
+  bool best_preferred = false;
+  for (const ObjectId candidate : candidates) {
+    const Combatant* other = find(candidate);
+    if (other == nullptr || !targetable(*self, *other)) continue;
+    if (filter.only_class != kNoClass && other->class_index != filter.only_class) continue;
+    if (filter.exclude_independents && other->owner == kNeutralWildlife) continue;
+    if (filter.require_armed && attack_of(*other) <= 0) continue;
+    const std::int64_t score = target_score(*self, *other);
+    const bool preferred =
+        filter.prefer_class != kNoClass && other->class_index == filter.prefer_class;
+    // Preference first, as `best_target` ranks it; within one rank an equal
+    // score replaces the one held (0x005db7c7).
+    const bool better = best == kNoObject || (preferred && !best_preferred) ||
+                        (preferred == best_preferred && score <= best_score);
+    if (better) {
+      best = other->id;
+      best_score = score;
+      best_preferred = preferred;
+    }
+  }
+  return best;
+}
+
 bool CombatSystem::targetable(const Combatant& self, const Combatant& other) const {
   if (!other.alive || other.action == Action::dying) return false;
   // Nothing at no health is a target. For a unit that is death itself (its
@@ -977,7 +1032,10 @@ bool CombatSystem::unit_can_attack(const Combatant& self, const Combatant& targe
   }
   if (theirs.is(CombatProfile::kLineFish)) return false;
 
-  if (target_is_building && them->settlement != kNoObject) {
+  // The settlement is looked up only for the two clauses that read it: it is
+  // a scan of the store, and every unit's sweep asks this of every building.
+  if (target_is_building && them->settlement != kNoObject &&
+      (theirs.is(CombatProfile::kLineFakeTower) || mine.is(CombatProfile::kLineRamUnit))) {
     if (EconomySystem* economy = economy_of(*world_); economy != nullptr) {
       if (const Settlement* set = economy->settlements().for_object(them->settlement);
           set != nullptr) {
@@ -1058,6 +1116,16 @@ bool CombatSystem::drop_target(ObjectId id) {
   if (unit == nullptr) return false;
   if (unit->target != kNoObject) {
     unit->target = kNoObject;
+    unit->attacks = 0;
+  }
+  return true;
+}
+
+bool CombatSystem::hand_target(ObjectId id, ObjectId target) {
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr) return false;
+  if (unit->target != target) {
+    unit->target = target;
     unit->attacks = 0;
   }
   return true;
@@ -1361,14 +1429,30 @@ void CombatSystem::die_as_engine(World& world, ObjectId id, GameTime now) {
   }
 }
 
-void CombatSystem::award_experience(Combatant& attacker, const Combatant& defender) {
+void CombatSystem::award_experience(World& world, const Combatant& attacker,
+                                    const Combatant& defender) {
   // CONST.INI: exp_gain = target_level / LevelExpDivider + 1, scaled by the
   // **attacker's own** `BattleTacticsExpModifier` -- the research is per player
   // and `SetExperienceModifier` writes it there.
-  attacker.experience += constants_.experience_gain(
+  //
+  // Paid where the original pays every award: into the running total
+  // `[unit+0x180]` through the unit's `SetExperience` virtual with the
+  // refresh flag (0x00511550 -> `vtbl+0x118`), so the stored level the next
+  // blow reads is rebuilt from it. That total is `HeroSystem`'s, and it is
+  // the one scripts read; a world with no hero system, or ids that are not
+  // the world's, keeps no total and the award goes nowhere.
+  //
+  // **Still this engine's:** the amount. 0x00511550 credits the blow's own
+  // award from 0x0050ff30 plus, on a kill, a gain from both units' inherent
+  // levels (0x0050fec0) that also feeds the hero's accumulator `[hero+0x2c4]`,
+  // and caps a non-hero at the owner's `max_battle_level`; here it is the
+  // CONST.INI line above on every damaging blow.
+  if (!world_bound_) return;
+  HeroSystem* heroes = hero_system_of(world);
+  if (heroes == nullptr) return;
+  const std::int32_t gain = constants_.experience_gain(
       defender.base_effective_level(), player_experience_modifier(attacker.owner));
-  const std::int32_t level = constants_.level_for_experience(attacker.experience);
-  if (level > attacker.level) attacker.level = level;
+  (void)heroes->set_experience(world, attacker.id, heroes->experience(attacker.id) + gain);
 }
 
 /// A building keeps its own running total of what it has taken --
@@ -1495,6 +1579,14 @@ std::int32_t CombatSystem::apply_damage(World& world, ObjectId victim, std::int3
   return removed;
 }
 
+bool CombatSystem::kill(World& world, ObjectId id) {
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr || !unit->alive || unit->action == Action::dying) return false;
+  unit->health = 0;
+  enter_dying(world, *unit, now_);
+  return true;
+}
+
 std::int32_t CombatSystem::heal(ObjectId id, std::int32_t amount) {
   Combatant* unit = mutable_find(id);
   if (unit == nullptr || !unit->alive || unit->action == Action::dying) return 0;
@@ -1515,23 +1607,72 @@ std::int32_t CombatSystem::max_health(ObjectId id) const noexcept {
   return unit == nullptr ? 0 : max_health_of(*unit);
 }
 
-std::int32_t CombatSystem::attack_of(const Combatant& unit) const {
-  return profile(unit.class_index).damage + unit.attack_bonus + unit.bonus.attack;
-}
+std::int32_t CombatSystem::attack_of(const Combatant& unit) const { return unit.stats.attack; }
 
 std::int32_t CombatSystem::armour_of(const Combatant& unit, DamageType type) const {
-  const std::int32_t from_record = type == DamageType::slash    ? unit.bonus.armour_slash
-                                   : type == DamageType::pierce ? unit.bonus.armour_pierce
-                                                                : 0;
-  return profile(unit.class_index).armour_against(type) + unit.armour_bonus + from_record;
+  switch (type) {
+    case DamageType::slash: return unit.stats.armour_slash;
+    case DamageType::pierce: return unit.stats.armour_pierce;
+    case DamageType::siege:
+    case DamageType::none: return 0;
+  }
+  return 0;
 }
 
 std::int32_t CombatSystem::max_health_of(const Combatant& unit) const {
-  return profile(unit.class_index).max_health + unit.bonus.max_health;
+  return unit.stats.max_health;
 }
 
 std::int32_t CombatSystem::max_stamina_of(const Combatant& unit) const {
-  return profile(unit.class_index).max_stamina + unit.bonus.max_stamina;
+  return unit.stats.max_stamina;
+}
+
+std::int32_t CombatSystem::range_of(const Combatant& unit) const { return unit.stats.range; }
+
+StatBlock CombatSystem::class_stats(const Combatant& unit) const {
+  const CombatProfile cls = profile(unit.class_index);
+  StatBlock out;
+  out.max_health = cls.max_health + unit.bonus.max_health;
+  out.max_stamina = cls.max_stamina + unit.bonus.max_stamina;
+  out.range = cls.range;
+  out.attack = cls.damage + unit.bonus.attack;
+  out.armour_slash = cls.armor_slash + unit.bonus.armour_slash;
+  out.armour_pierce = cls.armor_pierce + unit.bonus.armour_pierce;
+  return out;
+}
+
+void CombatSystem::store_stats(Combatant& unit, const StatBlock& next) {
+  const StatBlock old = unit.stats;
+  const std::int32_t health_before = unit.health;
+  const std::int32_t stamina_before = unit.stamina;
+  unit.stats = next;
+  if (old.max_health > 0) {
+    unit.health = static_cast<std::int32_t>(static_cast<std::int64_t>(unit.health) *
+                                            next.max_health / old.max_health);
+  }
+  if (old.max_stamina > 0) {
+    unit.stamina = static_cast<std::int32_t>(static_cast<std::int64_t>(unit.stamina) *
+                                             next.max_stamina / old.max_stamina);
+  }
+  // Written through only when the rescale moved them: the end of the turn
+  // publishes the rest, as it always has.
+  if (world_bound_ && world_ != nullptr &&
+      (unit.health != health_before || unit.stamina != stamina_before)) {
+    (void)world_->set_health(unit.id, unit.health);
+    if (ObjectState* state = world_->mutable_state(unit.id); state != nullptr) {
+      state->stamina = unit.stamina;
+    }
+  }
+}
+
+void CombatSystem::recalc(ObjectId id) {
+  if (world_bound_ && world_ != nullptr) {
+    recalc_bonuses(*world_, id);
+    return;
+  }
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr || !unit->alive || unit->action == Action::dying) return;
+  store_stats(*unit, class_stats(*unit));
 }
 
 bool CombatSystem::add_bonus(ObjectId id, const StatBonus& delta) {
@@ -1542,6 +1683,8 @@ bool CombatSystem::add_bonus(ObjectId id, const StatBonus& delta) {
   unit->bonus.armour_pierce += delta.armour_pierce;
   unit->bonus.max_health += delta.max_health;
   unit->bonus.max_stamina += delta.max_stamina;
+  // 0x005e0ce0 ends in the rebuild (`vtbl+0xc4`).
+  recalc(id);
   return true;
 }
 
@@ -1557,6 +1700,8 @@ bool CombatSystem::remove_bonus(ObjectId id, const StatBonus& delta) {
   down(unit->bonus.armour_pierce, delta.armour_pierce);
   down(unit->bonus.max_health, delta.max_health);
   down(unit->bonus.max_stamina, delta.max_stamina);
+  // 0x005e07f0 ends in the rebuild too.
+  recalc(id);
   return true;
 }
 
@@ -1604,9 +1749,9 @@ void CombatSystem::strike(World& world, Combatant& attacker, Combatant& defender
   // Experience is paid per damaging attack, not per kill -- see
   // CombatConstants. Paid before the defender is reaped so a killing blow
   // still counts. Both re-found: a fatal blow ran two hooks in between.
-  Combatant* a = mutable_find(attacker_id);
+  const Combatant* a = find(attacker_id);
   const Combatant* d = find(defender_id);
-  if (a != nullptr && d != nullptr) award_experience(*a, *d);
+  if (a != nullptr && d != nullptr) award_experience(world, *a, *d);
 }
 
 void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& defender,
@@ -1653,6 +1798,14 @@ void CombatSystem::land(World& world, Projectile& shot, GameTime now) {
   // The shooter is re-found at every use, and the splash walks ids rather than
   // `units_`: each `hit` can kill, and a kill runs hooks to completion.
   const auto shooter_now = [this, &shot]() { return find(shot.shooter); };
+
+  if (shot.ground) {
+    land_on_ground(world, shot, now);
+    world.despawn(shot.id);
+    shot.id = kNoObject;
+    return;
+  }
+
   Combatant* target = mutable_find(shot.target);
 
   const auto apply = [&](Combatant& victim) {
@@ -1694,6 +1847,101 @@ void CombatSystem::land(World& world, Projectile& shot, GameTime now) {
   shot.id = kNoObject;
 }
 
+/// A ground shot's impact, 0x004e4520 -> 0x005ac640 -> 0x005a9770 ->
+/// 0x005a8e10 (`docs/formats/siege-fire.md`, "A catapult's shot").
+///
+/// Every combatant -- every unit and building -- whose centre is inside the
+/// box and the circle of `splash_radius + 512` about the point, **whoever owns
+/// it**, takes, where its surface distance `d` (centre distance less its
+/// class's `radius`) is under `R = splash_radius`: the class damage `D` for
+/// `d < 1`, else `D * (R - d)^2 / R^2`, times the counter percent of the
+/// shooter's class against its own, over 100, applied as `Obj::Damage`
+/// applies it -- no armour, no level, no experience, nobody credited. The
+/// original walks its grid cell by cell; this walks ids ascending, which only
+/// orders the deaths' hooks among themselves.
+void CombatSystem::land_on_ground(World& world, const Projectile& shot, GameTime now) {
+  const std::int64_t radius = shot.splash_radius;
+  if (radius <= 0) return;
+  const std::int64_t reach = radius + 512;
+  std::vector<ObjectId> around;
+  around.reserve(units_.size());
+  for (const Combatant& other : units_) around.push_back(other.id);
+  for (const ObjectId id : around) {
+    const Combatant* victim = find(id);
+    if (victim == nullptr || !victim->alive || victim->action == Action::dying) continue;
+    if (victim->position == kHeldPosition) continue;
+    const std::int64_t dx = static_cast<std::int64_t>(victim->position.x) - shot.aim.x;
+    const std::int64_t dy = static_cast<std::int64_t>(victim->position.y) - shot.aim.y;
+    if (dx < -reach || dx > reach || dy < -reach || dy > reach) continue;
+    const std::int64_t d2 = dx * dx + dy * dy;
+    if (d2 > reach * reach) continue;
+    const std::int64_t surface = isqrt(d2) - profile(victim->class_index).radius;
+    if (surface >= radius) continue;
+    const std::int64_t base = surface < 1 ? shot.attack
+                                          : shot.attack * (radius - surface) * (radius - surface) /
+                                                (radius * radius);
+    const std::int64_t percent =
+        counters_.damage_percent(shot.shooter_class, victim->class_index, counter_mode_);
+    const std::int64_t blow = percent * base / 100;
+    now_ = now;
+    (void)apply_damage(world, id, static_cast<std::int32_t>(blow < 0 ? 0 : blow), shot.shooter);
+  }
+}
+
+bool CombatSystem::valid_target(const Combatant& self, const Combatant& other) const {
+  if (!other.alive || other.action == Action::dying || other.health <= 0) return false;
+  if (other.position == kHeldPosition) return false;
+  if (!is_enemy(self, other)) return false;
+  if (!profile(other.class_index).can_be_attacked) return false;
+  return unit_can_attack(self, other);
+}
+
+bool CombatSystem::launch_at_point(World& world, ObjectId catapult, Point from, Point at,
+                                   GameTime release) {
+  const Combatant* shooter = find(catapult);
+  if (shooter == nullptr) return false;
+  const CombatProfile mine = profile(shooter->class_index);
+  Projectile shot;
+  shot.shooter = catapult;
+  shot.target = kNoObject;
+  shot.class_index = mine.projectile;
+  shot.origin = from;
+  shot.aim = at;
+  shot.position = from;
+  shot.launched = release;
+  shot.id = world.spawn(NativeClass::catapult_shot, nullptr);
+  // The class's numbers, `[class+0x2a0]` and `[class+0x664]`, which is what
+  // 0x005a8e10 reads -- not the object's own attack.
+  shot.attack = mine.damage;
+  shot.type = mine.damage_type;
+  shot.splash_radius = mine.splash_radius;
+  shot.ground = true;
+  shot.shooter_class = shooter->class_index;
+  // The flight keeps the invented speed `launch` uses; the original's ten
+  // units a timer step is not settled in game time (siege-fire.md).
+  const std::int64_t distance = isqrt(distance_squared(from, at));
+  GameTime flight = distance * 1000 / kProjectileSpeed;
+  if (flight < 1) flight = 1;
+  shot.impact = release + flight;
+  shots_.push_back(shot);
+  events_.push_back(CombatEvent{CombatEvent::Kind::launch, release, catapult, kNoObject,
+                                shot.attack, 0});
+  return true;
+}
+
+bool CombatSystem::fire_arrow(World& world, ObjectId tower, ObjectId target, GameTime now) {
+  Combatant* shooter = mutable_find(tower);
+  const Combatant* victim = find(target);
+  if (shooter == nullptr || victim == nullptr) return false;
+  shooter->last_attack_time = now;
+  ++shooter->attacks;
+  // 0x0041e6c0: the victim's squad hears it was attacked, by the tower. No
+  // army stamp: `Building::Attack` calls no virtual on its target.
+  record_squad_attacked(world, target, tower, now);
+  launch(world, *shooter, *victim, now);
+  return true;
+}
+
 namespace {
 
 /// A siege engine its crew has not finished assembling, which takes no part
@@ -1715,11 +1963,24 @@ namespace {
          slot->object->is_a(NativeClass::catapult) && !slot->state.flags.built;
 }
 
+/// **A building fires only when a script makes it** (`docs/formats/siege-fire.md`).
+/// In `gbr.exe` a catapult's every shot is a `Catapult::Attack(point)` call
+/// from its autofire or attack script and a tower's a `Building::Attack` call
+/// from its guard script, each with the waits those entry points impose; no
+/// building acquires or strikes on a clock of its own. So the acquisition
+/// below is a unit's alone, and a building in it only waits. A synthetic roll
+/// with no world object behind an id keeps the old behaviour: it has no
+/// scripts to fire it.
+[[nodiscard]] bool fires_by_script(const World& world, ObjectId id) noexcept {
+  const WorldObject* slot = world.find(id);
+  return slot != nullptr && slot->state.flags.is_building;
+}
+
 }  // namespace
 
 void CombatSystem::act(World& world, Combatant& unit, GameTime now) {
   const CombatProfile mine = profile(unit.class_index);
-  if (!mine.can_attack() || unbuilt_engine(world, unit.id)) {
+  if (!mine.can_attack() || unbuilt_engine(world, unit.id) || fires_by_script(world, unit.id)) {
     unit.next_action_time = now + constants_.acquire_interval;
     return;
   }
@@ -1772,6 +2033,10 @@ void CombatSystem::act(World& world, Combatant& unit, GameTime now) {
 
 void CombatSystem::advance(World& world, const Turn& turn) {
   events_.clear();
+  // The fake towers owed to an outpost or an engine created since the last
+  // turn, before the roll is reconciled so that they are on it: where this
+  // engine delivers the original's message 0x3d (`sim/siege_fire.hpp`).
+  if (world_bound_) (void)post_fake_towers(world);
   // **Before the early return, not after it.** Objects appear and disappear
   // during a match, and a system that returned on an empty population would
   // never notice the first one that appeared. See `reconcile`.
@@ -1817,8 +2082,12 @@ void CombatSystem::advance(World& world, const Turn& turn) {
     std::size_t shot_index = 0;
     for (std::size_t i = 0; i < shots_.size(); ++i) {
       if (shots_[i].id == kNoObject) continue;
+      // No lower bound. A script's shot (`Catapult::Attack`, `Building::Attack`)
+      // is launched in the script pass, after this drain has run over the same
+      // slice of time, and can come due inside it; it lands at the head of the
+      // next drain, before anything else, at the time it was due.
       const GameTime t = shots_[i].impact;
-      if (t <= begin || t > end) continue;
+      if (t > end) continue;
       if (!have_shot || t < shot_when) {
         have_shot = true;
         shot_when = t;
@@ -1938,7 +2207,6 @@ void CombatSystem::hash(std::uint64_t& accumulator) const {
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.position.y)));
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.health)));
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.stamina)));
-    fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.experience)));
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(unit.level)));
     fold(static_cast<std::uint64_t>(unit.last_attack_time));
     fold(unit.target);
@@ -1946,6 +2214,14 @@ void CombatSystem::hash(std::uint64_t& accumulator) const {
     fold(unit.unit_flags);
     fold(static_cast<std::uint64_t>(unit.action));
     fold(static_cast<std::uint64_t>(unit.next_action_time));
+    // Not in the dumps, and state all the same: the stored stats are only as
+    // fresh as their last rebuild, so two peers that rebuilt at different
+    // moments disagree here first.
+    for (const std::int32_t stat : {unit.stats.max_health, unit.stats.max_stamina,
+                                    unit.stats.range, unit.stats.attack,
+                                    unit.stats.armour_slash, unit.stats.armour_pierce}) {
+      fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(stat)));
+    }
   }
   for (const Projectile& shot : shots_) {
     fold(shot.id);
@@ -2038,10 +2314,7 @@ std::int32_t read_armor_slash(const CombatSystem& c, ObjectId id) {
   const Combatant* u = c.find(id);
   return u == nullptr ? 0 : c.armour_of(*u, DamageType::slash);
 }
-std::int32_t read_range(const CombatSystem& c, ObjectId id) {
-  const Combatant* u = c.find(id);
-  return u == nullptr ? 0 : c.profile(u->class_index).range;
-}
+
 
 /// Publish a combatant's health and stamina onto its world object.
 ///
@@ -2248,7 +2521,7 @@ HostOutcome host_heal_stamina(CallContext& ctx) {
   const bool single = ctx.arg(0).is_object() && context != nullptr &&
                       ctx.arg(0).as_object().type == context->object_type;
   if (single && amount < 0) return HostOutcome::ok_void();
-  for (const ObjectId id : receiver_objects(*world, ctx.arg(0))) {
+  for (const ObjectId id : receiver_objects(ctx, *world, ctx.arg(0))) {
     if (single) {
       if (WorldObject* slot = script_object(ctx, *combat, id); slot != nullptr) {
         const std::int32_t cap = class_int(*world, *slot, "maxstamina");
@@ -2267,24 +2540,6 @@ HostOutcome host_heal_stamina(CallContext& ctx) {
     unit->stamina = static_cast<std::int32_t>(raised > max ? max : raised);
     sync_to_world(ctx, *combat, id);
   }
-  return HostOutcome::ok_void();
-}
-
-HostOutcome host_set_level(CallContext& ctx) {
-  CombatSystem* combat = system_of(ctx);
-  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
-  if (unit == nullptr) return HostOutcome::ok_void();
-  if (ctx.arg(1).is_integer()) unit->level = ctx.arg(1).as_integer();
-  return HostOutcome::ok_void();
-}
-
-HostOutcome host_set_experience(CallContext& ctx) {
-  CombatSystem* combat = system_of(ctx);
-  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  Combatant* unit = combat->find(id_of(ctx.arg(0)));
-  if (unit == nullptr) return HostOutcome::ok_void();
-  if (ctx.arg(1).is_integer()) unit->experience = ctx.arg(1).as_integer();
   return HostOutcome::ok_void();
 }
 
@@ -2330,9 +2585,98 @@ HostOutcome host_set_experience(CallContext& ctx) {
 /// `eax = 0`, which is this protocol's "done"; only the accepted path returns
 /// 1. So `while (.Attack(u))` leaves the instant the target stops being
 /// attackable, without spending game time on the attempt.
+/// `Catapult::Attack(point)` (0x004e2d10), suspending: one throw. Refused --
+/// nothing launched, nothing suspended -- for a receiver that does not
+/// resolve, a point on the engine itself, or an engine that carries towers
+/// (`has_towers`, `[cat+0x22c]`). Otherwise the shot leaves at the attack
+/// animation's action moment for the point and the script resumes when the
+/// animation ends. `docs/formats/siege-fire.md`, "A catapult's shot", has
+/// the state machine this stands for and what is approximated.
+HostOutcome catapult_attack(CallContext& ctx, CombatSystem& combat, World& world) {
+  const ObjectId catapult = id_of(ctx.arg(0));
+  const WorldObject* slot = world.find(catapult);
+  if (slot == nullptr) return HostOutcome::ok_void();
+  const Point at = unpack_point(ctx.arg(1));
+  const Point from = world.resolve_position(catapult);
+  if (at == from || slot->state.flags.has_towers) return HostOutcome::ok_void();
+  const std::int32_t release = catapult_release_ms(world, catapult);
+  if (!combat.launch_at_point(world, catapult, from, at, ctx.now + release)) {
+    return HostOutcome::ok_void();
+  }
+  const std::int32_t throw_ms = catapult_throw_ms(world, catapult);
+  HostOutcome out;
+  out.status = script::HostStatus::suspend;
+  out.suspend_for = throw_ms > 0 ? throw_ms : 1;
+  return out;
+}
+
+/// `Building::Attack(obj)` (0x004df650), suspending: one arrow, or a wait
+/// and another try. In the original's order: receiver and target resolve;
+/// the settlement's fire rate (`settlement_fire_rate`) is not 0; the tower
+/// may hit the target (`valid_target`) and it is in range (0x005a7800:
+/// surface distance within `range`, and past `min_range` when that is 1 or
+/// more). Any of those failing answers false at once. Then the tower's own
+/// `attack_delay` since its last shot, and the settlement's `1000 / rate`
+/// since any of its towers' last shot (`last_tower_fire_time`, reset if it
+/// lies ahead): while either has time left the call suspends for it and is
+/// made again (the original's return 1 with the wait in `[0x00a77eac]`).
+/// Otherwise both clocks are stamped, the arrow is loosed and the answer is
+/// true with no suspension. See `docs/formats/siege-fire.md`.
+HostOutcome building_attack(CallContext& ctx, CombatSystem& combat, World& world) {
+  const ObjectId tower = id_of(ctx.arg(0));
+  const ObjectId target = id_of(ctx.arg(1));
+  const WorldObject* slot = world.find(tower);
+  const Combatant* self = combat.find(tower);
+  const Combatant* other = combat.find(target);
+  const auto no = [] { return HostOutcome::ok_with(Value::boolean(false)); };
+  if (slot == nullptr || self == nullptr || world.find(target) == nullptr || other == nullptr) {
+    return no();
+  }
+  Settlement* set = siege_settlement_of(world, tower);
+  const std::int32_t rate =
+      set == nullptr ? 0 : settlement_fire_rate(world, *set, combat.constants().base_fire_rate);
+  if (rate <= 0) return no();
+  if (!combat.valid_target(*self, *other)) return no();
+  const CombatProfile mine = combat.profile(self->class_index);
+  const std::int64_t d =
+      isqrt(distance_squared(world.resolve_position(tower), world.resolve_position(target))) -
+      mine.radius - combat.profile(other->class_index).radius;
+  if ((mine.min_range >= 1 && d < mine.min_range) || d > mine.range) return no();
+
+  const GameTime now = ctx.now;
+  const auto wait = [](GameTime ms) {
+    HostOutcome out;
+    out.status = script::HostStatus::retry;
+    out.suspend_for = ms;
+    return out;
+  };
+  const GameTime delay = class_int(world, *slot, "attack_delay");
+  const GameTime since_shot = now - self->last_attack_time;
+  if (since_shot >= 0 && since_shot < delay) return wait(delay - since_shot);
+  if (now < set->last_tower_fire_time) set->last_tower_fire_time = 0;
+  const GameTime cadence = 1000 / rate;
+  const GameTime since_any = now - set->last_tower_fire_time;
+  if (cadence > since_any) return wait(cadence - since_any);
+
+  set->last_tower_fire_time = now;
+  (void)combat.fire_arrow(world, tower, target, now);
+  return HostOutcome::ok_with(Value::boolean(true));
+}
+
 HostOutcome host_attack(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  // Three bodies behind one name: the receiver's type picks it in the
+  // original, the argument and the receiver's class here. Only
+  // `Catapult::Attack` takes a point; a building's object form is
+  // `Building::Attack`, a unit's `Unit::Attack`.
+  if (World* world = world_of(ctx); world != nullptr && combat->world_bound()) {
+    if (ctx.count() >= 2 && is_point(ctx.arg(1))) return catapult_attack(ctx, *combat, *world);
+    const WorldObject* slot = world->find(id_of(ctx.arg(0)));
+    if (slot != nullptr && slot->state.flags.is_building) {
+      return building_attack(ctx, *combat, *world);
+    }
+  }
   const ObjectId attacker = id_of(ctx.arg(0));
   const bool ok = combat->order_attack(attacker, id_of(ctx.arg(1)));
   if (!ok) return HostOutcome::ok_with(Value::boolean(false));
@@ -2412,9 +2756,36 @@ HostOutcome host_is_enemy(CallContext& ctx) {
 /// told it had arrived by `GotoAttack` and that it was out of range by
 /// `InRange`, and looped between them until its instruction budget ran out.
 /// The original keeps one position per object, which both read.
+/// `range/0` -- `Obj::range` (0x005adde0): the stored `[obj+0xd4]`, 0 for a
+/// receiver that resolves nothing. A combatant answers its stored range
+/// (`range_of`, which a formation's `BonusRange` moves); any other object
+/// answers the class's `range`, which is what its constructor stored and what
+/// nothing ever rebuilds -- where this used to answer 0.
+HostOutcome host_range(CallContext& ctx) {
+  CombatSystem* combat = system_of(ctx);
+  if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  const ObjectId id = id_of(ctx.arg(0));
+  if (const Combatant* unit = combat->find(id); unit != nullptr) {
+    return HostOutcome::ok_with(Value::integer(combat->range_of(*unit)));
+  }
+  World* world = world_of(ctx);
+  const WorldObject* slot = world != nullptr ? world->find(id) : nullptr;
+  if (slot == nullptr || slot->internal != InternalKind::none) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
+  return HostOutcome::ok_with(Value::integer(class_int(*world, *slot, "range")));
+}
+
 HostOutcome host_in_range(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  // `Catapult::InRange(point)` (0x004e3230), the only point form.
+  if (ctx.count() >= 2 && is_point(ctx.arg(1))) {
+    World* world = world_of(ctx);
+    const bool in = world != nullptr && catapult_point_in_range(*world, *combat, id_of(ctx.arg(0)),
+                                                                unpack_point(ctx.arg(1)));
+    return HostOutcome::ok_with(Value::boolean(in));
+  }
   const Combatant* a = combat->find(id_of(ctx.arg(0)));
   const Combatant* d = combat->find(id_of(ctx.arg(1)));
   if (a == nullptr || d == nullptr) return HostOutcome::ok_with(Value::boolean(false));
@@ -2460,28 +2831,18 @@ HostOutcome host_set_experience_modifier(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `u.RecalcBonuses()` -- 1 site, and **a no-op here**.
+/// `u.RecalcBonuses()` -- 1 site: `ONFINISH_RESEARCH.VS` calls it on every
+/// unit of the settlement the moment a research completes, which is how a
+/// Statue of Amon-Ra reaches the units already standing.
 ///
-/// 0x005e0380 resolves the receiver and calls its `vtbl+0xc4`, which rebuilds
-/// the unit's cached attack and armour bonuses from the sources that feed them.
-/// `ONFINISH_RESEARCH.VS` calls it on every unit in the settlement the moment a
-/// research completes, which is exactly what a cache needs and a live read does
-/// not.
-///
-/// This engine keeps no such cache: `Combatant::attack_bonus`, `armour_bonus`,
-/// `level_floor` and the rest are written by whoever owns the source at the
-/// moment it changes -- the hero agent for skills, the economy for
-/// `in_settlement` -- and read straight out of the combatant when a blow lands.
-/// So there is nothing to rebuild, and a no-op is the same observable behaviour
-/// rather than an omission. **The day a research writes a derived number that
-/// something else has already copied, this stops being a no-op.**
-///
-/// The receiver is resolved anyway, so that the drop is a decision about a
-/// named unit rather than a body that ignores its argument.
+/// 0x005e0380 resolves the receiver -- a miss prints and does nothing -- and
+/// calls its `vtbl+0xc4`: on a unit the rebuild 0x005d9df0 (`recalc_bonuses`,
+/// `docs/formats/unit-stats.md`), on a building a bare `ret` (0x00686eb0 in
+/// every building vtable), which `recalc` matches by rebuilding units only.
 HostOutcome host_recalc_bonuses(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  (void)combat->find(id_of(ctx.arg(0)));
+  combat->recalc(id_of(ctx.arg(0)));
   return HostOutcome::ok_void();
 }
 
@@ -2514,12 +2875,10 @@ HostOutcome host_recalc_bonuses(CallContext& ctx) {
 /// object` and returns, so an unknown id is a no-op rather than a trap, and
 /// `add_bonus` answering false is that same no-op.
 ///
-/// **Nothing is recalculated afterwards, because nothing here is cached.** The
-/// original ends by calling the receiver's `vtbl+0xc4`, which rebuilds the
-/// five fields from the class and adds the record back on. `CombatSystem`
-/// derives all five on the spot -- see `attack_of` and the three beside it --
-/// so the rebuild has already happened by the time anybody reads one. That is
-/// also why `RecalcBonuses` next door is a no-op and stays one.
+/// The original ends by calling the receiver's `vtbl+0xc4`, the rebuild,
+/// which copies the class over the stored fields, adds the record back on and
+/// the rest after it, and rescales health and stamina by the new maxima;
+/// `add_bonus` does the same through `recalc`.
 HostOutcome host_add_bonus(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
@@ -2537,47 +2896,23 @@ HostOutcome host_add_bonus(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
+/// `BestTarget/0` is registered twice, `Catapult::BestTarget` (0x004e2f60)
+/// and `Building::BestTarget` (0x004dcc60); both are in
+/// `sim/siege_fire.cpp`. A unit receiver has no body of its own in the
+/// original and keeps the unit sweep here.
 HostOutcome host_best_target(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)))));
-}
-
-/// Whether the `*InSquadSight` family answers the invalid handle before it
-/// looks at anything: the receiver is invalid, dead or held.
-///
-/// The wrappers (0x005dcbc0, 0x005dcb00, 0x005dcc80, 0x005dcd40, 0x005dce00,
-/// 0x005dcf30) log and answer the invalid handle for an invalid receiver and,
-/// through `vtbl+0x50`, for a dead one. The core, 0x005dc950, then has two
-/// paths. A unit with a squad (`[unit+0x174]`, `HeroSystem::squad_of`) that is
-/// not held takes the **squad path**, which offers only the squad's own
-/// candidate deque at `squad+0x6c..0x7c` (walked by 0x005dbb20) and draws no
-/// circle -- and that deque is never filled: no instruction in `.text` pushes
-/// it (its count at `+0x7c` is written only by the two squad constructors,
-/// 0x0044440b and 0x0045402f, with zero; the only `lea [reg+0x6c]` near squad
-/// code feeds its clear, 0x006a3cc0), the same fact `IsEnemyInSquadSight`
-/// rests on in `sim/squad.cpp`. So an empty sweep returns the invalid handle
-/// (0x005dc9dd -> 0x005dcae9). A held unit -- with or without a squad -- gets
-/// the invalid handle on the other path. Only a free unit in no squad reaches
-/// the circle sweep `CombatSystem::best_target` models.
-///
-/// **The squad half is not reproduced, and that is a known gap.** Answering
-/// "no target" to every squad member was tried and measured: on Alesia the
-/// melee units in a fight then stood out of reach 1,904 times against 325 in
-/// reach (`test_alesias_armies_do_not_stand_on_one_another`), where the
-/// original's armies plainly fight. Whatever engages a squad member in
-/// `gbr.exe` when its scripts are told there is no target -- the unit's own
-/// idle acquisition, the squad's AI orders -- is not modelled to that extent
-/// here, and this engine's squad members get their fights from this answer.
-/// So a squad member is answered by the circle sweep, as a free unit is, until
-/// that mechanism is; see the audit's status note on 0x005dcbc0.
-[[nodiscard]] bool squad_sight_blind(CallContext& ctx, const CombatSystem& combat, ObjectId id) {
-  const Combatant* self = combat.find(id);
-  if (self == nullptr || !combat.is_alive(id) || self->action == Action::dying) return true;
-  World* world = world_of(ctx);
-  if (world == nullptr) return false;
-  const ObjectState* state = world->state(id);
-  return state != nullptr && state->is_held();
+  const ObjectId id = id_of(ctx.arg(0));
+  if (World* world = world_of(ctx); world != nullptr && combat->world_bound()) {
+    if (is_catapult(*world, id)) {
+      return HostOutcome::ok_with(ref_to(ctx, catapult_best_target(*world, *combat, id)));
+    }
+    if (const WorldObject* slot = world->find(id); slot != nullptr && slot->state.flags.is_building) {
+      return HostOutcome::ok_with(ref_to(ctx, building_best_target(*world, *combat, id)));
+    }
+  }
+  return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id)));
 }
 
 /// One acquisition under one variant's filter. The filter itself is
@@ -2588,61 +2923,144 @@ HostOutcome best_target_with(CallContext& ctx, const TargetFilter& filter) {
   return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id_of(ctx.arg(0)), filter)));
 }
 
-/// The same, for the `*InSquadSight` family: `squad_sight_blind` first.
-HostOutcome squad_sight_target(CallContext& ctx, const TargetFilter& filter) {
+/// The six `*InSquadSight` entry points' arguments to their one core,
+/// 0x005dc950, by name. Each wrapper passes the core five words (the table
+/// above `TargetFilter` in `sim/combat.hpp`); this is them.
+struct SquadSightArgs {
+  /// The `/1` forms' class name, resolved; `kNoClass` when none was passed or
+  /// the name resolves to nothing.
+  ClassIndex cls = kNoClass;
+  /// Whether a class name was passed at all, resolved or not.
+  bool named = false;
+  bool undiseased = false;      ///< `_PreferUndiseased`
+  bool no_independent = false;  ///< `BestNoIndependentTargetInSquadSight`
+  bool exclusive = false;       ///< `Exclusive`
+  bool mis_zero = false;        ///< `MisZeroDamage`
+};
+
+/// The `*InSquadSight` family, one rule for all six.
+///
+/// The wrappers (0x005dcbc0, 0x005dcb00, 0x005dcc80, 0x005dcd40, 0x005dce00,
+/// 0x005dcf30) log and answer the invalid handle for an invalid receiver and,
+/// through `vtbl+0x50`, for a dead one. The core, 0x005dc950, then has two
+/// paths, and which one a unit takes is `squad_sight_squad`'s gate:
+///
+///   * **the squad path** -- a unit in a squad that stands outside any holder,
+///     or whose squad carries `SF_ADVCHOOSER`. It draws no circle: it offers
+///     the squad's `Enemies` (0x005dbb20), what the squad's look last saw of
+///     the players it is at war with (`squad_look` in `sim/squad.hpp`), to
+///     the predicate built with the five words **in their own slots**
+///     (0x005dc9b7: name, undiseased, no-independents, exclusive, unarmed).
+///     So here, and only here, `MisZeroDamage` skips an unarmed candidate,
+///     `BestNoIndependent...` clears wildlife's bit out of the mask, and
+///     `Exclusive` rejects a class mismatch -- a name nothing resolves
+///     rejecting everything. `CombatSystem::best_target_in_list` is the walk.
+///   * **the circle path** -- a unit in no squad, outside any holder: the grid
+///     sweep `CombatSystem::best_target` models, with the predicate built one
+///     word over (0x005dca31..0x005dca5a): the exclusive flag lands in the
+///     independents slot, the unarmed flag in the exclusive slot (where with
+///     no name it does nothing), and the unarmed slot gets 0. A held unit in
+///     no squad, or held in a squad without `SF_ADVCHOOSER`, gets the invalid
+///     handle on this path (0x005dc9a1 is not reached).
+///
+/// This replaced a reading in which the squad path walked a deque nothing
+/// fills and so answered "no target" for every squad member; applied, that
+/// left Alesia's armies standing out of reach. The deque is `Enemies`, and the
+/// squad's look fills it every second: the copy at 0x00447a17 reaches it as
+/// `[squad+0x64]+8`, which a search for pushes at `+0x6c` could not see.
+///
+/// Not reproduced, as on every path here: the score (0x005d3630, the note
+/// above `TargetFilter`), the counter a chosen unit's `0x005d2850(1)` raises,
+/// the disease penalty (no disease is modelled), and the catapult fallback of
+/// 0x005db856.
+HostOutcome squad_sight_target(CallContext& ctx, const SquadSightArgs& args) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
   const ObjectId id = id_of(ctx.arg(0));
-  if (squad_sight_blind(ctx, *combat, id)) return HostOutcome::ok_with(ref_to(ctx, kNoObject));
+  const auto none = HostOutcome::ok_with(ref_to(ctx, kNoObject));
+  const Combatant* self = combat->find(id);
+  if (self == nullptr || !combat->is_alive(id) || self->action == Action::dying) return none;
+  World* world = world_of(ctx);
+  if (world == nullptr) return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id)));
+
+  const HeroSystem* heroes = hero_system_of(*world);
+  if (const Squad* squad =
+          heroes != nullptr ? squad_sight_squad(*world, *heroes, id) : nullptr;
+      squad != nullptr) {
+    TargetFilter filter;
+    filter.exclude_independents = args.no_independent;
+    filter.require_armed = args.mis_zero;
+    if (args.named && args.exclusive) {
+      if (args.cls == kNoClass) return none;  // a name that matches nothing
+      filter.only_class = args.cls;
+    } else if (args.named) {
+      filter.prefer_class = args.cls;
+    }
+    return HostOutcome::ok_with(
+        ref_to(ctx, combat->best_target_in_list(id, squad->enemies, filter)));
+  }
+
+  const ObjectState* state = world->state(id);
+  if (state != nullptr && state->is_held()) return none;
+  TargetFilter filter;
+  // The circle path's slots, one word over: see above.
+  filter.exclude_independents = args.exclusive;
+  if (args.named) filter.prefer_class = args.cls;
   return HostOutcome::ok_with(ref_to(ctx, combat->best_target(id, filter)));
+}
+
+/// The class name of a `/1` form, resolved against the class graph.
+[[nodiscard]] SquadSightArgs named_class(CallContext& ctx, const CombatSystem& combat) {
+  SquadSightArgs args;
+  if (ctx.count() > 1 && ctx.arg(1).is_string()) {
+    args.named = true;
+    if (const ClassGraph* graph = combat.class_graph(); graph != nullptr) {
+      args.cls = graph->find(ctx.arg(1).as_string());
+    }
+  }
+  return args;
 }
 
 /// `BestTargetInSquadSight/0` -- 0x005dcbc0, the core with no flag.
 HostOutcome host_best_target_in_squad_sight(CallContext& ctx) {
-  return squad_sight_target(ctx, TargetFilter{});
+  return squad_sight_target(ctx, SquadSightArgs{});
 }
 
 /// `BestTargetInSquadSightMisZeroDamage/0` -- 0x005dcb00, what
-/// `DATA\SUBAI\UNIT_IDLE.VS` runs. It passes the core's last flag, which the
-/// squad path hands to the predicate's damage slot (0x005db6a5 would skip an
-/// unarmed candidate). **The circle path builds its predicate one argument
-/// over** (0x005dca31..0x005dca5a: the constructor 0x005d45a0 gets the
-/// exclusive flag in the independents slot, this flag in the exclusive slot,
-/// and 0 for damage), and the squad path never answers (see
-/// `squad_sight_blind`). So on the only path that answers, the flag lands in
-/// the exclusive slot, where without a class string it does nothing: the
-/// answer is `BestTargetInSquadSight/0`'s. `UNIT_IDLE.VS` agrees -- it
-/// re-tests `u.attack > 0 || AsDruid || AsWagon` on what comes back.
+/// `DATA\SUBAI\UNIT_IDLE.VS` runs. Its flag is the core's last word, which
+/// the squad path hands to the predicate's damage slot (0x005db69e skips a
+/// candidate whose own attack is not positive) and the circle path hands to
+/// the exclusive slot, where with no class name it does nothing.
+/// `UNIT_IDLE.VS` re-tests `u.attack > 0 || AsDruid || AsWagon` on what comes
+/// back, which the circle path needs and the squad path makes redundant.
 HostOutcome host_best_target_mis_zero_damage(CallContext& ctx) {
-  return squad_sight_target(ctx, TargetFilter{});
+  SquadSightArgs args;
+  args.mis_zero = true;
+  return squad_sight_target(ctx, args);
 }
 
-/// `BestNoIndependentTargetInSquadSight/0` -- 0x005dcc80. Its flag is the one
-/// the circle path drops (0x005dca31), so the answer is
-/// `BestTargetInSquadSight/0`'s; `HERO_SNEAK.VS` is the one caller.
+/// `BestNoIndependentTargetInSquadSight/0` -- 0x005dcc80. Its flag clears
+/// wildlife's bit (14) out of the predicate's mask on the squad path and is
+/// dropped on the circle path (0x005dca31). `HERO_SNEAK.VS` is the one caller.
 HostOutcome host_best_target_no_independent(CallContext& ctx) {
-  return squad_sight_target(ctx, TargetFilter{});
+  SquadSightArgs args;
+  args.no_independent = true;
+  return squad_sight_target(ctx, args);
 }
 
 /// `BestTargetInSquadSight_PreferUndiseased/0` -- argument 2, which adds 200
-/// to a diseased candidate's score at `0x005db6e0`. **This engine has no
-/// disease**: nothing sets it, and `Unit::Disease` and `Unit::IsDiseased` are
-/// both unimplemented, so no candidate can carry the penalty and this returns
-/// the object the executable would. It is answered rather than left trapping
-/// on that ground alone -- see `TargetFilter` -- and the moment a disease
-/// state exists this must stop being an alias.
+/// to a diseased candidate's score at `0x005db6e0` on both paths. **This
+/// engine has no disease**: nothing sets it, and `Unit::Disease` and
+/// `Unit::IsDiseased` are both unimplemented, so no candidate can carry the
+/// penalty and this returns the object the executable would. It is answered
+/// rather than left trapping on that ground alone -- see `TargetFilter` -- and
+/// the moment a disease state exists this must gain the penalty.
 HostOutcome host_best_target_prefer_undiseased(CallContext& ctx) {
-  return squad_sight_target(ctx, TargetFilter{});
+  SquadSightArgs args;
+  args.undiseased = true;
+  return squad_sight_target(ctx, args);
 }
 
-/// `BestTargetInSquadSightExclusive/1` -- arguments 1 and 4 together, which
-/// make `0x005db774` reject every candidate whose class name is not the one
-/// passed. Exact class: the executable compares the class object's own name,
-/// so a subclass of the named class is not a match.
-///
-/// An unresolvable name, or no class graph at all, yields no candidate. That is
-/// the same answer the executable gives -- its string compare simply never
-/// matches -- and not a failure.
 /// `BestTargetInSquadSight/1(class)` -- 6 sites, and the sole blocker of
 /// `HERO_ENGAGE_UNIT_TYPE.VS` and `UNIT_ENGAGE_UNIT_TYPE.VS`.
 ///
@@ -2651,46 +3069,33 @@ HostOutcome host_best_target_prefer_undiseased(CallContext& ctx) {
 /// slot; the second passes 1 where the first passes 0, and that flag is what
 /// 0x005db774 reads to decide whether a class mismatch is a rejection or a
 /// 200-point penalty. So this one **prefers** the named class where `Exclusive`
-/// **requires** it, and reading the pair as two spellings of one filter would
-/// have been the mistake.
+/// **requires** it -- on the squad path. On the circle path the exclusive flag
+/// lands in the independents slot and both forms prefer.
 ///
 /// `TargetFilter::prefer_class` records how far the preference is reproduced
-/// and where it is not.
-///
-/// A name no class graph resolves is **not** a failure here: the original's
-/// string compare simply never matches, so every candidate takes the same
-/// penalty and the ranking is the unfiltered one. That is the opposite of
-/// `Exclusive`, where an unresolvable name matches nothing and the answer is no
-/// candidate at all -- and the difference is not a choice, it is what a
-/// rejection and a penalty each do when the test never passes.
+/// and where it is not. A name no class graph resolves is **not** a failure:
+/// the original's string compare simply never matches, so every candidate
+/// takes the same penalty and the ranking is the unfiltered one.
 HostOutcome host_best_target_prefer_class(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  const ClassGraph* graph = combat->class_graph();
-  TargetFilter filter;
-  if (graph != nullptr && ctx.arg(1).is_string()) {
-    filter.prefer_class = graph->find(ctx.arg(1).as_string());
-  }
-  return squad_sight_target(ctx, filter);
+  return squad_sight_target(ctx, named_class(ctx, *combat));
 }
 
-/// `BestTargetInSquadSightExclusive/1` -- 0x005dcf30. On the circle path its
-/// exclusive flag lands in the independents slot (0x005dca31): the enemy mask
-/// loses bit 14, so wildlife is excluded, and a class mismatch costs the
-/// +200 the plain string form charges instead of rejecting (0x005db789,
-/// with the exclusive slot holding the zero meant for the damage flag). A
-/// name nothing resolves therefore ranks every candidate the same: the
-/// unfiltered answer minus wildlife, not no answer.
+/// `BestTargetInSquadSightExclusive/1` -- 0x005dcf30. On the squad path a
+/// class mismatch is rejected (0x005db774), so a name nothing resolves
+/// answers no target. On the circle path its exclusive flag lands in the
+/// independents slot (0x005dca31): the enemy mask loses bit 14, so wildlife
+/// is excluded, and a mismatch costs the +200 the plain string form charges
+/// instead of rejecting (0x005db789, the exclusive slot holding the zero
+/// meant for the damage flag); a name nothing resolves therefore ranks every
+/// candidate the same there -- the unfiltered answer minus wildlife.
 HostOutcome host_best_target_exclusive(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
-  const ClassGraph* graph = combat->class_graph();
-  TargetFilter filter;
-  filter.exclude_independents = true;
-  if (graph != nullptr && ctx.arg(1).is_string()) {
-    filter.prefer_class = graph->find(ctx.arg(1).as_string());
-  }
-  return squad_sight_target(ctx, filter);
+  SquadSightArgs args = named_class(ctx, *combat);
+  args.exclusive = true;
+  return squad_sight_target(ctx, args);
 }
 
 /// `BestTargetForPos/0` -- `0x005dd280`, which is `0x005dd060` with the
@@ -2892,9 +3297,22 @@ HostOutcome host_get_point_on_target(CallContext& ctx) {
   return HostOutcome::ok_with(pack_point(world->resolve_position(target)));
 }
 
+/// The three are registered only on `Catapult` (0x004e3500, 0x004e3600,
+/// 0x004e3710) and are the engine's target slot, `ObjectState::catapult_target`,
+/// with its mirror onto the engine's towers (`sim/siege_fire.cpp`). A
+/// receiver that is not a catapult has no body in the original; it keeps the
+/// combatant's target here, which no shipped script reaches.
+[[nodiscard]] World* catapult_world(CallContext& ctx, const Value& receiver) {
+  World* world = world_of(ctx);
+  return world != nullptr && is_catapult(*world, id_of(receiver)) ? world : nullptr;
+}
+
 HostOutcome host_get_target(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  if (World* world = catapult_world(ctx, ctx.arg(0)); world != nullptr) {
+    return HostOutcome::ok_with(ref_to(ctx, world->state(id_of(ctx.arg(0)))->catapult_target));
+  }
   const Combatant* unit = combat->find(id_of(ctx.arg(0)));
   return HostOutcome::ok_with(ref_to(ctx, unit == nullptr ? kNoObject : unit->target));
 }
@@ -2902,6 +3320,10 @@ HostOutcome host_get_target(CallContext& ctx) {
 HostOutcome host_clear_target(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  if (World* world = catapult_world(ctx, ctx.arg(0)); world != nullptr) {
+    catapult_clear_target(*world, id_of(ctx.arg(0)));
+    return HostOutcome::ok_void();
+  }
   combat->stop(id_of(ctx.arg(0)));
   return HostOutcome::ok_void();
 }
@@ -2909,6 +3331,10 @@ HostOutcome host_clear_target(CallContext& ctx) {
 HostOutcome host_set_target(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
+  if (World* world = catapult_world(ctx, ctx.arg(0)); world != nullptr) {
+    catapult_set_target(*world, id_of(ctx.arg(0)), id_of(ctx.arg(1)));
+    return HostOutcome::ok_void();
+  }
   combat->order_attack(id_of(ctx.arg(0)), id_of(ctx.arg(1)));
   return HostOutcome::ok_void();
 }
@@ -2999,7 +3425,7 @@ void define_combat_host(script::HostRegistry& registry) {
   member("attack", 0, &read_int<&read_attack>);              //  16
   member("damage", 0, &read_int<&read_attack>);              //  inline only
   member("armor_slash", 0, &read_int<&read_armor_slash>);    //  inline only
-  member("range", 0, &read_int<&read_range>);                //  10
+  member("range", 0, &host_range);                           //  10
   member("Heal", 1, &host_heal);
   member("HealStamina", 1, &host_heal_stamina);  // 11, eight of them on a group
   member("SetHealth", 1, &host_set_health);

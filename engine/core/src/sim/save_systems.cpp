@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 34;  // 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 38;  // 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -378,6 +378,10 @@ void SquadTable::serialize(std::vector<std::byte>& out) const {
     bytes::put_u32(out, squad.last_attacker);
     bytes::put_i32(out, squad.eval);
     bytes::put_i32(out, squad.order);
+    // `Enemies`, which `Squad::Persist` (0x00445870) saves beside `Units`, and
+    // the look's timer, which the squad's timers carry.
+    put_ids(out, squad.enemies);
+    bytes::put_i64(out, squad.look_due);
   }
   // The sixteen AI order queues, `CExecutionAI::Persist`'s three names in its
   // order -- `FirstFree`, `View`, `Todo` -- and then the AI object's timer and
@@ -417,7 +421,8 @@ Status SquadTable::deserialize(std::span<const std::byte> data) {
         !bytes::get_i32(reader, squad.order_dest) || !bytes::get_i32(reader, squad.ai_dest) ||
         !bytes::get_i64(reader, squad.last_fight_time) ||
         !reader.u32(squad.last_attacker) || !bytes::get_i32(reader, squad.eval) ||
-        !bytes::get_i32(reader, squad.order)) {
+        !bytes::get_i32(reader, squad.order) || !get_ids(reader, squad.enemies) ||
+        !bytes::get_i64(reader, squad.look_due)) {
       return FormatError::truncated;
     }
     squads.push_back(std::move(squad));
@@ -655,6 +660,10 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     // rather than walk on to a free spot.
     put_bool(out, m.form_lock);
     put_bool(out, m.stop_requested);
+    // And the failed search's bit: a unit that came back without it would
+    // stop where it stood on a column-mate rather than walk on, and would
+    // count as arrived where the original does not.
+    put_bool(out, m.route_failed);
     // The formation's radius a march's hero carries: how far short of a gate
     // the march stands, until `place_army` lays its stations again.
     bytes::put_i32(out, m.form_extent);
@@ -723,7 +732,8 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
         !bytes::get_i32(reader, m.retry_time) || !reader.u32(m.party) ||
         !get_bool(reader, m.dest_lock) || !get_bool(reader, m.free_spot_tried) ||
         !get_bool(reader, m.free_spot_aimed) || !get_bool(reader, m.form_lock) ||
-        !get_bool(reader, m.stop_requested) || !bytes::get_i32(reader, m.form_extent) ||
+        !get_bool(reader, m.stop_requested) || !get_bool(reader, m.route_failed) ||
+        !bytes::get_i32(reader, m.form_extent) ||
         !bytes::get_i64(reader, m.march_rate)) {
       return FormatError::truncated;
     }
@@ -779,7 +789,6 @@ void CombatSystem::serialize(std::vector<std::byte>& out) const {
     put_point(out, u.position);
     bytes::put_i32(out, u.health);
     bytes::put_i32(out, u.stamina);
-    bytes::put_i32(out, u.experience);
     bytes::put_i32(out, u.level);
     bytes::put_i64(out, u.last_attack_time);
     bytes::put_u32(out, u.target);
@@ -789,9 +798,15 @@ void CombatSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, u.anim);
     bytes::put_i64(out, u.death_time);
     bytes::put_i64(out, u.next_action_time);
-    bytes::put_i32(out, u.attack_bonus);
-    bytes::put_i32(out, u.armour_bonus);
-    bytes::put_i32(out, u.level_floor);
+    // The stored stats: rebuilt only at the original's moments, so between
+    // two of them they are state of their own, and a load that rebuilt them
+    // instead would hand back numbers the game had not yet reached.
+    bytes::put_i32(out, u.stats.max_health);
+    bytes::put_i32(out, u.stats.max_stamina);
+    bytes::put_i32(out, u.stats.range);
+    bytes::put_i32(out, u.stats.attack);
+    bytes::put_i32(out, u.stats.armour_slash);
+    bytes::put_i32(out, u.stats.armour_pierce);
     bytes::put_i32(out, u.damage_multiplier_percent);
     // `Unit::AddBonus`'s record. Written rather than derived: nothing outside
     // the entry point produces it, so a load that dropped it would hand back a
@@ -821,6 +836,11 @@ void CombatSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, s.attacker_level);
     bytes::put_i32(out, s.splash_radius);
     put_bool(out, s.ignores_armour);
+    // Version 38: where it is going, which a ground shot has no target to
+    // re-derive from, and the two fields that make it one.
+    put_point(out, s.aim);
+    put_bool(out, s.ground);
+    bytes::put_u32(out, s.shooter_class);
   }
 
   // Not a log: a caller drains this with `clear_events`, so an undrained event
@@ -872,14 +892,17 @@ Status CombatSystem::deserialize(std::span<const std::byte> data) {
     Combatant u;
     if (!reader.u32(u.id) || !reader.u32(u.class_index) || !reader.u8(u.owner) ||
         !get_point(reader, u.position) || !bytes::get_i32(reader, u.health) ||
-        !bytes::get_i32(reader, u.stamina) || !bytes::get_i32(reader, u.experience) ||
+        !bytes::get_i32(reader, u.stamina) ||
         !bytes::get_i32(reader, u.level) || !bytes::get_i64(reader, u.last_attack_time) ||
         !reader.u32(u.target) || !bytes::get_i32(reader, u.attacks) ||
         !reader.u32(u.unit_flags) || !get_action(reader, u.action) ||
         !bytes::get_i32(reader, u.anim) || !bytes::get_i64(reader, u.death_time) ||
         !bytes::get_i64(reader, u.next_action_time) ||
-        !bytes::get_i32(reader, u.attack_bonus) || !bytes::get_i32(reader, u.armour_bonus) ||
-        !bytes::get_i32(reader, u.level_floor) ||
+        !bytes::get_i32(reader, u.stats.max_health) ||
+        !bytes::get_i32(reader, u.stats.max_stamina) || !bytes::get_i32(reader, u.stats.range) ||
+        !bytes::get_i32(reader, u.stats.attack) ||
+        !bytes::get_i32(reader, u.stats.armour_slash) ||
+        !bytes::get_i32(reader, u.stats.armour_pierce) ||
         !bytes::get_i32(reader, u.damage_multiplier_percent) ||
         !bytes::get_i32(reader, u.bonus.attack) ||
         !bytes::get_i32(reader, u.bonus.armour_slash) ||
@@ -904,7 +927,9 @@ Status CombatSystem::deserialize(std::span<const std::byte> data) {
         !bytes::get_i32(reader, s.attack) ||
         !get_enum(reader, s.type, static_cast<std::uint8_t>(DamageType::siege) + 1) ||
         !bytes::get_i32(reader, s.attacker_level) ||
-        !bytes::get_i32(reader, s.splash_radius) || !get_bool(reader, s.ignores_armour)) {
+        !bytes::get_i32(reader, s.splash_radius) || !get_bool(reader, s.ignores_armour) ||
+        !get_point(reader, s.aim) || !get_bool(reader, s.ground) ||
+        !reader.u32(s.shooter_class)) {
       return FormatError::truncated;
     }
     projectiles.push_back(s);
@@ -974,26 +999,27 @@ Status CombatSystem::deserialize(std::span<const std::byte> data) {
 void EconomySystem::serialize(std::vector<std::byte>& out) const {
   put_header(out, kEconomyMagic);
   put_bool(out, started_);
-  bytes::put_u32(out, next_wagon_);
   put_nested(out, store_);
-
-  bytes::put_u32(out, static_cast<std::uint32_t>(wagons_.size()));
-  for (const Wagon& w : wagons_) {
-    bytes::put_u32(out, w.id);
-    bytes::put_u32(out, w.source);
-    bytes::put_u32(out, w.destination);
-    bytes::put_u8(out, static_cast<std::uint32_t>(w.resource));
-    bytes::put_i32(out, w.amount);
-    bytes::put_i32(out, w.build_remaining);
-    bytes::put_u32(out, w.object);
-    bytes::put_u32(out, w.follow);
-  }
 
   // One row per settlement, in settlement-id order, which is what
   // `record_gold_converted` indexes. Written whole rather than sparsely: a
   // statistics row is small and a sparse encoding would need a second key.
   bytes::put_u32(out, static_cast<std::uint32_t>(stats_.size()));
   for (const Statistics& s : stats_) bytes::put_i32(out, s.gold_converted);
+
+  // The wagons' loyalty rows, in handle order: `[wagon+0x1d8]`, `+0x1dc` and
+  // `+0x1d0`, which the original's wagon serialiser (0x005eb3a0) writes as
+  // `loyalty`, `loyalty-cap` and `capture`, and the two timers' remaining
+  // time, which its timer wheel carries for it.
+  bytes::put_u32(out, static_cast<std::uint32_t>(wagon_loyalty_.size()));
+  for (const WagonLoyalty& w : wagon_loyalty_) {
+    bytes::put_u32(out, w.wagon);
+    bytes::put_i32(out, w.loyalty_tenths);
+    bytes::put_i32(out, w.pending);
+    put_bool(out, w.capturing);
+    bytes::put_i32(out, w.gain_remaining);
+    bytes::put_i32(out, w.cap_remaining);
+  }
 }
 
 Status EconomySystem::deserialize(std::span<const std::byte> data) {
@@ -1001,25 +1027,10 @@ Status EconomySystem::deserialize(std::span<const std::byte> data) {
   if (const Status status = open_header(reader, kEconomyMagic); !status.ok()) return status;
 
   bool started = false;
-  std::uint32_t next_wagon = 0;
-  if (!get_bool(reader, started) || !reader.u32(next_wagon)) return FormatError::truncated;
+  if (!get_bool(reader, started)) return FormatError::truncated;
 
   SettlementStore store;
   if (const Status status = get_nested(reader, store); !status.ok()) return status;
-
-  std::uint32_t count = 0;
-  if (!reader.u32(count)) return FormatError::truncated;
-  std::vector<Wagon> wagons;
-  for (std::uint32_t i = 0; i < count; ++i) {
-    Wagon w;
-    if (!reader.u32(w.id) || !reader.u32(w.source) || !reader.u32(w.destination) ||
-        !get_enum(reader, w.resource, static_cast<std::uint8_t>(Resource::food) + 1) ||
-        !bytes::get_i32(reader, w.amount) || !bytes::get_i32(reader, w.build_remaining) ||
-        !reader.u32(w.object) || !reader.u32(w.follow)) {
-      return FormatError::truncated;
-    }
-    wagons.push_back(w);
-  }
 
   std::uint32_t rows = 0;
   if (!reader.u32(rows)) return FormatError::truncated;
@@ -1029,13 +1040,26 @@ Status EconomySystem::deserialize(std::span<const std::byte> data) {
     if (!bytes::get_i32(reader, s.gold_converted)) return FormatError::truncated;
     stats.push_back(s);
   }
+  std::uint32_t loyal = 0;
+  if (!reader.u32(loyal)) return FormatError::truncated;
+  std::vector<WagonLoyalty> loyalty;
+  for (std::uint32_t i = 0; i < loyal; ++i) {
+    WagonLoyalty w;
+    if (!reader.u32(w.wagon) || !bytes::get_i32(reader, w.loyalty_tenths) ||
+        !bytes::get_i32(reader, w.pending) || !get_bool(reader, w.capturing) ||
+        !bytes::get_i32(reader, w.gain_remaining) || !bytes::get_i32(reader, w.cap_remaining)) {
+      return FormatError::truncated;
+    }
+    // Ascending and unique, which every lookup's binary search assumes.
+    if (!loyalty.empty() && loyalty.back().wagon >= w.wagon) return FormatError::malformed;
+    loyalty.push_back(w);
+  }
   if (const Status status = finish(reader); !status.ok()) return status;
 
   started_ = started;
-  next_wagon_ = next_wagon;
   store_ = std::move(store);
-  wagons_ = std::move(wagons);
   stats_ = std::move(stats);
+  wagon_loyalty_ = std::move(loyalty);
   return Status();
 }
 
@@ -1139,6 +1163,7 @@ void HeroSystem::serialize(std::vector<std::byte>& out) const {
     for (const bool offered : r.offered) put_bool(out, offered);
     for (const GameTime until : r.effect_until) bytes::put_i64(out, until);
     bytes::put_i64(out, r.army_attacked_at);
+    bytes::put_i32(out, r.army_addend);
     bytes::put_u32(out, r.army_attacked_unit);
     bytes::put_i32(out, r.party_orientation_request.x);
     bytes::put_i32(out, r.party_orientation_request.y);
@@ -1201,7 +1226,7 @@ Status HeroSystem::deserialize(std::span<const std::byte> data) {
       if (!bytes::get_i64(reader, until)) return FormatError::truncated;
     }
     if (!bytes::get_i64(reader, r.army_attacked_at) ||
-        !reader.u32(r.army_attacked_unit) ||
+        !bytes::get_i32(reader, r.army_addend) || !reader.u32(r.army_attacked_unit) ||
         !bytes::get_i32(reader, r.party_orientation_request.x) ||
         !bytes::get_i32(reader, r.party_orientation_request.y) ||
         !bytes::get_i32(reader, r.party_orientation.x) ||
@@ -1563,25 +1588,18 @@ void AiSystem::serialize(std::vector<std::byte>& out) const {
       bytes::put_i32(out, r.priority);
       bytes::put_i32(out, r.optimism);
     }
+    // The `AIRun` range, id 3 first, and the settlement slots ascending: the
+    // AI object's own, so they ride with its row.
+    for (const script::ScriptId run : p.runs) bytes::put_u32(out, run);
+    bytes::put_u32(out, static_cast<std::uint32_t>(p.settlements.size()));
+    for (const AiSettlementScripts& s : p.settlements) {
+      bytes::put_u32(out, s.settlement);
+      bytes::put_i32(out, s.economy);
+      bytes::put_u32(out, s.economy_script);
+      bytes::put_i32(out, s.tactic);
+      bytes::put_u32(out, s.tactic_script);
+    }
   }
-
-  bytes::put_u32(out, static_cast<std::uint32_t>(owners_.size()));
-  for (const ScriptOwner& o : owners_) {
-    bytes::put_u32(out, o.script);
-    bytes::put_u8(out, o.player);
-    put_bool(out, o.root);
-  }
-
-  bytes::put_u32(out, static_cast<std::uint32_t>(settlements_.size()));
-  for (const AiSettlementScripts& s : settlements_) {
-    bytes::put_u32(out, s.settlement);
-    bytes::put_i32(out, s.economy);
-    bytes::put_u32(out, s.economy_script);
-    bytes::put_i32(out, s.tactic);
-    bytes::put_u32(out, s.tactic_script);
-  }
-
-  bytes::put_u32(out, since_prune_);
 
   // The AI-helper table, ascending by name -- which is `std::map`'s order and
   // therefore the order `helpers()` iterates in. `AiSystem::hash` is a no-op
@@ -1659,38 +1677,26 @@ Status AiSystem::deserialize(std::span<const std::byte> data) {
     // node. A file whose permutation and map disagreed would make every
     // per-node accessor answer about a different node, silently.
     if (!p.gaika.adopt(std::move(slots), std::move(records))) return FormatError::malformed;
+    for (script::ScriptId& run : p.runs) {
+      if (!reader.u32(run)) return FormatError::truncated;
+    }
+    std::uint32_t settlement_count = 0;
+    if (!reader.u32(settlement_count)) return FormatError::truncated;
+    for (std::uint32_t k = 0; k < settlement_count; ++k) {
+      AiSettlementScripts s;
+      if (!reader.u32(s.settlement) || !bytes::get_i32(reader, s.economy) ||
+          !reader.u32(s.economy_script) || !bytes::get_i32(reader, s.tactic) ||
+          !reader.u32(s.tactic_script)) {
+        return FormatError::truncated;
+      }
+      // Sorted by settlement id, which `slot` binary-searches on.
+      if (k != 0 && s.settlement <= p.settlements.back().settlement) {
+        return FormatError::malformed;
+      }
+      p.settlements.push_back(s);
+    }
     players.push_back(std::move(p));
   }
-
-  std::uint32_t owner_count = 0;
-  if (!reader.u32(owner_count)) return FormatError::truncated;
-  std::vector<ScriptOwner> owners;
-  for (std::uint32_t i = 0; i < owner_count; ++i) {
-    ScriptOwner o;
-    if (!reader.u32(o.script) || !reader.u8(o.player) || !get_bool(reader, o.root)) {
-      return FormatError::truncated;
-    }
-    // Sorted by script id, which `owner` binary-searches on.
-    if (i != 0 && o.script <= owners.back().script) return FormatError::malformed;
-    owners.push_back(o);
-  }
-
-  std::uint32_t settlement_count = 0;
-  if (!reader.u32(settlement_count)) return FormatError::truncated;
-  std::vector<AiSettlementScripts> settlements;
-  for (std::uint32_t i = 0; i < settlement_count; ++i) {
-    AiSettlementScripts s;
-    if (!reader.u32(s.settlement) || !bytes::get_i32(reader, s.economy) ||
-        !reader.u32(s.economy_script) || !bytes::get_i32(reader, s.tactic) ||
-        !reader.u32(s.tactic_script)) {
-      return FormatError::truncated;
-    }
-    if (i != 0 && s.settlement <= settlements.back().settlement) return FormatError::malformed;
-    settlements.push_back(s);
-  }
-
-  std::uint32_t since_prune = 0;
-  if (!reader.u32(since_prune)) return FormatError::truncated;
 
   std::uint32_t helper_count = 0;
   if (!reader.u32(helper_count)) return FormatError::truncated;
@@ -1736,9 +1742,6 @@ Status AiSystem::deserialize(std::span<const std::byte> data) {
   if (!adopt_ship_transports(std::move(transports))) return FormatError::malformed;
 
   players_ = std::move(players);
-  owners_ = std::move(owners);
-  settlements_ = std::move(settlements);
-  since_prune_ = since_prune;
   manager_started_ = manager_started;
   helpers_ = std::move(helpers);
   // `profiles_` is left alone: its entries hold borrowed `const AiProfile*`,

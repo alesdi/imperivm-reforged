@@ -28,6 +28,8 @@
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/sim/avoidance.hpp"
+#include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/entrance.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/path.hpp"
@@ -1527,6 +1529,41 @@ TEST(the_free_spot_search_draws_one_heading_and_steps_out_from_the_centre) {
   CHECK(open.world.rng() == once);
 }
 
+TEST(the_free_spot_search_refuses_a_targeting_unit_whose_squad_sees_a_crowd) {
+  // 0x004180b0's opening test: a unit with a target (`[unit+0x1a8]`) whose
+  // squad's look saw more than 10 enemies (`[squad+0x7c]`) gets no spot, and
+  // the search draws nothing. Ten is not a crowd; no target, no refusal.
+  Field field(128, false);
+  HeroSystem heroes;
+  CombatSystem combat;
+  REQUIRE(field.world.add_system(&combat));
+  REQUIRE(field.world.add_system(&heroes));
+  field.world.start();
+  const ObjectId asker = field.unit("Soldier", Point{100, 100});
+  const SquadKey key = heroes.squads().create(0);
+  REQUIRE(heroes.squads().join(key, asker));
+  Combatant fighter;
+  fighter.id = asker;
+  fighter.target = 999;
+  combat.add(fighter);
+  std::vector<ObjectId> seen;
+  for (ObjectId id = 1000; id < 1011; ++id) seen.push_back(id);
+  heroes.squads().find(key)->enemies = seen;  // 11
+
+  Point spot{7, 7};
+  Rng untouched = field.world.rng();
+  CHECK(!field.movement.free_spot(field.world, asker, kTarget, spot));
+  CHECK(field.world.rng() == untouched);
+
+  heroes.squads().find(key)->enemies.pop_back();  // 10
+  CHECK(field.movement.free_spot(field.world, asker, kTarget, spot));
+  CHECK(!(field.world.rng() == untouched));
+
+  heroes.squads().find(key)->enemies = seen;
+  combat.find(asker)->target = kNoObject;
+  CHECK(field.movement.free_spot(field.world, asker, kTarget, spot));
+}
+
 TEST(an_attacker_queued_behind_a_full_band_is_re_aimed_round_it_once) {
   // The band is full and a column of posts stands west of it, out to x = 610.
   // The attacker from the west is cut back to the column's end; asked again
@@ -1781,4 +1818,164 @@ TEST(a_new_order_clears_the_stop_request) {
   CHECK(!field.move(walker).stop_requested);
   for (int i = 0; i < 3; ++i) field.world.advance(800);
   CHECK(field.move(walker).has_path);
+}
+
+// --------------------------------------------------------------------------
+// a search that lays nothing: the old route walked on to a free spot
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// Four soldiers on one point, walking one route south down x = 830 from
+/// (830,300) to (830,1500) -- reinforcements out of one door walk on top of
+/// one another, since a mover's next step is a stride ahead of the others --
+/// and, once they have walked six turns, a target 70 east of them whose band
+/// (`kBand`) is full: a post on it and eight round it at 39, as
+/// `ring_of_posts` stands them round `kTarget`. The ring's west post stands
+/// 31 from the column's line, so it never touches the walk. `party` is the
+/// march the column walks in, if any.
+struct ColumnAtAFullBand {
+  Field field;
+  ObjectId hero = kNoObject;
+  std::vector<ObjectId> column;
+  ObjectId target = kNoObject;
+  Point ordered_at;
+
+  explicit ColumnAtAFullBand(bool march = false) {
+    // A hero who stands: his march is over, so its members own their locks.
+    if (march) hero = field.unit("Soldier", Point{100, 100});
+    for (int i = 0; i < 4; ++i) column.push_back(field.unit("Soldier", Point{830, 300}));
+    for (const ObjectId id : column) {
+      field.movement.order_goto(field.world, id, Point{830, 1500}, 0, 0, hero, true);
+    }
+    for (int t = 0; t < 6; ++t) field.world.advance(800);
+    ordered_at = field.at(column.front());
+    target = field.unit("Post", centre());
+    const Point ring[] = {{39, 0}, {27, 27}, {0, 39}, {-28, 27},
+                          {-39, 0}, {-28, -28}, {0, -39}, {27, -28}};
+    for (const Point p : ring) field.unit("Post", Point{centre().x + p.x, centre().y + p.y});
+  }
+
+  [[nodiscard]] Point centre() const { return Point{ordered_at.x + 70, ordered_at.y}; }
+
+  /// Each of them, in id order, sent at the target as `GotoAttack` sends it:
+  /// the band and the lock flag.
+  void attack() {
+    for (const ObjectId id : column) {
+      field.movement.order_goto_object(field.world, id, target, kBand, 0, true);
+    }
+  }
+};
+
+}  // namespace
+
+TEST(a_column_whose_searches_lay_nothing_walks_on_to_free_spots) {
+  // Every search from the column's point lays nothing: the band has no goal
+  // point left, the route to the point nearest its centre is cut back to
+  // where the unit stands, and the free spot the search finds is not 200
+  // nearer (`0x00419230`). `RecastPathfind` (0x00419730) then keeps the
+  // route the unit was walking, sets bit 2 of its retry's flags (0x00419a1e)
+  // and steps through the path follower, whose stop branch (0x00419ee9,
+  // which tests bits 1 and 2 together) walks it on to the first passable
+  // free spot. The first stands free where it is and stops there; each of
+  // the others stands on it, walks on down its old route and stops on the
+  // first step clear of the ones before. They used to stop where they stood,
+  // all four on one point.
+  ColumnAtAFullBand c;
+  for (const ObjectId id : c.column) REQUIRE(c.field.at(id) == c.ordered_at);
+  REQUIRE(overlapping_pairs(c.field, c.column) == 6);
+  c.attack();
+  for (const ObjectId id : c.column) CHECK(c.field.move(id).route_failed);
+  // The first is on a free spot already: no step, and its walk is over.
+  CHECK(!c.field.move(c.column.front()).has_path);
+  // The rest are not: they walk on.
+  for (std::size_t i = 1; i < c.column.size(); ++i) CHECK(c.field.move(c.column[i]).has_path);
+  for (int t = 0; t < 4; ++t) c.field.world.advance(800);
+
+  CHECK(overlapping_pairs(c.field, c.column) == 0);
+  CHECK(c.field.at(c.column.front()) == c.ordered_at);
+  for (const ObjectId id : c.column) {
+    const MoveState& move = c.field.move(id);
+    // Along the route they had, and not far along it: a stride or so apart.
+    CHECK(c.field.at(id).x == 830);
+    CHECK(c.field.at(id).y >= c.ordered_at.y);
+    CHECK(c.field.at(id).y <= c.ordered_at.y + 4 * 40);
+    CHECK(!move.has_path);
+    // Stopped, not arrived, and the order still theirs: the retry stays with
+    // bit 2 set, so `IsArrived` is false and the next `SetDest` searches.
+    CHECK(move.goto_active);
+    CHECK(move.target_object == c.target);
+    CHECK(move.route_failed);
+    CHECK(move.last_outcome == MoveOutcome::exhausted);
+    CHECK(!c.field.movement.is_arrived(c.field.world, id));
+  }
+}
+
+TEST(a_unit_walking_on_after_a_failed_search_does_not_chase_its_target) {
+  // The path follower takes its stop branch (0x00419ee9) before anything that
+  // would lay the route again (0x0041a022 on), so a target that moves while
+  // the unit walks on to a free spot does not re-route it: it keeps the route
+  // it had, and the bit, until it stops or its script asks again.
+  ColumnAtAFullBand c;
+  c.attack();
+  const ObjectId walking = c.column.back();
+  REQUIRE(c.field.move(walking).has_path);
+  const Point old_end = c.field.move(walking).waypoints.back();
+  // Far enough to re-route a unit that was chasing it, onto open ground.
+  CHECK(c.field.world.set_position(c.target, Point{1500, c.ordered_at.y}));
+  c.field.world.advance(800);
+  CHECK(c.field.move(walking).route_failed);
+  CHECK(c.field.move(walking).target_object == c.target);
+  if (c.field.move(walking).has_path) CHECK(c.field.move(walking).waypoints.back() == old_end);
+  for (int t = 0; t < 4; ++t) c.field.world.advance(800);
+  CHECK(c.field.at(walking).x == 830);
+  CHECK(!c.field.move(walking).has_path);
+}
+
+TEST(a_march_whose_search_lays_nothing_stops_where_it_stands) {
+  // Bit 2 is set only for a retry not aimed at a formation (`[retry+0xc]`,
+  // 0x00419a17): a march member's search that lays nothing drops the route it
+  // was walking and leaves it where it stands, on its fellows.
+  ColumnAtAFullBand c(/*march=*/true);
+  for (const ObjectId id : c.column) REQUIRE(c.field.move(id).has_path);
+  for (const ObjectId id : c.column) {
+    c.field.movement.order_goto(c.field.world, id, c.centre(), kBand, 0, c.hero, true);
+    CHECK(!c.field.move(id).route_failed);
+    CHECK(!c.field.move(id).has_path);
+  }
+  for (int t = 0; t < 4; ++t) c.field.world.advance(800);
+  for (const ObjectId id : c.column) CHECK(c.field.at(id) == c.ordered_at);
+}
+
+TEST(a_unit_whose_last_search_laid_nothing_is_not_arrived) {
+  // `IsArrived` (0x00417c10) answers 0 while bit 1 or 2 of the retry's flags
+  // is set (0x00417c19), whatever the band says.
+  Field field;
+  const ObjectId unit = field.unit("Soldier", Point{500, 500});
+  field.movement.order_goto(field.world, unit, Point{510, 500}, 40, 0, kNoObject, true);
+  REQUIRE(field.move(unit).goto_active);
+  CHECK(field.movement.is_arrived(field.world, unit));
+  field.movement.state(unit).route_failed = true;
+  CHECK(!field.movement.is_arrived(field.world, unit));
+  field.movement.state(unit).route_failed = false;
+  field.movement.state(unit).stop_requested = true;
+  CHECK(!field.movement.is_arrived(field.world, unit));
+}
+
+TEST(the_failed_search_bit_survives_a_save_and_is_not_hashed) {
+  ColumnAtAFullBand c;
+  c.attack();
+  const ObjectId walking = c.column.back();
+  REQUIRE(c.field.move(walking).route_failed);
+  REQUIRE(c.field.move(walking).has_path);
+  std::uint64_t with = 0;
+  c.field.movement.hash(with);
+  std::vector<std::byte> bytes;
+  c.field.movement.serialize(bytes);
+  c.field.movement.state(walking).route_failed = false;
+  std::uint64_t without = 0;
+  c.field.movement.hash(without);
+  CHECK(with == without);
+  REQUIRE(c.field.movement.deserialize(bytes).ok());
+  CHECK(c.field.move(walking).route_failed);
 }

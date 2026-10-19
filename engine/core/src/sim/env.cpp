@@ -1027,35 +1027,14 @@ enum class ScopeArg : std::uint8_t {
 /// prepends to a root key that does not start with `/`.
 ///
 /// The field is a string on the script thread (serialised as `Context`,
-/// 0x0069cc58), null by default, and three launchers set it:
-///
-///   * **the sequence runner** (`Start`, 0x005b9d40) -- after spawning a
-///     sequence's thread it looks that thread up and sets its context to the
-///     one-character string `/` (0x005b9da7 .. 0x005b9db7). So inside every
-///     campaign sequence a relative root key is made absolute: `"Bonus"` and
-///     `"/Bonus"` are **one** slot there;
-///   * the object-attached launcher (0x0041ccb0, 0x0041cd00), which sets the
-///     object's id formatted `%d`; and
-///   * the conversation phrase runner (0x0050aa90, 0x0050b070), which sets a
-///     name followed by `/`.
-///
-/// Only the first is modelled. Every root-form `Env*` call in the installation
-/// -- 381 literal sites -- is inside a `Sequences/` script, so the other two
-/// would prefix keys no shipped script ever passes them; they answer "no
-/// context" here, which is the null the original starts every thread with.
-///
-/// A sequence's thread is the one `CampaignSystem` records as running it,
-/// which is saved state already (`SequenceEntry::running`).
-[[nodiscard]] std::string_view thread_context(CallContext& ctx) {
-  if (ctx.script == script::kNoScript) return {};
-  World* world = world_of(ctx);
-  const CampaignSystem* campaign = world == nullptr ? nullptr : campaign_system_of(*world);
-  if (campaign == nullptr) return {};
-  for (const CampaignSystem::SequenceEntry& entry : campaign->sequences()) {
-    if (entry.running == ctx.script) return "/";
-  }
-  return {};
-}
+/// 0x0069cc58), null by default, and three launchers set it -- the sequence
+/// runner to `/`, the AI's launcher to its seat, a conversation's phrase
+/// runner to `/<name>/`; `script::ScriptRecord::context` has the addresses.
+/// The VM hands it to every host call, so this is a read of the call's own
+/// thread and nothing else: a synchronous call -- a class hook, `Run`, the
+/// member `AIRun`, the `TS*` trampolines -- runs on a fresh thread with none,
+/// as 0x0069dca0's does.
+[[nodiscard]] std::string_view thread_context(CallContext& ctx) { return ctx.context; }
 
 /// One resolved `Env*` call: which scope, which key, where a write's value sits.
 ///
