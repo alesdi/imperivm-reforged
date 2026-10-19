@@ -98,6 +98,16 @@ What each entry point calls:
 So a query read inside its period answers the list its last refresh made, less what purges have
 dropped since; a `Wait*` never purges.
 
+## The order of a refreshed list
+
+The area kinds' refreshes -- circle, rectangle, sight and class-player, the last with no area
+included -- walk the world's grid (0x004fde60, 0x004fdc20, 0x004fd9c0, 0x004fd060,
+0x004fd2d0), so a refreshed list is in **grid order**: rows of 256-unit cells top to bottom,
+cells left to right, each cell's list in the order its objects came into it.
+[`spatial-index.md`](spatial-index.md) has the grid and the walk; the engine answers the same
+(`World::evaluate_query` sweeps with `SweepOrder::grid`), and a set operation over an area
+kind walks its operand in that order.
+
 ## The set operation's refresh
 
 0x004ffbe0, after writing its due time, reads its operands through their slots, so it composes
@@ -186,10 +196,6 @@ site writes through the list.
 
 ## What is still unknown
 
-* **The grid order.** The area sweeps walk the original's grid cells and each cell's list
-  (0x004fd060, 0x004fde60, 0x004fd9c0, ...), so a refreshed list is in grid order; the engine's
-  sweeps answer ascending handles. Reproducing it needs the original's cell size and per-cell
-  list order, which is a spatial-index design of its own.
 * **Bit 26 of `[obj+0x2c]`** refuses an object from `EnemyObjs`'s one-object test (0x004f8b16);
   its meaning is not settled in this engine.
 * **Group lifetime.** A group is created by `Group(name)` on a miss and lives in the name map;

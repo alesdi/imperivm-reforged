@@ -372,7 +372,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// 38). A version-43 file would load a unit walking on from a failed search
 /// as one walking to the end of its old route, and one stopped after it as
 /// arrived when it stands in its band.
-inline constexpr std::uint32_t kStateVectorVersion = 44;
+/// 45: the world section (its version 36) carries each object's grid arrival
+/// stamp (`SpatialSlot::arrival`) and the next one: the order of a grid
+/// cell's list, which is who came into the cell first and the order every
+/// area sweep answers in (`sim/spatial_index.hpp`). Not hashed. A version-44
+/// file has no stamps, and a load would list every cell in id order.
+inline constexpr std::uint32_t kStateVectorVersion = 45;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

@@ -170,6 +170,8 @@ envelope.
     u32     syncseed       Rng::state()
     u32     cmdidseed      World::next_command_id()
     u32     next_id        the next handle; never reused, so this is state
+    u64     next_arrival   the stamp the grid's next arrival takes (version 36;
+                           sim/spatial_index.hpp, docs/formats/spatial-index.md)
 
     -- the object table, in spawn order, which is tick order --
     u32     object_count
@@ -282,6 +284,12 @@ envelope.
                            whose handler clears bit 27; here the bit is read as
                            live while `time < curse_until`. Hashed: a shaman's
                            `IsCursed` guard decides whether it curses again.
+      u64   arrival        Its place in its grid cell's list: the stamp of its
+                           last arrival in a cell, earlier first. Version 36.
+                           The cell is the position's and is not stored; the
+                           load files each cell's objects in stamp order, so
+                           every area sweep answers as it did before the save.
+                           Not hashed.
       u8    animating
       u8    repeat         AnimRepeat
       -- only when native_class != 0xFF --

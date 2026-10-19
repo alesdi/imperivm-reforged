@@ -1030,13 +1030,16 @@ TEST(the_walkers_are_the_outer_loop_so_the_first_walker_gets_its_pick) {
   // decides which one the wait answers with: walkers outermost gives the first
   // *walker* its destination, destinations outermost would give the first
   // *destination* its walker. Both are stable and only one is the shape the
-  // out-parameters are named for -- `o1` is the unit that walked.
+  // out-parameters are named for -- `o1` is the unit that walked. The queries
+  // answer in grid order (rows of 256-unit cells first), and in that order as
+  // in id order the first walker is `near_east` and the first destination
+  // `west`, so the two nestings give different pairs.
   const HostRegistry registry = wait_registry();
   ConvWorld f;
-  const ObjectId near_east = f.spawn(f.walker_class, Point{10000, 100});
-  const ObjectId near_west = f.spawn(f.walker_class, Point{0, 100});
+  const ObjectId near_east = f.spawn(f.walker_class, Point{10000, 0});
+  const ObjectId near_west = f.spawn(f.walker_class, Point{0, 300});
   const ObjectId west = f.spawn(f.talker_class, Point{0, 0});
-  const ObjectId east = f.spawn(f.talker_class, Point{10000, 0});
+  const ObjectId east = f.spawn(f.talker_class, Point{10000, 300});
   CHECK(near_east < near_west && west < east);
 
   HostCall call(f.world, {query_value(f.query_of(f.walker_class)),

@@ -971,32 +971,35 @@ void World::collect(const WorldObject& slot, const ClassFilter& filter,
 // Every query below is a test on `(slot, at)`, where `at` is the object's own
 // position, over the objects that **stand on the map**: a held object is in no
 // grid cell in the original and no area sweep there finds it, so none here
-// does either (`sim/spatial_index.hpp` has the addresses). `scan` applies the
-// test to every such object in spawn order, which is what each of these was
-// written as. `sweep` gives the same answer from the grid: it gathers the
-// objects the box can hold, puts them back into spawn order, and applies the
-// same test and the same `collect`. See `sim/spatial_index.hpp` for why the
-// grid can never be the order.
+// does either (`sim/spatial_index.hpp` has the addresses). `sweep` takes the
+// objects the box can hold from the grid and applies the test and `collect`
+// to each, in the grid's walk order -- the original's, rows of cells top to
+// bottom, cells left to right, each cell's list from its head -- or, for a
+// caller that asks for spawn order, put back into ascending id. `scan`
+// applies the test to every standing object in spawn order, which is what
+// each of these was written as, and stands in for the grid when a spawn-order
+// box is most of the map.
 
 namespace {
 
 /// Past this many cells a box is most of the map, and the straight scan is the
-/// cheaper way to visit it. Either path gives the same answer.
-constexpr std::int64_t kMaxSweepCells = 256;
+/// cheaper way to visit it in spawn order. Either path gives the same answer.
+constexpr std::int64_t kMaxSweepCells = 1024;
 
 [[nodiscard]] SpatialBox box_around(Point centre, std::int32_t radius) noexcept {
   return SpatialBox{std::int64_t{centre.x} - radius, std::int64_t{centre.y} - radius,
                     std::int64_t{centre.x} + radius, std::int64_t{centre.y} + radius};
 }
 
+/// Every point there is: the grid's whole walk, border cells and all.
+constexpr SpatialBox kEverywhere{INT32_MIN, INT32_MIN, INT32_MAX, INT32_MAX};
+
 }  // namespace
 
-void World::rebuild_index() {
-  index_.clear();
-  for (WorldObject& slot : objects_) {
-    slot.spatial = SpatialSlot{};
-    index_.file(slot);
-  }
+void World::rebuild_index(std::uint64_t next_arrival) {
+  // Each object keeps the arrival stamp it was saved with, so each cell's list
+  // comes back in the order it had (`sim/spatial_index.hpp`).
+  index_.rebuild(objects_, next_arrival);
 }
 
 template <typename Test>
@@ -1004,7 +1007,7 @@ std::size_t World::scan(const ClassFilter& filter, bool filtered, std::vector<Ob
                         Test&& test) const {
   out.clear();
   for (const WorldObject& slot : objects_) {  // spawn order, never any other
-    if (slot.internal != InternalKind::none || slot.state.is_held()) continue;
+    if (!SpatialIndex::stands(slot)) continue;
     const Point at = slot.state.position;
     if (!test(slot, at)) continue;
     if (filtered) {
@@ -1018,47 +1021,65 @@ std::size_t World::scan(const ClassFilter& filter, bool filtered, std::vector<Ob
 
 template <typename Test>
 std::size_t World::sweep(const SpatialBox& box, const ClassFilter& filter, bool filtered,
-                         std::vector<ObjectId>& out, Test&& test) const {
-  if (SpatialIndex::cells_touched(box) > kMaxSweepCells) return scan(filter, filtered, out, test);
+                         std::vector<ObjectId>& out, SweepOrder order, Test&& test) const {
+  if (order == SweepOrder::spawn && SpatialIndex::cells_touched(box) > kMaxSweepCells) {
+    return scan(filter, filtered, out, test);
+  }
   out.clear();
   index_.gather(box, out);
-  // Back into spawn order, which is ascending id order. Each object is filed
-  // exactly once, so there is nothing to deduplicate.
-  std::sort(out.begin(), out.end());
   std::size_t kept = 0;
-  auto cursor = objects_.begin();
-  for (const ObjectId id : out) {
-    cursor = std::lower_bound(cursor, objects_.end(), id,
-                              [](const WorldObject& slot, ObjectId key) { return slot.id < key; });
-    const WorldObject& slot = *cursor;
-    const Point at = slot.state.position;
-    if (!test(slot, at)) continue;
-    // `collect`'s own tests, applied in place.
-    if (filtered && (slot.state.flags.unspawned || !matches_filter(slot, filter))) continue;
-    out[kept++] = id;
+  if (order == SweepOrder::grid) {
+    // The walk's own order, each candidate looked up by id.
+    for (const ObjectId id : out) {
+      const WorldObject* slot = find(id);
+      if (slot == nullptr) continue;
+      const Point at = slot->state.position;
+      if (!test(*slot, at)) continue;
+      if (filtered && (slot->state.flags.unspawned || !matches_filter(*slot, filter))) continue;
+      out[kept++] = id;
+    }
+  } else {
+    // Back into spawn order, which is ascending id order. Each object is filed
+    // exactly once, so there is nothing to deduplicate.
+    std::sort(out.begin(), out.end());
+    auto cursor = objects_.begin();
+    for (const ObjectId id : out) {
+      cursor = std::lower_bound(cursor, objects_.end(), id,
+                                [](const WorldObject& slot, ObjectId key) { return slot.id < key; });
+      const WorldObject& slot = *cursor;
+      const Point at = slot.state.position;
+      if (!test(slot, at)) continue;
+      // `collect`'s own tests, applied in place.
+      if (filtered && (slot.state.flags.unspawned || !matches_filter(slot, filter))) continue;
+      out[kept++] = id;
+    }
   }
   out.resize(kept);
 #ifdef IMPERIVM_SPATIAL_CHECK
   // A build with the check on asks the straight scan every time and stops on the first
   // disagreement: a stale grid is a desync, and a desync found at the query
-  // that caused it is worth the whole cost of the check.
+  // that caused it is worth the whole cost of the check. A grid-order answer
+  // is the scan's set in another order.
   {
     std::vector<ObjectId> expected;
     scan(filter, filtered, expected, test);
-    if (expected != out || !index_.consistent(objects_)) __builtin_trap();
+    std::vector<ObjectId> got = out;
+    if (order == SweepOrder::grid) std::sort(got.begin(), got.end());
+    if (expected != got || !index_.consistent(objects_)) __builtin_trap();
   }
 #endif
   return out.size();
 }
 
 std::size_t World::objects_in_radius(Point center, std::int32_t radius, const ClassFilter& filter,
-                                     std::vector<ObjectId>& out) const {
+                                     std::vector<ObjectId>& out, SweepOrder order) const {
   if (radius <= 0) {
-    return scan(filter, true, out,
-                [](const WorldObject&, Point at) { return at != kHeldPosition; });
+    const auto standing = [](const WorldObject&, Point at) { return at != kHeldPosition; };
+    if (order == SweepOrder::grid) return sweep(kEverywhere, filter, true, out, order, standing);
+    return scan(filter, true, out, standing);
   }
   const std::int64_t limit = static_cast<std::int64_t>(radius) * static_cast<std::int64_t>(radius);
-  return sweep(box_around(center, radius), filter, true, out,
+  return sweep(box_around(center, radius), filter, true, out, order,
                [&](const WorldObject&, Point at) {
                  return at != kHeldPosition && dist2(at, center) <= limit;
                });
@@ -1066,23 +1087,24 @@ std::size_t World::objects_in_radius(Point center, std::int32_t radius, const Cl
 
 std::size_t World::objects_in_rect(std::int32_t left, std::int32_t top, std::int32_t right,
                                    std::int32_t bottom, const ClassFilter& filter,
-                                   std::vector<ObjectId>& out) const {
+                                   std::vector<ObjectId>& out, SweepOrder order) const {
   const SpatialBox box{left, top, right, bottom};
-  return sweep(box, filter, true, out, [&](const WorldObject&, Point at) {
+  return sweep(box, filter, true, out, order, [&](const WorldObject&, Point at) {
     return at != kHeldPosition && box.contains(at);
   });
 }
 
 std::size_t World::objects_located_in_rect(std::int32_t left, std::int32_t top,
                                            std::int32_t right, std::int32_t bottom,
-                                           std::vector<ObjectId>& out) const {
+                                           std::vector<ObjectId>& out, SweepOrder order) const {
   const SpatialBox box{left, top, right, bottom};
-  return sweep(box, ClassFilter{}, false, out,
+  return sweep(box, ClassFilter{}, false, out, order,
                [&](const WorldObject&, Point at) { return box.contains(at); });
 }
 
 std::size_t World::objects_in_sight(ObjectId observer, std::int32_t radius,
-                                    const ClassFilter& filter, std::vector<ObjectId>& out) const {
+                                    const ClassFilter& filter, std::vector<ObjectId>& out,
+                                    SweepOrder order) const {
   out.clear();
   const WorldObject* watcher = find(observer);
   if (watcher == nullptr || radius < 0) return 0;
@@ -1091,7 +1113,7 @@ std::size_t World::objects_in_sight(ObjectId observer, std::int32_t radius,
   // the map's corner, and not from its holder; nothing it stands in is asked.
   const Point eye = watcher->state.position;
   const std::int64_t limit = static_cast<std::int64_t>(radius) * static_cast<std::int64_t>(radius);
-  return sweep(box_around(eye, radius), filter, true, out,
+  return sweep(box_around(eye, radius), filter, true, out, order,
                [&](const WorldObject& slot, Point at) {
                  // Nobody sees themselves (0x004fcc30 refuses the observer).
                  return slot.id != observer && at != kHeldPosition && dist2(at, eye) <= limit;
@@ -1100,10 +1122,19 @@ std::size_t World::objects_in_sight(ObjectId observer, std::int32_t radius,
 
 std::size_t World::objects_of_class_for_player(const ClassFilter& filter, PlayerId player,
                                                Point center, std::int32_t radius,
-                                               std::vector<ObjectId>& out) const {
+                                               std::vector<ObjectId>& out,
+                                               SweepOrder order) const {
   const auto owned = [player](const WorldObject& slot) {
     return player == kNoPlayer || slot.state.owner == player;
   };
+  if (radius <= 0 && order == SweepOrder::grid) {
+    // The whole map's rectangle through the grid (0x004fe860 -> 0x004fd2d0):
+    // nothing held, since nothing held is in a cell.
+    return sweep(kEverywhere, filter, true, out, order,
+                 [&](const WorldObject& slot, Point at) {
+                   return owned(slot) && at != kHeldPosition;
+                 });
+  }
   if (radius <= 0) {
     // The whole map, and no position test at all: a held object whose holder
     // is gone is still somebody's.
@@ -1116,7 +1147,7 @@ std::size_t World::objects_of_class_for_player(const ClassFilter& filter, Player
     return out.size();
   }
   const std::int64_t limit = static_cast<std::int64_t>(radius) * static_cast<std::int64_t>(radius);
-  return sweep(box_around(center, radius), filter, true, out,
+  return sweep(box_around(center, radius), filter, true, out, order,
                [&](const WorldObject& slot, Point at) {
                  return owned(slot) && at != kHeldPosition && dist2(at, center) <= limit;
                });
@@ -1125,9 +1156,10 @@ std::size_t World::objects_of_class_for_player(const ClassFilter& filter, Player
 std::size_t World::objects_of_class_for_player_in_rect(const ClassFilter& filter, PlayerId player,
                                                       std::int32_t left, std::int32_t top,
                                                       std::int32_t right, std::int32_t bottom,
-                                                      std::vector<ObjectId>& out) const {
+                                                      std::vector<ObjectId>& out,
+                                                      SweepOrder order) const {
   const SpatialBox box{left, top, right, bottom};
-  return sweep(box, filter, true, out, [&](const WorldObject& slot, Point at) {
+  return sweep(box, filter, true, out, order, [&](const WorldObject& slot, Point at) {
     if (player != kNoPlayer && slot.state.owner != player) return false;
     return at != kHeldPosition && box.contains(at);
   });
@@ -1485,6 +1517,13 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
   const QuerySpec* spec = query_spec(id);
   if (spec == nullptr) return 0;
 
+  // **Every area, rectangle and sight sweep walks the grid**, so every one of
+  // them answers in the grid's order (`sim/spatial_index.hpp`): the circle
+  // and rectangle (0x004fde60, 0x004fdc20), sight (0x004fd9c0) and the
+  // class-player circle and rectangle, whole map included (0x004fd060,
+  // 0x004fd2d0).
+  constexpr SweepOrder kGrid = SweepOrder::grid;
+
   // **Every area, rectangle and sight sweep refuses the dead.** The three
   // candidate filters the original's query sweeps run -- 0x004fc6b0 (the
   // class-player circle and rectangle, 0x004fd060/0x004fd2d0), 0x004fc980
@@ -1511,7 +1550,7 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
       // observer that is gone **or dead** (0x004ff0cd, 0x004ff0dc).
       const WorldObject* watcher = find(spec->subject);
       if (watcher == nullptr || object_is_dead(*watcher)) return 0;
-      return living(objects_in_sight(spec->subject, spec->radius, spec->filter, out));
+      return living(objects_in_sight(spec->subject, spec->radius, spec->filter, out, kGrid));
     }
 
     case QueryKind::map_area_circle: {
@@ -1534,14 +1573,15 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
       // taken here.
       if (spec->radius < 0) return 0;
       if (spec->radius == 0) {
-        return living(objects_in_rect(center.x, center.y, center.x, center.y, spec->filter, out));
+        return living(
+            objects_in_rect(center.x, center.y, center.x, center.y, spec->filter, out, kGrid));
       }
-      return living(objects_in_radius(center, spec->radius, spec->filter, out));
+      return living(objects_in_radius(center, spec->radius, spec->filter, out, kGrid));
     }
 
     case QueryKind::map_area_rect:
-      return living(
-          objects_in_rect(spec->left, spec->top, spec->right, spec->bottom, spec->filter, out));
+      return living(objects_in_rect(spec->left, spec->top, spec->right, spec->bottom, spec->filter,
+                                    out, kGrid));
 
     case QueryKind::class_player_area:
       // One kind, two shapes -- see `QuerySpec::area_is_rect` for why this is a
@@ -1549,15 +1589,16 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
       if (spec->area_is_rect) {
         return living(objects_of_class_for_player_in_rect(spec->filter, spec->player, spec->left,
                                                           spec->top, spec->right, spec->bottom,
-                                                          out));
+                                                          out, kGrid));
       }
-      objects_of_class_for_player(spec->filter, spec->player, spec->center, spec->radius, out);
+      objects_of_class_for_player(spec->filter, spec->player, spec->center, spec->radius, out,
+                                  kGrid);
       if (spec->radius <= 0) {
         // No area: the refresh (0x004fe860) sweeps the whole map's rectangle
         // (`[world+0xb4]`) **through the grid** (0x004fd2d0), and a held object
         // is in no cell -- so `ClassPlayerObjs` never lists one, garrison or
-        // passenger. `objects_of_class_for_player` keeps them for its other
-        // callers.
+        // passenger. The grid walk already leaves them out; this says so
+        // again, for the spawn-order arm's sake.
         out.erase(std::remove_if(out.begin(), out.end(),
                                  [&](ObjectId member) {
                                    const WorldObject* slot = find(member);
@@ -1627,9 +1668,8 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
       //     the operands' *counts* until the query-model round, which is a
       //     different operand whenever the shorter-lived list is the longer.
       //
-      // Each operand's own order is this engine's (ascending id for the area
-      // kinds, joining order for a group) rather than the original's grid
-      // order; see `sim/spatial_index.hpp`.
+      // Each operand's own order is its kind's: the grid's walk for the area
+      // kinds (`sim/spatial_index.hpp`), joining order for a group.
       std::vector<ObjectId> lhs_sorted = lhs;
       std::vector<ObjectId> rhs_sorted = rhs;
       std::sort(lhs_sorted.begin(), lhs_sorted.end());
@@ -2566,7 +2606,7 @@ WorldHashes World::hashes() const noexcept {
 namespace {
 
 constexpr std::uint32_t kWorldMagic = 0x444C5749u;  // "IWLD"
-constexpr std::uint32_t kWorldVersion = 35;  // 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
+constexpr std::uint32_t kWorldVersion = 36;  // 36: each object's grid arrival stamp and the next stamp; 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
 
 /// `0xFF` for a slot with no native object -- every internal kind.
 /// `NativeClass` is a `std::uint8_t` enum with 26 values, so the sentinel
@@ -2749,6 +2789,9 @@ void World::serialize(std::vector<std::byte>& out) const {
   bytes::put_u32(out, rng_.state());
   bytes::put_u32(out, next_command_id_);
   bytes::put_u32(out, next_id_);
+  // World version 36: the stamp the grid's next arrival takes. The order
+  // inside a grid cell is who came into it first (`sim/spatial_index.hpp`).
+  bytes::put_u64(out, index_.next_arrival());
 
   // -- the object table, in spawn order, which is the order it is ticked in.
   bytes::put_u32(out, static_cast<std::uint32_t>(objects_.size()));
@@ -2793,6 +2836,8 @@ void World::serialize(std::vector<std::byte>& out) const {
     bytes::put_u32(out, slot.state.traversed_by);
     // World version 35: when the unit's curse lifts.
     bytes::put_i64(out, slot.state.curse_until);
+    // World version 36: its place in its grid cell's list.
+    bytes::put_u64(out, slot.spatial.arrival);
 
     // The animation cursor. `AnimTimeline` is not written: it is re-resolved
     // from the entity on load, and a timeline in a file would be a copy of game
@@ -2970,8 +3015,9 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
   std::uint32_t next_command_id = 0;
   std::uint32_t next_id = 0;
   std::uint32_t object_count = 0;
+  std::uint64_t next_arrival = 0;
   if (!reader.u32(seed) || !reader.u32(next_command_id) || !reader.u32(next_id) ||
-      !reader.u32(object_count)) {
+      !bytes::get_u64(reader, next_arrival) || !reader.u32(object_count)) {
     return FormatError::truncated;
   }
 
@@ -3012,7 +3058,8 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
         !reader.u32(slot.state.sheltered_by) ||
         !reader.u32(slot.state.teleport_destination) ||
         !reader.u32(slot.state.traversed_by) ||
-        !bytes::get_i64(reader, slot.state.curse_until) || !reader.u8(animating) ||
+        !bytes::get_i64(reader, slot.state.curse_until) ||
+        !bytes::get_u64(reader, slot.spatial.arrival) || !reader.u8(animating) ||
         !reader.u8(repeat) || !bytes::get_string(reader, slot.display_name)) {
       return FormatError::truncated;
     }
@@ -3274,7 +3321,7 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
   next_command_id_ = next_command_id;
   next_id_ = next_id;
   objects_ = std::move(objects);
-  rebuild_index();  // derived, so never in the save: rebuilt from what was
+  rebuild_index(next_arrival);  // the cells derived, their lists' order kept: rebuilt from what was
   gate_lines_.forget();  // derived too: learnt again from the gates restored
   queries_ = std::move(queries);
   query_caches_ = std::move(caches);
