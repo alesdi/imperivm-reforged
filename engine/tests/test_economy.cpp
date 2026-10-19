@@ -419,138 +419,10 @@ TEST(economy_leaves_supply_to_the_village_behaviour) {
   economy.set_resource(source, Resource::food, 2000);
   economy.start(world);
 
-  run(economy, world, 400, 30000);
-  CHECK(economy.wagons().empty());
-  // The host side the script uses still does what it did.
   const std::int32_t before = economy.resource(source, Resource::food);
-  REQUIRE(before > 1000);
-  CHECK(economy.create_mule(source, sink, Resource::food, 1000) != 0);
-  CHECK(economy.resource(source, Resource::food) == before - 1000);
-  CHECK(economy.wagons().size() == 1);
-}
-
-/// `WagonBuildTime = 7000`: the cargo leaves the source at once and arrives at
-/// the destination one build time later, capped by the destination's store.
-TEST(economy_wagon_delivers_after_the_build_time) {
-  World world;
-  EconomySystem economy;
-  const SettlementId source = economy.create(village());
-  const SettlementId sink = economy.create(town_hall());
-  economy.find(source)->food_rate = 0;
-  economy.find(sink)->gold_rate = 0;
-  economy.set_resource(sink, Resource::food, 0);
-  economy.start(world);
-
-  CHECK(economy.create_mule(source, sink, Resource::food, 500) != 0);
-  CHECK(economy.resource(source, Resource::food) == 0);  // village starts at 100
-
-  run(economy, world, 400, 6800);
-  CHECK(economy.wagons().size() == 1);
-  CHECK(economy.resource(sink, Resource::food) == 0);
-
-  run(economy, world, 400, 200);
-  CHECK(economy.wagons().empty());
-  CHECK(economy.resource(sink, Resource::food) == 100);  // the village had 100
-}
-
-/// A wagon lost on the road takes its cargo with it. That is the whole point of
-/// carrying resources on an object rather than teleporting them.
-TEST(economy_lost_wagon_loses_its_cargo) {
-  World world;
-  EconomySystem economy;
-  economy.set_auto_deliver(false);
-  const SettlementId source = economy.create(town_hall());
-  const SettlementId sink = economy.create(town_hall());
-  economy.find(sink)->gold_rate = 0;  // hold the destination's store still
-  economy.set_resource(sink, Resource::gold, 0);
-  economy.start(world);
-
-  const std::uint32_t wagon = economy.create_mule(source, sink, Resource::gold, 1000);
-  REQUIRE(wagon != 0);
-  run(economy, world, 800, 8000);
-  REQUIRE(economy.wagons().size() == 1);
-  CHECK(economy.wagons()[0].ready());
-  CHECK(economy.lose_wagon(wagon));
-  CHECK(economy.resource(sink, Resource::gold) == 0);
-  CHECK(economy.find_wagon(wagon) == nullptr);
-}
-
-/// `Squad::SendFoodWagon`'s wagon: loaded now, built later, and then **never
-/// delivered** -- it stays in the table as the larder of the unit it follows,
-/// and only the feeder's draw empties it. See `Wagon::follow`.
-TEST(economy_feeding_wagon_is_a_larder_and_not_a_delivery) {
-  World world;
-  EconomySystem economy;
-  const SettlementId source = economy.create(town_hall());
-  economy.find(source)->gold_rate = 0;
-  economy.set_resource(source, Resource::food, 1000);
-  economy.start(world);
-  constexpr ObjectId kLeader = 41;
-  constexpr ObjectId kOther = 42;
-
-  // Nobody to follow is no wagon, and nothing to load is no wagon.
-  CHECK(economy.create_feeding_mule(source, kNoObject, 300) == 0);
-  CHECK(economy.create_feeding_mule(source, kLeader, 0) == 0);
-  CHECK(economy.wagons().empty());
-
-  const std::uint32_t wagon = economy.create_feeding_mule(source, kLeader, 300);
-  REQUIRE(wagon != 0);
-  CHECK(economy.resource(source, Resource::food) == 700);
-  {
-    const Wagon* w = economy.find_wagon(wagon);
-    REQUIRE(w != nullptr);
-    CHECK(w->follow == kLeader);
-    CHECK(w->follows());
-    CHECK(w->destination == kNoSettlement);
-    CHECK(w->resource == Resource::food);
-    CHECK(w->amount == 300);
-  }
-  const ObjectId squad[] = {kOther, kLeader};
-  const ObjectId strangers[] = {kOther};
-  // Not built yet: nothing to draw.
-  CHECK(economy.draw_from_larder(squad, 20) == 0);
-
-  // Built, and still here: a wagon with a unit to follow is not delivered.
-  run(economy, world, 400, 7200);
-  REQUIRE(economy.wagons().size() == 1);
-  CHECK(economy.wagons()[0].ready());
-  // Drawn only by a squad the followed unit is in, only by a positive want,
-  // and never past what it holds.
-  CHECK(economy.draw_from_larder(strangers, 20) == 0);
-  CHECK(economy.draw_from_larder(squad, 0) == 0);
-  CHECK(economy.draw_from_larder(squad, 20) == 20);
-  CHECK(economy.find_wagon(wagon)->amount == 280);
-  CHECK(economy.draw_from_larder(squad, 1000) == 280);
-  // Emptied, and gone.
-  CHECK(economy.find_wagon(wagon) == nullptr);
-  CHECK(economy.wagons().empty());
-
-  // A gold wagon following somebody is never a larder.
-  const std::uint32_t gold = economy.create_mule(source, kNoSettlement, Resource::gold, 100);
-  REQUIRE(gold != 0);
-  economy.set_auto_deliver(false);
-  run(economy, world, 400, 7200);
-  REQUIRE(economy.wagons().size() == 1);
-  CHECK(economy.draw_from_larder(squad, 20) == 0);
-}
-
-/// The unit a wagon follows is world state: two peers that disagree about it
-/// disagree about which army eats next week.
-TEST(economy_hash_covers_the_unit_a_wagon_follows) {
-  World world;
-  EconomySystem a, b;
-  const SettlementId sa = a.create(town_hall());
-  const SettlementId sb = b.create(town_hall());
-  a.set_resource(sa, Resource::food, 1000);
-  b.set_resource(sb, Resource::food, 1000);
-  a.start(world);
-  b.start(world);
-  REQUIRE(a.create_feeding_mule(sa, 41, 300) != 0);
-  REQUIRE(b.create_feeding_mule(sb, 42, 300) != 0);
-  std::uint64_t ha = 1469598103934665603ull, hb = 1469598103934665603ull;
-  a.hash(ha);
-  b.hash(hb);
-  CHECK(ha != hb);
+  run(economy, world, 400, 30000);
+  // Nothing left the village, and nothing reached the town.
+  CHECK(economy.resource(source, Resource::food) == before);
 }
 
 // --------------------------------------------------------------------------
@@ -5578,8 +5450,9 @@ TEST(a_mule_loads_from_the_settlement_it_stands_in_and_carries_one_kind) {
   CHECK(amount() == 0);
   CHECK(restype() == 0);
 
-  // 1. Standing nowhere, it loads nothing -- the settlement comes from the
-  //    holder, not from ownership or from the nearest town.
+  // 1. Standing nowhere, it loads nothing: out of a holder the mule looks for
+  //    a hall within its sight, and this class declares none (see
+  //    `a_mule_in_the_open_loads_at_the_first_supported_hall_it_sees`).
   CHECK(call("LoadGold", {self, script::Value::integer(500)}).status ==
         script::HostStatus::ok);
   CHECK(amount() == 0);

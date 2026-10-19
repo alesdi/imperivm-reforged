@@ -84,6 +84,12 @@ ClassGraph fixture_graph() {
   // Two descendants, so that "how many of this class" is a different question
   // from "how many members". `Count` is the only entry point here that needs it.
   graph.add(bytes(R"(<class id="Horse" cpp_class="CVXUnit" parent="Unit"/>)"), "horse.sc.xml");
+  // A mule: `SendFoodWagon` loads one and orders it to follow.
+  graph.add(bytes(R"(<class id="Trader" cpp_class="CVXWagon" parent="Unit">
+      <properties max_load="1000"/>
+      <method sig="follow" vs="data/subai/wagon_follow.vs"/>
+    </class>)"),
+            "trader.sc.xml");
   graph.add(bytes(R"(<class id="GDruid" cpp_class="CVXUnit" parent="Unit"/>)"), "druid.sc.xml");
   // An animal, which a squad's look leaves off its `Enemies`.
   graph.add(bytes(R"(<class id="Animal" cpp_class="CVXUnit" parent="Unit"/>)"), "animal.sc.xml");
@@ -1415,10 +1421,13 @@ TEST(eval_attach_scores_a_heros_squad_by_its_standing_against_min_and_its_level)
   }
 }
 
-/// `sq.SendFoodWagon(amount, range)` and `sq.FoodComing`: the nearest own
-/// settlement with food to spare within range loads a mule that follows the
-/// leader, and the squad reads the cargo of every wagon following one of its
-/// members as food on its way.
+/// `sq.SendFoodWagon(amount, range)` and `sq.FoodComing` (0x0042a750,
+/// 0x0042a5b0): the nearest own settlement with food to spare within range
+/// loads its race's mule, which is ordered to follow the leader; the squad
+/// reads the cargo of every food wagon in its player's peaceful squads whose
+/// running command is aimed at one of its members as food on its way. A wagon
+/// already on the road -- not following anybody -- is redirected instead when
+/// the settlement is 1,200 or more further.
 TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
   Fixture f;
   EconomySystem economy;
@@ -1460,27 +1469,52 @@ TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
     CHECK(out.status == HostStatus::ok);
     return out.value.is_integer() ? out.value.as_integer() : -1;
   };
+  // The newest object, which is the mule a send just made.
+  const auto newest = [&] { return f.world.next_id() - 1; };
+  // A wagon's own peaceful squad, as the AI's new-unit hook files it.
+  const auto file = [&](ObjectId wagon) {
+    const SquadKey own = f.heroes.squads().create(1);
+    f.heroes.squads().find(own)->flags |= kSquadFlagPeaceful;
+    CHECK(f.heroes.squads().join(own, wagon));
+  };
+  const auto following = [&](ObjectId wagon) {
+    const CommandQueue* q = f.commands.find(wagon);
+    const Command* run = q == nullptr ? nullptr : q->running();
+    return run != nullptr && run->verb == "follow" && run->arg_kind == CommandArgKind::object
+               ? run->object
+               : kNoObject;
+  };
 
   CHECK(coming(key) == 0);
-  // Out of range of everything own with food: nothing.
+  // Out of range of everything own with food: nothing, and no mule.
+  const ObjectId before = f.world.next_id();
   CHECK(!send(key, 300, 400));
-  CHECK(economy.wagons().empty());
-  // 500 is within 500: the near store loads 300 and the mule follows the
-  // leader; the food is out of the store at once and counts as coming.
+  CHECK(f.world.next_id() == before);
+  // 500 is within 500: the near store loads 300 into a mule in its holder,
+  // ordered to follow the leader.
   CHECK(send(key, 300, 500));
-  REQUIRE(economy.wagons().size() == 1);
-  CHECK(economy.wagons()[0].follow == leader);
-  CHECK(economy.wagons()[0].amount == 300);
-  CHECK(economy.wagons()[0].resource == Resource::food);
+  const ObjectId first = newest();
+  REQUIRE(f.world.find(first) != nullptr);
+  CHECK(f.world.find(first)->class_index == f.graph.find("Trader"));
+  CHECK(f.world.find(first)->state.cargo == 300);
+  CHECK(f.world.find(first)->state.cargo_resource == 1);
+  CHECK(f.world.find(first)->state.holder == economy.find(near)->holder.object);
+  CHECK(following(first) == leader);
   CHECK(economy.find(near)->warehouse.food == 700);
+  // Coming once it stands in a peaceful squad, and not before.
+  CHECK(coming(key) == 0);
+  file(first);
   CHECK(coming(key) == 300);
 
-  // 100 food exactly is enough to load at, and the load is clamped to it.
+  // 100 food exactly is enough to load at, and the load is clamped to it. The
+  // first mule follows a unit, so it is not redirected.
   economy.set_resource(hungry, Resource::food, 100);
   CHECK(send(key, 300, 500));
-  REQUIRE(economy.wagons().size() == 2);
-  CHECK(economy.wagons()[1].amount == 100);
+  const ObjectId second = newest();
+  REQUIRE(second != first);
+  CHECK(f.world.find(second)->state.cargo == 100);
   CHECK(economy.find(hungry)->warehouse.food == 0);
+  file(second);
   CHECK(coming(key) == 400);
 
   // Nothing to load is false, and a store that cannot pay is not chosen over
@@ -1488,10 +1522,42 @@ TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
   economy.set_resource(near, Resource::food, 0);
   CHECK(!send(key, 300, 500));
   CHECK(send(key, 50, 1000));
-  CHECK(economy.wagons().size() == 3);
+  const ObjectId third = newest();
   CHECK(economy.find(far)->warehouse.food == 950);
+  file(third);
+  const ObjectId none_yet = f.world.next_id();
   CHECK(!send(key, 0, 1000));
-  CHECK(economy.wagons().size() == 3);
+  CHECK(f.world.next_id() == none_yet);
+
+  // A wagon on the road to a point, 50 from the leader, carrying no more than
+  // asked: redirected when every store is at least 1,200 further, and its
+  // load and the stores untouched.
+  economy.set_resource(far, Resource::food, 0);
+  const ObjectId roadside = f.world.spawn(NativeClass::wagon, nullptr, f.graph.find("Trader"));
+  f.world.set_position(roadside, Point{150, 100});
+  f.world.set_owner(roadside, 1);
+  f.world.set_health(roadside, 400);
+  f.world.find(roadside)->state.cargo = 200;
+  f.world.find(roadside)->state.cargo_resource = 1;
+  file(roadside);
+  Command move;
+  move.verb = "move";
+  move.arg_kind = CommandArgKind::point;
+  move.point = Point{3000, 3000};
+  move.started = true;
+  f.commands.queue(roadside).entries.push_back(move);
+  const SettlementId distant = town(Point{1350, 100}, 1, 1000);  // 1,250 out
+  CHECK(send(key, 150, 2000));  // carrying more than asked: not a candidate
+  CHECK(economy.find(distant)->warehouse.food == 1000 - 150);
+  CHECK(following(roadside) == kNoObject);
+  economy.set_resource(distant, Resource::food, 1000);
+  const ObjectId plain = f.world.next_id();
+  CHECK(send(key, 300, 2000));
+  CHECK(f.world.next_id() == plain);
+  CHECK(following(roadside) == leader);
+  CHECK(f.world.find(roadside)->state.cargo == 200);
+  CHECK(economy.find(distant)->warehouse.food == 1000);
+  CHECK(coming(key) == 650);
 
   // Coming is by membership at the time of asking: a wagon after a member who
   // has left no longer counts, and another squad never counted it.
@@ -1500,16 +1566,16 @@ TEST(send_food_wagon_loads_at_the_nearest_own_store_and_food_coming_counts_it) {
   CHECK(f.heroes.squads().leave(key, leader));
   CHECK(coming(key) == 0);
   CHECK(f.heroes.squads().join(others, leader));
-  CHECK(coming(others) == 450);
+  CHECK(coming(others) == 650);
 
   // **A held leader is measured from its stored `(-1, -1)`** (`vtbl+0x3c`,
-  // 0x0042a7fc), not from what holds it: the far store, 50 from the keep the
-  // leader stands in, is out of a range of 200.
+  // 0x0042a7fc), not from what holds it: the distant store, 50 from the keep
+  // the leader stands in, is out of a range of 200.
   const ObjectId keep = f.world.spawn(NativeClass::building, nullptr);
-  f.world.set_position(keep, Point{1100, 150});
+  f.world.set_position(keep, Point{1350, 150});
   const ObjectId front = f.heroes.squads().find(others)->members.front();
   REQUIRE(f.world.put_in_holder(front, keep));
-  REQUIRE(f.world.resolve_position(front) == (Point{1100, 150}));
+  REQUIRE(f.world.resolve_position(front) == (Point{1350, 150}));
   CHECK(!send(others, 50, 200));
 
   // An empty squad and a handle naming none answer false and 0.

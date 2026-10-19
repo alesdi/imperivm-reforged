@@ -345,7 +345,15 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (`World::QueryCache`: the list its last refresh made and when the next one
 /// falls due, `[query+0x4c]`). A version-39 file has neither, and a query
 /// is no longer evaluated on every read: docs/formats/query-model.md.
-inline constexpr std::uint32_t kStateVectorVersion = 40;
+/// 41: the economy section grew the wagons' loyalty rows -- a wagon's
+/// loyalty, pending change, capture flag and its two capture timers
+/// (`WagonLoyalty`), which `Wagon::loyalty`, `SetLoyalty` and
+/// `DecreaseLoyalty` read and write -- and lost its shipment table: a
+/// settlement's mule and a squad's food wagon are wagon objects in the world
+/// section now, not rows with a build timer. Hashed, so a version-40 file
+/// would load a caravan mid-capture as one nobody had touched, and its mules
+/// in transit as loads nobody carried.
+inline constexpr std::uint32_t kStateVectorVersion = 41;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

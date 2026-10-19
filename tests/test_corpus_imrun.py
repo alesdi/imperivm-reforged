@@ -1086,17 +1086,15 @@ SIEGE_TURN = 10
 @pytest.mark.parametrize("cls, stand, hurts", [
     # 20 beyond the outpost's edge, inside a sword's 17 + 15 + 345.
     ("RHastatus", (NUMANTIA_OUTPOST[0] + 365, NUMANTIA_OUTPOST[1]), False),
-    # 500 from its centre to the south-west, inside a bow's reach. Not the
-    # east side: since a sequence reads Finished the moment its script ends
-    # (0x005b9f50), `seq3.vs`'s 28 `BestTarget` runs take a few turns rather
-    # than 28, so the Iberians' attackers are already advancing on their own
-    # outposts' ground there, and the archer's `unit_advance.vs` takes the
-    # first of them in squad sight for its target instead of the fort. Not due
-    # west either, since the tenth round's tree: an Iberian archer (p3) kills
-    # it there within three turns, before its first shot. From here it lands
-    # its shots before it falls (10,000 -> 9,940 on that tree and on the one
-    # before it).
-    ("RArcher", (NUMANTIA_OUTPOST[0] - 354, NUMANTIA_OUTPOST[1] - 354), True),
+    # 500 from its centre to the south-east, inside a bow's reach. Where it
+    # stands is the war's to decide, not the rule's: an Iberian archer (p3)
+    # kills it within a few turns wherever it waits, and the stand is one
+    # where it lands its shots first. Due west fell to that in the tenth
+    # round's tree; the south-west, which held then, fell in the eleventh,
+    # once a settlement's mules became objects walking the roads and moved the
+    # Iberians' first turns (turn 12, before its first shot). From here it
+    # shoots before it falls on both (10,000 -> 9,940), measured.
+    ("RArcher", (NUMANTIA_OUTPOST[0] + 354, NUMANTIA_OUTPOST[1] + 354), True),
 ])
 def test_the_attack_button_on_a_fort_hurts_it_from_an_archer_and_not_from_a_sword(
         imrun, game_dir, cls, stand, hurts):

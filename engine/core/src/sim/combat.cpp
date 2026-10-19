@@ -1558,6 +1558,14 @@ std::int32_t CombatSystem::apply_damage(World& world, ObjectId victim, std::int3
   return removed;
 }
 
+bool CombatSystem::kill(World& world, ObjectId id) {
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr || !unit->alive || unit->action == Action::dying) return false;
+  unit->health = 0;
+  enter_dying(world, *unit, now_);
+  return true;
+}
+
 std::int32_t CombatSystem::heal(ObjectId id, std::int32_t amount) {
   Combatant* unit = mutable_find(id);
   if (unit == nullptr || !unit->alive || unit->action == Action::dying) return 0;

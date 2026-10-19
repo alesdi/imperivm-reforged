@@ -21,10 +21,10 @@
 0x005c1d80	verified	Settlement::UnitsCount: [holder+0x40], the holder list's size; invalid prints, 0
 0x005c6de0	verified	Ship::UnitsCount: [[ship+0x1dc] holder +0x14] occupancy; invalid prints, 0; engine counts units_on_board
 0x005d7cd0	verified	Unit::SetFood: FIXED -- [u+0x16c] written unclamped (above maxfood and below 0), flag 0x20000000 set at >= 1 (feeder hungry mark); FeederSystem::write_food; test feeder_host_reads_and_writes_a_units_food
-0x005ebe70	partial	Wagon::SetFood: FIXED -- kind [+0x1d4]=1 then cargo [+0x1cc] via 0x005eb0a0, unclamped; test economy_wagon_set_food_and_set_gold_write_kind_and_cargo. Gap: 0x005eb0a0 kills an emptied wagon (vtbl+0xb0) outside the editor -- not reproduced
+0x005ebe70	verified	Wagon::SetFood: FIXED -- kind [+0x1d4]=1 then cargo [+0x1cc] through the setter 0x005eb0a0 (set_wagon_cargo): unclamped, and a cargo of exactly 0 kills a wagon not already dead (death virtual, CombatSystem::kill). Carrying-food flag 0x20000000 not modelled (only the dump reads it); editor guard moot (no script runs under it). Tests economy_wagon_set_food_and_set_gold_write_kind_and_cargo, a_wagon_emptied_to_zero_dies
 0x005c1bc0	verified	Settlement::ForceAddUnit: unit then settlement resolved (each miss prints, void); holder entry 0x005d3e10 with force 1 = garrison_enter(force) + onenter hook
 0x005c21a0	verified	Settlement::SetGold: FIXED -- min(value, cap [wh+0x10]) with no floor; test economy_settlement_setters_clamp_only_from_above
-0x005ebec0	partial	Wagon::SetGold: FIXED -- kind 0 then cargo via 0x005eb0a0; test economy_wagon_set_food_and_set_gold_write_kind_and_cargo. Gap: emptied-wagon death not reproduced (as Wagon::SetFood)
+0x005ebec0	verified	Wagon::SetGold: FIXED -- kind 0 then cargo through the setter 0x005eb0a0, emptied wagon dies (as Wagon::SetFood); test a_wagon_emptied_to_zero_dies
 0x00535260	verified	Item::name: FIXED -- [item+8] handle -> [+0x24] definition -> its first string, the <item id> (reader 0x005361f0 at 0x0053638d); invalid prints, ""; test item_name_answers_the_definitions_id
 0x005aea60	partial	Obj::name: reverse lookup of the NamedObj at [obj+0x84] in the named-object manager (0x0054b3a0), "" when absent; engine looks up the object itself -- the +0x84 indirection is not modelled (agrees for every top-level object)
 0x005c2700	verified	Settlement::name: std::string at [s+0xcc]; invalid prints, ""
@@ -39,7 +39,7 @@
 0x00428ba0	verified	Settlement::CanAfford(cmd): core with gold/food/pop costs, reserve unless ReserveFor names this command (0x00426df0); invalid prints, false; unknown command prints, false
 0x00428d40	verified	Settlement::CanAfford(cmd, count): FIXED -- count <= affordable with no floor on count (0x00428eb0); same reserve rule as CanAfford(cmd)
 0x005c27d0	verified	Settlement::SetLoyalty: 0..100 stored x10 at [s+0x54], else printed refusal
-0x005ec100	partial	Wagon::SetLoyalty: [w+0x1d8] = v*10 for 0..100. Gap (design): wagons carry no loyalty here (value, pending [+0x1dc], tick)
+0x005ec100	verified	Wagon::SetLoyalty: FIXED -- [w+0x1d8] = v*10 for 0..100, else refused; pending and capture untouched (EconomySystem::set_wagon_loyalty); test a_wagon_starts_at_its_initial_loyalty_and_only_a_taunt_starts_a_capture
 0x00425320	verified	Settlement::IsIndependent: owner index 14 or 15; invalid false, unprinted
 0x005c2bc0	verified	Settlement::max_population: [s+0x4c]; invalid prints, 0
 0x00563f10	verified	Building::GetOutpostFood: outpost gate, then [+0x260]; else 0
@@ -53,14 +53,14 @@
 0x005c1b20	verified	Settlement::AddUnit: FIXED -- answers true when the unit or the settlement misses (each prints, pushes 1); else holder entry 0x005d3e10 force 0 and its answer; test economy_add_unit_answers_true_for_a_handle_that_does_not_resolve
 0x005c5b90	verified	Settlement::ObjectsAround: FIXED -- class name resolved whole (0x00409e40), unknown or empty matches nothing; CollectUnits both flags; invalid receiver empty list; test economy_objects_around_filters_on_the_class_tree
 0x005c2c10	verified	Settlement::loyalty: [s+0x54] / 10; invalid prints, 0
-0x005ec090	partial	Wagon::loyalty: [w+0x1d8] / 10. Gap (design): wagons carry no loyalty here, a wagon answers 0, so UNIT_CAPTURE/HERO_CAPTURE take a caravan at once
+0x005ec090	verified	Wagon::loyalty: FIXED -- [w+0x1d8] / 10, LoyaltyWagonsInitial (100 tenths, so 10) for an untouched wagon (0x005eae80), so UNIT_CAPTURE/HERO_CAPTURE wear a caravan down instead of taking it at first contact; 0 for an invalid handle; test a_wagon_starts_at_its_initial_loyalty_and_only_a_taunt_starts_a_capture
 0x005c2200	verified	Settlement::SetPopulation: FIXED -- min(value, max_population) with no floor; test economy_settlement_setters_clamp_only_from_above
 0x005c2a60	verified	Settlement::DelSentry: FIXED -- bank [+0x100] spent first, else roster [+0xfc] - 1 floored at 0 (was dropped); new Settlement::sentries_put_back, PutSentry fills it; test get_sentry_takes_one_out_of_the_wall_and_put_sentry_puts_one_back
 0x00420650	verified	Settlement::IsTeutonTent: FIXED -- central class id or altid == "TTent" exactly, not ancestry (TTentWinter false); test economy_is_teuton_tent_compares_the_class_name_and_is_ttent_its_ancestry
-0x005ef140	partial	Settlement::CreateMuleGold: FIXED -- invalid receiver answers an invalid handle; test economy_handle_members_answer_an_invalid_handle_for_a_dead_settlement. Gap (design): 0x005eed90 makes a race mule object in the holder with cargo clamped to max_load; EconomySystem's wagon table abstracts the journey and hands back no object
+0x005ef140	partial	Settlement::CreateMuleGold: FIXED -- invalid receiver answers an invalid handle; FIXED (design) -- 0x005eed90 is make_mule: the race's mule (0x005eed10: Trader, Tradecar_Donkey 1/4/5, Camel 2/6, CartTrader 3/7), request clamped to its max_load then to the store, store drawn, nothing loaded -> invalid handle, else a wagon object with kind and cargo (through 0x005eb0a0), owned by the settlement's player, forced into its holder, handle answered; EconomySystem's shipment table is gone. Tests economy_handle_members_answer_an_invalid_handle_for_a_dead_settlement, a_settlement_makes_its_races_mule_with_the_load_in_it. Gaps: a negative request loads nothing (the original grows the store), and the AI hook 0x0041f310 files the mule into a squad at once where enrol_new_units_in_squads files it at the next turn
 0x004281a0	verified	Settlement::BestBarrack: member deque, eight-name test, CVXBarrack cast, damage tier != 3, unsigned queue < seed from argument; 0xffff when none
 0x005c3d40	partial	Settlement::Buildings: original aliases the ObjList at [s+0x60] (the member deque); engine snapshots by back-link. Design left after the query-model round: the pool now aliases holders and hero armies, but the roll is vector<SettlementBuilding> (rows with per-building max_health), not a handle list it could alias; agrees on loaded maps and no shipped site writes through it
-0x005ef040	partial	Settlement::CreateMuleFood: as CreateMuleGold with resource 1
+0x005ef040	partial	Settlement::CreateMuleFood: as CreateMuleGold with resource 1; same fix, same two gaps
 0x0042db30	verified	NearestStronghold(pt, id, flt): search 0x0042da70 with id-1 and the filter; BaseTownhall heirs, relation 0x0044e250, isqrt distance, strict less
 0x0042db90	verified	NearestStronghold(pt, id): filter AI_OWN (1)
 0x0042dbf0	verified	NearestStronghold(pt): the search with -1 (no filter); not bound -- no shipped site uses one argument

@@ -1284,6 +1284,12 @@ class CombatSystem final : public System {
   /// `hit`-only on purpose; see their notes for why the two differ.
   std::int32_t apply_damage(World& world, ObjectId victim, std::int32_t amount,
                             ObjectId source = kNoObject);
+  /// A unit's death virtual (`vtbl+0xb0`, 0x005db270) with no blow behind it:
+  /// the health goes to zero (its `SetHealth(0)`, `vtbl+0x98`) and the unit
+  /// dies exactly as `apply_damage` kills -- `ondie` included. The wagon's
+  /// cargo setter (0x005eb0a0) is the caller: a wagon emptied to zero dies.
+  /// False, and nothing done, for an id that is not a live combatant.
+  bool kill(World& world, ObjectId id);
   /// `Obj::Heal(n)`, clamped to `maxhealth`.
   std::int32_t heal(ObjectId id, std::int32_t amount);
 

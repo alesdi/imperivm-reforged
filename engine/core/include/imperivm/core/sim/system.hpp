@@ -470,12 +470,12 @@ struct ObjectState {
   ///
   /// **On the object, not on a trade record.** `Wagon::amount` (0x005ebdb0) and
   /// `Wagon::restype` (0x005ebe10) are plain reads of those two fields, and
-  /// `Wagon::LoadGold`/`LoadFood` (0x005ebfd0, 0x005ebf10) are the only writers
-  /// a script has. `EconomySystem::Wagon` is a different thing -- a settlement
-  /// -to-settlement shipment with a build timer and no world object -- and the
-  /// two must not be confused: a mule the AI walks around with is this, and
-  /// `ES_OUTPOSTSELLGOLD.VS` sums `AsWagon(o).amount` over a *group of objects*
-  /// to find out how much gold is on the road.
+  /// every write goes through the cargo setter (`set_wagon_cargo`, 0x005eb0a0,
+  /// which kills a wagon emptied to zero). Every carrier a settlement sends --
+  /// `CreateMuleGold`, `CreateBoatFood`, `SendFoodWagon` -- is such an object
+  /// (`make_mule`), and `ES_OUTPOSTSELLGOLD.VS` sums `AsWagon(o).amount` over
+  /// a *group of objects* to find out how much gold is on the road.
+  /// `docs/formats/wagon.md` is the model.
   ///
   /// `cargo_resource` uses `Resource`'s own numbering, and that is measured
   /// rather than assumed: `LoadFood` writes the literal 1 into `[+0x1d4]` and

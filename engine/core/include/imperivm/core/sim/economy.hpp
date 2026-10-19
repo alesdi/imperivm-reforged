@@ -91,7 +91,10 @@ struct EconomyRules {
   std::int32_t stronghold_food_production = 10;
 
   // -- warehouse and transport ------------------------------------------
-  /// `WagonBuildTime = 7000`: how long a dispatched wagon takes to exist.
+  /// `WagonBuildTime = 7000`. Held only so `GetConst` answers it: nothing in
+  /// `gbr.exe` names the key and no shipped script asks for it. A settlement's
+  /// mule exists the moment `CreateMuleGold` makes it (0x005eed90); there is
+  /// no build time.
   std::int32_t wagon_build_time = 7000;
   /// `MinResQtyToTransport = 100`. Both uses in the corpus are strict:
   /// `if (nSendGold > min_resource)` in `VILLAGE_BEHAVIOR_SUPPLY.VS`, and
@@ -144,6 +147,20 @@ struct EconomyRules {
   std::int32_t loyalty_after_capture = 11;
   /// `LoyaltyUnitsOutTreshold = 151`.
   std::int32_t loyalty_units_out_threshold = 151;
+  /// A wagon's own five: `WagonLoyaltyInterval = 1000`,
+  /// `WagonLoyaltyCapInterval = 500`, `WagonLoyaltyChangeCap = 5`,
+  /// `WagonLoyaltyIncreasePerUnit = 10`, `LoyaltyWagonsInitial = 100`, cached
+  /// together by 0x005eaef0 the first time a wagon is built or loaded. **The
+  /// initial value is used as tenths, unmultiplied** -- the wagon constructor
+  /// (0x005eae80) stores it straight into `[wagon+0x1d8]`, where the
+  /// settlement's stores ten times its own -- so a fresh wagon reads
+  /// `loyalty` 10, and the cap tick holds a wagon at or below it. See
+  /// `WagonLoyalty`.
+  std::int32_t wagon_loyalty_interval = 1000;
+  std::int32_t wagon_loyalty_cap_interval = 500;
+  std::int32_t wagon_loyalty_change_cap = 5;
+  std::int32_t wagon_loyalty_increase_per_unit = 10;
+  std::int32_t loyalty_wagons_initial = 100;
 
   // -- outposts ----------------------------------------------------------
   /// `OutpostRefresh = 2000`, `GOutpostFoodSales = 20`,
@@ -176,37 +193,35 @@ struct EconomyRules {
   std::int32_t mercenary_pact_gold = 40;
 };
 
-/// A wagon carrying resources between two settlements.
+/// A wagon object's loyalty, as `gbr.exe` keeps it on the `CVXWagon` itself.
+/// `docs/formats/wagon.md` is the whole model; this is the part of it this
+/// table holds.
 ///
-/// The economy owns the cargo and the two endpoints; it does not own movement.
-/// `WagonBuildTime` elapses first — the wagon does not exist before that — and
-/// then the wagon is `ready`. Who moves it and how long it takes is the
-/// movement system's business: it calls `deliver_wagon` when the wagon reaches
-/// its destination, or `lose_wagon` when it is captured or killed on the way.
-/// With no movement system attached, `auto_deliver` makes a ready wagon unload
-/// immediately so that the economy is closed and testable on its own.
-struct Wagon {
-  /// Dense, never reused, assigned from 1. Zero is not a wagon.
-  std::uint32_t id = 0;
-  SettlementId source = kNoSettlement;
-  SettlementId destination = kNoSettlement;
-  Resource resource = Resource::gold;
-  std::int32_t amount = 0;
-  /// Game time left before the wagon exists. Counts down to zero and stops.
-  std::int32_t build_remaining = 0;
-  /// The world object once one has been spawned for it, or null.
-  ObjectId object = kNoObject;
-  /// `Squad::SendFoodWagon`: the unit this wagon was sent after, and
-  /// `kNoObject` for a wagon bound for a settlement. **A wagon with one has no
-  /// destination and is never delivered**: when its build time runs out it
-  /// stays in the table as the larder of whatever squad that unit is then in,
-  /// and the feeder's food search draws it down until it is empty. That is
-  /// the original's mule following the army with the journey abstracted away,
-  /// which is what this table already does to every other wagon.
-  ObjectId follow = kNoObject;
-
-  [[nodiscard]] bool ready() const noexcept { return build_remaining <= 0; }
-  [[nodiscard]] bool follows() const noexcept { return follow != kNoObject; }
+/// Three fields on the object and two of its timers: the loyalty in tenths
+/// (`[wagon+0x1d8]`, which `Wagon::loyalty` answers over ten), the pending
+/// change (`[+0x1dc]`, the save's `loyalty-cap`), the capture flag
+/// (`[+0x1d0]`), and timers 9 and 10, which run exactly while the flag is up.
+/// **Kept here, keyed by the wagon's handle, rather than on every object**,
+/// because the constructor (0x005eae80) gives every wagon the same state --
+/// `LoyaltyWagonsInitial` tenths, nothing pending, no capture, no timer --
+/// and only three entry points ever move it from there: so a wagon with no
+/// row is in that state, and a row exists only for a wagon a script has
+/// touched. A row whose object is gone is dropped by `advance` (handles are
+/// never reused, so a stale row could never be read; dropping it keeps the
+/// hash honest).
+///
+/// The timers count down in the economy's own event-stepped clock, so the
+/// same instants fire whatever the turn lengths. `gain_remaining` is timer 9
+/// (`WagonLoyaltyInterval`, the guard count 0x005ec410) and `cap_remaining`
+/// timer 10 (`WagonLoyaltyCapInterval`, the cap 0x005eb100); both are zero
+/// whenever `capturing` is false, and both positive while it is true.
+struct WagonLoyalty {
+  ObjectId wagon = kNoObject;
+  std::int32_t loyalty_tenths = 0;
+  std::int32_t pending = 0;
+  bool capturing = false;
+  std::int32_t gain_remaining = 0;
+  std::int32_t cap_remaining = 0;
 };
 
 /// Why a spend was refused. `ok` is the only success.
@@ -240,12 +255,6 @@ class EconomySystem final : public System {
 
   [[nodiscard]] const EconomyRules& rules() const noexcept { return rules_; }
   void set_rules(const EconomyRules& rules) noexcept { rules_ = rules; }
-  /// Deliver a wagon's cargo the moment it is built, rather than waiting for a
-  /// movement system to carry it. Defaults to true so that the economy runs
-  /// closed; a build with movement turns it off.
-  void set_auto_deliver(bool enabled) noexcept { auto_deliver_ = enabled; }
-  [[nodiscard]] bool auto_deliver() const noexcept { return auto_deliver_; }
-
   // -- settlements -------------------------------------------------------
 
   [[nodiscard]] SettlementStore& settlements() noexcept { return store_; }
@@ -344,29 +353,6 @@ class EconomySystem final : public System {
   /// settlement's own included (0x005ef380 tests nothing).
   bool set_supplied(SettlementId id, SettlementId target);
 
-  /// `CreateMuleGold` / `CreateMuleFood`: take `amount` out of the warehouse
-  /// now and put a wagon on the build timer. Returns 0 when the settlement
-  /// cannot pay or the amount is not worth transporting.
-  std::uint32_t create_mule(SettlementId source, SettlementId destination, Resource r,
-                            std::int32_t amount);
-  /// `Squad::SendFoodWagon`: take `amount` food out of the warehouse now and
-  /// put a wagon on the build timer that will follow `follow` rather than go
-  /// anywhere. Returns 0 when the settlement cannot pay. See `Wagon::follow`.
-  std::uint32_t create_feeding_mule(SettlementId source, ObjectId follow, std::int32_t amount);
-  /// The feeder's second path: the first built food wagon following any of
-  /// `members`, drawn down by up to `want`. Returns what was taken; a wagon
-  /// emptied by the draw is erased. Ascending by wagon id, which is state.
-  std::int32_t draw_from_larder(std::span<const ObjectId> members, std::int32_t want);
-
-  [[nodiscard]] std::span<const Wagon> wagons() const noexcept { return wagons_; }
-  [[nodiscard]] const Wagon* find_wagon(std::uint32_t wagon) const noexcept;
-
-  /// `WAGON_UNLOAD.VS`: the cargo goes into the destination's warehouse and the
-  /// wagon is erased. Returns what the warehouse accepted.
-  std::int32_t deliver_wagon(std::uint32_t wagon);
-  /// Destroyed or captured in transit: the cargo is gone.
-  bool lose_wagon(std::uint32_t wagon);
-
   // -- capture and loyalty ----------------------------------------------
 
   /// `IsValidCaptureTarget`: capturable at all, and — for the classes that
@@ -439,6 +425,35 @@ class EconomySystem final : public System {
   /// script. `UNIT_CAPTURE.VS` takes this path for a non-enemy owner.
   bool set_owner(SettlementId id, PlayerId new_owner);
 
+  // -- a wagon's loyalty -------------------------------------------------
+  //
+  // The three `Wagon::` entry points and the two timers they arm. See
+  // `WagonLoyalty` for where the state lives and `docs/formats/wagon.md` for
+  // the model.
+
+  /// `[wagon+0x1d8]`: the row's tenths, or `LoyaltyWagonsInitial` for a wagon
+  /// with no row. `Wagon::loyalty` (0x005ec090) answers this over ten.
+  [[nodiscard]] std::int32_t wagon_loyalty_tenths(ObjectId wagon) const noexcept;
+  /// The row, or null for a wagon still in its constructed state.
+  [[nodiscard]] const WagonLoyalty* find_wagon_loyalty(ObjectId wagon) const noexcept;
+  [[nodiscard]] std::span<const WagonLoyalty> wagon_loyalties() const noexcept {
+    return wagon_loyalty_;
+  }
+  /// `Wagon::SetLoyalty(v)` (0x005ec100): `v * 10` for `v` from 0 to 100,
+  /// refused (and nothing written) outside. Neither the pending change nor
+  /// the capture is touched.
+  bool set_wagon_loyalty(ObjectId wagon, std::int32_t value);
+  /// `Wagon::DecreaseLoyalty(n)` (0x005ec160): a negative `n` is refused;
+  /// otherwise, when the capture flag is down, timers 9 and 10 are armed and
+  /// the flag raised, and then the pending change drops by `10 * n`.
+  ///
+  /// `late` is how far behind the economy's clock the caller stands -- a
+  /// script runs at an instant inside the turn the economy has already
+  /// stepped to its end -- so the timers fall due where the original's
+  /// would, `interval` after the call; one already overdue falls due on the
+  /// first millisecond of the next turn.
+  bool decrease_wagon_loyalty(ObjectId wagon, std::int32_t amount, std::int32_t late = 0);
+
   // -- sentries ----------------------------------------------------------
 
   /// `AddMaxSentries(n)`, 0x005c2b30: one `add` to the ceiling at
@@ -503,8 +518,9 @@ class EconomySystem final : public System {
   /// Append this system's state to `out`, as one self-describing section with
   /// its own magic and version -- the shape `Scheduler::serialize` established.
   ///
-  /// **Written:** the settlement store, the wagons in transit, the wagon id
-  /// counter, the per-settlement statistics and the `start`ed flag.
+  /// **Written:** the settlement store, the per-settlement statistics, the
+  /// wagons' loyalty rows and the `start`ed flag. A wagon's cargo is on the
+  /// wagon object, in the world's section.
   void serialize(std::vector<std::byte>& out) const;
 
   /// Replace this system's state with the one in `bytes`.
@@ -513,7 +529,7 @@ class EconomySystem final : public System {
   /// field has read cleanly, so a truncated or malformed save leaves the system
   /// exactly as it was.
   ///
-  /// **Not restored:** `EconomyRules` and `auto_deliver_`, which are the
+  /// **Not restored:** `EconomyRules`, which is the
   /// embedder's configuration and are the same on both sides of a load.
   [[nodiscard]] Status deserialize(std::span<const std::byte> bytes);
 
@@ -540,14 +556,18 @@ class EconomySystem final : public System {
   void repair(World& world, Settlement& s);
   void tick_loyalty(Settlement& s);
   void tick_loyalty_gain(World& world, Settlement& s);
+  /// A wagon's timer 9 (0x005ec410) and timer 10 (0x005eb100).
+  void tick_wagon_guard(World& world, WagonLoyalty& w);
+  void tick_wagon_cap(WagonLoyalty& w);
+  /// The row for `wagon`, made in its constructed state if there is none.
+  WagonLoyalty& wagon_loyalty_row(ObjectId wagon);
   void tick_outpost_trade(World& world, Settlement& s);
 
   EconomyRules rules_{};
   SettlementStore store_;
-  std::vector<Wagon> wagons_;
+  /// Ascending by wagon handle, which is the order `advance` ticks them in.
+  std::vector<WagonLoyalty> wagon_loyalty_;
   std::vector<Statistics> stats_;
-  std::uint32_t next_wagon_ = 1;
-  bool auto_deliver_ = true;
   bool started_ = false;
 };
 
@@ -587,6 +607,41 @@ struct CommandDef;
                                           const CommandDef& row, bool must_be_idle);
 
 [[nodiscard]] EconomySystem* economy_of(World& world) noexcept;
+
+/// The wagon's cargo setter, 0x005eb0a0 -- every write of a wagon's cargo
+/// goes through it (`docs/formats/wagon.md`): `ObjectState::cargo` takes
+/// `value` unclamped, and **a value of exactly zero kills a wagon that is not
+/// already dead** through its death virtual (`CombatSystem::kill`, `ondie`
+/// and all). The kind is the caller's to write first. The carrying-food flag
+/// the original also sets here (`0x20000000`) is not modelled: nothing but
+/// the state dump reads it. The editor guard (`[0x00a8734c]`) is not either:
+/// no script runs under it here. Nothing for an id that is not an object.
+void set_wagon_cargo(World& world, ObjectId wagon, std::int32_t value);
+
+/// 0x005eed90, behind `CreateMuleGold`/`CreateMuleFood` (`boat` false) and
+/// `CreateBoatGold`/`CreateBoatFood` (`boat` true), and the load step of
+/// `Squad::SendFoodWagon`: the carrier's class (`ShipS`, or the settlement's
+/// race's mule), `amount` clamped to that class's `max_load` and to the
+/// store, the store drawn by it, and -- for a nonzero load -- the carrier
+/// made, given the kind and the cargo, owned by the settlement's player and
+/// forced into the settlement's holder. Answers the carrier, or `kNoObject`
+/// for nothing loaded. **A negative request loads nothing here**; the original
+/// clamps only downwards and would grow the store and hand back a carrier
+/// with a negative load, which no shipped site asks for.
+ObjectId make_mule(World& world, SettlementId id, Resource kind, std::int32_t amount, bool boat);
+
+/// The feeder's second path: a hungry unit eats from a food wagon following
+/// its squad. The original's food search (0x005dbba0 with the predicate
+/// 0x005d58d0) sweeps around the unit for a store, a food wagon -- the fullest
+/// -- or a fed unit, and draws `min(want, cargo)` from the wagon through the
+/// cargo setter (0x005d3700), so the wagon that gives its last food dies.
+/// **What is approximated is the reach**: that search is the feeder's design
+/// and is not modelled here, so "within reach" is "a live food wagon whose
+/// running command is aimed at one of `members`" -- what `SendFoodWagon`
+/// makes, a mule following the army at 70 (`WAGON_FOLLOW.VS`). The fullest
+/// such wagon, the lowest handle of two equally full. Answers what was taken.
+std::int32_t draw_from_food_wagon(World& world, std::span<const ObjectId> members,
+                                  std::int32_t want);
 
 // -- the garrison ----------------------------------------------------------
 //
