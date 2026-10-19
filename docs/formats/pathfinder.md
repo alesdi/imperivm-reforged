@@ -137,6 +137,18 @@ radius and its class's ignore-passability flag. It answers **`+0x34` shifted dow
 bits** -- the length of whatever route the search laid, complete or not, with no 32,000 --
 and -1 when the search answered 0. A unit aboard a ship answers 1,000,000 without searching.
 
+The goal points are one ring of sixteen at exactly the range round the goal (0x00409cf0,
+each tested passable, 0x00409b80), or the goal alone for a range of 0, so a unit already
+inside the band is answered the walk out to the ring. The start of a unit at `(-1,-1)` is
+the exit point of its holder's settlement's central building towards the goal
+(0x005de2b1 .. 0x005de30b: `[holder+0xc]`, `[settlement+0x8c]`, 0x004db6c0 with the class's
+`water_unit`), which takes the door picker's one draw (0x0056fa40) when the building has
+doors and is the building's position when it has none.
+
+This engine does the same (`path_to_goal`, `path_to_start`, `path_to_impl` in
+`sim/movement.cpp`), but takes as its one goal the passable ring point nearest the unit in a
+straight line rather than giving the search all sixteen.
+
 ## Who searches, and how often
 
 Only `RecastPathfind` (0x00419730) searches for a route a unit walks, through 0x00419110,

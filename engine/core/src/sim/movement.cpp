@@ -2566,6 +2566,36 @@ Point path_to_goal(const ObstructionGrid& grid, Point from, Point dest, std::int
   return best_at;
 }
 
+/// Where `PathTo` searches from: the unit's position (`vtbl+0x3c`), unless
+/// that is `(-1, -1)` -- a unit in a holder -- when it is the door of its
+/// settlement's central building it would leave by towards `dest`
+/// (0x005de2b1 .. 0x005de30b: the holder's settlement, `[holder+0xc]`, its
+/// central building, `[settlement+0x8c]`, and that building's exit point,
+/// 0x004db6c0, for the unit class's `water_unit`, `[class+0xb30]`). The exit
+/// point takes the door picker's one draw (0x0056fa40,
+/// `pick_door_by_distance`) when the building has doors and is the building's
+/// own position when it has none. A holder that is no settlement's is
+/// measured from where the unit resolves (a ship's passenger answered
+/// 1,000,000 before this is asked).
+Point path_to_start(World& world, const ObstructionGrid& grid, ObjectId id, Point dest) {
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr || slot->state.position != kHeldPosition || !slot->state.is_held()) {
+    return world.resolve_position(id);
+  }
+  const EconomySystem* economy = economy_of(world);
+  const Settlement* s =
+      economy == nullptr ? nullptr : economy->settlements().for_object(slot->state.holder);
+  if (s == nullptr || s->holder.object != slot->state.holder || s->anchor == kNoObject ||
+      world.find(s->anchor) == nullptr) {
+    return world.resolve_position(id);
+  }
+  std::vector<Point> doors;
+  building_doors(world, &grid, s->anchor, kExitPointType,
+                 class_flag(world, *slot, "water_unit"), doors);
+  if (doors.empty()) return world.resolve_position(s->anchor);
+  return pick_door_by_distance(doors, dest, world.rng());
+}
+
 /// `PathTo(dest, range, ?)` -> the route's length in world units, or -1 when
 /// there is no route. Two bodies, one per destination type:
 ///
@@ -2599,9 +2629,9 @@ Point path_to_goal(const ObstructionGrid& grid, Point from, Point dest, std::int
 /// first goal cell the search reaches -- or the goal itself when no point is
 /// passable, and this engine's search runs to it.
 ///
-/// This used to answer 0 inside the band and -1 for a partial route.
-/// **Not reproduced:** a unit at `(-1, -1)` searches from an exit point
-/// (0x004db6c0); here from where it resolves.
+/// A unit at `(-1, -1)` searches from the door it would leave its settlement
+/// by (`path_to_start`). This used to answer 0 inside the band and -1 for a
+/// partial route, and measured a garrisoned unit from its settlement's centre.
 HostOutcome path_to_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::integer(-1)));
@@ -2624,7 +2654,7 @@ HostOutcome path_to_impl(CallContext& ctx) {
   }
   if (held_by_carrier(*self.world, self.id)) return HostOutcome::ok_with(Value::integer(1000000));
   PathRequest request;
-  request.start = self.world->resolve_position(self.id);
+  request.start = path_to_start(*self.world, self.movement->grid(), self.id, dest);
   request.goal = path_to_goal(self.movement->grid(), request.start, dest, range);
   request.arrival_range = 0;
   request.ignore_passability = self.movement->ignores_passability(*self.world, self.id);
