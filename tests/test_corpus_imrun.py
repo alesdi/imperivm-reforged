@@ -703,12 +703,19 @@ def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game
     than at the hero's own, p3's armies met p1's and p2's in other places and
     at other times, and 37 line units stood here on seed 1 where 63 had: the
     floor is 30, which is still a sample.
+
+    On the eleventh round's tree seed 1's p1 storms a p15 village, its
+    slingers on the wall, from turn 320 and loses its hero and 117 footmen
+    there by 2,200, where main lost ten and drew back: 16 line units are
+    left. The census is taken on seed 3, where 35 stand and none of them on
+    `advance` at home.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
         pytest.skip("Crossroads.BFHP is not in this installation")
     result = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS), "800"],
+        [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS), "800",
+         "--seed", "3"],
         capture_output=True, text=True, timeout=1800,
         env={**os.environ, "IMRUN_OBJECTS": AI_ARMIES},
     )
