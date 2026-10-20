@@ -537,6 +537,7 @@ CombatProfile CombatProfile::from_class(const ClassGraph& graph, ClassIndex inde
   out.target_factor = number("target_factor", 100);
   out.target_priority = number("target_priority", 100);
   out.splash_radius = number("splash_radius", 0);
+  out.shot_height = number("shot_height", 0);
   out.can_be_attacked = number("can_be_attacked", 1) != 0;
 
   const std::string_view projectile = graph.property(index, "projectile_class");
@@ -2167,12 +2168,14 @@ bool CombatSystem::launch_at_point(World& world, ObjectId catapult, Point from, 
   shot.splash_radius = mine.splash_radius;
   shot.ground = true;
   shot.shooter_class = shooter->class_index;
-  // The flight keeps the invented speed `launch` uses; the original's ten
-  // units a timer step is not settled in game time (siege-fire.md).
-  const std::int64_t distance = isqrt(distance_squared(from, at));
-  GameTime flight = distance * 1000 / kProjectileSpeed;
-  if (flight < 1) flight = 1;
-  shot.impact = release + flight;
+  // 0x004e47c0 measures the track from the launch point moved `shot_height`
+  // south -- the ground under a point drawn that high -- to `at`, and
+  // 0x004e4650 walks it ten units a 100 ms message, the first due 1 ms after
+  // the shot is placed. The original's square root is a float's; it differs
+  // from `isqrt` only where it rounds up to a whole multiple of ten, which
+  // needs a distance within a ten-thousandth of one.
+  const Point ground{from.x, from.y + mine.shot_height};
+  shot.impact = release + catapult_shot_flight(isqrt(distance_squared(ground, at)));
   shots_.push_back(shot);
   events_.push_back(CombatEvent{CombatEvent::Kind::launch, release, catapult, kNoObject,
                                 shot.attack, 0});
@@ -2495,6 +2498,26 @@ CombatSystem* combat_system_of(World& world) noexcept {
     }
   }
   return nullptr;
+}
+
+Point catapult_shot_origin(const World& world, ObjectId catapult, Point at) noexcept {
+  const Point position = world.resolve_position(catapult);
+  const WorldObject* slot = world.find(catapult);
+  if (slot == nullptr || slot->object == nullptr || slot->object->entity == nullptr) {
+    return position;
+  }
+  const Entity& entity = *slot->object->entity;
+  // 0x0053cee0(3, buffer, 64) -> 0x005fd290: the type-3 points' raw offsets
+  // in table order. They are added to the position as they stand, with no
+  // screen round trip.
+  const Point heading{at.x - position.x, at.y - position.y};
+  const std::uint32_t column = facing_column(heading, entity.variations());
+  std::uint32_t seen = 0;
+  for (const EntityPoint& point : entity.points()) {
+    if (point.type != 3) continue;
+    if (seen++ == column) return Point{position.x + point.x, position.y + point.y};
+  }
+  return position;
 }
 
 namespace {
@@ -2849,9 +2872,10 @@ HostOutcome catapult_attack(CallContext& ctx, CombatSystem& combat, World& world
   const WorldObject* slot = world.find(catapult);
   if (slot == nullptr) return HostOutcome::ok_void();
   const Point at = unpack_point(ctx.arg(1));
-  const Point from = world.resolve_position(catapult);
-  if (at == from || slot->state.flags.has_towers) return HostOutcome::ok_void();
+  const Point position = world.resolve_position(catapult);
+  if (at == position || slot->state.flags.has_towers) return HostOutcome::ok_void();
   const std::int32_t release = catapult_release_ms(world, catapult);
+  const Point from = catapult_shot_origin(world, catapult, at);
   if (!combat.launch_at_point(world, catapult, from, at, ctx.now + release)) {
     return HostOutcome::ok_void();
   }

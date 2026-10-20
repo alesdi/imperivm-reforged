@@ -591,6 +591,11 @@ struct CombatProfile {
   std::int32_t attack_interval = kDefaultAttackInterval;
   /// `splash_radius`, declared only by `Catapult` (100).
   std::int32_t splash_radius = 0;
+  /// `shot_height`, `[class+0xa0c]` (0x005a4647): how far above the ground a
+  /// catapult's shot leaves, which also moves the ground end of its flight
+  /// that far south (`siege-fire.md`, "A catapult's shot"). Declared by the
+  /// catapults (100, 150).
+  std::int32_t shot_height = 0;
   /// `projectile_class`, resolved. `kNoClass` for a unit that hits directly.
   ClassIndex projectile = kNoClass;
 
@@ -802,12 +807,12 @@ struct Combatant {
 /// `Big_Arrow`), so a shot is an object with a lifetime rather than an
 /// instantaneous hit.
 ///
-/// The arc is not modelled. `shot_tan` (600, 900, 2000) and `shot_height` (100,
-/// 150) describe one, and nothing in the data says what units they are in or
-/// how they convert to a flight time, so the position here interpolates the
-/// ground track and the arc is left to the renderer. **The flight time is
-/// INVENTED**: `kProjectileSpeed` world units per second, chosen so a
-/// catapult's 800-unit shot takes about a second.
+/// The arc is not modelled: the position here interpolates the ground track
+/// and the height is left to the renderer. A catapult's ground shot keeps the
+/// original's clock -- ten units of track every 100 ms, so it lands
+/// `1 + 100 * (S / 10)` ms after it leaves for a flight of `S` units
+/// (`launch_at_point`, `siege-fire.md`). **An arrow's flight time is still
+/// INVENTED**: `kProjectileSpeed` world units per second.
 struct Projectile {
   ObjectId id = kNoObject;
   ObjectId shooter = kNoObject;
@@ -838,8 +843,22 @@ struct Projectile {
   ClassIndex shooter_class = kNoClass;
 };
 
-/// INVENTED. World units per second of flight.
+/// INVENTED. World units per second of an arrow's (a unit's or a tower's)
+/// flight. A catapult's ground shot does not use it.
 inline constexpr std::int32_t kProjectileSpeed = 800;
+
+/// A catapult shot's step (0x004e4650): `10.0` units of track
+/// (`[0x007edb08]`) per message, the message re-armed every 100 ms and first
+/// due 1 ms after the shot is placed (0x004e4160 -> 0x00688240).
+inline constexpr std::int32_t kCatapultShotStep = 10;
+inline constexpr std::int32_t kCatapultShotStepMs = 100;
+
+/// The flight time of a catapult shot whose track is `distance` units: the
+/// shot lands on the first message whose step carries it past the end, which
+/// is message `distance / 10 + 1`.
+[[nodiscard]] constexpr GameTime catapult_shot_flight(std::int64_t distance) noexcept {
+  return 1 + kCatapultShotStepMs * (distance / kCatapultShotStep);
+}
 
 // ---------------------------------------------------------------------------
 // the target-selection family
@@ -1149,7 +1168,10 @@ class CombatSystem final : public System {
   /// `Catapult::Attack(point)`'s shot (0x004e22a0): a ground shot of the
   /// engine's class leaving `from` at `release` -- the attack animation's
   /// action moment, which may lie ahead -- for `at`, carrying the class's
-  /// `damage` and `splash_radius`. False when `catapult` is no combatant.
+  /// `damage` and `splash_radius`. `from` is the launch point
+  /// (`catapult_shot_origin`). The flight is the original's (0x004e47c0,
+  /// 0x004e4650): `catapult_shot_flight` of the distance to `at` from `from`
+  /// moved `shot_height` south. False when `catapult` is no combatant.
   /// See `docs/formats/siege-fire.md`.
   bool launch_at_point(World& world, ObjectId catapult, Point from, Point at, GameTime release);
 
@@ -1626,6 +1648,16 @@ class CombatSystem final : public System {
 /// added again for every domain, and kept correct across a save and reload,
 /// which a name lookup does not.
 [[nodiscard]] CombatSystem* combat_system_of(World& world) noexcept;
+
+/// Where `Catapult::Attack(point)`'s shot leaves the engine for `at`
+/// (0x004e22a0): the engine's position plus one of its entity's type-3
+/// points, taken raw and in table order, the one at the column the engine is
+/// drawn facing `at` -- `(n / 2 + sector) % n` over the entity's `n`
+/// variations, the same rule 0x0053db30 draws the engine by, which this
+/// engine's `facing_column` stands for. The engine's own position when it
+/// has no entity or no such point (the original would read a point it never
+/// wrote; no shipped firing catapult is short of one per facing).
+[[nodiscard]] Point catapult_shot_origin(const World& world, ObjectId catapult, Point at) noexcept;
 
 /// The object grid's cell, in world units: the `>> 8` of every target sweep
 /// (0x005db8c0, 0x005d4cd0).
