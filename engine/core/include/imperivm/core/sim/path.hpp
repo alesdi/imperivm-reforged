@@ -44,13 +44,28 @@
 //     were reused.
 //   * A fixed neighbour order, listed once in `path.cpp`.
 //
-// ## Bounded work
+// ## Bounded work, and what an unreachable goal answers
 //
-// A search that cannot reach its goal would otherwise flood the whole map:
-// a 16,384-unit map is 1,024 x 1,024 cells, a million nodes. `PathRequest`
-// carries a node budget, and an exhausted search returns the best partial route
-// it found rather than nothing, because a unit that walks most of the way and
-// stops is what the original does and is better than one that refuses to move.
+// `gbr.exe` runs two searches (docs/formats/pathfinder.md). The *smart
+// pathfinder* (vtable 0x007ac300, search 0x004138d0), live once
+// `DATA\PATHFINDERINIT.VS` has built it, searches a graph of areas, each grown
+// up to 48 cells from a seed, under a budget of 65,536 areas (0x00413690) that
+// no shipped map comes near: **a goal it can reach, it reaches.** One it cannot
+// answers status 2, "incomplete", with a route to the area nearest the goal
+// point by straight distance, ending where the line from the goal towards that
+// area first enters it (0x0040e500). Only a goal in the start's own area or one
+// touching it goes to the *grid* search (0x0041bc60 -> 0x0041b140), whose
+// budget is 8,000 cells and which answers the expanded cell nearest the goal
+// when the budget runs out.
+//
+// This engine has no areas. It has the same answer from the grid's regions
+// (`ObstructionGrid::region_of`): a goal in a region the start reaches is
+// searched for with no budget and found, and one in another region is answered
+// with a route to the reachable cell nearest the goal point -- a partial route,
+// as the original's status 2. The search therefore never floods a region to
+// learn that the goal is not in it. `PathRequest::node_budget` survives for the
+// one search the regions cannot settle, the one round a gate's line (`barrier`),
+// which only `route_past_gates` makes.
 
 #include <cstddef>
 #include <cstdint>
@@ -238,15 +253,32 @@ class ObstructionGrid {
   /// Set cells. A cross-check against the shipped file, nothing more.
   [[nodiscard]] std::size_t count_blocked() const noexcept;
 
+  /// The region a free cell belongs to: a number from 1 shared by every free
+  /// cell a unit can walk to from it, and 0 for a blocked or off-grid cell.
+  ///
+  /// Regions are the free cells' **four-connected** components. The search
+  /// steps diagonally only where both orthogonal neighbours are free, so
+  /// what it can reach from a cell is exactly that cell's four-connected
+  /// component, and "is the goal in the start's region" is "can the search
+  /// reach it". Numbered in cell order (row by row) the first time anything
+  /// asks after a change, and kept until the next `set_cell`; none of it is
+  /// world state, nothing hashes it, and a copy of the grid copies it.
+  [[nodiscard]] std::uint32_t region_of(std::int32_t cx, std::int32_t cy) const;
+
  private:
   [[nodiscard]] std::size_t bit_index(std::int32_t cx, std::int32_t cy) const noexcept {
     return static_cast<std::size_t>(cy) * static_cast<std::size_t>(width_) +
            static_cast<std::size_t>(cx);
   }
 
+  void label_regions() const;
+
   std::vector<std::uint64_t> words_;
   std::int32_t width_ = 0;
   std::int32_t height_ = 0;
+  /// `region_of`'s answers, one per cell, valid while `regions_valid_`.
+  mutable std::vector<std::uint32_t> regions_;
+  mutable bool regions_valid_ = false;
 };
 
 /// Cells one search treats as blocked on top of the grid, and nobody else
@@ -291,8 +323,11 @@ enum class PathStatus : std::uint8_t {
   arrived,
   /// A complete route to the goal (or into its arrival annulus).
   found,
-  /// The goal could not be reached, either because it is walled off or because
-  /// the node budget ran out. The route leads to the closest node reached.
+  /// The goal could not be reached: it lies in a region the start does not
+  /// reach, and the route leads to the reachable cell nearest the goal point
+  /// (the original's status 2, 0x004138d0; what `FormPathLeft` marks with
+  /// 32,000). A search round a gate's line (`barrier`) may also end here when
+  /// its node budget runs out, at the expanded cell nearest the goal.
   partial,
   /// Nothing to do: no grid, or the start is off the map.
   unreachable,
@@ -305,7 +340,11 @@ struct PathRequest {
   /// move. A unit approaching a building stops at its radius rather than
   /// walking into it.
   std::int32_t arrival_range = 0;
-  /// Cap on expanded nodes. Reached, the search returns its best partial route.
+  /// Cap on expanded nodes for a search with a `barrier`, the one whose
+  /// reachability the grid's regions cannot settle; reached, the search
+  /// returns its best partial route. A search over the grid alone has no
+  /// budget: the regions say beforehand whether it will arrive, as the
+  /// original's area search, budgeted at 65,536 areas, always does.
   /// 20,000 nodes covers roughly a 140-cell radius of open ground, which is
   /// 2,200 world units -- more than a screen.
   std::uint32_t node_budget = 20000;
@@ -378,8 +417,11 @@ class PathFinder {
   /// The search over whatever `blocked(cx, cy)` says is blocked: the grid
   /// alone, or the grid and a request's barrier. A template so that the
   /// common search, with no barrier, pays nothing for the other.
+  /// `by_regions` is whether `blocked` is the grid alone, so that its regions
+  /// decide reachability; a barrier's search passes false and keeps its budget.
   template <typename Blocked>
-  Path find_over(const ObstructionGrid& grid, const PathRequest& request, const Blocked& blocked);
+  Path find_over(const ObstructionGrid& grid, const PathRequest& request, const Blocked& blocked,
+                 bool by_regions);
   void reset(const ObstructionGrid& grid);
   void push(Open entry);
   Open pop();

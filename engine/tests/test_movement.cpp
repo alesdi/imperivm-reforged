@@ -1031,20 +1031,75 @@ TEST(the_pathfinder_does_not_depend_on_its_scratch_state) {
   CHECK(repeated.expanded == reference.expanded);
 }
 
-TEST(an_unreachable_goal_stays_within_budget) {
-  // A goal sealed behind a solid wall floods the search. Without a budget it
-  // would expand every one of a million cells.
+TEST(a_reachable_goal_is_found_whatever_the_budget) {
+  // `gbr.exe`'s route search reaches every goal it can: the smart
+  // pathfinder's area search is budgeted at 65,536 areas (0x00413690), which
+  // no map comes near. A search over the grid alone therefore takes no
+  // budget: the grid's regions say beforehand that it will arrive. This one
+  // has to go the long way round a wall, far beyond fifty nodes.
+  ObstructionGrid grid(64, 64);
+  for (std::int32_t y = 0; y < 60; ++y) grid.set_cell(32, y, true);
+
+  PathFinder finder;
+  PathRequest request;
+  request.start = Point{5 * 16 + 8, 5 * 16 + 8};
+  request.goal = Point{60 * 16 + 8, 5 * 16 + 8};
+  request.node_budget = 50;
+  const Path path = finder.find(grid, request);
+  CHECK(path.status == PathStatus::found);
+  REQUIRE(!path.waypoints.empty());
+  CHECK(path.waypoints.back() == request.goal);
+  CHECK(path.expanded > 50);
+}
+
+TEST(an_unreachable_goal_answers_the_reachable_cell_nearest_it_without_a_flood) {
+  // A goal sealed behind a solid wall is in a region the start does not
+  // reach. The original answers status 2 with a route to the area nearest
+  // the goal (0x004138d0: 0x00413690's best area, entered where the line from
+  // the goal first meets it, 0x0040e500); here, to the reachable cell whose
+  // centre is nearest the goal point -- found without flooding the start's
+  // side to learn that the goal is not on it.
   ObstructionGrid grid(64, 64);
   for (std::int32_t y = 0; y < 64; ++y) grid.set_cell(32, y, true);
 
   PathFinder finder;
   PathRequest request;
   request.start = Point{5 * 16 + 8, 30 * 16 + 8};
-  request.goal = Point{60 * 16 + 8, 30 * 16 + 8};
-  request.node_budget = 500;
+  request.goal = Point{60 * 16 + 8, 40 * 16 + 3};
   const Path path = finder.find(grid, request);
   CHECK(path.status == PathStatus::partial);
-  CHECK(path.expanded <= 500);
+  REQUIRE(!path.waypoints.empty());
+  CHECK(path.waypoints.back() == (Point{31 * 16 + 8, 40 * 16 + 8}));
+  CHECK(path.length > 0);
+  // The start's side holds 2,048 cells; the search goes straight across it.
+  CHECK(path.expanded < 200);
+
+  // Standing on that cell already, there is nowhere nearer to go.
+  PathRequest again = request;
+  again.start = Point{31 * 16 + 8, 40 * 16 + 8};
+  const Path stay = finder.find(grid, again);
+  CHECK(stay.status == PathStatus::partial);
+  CHECK(stay.waypoints.size() == 1);
+  CHECK(stay.length == 0);
+}
+
+TEST(a_grids_regions_follow_its_cells) {
+  // Four-connected: two free cells that touch only at a corner are apart,
+  // because the search steps diagonally only past two free orthogonals.
+  ObstructionGrid grid(4, 4);
+  for (std::int32_t i = 0; i < 4; ++i) {
+    for (std::int32_t j = 0; j < 4; ++j) grid.set_cell(i, j, true);
+  }
+  grid.set_cell(0, 0, false);
+  grid.set_cell(1, 1, false);
+  CHECK(grid.region_of(0, 0) != 0);
+  CHECK(grid.region_of(1, 1) != 0);
+  CHECK(grid.region_of(0, 0) != grid.region_of(1, 1));
+  CHECK(grid.region_of(2, 2) == 0);   // blocked
+  CHECK(grid.region_of(-1, 0) == 0);  // off the grid
+  // A change to the grid is seen at once.
+  grid.set_cell(1, 0, false);
+  CHECK(grid.region_of(0, 0) == grid.region_of(1, 1));
 }
 
 // --------------------------------------------------------------------------
@@ -1834,6 +1889,12 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
   // Six seconds on: `rand(0, 4)` and up. The field opens just before the
   // first call whose draw is not 0, which must not search; the first call
   // after that whose draw is 0 must. Every call takes exactly its draw.
+  //
+  // The draw binds only with neither of the follower's stop bits set
+  // (0x0041a4da): a search that laid nothing leaves bit 2, and then the next
+  // call searches whatever it drew (the test after this one). So each call
+  // here starts as a unit whose route has been walked to its end does -- no
+  // route, no stop bit, the order still on.
   world.advance(5000);
   bool opened = false;
   bool skipped = false;
@@ -1846,6 +1907,7 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
       movement.set_grid(open_field(32));
       opened = true;
     }
+    movement.find(unit)->route_failed = false;
     (void)goto_once(registry, world, unit, away, 100, -1);
     CHECK(world.rng() == expect);
     searched = movement.find(unit)->has_path;
@@ -1856,6 +1918,57 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
   CHECK(skipped);
   CHECK(searched);
   CHECK(movement.find(unit)->goto_failed_at == kNoGotoFailure);
+}
+
+TEST(a_search_that_laid_nothing_searches_again_at_the_next_call_whatever_the_draw) {
+  // `SetDest` tests the path follower's stop bits before it compares the goal
+  // (`test al, 6` at 0x0041a4da, 0x0041a5da) and takes its new-goal branch
+  // when one is set: the search runs whatever the draw before it said, and the
+  // free-spot search's flag 8 is forgotten (0x0041a594). A search that laid
+  // nothing leaves bit 2 (0x00419a1e, `MoveState::route_failed`).
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(sealed_cell(9, 10));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{9 * 16 + 8, 10 * 16 + 8}, 100);
+  const Point away{25 * 16 + 8, 10 * 16 + 8};
+
+  (void)goto_once(registry, world, unit, away, 1000, -1);
+  const GameTime stamped = movement.find(unit)->goto_failed_at;
+  REQUIRE(stamped == world.time());
+  REQUIRE(movement.find(unit)->route_failed);
+
+  // Far enough on that the draw is `rand(0, 4)` or more; wait for a call
+  // whose draw is not 0 and open the field just before it.
+  world.advance(6000);
+  bool tested = false;
+  for (int i = 0; i < 80 && !tested; ++i) {
+    const std::int64_t spans = std::min<std::int64_t>((world.time() - stamped) >> 11, 10);
+    Rng expect = world.rng();
+    const bool draws_zero = expect.between(0, static_cast<std::int32_t>(2 * spans)) == 0;
+    if (draws_zero) {
+      // Still sealed: the search runs and fails again, and the bit stays.
+      (void)goto_once(registry, world, unit, away, 100, -1);
+      CHECK(world.rng() == expect);
+      CHECK(movement.find(unit)->route_failed);
+      world.advance(100);
+      continue;
+    }
+    movement.set_grid(open_field(32));
+    movement.find(unit)->free_spot_tried = true;
+    (void)goto_once(registry, world, unit, away, 100, -1);
+    // The draw is taken all the same, and ignored.
+    CHECK(world.rng() == expect);
+    CHECK(movement.find(unit)->has_path);
+    CHECK(!movement.find(unit)->route_failed);
+    CHECK(!movement.find(unit)->free_spot_tried);
+    CHECK(movement.find(unit)->goto_failed_at == kNoGotoFailure);
+    tested = true;
+  }
+  CHECK(tested);
 }
 
 /// `PathTo` asks the same question with the same flag.
@@ -1897,6 +2010,27 @@ TEST(path_to_answers_a_straight_line_for_a_class_that_ignores_passability) {
         static_cast<std::int32_t>(distance(from, to)));
   HostCall walled(world, {Value::object(kTypeObj, soldier), pack_point(to), Value::integer(0), Value::integer(0)});
   CHECK(invoke(registry, CallKind::member, "PathTo", 3, walled).value.as_integer() == -1);
+}
+
+/// `PathTo` answers the path record's length (0x005de354 reads `+0x34`) for
+/// whatever route the search laid -- a partial one included, with no 32,000
+/// -- and -1 only when the search answered 0.
+TEST(path_to_answers_the_length_of_a_partial_route) {
+  ObstructionGrid grid = open_field(64);
+  for (std::int32_t y = 0; y < 64; ++y) grid.set_cell(32, y, true);
+  World world;
+  MovementSystem movement;
+  movement.set_grid(std::move(grid));
+  attach(world, movement);
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  const ObjectId unit = spawn_unit(world, movement, Point{10 * 16 + 8, 20 * 16 + 8}, 100);
+  // Beyond the wall: the route runs to the reachable cell nearest the goal,
+  // (31, 20), a straight 21 cells.
+  HostCall beyond(world, {Value::object(kTypeObj, unit), pack_point(Point{50 * 16 + 8, 20 * 16 + 8}),
+                          Value::integer(0), Value::integer(0)});
+  CHECK(invoke(registry, CallKind::member, "PathTo", 3, beyond).value.as_integer() == 21 * 16);
 }
 
 TEST(both_forms_of_goto_drop_the_combat_target) {
@@ -2602,10 +2736,14 @@ TEST(path_to_an_object_reaches_its_edge_and_a_passenger_answers_a_million) {
     CHECK(out.status == HostStatus::ok);
     return out.value.is_integer() ? out.value.as_integer() : -999;
   };
-  // 100 between centres: a walk of 100 to the point, and none to the object,
-  // whose band is 15 + 100 wide.
+  // 100 between centres: a walk of 100 to the point. To the object the goal
+  // is the ring of sixteen points at its band, 15 + 100, round its centre
+  // (0x00409cf0), and the walker inside it is answered the walk out to the
+  // nearest of them, (985, 1000): 15, where this used to answer 0.
   CHECK(path_to(walker, pack_point(Point{1100, 1000})) == 100);
-  CHECK(path_to(walker, Value::object(kTypeObj, camp)) == 0);
+  CHECK(path_to(walker, Value::object(kTypeObj, camp)) == 15);
+  // Standing on the point it was asked for, the route has no length: -1.
+  CHECK(path_to(walker, pack_point(Point{1000, 1000})) == -1);
 
   const ObjectId doomed = f.place("Walker", Point{1000, 1400});
   REQUIRE(f.world.despawn(doomed));
