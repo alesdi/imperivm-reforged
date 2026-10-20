@@ -662,7 +662,7 @@ void CommandSystem::start_head(World& world, ObjectId id, bool from_pass) {
   track_formation(world, id);
 }
 
-void CommandSystem::end_slot(World& world, ObjectId id, bool canceled) {
+void CommandSystem::end_slot(World& world, ObjectId id, bool canceled, bool start_next) {
   // 0x005b5160, the object's script-end virtual (`vtbl+0x1c`) for slot 0 --
   // what a command's thread ending calls, whether it returned (0x0069f7a0,
   // after the slice) or was ended by another script (0x0069fee0) -- and its
@@ -685,6 +685,7 @@ void CommandSystem::end_slot(World& world, ObjectId id, bool canceled) {
     if (q != nullptr && !q->entries.empty()) q->entries.erase(q->entries.begin());
     track_formation(world, id);
   }
+  if (!start_next) return;
   const WorldObject* slot = world.find(id);
   if (slot == nullptr || object_is_dead(*slot)) return;
   start_head(world, id);
@@ -701,7 +702,25 @@ void CommandSystem::after_slice(World& world, script::ScriptId script) {
   const ObjectId id = record->owner.id;
   const CommandQueue* q = find(id);
   if (q == nullptr || q->entries.empty() || q->entries.front().script != script) return;
-  end_slot(world, id, /*canceled=*/false);
+  // **A command whose script trapped is ended, and the next waits for the
+  // command pass -- an engine choice, not the original's rule.** 0x0069f7a0
+  // treats a failed thread as a finished one (`vtbl+0x1c` with `failed` set)
+  // and 0x005b4f20 starts the next at once, on the same millisecond: the
+  // wheel's insert (0x00688060) points the sweep at a thread armed on the
+  // millisecond being swept, so nothing in the original bounds a command that
+  // ends at once followed by one that hands back at once. Nothing has to:
+  // its interpreter does not stop a thread where this one traps -- an
+  // integer division by zero prints "Division by zero" and pushes the
+  // dividend (0x00694ac0), for one -- so its threads end only where their
+  // scripts end. Here a trap is this engine's, and a script that traps on
+  // its first slice, every time, under an `idle` that queues it again and
+  // returns, spun one pass for ever: `EAGLE_IDLE.VS` queues `move` and
+  // returns, and `EAGLE_MOVE.VS` divides by `GetAnimDuration(0)`, which is 0
+  // in a session built without entities (`imconform`'s thin session). Its
+  // next command starts a pass later, as every command's did before the
+  // end was made synchronous.
+  const bool trapped = record->execution.status == script::ExecStatus::failed;
+  end_slot(world, id, /*canceled=*/false, /*start_next=*/!trapped);
 }
 
 void CommandSystem::advance(World& world, const Turn& turn) {
