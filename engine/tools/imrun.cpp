@@ -93,10 +93,10 @@ int main(int argc, char** argv) {
                  "player orders before the first), IMRUN_PLACE=<x>,<y>\n"
                  "first stands it there, out of its AI's hands, IMRUN_ATTACK=<id>\n"
                  "makes the order the command bar's attack row (A) aimed at that\n"
-                 "object instead of the right click, IMRUN_WATCH=<id>\n"
-                 "prints where it stands every ten turns -- a hero, each member of\n"
-                 "his army too, and what it runs -- and every gate its route\n"
-                 "crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
+                 "object instead of the right click, IMRUN_WATCH=<id>[:<n>]\n"
+                 "prints where it stands every n turns (ten by default) -- a hero,\n"
+                 "each member of his army too, and what it runs -- and every gate\n"
+                 "its route crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
                  "and as it starts or stops letting units through, and every gate\n"
                  "at the end.\n"
                  "IMRUN_AILOG=<node> turns on the AI's own narration; the two\n"
@@ -690,8 +690,8 @@ int main(int argc, char** argv) {
   };
   // `IMRUN_GOTO=<turn>:<id>:<x>,<y>`: before that turn, the object's owner
   // right-clicks the point with it selected -- the default order, as a click
-  // gives it. `IMRUN_WATCH=<id>` prints where that object stands every ten
-  // turns, and the gates its route crosses whenever they change. `IMRUN_GATES=1`
+  // gives it. `IMRUN_WATCH=<id>[:<n>]` prints where that object stands every
+  // n turns (ten by default), and the gates its route crosses whenever they change. `IMRUN_GATES=1`
   // prints every gate that opens or closes and every one that starts or stops
   // letting units through, on the turn it happens, and every gate at the end.
   unsigned long long goto_turn = 0;
@@ -727,7 +727,12 @@ int main(int argc, char** argv) {
     attack_target = static_cast<ObjectId>(std::strtoul(attack, nullptr, 10));
   }
   ObjectId watched = kNoObject;
-  if (const char* watch = std::getenv("IMRUN_WATCH")) watched = static_cast<ObjectId>(std::strtoul(watch, nullptr, 10));
+  unsigned long long watch_every = 10;
+  if (const char* watch = std::getenv("IMRUN_WATCH")) {
+    char* rest = nullptr;
+    watched = static_cast<ObjectId>(std::strtoul(watch, &rest, 10));
+    if (rest != nullptr && *rest == ':') watch_every = std::max(1ULL, std::strtoull(rest + 1, nullptr, 10));
+  }
   const bool show_gates = std::getenv("IMRUN_GATES") != nullptr;
   std::string watched_crossing;
   std::map<ObjectId, std::pair<bool, bool>> gate_seen;  // target open, lets through
@@ -960,7 +965,7 @@ int main(int argc, char** argv) {
         watched_crossing = crossing;
       }
     }
-    if (watched != kNoObject && (turn + 1) % 10 == 0) {
+    if (watched != kNoObject && (turn + 1) % watch_every == 0) {
       const sim::Point at = run.world().resolve_position(watched);
       std::printf("  watch turn %llu: %u at (%d,%d)\n", static_cast<unsigned long long>(turn + 1),
                   watched, at.x, at.y);

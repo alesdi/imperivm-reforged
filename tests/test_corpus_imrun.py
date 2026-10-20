@@ -1031,8 +1031,12 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
     `sim/formation.hpp`): a 28-strong `Front` round a hero of radius 45 has its
     farthest slot about 300 out, and on the way the samples are laid round a
     centre 333 ahead of him, so the column leads him by up to 515 (turn 20)
-    and stands within 309 of him where he stops (turn 40). Nobody is behind
+    and stands within 297 of him where he stops (turn 35). Nobody is behind
     him on the way.
+    He is watched every turn: his `HERO_IDLE.VS` takes him off towards the
+    Iberians on the turn after his army is told to stand (round 12, where a
+    command's end starts the next at once), so a sample every ten turns can
+    miss the turn he is there.
     """
     numantia = game_dir / NUMANTIA
     if not numantia.is_file():
@@ -1052,7 +1056,7 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
     second = subprocess.run(
         [str(imrun), str(game_dir), str(numantia), "50", "800", "--human", "0"],
         capture_output=True, text=True, timeout=600,
-        env={**os.environ, "IMRUN_WATCH": str(hero),
+        env={**os.environ, "IMRUN_WATCH": f"{hero}:1",
              "IMRUN_GOTO": f"5:{hero}:{NUMANTIA_MARCH[0]},{NUMANTIA_MARCH[1]}"},
     )
     assert second.returncode == 0, second.stdout + second.stderr
