@@ -3892,9 +3892,14 @@ TEST(a_dead_hero_releases_its_army_and_its_squad) {
     CHECK(b.f.heroes.hero_of(member) == kNoObject);
     CHECK(b.f.heroes.squad_of(member) == kNoSquad);
   }
-  // The hero leaves its own squad, and an emptied squad is gone.
+  // The hero leaves its own squad. The emptied squad is stood down, not
+  // freed (0x00444750), so a script still holding it reads an empty roster
+  // until the turn's prune.
   CHECK(b.f.heroes.squad_of(hero) == kNoSquad);
   CHECK(b.f.heroes.hero(hero)->squad == kNoSquad);
+  REQUIRE(b.f.heroes.squads().find(squad) != nullptr);
+  CHECK(b.f.heroes.squads().find(squad)->members.empty());
+  b.f.heroes.squads().prune_empty();
   CHECK(b.f.heroes.squads().find(squad) == nullptr);
 }
 
@@ -3920,8 +3925,11 @@ TEST(an_ai_squad_is_one_smaller_the_moment_a_member_dies) {
   CHECK(b.f.heroes.squads().squad_of(a) == kNoSquad);
   CHECK(b.f.heroes.squad_of(c) == key);
 
-  // And the last one out takes the squad with it.
+  // The last one out leaves it empty and stood down; the turn's prune takes it.
   b.kill(c);
+  REQUIRE(b.f.heroes.squads().find(key) != nullptr);
+  CHECK(b.f.heroes.squads().find(key)->members.empty());
+  b.f.heroes.squads().prune_empty();
   CHECK(b.f.heroes.squads().find(key) == nullptr);
 }
 

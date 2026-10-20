@@ -492,7 +492,10 @@ void HeroSystem::ai_unregister(World& world, ObjectId id) {
   // match.
   if (const SquadKey listed = squads_.squad_of(id); listed.valid()) (void)squads_.leave(world, listed, id);
   if (HeroRecord* record = hero(id); record != nullptr) record->squad = kNoSquad;
-  squads_.prune_empty();
+  // No prune here. A squad this leave empties is stood down, not freed
+  // (0x00444750), and a script may still hold it: `GS_CAPTURE.VS` reads
+  // `squad.Units` after the `Siege` that boards its last man into a catapult
+  // (lines 224-226). `advance` prunes it on its next turn.
 }
 
 void HeroSystem::on_death(World& world, ObjectId id) {
