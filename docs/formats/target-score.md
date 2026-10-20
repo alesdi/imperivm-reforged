@@ -174,9 +174,6 @@ the later candidate. A unit answer's `danger` is raised by 1.
 
 All of the above, with these labelled differences:
 
-* Within one grid cell the original follows the cell's list; this engine
-  has no cell lists and orders a cell's objects by id
-  (`docs/formats/siege-fire.md` has the same note for the tower sweeps).
 * The game clock the counter reads is the object's (`[obj+0x18]`, a pointer
   this reading did not trace to its target); this engine reads the world's
   clock, which is the clock every other stamp on a unit reads.
