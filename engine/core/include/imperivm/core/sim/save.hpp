@@ -389,7 +389,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// cell's list, which is who came into the cell first and the order every
 /// area sweep answers in (`sim/spatial_index.hpp`). Not hashed. A version-46
 /// file has no stamps, and a load would list every cell in id order.
-inline constexpr std::uint32_t kStateVectorVersion = 47;
+/// 48: every combatant carries the danger counter the target searches raise
+/// and read (`Combatant::danger`, `[unit+0x1b0]`, and its stamp
+/// `danger_time`, `[unit+0x1b4]`; system section version 41,
+/// `docs/formats/target-score.md`). A version-47 file would load every unit
+/// as nobody's recent pick, and the next searches would bunch on it.
+inline constexpr std::uint32_t kStateVectorVersion = 48;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

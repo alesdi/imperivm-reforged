@@ -63,7 +63,9 @@ void catapult_clear_tower_target(World& world, ObjectId catapult);
                                             ObjectId catapult);
 
 /// `Building::BestTarget` (0x004dcc60): see `docs/formats/siege-fire.md`.
-[[nodiscard]] ObjectId building_best_target(const World& world, const CombatSystem& combat,
+/// Reads (and so decays) the `danger` of the units it weighs, and raises the
+/// answer's by one (`docs/formats/target-score.md`).
+[[nodiscard]] ObjectId building_best_target(const World& world, CombatSystem& combat,
                                             ObjectId building);
 
 /// The fire rate of a settlement's towers (0x005c2fb0): `isqrt(military +

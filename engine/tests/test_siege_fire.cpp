@@ -21,6 +21,7 @@
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/match.hpp"
+#include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/settlement.hpp"
 #include "imperivm/core/sim/siege_fire.hpp"
 #include "imperivm/core/sim/world.hpp"
@@ -56,6 +57,13 @@ constexpr std::string_view kEngineXml = R"(<?xml version="1.0"?>
   </images>
   <points>
     <point idx="1" type="3" x="0" y="-100"/>
+    <point idx="2" type="3" x="30" y="-90"/>
+    <point idx="3" type="3" x="40" y="-60"/>
+    <point idx="4" type="3" x="30" y="-30"/>
+    <point idx="5" type="3" x="0" y="-20"/>
+    <point idx="6" type="3" x="-30" y="-30"/>
+    <point idx="7" type="3" x="-40" y="-60"/>
+    <point idx="8" type="3" x="-30" y="-90"/>
   </points>
   <layers>
     <layer idx="1" name="body" image="1" z="1000"/>
@@ -143,7 +151,7 @@ struct Bench {
         R"(<class id="CatapultTower" parent="FakeTower" cpp_class="CVXBuilding"><properties range="800" min_range="150" sight="0"/></class>)",
         // A short-ranged tower, so that "in sight but out of range" exists.
         R"(<class id="WatchTower" parent="FakeTower" cpp_class="CVXBuilding"><properties range="300"/></class>)",
-        R"(<class id="Catapult" parent="Building" cpp_class="CVXCatapult"><properties maxhealth="1000" radius="50" damage="120" damage_type="siege" range="800" min_range="301" sight="850" splash_radius="100" attack_delay="500" projectile_class="Gule" max_units="10" is_central_building="1"/></class>)",
+        R"(<class id="Catapult" parent="Building" cpp_class="CVXCatapult"><properties maxhealth="1000" radius="50" damage="120" damage_type="siege" range="800" min_range="301" sight="850" splash_radius="100" attack_delay="500" projectile_class="Gule" max_units="10" is_central_building="1" shot_height="100"/></class>)",
         R"(<class id="GCatapult" parent="Catapult" cpp_class="CVXCatapult"/>)",
         R"(<class id="RCatapult" parent="Catapult" cpp_class="CVXCatapult"><properties range="700" min_range="201"/></class>)",
     };
@@ -319,7 +327,8 @@ TEST(a_catapult_throws_at_a_point_and_the_ground_shot_hurts_whoever_stands_there
   REQUIRE(b.combat.projectiles().size() == 1);
   CHECK(b.combat.projectiles()[0].launched == now + 300);
   CHECK(b.combat.projectiles()[0].ground);
-  b.run(10);
+  // In flight for 6,401 ms (the next test has why).
+  b.run(17);
   CHECK(b.combat.projectiles().empty());
   CHECK(b.combat.health(enemy) == 80);
   CHECK(b.combat.health(friend_) == 150);
@@ -335,6 +344,55 @@ TEST(a_catapult_throws_at_a_point_and_the_ground_shot_hurts_whoever_stands_there
   const script::HostOutcome towered = b.call("Attack", {Bench::obj(engine), pack_point(at)}, now);
   CHECK(towered.status == script::HostStatus::ok);
   CHECK(b.combat.projectiles().empty());
+}
+
+/// **A catapult's shot leaves from the point its entity draws for the facing,
+/// and flies ten units of track a tenth of a second** (0x004e22a0 ->
+/// 0x004e47c0, 0x004e4650). The launch point is the engine's position plus
+/// the type-3 point at the engine's column facing the aim; the track runs
+/// from that point moved `shot_height` (100) south to the aim; the first
+/// step is due 1 ms after the shot leaves and each further one 100 ms after
+/// the last, and the shot lands on the step that carries it past the end.
+TEST(a_catapult_shot_leaves_from_its_facing_point_and_flies_ten_units_a_tenth_of_a_second) {
+  Bench b;
+  const ObjectId engine = b.engine("GCatapult", Point{2000, 2000}, kUs, &b.engine_entity);
+  const Point east{2600, 2000};
+  const ObjectId enemy = b.unit("Swordsman", east, kThem);
+  b.world.start();
+  b.run(1);
+
+  // Facing east is column 6 of 8, the seventh type-3 point, (-40, -60).
+  REQUIRE(facing_column(Point{600, 0}, 8) == 6);
+  CHECK(catapult_shot_origin(b.world, engine, east) == (Point{1960, 1940}));
+  // Facing north is column 4, the fifth, (0, -20).
+  REQUIRE(facing_column(Point{0, -600}, 8) == 4);
+  CHECK(catapult_shot_origin(b.world, engine, Point{2000, 1400}) == (Point{2000, 1980}));
+
+  const std::int64_t now = b.world.time();
+  REQUIRE(b.call("Attack", {Bench::obj(engine), pack_point(east)}, now).status ==
+          script::HostStatus::suspend);
+  REQUIRE(b.combat.projectiles().size() == 1);
+  const Projectile& shot = b.combat.projectiles()[0];
+  CHECK(shot.origin == (Point{1960, 1940}));
+  // From (1960, 2040) to (2600, 2000): isqrt(640^2 + 40^2) = 641, so the
+  // 65th step, 1 + 64 * 100 ms after the release at +300.
+  CHECK(shot.launched == now + 300);
+  CHECK(shot.impact == now + 300 + 6401);
+  b.run(16);  // +6,400: still in the air
+  CHECK(b.combat.projectiles().size() == 1);
+  CHECK(b.combat.health(enemy) == 200);
+  b.run(1);   // +6,800: down
+  CHECK(b.combat.projectiles().empty());
+  CHECK(b.combat.health(enemy) == 80);
+
+  // North: from (2000, 1980), the track from (2000, 2080) to (2000, 1400) is
+  // 680 -- 580 without the height -- so the 69th step, 6,801 ms.
+  const std::int64_t later = b.world.time();
+  REQUIRE(b.call("Attack", {Bench::obj(engine), pack_point(Point{2000, 1400})}, later).status ==
+          script::HostStatus::suspend);
+  REQUIRE(b.combat.projectiles().size() == 1);
+  CHECK(b.combat.projectiles()[0].origin == (Point{2000, 1980}));
+  CHECK(b.combat.projectiles()[0].impact == later + 300 + 6801);
 }
 
 /// **`AttackWait` takes off the attack animation's `duration`, not a state's
@@ -527,4 +585,46 @@ TEST(a_towers_sweep_meets_a_cells_units_in_the_order_they_came_into_it) {
   const ObjectId best = b.handle(b.call("BestTarget", {Bench::obj(tower)}));
   CHECK(best == older);
   CHECK(best != younger);
+}
+
+/// **The tower reads `danger` twice** (0x004dbb20, `docs/formats/target-score.md`):
+/// the first unit it takes sets a "low danger" mark when its danger is under
+/// 4, and while the mark stands a farther unit beyond range cannot replace
+/// the one held; a unit beyond range whose own danger is over 3 is passed
+/// over. The answer's danger then goes up by one (0x004dcd80).
+TEST(a_towers_search_spreads_its_fire_by_the_danger_counter) {
+  Bench b;
+  const ObjectId post = b.spawn(NativeClass::outpost, "BOutpost", Point{8000, 8000}, kUs, 5000);
+  const SettlementId town = b.settle(post, kUs);
+  const ObjectId tower = b.spawn(NativeClass::building, "WatchTower", Point{8000, 8000}, kUs, 1500);
+  REQUIRE(b.economy.add_building(b.world, town, tower, 1500));
+  // Both beyond the 300 range: the first swept 340 off at the surface, the
+  // second (the next cell along the same row) 400 off.
+  const ObjectId first = b.unit("Swordsman", Point{8000, 7600}, kThem);
+  const ObjectId farther = b.unit("Swordsman", Point{8300, 7650}, kThem);
+  b.world.start();
+  b.run(1);
+  CombatSystem& combat = b.combat;
+  const auto set_danger = [&](ObjectId id, std::int32_t value) {
+    combat.find(id)->danger = value;
+    combat.find(id)->danger_time = b.world.time();
+  };
+  const auto best = [&] { return b.handle(b.call("BestTarget", {Bench::obj(tower)})); };
+
+  // Calm: the first is held and the mark is set, so the farther one waits.
+  CHECK(best() == first);
+  CHECK(combat.find(first)->danger == 1);
+  CHECK(combat.find(farther)->danger == 0);
+
+  // The first already wanted by four searches: no mark, and the farther one,
+  // calm, replaces it.
+  set_danger(first, 4);
+  CHECK(best() == farther);
+  CHECK(combat.find(farther)->danger == 1);
+  CHECK(combat.find(first)->danger == 4);
+
+  // Both wanted: a far unit over 3 is passed over, and the first stands.
+  set_danger(farther, 4);
+  CHECK(best() == first);
+  CHECK(combat.find(first)->danger == 5);
 }

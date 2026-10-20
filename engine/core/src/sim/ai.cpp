@@ -2750,10 +2750,10 @@ HostOutcome m_gaika_dist_to_players(CallContext& ctx) {
 /// returns 0, so the walk always goes on to the next squad, and the
 /// node-settlement query after the walk (0x00420c00) writes four locals nothing
 /// reads. `CombatSystem::best_target_among` is the filter, and it is
-/// deliberately the same code the other six run -- including its score, which
-/// is that system's and not the executable's, so the filter's own early stop
-/// (0x005db650 answering 0 for a candidate it scores under 50) is not
-/// reproduced here; see `sim/combat.cpp`.
+/// deliberately the same code the other six run, score and all
+/// (`docs/formats/target-score.md`). The filter's early stop (0x005db650
+/// answering 0 for a candidate it scores under 50) ends only the squad the
+/// helper is offering, and this flat list does not stop there.
 ///
 /// **There is no radius.** Every other member of the family gets its reach from
 /// the grid sweep it rides on; this one has no sweep, so a candidate on the far

@@ -458,6 +458,13 @@ void HeroSystem::roll_wisdom(World& world, ObjectId unit_id) {
   if (constants_.percent_per_wisdom_level * points > draw) (void)add_experience(leader, 1);
 }
 
+void HeroSystem::pool_experience(ObjectId hero_id, std::int32_t amount) {
+  HeroRecord* record = hero(hero_id);
+  if (record == nullptr) return;
+  record->experience_pool += amount;
+  if (record->experience_pool < 0) record->experience_pool = 0;
+}
+
 void HeroSystem::detach_for_death(World& world, ObjectId id) {
   // `DetachArmy` first, as the hero's override has it: every warrior leaves the
   // hero, and with it the hero's squad.
@@ -1006,16 +1013,26 @@ void HeroSystem::run_hero_ticks(World& world, GameTime from, GameTime to) {
   // turn-partitioned engine would have to save per hero to reproduce; the
   // multiples cover the same instants however the turns are cut. INFERRED.
   //
-  // The tick's first half -- converting the accumulator `[hero+0x2c4]` into
-  // experience, one point per `ExpFromArmyDivider` -- has nothing to convert
-  // here: the one writer this engine models (Wisdom) pays at once.
+  // The tick's first half converts the pool `[hero+0x2c4]` -- what the army's
+  // kills have earned the hero -- into experience: one point per whole
+  // `ExpFromArmyDivider`, through `SetExperience` with its refresh, and the
+  // remainder stays. (Wisdom, the other writer in the original, pays its one
+  // point at once here; see `roll_wisdom`.)
   const CombatSystem* combat = combat_system_of(world);
   if (combat == nullptr || to <= from) return;
   const HeroConstants& c = constants_;
   for (GameTime at = (from / kHeroTickInterval + 1) * kHeroTickInterval; at <= to;
        at += kHeroTickInterval) {
     std::vector<ObjectId> changed;
-    for (HeroRecord& record : heroes_) {
+    for (std::size_t i = 0; i < heroes_.size(); ++i) {
+      const std::int32_t divider = c.exp_from_army_divider;
+      if (divider > 0 && heroes_[i].experience_pool >= divider) {
+        const ObjectId id = heroes_[i].id;
+        const std::int32_t points = heroes_[i].experience_pool / divider;
+        heroes_[i].experience_pool %= divider;
+        (void)set_experience(world, id, experience(id) + points);
+      }
+      HeroRecord& record = heroes_[i];
       const Combatant* self = combat->find(record.id);
       if (self == nullptr) continue;
       // `vtbl+0x114`, the hero's stored level, through the table (0x005d2910).
@@ -1177,6 +1194,7 @@ void HeroSystem::hash(std::uint64_t& accumulator) const {
     fold(accumulator, static_cast<std::uint64_t>(record.army_attacked_at));
     fold(accumulator, record.army_attacked_unit);
     fold_i32(accumulator, record.army_addend);
+    fold_i32(accumulator, record.experience_pool);
     // The party orientations. Hashed because three shipped sub-AI scripts
     // branch on the settled one and a fourth writes the request, so two peers
     // that disagree form two different battle lines.

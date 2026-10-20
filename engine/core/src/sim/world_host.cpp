@@ -2874,33 +2874,30 @@ HostOutcome m_set_training(CallContext& ctx) {
 /// `0x005d5bf0` (registered under the internal misspelling
 /// `GetBestTrainigTarget`) resolves the receiver -- an invalid one prints and
 /// answers the invalid handle, and so does one whose position is the held
-/// sentinel -- then runs the nearest-match sweep at 0x005d4cd0 over the
-/// unit's own **sight** (`[unit+0xd0]`) with the predicate at 0x005d3cb0:
+/// sentinel -- then runs the grid sweep at 0x005d4cd0 over the unit's own
+/// **sight** (`[unit+0xd0]`) with the predicate at 0x005d3cb0
+/// (`docs/formats/target-score.md`):
 ///
 ///   * an **enemy** (0x005a78e0: the receiver's owner's row for the
-///     candidate's owner, bit 0 clear) that can attack (`[cand+0xdc]`, the
-///     class `damage`) is taken at once and ends the sweep -- that is how the
-///     enemy reaches the script;
+///     candidate's owner, bit 0 clear) whose `damage` (`[cand+0xdc]`) is not
+///     zero is taken at once and ends the sweep -- that is how the enemy
+///     reaches the script;
 ///   * otherwise the candidate must be a unit, not the receiver, carrying
 ///     `SyncFlags` bit 28 -- `ObjectFlags::training`, the bit `StartTraining`
-///     sets -- and is scored: `40 * threat + distance`, plus 100 for a hero
-///     (bit 24), plus 40 inside the receiver's `min_range`, plus 80 for a
-///     unit with a path (bit 17); a candidate within `range` whose score is
-///     under 50 is taken at once, and otherwise gets 100 off. The lowest
-///     score wins, an earlier candidate keeping a tie.
+///     sets -- and is scored from its **surface** distance (0x005a77b0, both
+///     class radii off): `40 * danger + distance`, plus 100 for a hero (bit
+///     24), plus 40 inside the receiver's `min_range`, plus 80 for a unit
+///     with a path (bit 17); a candidate within `range` whose score is under
+///     50 is taken at once, and otherwise gets 100 off. The lowest score
+///     wins, and **a later candidate takes a tie** (`<=`).
 ///
 /// The sweep visits **units only**: 0x005d3c50 seeds it with the `kSyncUnit`
-/// mask, so neither clause ever sees a building. And when the answer is a
-/// unit, 0x005d2850 adds one to that unit's `threat` (capped at 6).
-///
-/// `threat` is the decaying counter at `[unit+0x1b0]` (0x005d2800), which
-/// this engine does not model -- `sim/combat.hpp` says so for the target
-/// family that shares this formula -- so the term is 0 here and the score is
-/// the distance with its four adjustments. The distance is centre to centre;
-/// the original's is the same `isqrt` over the same squares (0x005a77b0).
-/// The sweep (0x005d4cd0) walks the world's grid in its order, and so does
-/// this one (`SweepOrder::grid`): that order decides the tie the last clause
-/// names, and which enemy ends the sweep first.
+/// mask, so neither clause ever sees a building; a hidden unit only when its
+/// owner shares its view with the receiver's player (`target_sweep`). When
+/// the answer is a unit, 0x005d2850 adds one to its `danger`, and every
+/// `danger` the scores read decays as it is read (`CombatSystem::danger`).
+/// The sweep (0x005d4cd0) walks the world's grid in its order (`SweepOrder::grid`):
+/// that order decides the tie, and which enemy ends the sweep first.
 HostOutcome m_best_training_target(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("BestTrainingTarget: no world");
@@ -2910,15 +2907,17 @@ HostOutcome m_best_training_target(CallContext& ctx) {
   if (at == kHeldPosition) return HostOutcome::ok_with(invalid_object());
   const std::int32_t max_range = class_int(*world, *self, "range");
   const std::int32_t min_range = class_int(*world, *self, "min_range");
+  const std::int32_t my_radius = class_int(*world, *self, "radius");
   const PlayerTable& players = world->players();
   const PlayerId owner = self->state.owner;
+  CombatSystem* combat = combat_system_of(*world);
+  const GameTime now = world->time();
 
   std::vector<ObjectId> around;
-  world->objects_in_radius(at, self->sight, ClassFilter{}, around, SweepOrder::grid);
+  target_sweep(*world, at, self->sight, owner, around);
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
   for (const ObjectId id : around) {
-    if (id == self->id) continue;
     const WorldObject* cand = world->find(id);
     if (cand == nullptr) continue;
     // The sweep's mask (0x005d3c50 seeds it with `0x400000`, `kSyncUnit`):
@@ -2926,25 +2925,37 @@ HostOutcome m_best_training_target(CallContext& ctx) {
     // -- neither ends the lesson nor is a partner.
     if (!cand->state.flags.is_unit) continue;
     if (owner != kNoPlayer && cand->state.owner != kNoPlayer &&
-        players.is_enemy(owner, cand->state.owner) && class_int(*world, *cand, "damage") > 0) {
-      return HostOutcome::ok_with(object_value(id));
+        players.is_enemy(owner, cand->state.owner) && class_int(*world, *cand, "damage") != 0) {
+      best = id;
+      break;
     }
-    if (!cand->state.flags.training) continue;
+    if (id == self->id || !cand->state.flags.training) continue;
     const Point there = world->resolve_position(id);
     const std::int64_t dx = there.x - at.x;
     const std::int64_t dy = there.y - at.y;
-    const std::int64_t distance = isqrt(dx * dx + dy * dy);
-    std::int64_t score = distance;
+    const std::int64_t distance =
+        isqrt(dx * dx + dy * dy) - my_radius - class_int(*world, *cand, "radius");
+    const std::int32_t danger = combat != nullptr ? combat->danger(id, now) : 0;
+    std::int64_t score = distance + static_cast<std::int64_t>(danger) * 40;
     if (cand->state.flags.is_hero) score += 100;
     if (distance < min_range) score += 40;
     if (cand->state.flags.has_active_path) score += 80;
     if (distance <= max_range) {
-      if (score < 50) return HostOutcome::ok_with(object_value(id));
+      if (score < 50) {
+        best = id;
+        break;
+      }
       score -= 100;
     }
-    if (best == kNoObject || score < best_score) {
+    if (best == kNoObject || score <= best_score) {
       best = id;
       best_score = score;
+    }
+  }
+  if (best != kNoObject && combat != nullptr) {
+    if (const WorldObject* answer = world->find(best);
+        answer != nullptr && answer->state.flags.is_unit) {
+      combat->raise_danger(best, 1, now);
     }
   }
   return HostOutcome::ok_with(object_value(best));

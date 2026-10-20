@@ -20,6 +20,7 @@
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/gaika_table.hpp"
 #include "imperivm/core/sim/globals.hpp"
+#include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/array.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/match.hpp"
@@ -2318,10 +2319,11 @@ struct CounterRow {
 /// six weights back as the odds of training each of its race's unit types.
 ///
 /// `0x0042eef0` resolves the settlement (an invalid one prints and returns
-/// with `W` untouched), then tries the AI's ten army rows at `[ai+0x30]` --
-/// the enemy formations it has *seen*, which this engine does not keep -- and,
-/// when none of them answers, falls back to a census (0x0041c400 ->
-/// 0x0041c320 -> 0x0041c0e0), which is what is reproduced here:
+/// with `W` untouched), then tries the owner's AI's ten army rows -- ranks 1
+/// to 10 of its GAIKA view `[ai+0x30]`, the independents' camps among the
+/// nodes it ranks highest (0x0041c420, below in the body) -- and, when none of
+/// them answers, falls back to a census (0x0041c400 -> 0x0041c320 ->
+/// 0x0041c0e0):
 ///
 ///   * for every countered class `C` of the counter table, `acc[C]` is the
 ///     number of `C` standing for every **active** player (`[p+0x290] == 1`)
@@ -2335,9 +2337,11 @@ struct CounterRow {
 ///     `coeff(k counters C) * uncovered` -- `coeff` being the table's own
 ///     number, 0 for a pair it does not list.
 ///
-/// `W` is **added to, never zeroed**: the zeroing is the army rows' path
-/// (0x0041c420), and the census adds onto whatever the script declared, which
-/// is an empty array. The `>> 10` is an arithmetic shift, so a mass under
+/// The census **adds to `W`, never zeroes it**: the zeroing is the army rows'
+/// (0x0041c420 writes six zeros before it looks at a node), so the census adds
+/// onto those zeros when the owner has an AI with a second record, and onto
+/// whatever the script declared -- an empty array -- when it has none. The
+/// `>> 10` is an arithmetic shift, so a mass under
 /// 1,024 cost units contributes nothing, and a well-countered one is skipped
 /// rather than subtracted. A settlement whose owner has no race in the
 /// catalog answers nothing.
@@ -2391,6 +2395,9 @@ HostOutcome get_counter_units_impl(CallContext& ctx) {
   }
 
   ArrayPool& arrays = world->arrays();
+  // 0x0041c0e0: what a mass of enemy classes (by table row) asks the owner's
+  // race to train, added onto `W`.
+  const auto distribute = [&](const std::vector<std::int32_t>& acc) {
   for (std::size_t i = 0; i < rows.size(); ++i) {
     if (acc[i] < shape[i].threshold) continue;
     std::int64_t covered = 0;
@@ -2412,6 +2419,78 @@ HostOutcome get_counter_units_impl(CallContext& ctx) {
                        Value::integer(static_cast<std::int32_t>(had + coeff * uncovered)));
     }
   }
+  };
+  const auto row_of = [&](ClassIndex cls) -> std::int32_t {
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      if (rows[i] == cls) return static_cast<std::int32_t>(i);
+    }
+    return -1;
+  };
+
+  // The army rows (0x0042eef0's loop): ranks 1 to 10 of the owner's AI's GAIKA
+  // view, `[ai+0x30]`, the list `SetPriority` keeps in descending priority
+  // (0x0041cf00) -- the ten nodes it ranks highest. For each, 0x0041c420
+  // zeroes `W[0..5]`, then answers only for a node whose settlement is the
+  // independents' (player 14) and is an outpost or a Teuton tent: the mass it
+  // counts is what the outpost is declared to hold (`defenders_max_N` of
+  // `defender_cls_N`, its central building's class, as `CVXOutpost` copies
+  // them), or for a tent every `TTeutonArcher` and `TTeutonRider` player 14
+  // has. A class the counter table does not list adds nothing. The first node
+  // that counts anything is the answer, and nothing else is asked.
+  //
+  // The owner's AI object (`[player+0x88]`) is what holds the list, so a
+  // player with no AI has no rows: its view is empty until `AIStart` seeds it
+  // and `AIStop` clears it.
+  const AiSystem* ai = ai_system_of(*world);
+  const GaikaView* seen = ai == nullptr ? nullptr : ai->gaika_view(owner);
+  const EconomySystem* economy = economy_of(*world);
+  if (seen != nullptr && economy != nullptr) {
+    constexpr PlayerId kIndependents = 14;
+    const GaikaView& view = *seen;
+    for (std::int32_t rank = 1; rank < 11; ++rank) {
+      if (rank >= view.size()) continue;
+      const GaikaNode* node = world->gaika().find(view.ranked(rank));
+      for (std::int32_t k = 0; k < 6; ++k) (void)arrays.set(out, k, Value::integer(0));
+      const Settlement* there =
+          node == nullptr ? nullptr : economy->settlements().for_object(node->settlement);
+      if (there == nullptr || there->owner != kIndependents) continue;
+      const WorldObject* central = world->find(there->anchor);
+      std::vector<std::int32_t> mass(rows.size(), 0);
+      bool counted = false;
+      const auto add = [&](ClassIndex cls, std::int32_t n) {
+        const std::int32_t row = cls == kNoClass ? -1 : row_of(cls);
+        if (row < 0) return;
+        mass[static_cast<std::size_t>(row)] += n;
+        counted = true;
+      };
+      if (there->is_outpost()) {
+        if (central == nullptr || central->class_index == kNoClass) continue;
+        for (const char* slot : {"1", "2"}) {
+          std::int32_t most = 0;
+          const std::string_view declared =
+              graph->property(central->class_index, std::string("defenders_max_") + slot);
+          if (declared.empty() || !parse_int(declared, most) || most <= 0) continue;
+          const std::string_view name =
+              graph->property(central->class_index, std::string("defender_cls_") + slot);
+          if (name.empty()) continue;
+          add(graph->lookup(name), most);
+        }
+      } else if (there->is_teuton_tent()) {
+        for (const char* name : {"TTeutonArcher", "TTeutonRider"}) {
+          const ClassIndex cls = graph->lookup(name);
+          add(cls, cls == kNoClass ? 0 : count_of(kIndependents, cls));
+        }
+      } else {
+        continue;
+      }
+      if (counted) {
+        distribute(mass);
+        return HostOutcome::ok_void();
+      }
+    }
+  }
+
+  distribute(acc);
   return HostOutcome::ok_void();
 }
 

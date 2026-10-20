@@ -26,6 +26,7 @@
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/game/class_graph.hpp"
+#include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/array.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
@@ -3564,6 +3565,7 @@ constexpr std::string_view kTrainXml = R"(<commands>
 <cmd name="trainspearman" costgold="90" costfood="40" method="train"/>
 <cmd name="trainhastatus" costgold="60" costfood="20" method="train"/>
 <cmd name="trainprinciple" costgold="100" costfood="50" method="train"/>
+<cmd name="trainrider" costgold="100" costfood="25" method="train"/>
 </commands>)";
 
 struct CounterBench {
@@ -3578,6 +3580,7 @@ struct CounterBench {
   ClassIndex spearman = kNoClass;
   ClassIndex hastatus = kNoClass;
   ClassIndex principle = kNoClass;
+  ClassIndex rider = kNoClass;
   ObjectId anchor = kNoObject;
   ObjectId settlement_object = kNoObject;
   SettlementId town = kNoSettlement;
@@ -3590,15 +3593,24 @@ struct CounterBench {
         R"(<class id="GSpearman" cpp_class="CVXUnit"><properties maxhealth="100"/></class>)",
         R"(<class id="RHastatus" cpp_class="CVXUnit"><properties maxhealth="100"/></class>)",
         R"(<class id="RPrinciple" cpp_class="CVXUnit"><properties maxhealth="100"/></class>)",
+        // An independents' camp for the army rows: 30 hastati declared, and a
+        // second slot that declares none.
+        R"(<class id="Outpost" parent="Building" cpp_class="CVXOutpost"/>)",
+        R"(<class id="IOutpost" parent="Outpost" cpp_class="CVXOutpost"><properties defender_cls_1="RHastatus" defenders_max_1="30" defender_cls_2="RPrinciple" defenders_max_2="0"/></class>)",
+        // And a Teuton tent's: what it counts is player 14's riders.
+        R"(<class id="TTeutonRider" cpp_class="CVXUnit"><properties maxhealth="100"/></class>)",
+        R"(<class id="TTent" parent="Building" cpp_class="CVXBuilding"/>)",
     };
-    const char* names[] = {"building.sc.xml", "gsword.sc.xml", "gspear.sc.xml", "rhast.sc.xml",
-                           "rprinc.sc.xml"};
-    for (int i = 0; i < 5; ++i) graph.add(bytes_of(docs[i]), names[i]);
+    const char* names[] = {"building.sc.xml", "gsword.sc.xml",   "gspear.sc.xml",
+                           "rhast.sc.xml",    "rprinc.sc.xml",   "outpost.sc.xml",
+                           "ioutpost.sc.xml", "ttrider.sc.xml",  "ttent.sc.xml"};
+    for (int i = 0; i < 9; ++i) graph.add(bytes_of(docs[i]), names[i]);
     graph.link();
     swordsman = graph.find("GSwordsman");
     spearman = graph.find("GSpearman");
     hastatus = graph.find("RHastatus");
     principle = graph.find("RPrinciple");
+    rider = graph.find("TTeutonRider");
 
     script::declare_shipped_surface(registry);
     register_world_host(registry);
@@ -3617,13 +3629,15 @@ struct CounterBench {
     env.start(world);
 
     // Race 0 is Gaul and race 1 Rome, as the shipped table numbers them.
-    std::vector<RaceUnits> races(2);
+    std::vector<RaceUnits> races(3);
     races[0].name = "Gaul";
     races[0].rows = {UnitRow{"GSwordsman", "", "trainswordsman"},
                      UnitRow{"GSpearman", "", "trainspearman"}};
     races[1].name = "RepublicanRome";
     races[1].rows = {UnitRow{"RHastatus", "", "trainhastatus"},
                      UnitRow{"RPrinciple", "", "trainprinciple"}};
+    races[2].name = "Teuton";
+    races[2].rows = {UnitRow{"TTeutonRider", "", "trainrider"}};
     env.units().set_races(std::move(races));
 
     CounterTable counters;
@@ -3631,6 +3645,7 @@ struct CounterBench {
     counters.add(spearman, hastatus, 63);
     counters.add(principle, swordsman, 50);
     counters.add(hastatus, spearman, 40);
+    counters.add(spearman, rider, 20);
     combat.set_counter_table(std::move(counters));
 
     for (PlayerId p = 2; p <= 5; ++p) {
@@ -3744,6 +3759,112 @@ TEST(get_counter_units_counts_only_active_enemies_above_the_threshold) {
   b.units(b.hastatus, 3, 40);
   CHECK(b.ask(set).status == script::HostStatus::ok);
   CHECK(b.weight(0) == 33);
+}
+
+/// **The army rows come first** (0x0042eef0 -> 0x0041c420): ranks 1 to 10 of
+/// the owner's AI's GAIKA view, highest priority first, and the first node
+/// whose settlement is the independents' (player 14) outpost answers with what
+/// that outpost is declared to hold -- `defenders_max_N` of `defender_cls_N`
+/// -- in place of the census. Each row asked zeroes the six weights first.
+TEST(get_counter_units_asks_the_ais_ranked_nodes_before_the_census) {
+  CounterBench b;
+  AiSystem ai;
+  REQUIRE(b.world.add_system(&ai));
+  const ObjectId tent = b.world.spawn(NativeClass::building, nullptr, b.graph.find("IOutpost"));
+  b.world.set_position(tent, Point{5000, 5000});
+  SettlementInit init;
+  init.kind = SettlementKind::outpost;
+  init.anchor = tent;
+  init.owner = 14;
+  init.max_units = 100;
+  b.economy.create(b.world, init);
+  const Settlement* camp = b.economy.settlements().for_object(tent);
+  REQUIRE(camp != nullptr);
+  REQUIRE(camp->is_outpost());
+  const SettlementId camp_id = camp->id;
+  // Node 1 the owner's town, node 2 the camp.
+  b.world.mutable_gaika().restore({GaikaNode{Point{1000, 1000}, kNoLsa, b.settlement_object},
+                                   GaikaNode{Point{5000, 5000}, kNoLsa, camp->object}},
+                                  LsaPartition{});
+  const script::Value set = script::Value::object(kTypeSettlement, b.settlement_object);
+
+  // No AI: the census, which finds nobody, and the weights stay undeclared.
+  CHECK(b.ask(set).status == script::HostStatus::ok);
+  CHECK(b.world.arrays().size(b.weights) == 0);
+
+  // An AI whose view holds the camp: thirty hastati of declared mass, as the
+  // census would count thirty standing -- 2400 >> 10, twice 33 and 63 -- though
+  // none stands.
+  ai.seed_gaika_view(2, 2);
+  CHECK(b.ask(set).status == script::HostStatus::ok);
+  CHECK(b.weight(0) == 66);
+  CHECK(b.weight(1) == 126);
+  // Zeroed before each answer, not added onto as the census adds.
+  CHECK(b.ask(set).status == script::HostStatus::ok);
+  CHECK(b.weight(0) == 66);
+  CHECK(b.weight(1) == 126);
+
+  // Ranked below the tenth node, the camp is not asked: the census answers,
+  // onto weights the rows zeroed, and with nobody about that is nothing.
+  ai.seed_gaika_view(2, 12);
+  b.world.mutable_gaika().restore(
+      {GaikaNode{Point{1000, 1000}, kNoLsa, b.settlement_object},
+       GaikaNode{Point{1100, 1000}, kNoLsa, kNoObject}, GaikaNode{Point{1200, 1000}, kNoLsa, kNoObject},
+       GaikaNode{Point{1300, 1000}, kNoLsa, kNoObject}, GaikaNode{Point{1400, 1000}, kNoLsa, kNoObject},
+       GaikaNode{Point{1500, 1000}, kNoLsa, kNoObject}, GaikaNode{Point{1600, 1000}, kNoLsa, kNoObject},
+       GaikaNode{Point{1700, 1000}, kNoLsa, kNoObject}, GaikaNode{Point{1800, 1000}, kNoLsa, kNoObject},
+       GaikaNode{Point{1900, 1000}, kNoLsa, kNoObject}, GaikaNode{Point{2000, 1000}, kNoLsa, kNoObject},
+       GaikaNode{Point{5000, 5000}, kNoLsa, b.economy.settlements().find(camp_id)->object}},
+      LsaPartition{});
+  CHECK(b.ask(set).status == script::HostStatus::ok);
+  CHECK(b.weight(0) == 0);
+  CHECK(b.weight(1) == 0);
+  // Its priority raised, it is ranked first and answers again.
+  ai.gaika_view(2)->set_priority(12, 100);
+  CHECK(b.ask(set).status == script::HostStatus::ok);
+  CHECK(b.weight(0) == 66);
+
+  // A camp of another player is passed over.
+  b.economy.settlements().find(camp_id)->owner = 3;
+  CHECK(b.ask(set).status == script::HostStatus::ok);
+  CHECK(b.weight(0) == 0);
+  CHECK(b.weight(1) == 0);
+}
+
+/// A Teuton tent of the independents' answers with **every** `TTeutonRider`
+/// (and `TTeutonArcher`) player 14 has, wherever they stand -- the class
+/// count of player 14's record (0x004441e0 on `[game+0x3e8c]`), not the
+/// tent's own.
+TEST(get_counter_units_counts_all_of_the_independents_riders_for_a_tent) {
+  CounterBench b;
+  AiSystem ai;
+  REQUIRE(b.world.add_system(&ai));
+  const ObjectId pole = b.world.spawn(NativeClass::building, nullptr, b.graph.find("TTent"));
+  b.world.set_position(pole, Point{5000, 5000});
+  SettlementInit init;
+  init.kind = SettlementKind::teuton_tent;
+  init.anchor = pole;
+  init.owner = 14;
+  init.max_units = 100;
+  b.economy.create(b.world, init);
+  const Settlement* tent = b.economy.settlements().for_object(pole);
+  REQUIRE(tent != nullptr);
+  REQUIRE(tent->is_teuton_tent());
+  b.world.mutable_gaika().restore({GaikaNode{Point{5000, 5000}, kNoLsa, tent->object}},
+                                  LsaPartition{});
+  ai.seed_gaika_view(2, 1);
+  const script::Value set = script::Value::object(kTypeSettlement, b.settlement_object);
+  // Twenty riders of player 14's, far from the tent: 125 a head, a threshold
+  // of 16, and 2500 >> 10 is 2 -- forty for the spearman, nothing for the
+  // swordsman, which does not counter a rider.
+  b.units(b.rider, 14, 20);
+  CHECK(b.ask(set).status == script::HostStatus::ok);
+  CHECK(b.weight(0) == 0);
+  CHECK(b.weight(1) == 40);
+  // Another player's riders are not the tent's.
+  b.units(b.rider, 3, 40);
+  CHECK(b.ask(set).status == script::HostStatus::ok);
+  CHECK(b.weight(1) == 40);
 }
 
 namespace {

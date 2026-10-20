@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 40;  // 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 41;  // 41: every combatant's danger counter and its stamp (`Combatant::danger`, `danger_time`), and a hero's experience pool (`HeroRecord::experience_pool`); 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -906,6 +906,8 @@ void CombatSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_u32(out, u.target);
     bytes::put_i32(out, u.attacks);
     bytes::put_u32(out, u.unit_flags);
+    bytes::put_i32(out, u.danger);
+    bytes::put_i64(out, u.danger_time);
     bytes::put_u8(out, static_cast<std::uint32_t>(u.action));
     bytes::put_i32(out, u.anim);
     bytes::put_i64(out, u.death_time);
@@ -1007,7 +1009,8 @@ Status CombatSystem::deserialize(std::span<const std::byte> data) {
         !bytes::get_i32(reader, u.stamina) ||
         !bytes::get_i32(reader, u.level) || !bytes::get_i64(reader, u.last_attack_time) ||
         !reader.u32(u.target) || !bytes::get_i32(reader, u.attacks) ||
-        !reader.u32(u.unit_flags) || !get_action(reader, u.action) ||
+        !reader.u32(u.unit_flags) || !bytes::get_i32(reader, u.danger) ||
+        !bytes::get_i64(reader, u.danger_time) || !get_action(reader, u.action) ||
         !bytes::get_i32(reader, u.anim) || !bytes::get_i64(reader, u.death_time) ||
         !bytes::get_i64(reader, u.next_action_time) ||
         !bytes::get_i32(reader, u.stats.max_health) ||
@@ -1276,6 +1279,7 @@ void HeroSystem::serialize(std::vector<std::byte>& out) const {
     for (const GameTime until : r.effect_until) bytes::put_i64(out, until);
     bytes::put_i64(out, r.army_attacked_at);
     bytes::put_i32(out, r.army_addend);
+    bytes::put_i32(out, r.experience_pool);
     bytes::put_u32(out, r.army_attacked_unit);
     bytes::put_i32(out, r.party_orientation_request.x);
     bytes::put_i32(out, r.party_orientation_request.y);
@@ -1338,7 +1342,8 @@ Status HeroSystem::deserialize(std::span<const std::byte> data) {
       if (!bytes::get_i64(reader, until)) return FormatError::truncated;
     }
     if (!bytes::get_i64(reader, r.army_attacked_at) ||
-        !bytes::get_i32(reader, r.army_addend) || !reader.u32(r.army_attacked_unit) ||
+        !bytes::get_i32(reader, r.army_addend) || !bytes::get_i32(reader, r.experience_pool) ||
+        !reader.u32(r.army_attacked_unit) ||
         !bytes::get_i32(reader, r.party_orientation_request.x) ||
         !bytes::get_i32(reader, r.party_orientation_request.y) ||
         !bytes::get_i32(reader, r.party_orientation.x) ||

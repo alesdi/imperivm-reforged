@@ -1505,7 +1505,7 @@ ObjectId best_in_gaika(SiegeBench& b, ObjectId caster) {
 ///
 /// The two candidates are joined **far first**, so a body that kept the first
 /// offered rather than the least would answer the wrong one. That is not
-/// pedantry: the tie rule really is "first offered", so the ordering is the
+/// pedantry: the tie rule really is "later offered", so the ordering is the
 /// only thing separating the two readings.
 TEST(best_target_in_gaika_takes_the_nearest_enemy_out_of_the_squads_standing_here) {
   SiegeBench b;
@@ -1522,10 +1522,10 @@ TEST(best_target_in_gaika_takes_the_nearest_enemy_out_of_the_squads_standing_her
   b.band(2, 1, {far_off, near_by});
   CHECK(best_in_gaika(b, caster) == near_by);
 
-  // And a tie keeps the **first offered**, which is squad order and then join
-  // order. There is no ascending sweep here to make it "lowest id", so the
-  // pair below is joined highest-id first: under the family's usual tie rule
-  // the other one would win.
+  // And a tie goes to the **later offered** -- the predicate keeps the one it
+  // holds only against a strictly worse score (0x005db7c7) -- which is squad
+  // order and then join order. The pair below is joined highest-id first, so
+  // a rule of "lowest id" would answer the other one.
   SiegeBench t;
   t.plant(3, 3);
   t.rebuild();
@@ -1535,7 +1535,7 @@ TEST(best_target_in_gaika_takes_the_nearest_enemy_out_of_the_squads_standing_her
   t.arm();
   REQUIRE(left < right);
   t.band(2, 1, {right, left});
-  CHECK(best_in_gaika(t, watcher) == right);
+  CHECK(best_in_gaika(t, watcher) == left);
 }
 
 /// **There is no reach.** Every other member of the family gets its radius from
