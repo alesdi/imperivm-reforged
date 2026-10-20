@@ -1103,6 +1103,13 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
 NUMANTIA_OUTPOST = (13681, 13531)
 #: Turn 10: the Roman army is out of its camp and following its heroes.
 SIEGE_TURN = 10
+#: How long the unit is watched at the outpost. Long enough for the archer's
+#: first shots (9,976 by turn 100 on the twelfth round's tree, 9,928 on the
+#: eleventh's), short enough to end before the Roman army itself storms the
+#: outpost: on the twelfth round's tree its hero's army stands round it from
+#: turn 130 and has it at 8,919 by 140, which is the war's damage and not the
+#: swordsman's (he falls to an Iberian archer at turn 17).
+SIEGE_WATCH = 110
 
 
 @pytest.mark.parametrize("cls, stand, hurts", [
@@ -1148,7 +1155,7 @@ def test_the_attack_button_on_a_fort_hurts_it_from_an_archer_and_not_from_a_swor
     unit, outpost, before = units[0], int(fort.group(1)), int(fort.group(2))
 
     second = subprocess.run(
-        [str(imrun), str(game_dir), str(numantia), str(SIEGE_TURN + 150), "800"],
+        [str(imrun), str(game_dir), str(numantia), str(SIEGE_TURN + SIEGE_WATCH), "800"],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_OBJECTS": "IOutpost",
              "IMRUN_PLACE": f"{stand[0]},{stand[1]}", "IMRUN_ATTACK": str(outpost),
