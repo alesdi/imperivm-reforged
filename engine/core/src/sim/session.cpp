@@ -1137,22 +1137,26 @@ std::size_t GameSession::start_object_scripts() {
   };
 
   std::size_t started = 0;
-  // **The class's behaviours, every object's, before any object's idle.**
+  // **Each object as it is started: its `idle`, then its behaviours.**
   //
-  // `gbr.exe` starts behaviours from the object's start virtual (vtbl+0x2c,
-  // 0x005aec40), which every factory path calls the moment an object is
-  // constructed -- the map loader's, `Place`'s, a clone's -- and which the
-  // unit, building and other overrides (0x0053c730, 0x004d64d0, 0x004db2d0,
-  // 0x005d3090) call before doing anything of their own. It sizes the
-  // object's script slots to one more than the class's behaviour count, asks
-  // slot 0 -- the command slot -- to restart whatever its queue holds, which at
-  // construction is nothing, and then spawns behaviour `i` into slot `i + 1`
-  // through 0x006a07e0, with the object as the script's one argument. The
-  // `idle` a class binds is not started there: it is the command queue's
-  // default and starts when the object's queue is first found empty, which is
-  // after construction. So a map's objects each have their behaviours before
-  // any of them has an idle -- **INFERRED** from that structure, not traced to
-  // the tick that first finds a queue empty.
+  // `gbr.exe` starts an object from its start virtual (vtbl+0x2c, 0x005aec40),
+  // which every factory path calls the moment an object is constructed -- the
+  // map loader's, `Place`'s, a clone's -- and which the unit, building and
+  // other overrides (0x0053c730, 0x004d64d0, 0x004db2d0, 0x005d3090) call
+  // before doing anything of their own. It opens with the object's slot-0
+  // script end (`vtbl+0x1c` with 0, 0x005b5160): nothing is queued yet, so
+  // the command advance (0x005b4f20) pushes the class's `idle` as a command
+  // and starts it (`CommandSystem::start_slot`). Then it sizes the object's
+  // script slots to one more than the class's behaviour count and spawns
+  // behaviour `i` into slot `i + 1` through 0x006a07e0, with the object as the
+  // script's one argument. One object after another, in the order they are
+  // made. (This engine started every object's behaviours first and every
+  // idle after them, outside any queue.)
+  //
+  // An object that was ordered before this pass reached it -- a trained
+  // soldier sent to its rally point in the pass that made it -- already has
+  // a head, so it is not given an idle: the original's would have been
+  // replaced by that order.
   //
   // Skipped, as 0x005aec40 skips them, while a save is being loaded
   // (`[0x00a87390]`): the load restores the coroutines instead. The same
@@ -1161,32 +1165,25 @@ std::size_t GameSession::start_object_scripts() {
   // Spawn order is object order, which is ascending id order, which is the
   // order the map declared them in, and within an object slot order. Script
   // ids therefore reproduce across runs, and a script id is world state.
+  CommandSystem* commands = command_system(impl.world);
   for (const WorldObject& slot : impl.world.objects()) {
     if (!offered(slot)) continue;
-    started += start_behaviors(impl.scheduler, impl, impl.world, slot.id);
-  }
-  // **Then each object's idle, unless it already has an order.** The idle is
-  // its command slot's default -- `CommandSystem::end_resting_idle` says why
-  // and where the original shows it -- so an object that was ordered before
-  // this pass reached it, a trained soldier sent to its rally point in the
-  // pass that made it, starts on the order, and its queue gives it the idle
-  // when the order is done. Started here it ran beside the order.
-  const CommandSystem* commands = command_system(impl.world);
-  for (const WorldObject& slot : impl.world.objects()) {
-    if (!offered(slot)) continue;
-    if (commands != nullptr && commands->command_count(slot.id) > 0) continue;
-    for (const ClassMethod& method : impl.classes->resolved_methods(slot.class_index)) {
-      if (method.sig != kIdleMethod) continue;
-      const std::uint32_t chunk = impl.chunk_for(method.vs);
-      if (chunk == script::kNoChunk) break;
-      const script::ObjectRef owner{kTypeObj, slot.id};
-      // The receiver is the script's first argument: `UNIT_IDLE.VS` opens
-      // `// void, Obj This`, and every idle script in the corpus does.
-      const script::Value self = script::Value::object(owner);
-      const script::Value args[] = {self};
-      if (impl.scheduler.spawn(chunk, args, owner) != script::kNoScript) ++started;
-      break;
+    const ObjectId id = slot.id;
+    if (commands != nullptr) {
+      if (commands->start_slot(impl.world, id)) ++started;
+    } else {
+      // No command system: the idle runs as a bare script, as it did.
+      for (const ClassMethod& method : impl.classes->resolved_methods(slot.class_index)) {
+        if (method.sig != kIdleMethod) continue;
+        const std::uint32_t chunk = impl.chunk_for(method.vs);
+        if (chunk == script::kNoChunk) break;
+        const script::ObjectRef owner{kTypeObj, id};
+        const script::Value args[] = {script::Value::object(owner)};
+        if (impl.scheduler.spawn(chunk, args, owner) != script::kNoScript) ++started;
+        break;
+      }
     }
+    started += start_behaviors(impl.scheduler, impl, impl.world, id);
   }
   impl.script_watermark = impl.world.next_id();
   impl.started += started;

@@ -332,17 +332,13 @@ HostOutcome fn_env_int_between(CallContext& ctx) {
 /// and `"standstill"`. `"standstill"` occurs exactly once in the whole
 /// executable -- here -- which is what identifies the second one at all.
 ///
-/// **An object with no command queue counts as resting, and that is a reading
-/// rather than a transcription.** In this engine `GameSession::start_object_
-/// scripts` spawns each class's `idle` method straight onto the scheduler and
-/// never routes it through `CommandSystem`, so a unit that has not been given
-/// an order has no queue and `command_name` answers `{}` -- where the original
-/// would be holding the string `"idle"`. Treating the empty answer as anything
-/// but resting would make `WaitIdle(Q_Slingers, -1)` -- a shipped site with no
-/// timeout -- wait forever on a map where nothing has been commanded yet.
-/// `Obj::command` had the same gap and now answers the default verb for an
-/// empty queue, by the same reading (`command_impl` in `sim/command.cpp`);
-/// this reads `command_name` directly, so it keeps its own empty case.
+/// Every started object's queue holds its running `idle` from its start
+/// (`CommandSystem::start_slot`, as 0x005aec40 pushes it), so an object nobody
+/// has ordered answers `"idle"` from its queue, as the original's string does.
+/// **An empty queue still counts as resting, a labelled reading:** only an
+/// object whose class binds no `idle`, or a dying one, has one, and the
+/// original's string (`[obj+0x110]`, written when a command starts) would
+/// still hold the last command it started, which this engine does not keep.
 HostOutcome fn_idle(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);

@@ -381,6 +381,35 @@ TEST(a_hero_and_his_army_leave_the_garrison_one_exit_slot_at_a_time) {
   CHECK(g.world.find(second)->state.holder == ship.holder);
 }
 
+/// `PathTo` from inside a garrison measures from the door the unit would
+/// leave by: `(-1, -1)` is replaced by the exit point of its settlement's
+/// central building towards the goal (0x005de2b1 .. 0x005de30b, 0x004db6c0),
+/// which for a building with no doors is the building's own position, with no
+/// draw.
+TEST(path_to_from_a_garrison_measures_from_the_central_buildings_door) {
+  Garrison g;
+  MovementSystem movement;
+  movement.set_grid(ObstructionGrid(512, 512));
+  REQUIRE(g.world.add_system(&movement));
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  (void)register_world_host(registry);
+  register_movement_host(registry);
+
+  REQUIRE(garrison_enter(g.world, g.town_id, g.mine, /*force=*/true));
+  REQUIRE(g.world.find(g.mine)->state.position == kHeldPosition);
+  const Rng before = g.world.rng();
+  const script::HostOutcome out =
+      call(registry, g.world, "PathTo", 3,
+           {obj(g.mine), pack_point(Point{3400, 3000}), script::Value::integer(0),
+            script::Value::integer(0)});
+  CHECK(out.status == script::HostStatus::ok);
+  CHECK(out.value.as_integer() == 400);
+  CHECK(g.world.rng() == before);
+  // Asked, not moved.
+  CHECK(g.world.find(g.mine)->state.is_held());
+}
+
 TEST(a_point_goto_drops_the_target_only_once_its_unit_is_out) {
   // 0x005d61b0 waits its turn at the settlement's exit (0x005d3f20) before
   // anything else, and empties the target handle only past that wait
@@ -484,6 +513,17 @@ TEST(form_accept_move_drops_the_members_combat_target) {
   REQUIRE(g.combat.find(g.mine) != nullptr);
   REQUIRE(g.combat.order_attack(g.mine, g.theirs));
 
+  // A member still pending -- attached, not yet laid out -- has no place in
+  // the formation (`[unit+0x1c0]`): the body returns 2 (0x005d7a1c), the
+  // script ends there, and the target stands.
+  CHECK(call(registry, g.world, "FormAcceptMove", 0, {obj(g.mine)}).status ==
+        script::HostStatus::finish);
+  CHECK(g.combat.find(g.mine)->target == g.theirs);
+
+  // With its slot, it gets this far.
+  Formation& form = movement.formation_of(hero);
+  form.pending.clear();
+  form.slots.push_back(FormationSlot{g.mine});
   CHECK(call(registry, g.world, "FormAcceptMove", 0, {obj(g.mine)}).status ==
         script::HostStatus::ok);
   CHECK(g.combat.find(g.mine)->target == kNoObject);

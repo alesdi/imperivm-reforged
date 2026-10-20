@@ -28,11 +28,10 @@
 //   * **`ctrl="1"` partitions the list.** `Unit`'s ground block is
 //     (move, advance[ctrl]); if the modifier only *added* candidates then
 //     unconditional `move` would win always and `advance` would be dead code.
-//   * **The class graph drops one half of an overloaded `<method sig>`.**
-//     `Unit` declares `attack` twice, and only the first carries
-//     `verify="unit_attack_verify.vs"`. Pinned here, because until it is fixed
-//     `attack` resolves unconditionally and a unit right-clicking its own town
-//     hall attacks it.
+//   * **An overloaded `<method sig>` keeps both forms.** `Unit` declares
+//     `attack` twice, and only the first, the object form, carries
+//     `verify="unit_attack_verify.vs"`. The class graph used to keep the
+//     second alone, and a unit right-clicking its own town hall attacked it.
 
 #include <cstddef>
 #include <cstdint>
@@ -787,17 +786,25 @@ TEST(control_resolved_default_cmds_loses_a_block_that_candidates_keeps) {
   CHECK(has_attack);
 }
 
-TEST(control_the_class_graph_drops_the_verifier_of_an_overloaded_method_sig) {
+TEST(a_class_keeps_both_overloads_of_a_method_sig) {
   // `Unit` declares `attack` twice: first with `vs="unit_attack.vs"` and
   // `verify="unit_attack_verify.vs"` (the object form), then with
-  // `vs="unit_advance.vs"` and no verifier (the point form). `upsert` keeps
-  // the last, so the verifier is gone -- and `attack` becomes unconditional.
-  //
-  // Measured over the shipped data: 21 of the 173 `<defaultcmd>` rows resolve
-  // to a different `verify=` under first-wins than under last-wins, 20 of them
-  // `attack`. Until this is fixed, a unit right-clicking its own town hall
-  // attacks it.
+  // `vs="unit_advance.vs"` and no verifier (the point form). `gbr.exe` keys a
+  // class's methods on the name and the script's signature, so both are its
+  // methods; the class's own list keeps both, object form first. It used to
+  // keep the last, which made `attack` unconditional: 21 of the 173 shipped
+  // `<defaultcmd>` rows resolve to a different `verify=` under the two, 20 of
+  // them `attack`, and a unit right-clicking its own town hall attacked it.
   Fixture f;
+  std::vector<std::string_view> own;
+  for (const ClassMethod& method : f.graph.at(f.unit).methods) {
+    if (method.sig == "attack") own.push_back(method.vs);
+  }
+  CHECK((own == std::vector<std::string_view>{"data/subai/unit_attack.vs",
+                                              "data/subai/unit_advance.vs"}));
+
+  // `resolved_methods` is the one-per-name view (hooks and `idle`, never
+  // overloaded): the last declaration, without the verifier.
   const std::vector<ClassMethod> methods = f.graph.resolved_methods(f.unit);
   const ClassMethod* attack = nullptr;
   std::size_t attack_rows = 0;
@@ -808,9 +815,9 @@ TEST(control_the_class_graph_drops_the_verifier_of_an_overloaded_method_sig) {
     }
   }
   REQUIRE(attack != nullptr);
-  CHECK(attack_rows == 1);                        // both declarations collapsed into one
-  CHECK(attack->vs == "data/subai/unit_advance.vs");  // the *point* form survived
-  CHECK(attack->verify.empty());                  // and its verifier went with the other one
+  CHECK(attack_rows == 1);
+  CHECK(attack->vs == "data/subai/unit_advance.vs");
+  CHECK(attack->verify.empty());
 
   // The methods that are *not* overloaded keep theirs, so this is specific to
   // the duplicate and not a general failure to read `verify=`.
@@ -832,23 +839,22 @@ TEST(a_unit_enters_its_own_building_and_captures_an_enemys) {
   const ObjectId mine = f.spawn(f.building, 1);
   const ObjectId theirs = f.spawn(f.building, 2);
 
-  // Own building: `attack_independent` and `capture` verify `IsEnemy` and fail,
-  // `attack`'s verifier is the one the class graph has dropped (so it is taken
-  // unverified -- see the pinned control above), and `enter` never gets asked.
-  // With `attack`'s verifier restored this becomes `enter`; the resolution
-  // machinery is the same either way, so the case is written against the
-  // verifier set rather than against the bug.
+  // Own building: `attack_independent`, `capture` and `attack` verify
+  // `IsEnemy` and fail -- `attack`'s object form carries its verifier (see
+  // the overload test above) -- and `enter` passes.
   TableVerifier verifier;
   verifier.pass = {"data/subai/unit_enter_verify.vs"};
   DefaultOrder order = resolve_default_order(f.world, f.table, soldier,
                                              OrderTarget{Point{5, 5}, mine}, false, &verifier);
   CHECK(order.status == DefaultOrderStatus::resolved);
-  CHECK(order.command == "attack");
-  CHECK(order.unverified == 1);
-  // The two verifiers ahead of it really were asked, in order.
-  REQUIRE(verifier.asked.size() == 2);
+  CHECK(order.command == "enter");
+  CHECK(order.unverified == 0);
+  // The verifiers ahead of it really were asked, in order.
+  REQUIRE(verifier.asked.size() == 4);
   CHECK(verifier.asked[0] == "data/subai/attack_independent_verify.vs");
   CHECK(verifier.asked[1] == "data/subai/unit_capture_verify.vs");
+  CHECK(verifier.asked[2] == "data/subai/unit_attack_verify.vs");
+  CHECK(verifier.asked[3] == "data/subai/unit_enter_verify.vs");
 
   // Enemy building: `capture` passes and nothing behind it is consulted.
   TableVerifier enemy;
@@ -2229,14 +2235,17 @@ TEST(exec_default_cmd_orders_a_list_like_a_click_and_marks_nobody) {
 }
 
 TEST(exec_default_cmd_on_an_object_receiver_runs_the_verifier_on_the_callers_scheduler) {
-  // A `Hero` target's first candidate is `attach`, whose method carries a
-  // `verify=`; `attack` behind it does not (the fixture declares it twice, as
-  // the shipped file does, and the second declaration drops the verifier --
-  // the header's overload note). So the verdict decides between the two.
+  // A `Hero` target's first candidate is `attach`, and `attack` is behind it;
+  // both methods carry a `verify=` (`attack`'s object form does: the fixture
+  // declares both forms, as the shipped file does). So the verdicts decide
+  // between the two.
   Dispatch d;
   REQUIRE(build(d.scheduler, d.registry,
                 "// bool, Obj this, Obj other\nreturn !this.IsEnemy(other);",
                 "data/subai/unit_attach_verify.vs"));
+  REQUIRE(build(d.scheduler, d.registry,
+                "// bool, Obj this, Obj other\nreturn this.IsEnemy(other);",
+                "data/subai/unit_attack_verify.vs"));
   const ObjectId mine = d.spawn(1, Point{100, 100});
   const ObjectId leader = d.world.spawn(NativeClass::hero, nullptr, d.graph.find("Hero"));
   d.world.set_position(leader, Point{300, 300});

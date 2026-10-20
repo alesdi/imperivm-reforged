@@ -1,4 +1,5 @@
-// The spatial index answers exactly what the straight scan answered.
+// The spatial index answers exactly what the straight scan answered, and in
+// the original's grid order when asked to.
 //
 // `World`'s spatial queries used to walk every object in spawn order. They now
 // take candidates from a grid (sim/spatial_index.hpp) and put them back into
@@ -9,6 +10,7 @@
 // move, spawn, die, change hands and go in and out of holders -- and across a
 // save and load, which rebuilds the grid from nothing.
 
+#include <algorithm>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -202,14 +204,39 @@ std::int32_t coordinate(Lcg& rng) {
 
 Point somewhere(Lcg& rng) { return Point{coordinate(rng), coordinate(rng)}; }
 
+/// True when `ids` are in the grid's walk order: rows of 256-unit cells top to
+/// bottom, cells left to right, and inside one cell the order the objects came
+/// into it (`sim/spatial_index.hpp`).
+bool in_grid_order(const World& w, const std::vector<ObjectId>& ids) {
+  for (std::size_t i = 1; i < ids.size(); ++i) {
+    const WorldObject* a = w.find(ids[i - 1]);
+    const WorldObject* b = w.find(ids[i]);
+    if (a == nullptr || b == nullptr) return false;
+    const std::int32_t ca = SpatialIndex::cell_of(a->state.position);
+    const std::int32_t cb = SpatialIndex::cell_of(b->state.position);
+    if (ca > cb) return false;
+    if (ca == cb && a->spatial.arrival >= b->spatial.arrival) return false;
+  }
+  return true;
+}
+
 struct Tally {
   std::uint64_t queries = 0;
   std::uint64_t mismatches = 0;
   std::uint64_t nonempty = 0;
+  std::uint64_t reordered = 0;  ///< grid answers that were not in the grid's order
   void compare(const std::vector<ObjectId>& got, const std::vector<ObjectId>& want) {
     ++queries;
     if (!want.empty()) ++nonempty;
     if (got != want) ++mismatches;
+  }
+  /// A grid-order answer: the scan's set, in the walk's order.
+  void compare_grid(const World& w, const std::vector<ObjectId>& got,
+                    const std::vector<ObjectId>& want) {
+    std::vector<ObjectId> sorted = got;
+    std::sort(sorted.begin(), sorted.end());
+    compare(sorted, want);
+    if (!in_grid_order(w, got)) ++reordered;
   }
 };
 
@@ -265,6 +292,33 @@ void ask_everything(Lcg& rng, const World& w, const Graph& g, Tally& tally) {
     tally.compare(got, scan_player(w, f, player, c, r));
     w.objects_of_class_for_player_in_rect(f, player, l, t, rr, b, got);
     tally.compare(got, scan_player_rect(w, f, player, l, t, rr, b));
+
+    // The same questions in the grid's order.
+    constexpr SweepOrder grid = SweepOrder::grid;
+    w.objects_in_radius(c, r, f, got, grid);
+    tally.compare_grid(w, got, scan_radius(w, c, r, f));
+    w.objects_in_rect(l, t, rr, b, f, got, grid);
+    tally.compare_grid(w, got, scan_rect(w, l, t, rr, b, f));
+    w.objects_located_in_rect(l, t, rr, b, got, grid);
+    tally.compare_grid(w, got, scan_located(w, l, t, rr, b));
+    w.objects_in_sight(eye, r, f, got, grid);
+    tally.compare_grid(w, got, scan_sight(w, eye, r, f));
+    w.objects_of_class_for_player(f, player, c, r, got, grid);
+    std::vector<ObjectId> want = scan_player(w, f, player, c, r);
+    // The whole map through the grid finds nothing held, nor anything at the
+    // held marker.
+    if (r <= 0) {
+      want.erase(std::remove_if(want.begin(), want.end(),
+                                [&](ObjectId id) {
+                                  const WorldObject* slot = w.find(id);
+                                  return slot->state.is_held() ||
+                                         slot->state.position == kHeldPosition;
+                                }),
+                 want.end());
+    }
+    tally.compare_grid(w, got, want);
+    w.objects_of_class_for_player_in_rect(f, player, l, t, rr, b, got, grid);
+    tally.compare_grid(w, got, scan_player_rect(w, f, player, l, t, rr, b));
   }
 }
 
@@ -379,10 +433,19 @@ TEST(spatial_index_answers_every_query_exactly_as_the_straight_scan) {
       Tally after;
       ask_everything(fork, loaded, g, after);
       CHECK(after.mismatches == 0);
+      CHECK(after.reordered == 0);
       CHECK(after.nonempty > 0);
+      // The order inside every cell came back with the stamps: the whole
+      // map's walk is the saved world's, id for id.
+      std::vector<ObjectId> before;
+      std::vector<ObjectId> since;
+      world.objects_located_in_rect(-40000, -40000, 40000, 40000, before, SweepOrder::grid);
+      loaded.objects_located_in_rect(-40000, -40000, 40000, 40000, since, SweepOrder::grid);
+      CHECK(before == since);
     }
   }
   CHECK(tally.mismatches == 0);
+  CHECK(tally.reordered == 0);
   CHECK(inconsistent == 0);
   // And the run was a real one: queries answered with something, and objects
   // were held while they were asked about.
@@ -418,3 +481,94 @@ TEST(spatial_index_finds_no_held_object_and_files_none) {
 }
 
 }  // namespace
+
+namespace {
+
+/// Four objects in two cells of row 0 and one of row 1, spawned `a`, `b`,
+/// `c`, `d`.
+struct Quad {
+  World world;
+  ObjectId a = kNoObject;
+  ObjectId b = kNoObject;
+  ObjectId c = kNoObject;
+  ObjectId d = kNoObject;
+  Quad() {
+    a = world.spawn(NativeClass::unit, nullptr);
+    b = world.spawn(NativeClass::unit, nullptr);
+    c = world.spawn(NativeClass::unit, nullptr);
+    d = world.spawn(NativeClass::unit, nullptr);
+    (void)world.set_position(a, Point{600, 50});  // row 0, cell 2
+    (void)world.set_position(b, Point{50, 300});  // row 1, cell 0
+    (void)world.set_position(c, Point{10, 10});   // row 0, cell 0
+    (void)world.set_position(d, Point{20, 20});   // row 0, cell 0, after c
+    for (const ObjectId id : {a, b, c, d}) (void)world.set_health(id, 100);  // alive
+  }
+  std::vector<ObjectId> walk(SweepOrder order) const {
+    std::vector<ObjectId> out;
+    world.objects_in_rect(0, 0, 1000, 1000, ClassFilter{}, out, order);
+    return out;
+  }
+};
+
+}  // namespace
+
+TEST(the_grid_walks_rows_then_cells_then_each_cells_list) {
+  // 0x0053d030: 256-unit cells, 128 to a row. Every sweep walks the box's
+  // rows top to bottom and each row's cells left to right (0x004fde60 and the
+  // rest), and a cell's list from its head.
+  Quad q;
+  CHECK((q.walk(SweepOrder::grid) == std::vector<ObjectId>{q.c, q.d, q.a, q.b}));
+  CHECK((q.walk(SweepOrder::spawn) == std::vector<ObjectId>{q.a, q.b, q.c, q.d}));
+  // A 255/256 border: x = 255 is cell 0, x = 256 cell 1.
+  (void)q.world.set_position(q.a, Point{256, 0});
+  (void)q.world.set_position(q.b, Point{255, 0});
+  CHECK((q.walk(SweepOrder::grid) == std::vector<ObjectId>{q.c, q.d, q.b, q.a}));
+}
+
+TEST(a_cell_lists_its_objects_in_the_order_they_came_into_it) {
+  // 0x0053f000 relinks an object only when its new point is in another cell:
+  // out of the old list (0x0053d630) and onto the new one's tail (0x0053ce50).
+  Quad q;
+  // Inside its cell: the list is not touched, so `c` stays ahead of `d`.
+  (void)q.world.set_position(q.c, Point{200, 200});
+  CHECK((q.walk(SweepOrder::grid) == std::vector<ObjectId>{q.c, q.d, q.a, q.b}));
+  // Out and back: `c` comes in behind `d`.
+  (void)q.world.set_position(q.c, Point{5000, 5000});
+  (void)q.world.set_position(q.c, Point{30, 30});
+  CHECK((q.walk(SweepOrder::grid) == std::vector<ObjectId>{q.d, q.c, q.a, q.b}));
+  // Into a holder and out again: the same, a held object being in no cell.
+  const ObjectId fort = q.world.spawn(NativeClass::building, nullptr);
+  (void)q.world.set_position(fort, Point{9000, 9000});
+  CHECK(q.world.put_in_holder(q.d, fort));
+  CHECK(q.world.remove_from_holder(q.d, Point{40, 40}));
+  CHECK((q.walk(SweepOrder::grid) == std::vector<ObjectId>{q.c, q.d, q.a, q.b}));
+  CHECK(q.world.spatial_index_consistent());
+}
+
+TEST(a_query_answers_in_grid_order_and_a_load_keeps_it) {
+  // The area queries' refreshes walk the grid (0x004fde60 for a circle), so
+  // `ObjsInCircle` lists in the walk's order, cell lists and all; and the
+  // order of a cell's list, being history, is saved.
+  Quad q;
+  (void)q.world.set_position(q.c, Point{5000, 5000});
+  (void)q.world.set_position(q.c, Point{30, 30});
+  const std::vector<ObjectId> expected{q.d, q.c, q.a, q.b};
+  const ObjectId circle = q.world.create_query(objs_in_circle(Point{0, 0}, 2000, ClassFilter{}));
+  std::vector<ObjectId> got;
+  q.world.evaluate_query(circle, got);
+  CHECK(got == expected);
+
+  std::vector<std::byte> bytes;
+  q.world.serialize(bytes);
+  World loaded;
+  CHECK(loaded.deserialize(bytes).ok());
+  CHECK(loaded.spatial_index_consistent());
+  std::vector<ObjectId> again;
+  loaded.objects_in_rect(0, 0, 1000, 1000, ClassFilter{}, again, SweepOrder::grid);
+  CHECK(again == expected);
+  // And the next arrival is stamped after everything already there.
+  (void)loaded.set_position(q.d, Point{5000, 5000});
+  (void)loaded.set_position(q.d, Point{40, 40});
+  loaded.objects_in_rect(0, 0, 1000, 1000, ClassFilter{}, again, SweepOrder::grid);
+  CHECK((again == std::vector<ObjectId>{q.c, q.d, q.a, q.b}));
+}

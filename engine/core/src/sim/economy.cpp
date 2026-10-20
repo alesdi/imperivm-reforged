@@ -20,6 +20,7 @@
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/gaika_table.hpp"
 #include "imperivm/core/sim/globals.hpp"
+#include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/array.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/match.hpp"
@@ -162,6 +163,27 @@ bool EconomySystem::add_building(World& world, SettlementId id, ObjectId buildin
   return true;
 }
 
+/// A settlement's buildings in the order of its member deque: `gbr.exe` keeps
+/// them in an `ObjList` at `[settlement+0x60]` (deque `+0x6c..+0x78`), appended
+/// as each joins, and every walk over them -- `BestGate` 0x004284e0 through
+/// the gate filter 0x00428360, `MostDamagedBuilding` 0x005c38d0,
+/// `Settlement::Buildings` 0x005c3d40 -- reads it front to back. Here the
+/// membership is the back-link (`World::buildings_in_settlement`) and the
+/// order is the roll's, `Settlement::buildings`, which `add_building` appends
+/// to in the same way; a back-linked building the roll does not list (none on
+/// a loaded map) comes after, in id order.
+void settlement_buildings(const World& world, const Settlement& s, std::vector<ObjectId>& out) {
+  world.buildings_in_settlement(s.object, ClassFilter{}, out);
+  const auto place = [&s](ObjectId id) {
+    for (std::size_t i = 0; i < s.buildings.size(); ++i) {
+      if (s.buildings[i].object == id) return i;
+    }
+    return s.buildings.size();
+  };
+  std::stable_sort(out.begin(), out.end(),
+                   [&](ObjectId a, ObjectId b) { return place(a) < place(b); });
+}
+
 namespace {
 
 /// Where `Settlement::Units`'s aliased handle points.
@@ -173,13 +195,28 @@ namespace {
 /// move every row it holds.
 ///
 /// Null for a settlement that has gone, which the pool reads as an empty list.
+///
+/// The settlement object itself is the owner of the second alias,
+/// `Settlement::Buildings` (0x005c3d40 aliases the `ObjList` at
+/// `[settlement+0x60]`, the member deque): that resolves to the settlement's
+/// buildings in roll order (`settlement_buildings`), refreshed here on every
+/// access so it is as live as the roll it reads.
 std::vector<ObjectId>* resolve_holder_roster(void* user, ObjectId owner) {
   World* world = static_cast<World*>(user);
   if (world == nullptr) return nullptr;
   EconomySystem* economy = economy_of(*world);
   if (economy == nullptr) return nullptr;
   Settlement* settlement = economy->settlements().for_object(owner);
-  if (settlement == nullptr || settlement->holder.object != owner) return nullptr;
+  if (settlement == nullptr) return nullptr;
+  if (settlement->object == owner) {
+    std::vector<ObjectId> now;
+    settlement_buildings(*world, *settlement, now);
+    // Rewritten only on a change, so a span taken from an earlier access is
+    // not moved under its reader by a later one that reads the same.
+    if (now != settlement->buildings_view) settlement->buildings_view = std::move(now);
+    return &settlement->buildings_view;
+  }
+  if (settlement->holder.object != owner) return nullptr;
   return &settlement->holder.units;
 }
 
@@ -1201,18 +1238,17 @@ HostOutcome load_cargo(CallContext& ctx) {
     // within the mule's sight (`[mule+0xd0]`, centre distance) that is a
     // `CVXTownHall` the mule's owner supports and that the mule can see --
     // 0x005a7870, a nonzero sight at least the distance less both class
-    // radii. The sweep walks 256-unit cells a row at a time, top to bottom
-    // and left to right; within a cell it walks the cell's own list, whose
-    // order was not read, and here goes by id (labelled). No central-building
-    // test: any town hall the mule stands by will do.
+    // radii. The sweep walks the world's grid: 256-unit cells a row at a
+    // time, top to bottom and left to right, and each cell's list in the
+    // order its objects came into it (`docs/formats/spatial-index.md`), and
+    // the first that passes is the answer. No central-building test: any
+    // town hall the mule stands by will do.
     const Point at = mule->state.position;
     const std::int32_t sight = mule->sight;
     if (sight == 0) return HostOutcome::ok_void();
     std::vector<ObjectId> near;
-    (void)world->objects_in_radius(at, sight, ClassFilter{}, near);
+    (void)world->objects_in_radius(at, sight, ClassFilter{}, near, SweepOrder::grid);
     const WorldObject* best = nullptr;
-    std::int64_t best_row = 0;
-    std::int64_t best_col = 0;
     for (const ObjectId id : near) {
       const WorldObject* slot = world->find(id);
       if (slot == nullptr || !slot->state.flags.is_building || !is_hall(slot)) continue;
@@ -1223,12 +1259,8 @@ HostOutcome load_cargo(CallContext& ctx) {
       const std::int64_t edge = isqrt(dx * dx + dy * dy) - class_int(*world, *mule, "radius") -
                                 class_int(*world, *slot, "radius");
       if (edge > sight) continue;
-      const std::int64_t row = p.y / 256;
-      const std::int64_t col = p.x / 256;
-      if (best != nullptr && (row > best_row || (row == best_row && col >= best_col))) continue;
       best = slot;
-      best_row = row;
-      best_col = col;
+      break;
     }
     if (best == nullptr) return HostOutcome::ok_void();
     here = economy->settlements().for_object(best->settlement);
@@ -2287,10 +2319,11 @@ struct CounterRow {
 /// six weights back as the odds of training each of its race's unit types.
 ///
 /// `0x0042eef0` resolves the settlement (an invalid one prints and returns
-/// with `W` untouched), then tries the AI's ten army rows at `[ai+0x30]` --
-/// the enemy formations it has *seen*, which this engine does not keep -- and,
-/// when none of them answers, falls back to a census (0x0041c400 ->
-/// 0x0041c320 -> 0x0041c0e0), which is what is reproduced here:
+/// with `W` untouched), then tries the owner's AI's ten army rows -- ranks 1
+/// to 10 of its GAIKA view `[ai+0x30]`, the independents' camps among the
+/// nodes it ranks highest (0x0041c420, below in the body) -- and, when none of
+/// them answers, falls back to a census (0x0041c400 -> 0x0041c320 ->
+/// 0x0041c0e0):
 ///
 ///   * for every countered class `C` of the counter table, `acc[C]` is the
 ///     number of `C` standing for every **active** player (`[p+0x290] == 1`)
@@ -2304,9 +2337,11 @@ struct CounterRow {
 ///     `coeff(k counters C) * uncovered` -- `coeff` being the table's own
 ///     number, 0 for a pair it does not list.
 ///
-/// `W` is **added to, never zeroed**: the zeroing is the army rows' path
-/// (0x0041c420), and the census adds onto whatever the script declared, which
-/// is an empty array. The `>> 10` is an arithmetic shift, so a mass under
+/// The census **adds to `W`, never zeroes it**: the zeroing is the army rows'
+/// (0x0041c420 writes six zeros before it looks at a node), so the census adds
+/// onto those zeros when the owner has an AI with a second record, and onto
+/// whatever the script declared -- an empty array -- when it has none. The
+/// `>> 10` is an arithmetic shift, so a mass under
 /// 1,024 cost units contributes nothing, and a well-countered one is skipped
 /// rather than subtracted. A settlement whose owner has no race in the
 /// catalog answers nothing.
@@ -2360,6 +2395,9 @@ HostOutcome get_counter_units_impl(CallContext& ctx) {
   }
 
   ArrayPool& arrays = world->arrays();
+  // 0x0041c0e0: what a mass of enemy classes (by table row) asks the owner's
+  // race to train, added onto `W`.
+  const auto distribute = [&](const std::vector<std::int32_t>& acc) {
   for (std::size_t i = 0; i < rows.size(); ++i) {
     if (acc[i] < shape[i].threshold) continue;
     std::int64_t covered = 0;
@@ -2381,6 +2419,78 @@ HostOutcome get_counter_units_impl(CallContext& ctx) {
                        Value::integer(static_cast<std::int32_t>(had + coeff * uncovered)));
     }
   }
+  };
+  const auto row_of = [&](ClassIndex cls) -> std::int32_t {
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      if (rows[i] == cls) return static_cast<std::int32_t>(i);
+    }
+    return -1;
+  };
+
+  // The army rows (0x0042eef0's loop): ranks 1 to 10 of the owner's AI's GAIKA
+  // view, `[ai+0x30]`, the list `SetPriority` keeps in descending priority
+  // (0x0041cf00) -- the ten nodes it ranks highest. For each, 0x0041c420
+  // zeroes `W[0..5]`, then answers only for a node whose settlement is the
+  // independents' (player 14) and is an outpost or a Teuton tent: the mass it
+  // counts is what the outpost is declared to hold (`defenders_max_N` of
+  // `defender_cls_N`, its central building's class, as `CVXOutpost` copies
+  // them), or for a tent every `TTeutonArcher` and `TTeutonRider` player 14
+  // has. A class the counter table does not list adds nothing. The first node
+  // that counts anything is the answer, and nothing else is asked.
+  //
+  // The owner's AI object (`[player+0x88]`) is what holds the list, so a
+  // player with no AI has no rows: its view is empty until `AIStart` seeds it
+  // and `AIStop` clears it.
+  const AiSystem* ai = ai_system_of(*world);
+  const GaikaView* seen = ai == nullptr ? nullptr : ai->gaika_view(owner);
+  const EconomySystem* economy = economy_of(*world);
+  if (seen != nullptr && economy != nullptr) {
+    constexpr PlayerId kIndependents = 14;
+    const GaikaView& view = *seen;
+    for (std::int32_t rank = 1; rank < 11; ++rank) {
+      if (rank >= view.size()) continue;
+      const GaikaNode* node = world->gaika().find(view.ranked(rank));
+      for (std::int32_t k = 0; k < 6; ++k) (void)arrays.set(out, k, Value::integer(0));
+      const Settlement* there =
+          node == nullptr ? nullptr : economy->settlements().for_object(node->settlement);
+      if (there == nullptr || there->owner != kIndependents) continue;
+      const WorldObject* central = world->find(there->anchor);
+      std::vector<std::int32_t> mass(rows.size(), 0);
+      bool counted = false;
+      const auto add = [&](ClassIndex cls, std::int32_t n) {
+        const std::int32_t row = cls == kNoClass ? -1 : row_of(cls);
+        if (row < 0) return;
+        mass[static_cast<std::size_t>(row)] += n;
+        counted = true;
+      };
+      if (there->is_outpost()) {
+        if (central == nullptr || central->class_index == kNoClass) continue;
+        for (const char* slot : {"1", "2"}) {
+          std::int32_t most = 0;
+          const std::string_view declared =
+              graph->property(central->class_index, std::string("defenders_max_") + slot);
+          if (declared.empty() || !parse_int(declared, most) || most <= 0) continue;
+          const std::string_view name =
+              graph->property(central->class_index, std::string("defender_cls_") + slot);
+          if (name.empty()) continue;
+          add(graph->lookup(name), most);
+        }
+      } else if (there->is_teuton_tent()) {
+        for (const char* name : {"TTeutonArcher", "TTeutonRider"}) {
+          const ClassIndex cls = graph->lookup(name);
+          add(cls, cls == kNoClass ? 0 : count_of(kIndependents, cls));
+        }
+      } else {
+        continue;
+      }
+      if (counted) {
+        distribute(mass);
+        return HostOutcome::ok_void();
+      }
+    }
+  }
+
+  distribute(acc);
   return HostOutcome::ok_void();
 }
 
@@ -2490,8 +2600,10 @@ namespace {
 /// nearer the unit than the best. Then the defenders: the settlement holder's
 /// units, and when fewer than two of the defender class are inside, the units
 /// of that class within the building's `range` (`[bld+0xd4]`) around it
-/// (0x004233b0) -- **two** are needed, the last one met being the defender
-/// remembered. The winner gets `approach` set on the unit, aimed at the
+/// (0x004233b0, visitor 0x00421de0: a unit, alive, the independents' own --
+/// the sweep's player record is player fourteen's -- of either defender class,
+/// not a spawn template), counting on from the holder's count and **stopping
+/// at two**: the unit that made the count two is the defender remembered. The winner gets `approach` set on the unit, aimed at the
 /// building (`vtbl+0xb8` with 1, `SetCommand`), then `engage` appended --
 /// or, for the Iberian outpost, `engage_unit_type_exclusive` aimed at the
 /// defender -- and the call answers **true**; with no winner, false and
@@ -2499,9 +2611,10 @@ namespace {
 ///
 /// The walk here is the roll in reverse, as the original's is, so an equal
 /// rank at an equal distance keeps the later settlement in both; the sweep
-/// around the building is ascending id where the original's is cell order,
-/// which can change *which* defender the exclusive engage names and nothing
-/// else.
+/// around the building walks the world's grid in its order (rows of 256-unit
+/// cells, cells, each cell's list in arrival order;
+/// `docs/formats/spatial-index.md`), as 0x004233b0 does, which decides *which*
+/// defender the exclusive engage names.
 HostOutcome attack_set_for_training_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("AttackSetForTraining: no world");
@@ -2585,16 +2698,18 @@ HostOutcome attack_set_for_training_impl(CallContext& ctx) {
     }
     if (found < 2) {
       std::vector<ObjectId> around;
-      world->objects_in_radius(there, class_int(*world, *building, "range"), ClassFilter{}, around);
+      world->objects_in_radius(there, class_int(*world, *building, "range"), ClassFilter{}, around,
+                               SweepOrder::grid);
       for (const ObjectId id : around) {
         const WorldObject* slot = world->find(id);
         if (slot == nullptr || !slot->state.flags.is_unit || !is_defender(*slot)) continue;
-        // A unit inside a holder is located at the holder here, where the
-        // original's cell sweep does not see it at all: the garrison was
-        // counted above and is not counted twice.
-        if (slot->state.holder != kNoObject || s.holder.contains(id)) continue;
+        if (object_is_dead(*slot) || slot->state.owner != kIndependents) continue;
+        // A held unit is in no grid cell, and the garrison was counted above:
+        // one this engine's roll lists without its world holder is not
+        // counted twice.
+        if (s.holder.contains(id)) continue;
         last = id;
-        ++found;
+        if (++found >= 2) break;
       }
     }
     if (found < 2) continue;
@@ -3482,7 +3597,7 @@ void give_object_to(CallContext& ctx, EconomySystem* economy, World& world, Obje
 
 [[nodiscard]] std::vector<ObjectId> settlement_gates(const World& world, const Settlement& s) {
   std::vector<ObjectId> buildings;
-  world.buildings_in_settlement(s.object, ClassFilter{}, buildings);
+  settlement_buildings(world, s, buildings);
   std::vector<ObjectId> gates;
   for (const ObjectId id : buildings) {
     const WorldObject* slot = world.find(id);
@@ -4080,29 +4195,18 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // too, and its miss path is the same shape as `Units`' -- a printed
     // diagnostic and a **fresh empty list**, never a refusal.
     //
-    // **This one snapshots, and the divergence is deliberate.** Three reasons,
-    // in the order they decided it:
-    //
-    //   1. No shipped site can tell. All nine take the list and read it --
-    //      `for (i=0; i<olBuildings.count; i+=1)` in five village and mule
-    //      verifiers, `blds = sett.Buildings` in the two outpost scripts. Not
-    //      one calls `Clear`, `Add`, `Remove` or `ClearDead` on it. `Units`
-    //      aliases because `TOWNHALL_BEHAVIOR_GUARD.VS` *can* tell and the
-    //      faithful reading is what that file gets; there is no such file here.
-    //   2. `ObjListPool::AliasResolver` hands back a `std::vector<ObjectId>*`,
-    //      and a settlement's roll is `std::vector<SettlementBuilding>` -- rows
-    //      carrying a per-building `max_health` the anchor's capture arithmetic
-    //      reads. Aliasing would mean keeping a parallel `vector<ObjectId>`
-    //      beside it, which puts one fact in two places: exactly the drift the
-    //      alias exists to prevent.
-    //   3. The membership here is the **back-link**, not the roll. That was
-    //      chosen while `Settlement::buildings` was empty at load; the loader
-    //      now files every member building into the roll (sim/session.cpp, in
-    //      document order), so the two agree on a loaded map and differ only
-    //      for a building that gained a back-link without `add_building`.
-    //      (The economy-1 audit read 0x005c3d40: the list it aliases is the
-    //      ObjList embedded at `+0x60`, whose deque is the `+0x6c..+0x78` one
-    //      `BestBarrack` walks -- the roll.)
+    // **So does this one.** The alias's owner is the settlement object, and
+    // `EconomySystem`'s resolver answers it with the settlement's buildings in
+    // the deque's order (`settlement_buildings`: the roll's order, the
+    // back-link's membership), refreshed on every access. So a list held
+    // across a building's joining sees it, as the original's does. What is not
+    // carried is a write *through* the handle: the view is rebuilt from the
+    // roll on the next access, where the original's `Add` or `Remove` would
+    // change the settlement's own deque. Every one of the nine shipped sites
+    // only reads it -- `for (i=0; i<olBuildings.count; i+=1)` in five village
+    // and mule verifiers, `blds = sett.Buildings` in the two outpost scripts
+    // -- and the roll is rows carrying a per-building `max_health`, which a
+    // script's bare handle could not supply.
     //
     // The filter is match-all: the registration is `[23, 1, 27]`, one argument
     // and it is the receiver, so there is no class to filter on.
@@ -4111,15 +4215,12 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        World* world = world_of(ctx);
        if (world == nullptr) return HostOutcome::failed("Buildings: no world");
        ObjListPool& pool = objlist_pool_of(*world);
-       const ObjListId id = pool.acquire_temporary(ctx.script);
        const Settlement* s = receiver(ctx);
        // The diagnostic-and-empty-list path, not a refusal.
-       if (s != nullptr) {
-         if (std::vector<ObjectId>* out = pool.mutable_items(id)) {
-           world->buildings_in_settlement(s->object, ClassFilter{}, *out);
-         }
+       if (s == nullptr || s->object == kNoObject) {
+         return HostOutcome::ok_with(make_objlist_value(pool.acquire_temporary(ctx.script)));
        }
-       return HostOutcome::ok_with(make_objlist_value(id));
+       return HostOutcome::ok_with(make_objlist_value(pool.acquire_alias(ctx.script, s->object)));
      }},
     // `set.ObjectsAround("Military")` -- 16 sites in 11 scripts, the sole
     // blocker of seven, and **a fourth name for a collector this engine
@@ -5166,9 +5267,8 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // cell sweep (0x005eb4b0) of the mule's sight (`[mule+0xd0]`) for the
     // first `CVXTownHall` it can see (0x005a7870) whose owner it grants
     // share-support -- so a mule standing beside a friendly town loads from it
-    // without entering. Reproduced in `load_cargo`, with one labelled reading:
-    // two halls in one 256-unit cell are taken by id, the cell's own list
-    // order not having been read.
+    // without entering. Reproduced in `load_cargo`, in the grid's walk order,
+    // a cell's own list included.
     // `set.CreateBoatGold(n)` / `CreateBoatFood(n)` -- 3 sites each, and
     // between them the whole of four scripts: `CREATE_GOLD_BOAT_BIG.VS` and its
     // three siblings differ only in `1000` against `250` and which of the two
@@ -5417,9 +5517,8 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // A settlement's gates are the members of its building list that are
     // `CVXGate`s: 0x00428360 walks the deque at `[settlement+0x68]` and asks
     // each member through a dynamic type query. Here that is
-    // `World::buildings_in_settlement` filtered on `NativeClass::gate`, which
-    // answers in ascending id where the original answers in the order the
-    // buildings joined -- observable only through `BestGate`'s tie, which
+    // `settlement_buildings` filtered on `NativeClass::gate`, in the order the
+    // buildings joined, as the deque's -- which `BestGate`'s tie reads: it
     // keeps the earlier of two equal scores.
     //
     // `Gate::Inside(squad)` (0x00429310) is below, beside `NumGates`.
@@ -5438,7 +5537,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
            ctx.arg(0).is_object() && ctx.arg(0).as_object().type == kTypeSettlement;
        if (Settlement* s = settlement ? receiver(ctx) : nullptr) {
          std::vector<ObjectId> buildings;
-         world->buildings_in_settlement(s->object, ClassFilter{}, buildings);
+         settlement_buildings(*world, *s, buildings);
          for (const ObjectId id : buildings) {
            if (ObjectState* state = world->mutable_state(id)) state->damage_taken = 0;
          }
@@ -5463,7 +5562,7 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        if (s == nullptr) return HostOutcome::ok_with(invalid_handle());
        World& world = *world_of(ctx);
        std::vector<ObjectId> buildings;
-       world.buildings_in_settlement(s->object, ClassFilter{}, buildings);
+       settlement_buildings(world, *s, buildings);
        ObjectId best = kNoObject;
        std::int32_t most = 0;
        for (const ObjectId id : buildings) {
@@ -5699,31 +5798,6 @@ ObjectId make_mule(World& world, SettlementId id, Resource kind, std::int32_t am
   world.set_owner(carrier, s->owner);
   (void)world.put_in_holder(carrier, s->holder.object);
   return carrier;
-}
-
-std::int32_t draw_from_food_wagon(World& world, std::span<const ObjectId> members,
-                                  std::int32_t want) {
-  if (want <= 0 || members.empty()) return 0;
-  const CommandSystem* commands = command_system(world);
-  if (commands == nullptr) return 0;
-  const WorldObject* fullest = nullptr;
-  for (const WorldObject& slot : world.objects()) {
-    if (slot.object == nullptr || !slot.object->is_a(NativeClass::wagon)) continue;
-    if (slot.state.health <= 0 || slot.state.cargo <= 0) continue;
-    if (slot.state.cargo_resource != static_cast<std::int32_t>(Resource::food)) continue;
-    const CommandQueue* queue = commands->find(slot.id);
-    const Command* running = queue == nullptr ? nullptr : queue->running();
-    if (running == nullptr || running->arg_kind != CommandArgKind::object) continue;
-    if (std::find(members.begin(), members.end(), running->object) == members.end()) continue;
-    // The fullest, and the first met of two that are equally full: 0x005d58d0
-    // replaces its pick only with a wagon carrying strictly more.
-    if (fullest != nullptr && slot.state.cargo <= fullest->state.cargo) continue;
-    fullest = &slot;
-  }
-  if (fullest == nullptr) return 0;
-  const std::int32_t taken = std::min(want, fullest->state.cargo);
-  set_wagon_cargo(world, fullest->id, fullest->state.cargo - taken);
-  return taken;
 }
 
 void set_wagon_cargo(World& world, ObjectId wagon, std::int32_t value) {

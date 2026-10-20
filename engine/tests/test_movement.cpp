@@ -318,7 +318,6 @@ TEST(a_fresh_move_state_takes_its_speed_from_the_class) {
   const MoveState* state = movement.find(walker);
   REQUIRE(state != nullptr);
   CHECK(state->speed == 120);
-  CHECK(state->formation_radius == 31);
 
   // And it really walks, which a speed of zero would not.
   const Point before = world.resolve_position(walker);
@@ -332,7 +331,6 @@ TEST(a_fresh_move_state_takes_its_speed_from_the_class) {
   (void)movement.order_goto(world, statue, Point{200, 300}, 0, 0);
   REQUIRE(movement.find(statue) != nullptr);
   CHECK(movement.find(statue)->speed == 0);
-  CHECK(movement.find(statue)->formation_radius == kDefaultFormationRadius);
 
   // With no class graph at all the defaults stand, which is what every test in
   // this file that sets `speed` by hand depends on.
@@ -1031,20 +1029,75 @@ TEST(the_pathfinder_does_not_depend_on_its_scratch_state) {
   CHECK(repeated.expanded == reference.expanded);
 }
 
-TEST(an_unreachable_goal_stays_within_budget) {
-  // A goal sealed behind a solid wall floods the search. Without a budget it
-  // would expand every one of a million cells.
+TEST(a_reachable_goal_is_found_whatever_the_budget) {
+  // `gbr.exe`'s route search reaches every goal it can: the smart
+  // pathfinder's area search is budgeted at 65,536 areas (0x00413690), which
+  // no map comes near. A search over the grid alone therefore takes no
+  // budget: the grid's regions say beforehand that it will arrive. This one
+  // has to go the long way round a wall, far beyond fifty nodes.
+  ObstructionGrid grid(64, 64);
+  for (std::int32_t y = 0; y < 60; ++y) grid.set_cell(32, y, true);
+
+  PathFinder finder;
+  PathRequest request;
+  request.start = Point{5 * 16 + 8, 5 * 16 + 8};
+  request.goal = Point{60 * 16 + 8, 5 * 16 + 8};
+  request.node_budget = 50;
+  const Path path = finder.find(grid, request);
+  CHECK(path.status == PathStatus::found);
+  REQUIRE(!path.waypoints.empty());
+  CHECK(path.waypoints.back() == request.goal);
+  CHECK(path.expanded > 50);
+}
+
+TEST(an_unreachable_goal_answers_the_reachable_cell_nearest_it_without_a_flood) {
+  // A goal sealed behind a solid wall is in a region the start does not
+  // reach. The original answers status 2 with a route to the area nearest
+  // the goal (0x004138d0: 0x00413690's best area, entered where the line from
+  // the goal first meets it, 0x0040e500); here, to the reachable cell whose
+  // centre is nearest the goal point -- found without flooding the start's
+  // side to learn that the goal is not on it.
   ObstructionGrid grid(64, 64);
   for (std::int32_t y = 0; y < 64; ++y) grid.set_cell(32, y, true);
 
   PathFinder finder;
   PathRequest request;
   request.start = Point{5 * 16 + 8, 30 * 16 + 8};
-  request.goal = Point{60 * 16 + 8, 30 * 16 + 8};
-  request.node_budget = 500;
+  request.goal = Point{60 * 16 + 8, 40 * 16 + 3};
   const Path path = finder.find(grid, request);
   CHECK(path.status == PathStatus::partial);
-  CHECK(path.expanded <= 500);
+  REQUIRE(!path.waypoints.empty());
+  CHECK(path.waypoints.back() == (Point{31 * 16 + 8, 40 * 16 + 8}));
+  CHECK(path.length > 0);
+  // The start's side holds 2,048 cells; the search goes straight across it.
+  CHECK(path.expanded < 200);
+
+  // Standing on that cell already, there is nowhere nearer to go.
+  PathRequest again = request;
+  again.start = Point{31 * 16 + 8, 40 * 16 + 8};
+  const Path stay = finder.find(grid, again);
+  CHECK(stay.status == PathStatus::partial);
+  CHECK(stay.waypoints.size() == 1);
+  CHECK(stay.length == 0);
+}
+
+TEST(a_grids_regions_follow_its_cells) {
+  // Four-connected: two free cells that touch only at a corner are apart,
+  // because the search steps diagonally only past two free orthogonals.
+  ObstructionGrid grid(4, 4);
+  for (std::int32_t i = 0; i < 4; ++i) {
+    for (std::int32_t j = 0; j < 4; ++j) grid.set_cell(i, j, true);
+  }
+  grid.set_cell(0, 0, false);
+  grid.set_cell(1, 1, false);
+  CHECK(grid.region_of(0, 0) != 0);
+  CHECK(grid.region_of(1, 1) != 0);
+  CHECK(grid.region_of(0, 0) != grid.region_of(1, 1));
+  CHECK(grid.region_of(2, 2) == 0);   // blocked
+  CHECK(grid.region_of(-1, 0) == 0);  // off the grid
+  // A change to the grid is seen at once.
+  grid.set_cell(1, 0, false);
+  CHECK(grid.region_of(0, 0) == grid.region_of(1, 1));
 }
 
 // --------------------------------------------------------------------------
@@ -1094,10 +1147,14 @@ TEST(the_formation_table_reads_what_the_file_declares) {
   CHECK(front->height == 1);
   CHECK(front->bonus_level == 4);
   CHECK(front->offset_front_line_y == 30);
-  CHECK(front->placement_of("Unit") == FormationPlacement::front_line);
-  CHECK(front->placement_of("Peasant") == FormationPlacement::central_block);
-  // A class the formation does not mention takes the central block.
-  CHECK(front->placement_of("Bowman") == FormationPlacement::central_block);
+  // The `<Class>` entries in file order, each with its three weights.
+  REQUIRE(front->roles.size() == 2);
+  CHECK(front->roles[0].class_name == "Unit");
+  CHECK(front->roles[0].front == 1);
+  CHECK(front->roles[0].central == 0);
+  CHECK(front->roles[1].class_name == "Peasant");
+  CHECK(front->roles[1].central == 1);
+  CHECK(table->find("Cavalry core")->roles[0].wings == 1);
 
   // `SetFormation(cmdparam)` passes map-authored strings, so lookup folds case.
   CHECK(table->find("cavalry core") != nullptr);
@@ -1137,124 +1194,255 @@ TEST(the_bonus_attributes_land_where_the_executable_puts_them) {
   CHECK(third->bonus_attack == 4);
 }
 
-TEST(a_line_formation_puts_everyone_abreast) {
-  Result<FormationTable> table = FormationTable::parse(as_bytes(kFormationsXml));
-  REQUIRE(table.ok());
-  const FormationClassDef* line = table->find("Line");
-  REQUIRE(line != nullptr);
+namespace {
 
-  std::vector<FormationMember> members(6);
-  for (FormationMember& member : members) {
-    member.placement = FormationPlacement::front_line;
-    member.formation_radius = kDefaultFormationRadius;
+/// The classes the layout tests lay: a root `Unit` with the shipped spacing
+/// radius, a hero with the shipped `radius` of 45, and three kinds of
+/// soldier with their own `formation_priority`, one of them wider.
+ClassGraph layout_graph() {
+  ClassGraph graph;
+  graph.add(as_bytes(R"(<class id="Unit" cpp_class="CVXUnit" parent="">
+      <properties formation_radius="26" radius="15"/></class>)"),
+            "unit.sc.xml");
+  graph.add(as_bytes(R"(<class id="Leader" cpp_class="CVXHero" parent="Unit">
+      <properties radius="45" formation_priority="1100"/></class>)"),
+            "leader.sc.xml");
+  graph.add(as_bytes(R"(<class id="Archer" cpp_class="CVXUnit" parent="Unit">
+      <properties formation_priority="500"/></class>)"),
+            "archer.sc.xml");
+  graph.add(as_bytes(R"(<class id="Sword" cpp_class="CVXUnit" parent="Unit">
+      <properties formation_priority="1100"/></class>)"),
+            "sword.sc.xml");
+  graph.add(as_bytes(R"(<class id="Horse" cpp_class="CVXUnit" parent="Unit">
+      <properties formation_radius="35" formation_priority="2000"/></class>)"),
+            "horse.sc.xml");
+  graph.link();
+  return graph;
+}
+
+/// `count` records of `klass`, laid in `shape` round a hero of radius 45.
+struct Laid {
+  std::vector<FormationRecord> records;
+  std::int32_t radius = 0;
+};
+Laid lay(const ClassGraph& graph, std::string_view xml, std::string_view shape,
+         std::span<const ClassIndex> classes) {
+  Laid out;
+  Result<FormationTable> table = FormationTable::parse(as_bytes(xml));
+  CHECK(table.ok());
+  const FormationClassDef* def = table.ok() ? table->find(shape) : nullptr;
+  CHECK(def != nullptr);
+  if (def == nullptr) return out;
+  for (const ClassIndex klass : classes) out.records.push_back({klass, Point{}});
+  out.radius = formation_lay_out(graph, *def, 45, out.records);
+  return out;
+}
+
+std::vector<Point> offsets_of(const Laid& laid) {
+  std::vector<Point> out;
+  for (const FormationRecord& record : laid.records) out.push_back(record.offset);
+  return out;
+}
+
+constexpr std::string_view kBlockXml = R"(<Formations><Default Name="Block"/>
+  <FormationClass Name="Block"><Class Name="Unit" CentralBlock="1"/></FormationClass>
+  <FormationClass Name="Mixed" OffsetFrontLineByY="30">
+    <Class Name="Unit" CentralBlock="1"/><Class Name="Horse" FrontLine="1"/></FormationClass>
+</Formations>)";
+
+}  // namespace
+
+/// The central block (0x005f04b0) is square rings round the hero: ring one at
+/// `R + S` -- the hero's `radius` 45 and twice the soldiers' 26 -- with room
+/// for eight. Eight fill it: one along the back, a pair down the sides, one
+/// along the front, then the four corners; the radius is the corner's
+/// distance, `isqrt(2 * 97^2)`.
+TEST(a_block_of_eight_is_the_first_ring_round_the_hero) {
+  const ClassGraph graph = layout_graph();
+  const std::vector<ClassIndex> classes(8, graph.find("Unit"));
+  const Laid laid = lay(graph, kBlockXml, "Block", classes);
+  const std::vector<Point> want = {{0, 97},   {-97, 0},  {97, 0},   {0, -97},
+                                   {-97, 97}, {97, 97}, {-97, -97}, {97, -97}};
+  CHECK(offsets_of(laid) == want);
+  CHECK(laid.radius == 137);
+}
+
+/// A ring of six is the corners and two more, `6 - 4 = 4*0 + 2`: with no
+/// front line one goes to the back and one to the front; a ring of five puts
+/// its one extra at the front; three left over make a last short ring of the
+/// front corners and the back centre, one ring further out.
+TEST(a_short_ring_spreads_its_remainder_the_way_the_original_does) {
+  const ClassGraph graph = layout_graph();
+  const ClassIndex unit = graph.find("Unit");
+  {
+    const std::vector<ClassIndex> classes(6, unit);
+    const std::vector<Point> want = {{0, 97}, {0, -97}, {-97, 97}, {97, 97}, {-97, -97}, {97, -97}};
+    CHECK(offsets_of(lay(graph, kBlockXml, "Block", classes)) == want);
   }
-  std::vector<Point> offsets(members.size());
-  CHECK(formation_offsets(*line, members, Point{0, kFacingLength}, offsets) == 6);
-
-  // Six at 6:1 is one rank of six, all at the declared front-line offset.
-  for (const Point& offset : offsets) CHECK(offset.y == 50);
-  // Spread across the rank, centred, one spacing apart.
-  CHECK(offsets[0].x == -130);
-  CHECK(offsets[5].x == 130);
-  for (std::size_t i = 1; i < offsets.size(); ++i) {
-    CHECK(offsets[i].x - offsets[i - 1].x == 2 * kDefaultFormationRadius);
+  {
+    const std::vector<ClassIndex> classes(5, unit);
+    const std::vector<Point> want = {{0, -97}, {-97, 97}, {97, 97}, {-97, -97}, {97, -97}};
+    CHECK(offsets_of(lay(graph, kBlockXml, "Block", classes)) == want);
+  }
+  {
+    const std::vector<ClassIndex> classes(11, unit);
+    const Laid laid = lay(graph, kBlockXml, "Block", classes);
+    REQUIRE(laid.records.size() == 11);
+    CHECK(laid.records[8].offset == (Point{-149, -149}));
+    CHECK(laid.records[9].offset == (Point{149, -149}));
+    CHECK(laid.records[10].offset == (Point{0, 149}));
+    CHECK(laid.radius == 210);
+  }
+  {
+    // One alone stands at the front of the first ring.
+    const std::vector<ClassIndex> classes(1, unit);
+    const Laid laid = lay(graph, kBlockXml, "Block", classes);
+    CHECK(offsets_of(laid) == (std::vector<Point>{{0, -97}}));
+    CHECK(laid.radius == 97);
   }
 }
 
-TEST(a_front_formation_forms_ranks) {
-  Result<FormationTable> table = FormationTable::parse(as_bytes(kFormationsXml));
-  REQUIRE(table.ok());
-  const FormationClassDef* front = table->find("Front");
-  REQUIRE(front != nullptr);
-
-  std::vector<FormationMember> members(6);
-  for (FormationMember& member : members) {
-    member.placement = FormationPlacement::front_line;
-    member.formation_radius = kDefaultFormationRadius;
-  }
-  std::vector<Point> offsets(members.size());
-  CHECK(formation_offsets(*front, members, Point{0, kFacingLength}, offsets) == 6);
-
-  // Six at 2:1 is three abreast and two deep: the first rank at the declared
-  // offset, the second one spacing behind it.
-  CHECK(offsets[0].y == 30);
-  CHECK(offsets[1].y == 30);
-  CHECK(offsets[2].y == 30);
-  CHECK(offsets[3].y == 30 + 2 * kDefaultFormationRadius);
-  CHECK(offsets[4].y == 30 + 2 * kDefaultFormationRadius);
-  CHECK(offsets[5].y == 30 + 2 * kDefaultFormationRadius);
-  CHECK(offsets[0].x == -52);
-  CHECK(offsets[1].x == 0);
-  CHECK(offsets[2].x == 52);
+/// The front line (0x005f0b60) is a grid that grows by `Width` and `Height`
+/// until it holds everyone and is then cut back: six in a 6-by-1 `Line` are
+/// one row of six, spread from the centre out to a half-width of
+/// `3 * 52 - 26`, standing `52 + 45 + 50` ahead -- one row, the empty block's
+/// depth (the hero's radius) and the line's offset.
+TEST(a_line_is_one_row_spread_from_the_centre_out) {
+  const ClassGraph graph = layout_graph();
+  constexpr std::string_view kXml = R"(<Formations><Default Name="Line"/>
+    <FormationClass Name="Line" Width="6" Height="1" OffsetFrontLineByY="50">
+      <Class Name="Unit" FrontLine="1"/></FormationClass></Formations>)";
+  const std::vector<ClassIndex> classes(6, graph.find("Unit"));
+  const Laid laid = lay(graph, kXml, "Line", classes);
+  const std::vector<Point> want = {{-26, -147}, {26, -147},  {-78, -147},
+                                   {78, -147},  {-130, -147}, {130, -147}};
+  CHECK(offsets_of(laid) == want);
+  CHECK(laid.radius == 196);
 }
 
-TEST(wings_go_out_to_both_sides) {
-  Result<FormationTable> table = FormationTable::parse(as_bytes(kFormationsXml));
-  REQUIRE(table.ok());
-  const FormationClassDef* cavalry = table->find("Cavalry core");
-  REQUIRE(cavalry != nullptr);
-  CHECK(cavalry->placement_of("Unit") == FormationPlacement::wings);
-  CHECK(cavalry->placement_of("Horse") == FormationPlacement::front_line);
-
-  std::vector<FormationMember> members(4);
-  for (FormationMember& member : members) {
-    member.placement = FormationPlacement::wings;
-    member.formation_radius = kDefaultFormationRadius;
-  }
-  std::vector<Point> offsets(members.size());
-  CHECK(formation_offsets(*cavalry, members, Point{0, kFacingLength}, offsets) == 4);
-
-  // Alternating sides at the declared wing offset, filling outwards.
-  CHECK(offsets[0].x == 50);
-  CHECK(offsets[1].x == -50);
-  CHECK(offsets[2].x == 50 + 2 * kDefaultFormationRadius);
-  CHECK(offsets[3].x == -(50 + 2 * kDefaultFormationRadius));
-  for (const Point& offset : offsets) CHECK(offset.y == 0);
+/// Five in a 2-by-1 `Front`: the grid grows to 4 by 2, is cut back to 3 by 2;
+/// the first row has a centre and the pair at the edges, the second only the
+/// pair.
+TEST(a_front_of_five_is_three_then_two) {
+  const ClassGraph graph = layout_graph();
+  constexpr std::string_view kXml = R"(<Formations><Default Name="Front"/>
+    <FormationClass Name="Front" Width="2" Height="1" OffsetFrontLineByY="30">
+      <Class Name="Unit" FrontLine="1"/></FormationClass></Formations>)";
+  const std::vector<ClassIndex> classes(5, graph.find("Unit"));
+  const std::vector<Point> want = {{0, -179}, {-52, -179}, {52, -179}, {-52, -127}, {52, -127}};
+  CHECK(offsets_of(lay(graph, kXml, "Front", classes)) == want);
 }
 
-TEST(a_formation_turns_with_its_leader) {
-  Result<FormationTable> table = FormationTable::parse(as_bytes(kFormationsXml));
-  REQUIRE(table.ok());
-  const FormationClassDef* line = table->find("Line");
-  REQUIRE(line != nullptr);
-
-  std::vector<FormationMember> members(2);
-  for (FormationMember& member : members) {
-    member.placement = FormationPlacement::front_line;
-    member.formation_radius = kDefaultFormationRadius;
-  }
-  std::vector<Point> facing_north(2);
-  std::vector<Point> facing_east(2);
-  (void)formation_offsets(*line, members, Point{0, kFacingLength}, facing_north);
-  (void)formation_offsets(*line, members, Point{kFacingLength, 0}, facing_east);
-
-  // Forward is local +y, so facing north the front line is at +y and facing
-  // east it is at +x. The rotation is a rotation: lengths are preserved.
-  CHECK(facing_north[0].y == 50);
-  CHECK(facing_east[0].x == 50);
-  for (std::size_t i = 0; i < 2; ++i) {
-    CHECK(vector_length(facing_north[i]) == vector_length(facing_east[i]));
-  }
+/// The wings (0x005f0d90) take half the `Wings` weight each, so units of one
+/// class go left, right, left, right; each wing stands off the front line's
+/// edge by `OffsetWingsByX` and lays its columns outwards from there.
+TEST(the_wings_share_a_class_out_and_stand_off_the_front_lines_edge) {
+  const ClassGraph graph = layout_graph();
+  constexpr std::string_view kXml = R"(<Formations><Default Name="Wings"/>
+    <FormationClass Name="Wings" OffsetWingsByX="50">
+      <Class Name="Unit" Wings="2"/></FormationClass></Formations>)";
+  const std::vector<ClassIndex> classes(4, graph.find("Unit"));
+  const Laid laid = lay(graph, kXml, "Wings", classes);
+  const std::vector<Point> want = {{-147, -45}, {-147, 7}, {147, -45}, {147, 7}};
+  CHECK(offsets_of(laid) == want);
+  CHECK(laid.radius == 153);
 }
 
-TEST(formation_offsets_are_deterministic) {
-  Result<FormationTable> table = FormationTable::parse(as_bytes(kFormationsXml));
-  REQUIRE(table.ok());
-  const FormationClassDef* front = table->find("Front");
-  REQUIRE(front != nullptr);
+/// The `<Class>` entries are met most derived first (the loader, 0x005f6ca0),
+/// so `Horse` takes its own entry although `Unit`'s is written first; within
+/// a group the slots go by `formation_priority`, lowest first; and each
+/// group's spacing is its own widest -- the horse's 35, the block's 26. The
+/// block's three are a short last ring, and the line's one stands at its
+/// centre, the block's half-width out.
+TEST(the_layout_groups_by_the_most_derived_entry_and_orders_by_priority) {
+  const ClassGraph graph = layout_graph();
+  const ClassIndex sword = graph.find("Sword");
+  const ClassIndex archer = graph.find("Archer");
+  const ClassIndex horse = graph.find("Horse");
+  const std::vector<ClassIndex> classes = {sword, archer, horse, sword};
+  const Laid laid = lay(graph, kBlockXml, "Mixed", classes);
+  REQUIRE(laid.records.size() == 4);
+  CHECK(laid.records[0].klass == archer);
+  CHECK(laid.records[1].klass == sword);
+  CHECK(laid.records[2].klass == sword);
+  CHECK(laid.records[3].klass == horse);
+  const std::vector<Point> want = {{-97, -97}, {97, -97}, {0, 97}, {0, -197}};
+  CHECK(offsets_of(laid) == want);
+  CHECK(laid.radius == 197);
+}
 
-  std::vector<FormationMember> members(9);
-  for (std::size_t i = 0; i < members.size(); ++i) {
-    members[i].id = static_cast<ObjectId>(i + 1);
-    members[i].placement = i % 3 == 0 ? FormationPlacement::front_line
-                                      : FormationPlacement::central_block;
-    members[i].formation_radius = kDefaultFormationRadius;
-  }
-  std::vector<Point> first(members.size());
-  std::vector<Point> second(members.size());
-  (void)formation_offsets(*front, members, Point{300, -400}, first);
-  (void)formation_offsets(*front, members, Point{300, -400}, second);
-  for (std::size_t i = 0; i < first.size(); ++i) CHECK(first[i] == second[i]);
+/// A sample turns each offset into the formation's direction (0x005f2900):
+/// local -y onto the direction, local +x onto it turned a quarter to
+/// `(-dy, dx)`, each coordinate truncated toward zero.
+TEST(a_sample_turns_the_offsets_into_the_formations_direction) {
+  const Point centre{1000, 1000};
+  CHECK(formation_turn(centre, Point{0, -5}, Point{0, -97}) == (Point{1000, 903}));
+  CHECK(formation_turn(centre, Point{3, 4}, Point{0, -100}) == (Point{1060, 1080}));
+  CHECK(formation_turn(centre, Point{3, 4}, Point{10, 0}) == (Point{992, 1006}));
+  CHECK(formation_turn(centre, Point{3, 4}, Point{7, 0}) == (Point{995, 1004}));
+  CHECK(formation_turn(centre, Point{1, 1}, Point{0, -10}) == (Point{1007, 1007}));
+  CHECK(formation_turn(centre, Point{-1, -1}, Point{0, -10}) == (Point{993, 993}));
+}
+
+/// Joining only marks the layout, and leaving takes the slot out at once
+/// (0x005f47e0, 0x005f3290): the layout -- the slots' units in slot order,
+/// then the pending ones -- gives each the first slot of its own class, and
+/// hands back the pending ones for `form_move`. A reassign then gives each
+/// member the slot nearest it relative to the means (0x005f56d0).
+TEST(the_roster_waits_for_the_layout_and_the_reassign_matches_where_members_stand) {
+  ClassGraph graph = layout_graph();
+  World world;
+  world.set_class_graph(&graph);
+  Result<FormationTable> table = FormationTable::parse(as_bytes(kBlockXml));
+  REQUIRE(table.ok());
+  const ObjectId hero = world.spawn(NativeClass::hero, nullptr, graph.find("Leader"));
+  REQUIRE(world.set_position(hero, Point{1000, 1000}));
+  const ObjectId a = world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  const ObjectId b = world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  // `a` stands at the back, `b` at the front of a formation facing -y.
+  REQUIRE(world.set_position(a, Point{1000, 1100}));
+  REQUIRE(world.set_position(b, Point{1000, 900}));
+
+  Formation form;
+  form.hero = hero;
+  formation_add(form, a);
+  formation_add(form, b);
+  CHECK(form.slots.empty());
+  CHECK(form.pending.size() == 2);
+  CHECK(form.radius == 0);
+  CHECK(formation_reach(&form, 45) == 45);
+
+  std::vector<ObjectId> joined;
+  REQUIRE(formation_rebuild(world, form, *table, joined));
+  CHECK(joined == (std::vector<ObjectId>{a, b}));
+  REQUIRE(form.slots.size() == 2);
+  // Two in a block, no front line: the front centre, then the back centre.
+  CHECK(form.slots[0].offset == (Point{0, -97}));
+  CHECK(form.slots[1].offset == (Point{0, 97}));
+  CHECK(form.slots[0].unit == a);
+  CHECK(form.slots[1].unit == b);
+  CHECK(form.radius == 97);
+  CHECK(formation_reach(&form, 45) == 97);
+  CHECK(form.reassign);
+  // Nothing marked, nothing laid.
+  joined.clear();
+  CHECK(!formation_rebuild(world, form, *table, joined));
+
+  // The sample, facing -y: the reassign puts `b`, in front, on the front slot.
+  formation_place_sample(world, form, *table, Point{1000, 1000}, Point{0, -1}, joined);
+  CHECK(form.slots[0].sample == (Point{1000, 903}));
+  CHECK(form.slots[1].sample == (Point{1000, 1097}));
+  CHECK(form.slots[0].unit == b);
+  CHECK(form.slots[1].unit == a);
+  CHECK(!form.reassign);
+
+  // Leaving takes the slot out and marks the layout; the radius stands.
+  CHECK(formation_remove(form, b));
+  CHECK(form.slots.size() == 1);
+  CHECK(form.died == 1);
+  CHECK(form.rebuild);
+  CHECK(form.radius == 97);
+  CHECK(!formation_remove(form, b));
 }
 
 // --------------------------------------------------------------------------
@@ -1834,6 +2022,12 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
   // Six seconds on: `rand(0, 4)` and up. The field opens just before the
   // first call whose draw is not 0, which must not search; the first call
   // after that whose draw is 0 must. Every call takes exactly its draw.
+  //
+  // The draw binds only with neither of the follower's stop bits set
+  // (0x0041a4da): a search that laid nothing leaves bit 2, and then the next
+  // call searches whatever it drew (the test after this one). So each call
+  // here starts as a unit whose route has been walked to its end does -- no
+  // route, no stop bit, the order still on.
   world.advance(5000);
   bool opened = false;
   bool skipped = false;
@@ -1846,6 +2040,7 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
       movement.set_grid(open_field(32));
       opened = true;
     }
+    movement.find(unit)->route_failed = false;
     (void)goto_once(registry, world, unit, away, 100, -1);
     CHECK(world.rng() == expect);
     searched = movement.find(unit)->has_path;
@@ -1856,6 +2051,57 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
   CHECK(skipped);
   CHECK(searched);
   CHECK(movement.find(unit)->goto_failed_at == kNoGotoFailure);
+}
+
+TEST(a_search_that_laid_nothing_searches_again_at_the_next_call_whatever_the_draw) {
+  // `SetDest` tests the path follower's stop bits before it compares the goal
+  // (`test al, 6` at 0x0041a4da, 0x0041a5da) and takes its new-goal branch
+  // when one is set: the search runs whatever the draw before it said, and the
+  // free-spot search's flag 8 is forgotten (0x0041a594). A search that laid
+  // nothing leaves bit 2 (0x00419a1e, `MoveState::route_failed`).
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  World world;
+  MovementSystem movement;
+  movement.set_grid(sealed_cell(9, 10));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{9 * 16 + 8, 10 * 16 + 8}, 100);
+  const Point away{25 * 16 + 8, 10 * 16 + 8};
+
+  (void)goto_once(registry, world, unit, away, 1000, -1);
+  const GameTime stamped = movement.find(unit)->goto_failed_at;
+  REQUIRE(stamped == world.time());
+  REQUIRE(movement.find(unit)->route_failed);
+
+  // Far enough on that the draw is `rand(0, 4)` or more; wait for a call
+  // whose draw is not 0 and open the field just before it.
+  world.advance(6000);
+  bool tested = false;
+  for (int i = 0; i < 80 && !tested; ++i) {
+    const std::int64_t spans = std::min<std::int64_t>((world.time() - stamped) >> 11, 10);
+    Rng expect = world.rng();
+    const bool draws_zero = expect.between(0, static_cast<std::int32_t>(2 * spans)) == 0;
+    if (draws_zero) {
+      // Still sealed: the search runs and fails again, and the bit stays.
+      (void)goto_once(registry, world, unit, away, 100, -1);
+      CHECK(world.rng() == expect);
+      CHECK(movement.find(unit)->route_failed);
+      world.advance(100);
+      continue;
+    }
+    movement.set_grid(open_field(32));
+    movement.find(unit)->free_spot_tried = true;
+    (void)goto_once(registry, world, unit, away, 100, -1);
+    // The draw is taken all the same, and ignored.
+    CHECK(world.rng() == expect);
+    CHECK(movement.find(unit)->has_path);
+    CHECK(!movement.find(unit)->route_failed);
+    CHECK(!movement.find(unit)->free_spot_tried);
+    CHECK(movement.find(unit)->goto_failed_at == kNoGotoFailure);
+    tested = true;
+  }
+  CHECK(tested);
 }
 
 /// `PathTo` asks the same question with the same flag.
@@ -1897,6 +2143,27 @@ TEST(path_to_answers_a_straight_line_for_a_class_that_ignores_passability) {
         static_cast<std::int32_t>(distance(from, to)));
   HostCall walled(world, {Value::object(kTypeObj, soldier), pack_point(to), Value::integer(0), Value::integer(0)});
   CHECK(invoke(registry, CallKind::member, "PathTo", 3, walled).value.as_integer() == -1);
+}
+
+/// `PathTo` answers the path record's length (0x005de354 reads `+0x34`) for
+/// whatever route the search laid -- a partial one included, with no 32,000
+/// -- and -1 only when the search answered 0.
+TEST(path_to_answers_the_length_of_a_partial_route) {
+  ObstructionGrid grid = open_field(64);
+  for (std::int32_t y = 0; y < 64; ++y) grid.set_cell(32, y, true);
+  World world;
+  MovementSystem movement;
+  movement.set_grid(std::move(grid));
+  attach(world, movement);
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  const ObjectId unit = spawn_unit(world, movement, Point{10 * 16 + 8, 20 * 16 + 8}, 100);
+  // Beyond the wall: the route runs to the reachable cell nearest the goal,
+  // (31, 20), a straight 21 cells.
+  HostCall beyond(world, {Value::object(kTypeObj, unit), pack_point(Point{50 * 16 + 8, 20 * 16 + 8}),
+                          Value::integer(0), Value::integer(0)});
+  CHECK(invoke(registry, CallKind::member, "PathTo", 3, beyond).value.as_integer() == 21 * 16);
 }
 
 TEST(both_forms_of_goto_drop_the_combat_target) {
@@ -2602,10 +2869,14 @@ TEST(path_to_an_object_reaches_its_edge_and_a_passenger_answers_a_million) {
     CHECK(out.status == HostStatus::ok);
     return out.value.is_integer() ? out.value.as_integer() : -999;
   };
-  // 100 between centres: a walk of 100 to the point, and none to the object,
-  // whose band is 15 + 100 wide.
+  // 100 between centres: a walk of 100 to the point. To the object the goal
+  // is the ring of sixteen points at its band, 15 + 100, round its centre
+  // (0x00409cf0), and the walker inside it is answered the walk out to the
+  // nearest of them, (985, 1000): 15, where this used to answer 0.
   CHECK(path_to(walker, pack_point(Point{1100, 1000})) == 100);
-  CHECK(path_to(walker, Value::object(kTypeObj, camp)) == 0);
+  CHECK(path_to(walker, Value::object(kTypeObj, camp)) == 15);
+  // Standing on the point it was asked for, the route has no length: -1.
+  CHECK(path_to(walker, pack_point(Point{1000, 1000})) == -1);
 
   const ObjectId doomed = f.place("Walker", Point{1000, 1400});
   REQUIRE(f.world.despawn(doomed));
@@ -2636,12 +2907,14 @@ TEST(form_radius_is_the_formations_reach_or_the_heros_own_radius) {
     return f.call("FormRadius", {Value::object(kTypeObj, hero)}).value.as_integer();
   };
   CHECK(radius() == 22);
-  f.movement.state(hero).form_extent = 240;
-  // A radius with no army behind it is not the formation's.
+  f.movement.formation_of(hero).radius = 240;
+  // A radius with no slot behind it is not the formation's.
   CHECK(radius() == 22);
-  HeroRecord& record = f.heroes.register_hero(f.world, hero);
-  record.army.push_back(f.unit(Point{340, 300}));
+  f.movement.formation_of(hero).slots.push_back(FormationSlot{f.unit(Point{340, 300})});
   CHECK(radius() == 240);
+  // Nor is a radius of 0, whatever the slots.
+  f.movement.formation_of(hero).radius = 0;
+  CHECK(radius() == 22);
 }
 
 /// A hero's `HasPath` (0x0052fe40) is its own route or any member of its army

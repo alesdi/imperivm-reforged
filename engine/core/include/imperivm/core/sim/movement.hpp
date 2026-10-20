@@ -93,15 +93,15 @@
 //      accumulator already means. A give-way step therefore takes as long as
 //      its distance says rather than the original's constant; `0x005d39c0`
 //      was not read.
-//   3. **Who is in a party.** `[unit+0x1c0]` is filled by the original's party
-//      move, which this engine does not have; its formation march is
-//      `place_army`. So a march's members and its hero carry the hero's id in
+//   3. **Who is in a party.** `[unit+0x1c0]` is the member's slot in its
+//      hero's formation object (`sim/formation.hpp`: written by the slot
+//      assignment, 0x005f3115, cleared by a removal, 0x005f4686), which this
+//      engine keeps as `Formation::slots`. What the avoidance step reads is
+//      still the order: a march's members and its hero carry the hero's id in
 //      `MoveState::party` from the order `place_army` gives them until an
 //      order that is not a march; members step `kFormationStride`, the hero
-//      keeps its own. The original's record is a slot of the formation
-//      object (written by its slot assignment, 0x005f3115, cleared by a
-//      removal, 0x005f4686), so it may well outlast an order there; that
-//      was not followed. And the original member's route is the
+//      keeps its own. The original's slot outlasts an order, so a member
+//      sent elsewhere is still of the party there; that was not followed. And the original member's route is the
 //      formation's (`SetFormation`, 0x00417790), which has a next point for
 //      as long as the formation's path does; here a member at the end of its
 //      station's route waits on it while its hero still walks the march
@@ -113,7 +113,7 @@
 //      member's (0x0052e830), times every step of such a route to reach the
 //      unit's station at the sample's deadline (0x00419e52) and lays each
 //      sample round a centre that steps ahead along the formation's route.
-//      Here the hero's route stands for the formation's, the stations are
+//      Here the hero's route stands for the formation's, the samples are
 //      laid round a centre ahead of him on it, and each placement gives the
 //      hero and every marching member a pace (`MoveState::march_rate`); see
 //      `march_centre` and `pace_march` in `sim/command.cpp`. Before it, the
@@ -154,6 +154,7 @@
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/avoidance.hpp"
+#include "imperivm/core/sim/formation.hpp"
 #include "imperivm/core/sim/path.hpp"
 #include "imperivm/core/sim/system.hpp"
 #include "imperivm/core/sim/world.hpp"
@@ -217,9 +218,6 @@ inline constexpr std::int64_t kNoGotoFailure = -1;
 /// already sitting on a boundary, where either answer is as good.
 [[nodiscard]] std::uint32_t facing_column(Point facing, std::int32_t variations) noexcept;
 
-/// `Unit`'s `formation_radius` property, which 134 unit classes inherit.
-inline constexpr std::int32_t kDefaultFormationRadius = 26;
-
 // --------------------------------------------------------------------------
 // per-object movement state
 // --------------------------------------------------------------------------
@@ -260,13 +258,6 @@ struct MoveState {
   /// not a poll. `World::play_anim` restarts the timeline, so a system that
   /// called it every turn would freeze the sprite on frame zero.
   bool walking = false;
-
-  /// The class's `formation_radius` property, which `Hero.FormRadius` reports
-  /// and `formation_offsets` spaces ranks by. `Unit` declares 26.
-  std::int32_t formation_radius = kDefaultFormationRadius;
-  /// `Obj.SetFormation` / the `formation` property. Empty means the table's
-  /// `<Default Name="…"/>` applies.
-  std::string formation;
 
   /// `PathType point=(x,y)`: where the unit is going.
   Point target;
@@ -367,19 +358,6 @@ struct MoveState {
   /// like the rest of this block. See `sim/avoidance.hpp`, "Destination
   /// locks".
   bool dest_lock = false;
-  /// On the hero leading a march: `FormSetupAndMoveTo`'s fourth argument,
-  /// which `CVXFormObj::SetDest` (0x005f2cc0) stores at `[form+0x8c]` and
-  /// `0x004178d0` reads -- whether the members own a destination lock once
-  /// the formation's path is spent. `place_army` hands it to every member's
-  /// order as `dest_lock`. **Saved, and not hashed**.
-  bool form_lock = false;
-  /// On the hero leading a march: the formation's radius, `[form+0x34]` --
-  /// how far its farthest station stands from him, the integer square root
-  /// of the largest squared offset `place_army` laid (0x005f1f60, 0x005f2062).
-  /// 0 with no station. The gate step reads it as the march's reach
-  /// (0x005f2350, 0x00418260; `sim/gate.hpp`, "A group's floor"). **Saved and
-  /// hashed**: it decides where the march stands before a gate.
-  std::int32_t form_extent = 0;
   /// `Unit::Stop` has asked a moving unit to stop: `CVXPathRetry`'s flag bit 1
   /// (`[retry+0x20] |= 2`, slot 6 at 0x004178b0). The path follower
   /// (0x00419ee0) then walks on, step by step, until the unit stands on a
@@ -399,8 +377,9 @@ struct MoveState {
   /// `Unit::Stop` does -- to the first passable free spot, for an order that
   /// owns a lock, and not a step for one that does not -- instead of
   /// stopping where it is. `IsArrived` (0x00417c10) is false while either bit
-  /// is set. (`SetDest` also searches again whenever one is set, 0x0041a4da;
-  /// **not reproduced**, see `run_goto`.)
+  /// is set. `SetDest` also searches again whenever one is set, whatever the
+  /// failing unit's draw says (0x0041a4da, 0x0041a5da; `run_goto`,
+  /// `order_goto`).
   ///
   /// When the walk ends the order stays: the unit's step (0x005d3b50) deletes
   /// a route with no next step only when no `Goto`-family call is waiting on
@@ -463,18 +442,14 @@ struct MoveState {
 // -- how a block is shaped and which way it faces -- are marked as inferences
 // where they are computed.
 
-/// Where a class stands in a formation. The file gives each `<Class>` exactly
-/// one of these three flags.
-enum class FormationPlacement : std::uint8_t {
-  central_block,  ///< around the hero; the default for anything unlisted
-  front_line,     ///< ahead of him, by `OffsetFrontLineByY`
-  wings,          ///< out to either side, by `OffsetWingsByX`/`ByY`
-};
-
-/// One `<Class Name=… FrontLine|Wings|CentralBlock="1"/>`.
+/// One `<Class Name=… CentralBlock=… FrontLine=… Wings=…/>`: the class and
+/// the three integer weights the layout shares its units out by
+/// (docs/formats/formation.md, "The layout"; the loader is 0x005f6ca0).
 struct FormationRole {
   std::string class_name;
-  FormationPlacement placement = FormationPlacement::central_block;
+  std::int32_t central = 0;  ///< `CentralBlock`
+  std::int32_t front = 0;    ///< `FrontLine`
+  std::int32_t wings = 0;    ///< `Wings`, half to each wing
 };
 
 /// One `<FormationClass>`.
@@ -497,10 +472,8 @@ struct FormationRole {
 struct FormationClassDef {
   std::string name;
   std::string description;
-  /// `Width`/`Height`. **Read as an aspect ratio, not a cell count** -- `Line`
-  /// is 6x1 and described as "all warriors at the front line", `Block` declares
-  /// neither and is described as gathering around the hero, and a literal
-  /// reading would cap `Front` at two soldiers. See `formation_offsets`.
+  /// `Width`/`Height`: the step the front line's grid grows by
+  /// (0x005f02e0). Each defaults to 1; the loader refuses a 0.
   std::int32_t width = 1;
   std::int32_t height = 1;
 
@@ -517,12 +490,9 @@ struct FormationClassDef {
   std::int32_t offset_wings_x = 0;
   std::int32_t offset_wings_y = 0;
 
+  /// The `<Class>` entries in file order. The layout puts them in the
+  /// loader's order, most derived first (`formation_lay_out`).
   std::vector<FormationRole> roles;
-
-  /// Where `class_name` stands. Matching is exact and case-insensitive against
-  /// the `<Class Name>` values; an unlisted class takes the central block,
-  /// which is what `Block` -- the formation that lists only `Unit` -- needs.
-  [[nodiscard]] FormationPlacement placement_of(std::string_view class_name) const noexcept;
 };
 
 /// `DATA\FORMATIONS.XML`.
@@ -546,36 +516,6 @@ class FormationTable {
   std::vector<FormationClassDef> formations_;
   std::string default_name_ = "Front";
 };
-
-/// One soldier to place.
-struct FormationMember {
-  ObjectId id = kNoObject;
-  FormationPlacement placement = FormationPlacement::central_block;
-  /// The class's `formation_radius` property (26 on `Unit`), which sets the
-  /// spacing. Zero falls back to `kDefaultFormationSpacing / 2`.
-  std::int32_t formation_radius = 0;
-};
-
-/// Spacing when nothing declares a `formation_radius`: twice `Unit`'s 26, so
-/// two neighbours in a rank stand exactly touching.
-inline constexpr std::int32_t kDefaultFormationSpacing = 2 * kDefaultFormationRadius;
-
-/// Where each member stands, relative to the leader, facing `facing`.
-///
-/// Members are bucketed by placement in the order given, and each bucket is
-/// laid out as a rectangle whose aspect follows the formation's `Width:Height`:
-/// for `n` members, `columns = isqrt(n * Width / Height)` clamped to at least
-/// one, rows following. `Line` (6:1) therefore puts six abreast, `Front` (2:1)
-/// three by two, and `Block` (1:1, the file declares no size) two by three.
-/// **The rectangle shape is an inference**; the offsets, the bucketing and the
-/// three placements are all read from the file.
-///
-/// The result is rotated into `facing`, whose forward direction is local +y --
-/// the axis `OffsetFrontLineByY` names. Writes `out.size()` offsets and returns
-/// how many it wrote, which is `min(members.size(), out.size())`.
-std::size_t formation_offsets(const FormationClassDef& formation,
-                              std::span<const FormationMember> members, Point facing,
-                              std::span<Point> out) noexcept;
 
 // --------------------------------------------------------------------------
 // the system
@@ -637,8 +577,34 @@ class MovementSystem : public System {
   void set_formations(FormationTable table) { formations_ = std::move(table); }
   [[nodiscard]] const FormationTable& formations() const noexcept { return formations_; }
 
-  /// Cap on nodes one search may expand. Lower it on a large map if a frame
-  /// budget demands; it changes routes, so it is world configuration.
+  // -- formations ---------------------------------------------------------
+  //
+  // One `Formation` per hero (`[hero+0x2b0]`, `sim/formation.hpp`), kept here
+  // because the march that reads it is this system's. Made the first time a
+  // unit joins, a shape is set or a march is set up, as the hero's
+  // constructor makes it; dropped with the hero's movement state.
+
+  /// The hero's formation, or null before anything made one.
+  [[nodiscard]] const Formation* formation(ObjectId hero) const noexcept;
+  [[nodiscard]] Formation* formation(ObjectId hero) noexcept;
+  /// The same, made when missing. The reference lasts until the next
+  /// formation is made.
+  Formation& formation_of(ObjectId hero);
+  /// Every formation, by hero id.
+  [[nodiscard]] const std::vector<Formation>& formation_list() const noexcept {
+    return formation_objects_;
+  }
+  /// `AddUnit` (0x005f47e0): `unit` joins `hero`'s formation, pending.
+  void join_formation(ObjectId hero, ObjectId unit);
+  /// The hero's destructor (0x005304b0): his formation is deleted.
+  void drop_formation(ObjectId hero);
+  /// `RemoveUnit` (0x005f3290): `unit` leaves `hero`'s formation, and its
+  /// route is deleted (0x005d3830 with 0), as the original's last act there.
+  void leave_formation(World& world, ObjectId hero, ObjectId unit);
+
+  /// Cap on nodes one search round a gate's line may expand
+  /// (`PathRequest::node_budget`); a search over the grid alone has none. It
+  /// changes routes, so it is world configuration.
   void set_node_budget(std::uint32_t budget) noexcept { node_budget_ = budget; }
 
   // -- per-object state --------------------------------------------------
@@ -935,6 +901,9 @@ class MovementSystem : public System {
   std::uint32_t grid_generation_ = 1;
   std::uint32_t node_budget_ = 20000;
 
+  /// World state, saved and (the radius) hashed: see `formation`.
+  std::vector<Formation> formation_objects_;
+
   /// World state, saved: see `static_locks()`.
   std::vector<StaticLock> static_locks_;
   bool static_locks_built_ = false;
@@ -1031,9 +1000,11 @@ struct GotoOrder {
   ///     which for an unchanged goal skips the search and answers from the
   ///     route the record already has (0x0041a513, 0x0041a53c). A unit five
   ///     seconds stuck searches one call in five, and one stuck for 21
-  ///     seconds or more one call in twenty-one. (In the original only when
-  ///     no stop bit is set, which a search that laid nothing leaves set --
-  ///     `MoveState::route_failed`; **not reproduced**, see `run_goto`.)
+  ///     seconds or more one call in twenty-one -- **but only with no stop
+  ///     bit set**: a search that laid nothing leaves bit 2
+  ///     (`MoveState::route_failed`), and `SetDest` then searches at every
+  ///     call whatever was drawn (0x0041a4da), so the draw binds a unit whose
+  ///     route has run out, not one whose search failed.
   ///   * **the end of the unit's command clears the stamp**, inferred: slot 9
   ///     of the seven unit vtables (0x005d2940) clears it, with the walking
   ///     flags, before the base (0x005b5160) pops the command queue's head.

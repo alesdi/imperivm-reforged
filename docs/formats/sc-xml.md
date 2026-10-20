@@ -433,12 +433,20 @@ a plain unit like `BBowman` a 65-entry method table and a hero like `BHero1` an 
 <method sig="attack" vs="data/subai/unit_advance.vs"/>
 ```
 
-Under last-wins, `Unit.attack` binds `unit_advance.vs` and loses its `verify` script. Whether the
-engine takes the last, the first, or builds an overload list keyed on something not in the XML is
-**unknown**. The classes affected are `Unit` (`attack`, `onenter`), `Hero` (`attack`),
-`BDruid` (`hide`), `GDruid`/`RPriest` (`heal`), `Bear`/`Boar`/`LionF`/`LionM`/`Peaceful`/`GGhost`
-(`attack`) — i.e. it clusters on `attack`, which suggests a deliberate but undocumented
-mechanism rather than pure sloppiness. Flagged for Part 3.
+**A method is keyed on its name and its script's signature**, so these are overloads, not
+collisions. `gbr.exe`'s loader builds each method's key from the `sig` and the parameter list of the
+compiled `vs` script (0x0059a830) and finds or inserts it in the class's method tree (0x0059ece0);
+the lookup that queues a command builds the same key from the verb and the shape of the argument
+it is given (0x005aef20 picks one of six signatures by kind, 0x0059ad40 searches). Every
+duplicate in the shipped tree pairs a script taking a unit (`Obj`) with one taking a point:
+`Unit.attack` is `unit_attack.vs` with its verifier against a unit and `unit_advance.vs` on the
+ground, `RPriest.heal` is `druid_heal.vs` on a unit and `druid_heal_ground.vs` on the ground, and
+so on for `Hero` (`attack`), `BDruid` (`hide`), `GDruid` (`heal`) and
+`Bear`/`Boar`/`LionF`/`LionM`/`Wolf`/`Peaceful`/`GGhost`/`ShamanGhost` (`attack`). The two
+same-signature repeats (`Unit.onenter`, `Stonehenge`'s `starvation` and `bloodlust`) name the same
+script twice, and the find-or-insert makes the second a rewrite of the first. Down the class tree
+a declaration replaces the inherited method of its own name and signature and leaves the other
+form standing.
 
 `sig` values that are not lowercase identifiers exist: `Scout Area`, `Gossip`,
 `form-ranged-wings`. Treat `sig` as an opaque string.
@@ -641,9 +649,6 @@ essentially clean:
 
 - **`flags` on `<value0..5>`.** Only `-1`, `0` and `5` occur. Probably a visibility or
   formatting bitmask; not inferable from the data.
-- **Duplicate `<method sig>`.** 14 cases, clustered on `attack`. Last-wins is assumed but
-  unproven, and under last-wins the `verify` script on `Unit.attack` is discarded, which looks
-  wrong.
 - **The `onfinish` attribute.** 10 elements over 6 distinct files, and the fourth member of the
   engine-fired family the three `on*` sigs belong to. When the engine runs it, what it is handed,
   and whether it fires on a method that was interrupted as well as one that ran out, are all

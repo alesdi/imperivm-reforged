@@ -170,75 +170,33 @@ void AiSystem::advance(World& world, const Turn& turn) {
   // The AI is its scripts and the scheduler runs those; the original's `CVXAI`
   // has no per-frame tick either -- `CVXAI::Start` runs `Main.vs` and stops.
   //
-  // **What does run here is the per-node sweep, and only its `Explored` half.**
-  // The original's engine sets a node's `Explored` and `Revealed` bits and its
-  // `LastSeen` for a player from what that player can see, and fills `enemies`
-  // when sight is lost; the sweep itself was not recovered. Without any of it
-  // `Explored` read false everywhere, and `RECRUITER.VS:104-116` skips every
-  // node that is neither home nor explored nor `CanExplore` -- which is every
-  // node, since `CanExplore` asks whether a *neighbour* is explored. No
-  // computer player ever chose a target.
+  // **What runs here is the per-node visibility sweep** (0x0044ecc0,
+  // `sweep_gaika`), on every node. The original runs it on a node when a unit
+  // enters the world in it or crosses into or out of it (0x0041f310,
+  // 0x0041f530 on the old node and the new, 0x0041e970, 0x0041eee0), and on
+  // every node once the table is built (0x0044f2b0). Its effect only changes
+  // when who stands in a node changes, and here that is `revalue_squads`'
+  // once-a-tick refresh of where each squad stands; sweeping every node once
+  // a tick after it is the same sweep at the same granularity. For each
+  // seated AI the sweep marks a node `Explored` and `Revealed` while that
+  // player or one sharing its view stands in it (a squad there, or the
+  // settlement), and when that stops clears `Revealed`, stamps `LastSeen` and
+  // remembers the enemy strength standing there (`Laika::enemies`), which the
+  // `Eval` memory tail reads.
   //
-  // **Readings, labelled.** A node is `Explored` for a player once the
-  // exploration map shows its **centre**, or the centre of **any 128-unit slot
-  // credited to it**, explored for that player's slot. The original's node is
-  // a region of slots (the link pass below credits every slot to the node its
-  // centre falls in, and measures neighbours on that), and seeing any part of
-  // a region is seeing the region; the centre alone was the first reading, and
-  // it never explored p0's town on Crossroads, a walled corner whose centre no
-  // scout reaches, though p2 had explored two of its neighbours. The centre
-  // is still tested first, so a node explored by it is stamped as before; the
-  // slots are walked only while some node is still unexplored. `LastSeen` is stamped with the turn's time on
-  // every pass that finds the node explored: exploration is the only
-  // per-player sight this engine keeps, so "last seen" is "now" for any node
-  // ever explored, where the original stamps the moment sight is *lost*. The
-  // readers are `GETARMYNEED.VS:28` and `:139`, which only ask it of a node
-  // that is not `Revealed`; the alternative -- leaving it 0 -- makes every
-  // explored non-stronghold node read as "not visited for ten minutes, expect
-  // one enemy". `Revealed` and `enemies` need current visibility, which is not
-  // kept, and stay unset. The bit is never cleared: the exploration map only
-  // ever gains ground. Players 9..16 have no fog slot and the map answers true
-  // for them everywhere, which is the original's short circuit.
+  // **This replaced a reading.** Until the twelfth round a node was marked
+  // explored from the fog's exploration map (its centre or any slot of it
+  // explored for the player), `LastSeen` was "now" for any explored node and
+  // `Revealed` never set. The original never consults the exploration map for
+  // a node: 0x0041cb80 reads the bit the sweep sets, or a session override
+  // (`laika_explored`).
   //
-  // Neither the view nor the fog is hashed (`aihash` and `exploration` are zero
-  // in every dump); both are saved, and the sweep is a function of them, so a
-  // load continues identically.
-  FogSystem* fog = fog_system_of(world);
-  if (fog == nullptr) return;
-  const GaikaTable& table = world.gaika();
-  for (PlayerId player = 0; player < players_.size(); ++player) {
-    // A player nobody seeded has an empty view, and `find` answers null for
-    // every node of it.
-    GaikaView& view = players_[player].gaika;
-    bool pending = false;
-    for (GaikaId id = 1; id <= static_cast<GaikaId>(table.count()); ++id) {
-      const GaikaNode* node = table.find(id);
-      Laika* record = view.find(id);
-      if (node == nullptr || record == nullptr) continue;
-      if ((record->flags & kLaikaExplored) == 0 &&
-          !fog->map().explored(node->center, static_cast<std::int32_t>(player))) {
-        pending = true;
-        continue;
-      }
-      record->flags |= kLaikaExplored;
-      record->last_seen = turn.time;
-    }
-    if (!pending) continue;
-    // And any slot of it -- the second reading above.
-    const std::span<const GaikaId> slots = table.slot_nodes();
-    const std::int32_t columns = table.slot_columns();
-    for (std::size_t i = 0; i < slots.size() && columns > 0; ++i) {
-      const GaikaId id = slots[i];
-      if (id == kNoGaika) continue;
-      Laika* record = view.find(id);
-      if (record == nullptr || (record->flags & kLaikaExplored) != 0) continue;
-      const std::int32_t sx = static_cast<std::int32_t>(i % static_cast<std::size_t>(columns));
-      const std::int32_t sy = static_cast<std::int32_t>(i / static_cast<std::size_t>(columns));
-      const Point centre{sx * kLsaSlotSize + kLsaSlotSize / 2, sy * kLsaSlotSize + kLsaSlotSize / 2};
-      if (!fog->map().explored(centre, static_cast<std::int32_t>(player))) continue;
-      record->flags |= kLaikaExplored;
-      record->last_seen = turn.time;
-    }
+  // The view is saved and not hashed; the sweep is a function of it and of
+  // the squads, so a load continues identically.
+  (void)turn;
+  const std::int32_t nodes = world.gaika().count();
+  for (GaikaId id = 1; id <= static_cast<GaikaId>(nodes); ++id) {
+    sweep_gaika(world, id, turn.time);
   }
 }
 
@@ -656,6 +614,83 @@ AiSystem* ai_system_of(World& world) noexcept {
     if (system != nullptr && system->name() == "ai") return static_cast<AiSystem*>(system);
   }
   return nullptr;
+}
+
+Laika* laika_for(World& world, std::int32_t viewer, GaikaId node) noexcept {
+  if (viewer < 0 || viewer >= static_cast<std::int32_t>(kPlayerCount)) return nullptr;
+  AiSystem* ai = ai_system_of(world);
+  GaikaView* view = ai == nullptr ? nullptr : ai->gaika_view(static_cast<PlayerId>(viewer));
+  return view == nullptr ? nullptr : view->find(node);
+}
+
+// 0x0041cb80 takes one of two overrides before the bit, chosen by 0x005bde80
+// (a single-player game whose settings carry `+0xdc4`): the session's
+// exploration setting (`+0xda0 == 0`), or else the exploration map's
+// explored-everywhere flag (`[[world+0xb0]+0xf0]`, which only 0x005157c0 --
+// `ExploreAll`, and the load with exploration off -- sets). The match rule
+// is read for both: a load with exploration off is the one way the flag is
+// set at the start, and the rule is the one the session keeps. A script's
+// `ExploreAll` in a match with exploration on is where the two part (the
+// scenario path would answer yes everywhere from then on); labelled.
+bool laika_explored(World& world, const Laika& record) noexcept {
+  if (const MatchSystem* match = match_system_of(world);
+      match != nullptr && !match->rules().exploration) {
+    return true;
+  }
+  return (record.flags & kLaikaExplored) != 0;
+}
+
+bool laika_revealed(World& world, const Laika& record) noexcept {
+  const MatchSystem* match = match_system_of(world);
+  if (match != nullptr && !match->rules().fog_of_war) return laika_explored(world, record);
+  return (record.flags & kLaikaRevealed) != 0;
+}
+
+// 0x0044ecc0. See `AiSystem::advance` for when, and docs/formats/gaika.md.
+void sweep_gaika(World& world, GaikaId node, GameTime now) {
+  AiSystem* ai = ai_system_of(world);
+  HeroSystem* heroes = hero_system_of(world);
+  const GaikaNode* here = world.gaika().find(node);
+  if (ai == nullptr || here == nullptr) return;
+  // Who is in the node: the owner of every squad on its deque that stands in
+  // it, and the owner of its settlement.
+  std::uint32_t present = 0;
+  if (heroes != nullptr) {
+    SquadTable& table = heroes->squads();
+    for (const SquadKey& key : table.filed_under(node)) {
+      const Squad* squad = table.find(key);
+      if (squad != nullptr && squad->gaika_in == node && key.player < kPlayerCount) {
+        present |= 1u << key.player;
+      }
+    }
+  }
+  if (here->settlement != kNoObject) {
+    if (const EconomySystem* economy = economy_of(world); economy != nullptr) {
+      const Settlement* set = economy->settlements().for_object(here->settlement);
+      if (set != nullptr && set->owner < kPlayerCount) present |= 1u << set->owner;
+    }
+  }
+  const PlayerTable& players = world.players();
+  for (PlayerId p = 0; p < kPlayerCount; ++p) {
+    Laika* record = laika_for(world, static_cast<std::int32_t>(p), node);
+    if (record == nullptr) continue;
+    // The player sees with its own squads and with those of every player its
+    // row shares its view with (flag 0x10, `share_view`).
+    std::uint32_t seers = 1u << p;
+    for (PlayerId q = 0; q < kPlayerCount; ++q) {
+      if (q != p && players.has(p, q, Relation::share_view)) seers |= 1u << q;
+    }
+    if ((seers & present) != 0) {
+      record->flags |= kLaikaExplored | kLaikaRevealed;
+      continue;
+    }
+    if ((record->flags & kLaikaRevealed) == 0) continue;
+    // Sight lost: remember when, and what enemy strength was standing there.
+    record->flags = static_cast<std::uint16_t>(record->flags & ~kLaikaRevealed);
+    record->last_seen = now;
+    record->enemies =
+        heroes == nullptr ? 0 : seen_enemy_staying(world, *heroes, node, static_cast<std::int32_t>(p));
+  }
 }
 
 AiStartStatus ai_start(World& world, PlayerId player, std::string_view profile,
@@ -2190,33 +2225,31 @@ HostOutcome f_ss_str(CallContext& ctx) {
   return text(profile->constant_name(AiEnum::squad_state, state));
 }
 
-/// `SetMAIKA(gSrc, gDst, gMAIKA)` -- 3 sites, and **accepted and dropped**.
+/// `SetMAIKA(gSrc, gDst, gMAIKA)` -- 3 sites, all in `SQUADMONITOR.VS`.
 ///
 /// 0x00421b70 refuses seven ways -- no node table, any of the three ids zero,
-/// or any two of them equal -- and otherwise hands the triple to 0x0044fc60,
-/// which records `gMAIKA` as the way-point between `gSrc` and `gDst` on the
-/// node manager's routing table.
+/// or any two of them equal -- and otherwise hands the triple, in argument
+/// order, to 0x0044fc60, which puts it at the front of the node manager's
+/// MAIKA list (`SquadTable::record_route`: an equal triple is moved to the
+/// front, the list keeps 512). Its reader is `GAIKA::Recruit`'s routing
+/// filter (0x0043eda0), through `CheckMAIKA.vs`; see `recruit_impl`. The
+/// native writer is the attacked hook, `record_squad_attacked`.
 ///
-/// **Nothing reads it back.** There is no `GetMAIKA` in the shipped inventory
-/// -- `CHECKMAIKA.VS`, the only caller, writes the table and never queries it
-/// -- and this engine keeps no routing table for the C++ side to read either.
-/// That is the test `ObjectState::user` passes and this fails, and it is
-/// `GlobalSpellStart`'s precedent exactly: the three ids are resolved, the
-/// refusals are reproduced so that a script cannot tell the difference, and
-/// nothing is stored.
-/// **The seven refusals are deliberately not reproduced**, and are written out
-/// above instead. `GlobalSpellStart` settled this shape: with nothing stored,
-/// no guard can change an answer, and a guard that cannot is validation
-/// theatre -- injecting a fault into any of them changes no test, because
-/// there is no test that could tell. They are the first thing to restore
-/// alongside a routing table.
+/// It was accepted and dropped here, on the reading that nothing read the
+/// list back; the reader is a native one, and it is what decides whether a
+/// squad across a recorded way-point is recruited at all.
 HostOutcome f_set_maika(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetMAIKA: no world");
-  // Named, and dropped. `CreateFeedback`'s gesture.
-  (void)gaika_of(ctx.arg(0));
-  (void)gaika_of(ctx.arg(1));
-  (void)gaika_of(ctx.arg(2));
+  const GaikaId src = gaika_of(ctx.arg(0));
+  const GaikaId dst = gaika_of(ctx.arg(1));
+  const GaikaId way = gaika_of(ctx.arg(2));
+  if (world->gaika().count() == 0) return HostOutcome::ok_void();
+  if (src == kNoGaika || dst == kNoGaika || way == kNoGaika) return HostOutcome::ok_void();
+  if (src == dst || src == way || dst == way) return HostOutcome::ok_void();
+  if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
+    heroes->squads().record_route(src, dst, way);
+  }
   return HostOutcome::ok_void();
 }
 
@@ -2300,16 +2333,12 @@ HostOutcome m_gaika_need(CallContext& ctx) {
 /// squad there. `sim/squad.cpp` walks that same container for
 /// `GetAIControlledUnits` and `GetSquads`.
 ///
-/// Modelled from the squad side, because that is where this engine keeps node
-/// membership: no squad whose `GAIKAIn` is this node. The two agree wherever
-/// the original's container exists, and the original cannot distinguish an
-/// allocated-but-empty container from an absent one in any way a script can
-/// see -- nothing shrinks it back to null.
-///
-/// **It answers true on every shipped map today**, because nothing here assigns
-/// a GAIKA to a squad. `RECRUITER.VS` reads it as "this node has no army in it
-/// and has not been explored, so skip it", and true is the answer that keeps
-/// that walk moving rather than the one that stops it.
+/// That deque is `SquadTable::filed_under`, and it holds a squad that is
+/// **standing in the node or heading for it** -- so a node an army is
+/// marching on is not empty before the army arrives. This read "no squad
+/// whose `GAIKAIn` is this node", which missed every squad on its way.
+/// 0x0044f300 frees the deque when its last entry is erased, so an emptied
+/// deque is null again and empty is "no entry", nothing more.
 HostOutcome m_gaika_empty(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr || ctx.count() == 0) {
@@ -2319,12 +2348,9 @@ HostOutcome m_gaika_empty(CallContext& ctx) {
   if (node == kNoGaika || world->gaika().find(node) == nullptr) {
     return HostOutcome::ok_with(Value::boolean(true));
   }
-  const HeroSystem* heroes = hero_system_of(*world);
+  HeroSystem* heroes = hero_system_of(*world);
   if (heroes == nullptr) return HostOutcome::ok_with(Value::boolean(true));
-  for (const Squad& squad : heroes->squads().squads()) {
-    if (squad.gaika_in == node) return HostOutcome::ok_with(Value::boolean(false));
-  }
-  return HostOutcome::ok_with(Value::boolean(true));
+  return HostOutcome::ok_with(Value::boolean(heroes->squads().filed_under(node).empty()));
 }
 
 /// `g.MilitaryPresence(idPlayer)` -- 2 sites, and the sole blocker of both
@@ -2386,9 +2412,12 @@ HostOutcome m_gaika_military_presence(CallContext& ctx) {
     return viewer < 0 ? kAiOwn : ai_relation(players, viewer, owner);
   };
 
-  const HeroSystem* heroes = hero_system_of(*world);
+  HeroSystem* heroes = hero_system_of(*world);
   if (heroes == nullptr) return no;
-  for (const Squad& squad : heroes->squads().squads()) {
+  for (const SquadKey& key : squads_filed_under(heroes->squads(), node)) {
+    const Squad* filed = heroes->squads().find(key);
+    if (filed == nullptr) continue;
+    const Squad& squad = *filed;
     if (squad.eval == 0) continue;
     if ((category(squad.key.player) & kAiOwn) == 0) continue;
     if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
@@ -2721,10 +2750,10 @@ HostOutcome m_gaika_dist_to_players(CallContext& ctx) {
 /// returns 0, so the walk always goes on to the next squad, and the
 /// node-settlement query after the walk (0x00420c00) writes four locals nothing
 /// reads. `CombatSystem::best_target_among` is the filter, and it is
-/// deliberately the same code the other six run -- including its score, which
-/// is that system's and not the executable's, so the filter's own early stop
-/// (0x005db650 answering 0 for a candidate it scores under 50) is not
-/// reproduced here; see `sim/combat.cpp`.
+/// deliberately the same code the other six run, score and all
+/// (`docs/formats/target-score.md`). The filter's early stop (0x005db650
+/// answering 0 for a candidate it scores under 50) ends only the squad the
+/// helper is offering, and this flat list does not stop there.
 ///
 /// **There is no radius.** Every other member of the family gets its reach from
 /// the grid sweep it rides on; this one has no sweep, so a candidate on the far
@@ -2808,7 +2837,10 @@ HostOutcome m_best_target_in_gaika(CallContext& ctx) {
   // -- the squads standing here ------------------------------------------
   if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
     std::vector<ObjectId> candidates;
-    for (const Squad& squad : heroes->squads().squads()) {
+    for (const SquadKey& key : squads_filed_under(heroes->squads(), node)) {
+      const Squad* filed = heroes->squads().find(key);
+      if (filed == nullptr) continue;
+      const Squad& squad = *filed;
       if (squad.eval == 0) continue;
       if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
       if (!players.is_enemy(mine, squad.key.player)) continue;
@@ -2898,33 +2930,29 @@ HostOutcome m_best_target_in_gaika(CallContext& ctx) {
 /// it: `Prioritized` 0x01, `Explored` 0x02, `Revealed` 0x04, `NoRecruit` 0x08,
 /// `NoAttack` 0x10, `ControlFlag` 0x20.
 ///
-/// ## Two of them have global overrides, and neither is reproduced
+/// ## Two of them have global overrides
 ///
-/// `Explored` consults two settings before the bit: an `exploration` game
-/// setting, gated on the game being a single-player one of a particular kind,
-/// and a view-side reveal-all. `Revealed` consults a *different* one -- the
-/// `fogofwar` setting -- and when fog is **off** it tail-calls `Explored`'s
-/// implementation outright, so with fog disabled `Revealed` *is* `Explored`.
+/// `Explored` consults the exploration setting before the bit, and `Revealed`
+/// the fog-of-war setting, tail-calling `Explored` when fog is **off**:
+/// `laika_explored` and `laika_revealed`, which read `MatchRules` (the
+/// scenario path's explored-everywhere flag is labelled at the first).
 ///
-/// Neither override exists here, because neither setting does: this engine has
-/// no game-settings object and `sim/system.hpp` keeps fog of war out of the
-/// determinism contract on the shipped build's own precedent. So both answer
-/// the bit, which is the answer the original gives for an ordinary fogged
-/// multiplayer game -- the case the AI scripts are written for.
+/// ## Both bits are the visibility sweep's
 ///
-/// ## `Explored` is set by `AiSystem::advance`; `Revealed` by nothing
-///
-/// The original's per-node visibility sweep sets both when a player can see a
-/// node and clears `Revealed` when sight is lost. `AiSystem::advance` runs the
-/// `Explored` half against the exploration map (a node is explored once its
-/// centre is -- a labelled reading, see there). `Revealed` needs *current*
-/// sight, which this engine does not keep, so it still reads false: the state
-/// of a node nobody is looking at right now.
+/// `sweep_gaika` (0x0044ecc0), which `AiSystem::advance` runs on every node,
+/// sets both while the player stands in the node and clears `Revealed` when
+/// sight is lost.
 template <std::uint16_t kBit>
 HostOutcome m_laika_flag(CallContext& ctx) {
   const Laika* record = laika_of(ctx, 1);
-  return HostOutcome::ok_with(
-      Value::boolean(record != nullptr && (record->flags & kBit) != 0));
+  if (record == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  World* world = world_of(ctx);
+  if constexpr (kBit == kLaikaExplored) {
+    if (world != nullptr) return HostOutcome::ok_with(Value::boolean(laika_explored(*world, *record)));
+  } else if constexpr (kBit == kLaikaRevealed) {
+    if (world != nullptr) return HostOutcome::ok_with(Value::boolean(laika_revealed(*world, *record)));
+  }
+  return HostOutcome::ok_with(Value::boolean((record->flags & kBit) != 0));
 }
 
 /// `g.CanExplore(player)` -- 1 site, and one of the two names between
@@ -2982,7 +3010,7 @@ HostOutcome m_gaika_can_explore(CallContext& ctx) {
 
   const auto explored = [&](GaikaId id) {
     const Laika* record = view->find(id);
-    return record != nullptr && (record->flags & kLaikaExplored) != 0;
+    return record != nullptr && laika_explored(*world, *record);
   };
   for (const GaikaId next_door : table.neighbours(here)) {
     if (explored(next_door)) return HostOutcome::ok_with(Value::boolean(true));
@@ -3092,13 +3120,11 @@ HostOutcome m_gaika_set_priority(CallContext& ctx) {
 /// >= 600000)` with the comment *"expect only few enemies if non-stronghold
 /// GIAKA not visited for 10 min"*, and a five-minute variant beside it.
 ///
-/// The original stamps it from a per-node visibility sweep that also fills
-/// `enemies` with the strength remembered from the moment sight was lost.
-/// `AiSystem::advance` stamps it with the turn's time on every pass that finds
-/// the node explored -- a labelled reading, since exploration is the only
-/// per-player sight kept here -- so a node never seen answers 0 and both
-/// readers take their "long unvisited" branch, and an explored one answers
-/// about now. `enemies` is still not filled.
+/// The per-node visibility sweep (`sweep_gaika`, 0x0044ecc0) stamps it when
+/// the player loses sight of the node, and fills `enemies` with the strength
+/// standing there at that moment. A node never left answers 0, so a reader
+/// takes its "long unvisited" branch; the shipped readers ask it only of a
+/// node that is not `Revealed`.
 HostOutcome m_gaika_last_seen(CallContext& ctx) {
   const Laika* record = laika_of(ctx, 1);
   const GameTime seen = record == nullptr ? 0 : record->last_seen;
@@ -3531,7 +3557,7 @@ HostOutcome f_find_teleport(CallContext& ctx) {
     if (node == nullptr || node->lsa != from) continue;
     if (view != nullptr) {
       const Laika* record = view->find(stands_in);
-      if (record != nullptr && (record->flags & kLaikaExplored) == 0) continue;
+      if (record != nullptr && !laika_explored(*world, *record)) continue;
     }
     const WorldObject* far_end = world->find(teleport->state.teleport_destination);
     if (far_end == nullptr) continue;
@@ -4225,7 +4251,10 @@ struct SpellSite {
   site.ok = true;
   site.mine = mine;
   site.from = unit_pos_rh(world, self);
-  for (const Squad& squad : heroes->squads().squads()) {
+  for (const SquadKey& key : squads_filed_under(heroes->squads(), node)) {
+    const Squad* filed = heroes->squads().find(key);
+    if (filed == nullptr) continue;
+    const Squad& squad = *filed;
     if (squad.eval == 0) continue;
     if (!players.is_enemy(mine, squad.key.player)) continue;
     if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
@@ -4614,24 +4643,22 @@ HostOutcome f_enemy_players_eval(CallContext& ctx) {
 ///     its minimum.
 ///  7. `*nAvail -= sent`, floored at zero, and the answer is `sent`.
 ///
-/// ## The block that is skipped, and why that is a gap
+/// ## The routing filter (0x0043816e..0x004382b0)
 ///
 /// Between steps 5 and 6 the original runs a fourth filter, gated on two
-/// conditions: the under-fire flag is clear **and the MAIKA routing deque at
-/// `[0x8c8e54]+0x38` is non-empty**. For each live candidate standing in some
-/// node other than this one (`GAIKAIn`, `[squad+0x22]`) it asks 0x0043eda0,
-/// once per source node, for a way-point between that node and this one,
-/// drops (marks -2) the squads that have none, and abandons the whole recruit
-/// if the drops take the total below `nMin`.
-///
-/// **That deque is empty in this engine and always will be**, because the only
-/// thing that ever fills it is `SetMAIKA`, which `f_set_maika` accepts and
-/// drops for want of a routing table -- it says so at length. **In retail it is
-/// not empty**: `SQUADMONITOR.VS`, which every computer player runs, calls
-/// `SetMAIKA` from three places, so the filter is live there and can refuse a
-/// squad that has no recorded way across. Skipping it is therefore the routing
-/// table's gap showing through, not a reproduction, and it is the first thing
-/// to restore alongside that table.
+/// conditions: the under-fire flag is clear **and the MAIKA list at
+/// `[0x8c8e54]+0x38` is not empty** (`SquadTable::routes`, which `SetMAIKA`
+/// and the attacked hook fill). Walking the ranking best-first to the first
+/// refused entry, each live candidate standing in some node other than this
+/// one (`GAIKAIn`, `[squad+0x22]`) is put to 0x0043eda0 -- once per source
+/// node, the verdict cached by node -- which walks the list newest first for
+/// a record from that node to this one and asks `CheckMAIKA.vs(idPlayer,
+/// gSrc, gDst, gMAIKA)` of each until one answers **false**: that record's
+/// way-point is the answer, and a squad with a way-point is dropped (marked
+/// -2) and its strength counted. If the drops take the total below `nMin`
+/// the whole recruit is abandoned. The script's trampoline answers true when
+/// it cannot be run (0x0043d70c), so with no `CheckMAIKA.vs` nothing is
+/// dropped. A way-point of 0 is never the answer, and cannot be recorded.
 ///
 /// ## Four narrowings, named
 ///
@@ -4856,9 +4883,59 @@ HostOutcome m_gaika_recruit(CallContext& ctx) {
     }
     if (total < min_need) return HostOutcome::ok_with(none);
   }
-  // The routing filter would run here. See the header: its gate is the MAIKA
-  // deque and this engine has none, so it is skipped rather than approximated.
-  (void)under_fire;
+  // The routing filter. See the header.
+  if (!under_fire && !squads.routes().empty()) {
+    const std::uint32_t check_chunk = ai->find_script(*ctx.scheduler, player, "CheckMAIKA.vs");
+    // 0x0043eda0 for one source node: the first record from `src` to `node`
+    // whose way-point `CheckMAIKA.vs` refuses.
+    const auto way_point = [&](GaikaId src, GaikaId& way, HostOutcome& failure) {
+      way = kNoGaika;
+      // A copy: the script can call `SetMAIKA`, and the walk is over the list
+      // as it stood (the original walks the live deque by index).
+      const std::vector<SquadTable::Route> routes(squads.routes().begin(),
+                                                  squads.routes().end());
+      for (const SquadTable::Route& route : routes) {
+        if (route.src != src || route.dst != node) continue;
+        bool passable = true;
+        if (check_chunk != script::kNoChunk) {
+          const Value args[4] = {Value::integer(asked), gaika_value(route.src),
+                                 gaika_value(route.dst), gaika_value(route.way)};
+          Value answer = Value::boolean(true);
+          failure = run_script_now(ctx, check_chunk, args, "Recruit: CheckMAIKA.vs failed", answer);
+          if (failure.status != script::HostStatus::ok) return;
+          passable = answer.truthy_scalar();
+        }
+        if (!passable && route.way != kNoGaika) {
+          way = route.way;
+          return;
+        }
+      }
+    };
+    std::vector<std::int8_t> verdict(static_cast<std::size_t>(world->gaika().count()) + 1, -1);
+    std::int32_t dropped = 0;
+    for (Candidate& candidate : ranked) {
+      if (candidate.score == 0) break;
+      if (candidate.score < 0) continue;
+      const Squad* squad = squads.find(candidate.squad);
+      if (squad == nullptr) continue;
+      const GaikaId in = squad->gaika_in;
+      if (in == kNoGaika || in == node) continue;
+      if (in < 0 || static_cast<std::size_t>(in) >= verdict.size()) continue;
+      std::int8_t& clear = verdict[static_cast<std::size_t>(in)];
+      if (clear < 0) {
+        GaikaId way = kNoGaika;
+        HostOutcome failure = HostOutcome::ok_void();
+        way_point(in, way, failure);
+        if (failure.status != script::HostStatus::ok) return failure;
+        clear = way == kNoGaika ? 1 : 0;
+      }
+      if (clear == 0) {
+        dropped += squad->eval;
+        candidate.score = -2;
+      }
+    }
+    if (total - dropped < min_need) return HostOutcome::ok_with(none);
+  }
 
   // Step 6, the free half.
   const auto send = [&](SquadKey key, HostOutcome& failure) {

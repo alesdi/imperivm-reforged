@@ -1792,19 +1792,20 @@ TEST(the_stop_request_and_the_marchs_flag_survive_a_save_and_are_not_hashed) {
   const ObjectId walker = field.unit("Soldier", Point{100, 500});
   field.movement.order_goto(field.world, walker, Point{900, 500}, 0, 0, kNoObject, true);
   REQUIRE(field.movement.request_stop(field.world, walker));
-  field.movement.state(walker).form_lock = true;
+  field.movement.formation_of(walker).should_lock = true;
   std::uint64_t with = 0;
   field.movement.hash(with);
   std::vector<std::byte> bytes;
   field.movement.serialize(bytes);
   field.movement.state(walker).stop_requested = false;
-  field.movement.state(walker).form_lock = false;
+  field.movement.formation_of(walker).should_lock = false;
   std::uint64_t without = 0;
   field.movement.hash(without);
   CHECK(with == without);
   REQUIRE(field.movement.deserialize(bytes).ok());
   CHECK(field.move(walker).stop_requested);
-  CHECK(field.move(walker).form_lock);
+  REQUIRE(field.movement.formation(walker) != nullptr);
+  CHECK(field.movement.formation(walker)->should_lock);
 }
 
 TEST(a_new_order_clears_the_stop_request) {

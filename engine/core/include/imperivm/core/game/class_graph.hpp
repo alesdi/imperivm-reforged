@@ -133,7 +133,9 @@ struct ClassDefinition {
 
   std::vector<ClassProperty> properties;  ///< sorted by key
   std::vector<ClassProperty> sounds;      ///< sorted by channel
-  std::vector<ClassMethod> methods;       ///< sorted by sig
+  /// Sorted by sig; overloads of one sig (different scripts) in document
+  /// order. `gbr.exe` keys methods on the name and the script's signature.
+  std::vector<ClassMethod> methods;
   std::vector<std::string_view> behaviors;
   std::vector<DefaultCommandBlock> default_cmds;  ///< in document order
   std::array<InfoValue, 6> values{};
@@ -245,6 +247,10 @@ class ClassGraph {
 
   [[nodiscard]] std::vector<ClassProperty> resolved_properties(ClassIndex index) const;
   [[nodiscard]] std::vector<ClassProperty> resolved_sounds(ClassIndex index) const;
+  /// One method per sig, the last declaration nearest the class winning: the
+  /// view for hooks and `idle`, which are never overloaded, and what
+  /// `imcheck classes` compares. `CommandSystem` merges the overloads itself,
+  /// since telling them apart takes the scripts' signatures.
   [[nodiscard]] std::vector<ClassMethod> resolved_methods(ClassIndex index) const;
 
   /// The behaviour list `gbr.exe` keeps on a class (`[class+0x1ec]` entries,

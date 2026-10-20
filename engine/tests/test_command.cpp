@@ -104,6 +104,18 @@ ClassGraph fixture_graph() {
       <method sig="ai_killall" vs="data/subai/hero_ai_killall.vs"/>
     </class>)"),
             "hero.sc.xml");
+  // `heal` declared twice, on a unit and on the ground, as `RPriest` and
+  // `GDruid` declare it; and a class below it that redeclares the unit form
+  // only.
+  graph.add(bytes(R"(<class id="Priest" cpp_class="CVXDruid" parent="Unit">
+      <method sig="heal" vs="data/subai/druid_heal.vs"/>
+      <method sig="heal" vs="data/subai/druid_heal_ground.vs"/>
+    </class>)"),
+            "priest.sc.xml");
+  graph.add(bytes(R"(<class id="Abbot" cpp_class="CVXDruid" parent="Priest">
+      <method sig="heal" vs="data/subai/abbot_heal.vs"/>
+    </class>)"),
+            "abbot.sc.xml");
   // A class that binds nothing at all: a command queued on it can never start,
   // and must be retired rather than block the queue forever.
   graph.add(bytes(R"(<class id="Rock" cpp_class="CVXDecor" parent=""/>)"), "rock.sc.xml");
@@ -525,15 +537,22 @@ TEST(sneak_command_interrupts_the_runner_and_resumes_it_after) {
   (void)f.add(u, false, "guard");
   CHECK(f.verbs(u) == (std::vector<std::string>{"move", "guard"}));
 
+  const std::uint32_t runner = f.commands.find(u)->entries.front().id;
+  const std::uint32_t next = f.world.next_command_id();
   HostCall sneak(f.world, {obj(u), Value::string("engage")});
   CHECK(invoke(registry, CallKind::member, "SneakCommand", 1, sneak).status == HostStatus::ok);
   CHECK(f.verbs(u) == (std::vector<std::string>{"engage", "move", "guard"}));
   const CommandQueue* q = f.commands.find(u);
   REQUIRE(q != nullptr && q->entries.size() == 3);
-  // The resumed march is the old one, argument and all, under a fresh id.
+  // The resumed march is the old one, argument, row and id: the clone draws
+  // an id in its constructor and then takes the runner's (0x00599cdb). The
+  // new command drew the id after the one the probe above took, the clone
+  // the one after that.
   CHECK(q->entries[1].arg_kind == CommandArgKind::point);
   CHECK(q->entries[1].point == (Point{640, 480}));
-  CHECK(q->entries[1].id != q->entries[0].id);
+  CHECK(q->entries[1].id == runner);
+  CHECK(q->entries[0].id == next + 1);
+  CHECK(f.world.next_command_id() == next + 3);
   CHECK(q->entries[0].arg_kind == CommandArgKind::none);
 
   // A verb the class does not bind prints and adds nothing.
@@ -641,13 +660,14 @@ TEST(the_host_add_and_set_command_reach_the_queue) {
   CHECK(invoke(registry, CallKind::member, "CmdCount", 0, count).value.as_integer() == 3);
 }
 
-TEST(an_object_nobody_has_ordered_is_running_idle) {
-  // The original keeps the running command's name on the object (`obj+0x10c`,
-  // `WaitIdle`'s compare at 0x005ece5a), and an object never ordered is
-  // running its `idle`. Here that first `idle` is started outside any queue,
-  // so the queue is empty -- and `ES_STRONGHOLD.VS`'s `barrack.command ==
-  // "idle"` has to be true of it, or no barracks trains until something else
-  // has ordered it once.
+TEST(the_bare_command_of_an_empty_queue_is_idle) {
+  // The original's bare `command` (0x005abe40) reads the name of the command
+  // the object last started, a string on the object; the indexed form
+  // (0x005ae620) reads the queue, `""` past its end. A started object's queue
+  // holds its running `idle` (`CommandSystem::start_slot`); a queue the
+  // fixture never started is empty, and the bare form answers the resting
+  // verb for it (the labelled reading at `command_impl`) --
+  // `ES_STRONGHOLD.VS`'s `barrack.command == "idle"`.
   Fixture f;
   HostRegistry registry;
   register_command_host(registry);
@@ -657,11 +677,10 @@ TEST(an_object_nobody_has_ordered_is_running_idle) {
     return invoke(registry, CallKind::member, "command", arity, call).value.as_string();
   };
   CHECK(name({obj(barracks)}, 0) == "idle");
-  CHECK(name({obj(barracks), Value::integer(0)}, 1) == "idle");
-  // Only the running slot: nothing is queued behind it.
+  // The indexed form reads the queue, which holds nothing.
+  CHECK(name({obj(barracks), Value::integer(0)}, 1).empty());
   CHECK(name({obj(barracks), Value::integer(1)}, 1).empty());
-  // And the queue is still empty -- `CmdCount` counts what is queued, and
-  // `barrack.CmdCount < 5` reads the same either way.
+  // And the queue is still empty: `CmdCount` counts what is queued.
   HostCall count(f.world, {obj(barracks)});
   CHECK(invoke(registry, CallKind::member, "CmdCount", 0, count).value.as_integer() == 0);
   CHECK(f.commands.find(barracks) == nullptr || f.commands.find(barracks)->empty());
@@ -1710,7 +1729,6 @@ TEST(a_commands_onfinish_runs_with_the_cancel_flag_and_the_commands_param) {
   f.commands.set_command(f.world, u, "research", order);
   for (int i = 0; i < 10 && f.commands.command_name(u) == "research"; ++i) step(200);
   CHECK(f.commands.command_name(u) == "idle");
-  step(200);  // the onfinish spawned at the turn's end runs on the next pass
   CHECK(f.world.find(u)->state.user == 115);
 
   // Replaced while running: `bCanceled` true.
@@ -2348,7 +2366,7 @@ TEST(a_fast_hero_marches_at_his_armys_pace_and_it_stands_formed_on_him_when_he_s
   }
   for (const ObjectId w : army) movement.stop(f.world, w);
   for (const ObjectId w : army) {
-    CHECK(isqrt(dist_sq(f.world.resolve_position(w), dest)) <= 3 * kDefaultFormationSpacing);
+    CHECK(isqrt(dist_sq(f.world.resolve_position(w), dest)) <= 3 * 52);
     CHECK(movement.find(w)->march_rate == 0);
   }
   // An order that is not a march walks at the unit's own pace again.
@@ -2411,34 +2429,35 @@ struct MarchBench {
 }  // namespace
 
 TEST(a_marchs_pace_is_its_share_of_the_mean_deadline_short_of_133) {
-  // One member, 200 east of the hero on his route, and so 133 short of its
-  // station: the centre stands 333 ahead of him (one 200-unit sample beyond
-  // the 133 a unit is timed short of, 0x00419c78), and a lone member of a
-  // block stands on it. The deadline is the mean over both of the time to
-  // cover the straight distance less 133 (0x005f5850): (200 + 0) / 2 at the
-  // formation's 100, a second. The hero's route to the centre less 133 is
-  // 200, so he is paced at 200 a second -- twice the formation's speed, and
-  // twice his own. The member has nothing left to cover and takes the fast
-  // end of the clamp, two and a half times (0x00419e91, 0x005f2130).
+  // One member, 200 east of the hero on his route. The centre stands 333
+  // ahead of him (one 200-unit sample beyond the 133 a unit is timed short
+  // of, 0x00419c78), facing the way it stepped, and a lone member of a block
+  // stands at the front of its first ring, `15 + 2 * 26` = 67 further on
+  // (0x005f04b0: the hero's `radius`, twice the member's `formation_radius`).
+  // The deadline is the mean over both of the time to cover the straight
+  // distance less 133 (0x005f5850): (200 + 67) / 2 at the formation's 100,
+  // 1,335 ms. The hero's route to the centre less 133 is 200, the member's
+  // to its station 67; each is paced at that over the deadline.
   const Point at[] = {Point{500, 500}};
   MarchBench b(Point{300, 500}, 100, at, 100);
   b.march(Point{4000, 500});
-  CHECK(b.movement.find(b.army[0])->target == (Point{633, 500}));
-  CHECK(b.pace(b.hero) == 200 * kDefaultSpeedFactor);
-  CHECK(b.pace(b.army[0]) == 250 * kDefaultSpeedFactor);
+  CHECK(b.movement.find(b.army[0])->target == (Point{700, 500}));
+  CHECK(b.pace(b.hero) == 200 * kSpeedScale / 1335);
+  CHECK(b.pace(b.army[0]) == 67 * kSpeedScale / 1335);
 }
 
 TEST(the_last_sample_is_the_destination_and_nothing_is_taken_short_of_it) {
   // The destination 200 east of the hero, nearer than a sample: the centre is
   // the route's end, the formation's last sample (`[form+0x88]` cleared,
   // 0x005f5cff), and no 133 comes off either distance. The member's station
-  // is the destination, 223 from it; the deadline is (2,000 + 2,230 + 1) / 2
-  // ms at the formation's 100, and the hero's pace his 200 over it.
+  // is 67 ahead of the destination, 285 from it; the deadline is
+  // (2,000 + 2,850 + 1) / 2 ms at the formation's 100, and the hero's pace
+  // his 200 over it.
   const Point at[] = {Point{300, 600}};
   MarchBench b(Point{300, 500}, 100, at, 100);
   b.march(Point{500, 500});
-  CHECK(b.movement.find(b.army[0])->target == (Point{500, 500}));
-  CHECK(b.pace(b.hero) == 200 * kSpeedScale / 2115);
+  CHECK(b.movement.find(b.army[0])->target == (Point{567, 500}));
+  CHECK(b.pace(b.hero) == 200 * kSpeedScale / 2425);
 }
 
 TEST(a_straggler_is_hurried_and_the_hero_held_back_within_the_clamp) {
@@ -2456,6 +2475,98 @@ TEST(a_straggler_is_hurried_and_the_hero_held_back_within_the_clamp) {
   CHECK(b.pace(b.army[2]) == formation * 5 / 2);
   CHECK(b.pace(b.army[0]) >= formation / 2);
   CHECK(b.pace(b.army[0]) <= formation * 5 / 2);
+}
+
+namespace {
+
+[[nodiscard]] std::int64_t form_radius_of(MarchBench& b) {
+  HostCall call(b.f.world, {obj(b.hero)});
+  return invoke(b.registry, CallKind::member, "FormRadius", 0, call).value.as_integer();
+}
+
+}  // namespace
+
+TEST(a_unit_that_joins_a_march_takes_its_place_at_the_next_layout) {
+  // Joining only puts the unit on the formation's pending list and marks the
+  // layout (0x005f47e0); `FormRadius` answers the last layout's radius until
+  // the layout runs (0x005f2350), and that is in `FormKeepMoving`'s update
+  // (0x005f5e30 -> 0x005f4390), which hands every unit it lays `form_move`.
+  // The hero's class radius is 15 and the warriors' 26: two in a block stand
+  // at the front and back of the first ring, 67 out; three are its short
+  // ring, the front corners 94 out.
+  const Point at[] = {Point{300, 540}, Point{300, 460}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  CHECK(form_radius_of(b) == 15);
+  b.march(Point{3000, 500});
+  CHECK(form_radius_of(b) == 67);
+  for (const ObjectId w : b.army) CHECK(b.f.verbs(w) == std::vector<std::string>{"form_move"});
+
+  const ObjectId late = b.f.spawn(b.f.warrior_class, Point{200, 500});
+  b.heroes.register_unit(b.f.world, late);
+  REQUIRE(b.heroes.attach(b.f.world, late, b.hero));
+  b.movement.state(late).speed = 100;
+  (void)b.f.order(late, "idle");
+  CHECK(form_radius_of(b) == 67);
+  CHECK(b.f.verbs(late) == std::vector<std::string>{"idle"});
+
+  b.f.world.advance(500);
+  HostCall keep(b.f.world, {obj(b.hero), Value::integer(1500)});
+  (void)invoke(b.registry, CallKind::member, "FormKeepMoving", 1, keep);
+  CHECK(b.f.verbs(late) == std::vector<std::string>{"form_move"});
+  CHECK(b.movement.find(late)->goto_active);
+  CHECK(b.movement.find(late)->party == b.hero);
+  CHECK(form_radius_of(b) == 94);
+}
+
+TEST(a_member_that_leaves_the_army_loses_its_route) {
+  // The hero's `RemoveUnit` (0x0052db70 -> 0x005f3290) deletes the leaving
+  // member's route (0x005d3830 with 0), and its slot goes with it.
+  const Point at[] = {Point{300, 540}, Point{300, 460}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  b.march(Point{3000, 500});
+  REQUIRE(b.movement.find(b.army[0])->goto_active);
+  REQUIRE(b.heroes.detach(b.f.world, b.army[0]));
+  CHECK(!b.movement.find(b.army[0])->goto_active);
+  CHECK(!b.movement.find(b.army[0])->has_path);
+  CHECK(b.movement.formation(b.hero)->slots.size() == 1);
+  CHECK(b.movement.formation(b.hero)->rebuild);
+  CHECK(b.movement.find(b.army[1])->goto_active);
+}
+
+TEST(a_requested_orientation_is_settled_by_the_setup_and_faces_the_last_sample) {
+  // `SetDest` (0x005f2cc0) moves a requested orientation into the settled
+  // pair and clears the request; within 200 of the path's end the sample
+  // faces it (0x005f5c7d). Two hundred east, the first sample is the last:
+  // the lone member stands at the front of the block, 67 along the settled
+  // orientation -- south -- and not along the march -- east.
+  const Point at[] = {Point{300, 540}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  HeroRecord* record = b.heroes.hero(b.hero);
+  REQUIRE(record != nullptr);
+  record->party_orientation_request = Point{0, 50};
+  b.march(Point{500, 500});
+  CHECK(record->party_orientation == (Point{0, 50}));
+  CHECK(record->party_orientation_request == (Point{}));
+  CHECK(b.movement.find(b.army[0])->target == (Point{500, 567}));
+}
+
+TEST(a_setup_to_where_the_hero_stands_ends_the_march) {
+  // `HERO_IDLE.VS` after a fight: `.FormSetupAndMoveTo(.pos, 0, 0, true)`.
+  // `SetDest` hands every member with a slot `form_move` (0x005f2b50), and
+  // the first sample cannot step a centre that has nowhere to go: with no
+  // sample laid, `CreateNextSample` ends the march (0x005f5ce5 -> 0x005f2c10)
+  // -- each member loses its route and its `form_move`.
+  const Point at[] = {Point{300, 540}, Point{300, 460}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  b.march(Point{1000, 500});
+  for (const ObjectId w : b.army) CHECK(b.f.verbs(w) == std::vector<std::string>{"form_move"});
+  b.f.world.advance(500);
+  b.march(b.f.world.resolve_position(b.hero));
+  for (const ObjectId w : b.army) {
+    CHECK(b.f.verbs(w).empty());
+    CHECK(!b.movement.find(w)->goto_active);
+  }
+  CHECK(b.movement.formation(b.hero)->samples == 0);
 }
 
 TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) {
@@ -2504,7 +2615,7 @@ TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) 
                            Value::integer(0), Value::boolean(true)});
   REQUIRE(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, setup).status ==
           HostStatus::ok);
-  CHECK(movement.find(hero)->form_lock);
+  CHECK(movement.formation(hero)->should_lock);
   for (const ObjectId w : army) {
     CHECK(f.verbs(w) == std::vector<std::string>{"form_move"});
     CHECK(movement.find(w)->goto_active);
@@ -2770,7 +2881,15 @@ TEST(form_path_left_is_a_distance) {
   HostCall idle(f.world, {obj(hero)});
   CHECK(invoke(registry, CallKind::member, "FormPathLeft", 0, idle).value.as_integer() == 0);
 
+  // A route that is not a march's is not the formation's: 0x0052ebc0
+  // answers 0 while the formation has no route record (`[form+0x84]`).
   movement.order_goto(f.world, hero, Point{900, 100}, 0);
+  HostCall alone(f.world, {obj(hero)});
+  CHECK(invoke(registry, CallKind::member, "FormPathLeft", 0, alone).value.as_integer() == 0);
+
+  // Leading a march, his route stands for the formation's.
+  movement.formation_of(hero).path = true;
+  movement.state(hero).party = hero;
   HostCall walking(f.world, {obj(hero)});
   const std::int32_t left =
       invoke(registry, CallKind::member, "FormPathLeft", 0, walking).value.as_integer();
@@ -3254,6 +3373,52 @@ TEST(add_command_queues_only_a_verb_bound_in_the_shape_it_is_given) {
   CHECK(f.world.command_id_seed() == 502);
 }
 
+/// **A method is its name and its script's signature**: the loader keys a
+/// class's methods on both (0x0059a830, 0x0059ece0) and 0x005aef20 looks them
+/// up on both, so `RPriest`'s two `heal`s -- `druid_heal.vs` on a unit,
+/// `druid_heal_ground.vs` on the ground -- are two methods, and a class below
+/// that redeclares one form keeps the other. Keyed on the name alone, the
+/// ground form was the priest's only `heal`, `AddCommand(true, "heal", tgt)`
+/// in `RPRIEST_ADVANCE.VS` found nothing, and the advance it queues beside it
+/// came round again on the same millisecond for ever (Crossroads, seed 1,
+/// turn 1,015, until the machine ran out of memory).
+TEST(a_verb_declared_on_a_unit_and_on_the_ground_is_two_methods) {
+  ShapeFixture f;
+  f.library.sources.emplace_back("data/subai/druid_heal.vs",
+                                 "// void, Obj This, Obj target\nThis.SetUser(1);\nSleep(500);\n");
+  f.library.sources.emplace_back("data/subai/druid_heal_ground.vs",
+                                 "// void, Obj This, point pt\nThis.SetUser(2);\nSleep(500);\n");
+  f.library.sources.emplace_back("data/subai/abbot_heal.vs",
+                                 "// void, Obj This, Obj target\nThis.SetUser(3);\nSleep(500);\n");
+  const ObjectId priest = f.spawn(f.graph.find("Priest"));
+  const ObjectId abbot = f.spawn(f.graph.find("Abbot"), Point{300, 100});
+  const ObjectId hurt = f.spawn(f.unit_class, Point{200, 100});
+
+  CHECK(f.commands.script_for(f.world, priest, "heal", CommandArgKind::object) ==
+        "data/subai/druid_heal.vs");
+  CHECK(f.commands.script_for(f.world, priest, "heal", CommandArgKind::point) ==
+        "data/subai/druid_heal_ground.vs");
+  CHECK(!f.commands.binds(f.world, priest, "heal", CommandArgKind::none));
+  CHECK(f.commands.script_for(f.world, abbot, "heal", CommandArgKind::object) ==
+        "data/subai/abbot_heal.vs");
+  CHECK(f.commands.script_for(f.world, abbot, "heal", CommandArgKind::point) ==
+        "data/subai/druid_heal_ground.vs");
+
+  // The script's own `AddCommand` finds the unit form and runs it.
+  HostCall heal(f.world, {obj(priest), Value::boolean(false), Value::string("heal"), obj(hurt)});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, heal).status == HostStatus::ok);
+  CHECK(f.verbs(priest) == (std::vector<std::string>{"heal"}));
+  HostCall ground(f.world,
+                  {obj(abbot), Value::boolean(false), Value::string("heal"), pack_point(Point{9, 9})});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, ground).status == HostStatus::ok);
+  Turn pass;
+  pass.time = f.scheduler.now();
+  f.commands.advance(f.world, pass);
+  f.scheduler.advance(100);
+  CHECK(f.world.find(priest)->state.user == 1);
+  CHECK(f.world.find(abbot)->state.user == 2);
+}
+
 /// A script's `SetCommand` clears the tail **before** it looks the verb up, and
 /// on a miss the `Obj` form leaves the head running (0x005b0aec returns) while
 /// the `ObjList` and `Query` forms end it anyway (0x00561d6a, 0x00577ef8).
@@ -3275,7 +3440,9 @@ TEST(a_set_command_that_finds_no_method_clears_the_tail_and_only_a_list_ends_the
   *pool.mutable_items(list) = {b};
   HostCall group(f.world, {make_objlist_value(list), Value::string("move")});
   REQUIRE(invoke(f.registry, CallKind::member, "SetCommand", 1, group).status == HostStatus::ok);
-  CHECK(f.verbs(b).empty());
+  // The head ended, and the end refilled the queue with the class's `idle`
+  // there and then (0x005b5160 -> 0x005b4f20).
+  CHECK(f.verbs(b) == (std::vector<std::string>{"idle"}));
 }
 
 /// `Obj::KillCommand` and `Obj::ClearCommands` refuse a dead object
@@ -3366,6 +3533,230 @@ TEST(a_command_that_kills_itself_is_told_it_finished_and_not_that_it_was_cancell
   }
   CHECK(f.commands.command_name(u) != "research");
   CHECK(f.world.find(u)->state.user == 1);
+}
+
+// --------------------------------------------------------------------------
+// the command slot's end: 0x005b5160 -> 0x005b19f0 -> 0x005b4f20
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// A `RunFixture` with the session's step hook, which is where a command's
+/// thread ending is told to its queue (0x0069f7a0 -> `vtbl+0x1c`), and the
+/// four scripts the tests below queue. Each one leaves its mark in the unit's
+/// `user` word: `move` adds 1 and returns, `guard` adds 10 and stays,
+/// `research` waits, and `research`'s `onfinish` adds 1000 when it is told it
+/// was cancelled and 100 when not.
+struct EndFixture : RunFixture {
+  EndFixture() {
+    install_deferred_erase(scheduler);
+    (void)register_global_hosts(registry);
+    (void)add_script("// void, Obj This, point pt\nThis.SetUser(This.user + 1);\n",
+                     "data/subai/unit_move.vs");
+    (void)add_script("// void, Obj This\nThis.SetUser(This.user + 10);\nSleep(100000);\n",
+                     "data/subai/unit_guard.vs");
+    (void)add_script("// void, Obj This\nSleep(500);\n", "data/subai/research.vs");
+    (void)add_script("// void, Obj me\nwhile (1) Sleep(1000);\n", "data/subai/unit_idle.vs");
+  }
+  void onfinish(std::string_view first_line) {
+    std::string source = "// void, Obj This, bool bCanceled\n";
+    source += first_line;
+    source +=
+        "if (bCanceled) This.SetUser(This.user + 1000); else This.SetUser(This.user + 100);\n";
+    (void)add_script(source, "data/subai/onfinish_research.vs");
+  }
+  std::int32_t user(ObjectId id) { return world.find(id)->state.user; }
+  const Command* head(ObjectId id) {
+    const CommandQueue* q = commands.find(id);
+    return q == nullptr ? nullptr : q->running();
+  }
+};
+
+}  // namespace
+
+/// **A command whose script returns starts the next one there and then**,
+/// before any other script runs: 0x0069f7a0 calls the owner's `vtbl+0x1c` as
+/// soon as the thread's slice is over and it has finished, and 0x005b5160
+/// pops the head and starts the next through 0x005b4f20, whose thread is armed
+/// at the clock and so runs in the same pass. It used to wait for the next
+/// turn's command pass.
+/// **A list-and-point command hands its script a list and a point**: kind 5,
+/// `SHIP_UNBOARD.VS`'s `// void, Obj This, ObjList ol, point pt`, which the
+/// issue's group-move set-up makes for a ship (0x004ef1c0). The list is the
+/// script's temporary and goes with it.
+TEST(a_list_and_point_command_hands_its_script_both) {
+  EndFixture f;
+  (void)register_objlist_host(f.registry);
+  REQUIRE(f.add_script("// void, Obj This, ObjList ol, point pt\n"
+                       "This.SetUser(ol.count * 1000 + pt.x);\n",
+                       "data/subai/wagon_unload.vs"));
+  const ObjectId u = f.spawn(f.unit_class);
+  const ObjectId a = f.spawn(f.unit_class);
+  const ObjectId b = f.spawn(f.unit_class);
+  CHECK(f.commands.binds(f.world, u, "unload", CommandArgKind::list_point));
+  CHECK(!f.commands.binds(f.world, u, "unload", CommandArgKind::point));
+  Command unload;
+  unload.arg_kind = CommandArgKind::list_point;
+  unload.point = Point{321, 50};
+  unload.list = {a, b};
+  REQUIRE(f.commands.set_command(f.world, u, "unload", unload) != 0);
+  f.scheduler.advance(100);
+  CHECK(f.user(u) == 2321);
+}
+
+/// **A command whose script traps does not start the next inside the pass.**
+/// An `idle` that queues a command and returns, over a command whose script
+/// traps on its first slice, would otherwise end and start one another on
+/// the same instant for ever (`EAGLE_IDLE.VS` over `EAGLE_MOVE.VS` in a
+/// session with no entities, whose `GetAnimDuration(0)` divides by zero).
+/// Bounded: the `idle` counts its runs and stops handing back at fifty, so
+/// the unfixed loop fails here rather than hangs.
+TEST(a_command_whose_script_traps_starts_the_next_at_the_pass_not_at_once) {
+  RunFixture f;
+  install_deferred_erase(f.scheduler);
+  (void)register_global_hosts(f.registry);
+  REQUIRE(f.add_script("// void, Obj This\n"
+                       "This.SetUser(This.user + 1);\n"
+                       "if (This.user > 50) { while (1) Sleep(100000); }\n"
+                       "This.AddCommand(true, \"engage\");\n",
+                       "data/subai/unit_idle.vs"));
+  REQUIRE(f.add_script("// void, Obj This\nint z;\nz = 0;\nz = 1 / z;\n",
+                       "data/subai/unit_engage.vs"));
+  const ObjectId u = f.spawn(f.unit_class);
+  REQUIRE(f.commands.start_slot(f.world, u));
+  f.scheduler.advance(100);
+  // The idle ran once and handed over; `engage` trapped and ended; the next
+  // idle waits for the command pass.
+  CHECK(f.world.find(u)->state.user == 1);
+  // Each command pass starts the next idle, which hands over once more.
+  for (int turn = 0; turn < 3; ++turn) {
+    Turn pass;
+    pass.time = f.scheduler.now();
+    f.commands.advance(f.world, pass);
+    f.scheduler.advance(100);
+  }
+  CHECK(f.world.find(u)->state.user == 4);
+}
+
+TEST(a_command_that_returns_starts_the_next_in_the_same_pass) {
+  EndFixture f;
+  f.onfinish("");
+  const ObjectId u = f.spawn(f.unit_class);
+  Command order;
+  order.arg_kind = CommandArgKind::point;
+  order.point = Point{300, 300};
+  f.commands.set_command(f.world, u, "move", order);
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  // One scheduler pass and no command pass: `move` ran and returned, and
+  // `guard` started at its end and ran in the same pass.
+  f.scheduler.advance(100);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "guard");
+  CHECK(f.user(u) == 11);
+  // And a queue that runs dry is given its `idle` the same way.
+  f.commands.set_command(f.world, u, "move", order);
+  f.scheduler.advance(100);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "idle");
+  CHECK(f.head(u)->started);
+  CHECK(f.scheduler.alive(f.head(u)->script));
+}
+
+/// **Ended by another script, a command is told inside the call and the next
+/// starts inside it too**: 0x005b07d0 deletes the thread through 0x0069fee0,
+/// which calls `vtbl+0x1c` at once under the cancel flag -- the `onfinish`
+/// runs to its end there (0x0059af00 through the synchronous launcher
+/// 0x006a0360), the head is popped and the next started. The `onfinish` was
+/// spawned and ran a pass late, and the next command waited for the pass.
+TEST(a_command_ended_by_another_script_is_told_and_followed_inside_the_call) {
+  EndFixture f;
+  f.onfinish("");
+  const ObjectId u = f.spawn(f.unit_class);
+  f.commands.set_command(f.world, u, "research", Command{});
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  REQUIRE(f.head(u) != nullptr);
+  REQUIRE(f.head(u)->verb == "research");
+  REQUIRE(f.head(u)->started);
+
+  CHECK(f.commands.kill_command(f.world, u));
+  // No pass has run.
+  CHECK(f.user(u) == 1000);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "guard");
+  CHECK(f.head(u)->started);
+  CHECK(f.scheduler.alive(f.head(u)->script));
+}
+
+/// **A command ended by its own script stops at that call.** 0x0069fee0 finds
+/// the thread it is to end is the one running and only raises its stop flag
+/// (`[ctx+0x40]`); the interpreter reads it as the host call returns
+/// (0x0069d4c0) and ends the script there, so nothing after the call runs.
+/// The end then pops it with the cancel flag down and starts the next. Here
+/// the script used to run on to its next suspension.
+TEST(a_command_ending_itself_stops_at_the_call_and_the_next_starts_after_it) {
+  EndFixture f;
+  (void)f.add_script("// void, Obj This\nThis.KillCommand();\nThis.SetUser(This.user + 5);\n"
+                     "Sleep(100000);\n",
+                     "data/subai/barrack_train.vs");
+  const ObjectId u = f.spawn(f.unit_class);
+  f.commands.set_command(f.world, u, "train", Command{});
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  f.scheduler.advance(100);
+  // Not 15: the line after `KillCommand` never ran; `guard` started at the
+  // end and ran in the same pass.
+  CHECK(f.user(u) == 10);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "guard");
+}
+
+/// **While a command's `onfinish` runs, ending index 0 does nothing.** The
+/// thread is deleted before `vtbl+0x1c` is called, and 0x005b07d0 does
+/// nothing at all without a live thread in the command slot (0x0069f950), so
+/// a `KillCommand` inside the `onfinish` leaves the head for the end to pop,
+/// and the command behind it starts.
+TEST(a_kill_command_inside_an_onfinish_leaves_the_queue_to_the_end) {
+  EndFixture f;
+  f.onfinish("This.KillCommand();\n");
+  const ObjectId u = f.spawn(f.unit_class);
+  f.commands.set_command(f.world, u, "research", Command{});
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  CHECK(f.commands.kill_command(f.world, u));
+  CHECK(f.user(u) == 1000);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "guard");
+  CHECK(f.commands.command_count(u) == 1);
+}
+
+/// **A research that jumps a running order starts inside the issue**
+/// (0x004efa82..0x004efaba: the runner's thread deleted, its `onfinish` told
+/// it was cancelled, the research pushed to the front and started through
+/// 0x005b4f20). It used to stand unstarted until the next pass.
+TEST(a_research_that_jumps_the_queue_starts_inside_the_issue) {
+  EndFixture f;
+  f.onfinish("");
+  CommandDef study;
+  study.name = "researchArmour";
+  study.method = "research";
+  study.research_command = true;
+  f.commands.mutable_table().set(study);
+  CommandDef stand;
+  stand.name = "guardHere";
+  stand.method = "guard";
+  f.commands.mutable_table().set(stand);
+  const ObjectId u = f.spawn(f.unit_class);
+  HostCall order(f.world, {obj(u), Value::string("guardHere"), Value::nil(), Value::nil(),
+                           Value::boolean(true)});
+  REQUIRE(invoke(f.registry, CallKind::member, "ExecCmd", 4, order).status == HostStatus::ok);
+  f.commands.add_command(f.world, u, false, "guard", Command{});
+  REQUIRE(f.head(u) != nullptr);
+  REQUIRE(f.head(u)->verb == "guard");
+  HostCall call(f.world, {obj(u), Value::string("researchArmour"), Value::nil(), Value::nil(),
+                          Value::boolean(false)});
+  REQUIRE(invoke(f.registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
+  REQUIRE(f.head(u) != nullptr);
+  CHECK(f.head(u)->verb == "research");
+  CHECK(f.head(u)->started);
+  CHECK(f.scheduler.alive(f.head(u)->script));
 }
 
 // --------------------------------------------------------------------------

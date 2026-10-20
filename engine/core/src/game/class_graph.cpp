@@ -40,6 +40,31 @@ void upsert(std::vector<ClassMethod>& table, const ClassMethod& method) {
   table.insert(at, method);
 }
 
+/// A class's own `<method>`, keeping overloads. `gbr.exe` keys a class's
+/// methods on the name *and* the compiled script's signature (the loader's
+/// find-or-insert 0x0059ece0 and the lookup 0x0059ad40 build the same key,
+/// 0x0059a830), so `heal` on a unit and `heal` on the ground are two methods.
+/// The signature is the script's, which this file does not read; two
+/// declarations of one `sig` naming the same script have the same one, and
+/// the later replaces the earlier as the loader's find-or-insert has it. Any
+/// other second declaration is kept, after the first, for `CommandSystem` to
+/// tell apart by the script it binds.
+void add_method(std::vector<ClassMethod>& table, const ClassMethod& method) {
+  const auto end = std::upper_bound(
+      table.begin(), table.end(), method.sig,
+      [](std::string_view needle, const ClassMethod& entry) { return needle < entry.sig; });
+  for (auto it = std::lower_bound(
+           table.begin(), end, method.sig,
+           [](const ClassMethod& entry, std::string_view needle) { return entry.sig < needle; });
+       it != end; ++it) {
+    if (it->vs == method.vs) {
+      *it = method;
+      return;
+    }
+  }
+  table.insert(end, method);
+}
+
 std::string join(std::string_view a, std::string_view b) {
   std::string out;
   out.reserve(a.size() + b.size());
@@ -146,7 +171,7 @@ Status ClassGraph::add(std::span<const std::byte> document, std::string_view sou
       // collide with anything: dropping it loses nothing, and refusing the
       // whole class over it would lose a great deal.
       if (sig.empty()) continue;
-      upsert(definition.methods, ClassMethod{arena_.intern(sig),
+      add_method(definition.methods, ClassMethod{arena_.intern(sig),
                                              arena_.intern(doc.attribute(child, "vs")),
                                              arena_.intern(doc.attribute(child, "verify")),
                                              arena_.intern(doc.attribute(child, "onfinish"))});

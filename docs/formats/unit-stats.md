@@ -133,6 +133,60 @@ ExpPercentPerLeadershipLevel * Leadership) * Exp[stored level of the hero] /
 100 + 1`, and only when it differs from `[hero+0x2c0]` stores it and rebuilds
 the army.
 
+## What a blow pays
+
+Experience in a fight comes from one routine, the blow 0x00511550. The melee
+strike (0x005dc650, and its sweep 0x005d4f30 for a class that hits all round
+it) calls it with the striker and the struck, and so does a projectile when
+it lands (0x004d9bb0), with its shooter, and only while both are alive and
+the target is not inside a holder. **A blow that does not kill pays
+nothing.** `CONST.INI`'s `exp_gain = target_level / LevelExpDivider + 1` is a
+comment: the unit constructor (0x005d3170) reads `LevelExpDivider` into a
+global that nothing reads again.
+
+When the blow kills, and both ends are units (the blow casts each to
+`CVXUnit`) and the victim is not a `Sentry` (0x005400c0):
+
+1. **The gain.** The levels of the two running totals (0x005d28c0, not the
+   stored levels) are compared: the victim's level less the killer's,
+   divided by 6 and truncated toward zero, kept between 0 and 8, plus 1. An
+   equal or a lesser victim is worth 1, one six levels above is worth 2, and
+   nothing is worth more than 9.
+2. **The modifier** (0x0050fec0) is the killer's owner's word
+   `[player+0x84]`, which `SetExperienceModifier` writes and the player
+   record's constructor (0x00565a00) zeroes. Zero keeps the gain. A positive
+   `m` multiplies it by `m / 100 + 1`, and by one more when a draw of 0..99
+   on the game's generator is under `m % 100` (no draw when `m % 100` is 0).
+   A negative `m` loses the whole gain when a draw is under `-m`. The *Battle
+   tactics* research sets it to `BattleTacticsExpModifier`, 100: double.
+3. **The hero's pool.** When the killer follows a hero, the gain is also
+   added to that hero's pool `[hero+0x2c4]`, which the hero's tick turns into
+   experience a point per `ExpFromArmyDivider` (3).
+4. The kill's statistics and the killer's `onkill` hook (0x005b5ca0) run
+   between the gain and the payment.
+
+The payment is the gain plus the `Learning` special's point (below), through
+`SetExperience` with the refresh. A hero (sync bit 0x1000000) or a unit in
+training (0x10000000) takes all of it. Anyone else is held at the start of
+its owner's `max_battle_level` level when that ledger entry
+(`/<map>/Player<n>/max_battle_level`, `n` the owner's script number) is set
+-- the *Standardization* researches, "All new warriors are level 4 but cannot
+gain more experience": a total that would reach that level's threshold is
+set to it, and a total already there is left alone.
+
+Two more awards come from the same routine and are not reproduced here:
+
+* **`Learning`** (0x0050ff30's last test): a blow by a unit, not a `Sentry`,
+  whose running total is below the struck unit's, pays 1 more point when the
+  unit has the special (bit 0x10000000 of its specials word `[unit+0x198]`)
+  or its owner's `Learning` entry reads `researched`, and its stamina covers
+  `LearningCost`, which it then pays. This engine charges no special's
+  stamina.
+* **The training blow**: a blow between two units where the struck one is
+  not the striker's enemy does a reduced damage that leaves it at least a
+  tenth of its health, and pays 1 point with a chance of `TrainingExpChance`
+  (75) in a hundred. This engine's training does not strike.
+
 ## The readers
 
 | entry point | reads |
@@ -154,9 +208,9 @@ the army.
   convert, because the engine's one writer of it (Wisdom) pays at once.
 * The formation loader's clamp to `[-1000, 1000]` is taken where the rebuild
   reads a bonus, not where `FORMATIONS.XML` is read.
-* The amount of experience a blow pays is still the engine's
-  (`target level / LevelExpDivider + 1` per damaging blow); only where it
-  goes is the original's.
+* A blow pays experience for a kill only, as above; the `Learning` point and
+  the training blow's are not paid. Wisdom pays its point straight into the
+  hero's total, where the original adds `ExpFromArmyDivider` to the pool.
 
 ## What is still unknown
 

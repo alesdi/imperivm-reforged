@@ -67,6 +67,11 @@ using core::PlayerId;
   return static_cast<std::uint16_t>(id);
 }
 
+/// The original's invalid handle index, `0xffff`: what a handle naming nothing
+/// carries, and what `EnvWriteObj` writes for one (`$$65535$$`, 0x006adf70).
+/// The original's table holds nothing there, so it reads back as nothing.
+inline constexpr ObjectId kCompatNoHandle = 0xFFFF;
+
 /// A position in world units. Maps are 8,192 to 32,768 units square, and the
 /// coordinate space is bounded by 16,383 on a standard map.
 struct Point {

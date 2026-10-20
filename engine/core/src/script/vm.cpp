@@ -334,7 +334,13 @@ void Machine::do_call(const Instruction& instruction) {
     return;
   }
 
-  if (outcome.status == HostStatus::retry) {
+  // The stop flag a host call raised on its own thread: 0x0069d4c0 reads
+  // `[ctx+0x40]` after every host call and turns whatever the call answered
+  // -- a suspension included -- into code 2, the end of the script.
+  const bool stopped = env.stop != nullptr && *env.stop;
+  if (stopped) *env.stop = false;
+
+  if (outcome.status == HostStatus::retry && !stopped) {
     // The call has not happened as far as the script is concerned: leave the
     // arguments where they are and the instruction pointer where it is, so the
     // whole call runs again when the wait is over. This is what a re-polling
@@ -359,7 +365,7 @@ void Machine::do_call(const Instruction& instruction) {
   execution.retry_since = 0;
   execution.retry_scratch = 0;
 
-  if (outcome.status == HostStatus::finish) {
+  if (outcome.status == HostStatus::finish || stopped) {
     // The original's host code 2: the script stops at this call, with nothing
     // pushed and nothing after it run. See `script/host.hpp`.
     execution.result = Value::nil();

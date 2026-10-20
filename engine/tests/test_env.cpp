@@ -187,8 +187,13 @@ TEST(env_object_values_round_trip_through_the_dollar_encoding) {
   CHECK(env_parse_object("$$$$") == sim::kNoObject);
   CHECK(env_parse_object("$$-5$$") == sim::kNoObject);
 
+  // Nothing is the original's invalid index, 0xffff (0x006adf70), and that
+  // index reads back as nothing (0x006ac790's table holds nothing there).
   store.write_object(player, "TributeBuilding", sim::kNoObject);
+  CHECK(store.read_string(player, "TributeBuilding") == "$$65535$$");
   CHECK(store.read_object(player, "TributeBuilding") == sim::kNoObject);
+  CHECK(env_parse_object("$$65535$$") == sim::kNoObject);
+  CHECK(env_parse_object("$$65534$$") == 65534);
 }
 
 TEST(env_scopes_with_the_same_number_are_different_scopes) {

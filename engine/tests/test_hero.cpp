@@ -2937,6 +2937,24 @@ TEST(hero_find_unit_to_heal_parks_by_the_casters_own_level) {
   CHECK(b.found("FindUnitToHeal", druid) == grazed);
 }
 
+/// The caster searches walk the world's grid over the sight circle
+/// (0x00512dc0 for learn, 0x00512430 for heal: rows of 256-unit cells, cells
+/// left to right, each cell's list in arrival order). Learn takes the first
+/// match it meets and heal keeps the first of equal scores, so of two equal
+/// candidates the one a row of cells higher wins, whatever the ids.
+TEST(hero_caster_searches_meet_candidates_in_the_grids_order) {
+  CasterBench b;
+  const ObjectId druid = b.spawn(b.caster_class, Point{1000, 1000}, 1, 100);
+  REQUIRE(b.heroes.set_level(druid, 1));  // heal threshold 41
+  const ObjectId below = b.spawn(b.plain_class, Point{1000, 1300}, 1, 100);
+  const ObjectId above = b.spawn(b.plain_class, Point{1000, 700}, 1, 100);
+  CHECK(below < above);
+  REQUIRE(b.heroes.set_experience(below, 50));
+  REQUIRE(b.heroes.set_experience(above, 50));
+  CHECK(b.found("FindUnitToLearn", druid) == above);
+  CHECK(b.found("FindUnitToHeal", druid) == above);
+}
+
 /// `FindUnitToLearn`'s scan takes allies only: its mask is the friendly word
 /// heal's is (0x00514080 with `[record+0x10] ^ 0xffff`).
 TEST(hero_find_unit_to_learn_takes_an_ally_only) {
@@ -3365,6 +3383,42 @@ TEST(hero_find_unit_below_ilevel_wants_an_ally_strictly_below_the_ceiling) {
   CHECK(below(5) == messenger);
 
   CHECK(b.found("FindUnitBelowILevel", 9999, {script::Value::integer(9)}) == kNoObject);
+}
+
+/// The search is the nearest-by-grid walk 0x0053e290 under 0x00512360: the
+/// first object its grid walk offers becomes the answer **untested**, each
+/// later one is put to the predicate and the first that passes replaces it and
+/// ends the walk, and only then is the answer checked -- not the caster, among
+/// the rest. So a qualifying caster met after the first candidate ends the walk
+/// and is refused.
+TEST(hero_find_unit_below_ilevel_keeps_the_grid_walks_first_candidate_untested) {
+  CasterBench b;
+  const auto below = [&](ObjectId who, std::int32_t ceiling) {
+    return b.found("FindUnitBelowILevel", who, {script::Value::integer(ceiling)});
+  };
+  // A pupil in the first cell, the caster a row of cells below it.
+  const ObjectId pupil = b.spawn(b.plain_class, Point{100, 100}, 1);
+  CHECK(b.heroes.set_level(pupil, 1));
+  const ObjectId caster = b.spawn(b.caster_class, Point{300, 300}, 1, 100);
+  CHECK(b.heroes.set_level(caster, 1));
+  // The pupil is offered first and kept untested; the caster passes the
+  // predicate, ends the walk, and is refused: nobody.
+  CHECK(below(caster, 6) == kNoObject);
+  // A caster above the ceiling does not pass, and the pupil stands.
+  CHECK(b.heroes.set_level(caster, 7));
+  CHECK(below(caster, 6) == pupil);
+  // With the caster first in the walk (the pupil a row below it), the caster
+  // is the one kept untested and the pupil passes: the pupil.
+  CHECK(b.heroes.set_level(caster, 1));
+  REQUIRE(b.world.set_position(caster, Point{300, 20}));
+  REQUIRE(b.world.set_position(pupil, Point{300, 300}));
+  CHECK(below(caster, 6) == pupil);
+  // A first candidate that does not qualify is still kept when nothing later
+  // passes, and then refused by the checks: an elder alone above the caster.
+  const ObjectId elder = b.spawn(b.plain_class, Point{20, 10}, 1);
+  CHECK(b.heroes.set_level(elder, 9));
+  REQUIRE(b.world.set_position(pupil, Point{5000, 5000}));
+  CHECK(below(caster, 6) == kNoObject);
 }
 
 // ---------------------------------------------------------------------------
@@ -3838,9 +3892,14 @@ TEST(a_dead_hero_releases_its_army_and_its_squad) {
     CHECK(b.f.heroes.hero_of(member) == kNoObject);
     CHECK(b.f.heroes.squad_of(member) == kNoSquad);
   }
-  // The hero leaves its own squad, and an emptied squad is gone.
+  // The hero leaves its own squad. The emptied squad is stood down, not
+  // freed (0x00444750), so a script still holding it reads an empty roster
+  // until the turn's prune.
   CHECK(b.f.heroes.squad_of(hero) == kNoSquad);
   CHECK(b.f.heroes.hero(hero)->squad == kNoSquad);
+  REQUIRE(b.f.heroes.squads().find(squad) != nullptr);
+  CHECK(b.f.heroes.squads().find(squad)->members.empty());
+  b.f.heroes.squads().prune_empty();
   CHECK(b.f.heroes.squads().find(squad) == nullptr);
 }
 
@@ -3866,8 +3925,11 @@ TEST(an_ai_squad_is_one_smaller_the_moment_a_member_dies) {
   CHECK(b.f.heroes.squads().squad_of(a) == kNoSquad);
   CHECK(b.f.heroes.squad_of(c) == key);
 
-  // And the last one out takes the squad with it.
+  // The last one out leaves it empty and stood down; the turn's prune takes it.
   b.kill(c);
+  REQUIRE(b.f.heroes.squads().find(key) != nullptr);
+  CHECK(b.f.heroes.squads().find(key)->members.empty());
+  b.f.heroes.squads().prune_empty();
   CHECK(b.f.heroes.squads().find(key) == nullptr);
 }
 

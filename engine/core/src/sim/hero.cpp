@@ -13,6 +13,7 @@
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/fog.hpp"
 #include "imperivm/core/sim/host_context.hpp"
+#include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 
@@ -261,6 +262,9 @@ HeroRecord& HeroSystem::register_hero(World& world, ObjectId id) {
 
 void HeroSystem::forget(World& world, ObjectId id) {
   if (HeroRecord* record = hero(id)) {
+    // The hero's destructor deletes his formation (0x005304b0) without
+    // removing its members one by one, so their routes are not deleted.
+    if (MovementSystem* movement = movement_system(world)) movement->drop_formation(id);
     const std::vector<ObjectId> army = record->army;
     for (const ObjectId member : army) detach(world, member);
     squads_.destroy(record->squad);
@@ -397,6 +401,9 @@ bool HeroSystem::attach(World& world, ObjectId unit_id, ObjectId hero_id) {
   record->squad = leader->squad;
   leader->army.push_back(unit_id);
   squads_.join(leader->squad, unit_id);
+  // The hero's `AddUnit` (0x0052e3e0) puts it in his formation, pending until
+  // the layout runs (0x005f47e0, `sim/formation.hpp`).
+  if (MovementSystem* movement = movement_system(world)) movement->join_formation(hero_id, unit_id);
   // `AttachHero` (0x005ddf50) rebuilds the unit: its new leader's skills.
   recalc_bonuses(world, unit_id);
   return true;
@@ -410,6 +417,11 @@ bool HeroSystem::detach(World& world, ObjectId unit_id) {
     const auto it = std::find(leader->army.begin(), leader->army.end(), unit_id);
     if (it != leader->army.end()) leader->army.erase(it);
     squads_.leave(world, leader->squad, unit_id);
+    // The hero's `RemoveUnit` (0x0052db70): out of his formation, its route
+    // deleted (0x005f3290).
+    if (MovementSystem* movement = movement_system(world)) {
+      movement->leave_formation(world, record->hero, unit_id);
+    }
   }
   record->hero = kNoObject;
   record->squad = kNoSquad;
@@ -446,6 +458,13 @@ void HeroSystem::roll_wisdom(World& world, ObjectId unit_id) {
   if (constants_.percent_per_wisdom_level * points > draw) (void)add_experience(leader, 1);
 }
 
+void HeroSystem::pool_experience(ObjectId hero_id, std::int32_t amount) {
+  HeroRecord* record = hero(hero_id);
+  if (record == nullptr) return;
+  record->experience_pool += amount;
+  if (record->experience_pool < 0) record->experience_pool = 0;
+}
+
 void HeroSystem::detach_for_death(World& world, ObjectId id) {
   // `DetachArmy` first, as the hero's override has it: every warrior leaves the
   // hero, and with it the hero's squad.
@@ -473,7 +492,10 @@ void HeroSystem::ai_unregister(World& world, ObjectId id) {
   // match.
   if (const SquadKey listed = squads_.squad_of(id); listed.valid()) (void)squads_.leave(world, listed, id);
   if (HeroRecord* record = hero(id); record != nullptr) record->squad = kNoSquad;
-  squads_.prune_empty();
+  // No prune here. A squad this leave empties is stood down, not freed
+  // (0x00444750), and a script may still hold it: `GS_CAPTURE.VS` reads
+  // `squad.Units` after the `Siege` that boards its last man into a catapult
+  // (lines 224-226). `advance` prunes it on its next turn.
 }
 
 void HeroSystem::on_death(World& world, ObjectId id) {
@@ -994,16 +1016,26 @@ void HeroSystem::run_hero_ticks(World& world, GameTime from, GameTime to) {
   // turn-partitioned engine would have to save per hero to reproduce; the
   // multiples cover the same instants however the turns are cut. INFERRED.
   //
-  // The tick's first half -- converting the accumulator `[hero+0x2c4]` into
-  // experience, one point per `ExpFromArmyDivider` -- has nothing to convert
-  // here: the one writer this engine models (Wisdom) pays at once.
+  // The tick's first half converts the pool `[hero+0x2c4]` -- what the army's
+  // kills have earned the hero -- into experience: one point per whole
+  // `ExpFromArmyDivider`, through `SetExperience` with its refresh, and the
+  // remainder stays. (Wisdom, the other writer in the original, pays its one
+  // point at once here; see `roll_wisdom`.)
   const CombatSystem* combat = combat_system_of(world);
   if (combat == nullptr || to <= from) return;
   const HeroConstants& c = constants_;
   for (GameTime at = (from / kHeroTickInterval + 1) * kHeroTickInterval; at <= to;
        at += kHeroTickInterval) {
     std::vector<ObjectId> changed;
-    for (HeroRecord& record : heroes_) {
+    for (std::size_t i = 0; i < heroes_.size(); ++i) {
+      const std::int32_t divider = c.exp_from_army_divider;
+      if (divider > 0 && heroes_[i].experience_pool >= divider) {
+        const ObjectId id = heroes_[i].id;
+        const std::int32_t points = heroes_[i].experience_pool / divider;
+        heroes_[i].experience_pool %= divider;
+        (void)set_experience(world, id, experience(id) + points);
+      }
+      HeroRecord& record = heroes_[i];
       const Combatant* self = combat->find(record.id);
       if (self == nullptr) continue;
       // `vtbl+0x114`, the hero's stored level, through the table (0x005d2910).
@@ -1058,6 +1090,9 @@ void HeroSystem::clear_dead(World& world) {
     const auto gone = std::remove_if(army.begin(), army.end(), [&](ObjectId member) {
       if (world.find(member) != nullptr) return false;
       squads_.leave(world, record.squad, member);
+      if (MovementSystem* movement = movement_system(world)) {
+        if (Formation* form = movement->formation(record.id)) (void)formation_remove(*form, member);
+      }
       if (UnitRecord* unit_record = unit(member)) {
         unit_record->hero = kNoObject;
         unit_record->squad = kNoSquad;
@@ -1162,6 +1197,7 @@ void HeroSystem::hash(std::uint64_t& accumulator) const {
     fold(accumulator, static_cast<std::uint64_t>(record.army_attacked_at));
     fold(accumulator, record.army_attacked_unit);
     fold_i32(accumulator, record.army_addend);
+    fold_i32(accumulator, record.experience_pool);
     // The party orientations. Hashed because three shipped sub-AI scripts
     // branch on the settled one and a fourth writes the request, so two peers
     // that disagree form two different battle lines.
@@ -1197,6 +1233,18 @@ void record_squad_attacked(World& world, ObjectId victim, ObjectId attacker,
   if (squad->last_fight_time == now) return;
   squad->last_fight_time = now;
   squad->last_attacker = attacker;
+  // The tail (0x0041e70d..0x0041e790): a squad hit while crossing a node
+  // between where it came from and where it is going records that node as a
+  // way-point on the node manager's MAIKA list -- source, heading (the
+  // order's node, else `DestGAIKA`) and the node it stands in, all three
+  // named and distinct.
+  if (world.gaika().count() == 0) return;
+  const GaikaId src = squad->src_gaika;
+  const GaikaId in = squad->gaika_in;
+  const GaikaId heading = squad_ai_dest(*squad);
+  if (src == kNoGaika || in == kNoGaika || in == src || heading == kNoGaika) return;
+  if (heading == in || heading == src) return;
+  heroes->squads().record_route(src, heading, in);
 }
 
 void record_army_attacked(World& world, ObjectId victim, GameTime now) noexcept {
@@ -1623,6 +1671,27 @@ HostOutcome fn_autocast(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(state != nullptr && state->flags.autocast));
 }
 
+/// The circle a caster's search sweeps: every object standing within
+/// `radius` of `centre`, `dx² + dy² <= r²` inclusive, in the world grid's walk
+/// order -- rows of 256-unit cells top to bottom, cells left to right, each
+/// cell's list in the order its objects came into it. The searches
+/// 0x00512430, 0x00512830, 0x00512b60, 0x00512dc0, 0x00513060, 0x005d5450 and
+/// the nearest-by-grid walk 0x0053e290 all walk it so
+/// (`docs/formats/spatial-index.md`). The box is the point itself for a radius
+/// of 0, and empty for a negative one; a held object is in no cell.
+[[nodiscard]] std::vector<ObjectId> caster_circle(const World& world, Point centre,
+                                                  std::int32_t radius) {
+  std::vector<ObjectId> found;
+  if (radius < 0) return found;
+  if (radius == 0) {
+    world.objects_in_rect(centre.x, centre.y, centre.x, centre.y, ClassFilter{}, found,
+                          SweepOrder::grid);
+  } else {
+    world.objects_in_radius(centre, radius, ClassFilter{}, found, SweepOrder::grid);
+  }
+  return found;
+}
+
 /// The squad a caster falls back on when its sight circle found nobody --
 /// the second phase of `FindUnitToLearn`, `FindUnitToHeal`,
 /// `FindUnitToRevitalize` and `FindUnitToHide` (0x00513ce0, 0x00513990,
@@ -1674,12 +1743,12 @@ HostOutcome fn_autocast(CallContext& ctx) {
 /// with the same predicate, and **the last** member that passes wins -- the
 /// walk overwrites its answer and does not stop.
 ///
+/// The first match is the first in the sweep's order (0x00512dc0, the world
+/// grid's walk: `caster_circle`), which is not the nearest.
+///
 /// **Not reproduced:** the stealth half of the mask (the caster's team-vision
 /// bits against a hidden candidate; a hidden object is no candidate here, the
-/// section note says why), and the first match's order -- the original's
-/// 256-unit grid's cell order, which is not the nearest and not reproducible
-/// without that grid; this takes the first in ascending object id, which is
-/// spawn order, equally not the nearest, and identical on every peer.
+/// section note says why).
 ///
 /// A miss is an invalid handle, which `BDRUID_IDLE.VS` guards with
 /// `if (!tgt.IsValid())`.
@@ -1705,9 +1774,8 @@ HostOutcome fn_find_unit_to_learn(CallContext& ctx) {
     // because the original keeps it.
     if (other.id == self) return false;
     if (other.internal != InternalKind::none) return false;
-    // A spawn template is not in play: it is in no grid cell and no squad.
-    // This walk reads `World::objects()` rather than the spatial query the
-    // other searches use, so it has to say so itself.
+    // A spawn template is not in play. The circle's sweep leaves it out
+    // (`World::collect`); the squad pass has to say so itself.
     if (other.state.flags.unspawned) return false;
     if (!other.state.flags.is_unit) return false;            // a unit, or null
     if (other.state.health <= 0) return false;              // `vtbl[0x50]`, IsDead
@@ -1723,15 +1791,12 @@ HostOutcome fn_find_unit_to_learn(CallContext& ctx) {
     return true;
   };
 
-  for (const WorldObject& other : world->objects()) {
-    if (!learnable(other)) continue;
-    if (world->players().is_enemy(druid->state.owner, other.state.owner)) continue;  // the mask
-    if (other.state.flags.hidden) continue;
-    const Point at = world->resolve_position(other.id);
-    const std::int64_t dx = at.x - from.x;
-    const std::int64_t dy = at.y - from.y;
-    if (dx * dx + dy * dy > static_cast<std::int64_t>(sight) * sight) continue;
-    return HostOutcome::ok_with(Value::object(receiver_type(ctx), other.id));
+  for (const ObjectId id : caster_circle(*world, from, sight)) {
+    const WorldObject* other = world->find(id);
+    if (other == nullptr || !learnable(*other)) continue;
+    if (world->players().is_enemy(druid->state.owner, other->state.owner)) continue;  // the mask
+    if (other->state.flags.hidden) continue;
+    return HostOutcome::ok_with(Value::object(receiver_type(ctx), id));
   }
   // The squad pass: the last member that passes.
   ObjectId last = kNoObject;
@@ -1878,8 +1943,7 @@ HostOutcome fn_find_unit_to_heal(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), sight, ClassFilter{}, found);
+  const std::vector<ObjectId> found = caster_circle(*world, world->resolve_position(self), sight);
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
     if (other == nullptr || !caster_candidate_basics(*world, *other, self)) continue;
@@ -1998,9 +2062,8 @@ HostOutcome fn_find_unit_to_revitalize(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
+  const std::vector<ObjectId> found =
+      caster_circle(*world, world->resolve_position(self), caster_sight(*world, self));
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
     // The basics carry alive, not-self, not-held, not-hidden and not-a-ship,
@@ -2127,9 +2190,8 @@ HostOutcome fn_find_unit_to_hide(CallContext& ctx) {
 
   ObjectId best = kNoObject;
   std::int64_t best_score = 0;
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
+  const std::vector<ObjectId> found =
+      caster_circle(*world, world->resolve_position(self), caster_sight(*world, self));
   for (const ObjectId id : found) {
     const WorldObject* other = world->find(id);
     if (other == nullptr || !caster_candidate_basics(*world, *other, self)) continue;
@@ -2164,7 +2226,6 @@ HostOutcome fn_find_unit_to_hide(CallContext& ctx) {
 /// wrote the list.
 [[nodiscard]] std::vector<ObjectId> enemy_sight_candidates(World& world, ObjectId self,
                                                            bool& from_squad) {
-  std::vector<ObjectId> found;
   from_squad = false;
   if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
     if (const Squad* squad = squad_sight_squad(world, *heroes, self); squad != nullptr) {
@@ -2172,9 +2233,7 @@ HostOutcome fn_find_unit_to_hide(CallContext& ctx) {
       return squad->enemies;
     }
   }
-  world.objects_in_radius(world.resolve_position(self), caster_sight(world, self), ClassFilter{},
-                          found);
-  return found;
+  return caster_circle(world, world.resolve_position(self), caster_sight(world, self));
 }
 
 /// `Unit::GetBestCurseTarget` -- the enemy with the highest `attack`.
@@ -2278,6 +2337,27 @@ HostOutcome fn_get_best_cripple_target(CallContext& ctx) {
 /// `.inherentlevel` for a teaching increment. The original registers a second
 /// overload taking an explicit radius; it has no shipped call site and is not
 /// bound, on the rectangle family's rule.
+///
+/// **The search is the nearest-by-grid walk, and its first candidate is
+/// special.** 0x005132f0 -> 0x00512360 -> 0x0053eaf0 -> 0x0053e290 walks the
+/// grid over the caster's sight circle (`caster_circle`'s order) and offers
+/// every object whose owner is in the caster's friendly mask (and, hidden,
+/// seen by its team; here a hidden object is no candidate). The walk keeps a
+/// current answer:
+///
+///   * the **first** candidate becomes the answer **untested**;
+///   * each later one is handed to the predicate 0x005122f0 -- a unit, alive,
+///     inherent level below the ceiling, not a `Sentry`, and a `Military` or
+///     `BaseMage` heir -- and the first that passes replaces the answer and
+///     ends the walk.
+///
+/// Then 0x00512360 checks the answer: a unit, not the caster, not an enemy,
+/// inherent level below the ceiling, `Military` or `BaseMage`, not held, not a
+/// messenger; anything else is the invalid handle. So the caster itself,
+/// when it qualifies and is met after the first candidate, ends the walk and
+/// is refused -- a druid that the grid reaches before its pupils teaches
+/// nobody -- and a messenger that qualifies does the same. A spawn template is
+/// no candidate here (the sweeps' `collect`), as for the other searches.
 HostOutcome fn_find_unit_below_ilevel(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("FindUnitBelowILevel: no world");
@@ -2288,21 +2368,51 @@ HostOutcome fn_find_unit_below_ilevel(CallContext& ctx) {
   const WorldObject* caster = world->find(self);
   if (caster == nullptr) return none;
   const std::int32_t ceiling = int_arg(ctx, 1);
+  const PlayerTable& players = world->players();
+  const PlayerId owner = caster->state.owner;
 
-  std::vector<ObjectId> found;
-  world->objects_in_radius(world->resolve_position(self), caster_sight(*world, self),
-                           ClassFilter{}, found);
-  for (const ObjectId id : found) {
+  // The walk's own mask: an owner -- one bit of the low sixteen, which a
+  // decoration has none of -- the caster's player is not at war with.
+  const auto offered = [&](const WorldObject& other) {
+    if (other.internal != InternalKind::none) return false;
+    if (!PlayerTable::is_valid(other.state.owner)) return false;
+    if (players.is_enemy(owner, other.state.owner)) return false;
+    return !other.state.flags.hidden;
+  };
+  const auto teachable = [&](const WorldObject& other) {
+    return is_a(*world, other, "Military") || is_a(*world, other, "BaseMage");
+  };
+  // 0x005122f0.
+  const auto passes = [&](const WorldObject& other) {
+    if (!other.state.flags.is_unit || other.state.health <= 0) return false;
+    if (heroes->inherent_level(other.id) >= ceiling) return false;
+    if (is_a(*world, other, "Sentry")) return false;
+    return teachable(other);
+  };
+
+  ObjectId kept = kNoObject;
+  for (const ObjectId id :
+       caster_circle(*world, world->resolve_position(self), caster_sight(*world, self))) {
     const WorldObject* other = world->find(id);
-    if (other == nullptr || !caster_candidate_basics(*world, *other, self)) continue;
-    if (world->players().is_enemy(caster->state.owner, other->state.owner)) continue;
-    if (is_a(*world, *other, "Sentry")) continue;
-    if (other->state.flags.messenger) continue;
-    if (!is_a(*world, *other, "Military") && !is_a(*world, *other, "BaseMage")) continue;
-    if (heroes->inherent_level(id) >= ceiling) continue;
-    return HostOutcome::ok_with(Value::object(receiver_type(ctx), id));
+    if (other == nullptr || !offered(*other)) continue;
+    if (kept == kNoObject) {
+      kept = id;
+      continue;
+    }
+    if (passes(*other)) {
+      kept = id;
+      break;
+    }
   }
-  return none;
+  // 0x00512360's checks on whatever the walk kept.
+  const WorldObject* answer = world->find(kept);
+  if (answer == nullptr || !answer->state.flags.is_unit || answer->id == self) return none;
+  if (PlayerTable::is_valid(answer->state.owner) && players.is_enemy(owner, answer->state.owner)) {
+    return none;
+  }
+  if (heroes->inherent_level(kept) >= ceiling || !teachable(*answer)) return none;
+  if (answer->state.holder != kNoObject || answer->state.flags.messenger) return none;
+  return HostOutcome::ok_with(Value::object(receiver_type(ctx), kept));
 }
 
 /// `Unit::hero` (0x005d7380): the 16-bit hero handle at `[unit+0x170]`, as an
@@ -2940,14 +3050,15 @@ HostOutcome fn_drop_item(CallContext& ctx) {
 /// `[hero+0x2b0]`. `Set` writes `pt - (1024, 1024)` into `+0x54/+0x58`; `Has`
 /// answers `(+0x54 | +0x58) != 0`; `Get` reads a **different pair**,
 /// `+0x5c/+0x60`, and adds `(1024, 1024)` back. Between them sits the
-/// party-formation code, which settles a request into the second pair when a
-/// formation completes -- and this engine does not model formation, so the
-/// settled slot is written by nothing.
+/// formation's `SetDest` (0x005f2cc0), which settles a request into the
+/// second pair and clears it when a march is set up -- `FormSetupAndMoveTo`
+/// here (`sim/formation.hpp`); the object form clears both.
 ///
-/// **So `Get` answers `(1024, 1024)` today, and that is the right answer rather
-/// than a placeholder.** It is what the original answers for any hero whose
-/// party has not finished forming, which is most heroes most of the time, and
-/// it is exactly what the three readers are shaped for:
+/// **So `Get` answers `(1024, 1024)` until a march is set up after a request,
+/// and that is the right answer rather than a placeholder.** It is what the
+/// original answers for any hero who has not marched since one, which is most
+/// heroes most of the time, and it is exactly what the three readers are
+/// shaped for:
 ///
 ///     dpt = .GetFinalPartyOrientation() - Point(1024, 1024);
 ///     if (dpt.x != 0 || dpt.y != 0) ...

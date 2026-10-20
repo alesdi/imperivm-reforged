@@ -89,9 +89,11 @@ struct Fixture {
         R"(<class id="ShipBattle" parent="Object" cpp_class="CVXShip">
              <properties radius="90" water_unit="1"/></class>)",
         R"(<class id="Barge" parent="Object" cpp_class="CVXShip">
-             <properties maxhealth="500" max_units_to_board="2"/></class>)",
+             <properties maxhealth="500" max_units_to_board="2"/>
+             <method sig="unboard" vs="data/subai/ship_unboard.vs"/></class>)",
         R"(<class id="Soldier" parent="Object" cpp_class="CVXUnit">
-             <properties maxhealth="100"/></class>)",
+             <properties maxhealth="100"/>
+             <method sig="move" vs="data/subai/unit_move.vs"/></class>)",
         // Bodies with a size, for `FindPointToStay`'s free-spot test, which
         // measures by the two radii summed.
         R"(<class id="Skiff" parent="Object" cpp_class="CVXShip">
@@ -748,6 +750,60 @@ TEST(boarding_table_is_hashed_and_round_trips) {
 
 /// 0x005c8010: 25 x 25 steps of 16 around the centre, row by row, minus the
 /// wall, the sea and the edge of the map.
+/// **An order to units aboard a ship has the ship put them ashore first, or
+/// nobody gets it.** The issue (0x004ef3d0) asks, once, of the first actor it
+/// makes a command for, whether the list's first member is aboard a ship
+/// (0x004e9100); if so 0x004e8ae0 refuses an order whose point is deep water
+/// -- every actor's command made, its id spent, and dropped -- and otherwise
+/// 0x004ef1c0 makes the ship an `unboard` with the list and the point, after
+/// the first actor's command and queued before it.
+TEST(an_order_to_units_aboard_a_ship_has_the_ship_put_them_ashore_first) {
+  Fixture f;
+  f.terrain_with_a_sea_from(8);  // land west of x = 512
+  CommandTable table;
+  REQUIRE(table.merge(bytes_of(R"(<commands><cmd name="move" priority="0"/></commands>)")).ok());
+  f.commands.set_table(std::move(table));
+  const CommandDef* move = f.commands.table().find("move");
+  REQUIRE(move != nullptr);
+  const World::ShipIds ship = f.make_ship(pt(700, 300));
+  const ObjectId a = f.make_unit(pt(100, 100));
+  const ObjectId b = f.make_unit(pt(120, 100));
+  REQUIRE(f.world.put_in_holder(a, ship.holder));
+  REQUIRE(f.world.put_in_holder(b, ship.holder));
+  const ObjectId actors[] = {a, b};
+
+  // To the sea: nobody, and two ids spent.
+  const std::uint32_t seed = f.world.command_id_seed();
+  CHECK(f.commands.issue(f.world, actors, *move, pt(900, 300), kNoObject, /*replace=*/true,
+                         /*modifier=*/false, /*player_arg=*/0, /*user=*/false) == 0);
+  CHECK(f.commands.command_count(a) == 0);
+  CHECK(f.commands.command_count(b) == 0);
+  CHECK(f.commands.command_count(ship.ship) == 0);
+  CHECK(f.world.command_id_seed() == seed + 2);
+
+  // Ashore: the ship's `unboard` with both, to the point; the first actor's
+  // command was made before it, the second's after.
+  CHECK(f.commands.issue(f.world, actors, *move, pt(200, 300), kNoObject, /*replace=*/true,
+                         /*modifier=*/false, /*player_arg=*/0, /*user=*/false) == 2);
+  const CommandQueue* sq = f.commands.find(ship.ship);
+  REQUIRE(sq != nullptr && sq->entries.size() == 1);
+  const Command& unboard = sq->entries.front();
+  CHECK(unboard.verb == "unboard");
+  CHECK(unboard.arg_kind == CommandArgKind::list_point);
+  CHECK(unboard.list == (std::vector<ObjectId>{a, b}));
+  CHECK(unboard.point == pt(200, 300));
+  CHECK(unboard.id == seed + 3);
+  CHECK(f.commands.find(a)->entries.front().id == seed + 2);
+  CHECK(f.commands.find(b)->entries.front().id == seed + 4);
+
+  // A unit standing ashore first in the list: no set-up at all.
+  const ObjectId c = f.make_unit(pt(140, 100));
+  const ObjectId ashore_first[] = {c, a};
+  CHECK(f.commands.issue(f.world, ashore_first, *move, pt(900, 300), kNoObject, true, false, 0,
+                         false) == 2);
+  CHECK(f.commands.command_count(ship.ship) == 1);
+}
+
 TEST(unboarding_points_is_the_lattice_minus_walls_water_and_the_map_edge) {
   Fixture f;
   // No grid at all: nothing to land on, and no crash.

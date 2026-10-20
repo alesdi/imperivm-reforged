@@ -104,7 +104,7 @@ struct GateField {
   explicit GateField(bool second_gap = false, CommandSystem* commands = nullptr,
                      HeroSystem* heroes = nullptr) {
     graph.add(bytes_of(R"(<class id="Soldier" cpp_class="CVXUnit" parent="">
-      <properties speed="100" radius="15"/></class>)"),
+      <properties speed="100" radius="15" formation_radius="26"/></class>)"),
               "soldier.sc.xml");
     graph.add(bytes_of(R"(<class id="Gate" cpp_class="CVXGate" parent="">
       <properties maxhealth="1000"/></class>)"),
@@ -679,11 +679,13 @@ void march(World& world, ObjectId hero, Point dest) {
 /// 900 along, and with an enemy near the gate it stands once the crossing is
 /// within reach. Alone, a soldier's reach is 15 + 210 = 225: it stands at the
 /// first decision at or past 675 along, 680, at y 1220. A hero leading three
-/// soldiers in a `Front` -- two abreast 26 either side of him and one 52
-/// behind, so the formation's radius is 52 -- reaches max(52, 275) + 210 =
-/// 485: he stands at 440 along, y 1460. A hero whose two soldiers march on
-/// the wings 400 either side has a formation radius of 400 and reaches 610:
-/// he stands at 320 along, y 1580.
+/// soldiers in a central block -- the short first ring's two front corners
+/// and its back centre, `15 + 2 * 26` = 67 out, so the formation's radius is
+/// `isqrt(2 * 67^2)` = 94 -- reaches max(94, 275) + 210 = 485: he stands at
+/// 440 along, y 1460. A hero whose two soldiers march on the wings, one a
+/// side, 400 off the hero's own radius and one spacing further, 467 out and
+/// 75 ahead, has a formation radius of 472 and reaches 682: he stands at 240
+/// along, y 1660.
 TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_275) {
   constexpr Point kFar{1000, 1900};
   struct Case {
@@ -696,11 +698,11 @@ TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_27
       {R"(<FormationClass Name="Front" Width="2" Height="1" OffsetFrontLineByY="60"
             OffsetWingsByX="80" OffsetWingsByY="-40">
             <Class Name="Soldier" CentralBlock="1"/></FormationClass>)",
-       {Point{974, 1900}, Point{1026, 1900}, Point{1000, 1952}}, 52, 1460},
+       {Point{974, 1900}, Point{1026, 1900}, Point{1000, 1952}}, 94, 1460},
       {R"(<FormationClass Name="Front" Width="2" Height="1" OffsetFrontLineByY="60"
             OffsetWingsByX="400" OffsetWingsByY="0">
             <Class Name="Soldier" Wings="1"/></FormationClass>)",
-       {Point{600, 1900}, Point{1400, 1900}}, 400, 1580},
+       {Point{600, 1900}, Point{1400, 1900}}, 472, 1660},
   };
   for (const Case& c : cases) {
     HeroSystem heroes;
@@ -732,7 +734,7 @@ TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_27
     }
     march(f.world, hero, Point{1000, 700});
     REQUIRE(f.move(hero).party == hero);
-    CHECK(f.move(hero).form_extent == c.extent);
+    CHECK(f.movement.formation(hero)->radius == c.extent);
     REQUIRE(f.move(hero).gate_crossings.size() == 1);
     CHECK(f.move(hero).gate_crossings[0].at == 900);
 
@@ -749,12 +751,12 @@ TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_27
     f.movement.hash(with);
     std::vector<std::byte> saved;
     f.movement.serialize(saved);
-    f.movement.state(hero).form_extent = 0;
+    f.movement.formation_of(hero).radius = 0;
     std::uint64_t without = 0;
     f.movement.hash(without);
     CHECK(with != without);
     REQUIRE(f.movement.deserialize(saved).ok());
-    CHECK(f.move(hero).form_extent == c.extent);
+    CHECK(f.movement.formation(hero)->radius == c.extent);
 
     // The gate opening, the march walks on through it.
     f.swing(true);

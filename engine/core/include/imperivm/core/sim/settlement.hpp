@@ -384,6 +384,12 @@ struct Settlement {
   /// The settlement's buildings, in placement order. The repair cursor walks
   /// this; `Buildings()` returns it.
   std::vector<SettlementBuilding> buildings;
+  /// What a `Settlement::Buildings` alias reads: the members of `buildings`
+  /// (by back-link, as `World::buildings_in_settlement`) in its order,
+  /// rewritten from the roll on every access (`EconomySystem`'s alias
+  /// resolver). Not saved and not hashed: it is a view, and `buildings` is the
+  /// state.
+  std::vector<ObjectId> buildings_view;
 
   // -- timers ------------------------------------------------------------
   //

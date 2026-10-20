@@ -177,6 +177,13 @@ struct VmEnv {
   /// that. One that does not is a bug, and a bug that hangs the simulation is
   /// worse than one that traps.
   std::uint64_t instruction_budget = 1u << 20;
+  /// The running thread's stop flag (`[ctx+0x40]` in `gbr.exe`), or null for
+  /// none. The interpreter clears it as a slice opens (0x0069d4c0) and, after
+  /// every host call, ends the script there when it is up, as a host call that
+  /// answered code 2 would. Raised through `Scheduler::stop` by a host call
+  /// that ends the command the calling script is itself running (0x0069fee0
+  /// on the current thread); see `CommandSystem::remove_at`.
+  bool* stop = nullptr;
 };
 
 /// Bind `args` to the chunk's parameters and prepare frame zero.

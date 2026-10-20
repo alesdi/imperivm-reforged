@@ -25,6 +25,7 @@
 
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/feeder.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/session.hpp"
@@ -1316,17 +1317,19 @@ TEST(a_load_restores_the_script_watermark_rather_than_the_fresh_sessions) {
   run.advance(1, 400);
   REQUIRE(run.report().scripts_started == 3);
   REQUIRE(run.script_watermark() == run.world().next_id());
-  // Retire the copy's idle the way a command does, so that the only thing
-  // that could bring one back is the sweep running over it a second time.
+  // Take the copy's idle away with its whole queue -- a queue whose head
+  // merely ended would start another `idle` at once, as the original's does
+  // (0x005b5160 -> 0x005b4f20) -- so that the only thing that could bring
+  // one back is the sweep running over it a second time.
   {
-    std::size_t killed = 0;
+    std::size_t live = 0;
     for (const script::ScriptRecord& record : run.scheduler().scripts()) {
-      if (record.owner.id == copy && !record.dead) {
-        REQUIRE(run.scheduler().kill(record.id));
-        ++killed;
-      }
+      if (record.owner.id == copy && !record.dead) ++live;
     }
-    REQUIRE(killed == 1);
+    REQUIRE(live == 1);
+    CommandSystem* commands = command_system(run.world());
+    REQUIRE(commands != nullptr);
+    commands->forget(copy);
   }
   run.advance(1, 400);
   const std::size_t live_before = run.scheduler().live_count();
@@ -2847,11 +2850,17 @@ TEST(calc_escape_direction_points_away_from_the_nearest_enemy_tower) {
   f.world.despawn(near);
   CHECK(ask(cat) == (Point{1000, 0}));
   // A second tower at exactly the west tower's distance does not replace it:
-  // an equal distance keeps the first the sweep met, which here is the lower
-  // id -- the labelled tie rule.
+  // an equal distance keeps the first the sweep met. The sweep is the grid's
+  // walk (0x004e2760), and both stand in one row, `west` in the earlier cell.
   const ObjectId east = building("Tower", Point{3000, 2000}, 1);
   CHECK(ask(cat) == (Point{1000, 0}));
   f.world.despawn(east);
+  // One a row of cells above, due north at the same distance, came later but
+  // is met first, and the answer points due south.
+  const ObjectId north = building("Tower", Point{2000, 1000}, 1);
+  CHECK(north > west);
+  CHECK(ask(cat) == (Point{0, 1000}));
+  f.world.despawn(north);
 
   // Nothing in sight: two draws on the world RNG, `rand(0, 1000) - 500` on
   // each axis, normalised to 1000 the same way.
@@ -2943,9 +2952,12 @@ TEST(ram_best_target_is_the_nearest_unbroken_enemy_gate_outpost_or_shipyard) {
   CHECK(ask(ram) == yard);
   const ObjectId post = building("GaulOutpost", Point{2000, 2400}, 1);
   CHECK(ask(ram) == post);
-  // An equal distance keeps the first met -- the lower id.
+  // An equal distance keeps the first met in the grid's walk (0x005d56b0):
+  // `west` stands a row of 256-unit cells above `post`, so it is met first
+  // though its id is the higher.
   const ObjectId west = building("Gate", Point{1600, 2000}, 1);
-  CHECK(ask(ram) == post);
+  CHECK(west > post);
+  CHECK(ask(ram) == west);
 
   // The reach is the sight plus 512; a target at 913 is out of it even
   // though 1000 would admit it, and one at 999 is in once the sight allows.

@@ -66,10 +66,12 @@
 ///     warehouse. That is the reading `Unit::GetHolderSett` supports and it is
 ///     what makes a town hall's store a sink: `BASETOWNHALL.SC.XML` ships
 ///     `produces_food="0"` and `max_units="10000"`, so a stronghold garrison
-///     eats a store that has no production behind it, only wagons. **A unit
-///     standing in the open is deliberately not fed by this system**: the
-///     original may search a radius, but no shipped file names one, and
-///     inventing a radius would be inventing a balance rule.
+///     eats a store that has no production behind it, only wagons. A unit
+///     standing in the open runs the original's own search (0x005dbba0):
+///     the stores of friendly settlements whose buildings stand within its
+///     sight plus 512, then the grid around it for a food wagon or a fed
+///     comrade (`search_open_field`). The radius is the executable's, not a
+///     balance rule of this engine's.
 ///
 /// ## Rates, checked
 ///
@@ -112,6 +114,7 @@
 namespace imperivm::core::sim {
 
 class World;
+class EconomySystem;
 
 /// The feeding constants, all of them from the `;Feeding Constants` and
 /// `;Unit Feeding` blocks of `DATA\CONST.INI`, and every one of them present in
@@ -315,6 +318,11 @@ class FeederSystem final : public System {
   void drop_food(FeedingUnit& link, GameTime now);
   void drop_health(World& world, FeedingUnit& link);
   void run_searches(World& world, GameTime now);
+  /// The open-field food search (0x005dbba0) and its draw (0x005d3700) for a
+  /// hungry `unit` standing in no holder: what it took, 0 for nothing. See
+  /// the definition.
+  std::int32_t search_open_field(World& world, EconomySystem* economy, ObjectId unit,
+                                 std::int32_t want);
   /// `FoodSearchFreq` ± `FoodSearchFreqVar`, drawn from the world's generator.
   void schedule_search(World& world, FeedingUnit& link, GameTime now);
   void mark_hungry(ObjectId unit);

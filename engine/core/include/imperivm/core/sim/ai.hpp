@@ -214,13 +214,12 @@ struct Laika {
   /// tactic scripts.
   script::ScriptId strat_script = script::kNoScript;
   /// The enemy strength remembered from the moment this player last lost sight
-  /// of the node. Written by the original's visibility sweep; `AiSystem::
-  /// advance` runs only that sweep's `Explored` half, so nothing writes it.
+  /// of the node (`seen_enemy_staying` then), written by the visibility sweep
+  /// (`sweep_gaika`, 0x0044ecc0) and read back by `Eval`'s memory tail.
   std::int32_t enemies = 0;
-  /// Game time at which this player last saw the node, in milliseconds, which
-  /// `AiSystem::advance` reads as the last turn the node was explored --
-  /// `GETARMYNEED.VS` compares it against `GetTime()` with thresholds of ten
-  /// and five minutes.
+  /// Game time at which this player last lost sight of the node, in
+  /// milliseconds, stamped by the same sweep -- `GETARMYNEED.VS` compares it
+  /// against `GetTime()` with thresholds of ten and five minutes.
   GameTime last_seen = 0;
   std::int32_t priority = 0;
   std::int32_t optimism = kDefaultGaikaOptimism;
@@ -720,6 +719,27 @@ class AiSystem final : public System {
 
 /// The world's `AiSystem`, or null. Found by name, like every other domain's.
 [[nodiscard]] AiSystem* ai_system_of(World& world) noexcept;
+
+/// `viewer`'s record for `node` (`[ai+0x40]` then `[ai+0x30]`), or null: no
+/// AI system, a viewer outside 0..15, a player nobody seeded, a node the view
+/// has no slot for.
+[[nodiscard]] Laika* laika_for(World& world, std::int32_t viewer, GaikaId node) noexcept;
+
+/// 0x0041cb80, what `GAIKA::Explored` and every explored test reads: true when
+/// the match has exploration off (`MatchRules::exploration`, the session's
+/// `+0xda0`; the original's scenario path reads the exploration map's
+/// explored-everywhere flag instead, which `ExploreAll` sets -- see the note
+/// at the body), else bit 0x02.
+[[nodiscard]] bool laika_explored(World& world, const Laika& record) noexcept;
+
+/// 0x0041cbd0, `GAIKA::Revealed`: with fog of war on, bit 0x04; with it off,
+/// `laika_explored`.
+[[nodiscard]] bool laika_revealed(World& world, const Laika& record) noexcept;
+
+/// The per-node visibility sweep, 0x0044ecc0, run on `node` for every seated
+/// AI: see `AiSystem::advance`, which runs it. `now` is the game time
+/// `LastSeen` is stamped with.
+void sweep_gaika(World& world, GaikaId node, GameTime now);
 
 /// Run a compiled script to completion, right now, from inside a host body, and
 /// hand back its `return`. The synchronous trampoline behind

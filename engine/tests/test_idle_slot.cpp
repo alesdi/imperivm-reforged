@@ -9,9 +9,11 @@
 // holds at least one entry, and the only empty ones are the dying units
 // (`docs/engine/state-vector.md`). So an idle never runs beside an order.
 //
-// This engine starts an object's first idle straight on the scheduler, from
+// This engine started an object's first idle straight on the scheduler, from
 // `GameSession::start_object_scripts`, outside the queue -- and it went on
-// running after the object was ordered. Playtest #12 is what that looked like:
+// running after the object was ordered. It is the queue's head now from the
+// object's start (0x005aec40 opening with the slot-0 end, 0x005b5160 ->
+// 0x005b4f20), as the original's is. Playtest #12 is what that looked like:
 // the shipped unit idle stops its unit every four seconds or so and stands
 // idle for two, so a legionary walking a right-click move halted, and the move
 // script only laid the route again when its own two-second slice ran out.
@@ -177,7 +179,7 @@ TEST(an_order_takes_the_slot_of_the_idle_a_unit_was_started_with) {
   GameSession& run = *session.value();
   REQUIRE(run.start_object_scripts() == 4);
   run.advance(1, 100);
-  const std::vector<std::string> resting = {"watch.vs", "idle.vs"};
+  const std::vector<std::string> resting = {"idle.vs", "watch.vs"};
   CHECK(owned(run, 1) == resting);
 
   CommandSystem* commands = command_system(run.world());
@@ -190,6 +192,36 @@ TEST(an_order_takes_the_slot_of_the_idle_a_unit_was_started_with) {
   CHECK(owned(run, 1) == ordered);
   CHECK(commands->command_name(1) == "hold");
   CHECK(owned(run, 2) == resting);
+}
+
+/// **A started object's queue holds its running `idle`**, so a script's
+/// `AddCommand` waits behind it and `CmdCount` counts it. 0x005b5c30 inserts
+/// without looking at the head, and the running `idle` (`while(1)` in the
+/// shipped files) ends only when something ends it -- here the idiom
+/// `AddCommand(false, verb); KillCommand();` eleven shipped sites write, which
+/// then starts the queued command inside the `KillCommand`. With the `idle`
+/// outside the queue, the command started at the next pass on its own and the
+/// `KillCommand` ended it before it had run.
+TEST(a_command_added_behind_a_running_idle_waits_for_the_idle_to_end) {
+  Fixture f;
+  auto session = GameSession::create(f.registry, f.inputs, /*seed=*/1);
+  REQUIRE(session.ok());
+  GameSession& run = *session.value();
+  REQUIRE(run.start_object_scripts() == 4);
+  CommandSystem* commands = command_system(run.world());
+  REQUIRE(commands != nullptr);
+  CHECK(commands->command_count(1) == 1);
+  CHECK(commands->command_name(1) == "idle");
+
+  REQUIRE(commands->add_command(run.world(), 1, /*front=*/false, "hold", Command{}) != 0);
+  run.advance(3, 100);
+  CHECK(commands->command_count(1) == 2);
+  CHECK(commands->command_name(1) == "idle");
+  CHECK(owned(run, 1) == (std::vector<std::string>{"idle.vs", "watch.vs"}));
+
+  CHECK(commands->kill_command(run.world(), 1));
+  CHECK(commands->command_name(1) == "hold");
+  CHECK(owned(run, 1) == (std::vector<std::string>{"watch.vs", "hold.vs"}));
 }
 
 TEST(an_order_to_idle_leaves_one_idle_not_two) {
@@ -206,6 +238,7 @@ TEST(an_order_to_idle_leaves_one_idle_not_two) {
   REQUIRE(commands != nullptr);
   REQUIRE(commands->set_command(run.world(), 1, "idle", Command{}) != 0);
   run.advance(2, 100);
+  // The new idle is a new script, started after the behaviour.
   const std::vector<std::string> resting = {"watch.vs", "idle.vs"};
   CHECK(owned(run, 1) == resting);
   CHECK(commands->command_name(1) == "idle");

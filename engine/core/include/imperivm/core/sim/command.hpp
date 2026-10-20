@@ -6,6 +6,8 @@
 // Contract: sim/system.hpp. Movement: sim/movement.hpp. Class methods:
 // game/class_graph.hpp. Command metadata: `DATA\COMMANDS\*.XML`.
 // Inventory: docs/formats/vs-host-api.md; verb table: docs/formats/sc-xml.md.
+// The original's model -- the slot's end, the idle at the head, the issue's
+// group-move set-up: docs/formats/command-queue.md.
 //
 // `AddCommand` (215 call sites) and `SetCommand` (200) are the first and third
 // most used members in the whole host API after the trivial accessors, and
@@ -341,6 +343,12 @@ enum class CommandArgKind : std::uint8_t {
   none,
   point,
   object,
+  /// A list and a point, `(ObjList ol, point pt)`: 0x005aef20's kind 5, which
+  /// only the issue's group-move set-up makes, for a ship's `unboard`
+  /// (0x004ef1c0, `SHIP_UNBOARD.VS`'s `// void, Obj This, ObjList ol, point
+  /// pt`). The list is `Command::list`; the script is handed a fresh `ObjList`
+  /// holding it.
+  list_point,
 };
 
 /// One entry in an object's queue.
@@ -356,6 +364,9 @@ struct Command {
   CommandArgKind arg_kind = CommandArgKind::none;
   Point point{};
   ObjectId object = kNoObject;
+  /// The objects of a `list_point` command, in order. Empty for every other
+  /// kind.
+  std::vector<ObjectId> list;
 
   /// `<cmd param="...">` when the command came in through `ExecCmd`. Empty for
   /// a direct `AddCommand`.
@@ -580,6 +591,23 @@ class CommandSystem final : public System {
   /// empty. `!front` appends. 0 when refused, as `set_command`.
   std::uint32_t add_command(World& world, ObjectId id, bool front, std::string_view verb,
                             const Command& prototype);
+  /// 0x004e9100: the ship the first of `actors` is aboard, or `kNoObject`.
+  [[nodiscard]] static ObjectId carrier_of_first(const World& world,
+                                                 std::span<const ObjectId> actors);
+  /// The issue's group-move set-up, 0x004e8ae0 and 0x004ef1c0: false when
+  /// nobody is to get the order; otherwise, when the actors must be put ashore
+  /// first, the ship's `unboard` made and queued. `kind` is the first actor's
+  /// resolved form. See `issue`.
+  bool group_move_set_up(World& world, ObjectId ship, std::span<const ObjectId> actors,
+                         CommandArgKind kind, Point point, ObjectId object, bool replace);
+  /// `set_command` and `append_order` for a command already made, its id
+  /// already drawn (`Command::id`) and its verb set.
+  std::uint32_t set_made(World& world, ObjectId id, Command command);
+  std::uint32_t append_made(World& world, ObjectId id, Command command);
+  /// `add_command`'s insert (`vtbl+0xbc`, 0x005b5c30) for a command already
+  /// made, its id already drawn: the accept test, then index 1 or the back.
+  /// Returns the command's id, or 0 when refused.
+  std::uint32_t insert_made(World& world, ObjectId id, bool front, Command command);
   /// An **order** appended through the order core -- `ExecCmd(..., false)`,
   /// a queued player order, `UpgradeBestBarrack` -- rather than a script's
   /// own `AddCommand`. The one difference: a head that is the default verb
@@ -628,6 +656,23 @@ class CommandSystem final : public System {
   /// `KillCommand()`: end the running command. Returns false when there was
   /// none. The queue refills with the default verb if it would go empty.
   bool kill_command(World& world, ObjectId id);
+
+  /// 0x005aec40's first act on an object it starts: its slot-0 end with
+  /// nothing queued, which pushes the class's `idle` and starts it
+  /// (`end_slot` -> `start_head`). Nothing for an object that is dead, binds
+  /// no `idle`, or already has a queue. True when an `idle` was started.
+  /// `GameSession::start_object_scripts` calls it before the object's
+  /// behaviours.
+  bool start_slot(World& world, ObjectId id);
+
+  /// The scheduler's step hook calls this after every slice
+  /// (`install_deferred_erase`): when `script` has just ended -- returned,
+  /// trapped, or stopped by its own `KillCommand` / `SetCommand` -- and it is
+  /// the running command of the object that owns it, the command ends there
+  /// and then (`end_slot`, its `onfinish` told it was not cancelled) and the
+  /// next one starts. 0x0069f7a0 calling the owner's `vtbl+0x1c` once the
+  /// slice is over.
+  void after_slice(World& world, script::ScriptId script);
   /// `ClearCommands()`: drop the pending tail, leave the runner alone.
   std::size_t clear_commands(World& world, ObjectId id);
   /// `CVXCmdCancelCmd`'s execution (0x004e63c0): the command `command_id` on
@@ -815,13 +860,21 @@ class CommandSystem final : public System {
   /// object nothing has taken a command from.
   [[nodiscard]] std::span<const std::string> disabled_commands(ObjectId id) const noexcept;
 
-  /// The `.vs` file bound to `verb` on `id`'s class, or empty.
+  /// The `.vs` file bound to `verb` on `id`'s class, or empty: the first
+  /// overload, which is all a question of whether the class binds the verb
+  /// at all needs.
   ///
-  /// Resolved through `ClassGraph::resolved_methods`, cached per class index.
-  /// The cache is a pure function of the class graph, so it is not world state
-  /// and is not hashed.
+  /// Resolved through the class graph's declarations, cached per class index.
+  /// The cache is a function of the class graph and of the scripts' compiled
+  /// signatures, so it is not world state and is not hashed.
   [[nodiscard]] std::string_view script_for(World& world, ObjectId id,
                                             std::string_view verb) const;
+  /// The `.vs` file bound to `verb` taking an argument of `kind`, or empty:
+  /// 0x005aef20's lookup by name and shape. A verb declared once answers its
+  /// one script whatever `kind` is (`binds` checks the shape); an overloaded
+  /// one answers the overload whose script takes that argument, or nothing.
+  [[nodiscard]] std::string_view script_for(World& world, ObjectId id, std::string_view verb,
+                                            CommandArgKind kind) const;
 
   // -- the saved game ----------------------------------------------------
   //
@@ -876,10 +929,18 @@ class CommandSystem final : public System {
     std::string sig;
     std::string script;
     std::string onfinish;  ///< `<method onfinish>`, empty when absent
+    /// The script's parameters after the receiver, folded and comma-joined
+    /// (`point`, `obj`, `objlist,point`, empty for none): the half of
+    /// `gbr.exe`'s method key that is not the name. Read only for a sig
+    /// declared more than once down the class's ancestry -- the only case
+    /// where it decides anything -- and only when the script compiles.
+    std::string shape;
+    bool shaped = false;
   };
   struct ClassMethods {
     ClassIndex index = kNoClass;
-    std::vector<MethodEntry> methods;  ///< sorted by folded sig
+    /// Sorted by folded sig; a sig's overloads in declaration order.
+    std::vector<MethodEntry> methods;
   };
 
   [[nodiscard]] std::size_t lower_bound(ObjectId id) const noexcept;
@@ -887,29 +948,42 @@ class CommandSystem final : public System {
   /// during a turn, and the default refill only happens for a verb the class
   /// actually binds.
   void service(World& world, Entry& entry, GameTime now);
+  /// 0x005b4f20: start the head, or -- the queue empty -- push the default
+  /// verb and start that. A head whose verb has no compiled script is left
+  /// standing unless `from_pass`, when it is dropped (and counted) and the
+  /// next tried. Nothing but the refill's absence without a scheduler.
+  void start_head(World& world, ObjectId id, bool from_pass = false);
+  /// 0x005b5160 with 0x005b19f0, the command slot's end: the head's
+  /// `onfinish` (run now, `canceled` as its flag), the head popped, and the
+  /// next started unless the object is dead.
+  void end_slot(World& world, ObjectId id, bool canceled, bool start_next = true);
   bool launch(World& world, ObjectId id, Command& command, GameTime now);
   /// The compiled chunk `verb` runs on `id`, compiling it through the library
   /// on a first use; `kNoChunk` when there is none, counted in
   /// `launch_failures` when `count_miss`.
-  std::uint32_t chunk_of(World& world, ObjectId id, std::string_view verb, bool count_miss);
+  std::uint32_t chunk_of(World& world, ObjectId id, std::string_view verb, CommandArgKind kind,
+                         bool count_miss);
   /// `launch`'s second half: spawn `command`'s script from `chunk`.
   bool launch_chunk(World& world, ObjectId id, Command& command, std::uint32_t chunk);
-  /// End the `idle` an object was started with outside its queue, now that a
-  /// command holds the object's command slot. See `launch`.
-  void end_resting_idle(World& world, ObjectId id);
   void retire(Command& command);
   /// `retire`, then the method's `onfinish` script for a command that had
   /// started, with `canceled` as its second argument. See `finish_command`.
   void retire(World& world, ObjectId id, Command& command, bool canceled);
   /// Run `<method onfinish>` for a command that is over: `(This, bCanceled)`,
-  /// spawned on the scheduler with the command kept on `finishing_` so that
-  /// `cmdparam` and the costs still answer inside it. Nothing when the class
-  /// binds no `onfinish` for the verb.
+  /// to its end, now (0x0059af00 through 0x006a0360), with the command
+  /// ambient so that `cmdparam` and the costs answer inside it. Nothing when
+  /// the class binds no `onfinish` for the verb.
   void finish_command(World& world, ObjectId id, const Command& command, bool canceled);
   /// The class's `<method>` row for `verb`, or null. Static and private so
   /// the cache's shape stays this file's.
   [[nodiscard]] static const MethodEntry* method_row(const ClassMethods& methods,
                                                      std::string_view verb);
+  /// The row for `verb` taking an argument of `kind`: see `script_for`.
+  [[nodiscard]] static const MethodEntry* method_row(const ClassMethods& methods,
+                                                     std::string_view verb, CommandArgKind kind);
+  /// `entry.shape`, from its script's compiled parameters; false when the
+  /// script is not to be had (no library, or it does not compile).
+  bool shape_of(MethodEntry& entry) const;
   const ClassMethods& methods_for(const ClassGraph& graph, ClassIndex index) const;
 
   /// The accept test every insert opens with (0x005b1760): pay, then ask the
@@ -934,10 +1008,14 @@ class CommandSystem final : public System {
   /// insert as an ordinary order instead. See `issue`.
   [[nodiscard]] bool issue_research(World& world, ObjectId id, Command command);
   /// 0x005b07d0: take the command at `index` out of `id`'s queue -- released
-  /// first, while it is still in place, then ended (index 0, its `onfinish`
-  /// told it was cancelled) or erased unrun. False when there is no such
-  /// index. Finds the command again after the hook, which could have run
-  /// anything.
+  /// first, while it is still in place, then erased unrun (index > 0) or
+  /// ended (index 0). The head's end depends on whose thread it is: another
+  /// script's is ended now (`end_slot`, its `onfinish` told it was cancelled,
+  /// the next started inside the call); the calling script's own only has its
+  /// stop flag raised (`Scheduler::stop`), and ends as the call returns. While
+  /// the object's slot is ending (`ending_`) nothing at all happens. False
+  /// when there is no such index or nothing happened. Finds the command again
+  /// after the hook, which could have run anything.
   bool remove_at(World& world, ObjectId id, std::size_t index);
 
   struct DisabledEntry {
@@ -960,10 +1038,6 @@ class CommandSystem final : public System {
   [[nodiscard]] std::size_t disabled_lower_bound(ObjectId id) const noexcept;
 
   std::vector<Entry> queues_;  ///< sorted by id; iteration order is world state
-  /// Commands whose `onfinish` script is running, `script` being that script.
-  /// Pruned when the script is gone. `command_of_script` reads it after the
-  /// queues, so an `onfinish` sees the command it is finishing.
-  std::vector<Command> finishing_;
   /// Sorted by id, and only objects a script has taken a command from are in
   /// it: the set is empty on every map at turn zero.
   std::vector<DisabledEntry> disabled_;
@@ -982,6 +1056,10 @@ class CommandSystem final : public System {
   /// The script whose host call is changing a queue, or `kNoScript`; see
   /// `set_caller`. Transient, never saved.
   script::ScriptId caller_ = script::kNoScript;
+  /// The objects whose command slot is ending right now (`end_slot` running
+  /// their `onfinish`), innermost last: their slot has no thread, so ending
+  /// index 0 does nothing (`remove_at`). Transient, never saved.
+  std::vector<ObjectId> ending_;
   std::vector<script::FailedScript> hook_traps_;
   std::string default_verb_{kDefaultCommandVerb};
   /// Sorted by class index. Derived from the class graph, never hashed.
@@ -1083,13 +1161,13 @@ inline constexpr std::int64_t kDefaultIdleSlice = 1000;
 ///     .FormSetupAndMoveTo(pt, 0, 0, true);
 ///     while (.HasPath()) .FormKeepMoving(1500);
 ///
-/// Setup lays the hero's own route and records the order; each `FormKeepMoving`
-/// re-places the army at its formation offsets around the hero's *current*
-/// position and facing, then suspends for the lesser of its argument and the
-/// hero's time to arrival. The offsets come from `formation_offsets` and the
-/// hero's `formation` -- both already in `sim/movement.hpp`, both read from
-/// `DATA\FORMATIONS.XML`. Arguments two and three are the arrival annulus, which
-/// `Hero.FormSetupAndMoveTo(b, 100, 100, false)` shows using both halves of.
+/// Setup lays the hero's own route, which stands for the formation's, and
+/// the first sample; each `FormKeepMoving` updates the hero's formation
+/// object (`sim/formation.hpp`, docs/formats/formation.md), samples it again
+/// ahead of him, sends every marching member to its slot's sample, then
+/// suspends for its argument. Arguments two and three are the arrival
+/// annulus, which `Hero.FormSetupAndMoveTo(b, 100, 100, false)` shows using
+/// both halves of.
 ///
 /// ### The flag argument
 ///

@@ -1,8 +1,8 @@
 0x0055e0c0	verified	ObjList::count: the deque's size word, members counted not resolved; prose at m_count
 0x00577b90	verified	Query::count: Refresh, accessor, size; invalid receiver prints and answers 0; evaluation itself is the query system's
 0x00422300	partial	free Count(player, class): reads a per-player class-name counter map (0x004441e0/0x00444030) whose maintenance was not traced; engine counts live is-a objects
-0x00430a30	partial	GAIKA::Count/6: walk matches census_of<true>; gaps named in squad.cpp: GAIKA node table approximated (design), 0x0044eb80 fog-memory rewrite absent, settlement sentry tail (0x00420c00) left out
-0x004330b0	partial	GAIKA::Count/3: walk matches count_class_in_node; same node-table and 0x0044eb80 gaps; sentry tail gated on ready count only, not BaseTownhall (0x0043ffc0) plus strength > 0
+0x00430a30	verified	GAIKA::Count/6: Eval/6's walk counting heads -- the node deque in order, category 0x0044e250 off the viewer row (negative viewer = all own), presence 0x0044e1f0 with 0x0044eb80 for enemies, accumulator 0x00427e90 (messenger squads skipped, enemy_hidden), member count [squad+0x50], settlement tail 0x00420c00 adding the wall's head count [+0xf4] for a BaseTownhall with strength > 0; no memory tail (fixed: census_of had none of the viewer, sight, messenger, hidden or wall rules; test gaika_eval_adds_the_settlement_skips_messengers_and_sees_as_the_ai_sees, census test)
+0x004330b0	verified	GAIKA::Count/3: node deque in order, strength, relation 0x0044e250 off the viewer row (player<1 = all own) against sides, presence 0x0044e1f0(,,1) & staying with 0x0044eb80 for enemies (fixed: absent), members by descent (0x00427fc0); tail 0x00420c00: BaseTownhall heir with strength [+0xf8] > 0 and head count != 0, category in sides, class under Sentry adds [+0xf4] (fixed: gated on head count alone; test gaika_count_by_class_walks_the_staying_squads_and_then_the_settlement)
 0x0053c660	partial	ItemHolder::count: vtbl+0x104 of the holder, not resolved; no shipped site reaches it, and m_count refuses an ItemHolder receiver
 0x00427980	verified	Squad::Count: is-a by name over the squad's members; comma-list acceptance labelled (no shipped site)
 0x0055f430	verified	ClearDead: unresolvable or vtbl+0x50 (IsDead) members erased in place; same rule as m_is_dead
@@ -15,14 +15,14 @@
 0x0055ff00	verified	AddList: FIXED -- ordered union, push only when absent; test objlist_addlist_and_removelist_are_set_moves_not_copies
 0x0055f370	verified	Remove: FIXED -- first occurrence only (0x0041ee70), diagnostic when absent; test objlist_remove_and_removelist_take_one_occurrence_per_handle
 0x0055f100	partial	RemoveList: FIXED -- one first-occurrence erase per member of the argument; test objlist_remove_and_removelist_take_one_occurrence_per_handle. Gap: RemoveList(self) walks the list it erases in the original (no shipped site)
-0x005c89f0	partial	GetUnitsOnBoard: copy of the ship holder's deque; engine answers id order since a ship holder keeps no roster here (differs after unload/reload)
+0x005c89f0	verified	GetUnitsOnBoard: a copy (not an alias) of the ship holder's deque [holder+0x30], holder = ship+1; FIXED (spatial-index round): the order is the holder's roster, the order the units came aboard (World::contents_of: each member's stamp of joining, written by put_in_holder, saved), where it was ascending id; test objlist_get_units_on_board_lists_the_passengers_in_the_order_they_came_aboard
 0x005794c0	verified	NearestObj (point): 10,000,000 start, strict less, edge distance 0x005a7900
 0x00579620	verified	NearestObj (object): as point form less the argument's radius (0x005a77b0); invalid argument answers invalid
 0x0055e490	verified	ObjList::Contains: handle scan, argument not resolved
 0x00578d20	verified	Query::Contains: FIXED -- Refresh then handle scan (0x00571870); was refused, trapping the tutorial; test objlist_contains_on_a_query_asks_the_refreshed_result
 0x005616c0	verified	FilterClosest: FIXED -- bounded heap (0x00561450, comparator 0x0055df20, sift 0x0055eb40); ties keep the earlier member; test objlist_filterclosest_is_a_bounded_heap_whose_ties_keep_the_earlier_member
 0x0042c780	partial	IdxToSet: slot table with holes reused first-free (0x005c3a80); engine never despawns a settlement so equal; load-time numbering not read
-0x005df620	partial	GetUnitsInSameHolder: FIXED -- a settlement holder's roster in garrison order (same deque as Settlement::Units); test objlist_get_units_in_same_holder_follows_the_holders_own_roster. Other holders fall back to id order
+0x005df620	verified	GetUnitsInSameHolder: FIXED -- a settlement holder's roster in garrison order (same deque as Settlement::Units); test objlist_get_units_in_same_holder_follows_the_holders_own_roster. FIXED (spatial-index round): any other holder answers its roster in the order its members came in (World::contents_of, as GetUnitsOnBoard), where it was ascending id; test objlist_get_units_on_board_lists_the_passengers_in_the_order_they_came_aboard
 0x00422f50	partial	MaxSetIdx: slot-table length, nulls included; see IdxToSet
 0x00560c10	verified	ObjClass: lookup 0x00409e40, is-a 0x0059a220; unknown name answers empty
 0x005607b0	verified	ObjEnemy: owner's relation bit 0 clear for the player record at player-1

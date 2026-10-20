@@ -43,6 +43,8 @@ struct Bench {
   ClassIndex tough = kNoClass;
   ClassIndex hero_class = kNoClass;
   ClassIndex post = kNoClass;
+  ClassIndex sentry = kNoClass;
+  ClassIndex slinger = kNoClass;
 
   Bench() {
     graph.add(text(R"(<class id="Soldier" cpp_class="CVXUnit" parent="">
@@ -58,12 +60,21 @@ struct Bench {
         <properties maxhealth="1000" damage="20" max_army="50"/>
       </class>)"),
               "chief.sc.xml");
+    graph.add(text(R"(<class id="Sentry" cpp_class="CVXUnit" parent="Soldier"/>)"),
+              "sentry.sc.xml");
+    graph.add(text(R"(<class id="Pebble" cpp_class="CVXProjectile" parent=""/>)"), "pebble.sc.xml");
+    graph.add(text(R"(<class id="Slinger" cpp_class="CVXUnit" parent="Soldier">
+        <properties projectile_class="Pebble" range="300"/>
+      </class>)"),
+              "slinger.sc.xml");
     graph.add(text(R"(<class id="Post" cpp_class="CVXDecor" parent="">
         <properties range="321"/>
       </class>)"),
               "post.sc.xml");
     graph.link();
     post = graph.find("Post");
+    sentry = graph.find("Sentry");
+    slinger = graph.find("Slinger");
     soldier = graph.find("Soldier");
     tough = graph.find("Tough");
     hero_class = graph.find("Chief");
@@ -123,6 +134,15 @@ struct Bench {
     return unit != nullptr ? unit->stats : none;
   }
   [[nodiscard]] std::int32_t health(ObjectId id) { return combat.health(id); }
+
+  /// `killer` fights `victim`, left one health from death, until the victim
+  /// falls. Answers whether it did.
+  bool kill(ObjectId killer, ObjectId victim) {
+    (void)combat.apply_damage(world, victim, combat.health(victim) - 1);
+    if (!combat.order_attack(killer, victim)) return false;
+    for (int turn = 0; turn < 10 && combat.is_alive(victim); ++turn) world.advance(400);
+    return !combat.is_alive(victim);
+  }
 };
 
 }  // namespace
@@ -237,7 +257,7 @@ TEST(stats_the_formation_pays_while_the_unit_stands_in_it) {
 
   // A formation that takes more than there is stops at zero while standing,
   // and a negative record outside the formation is not floored.
-  b.movement.state(chief).formation = "Ragged";
+  b.movement.formation_of(chief).shape = "Ragged";
   StatBonus minus;
   minus.armour_slash = -10;
   REQUIRE(b.combat.add_bonus(man, minus));
@@ -305,45 +325,139 @@ TEST(stats_obj_range_answers_a_non_combatant_its_class_range) {
   CHECK(range(9999) == 0);
 }
 
-/// A blow's experience goes where every award goes in the original: the
-/// running total `[unit+0x180]` scripts read, through `SetExperience` with the
-/// refresh (0x00511550 -> 0x005dbf70), so the stored level follows it -- for a
-/// unit no record had been made for too. Scaled by the *attacker's* owner's
-/// `SetExperienceModifier`. It used to rise in a copy of combat's own, on a
-/// table without the division by 100, that no script could see.
-TEST(stats_a_blows_experience_lands_in_the_running_total_and_the_level_follows) {
+/// **A kill pays, a blow does not** (0x00511550, `docs/formats/unit-stats.md`,
+/// "What a blow pays"): a sixth of the levels the victim stood above the
+/// killer, truncated and kept to 0..8, plus one, into the running total
+/// `[unit+0x180]` through `SetExperience` with the refresh, so the stored level
+/// follows it -- for a unit no record had been made for too. Both levels are
+/// of the running totals.
+TEST(stats_a_kill_pays_by_the_level_gap_and_the_level_follows) {
   Bench b;
-  const ObjectId attacker = b.world.spawn(NativeClass::unit, nullptr, b.soldier);
-  b.world.set_owner(attacker, 1);
-  b.world.set_position(attacker, Point{1000, 1000});
-  b.world.set_health(attacker, 200);
-  const ObjectId victim = b.world.spawn(NativeClass::unit, nullptr, b.soldier);
-  b.world.set_owner(victim, 2);
+  const ObjectId killer = b.world.spawn(NativeClass::unit, nullptr, b.soldier);
+  b.world.set_owner(killer, 1);
+  b.world.set_position(killer, Point{1000, 1000});
+  b.world.set_health(killer, 200);
+  const ObjectId victim = b.spawn(b.soldier, 2);
   b.world.set_position(victim, Point{1040, 1000});
-  b.world.set_health(victim, 200);
   (void)b.combat.reconcile(b.world);
-  REQUIRE(b.heroes.unit(attacker) == nullptr);  // nothing has met it yet
-  b.combat.set_player_experience_modifier(1, 200);
-
-  REQUIRE(b.combat.order_attack(attacker, victim));
-  std::int32_t strikes = 0;
-  for (int turn = 0; turn < 4; ++turn) {
-    b.world.advance(400);
-    for (const CombatEvent& event : b.combat.events()) {
-      if (event.kind == CombatEvent::Kind::strike && event.attacker == attacker &&
-          event.damage > 0) {
-        ++strikes;
-      }
-    }
-    b.combat.clear_events();
-  }
-  REQUIRE(strikes > 0);
-  // A victim below level 8 is worth 1, doubled by the attacker's research.
-  CHECK(b.heroes.experience(attacker) == 2 * strikes);
-  const Combatant* a = b.combat.find(attacker);
+  REQUIRE(b.heroes.unit(killer) == nullptr);  // nothing has met it yet
+  // Level 13 against level 1: twelve levels, two sixths, so 3.
+  REQUIRE(b.heroes.set_experience(b.world, victim, b.heroes.experience_for_level(13)));
+  REQUIRE(b.kill(killer, victim));
+  CHECK(b.heroes.experience(killer) == 3);
+  const Combatant* a = b.combat.find(killer);
   REQUIRE(a != nullptr);
-  CHECK(a->level == b.heroes.level_for_experience(b.heroes.experience(attacker)));
+  CHECK(a->level == b.heroes.level_for_experience(3));
   CHECK(a->level > 1);
+
+  // Five levels above is under a sixth: 1. (The killer stands at level 3.)
+  const ObjectId lesser = b.spawn(b.soldier, 2);
+  b.world.set_position(lesser, Point{1040, 1000});
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.heroes.set_experience(b.world, lesser, b.heroes.experience_for_level(8)));
+  REQUIRE(b.kill(killer, lesser));
+  CHECK(b.heroes.experience(killer) == 4);
+
+  // And far above is kept to 9.
+  const ObjectId elder = b.spawn(b.soldier, 2);
+  b.world.set_position(elder, Point{1040, 1000});
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.heroes.set_experience(b.world, elder, b.heroes.experience_for_level(200)));
+  REQUIRE(b.kill(killer, elder));
+  CHECK(b.heroes.experience(killer) == 13);
+
+  // A shot's kill pays its shooter the same way: the projectile's landing
+  // (0x004d9bb0) is the blow too. Only a shooter can strike a Sentry here.
+  const ObjectId slinger = b.spawn(b.slinger, 1);
+  b.world.set_position(slinger, Point{3000, 3000});
+  const ObjectId mark = b.spawn(b.soldier, 2);
+  b.world.set_position(mark, Point{3200, 3000});
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.combat.profile(b.slinger).shoots);
+  REQUIRE(b.kill(slinger, mark));
+  CHECK(b.heroes.experience(slinger) == 1);
+
+  // But a Sentry's death pays nothing (0x005400c0).
+  const ObjectId sentry = b.spawn(b.sentry, 2);
+  b.world.set_position(sentry, Point{3200, 3000});
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.kill(slinger, sentry));
+  CHECK(b.heroes.experience(slinger) == 1);
+}
+
+/// The owner's modifier `[player+0x84]` (0x0050fec0), which the *Battle
+/// tactics* research sets: none keeps the gain, a positive one multiplies it
+/// by `m / 100 + 1` (one more with a chance of `m % 100`), and a negative one
+/// loses it with a chance of `-m`.
+TEST(stats_the_owners_modifier_scales_a_kills_gain) {
+  Bench b;
+  const ObjectId killer = b.spawn(b.soldier, 1);
+  const ObjectId first = b.spawn(b.soldier, 2);
+  b.world.set_position(killer, Point{1000, 1000});
+  b.world.set_position(first, Point{1040, 1000});
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.combat.player_experience_modifier(1) == 0);
+  b.combat.set_player_experience_modifier(1, 200);  // three times, no chance
+  REQUIRE(b.kill(killer, first));
+  CHECK(b.heroes.experience(killer) == 3);
+
+  b.combat.set_player_experience_modifier(1, -100);  // always lost
+  const ObjectId second = b.spawn(b.soldier, 2);
+  b.world.set_position(second, Point{1040, 1000});
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.kill(killer, second));
+  CHECK(b.heroes.experience(killer) == 3);
+}
+
+/// The same gain goes into the killer's hero's pool `[hero+0x2c4]`, and the
+/// hero's tick (0x0052fc50) takes a point of experience per whole
+/// `ExpFromArmyDivider` (3) of it and keeps the rest.
+TEST(stats_a_kill_feeds_the_killers_hero_through_its_pool) {
+  Bench b;
+  const ObjectId chief = b.spawn(b.hero_class, 1);
+  b.world.set_position(chief, Point{8000, 8000});
+  const ObjectId man = b.spawn(b.soldier, 1);
+  REQUIRE(b.heroes.attach(b.world, man, chief));
+  b.world.set_position(man, Point{1000, 1000});
+  const ObjectId victim = b.spawn(b.soldier, 2);
+  b.world.set_position(victim, Point{1040, 1000});
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.heroes.set_experience(b.world, victim, b.heroes.experience_for_level(25)));
+  const std::int32_t before = b.heroes.experience(chief);
+  REQUIRE(b.kill(man, victim));
+  CHECK(b.heroes.experience(man) == 5);  // 24 levels: four sixths, plus one
+  // Five in the pool; a tick takes one point and leaves two.
+  for (int turn = 0; turn < 4; ++turn) b.world.advance(400);
+  CHECK(b.heroes.experience(chief) == before + 1);
+  CHECK(b.heroes.hero(chief)->experience_pool == 2);
+}
+
+/// `max_battle_level` (the *Standardization* researches: "cannot gain more
+/// experience") holds a non-hero at its level's start: a total that would
+/// pass it is set to it, and one already there stays. A hero is not held.
+TEST(stats_max_battle_level_holds_a_warrior_but_not_a_hero) {
+  Bench b;
+  b.env.env().write_string(EnvScope::for_player(player_to_script(1)), "max_battle_level", "3");
+  const std::int32_t cap = b.heroes.experience_for_level(3);
+  REQUIRE(cap > 0);
+  const ObjectId killer = b.spawn(b.soldier, 1);
+  const ObjectId victim = b.spawn(b.soldier, 2);
+  b.world.set_position(killer, Point{1000, 1000});
+  b.world.set_position(victim, Point{1040, 1000});
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.heroes.set_experience(b.world, victim, b.heroes.experience_for_level(200)));
+  REQUIRE(b.kill(killer, victim));
+  CHECK(b.heroes.experience(killer) == cap);
+
+  const ObjectId chief = b.spawn(b.hero_class, 1);
+  b.world.set_position(chief, Point{3000, 3000});
+  const ObjectId other = b.spawn(b.soldier, 2);
+  b.world.set_position(other, Point{3040, 3000});
+  (void)b.combat.reconcile(b.world);
+  REQUIRE(b.heroes.set_experience(b.world, other, b.heroes.experience_for_level(200)));
+  const std::int32_t had = b.heroes.experience(chief);
+  REQUIRE(b.kill(chief, other));
+  CHECK(b.heroes.experience(chief) == had + 9);
 }
 
 /// The stored level, 0x005d9f0c..0x005da80f: the running total plus the

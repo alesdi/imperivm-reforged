@@ -115,13 +115,17 @@ Squad* SquadTable::remove_member(SquadKey key, ObjectId id) {
   return squad;
 }
 
-void SquadTable::stand_down(Squad& squad) noexcept {
+void SquadTable::stand_down(Squad& squad) {
   squad.eval = 0;
   // 0x00687c80 kills the squad's timers, and the one it arms is the look.
   squad.look_due = kSquadLookUnarmed;
+  // The order freed refiles the squad from the order's node to `DestGAIKA`;
+  // filed under no node takes it off the deque it stood on; bound for none
+  // takes it off `DestGAIKA`'s. So it ends on no deque at all, in the
+  // original's three steps.
   free_order(squad);
-  squad.gaika_in = kNoGaika;
-  squad.dest_gaika = kNoGaika;
+  move_in(squad.key, kNoGaika);
+  set_dest(squad.key, kNoGaika);
 }
 
 bool SquadTable::leave(SquadKey key, ObjectId id) {
@@ -149,6 +153,10 @@ bool SquadTable::destroy(SquadKey key) {
   const std::size_t at = lower_bound(key);
   if (at >= squads_.size() || !(squads_[at].key == key)) return false;
   free_order(squads_[at]);
+  // The original only destroys a squad its leave has already filed under no
+  // node; this table's other ways out take it off the deques the same way, so
+  // a later squad given the same index does not inherit its place.
+  forget(key);
   squads_.erase(squads_.begin() + static_cast<std::ptrdiff_t>(at));
   return true;
 }
@@ -176,7 +184,9 @@ void SquadTable::prune_empty() {
   // `leave` has already freed the order of a squad it emptied; this catches a
   // squad that was made and never joined, which has none to free.
   for (Squad& squad : squads_) {
-    if (squad.members.empty()) free_order(squad);
+    if (!squad.members.empty()) continue;
+    free_order(squad);
+    forget(squad.key);
   }
   squads_.erase(std::remove_if(squads_.begin(), squads_.end(),
                                [](const Squad& s) { return s.members.empty(); }),
@@ -223,8 +233,14 @@ AiOrderQueue* SquadTable::mutable_orders(PlayerId player) noexcept {
   return player < orders_.size() ? &orders_[player] : nullptr;
 }
 
-void SquadTable::free_order(Squad& squad) noexcept {
+void SquadTable::free_order(Squad& squad) {
   const std::int32_t index = squad.order;
+  // 0x00448a10 -> 0x0041ea60: a record that sends the squad refiles it from
+  // the record's node (`DestGAIKA` when that is 0) back to `DestGAIKA`.
+  if (index >= 0) {
+    refile_heading(squad, squad.ai_dest != kNoGaika ? squad.ai_dest : squad.dest_gaika,
+                   squad.dest_gaika);
+  }
   squad.order = -1;
   squad.order_dest = kNoGaika;
   squad.ai_dest = kNoGaika;
@@ -261,10 +277,111 @@ bool SquadTable::post_order(SquadKey key, GaikaId node, std::int16_t priority) {
     index = static_cast<std::int32_t>(queue->todo.size());
     queue->todo.push_back(record);
   }
+  // 0x004494c0 -> 0x0041ea60(squad, 0, node): from `DestGAIKA`, which the
+  // free above has just refiled it to, to the order's node -- so a squad sent
+  // again to the node it was already sent to goes to the back of that node's
+  // deque.
+  refile_heading(*squad, squad->dest_gaika, node != kNoGaika ? node : squad->dest_gaika);
   squad->order = index;
   squad->order_dest = node;
   squad->ai_dest = node;
   return true;
+}
+
+// -- the node deques ----------------------------------------------------------
+//
+// `docs/formats/gaika.md` has the reading; the declarations say which
+// address each of these is.
+
+void SquadTable::file(GaikaId node, SquadKey key) {
+  if (node <= kNoGaika) return;
+  const auto at = static_cast<std::size_t>(node);
+  if (filed_.size() <= at) filed_.resize(at + 1);
+  filed_[at].push_back(key);
+}
+
+void SquadTable::unfile(GaikaId node, SquadKey key) {
+  if (node <= kNoGaika) return;
+  const auto at = static_cast<std::size_t>(node);
+  if (filed_.size() <= at) return;
+  std::vector<SquadKey>& deque = filed_[at];
+  const auto it = std::find(deque.begin(), deque.end(), key);
+  if (it != deque.end()) deque.erase(it);
+}
+
+void SquadTable::forget(SquadKey key) {
+  for (std::vector<SquadKey>& deque : filed_) {
+    deque.erase(std::remove(deque.begin(), deque.end(), key), deque.end());
+  }
+}
+
+void SquadTable::refile_heading(const Squad& squad, GaikaId from, GaikaId to) {
+  if (from == to) return;
+  if (from != kNoGaika && from != squad.gaika_in) unfile(from, squad.key);
+  if (to != kNoGaika && to != squad.gaika_in) file(to, squad.key);
+}
+
+void SquadTable::move_in(SquadKey key, GaikaId to) {
+  Squad* squad = find(key);
+  if (squad == nullptr) return;
+  const GaikaId from = squad->gaika_in;
+  if (from != to) {
+    const GaikaId heading = squad_ai_dest(*squad);
+    if (from != kNoGaika && from != heading) unfile(from, key);
+    if (to != kNoGaika && to != heading) file(to, key);
+    squad->gaika_in = to;
+  }
+  // 0x0041eb04, and it is the whole of what `SrcGAIKA` means: the first node
+  // the squad was ever filed under, written once and never again.
+  if (squad->src_gaika == kNoGaika) squad->src_gaika = squad->gaika_in;
+}
+
+void SquadTable::set_dest(SquadKey key, GaikaId to) {
+  Squad* squad = find(key);
+  if (squad == nullptr || squad->dest_gaika == to) return;
+  // 0x0041ea10 refiles only when 0x00444140 answers 0: no order, or an order
+  // for node 0 -- the cases in which `DestGAIKA` is the heading.
+  if (squad->ai_dest == kNoGaika) refile_heading(*squad, squad->dest_gaika, to);
+  squad->dest_gaika = to;
+}
+
+// 0x0044fc60. The find (0x0044e460) compares all three ids; a hit not at
+// the front is erased (0x0044e700) and pushed on the front (0x0044f700); a
+// miss on a list of more than 511 pops the back first.
+void SquadTable::record_route(GaikaId src, GaikaId dst, GaikaId way) {
+  const Route route{src, dst, way};
+  const auto hit = std::find(routes_.begin(), routes_.end(), route);
+  if (hit == routes_.begin() && hit != routes_.end()) return;
+  if (hit != routes_.end()) {
+    routes_.erase(hit);
+  } else if (routes_.size() >= kRouteCap) {
+    routes_.pop_back();
+  }
+  routes_.push_front(route);
+}
+
+std::span<const SquadKey> SquadTable::filed_under(GaikaId node) {
+  if (node <= kNoGaika) return {};
+  const auto at = static_cast<std::size_t>(node);
+  const auto belongs = [node](const Squad& squad) {
+    return squad.gaika_in == node || squad_ai_dest(squad) == node;
+  };
+  // Settle, as the declaration says: in play both loops find nothing to do.
+  if (filed_.size() <= at) filed_.resize(at + 1);
+  std::vector<SquadKey>& deque = filed_[at];
+  deque.erase(std::remove_if(deque.begin(), deque.end(),
+                             [&](const SquadKey& key) {
+                               const Squad* squad = find(key);
+                               return squad == nullptr || !belongs(*squad);
+                             }),
+              deque.end());
+  for (const Squad& squad : squads_) {
+    if (!belongs(squad)) continue;
+    if (std::find(deque.begin(), deque.end(), squad.key) == deque.end()) {
+      deque.push_back(squad.key);
+    }
+  }
+  return deque;
 }
 
 bool SquadTable::delete_order(SquadKey key) {
@@ -318,12 +435,13 @@ void revalue_squads(World& world, SquadTable& squads) {
     // filed under the town's node and not under wherever its holder record
     // happens to sit -- and a siege engine's crew stays filed under the node
     // it is besieging.
+    //
+    // The refile is `move_in`'s, which also stamps `SrcGAIKA` (0x0041eb04).
     if (!squad.members.empty() && world.find(squad.members.front()) != nullptr) {
-      squad.gaika_in = nodes.at(areas, unit_pos_rh(world, squad.members.front()));
+      squads.move_in(squad.key, nodes.at(areas, unit_pos_rh(world, squad.members.front())));
+    } else if (squad.src_gaika == kNoGaika) {
+      squad.src_gaika = squad.gaika_in;
     }
-    // 0x0041eb04, and it is the whole of what `SrcGAIKA` means: the first node
-    // the squad was ever filed under, written once and never again.
-    if (squad.src_gaika == kNoGaika) squad.src_gaika = squad.gaika_in;
   }
 }
 
@@ -1867,14 +1985,11 @@ constexpr std::int32_t kAiEnemy = 4;
 ///     `enrol_new_units_in_squads`), so the case is a squad stood down to no
 ///     node, or one formed at a point no node covers.
 ///
-/// **Which squads are asked is reconstructed, and that is the inference in
-/// this whole family.** Retail walks a deque stored *on* the node (0x004395f4
-/// reads `[gaika+0x18]`). `sim/gaika.hpp` now has a node table, but it holds no
-/// such deque and its numbering is this engine's own approximation rather than
-/// the original's, so every squad is asked and the ones the answer puts
-/// nowhere near the node are the ones the deque would not hold. The order the
-/// survivors come in is the table's (player, index), not the deque's filing
-/// order.
+/// **Which squads are asked is the node's deque** (0x004395f4 reads
+/// `[gaika+0x18]`), `SquadTable::filed_under`: a squad is on it exactly when
+/// this function answers non-zero for it with `take_peaceful` -- standing
+/// here or heading here -- and it comes in the order it was filed. Every
+/// walker in this family reads the deque and then asks this of each entry.
 ///
 /// **Where a squad is heading is `AIDest`, not `DestGAIKA`.** Posting an
 /// order re-files the squad on the node table from its `DestGAIKA` to the
@@ -2045,9 +2160,10 @@ constexpr std::int32_t kComingSightByDifficulty[4] = {1000, 6000, 32000, 0x007b1
 /// invalid list); here it stays an empty one, which reads the same through
 /// `EOL`, `Cur`, `Next`, `Size` and `Rewind`.
 ///
-/// **What stays inferred is the deque** -- which squads it holds, and in what
-/// order; `squad_presence` says how that is reconstructed. This is the GAIKA
-/// node design's gap, not this body's.
+/// **The deque is the node's own** (`SquadTable::filed_under`), in the order
+/// its squads were filed: a squad that came to the node first is listed
+/// first, whatever its index. This walked the squad table, in (player, index)
+/// order, until the twelfth round.
 HostOutcome get_squads_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
@@ -2075,12 +2191,16 @@ HostOutcome get_squads_impl(CallContext& ctx) {
   out->clear();
 
   const PlayerTable& players = world->players();
-  const SquadTable& table = heroes->squads();
-  for (const Squad& squad : table.squads()) {
+  SquadTable& table = heroes->squads();
+  // A copy of the deque: nothing below files or unfiles, but the walk hands
+  // keys to a pool that lives beside the table.
+  for (const SquadKey& key : squads_filed_under(table, node)) {
+    const Squad* found = table.find(key);
+    if (found == nullptr) continue;
+    const Squad& squad = *found;
     if (arity <= 1) {
-      // `/1`: the deque whole. A squad is on it when the node is its place or
-      // its heading, peaceful or not.
-      if (squad_presence(node, squad, /*take_peaceful=*/true) != 0) out->push_back(squad.key);
+      // `/1`: the deque whole, peaceful or not.
+      out->push_back(squad.key);
       continue;
     }
     if (squad.eval == 0) continue;
@@ -2163,11 +2283,10 @@ HostOutcome get_squads_impl(CallContext& ctx) {
 ///
 /// ## What stays inferred
 ///
-/// This note used to say the list was always empty, because no squad had a
-/// node or a strength; `revalue_squads` now gives them both. What is still
-/// this engine's reading is the node's squad deque -- which squads it holds,
-/// and their order, which decides who is taken first (`squad_presence`). And
-/// the class argument is one name there (0x00409e40, then `IsHeirOf`), where
+/// Not the deque any more: it is the node's own (`SquadTable::filed_under`),
+/// so the squads come in the order they were filed and the first to arrive
+/// is the first a recruiter takes from. What stays this engine's is the class
+/// argument, one name there (0x00409e40, then `IsHeirOf`), where
 /// `ClassFilter` also reads a comma list; every shipped call passes one name.
 ///
 /// An empty list is the right answer rather than a refusal, and that is
@@ -2218,7 +2337,11 @@ HostOutcome m_get_ai_controlled_units(CallContext& ctx) {
   const bool take_peaceful =
       ctx.count() > 4 && ctx.arg(4).is_integer() && ctx.arg(4).as_integer() != 0;
 
-  for (const Squad& squad : heroes->squads().squads()) {
+  SquadTable& table = heroes->squads();
+  for (const SquadKey& key : squads_filed_under(table, node)) {
+    const Squad* found = table.find(key);
+    if (found == nullptr) continue;
+    const Squad& squad = *found;
     if (squad.eval == 0) continue;
     if (filter_by_owner) {
       // 0x0044e250 is a four-way relation -- invalid, same, allied, enemy --
@@ -2238,8 +2361,6 @@ HostOutcome m_get_ai_controlled_units(CallContext& ctx) {
       if (static_cast<std::int32_t>(squad.key.player) != owner) continue;
     }
     if (!take_peaceful && (squad.flags & kSquadFlagPeaceful) != 0) continue;
-    const GaikaId heading = squad.order_dest != kNoGaika ? squad.order_dest : squad.dest_gaika;
-    if (heading != node && squad.gaika_in != node) continue;
 
     for (const ObjectId member : squad.members) {
       const WorldObject* slot = world->find(member);
@@ -2323,22 +2444,19 @@ HostOutcome fn_get_squad(CallContext& ctx) {
 /// The region census: `GAIKA::Eval` and `GAIKA::Count`, four arities between
 /// them. `GETGAIKASTRAT.VS` calls the two back to back on one node with
 /// parallel variable names -- `nOwn/nAlly/nEnemy` then `nOwnC/nAllyC/nEnemyC`
-/// -- and they share their walk and their membership rule (`squad_presence`),
-/// but **since the tenth round `Eval` is no longer `Count` with another
-/// addend**: its four bodies were read whole, and they differ from what the
-/// shared walk below did in six places. `gaika_eval` is `Eval`'s; `census_of`
-/// stays `Count/6`'s (0x00430a30, not read in that round), with the rules this
-/// note always gave it.
+/// -- and they share their walk and their membership rule (`squad_presence`).
+/// **`Count/6` (0x00430a30) is `Eval/6` counting heads**: the same walk of the
+/// node's deque, the same category, presence and sight, the same accumulator
+/// (0x00427e90) and the same settlement tail (0x00420c00) -- handed the
+/// squad's member count `[squad+0x50]` where `Eval` hands it the strength,
+/// and the wall's head count `[+0xf4]` where `Eval` adds its strength, and
+/// with no memory tail. `gaika_eval` is both, with `bodies` set for `Count`.
+/// This had its own walk, `census_of`, which skipped the viewer rules, the
+/// sight, the messengers, the hidden and the wall; read in the twelfth round.
 ///
 /// The out-parameter order is `own, ally, enemy, enemy_hidden`, left to right in
 /// the source; `gbr.exe` types all four as `0x101`, an `int` by reference.
 ///
-/// What `census_of` does for `Count`: walk every squad, skip one with no
-/// strength and one carrying `SF_PEACEFUL` (`[squad+0x30] & 4`, which is
-/// 0x0044e1f0's flag gate -- the census passes 0 for its third argument), keep
-/// those whose `squad_presence` meets the presence mask, and sort them into
-/// `own`/`ally`/`enemy` by `squad_relation`, summing bodies. `enemy_hidden`
-/// stays 0 there, and the node's settlement (0x00420c00) is not asked.
 struct Census {
   std::int32_t own = 0;
   std::int32_t ally = 0;
@@ -2361,29 +2479,6 @@ struct Census {
     if (category == kAiEnemy) enemy += amount;
   }
 };
-
-template <bool kBodies>
-[[nodiscard]] Census census_of(World& world, HeroSystem& heroes, GaikaId node,
-                               std::int32_t presence, PlayerId player) {
-  Census out;
-  const PlayerTable& players = world.players();
-  for (const Squad& squad : heroes.squads().squads()) {
-    if (squad.eval == 0) continue;
-    if ((squad.flags & kSquadFlagPeaceful) != 0) continue;
-    if ((squad_presence(node, squad) & presence) == 0) continue;
-    const std::int32_t relation = squad_relation(players, player, squad);
-    const std::int32_t amount =
-        kBodies ? static_cast<std::int32_t>(squad.members.size()) : squad.eval;
-    // Not `else if`: the relations are a mask, and a squad that read as both
-    // own and enemy would land in both totals rather than in whichever branch
-    // came first. `squad_relation` cannot produce that today; the accumulation
-    // does not depend on it.
-    if ((relation & kAiOwn) != 0) out.own += amount;
-    if ((relation & kAiAlly) != 0) out.ally += amount;
-    if ((relation & kAiEnemy) != 0) out.enemy += amount;
-  }
-  return out;
-}
 
 /// The receiver, the presence mask and the player, which all four arities share.
 struct CensusCall {
@@ -2424,7 +2519,8 @@ struct CensusCall {
 ///     `GS_CAPTURE.VS` subtracts it (`enemy -= enemy_hidden`). This total used
 ///     to be documented as the memory adjustment and answered 0; the memory
 ///     adjustment is the tail `gaika_eval` names, and this is the flag.
-void add_squad_to_buckets(World& world, Census& out, std::int32_t category, const Squad& squad) {
+void add_squad_to_buckets(World& world, Census& out, std::int32_t category, const Squad& squad,
+                          std::int32_t amount) {
   const WorldObject* front =
       squad.members.empty() ? nullptr : world.find(squad.members.front());
   if (front != nullptr && front->state.flags.messenger) {
@@ -2436,10 +2532,10 @@ void add_squad_to_buckets(World& world, Census& out, std::int32_t category, cons
     }
     if (messengers >= squad.members.size()) return;
   }
-  out.add(category, squad.eval);
+  out.add(category, amount);
   if (category == kAiEnemy && front != nullptr && !front->state.is_held() &&
       front->state.flags.hidden) {
-    out.enemy_hidden += squad.eval;
+    out.enemy_hidden += amount;
   }
 }
 
@@ -2452,8 +2548,7 @@ void add_squad_to_buckets(World& world, Census& out, std::int32_t category, cons
 ///      it cannot fail, so the walk runs for any id, and only the settlement
 ///      and the sight range below need the node's record);
 ///   2. **walks the squads filed under the node** -- the deque at
-///      `[node+0x18]`, rebuilt here from the squads' own fields by
-///      `squad_presence` (see its note for the inference) -- and for each with
+///      `[node+0x18]`, `SquadTable::filed_under` -- and for each with
 ///      strength (`[squad+0x1c] != 0`):
 ///        * its **category** is 0x0044e250(viewer, the squad's player nibble)
 ///          -- 1, 2 or 4, one-directional, so a one-sided truce is an ally
@@ -2477,33 +2572,32 @@ void add_squad_to_buckets(World& world, Census& out, std::int32_t category, cons
 ///      and it is added when the mask has `AI_STAYING` and the category passes
 ///      the form's gate (to the category's bucket, in the six-argument form).
 ///      The strength is `sentry_strength` (`sim/economy.cpp`);
-///   4. **the memory tail, which is not modelled**: when the mask has
-///      `AI_STAYING`, the three- and six-argument forms (the first only when
-///      `sides` has `AI_ENEMY`) look the node up in the asking AI's per-node
-///      record (`[ai+0x40]`, a vector of indices into `[ai+0x30]`, 0x18 bytes
-///      each) and, when the node is not in sight (0x0041cbd0 answers 0), add
-///      the **remembered** enemy strength (`record+8`) minus the enemy staying
-///      strength they can see -- the walk and the settlement redone with
-///      `AI_ENEMY` and `AI_STAYING` fixed. This engine keeps no per-player
-///      memory of enemy force, so the seen strength is answered; that is the
-///      AI-record design the ninth round left partial.
+///   4. **the memory tail** (`memory`): when the mask has `AI_STAYING`, the
+///      three- and six-argument forms (the first only when `sides` has
+///      `AI_ENEMY`) and `EvalNeighbors`' per-node census look the node up in
+///      the asking AI's per-node record (`laika_for`) and, when the node is not
+///      revealed to it (0x0041cbd0, `laika_revealed`), add the **remembered**
+///      enemy strength (`Laika::enemies`, `record+8`) minus the enemy staying
+///      strength they can see (`seen_enemy_staying` -- the walk and the
+///      settlement redone with `AI_ENEMY` and `AI_STAYING` fixed). So an
+///      unwatched node answers what was there when it was last watched,
+///      corrected by what can be seen there now. The record is the visibility
+///      sweep's (`sweep_gaika`, 0x0044ecc0); twelfth round.
 ///
 /// The six-argument form's failure arm writes three out-parameters and leaves
 /// `enemy_hidden` as it was, but it is reached only when the node vector does
 /// not exist at all; here all four are always written.
 ///
-/// **Known gap, shared with `GetSquads`**: a squad standing in the node with no
-/// order and no `DestGAIKA` reads as staying (`squad_presence`), where
-/// 0x0044e1f0 would read it as leaving (its heading is 0, which is not the
-/// node). The engine mints hero squads with no `DestGAIKA`, so the change
-/// belongs to the squad roster's design, not to this census.
 [[nodiscard]] Census gaika_eval(World& world, HeroSystem& heroes, GaikaId node,
                                 std::int32_t presence, std::int32_t viewer, std::int32_t sides,
-                                bool buckets) {
+                                bool buckets, bool bodies = false, bool memory = false) {
   Census out;
   const PlayerTable& players = world.players();
-  const SquadTable& table = heroes.squads();
-  for (const Squad& squad : table.squads()) {
+  SquadTable& table = heroes.squads();
+  for (const SquadKey& key : squads_filed_under(table, node)) {
+    const Squad* found = table.find(key);
+    if (found == nullptr) continue;
+    const Squad& squad = *found;
     if (squad.eval == 0) continue;
     const std::int32_t category =
         viewer < 0 ? kAiOwn : ai_relation(players, viewer, squad.key.player);
@@ -2514,33 +2608,51 @@ void add_squad_to_buckets(World& world, Census& out, std::int32_t category, cons
       here = enemy_presence_as_seen(world, table, squad, node, viewer, here);
     }
     if ((here & presence) == 0) continue;
+    // `Count/6` hands the accumulator the squad's member count (`[squad+0x50]`)
+    // where `Eval` hands it the strength (`[squad+0x1c]`).
+    const std::int32_t amount =
+        bodies ? static_cast<std::int32_t>(squad.members.size()) : squad.eval;
     if (buckets) {
-      add_squad_to_buckets(world, out, category, squad);
+      add_squad_to_buckets(world, out, category, squad, amount);
     } else {
-      out.add(category, squad.eval);
+      out.add(category, amount);
     }
   }
 
-  // The settlement, 0x00420c00.
   if ((presence & kAiStaying) == 0) return out;
-  const GaikaNode* here = world.gaika().find(node);
-  const EconomySystem* economy = economy_of(world);
-  if (here == nullptr || here->settlement == kNoObject || economy == nullptr) return out;
-  if (world.find(here->settlement) == nullptr) return out;
-  const Settlement* set = economy->settlements().for_object(here->settlement);
-  // 0x0043ffc0: only a `BaseTownhall` heir offers its wall -- `stronghold` is
-  // that class test made at load. A village or outpost with sentries is not.
-  if (set == nullptr || set->kind != SettlementKind::stronghold) return out;
-  const std::int32_t strength = sentry_strength(world, *set);
-  if (strength <= 0) return out;
-  const std::int32_t category = viewer < 0 ? kAiOwn : ai_relation(players, viewer, set->owner);
-  if ((category & sides) == 0) return out;
-  out.add(category, strength);
+  // The settlement, 0x00420c00.
+  [&] {
+    const GaikaNode* here = world.gaika().find(node);
+    const EconomySystem* economy = economy_of(world);
+    if (here == nullptr || here->settlement == kNoObject || economy == nullptr) return;
+    if (world.find(here->settlement) == nullptr) return;
+    const Settlement* set = economy->settlements().for_object(here->settlement);
+    // 0x0043ffc0: only a `BaseTownhall` heir offers its wall -- `stronghold`
+    // is that class test made at load. A village or outpost with sentries is
+    // not.
+    if (set == nullptr || set->kind != SettlementKind::stronghold) return;
+    const std::int32_t strength = sentry_strength(world, *set);
+    if (strength <= 0) return;
+    const std::int32_t category =
+        viewer < 0 ? kAiOwn : ai_relation(players, viewer, set->owner);
+    if ((category & sides) == 0) return;
+    // 0x00420c00's two outputs: the strength `[+0xf8]` gates both forms, and
+    // `Count/6` adds the wall's head count `[+0xf4]` (0x00430d2b).
+    out.add(category, bodies ? set->sentries_ready : strength);
+  }();
+
+  // The memory tail (step 4). A viewer past the table has no record.
+  if (!memory || (sides & kAiEnemy) == 0 || node == kNoGaika) return out;
+  if (viewer < 0 || viewer >= static_cast<std::int32_t>(kPlayerCount)) return out;
+  const Laika* record = laika_for(world, viewer, node);
+  if (record == nullptr || laika_revealed(world, *record)) return out;
+  out.enemy += record->enemies - seen_enemy_staying(world, heroes, node, viewer);
   return out;
 }
 
 /// `g.Count(presence, idPlayer, &own, &ally, &enemy, &enemy_hidden)` -- 5
-/// sites. `census_of`'s; see the note above it.
+/// sites, 0x00430a30: `gaika_eval` counting heads; see the note above
+/// `Census`.
 template <bool kBodies>
 HostOutcome census_out_impl(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -2549,7 +2661,8 @@ HostOutcome census_out_impl(CallContext& ctx) {
   if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
   if (ctx.count() < 7) return HostOutcome::failed("Eval: expected four out-parameters");
   const CensusCall call = census_args(ctx);
-  const Census census = census_of<kBodies>(*world, *heroes, call.node, call.presence, call.player);
+  const Census census = gaika_eval(*world, *heroes, call.node, call.presence, call.viewer,
+                                   0xFFFF, true, kBodies);
   ctx.out(3) = Value::integer(census.own);
   ctx.out(4) = Value::integer(census.ally);
   ctx.out(5) = Value::integer(census.enemy);
@@ -2566,8 +2679,8 @@ HostOutcome eval_out_impl(CallContext& ctx) {
   if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
   if (ctx.count() < 7) return HostOutcome::failed("Eval: expected four out-parameters");
   const CensusCall call = census_args(ctx);
-  const Census census =
-      gaika_eval(*world, *heroes, call.node, call.presence, call.viewer, 0xFFFF, true);
+  const Census census = gaika_eval(*world, *heroes, call.node, call.presence, call.viewer,
+                                   0xFFFF, true, false, /*memory=*/true);
   ctx.out(3) = Value::integer(census.own);
   ctx.out(4) = Value::integer(census.ally);
   ctx.out(5) = Value::integer(census.enemy);
@@ -2591,36 +2704,80 @@ HostOutcome eval_total_impl(CallContext& ctx) {
   const CensusCall call = census_args(ctx);
   const std::int32_t sides =
       ctx.count() > 3 ? (ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0) : kAiOwn;
-  const Census census =
-      gaika_eval(*world, *heroes, call.node, call.presence, call.viewer, sides, false);
+  // The memory tail is 0x0042f670's and not 0x0042f3d0's: the two-argument
+  // form's gate is `AI_OWN`, and the tail only ever touches the enemy total.
+  const Census census = gaika_eval(*world, *heroes, call.node, call.presence, call.viewer,
+                                   sides, false, false, /*memory=*/ctx.count() > 3);
   return HostOutcome::ok_with(Value::integer(census.selected(sides)));
 }
 
-/// `g.EvalNeighbors(presence, idPlayer, &own, &ally, &enemy, bool)` -- 1 site.
+/// `g.EvalNeighbors(presence, idPlayer, &own, &ally, &enemy, bool)` -- 1 site
+/// (`GETARMYNEED.VS`, with the flag set), 0x00430800.
 ///
-/// The same census over the node's **neighbours** rather than the node, with
-/// three out-parameters instead of four and a trailing `bool` whose meaning is
-/// not established. It is bound on the same standing as its four siblings.
+/// `Eval/6`'s census summed over the node's **neighbours**, in adjacency order,
+/// into three out-parameters (the hidden total is kept and dropped). Each
+/// neighbour is passed over when:
 ///
-/// **The adjacency it needs now exists** -- `GaikaTable::neighbours`, built for
-/// `ControlledNeighbors` -- and so do the squad fields, so the two things this
-/// note used to be waiting for are both here. What is still unread is the rest
-/// of 0x00430800: the trailing `bool` gates a filter that walks the asking
-/// player's own node view (`[ai+0x88]`, a per-node record reached through a
-/// vector of ids at `[+0x40]`) and then refuses a neighbour on three
-/// settlement predicates, 0x00440100, 0x0043ffc0 and 0x004401c0. Answering the
-/// census over every neighbour regardless would be a different function, so
-/// this stays a zero until those are read.
+///   * the flag is set and the neighbour is not revealed to the asking player
+///     (0x0041cbd0 on its record, `laika_revealed`) -- so the census is of
+///     what is in sight, and the remembered strength of what is not comes in
+///     through each census's memory tail only when the flag is clear. A
+///     neighbour the player has no record for is passed over here; the
+///     original reads through the null;
+///   * its settlement is a Teuton tent (0x00440100, `IsTTent`), a
+///     `BaseTownhall` heir (0x0043ffc0, a stronghold) or an independent
+///     guarded outpost (0x004401c0, `IsIndependentGuarded`): places that are
+///     strategies of their own rather than ground to cross.
+///
+/// The census is 0x004302a0, `Eval/6`'s walk (0x00427e90's buckets, the wall,
+/// the memory tail) on the neighbour, for the viewer `idPlayer - 1`. An id
+/// with no node answers three zeros.
+///
+/// This answered three zeros always, waiting on the node memory the flag
+/// reads; twelfth round.
 HostOutcome eval_neighbors_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
-  if (hero_system_of(*world) == nullptr) return HostOutcome::failed(kNoHeroes);
+  HeroSystem* heroes = hero_system_of(*world);
+  if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
   if (ctx.count() < 7) {
     return HostOutcome::failed("EvalNeighbors: expected three out-parameters");
   }
-  ctx.out(3) = Value::integer(0);
-  ctx.out(4) = Value::integer(0);
-  ctx.out(5) = Value::integer(0);
+  const CensusCall call = census_args(ctx);
+  const bool in_sight_only = ctx.arg(6).truthy_scalar();
+  Census total;
+  const GaikaTable& table = world->gaika();
+  const EconomySystem* economy = economy_of(*world);
+  const ClassGraph* graph = world->class_graph();
+  const auto refused = [&](GaikaId id) {
+    const GaikaNode* node = table.find(id);
+    if (node == nullptr || node->settlement == kNoObject || economy == nullptr) return false;
+    const Settlement* set = economy->settlements().for_object(node->settlement);
+    if (set == nullptr) return false;
+    if (set->is_teuton_tent() || set->kind == SettlementKind::stronghold) return true;
+    if (!set->is_outpost() || !set->independent()) return false;
+    const WorldObject* central = world->find(set->anchor);
+    if (central == nullptr || graph == nullptr || central->class_index == kNoClass) return false;
+    return !graph->property(central->class_index, "defender_cls_1").empty() ||
+           !graph->property(central->class_index, "defender_cls_2").empty();
+  };
+  if (table.find(call.node) != nullptr) {
+    for (const GaikaId next : table.neighbours(call.node)) {
+      if (in_sight_only) {
+        const Laika* record = laika_for(*world, call.viewer, next);
+        if (record == nullptr || !laika_revealed(*world, *record)) continue;
+      }
+      if (refused(next)) continue;
+      const Census census = gaika_eval(*world, *heroes, next, call.presence, call.viewer,
+                                       0xFFFF, true, false, /*memory=*/true);
+      total.own += census.own;
+      total.ally += census.ally;
+      total.enemy += census.enemy;
+    }
+  }
+  ctx.out(3) = Value::integer(total.own);
+  ctx.out(4) = Value::integer(total.ally);
+  ctx.out(5) = Value::integer(total.enemy);
   return HostOutcome::ok_void();
 }
 
@@ -2698,22 +2855,15 @@ HostOutcome eval_neighbors_impl(CallContext& ctx) {
 /// **ready-sentry count** -- `[settlement+0xf4]`, what `GetSentry` hands out and
 /// `PutSentry` gives back, which is `Settlement::sentries_ready` here.
 ///
-/// The original gates that on two numbers, `[+0xf4] > 0` and `[+0xf8] > 0`, and
-/// only the first is reproduced. `[+0xf8]` is the sentries' *strength*, which
-/// 0x005c4930 recomputes as the per-sentry eval times `[+0xf4]` on every write,
-/// so the second gate carries nothing the first does not **unless the per-sentry
-/// eval is zero** -- and that number is `Settlement::EvalSentries` (0x005c4a60),
-/// which is still unwritten here. It reads the settlement's own building class,
-/// appends `Sentry` to its name, and scales that class's maximum health by a
-/// per-player factor, so it is zero only for a settlement whose sentry class
-/// does not exist or has no health. Stated rather than guessed at; the day
-/// `EvalSentries` lands, this gate gains its second half.
-///
-/// **So this is the rare AI entry point that is not answering zero.** The squad
-/// half is zero for the reason `census_of` gives -- nothing in this engine
-/// assigns a node to a squad -- but `sentries_ready` is live world state that
-/// the economy writes, saves and hashes, so `GS_CAPTURE.VS` asking how many
-/// sentries stand in a settlement it means to take gets a real number back.
+/// The tail is 0x00420c00's, the same one `Eval` and `Count/6` read: only a
+/// settlement whose central building descends from `BaseTownhall` (0x0043ffc0,
+/// `SettlementKind::stronghold`) offers a wall, and only when its strength
+/// `[+0xf8]` (`sentry_strength`) is above 0; `Count/3` then adds the head
+/// count when that is not 0. This gated on the head count alone, so a
+/// village's sentries were counted. And an enemy squad's presence is the
+/// asking AI's view (0x0044eb80), which this did not apply: an enemy whose
+/// order elsewhere was still pending counted as gone. The relation is
+/// 0x0044e250's one-directional one, as in `Eval`. Fixed in the twelfth round.
 [[nodiscard]] std::int32_t count_class_in_node(World& world, HeroSystem& heroes,
                                                const ClassGraph& graph, GaikaId node,
                                                std::int32_t sides, std::int32_t raw_player,
@@ -2724,34 +2874,49 @@ HostOutcome eval_neighbors_impl(CallContext& ctx) {
   // node matches an `AI_OWN` mask. An index past the sixteenth player asks the
   // table anyway and gets 0 back, which matches no mask at all.
   const bool unnamed = raw_player <= 0;
-  const PlayerId player =
-      (raw_player >= 1 && raw_player <= 16) ? static_cast<PlayerId>(raw_player - 1) : kNoPlayer;
+  const std::int32_t viewer = raw_player - 1;
 
   std::int32_t total = 0;
   const PlayerTable& players = world.players();
-  for (const Squad& squad : heroes.squads().squads()) {
+  SquadTable& table = heroes.squads();
+  for (const SquadKey& key : squads_filed_under(table, node)) {
+    const Squad* found = table.find(key);
+    if (found == nullptr) continue;
+    const Squad& squad = *found;
     if (squad.eval == 0) continue;
-    const std::int32_t relation = unnamed ? kAiOwn : squad_relation(players, player, squad);
+    // 0x0044e250, one-directional from the viewer's row, as `Eval`'s walk.
+    const std::int32_t relation =
+        unnamed ? kAiOwn : ai_relation(players, viewer, squad.key.player);
     if ((relation & sides) == 0) continue;
-    // 0x004330b0 asks 0x0044e1f0 with 1: a peaceful squad is counted.
-    if ((squad_presence(node, squad, /*take_peaceful=*/true) & kAiStaying) == 0) continue;
+    // 0x004330b0 asks 0x0044e1f0 with 1: a peaceful squad is counted. An
+    // enemy's presence is then the asking AI's view of it (0x0044eb80), as
+    // in every `Eval`: an undrained order elsewhere has not left.
+    std::int32_t here = squad_presence(node, squad, /*take_peaceful=*/true);
+    if (!unnamed && relation == kAiEnemy) {
+      here = enemy_presence_as_seen(world, table, squad, node, viewer, here);
+    }
+    if ((here & kAiStaying) == 0) continue;
+    // 0x00427fc0: every member, by descent, alive or not.
     for (const ObjectId member : squad.members) {
       if (world.class_is_a(member, wanted)) ++total;
     }
   }
 
-  const ClassIndex sentry = graph.find("Sentry");
-  if (!class_is_heir(graph, wanted, sentry)) return total;
+  // 0x00420c00, the node's settlement: a `BaseTownhall` heir (0x0043ffc0) with
+  // a wall of strength `[+0xf8]`, staying, under its owner's category -- and
+  // `Count/3` adds its head count `[+0xf4]` only when that is not 0 and the
+  // class asked for descends from `Sentry` (0x0059c020).
   const GaikaNode* here = world.gaika().find(node);
   if (here == nullptr || here->settlement == kNoObject) return total;
   const EconomySystem* economy = economy_of(world);
   if (economy == nullptr) return total;
   const Settlement* set = economy->settlements().for_object(here->settlement);
-  if (set == nullptr || set->sentries_ready <= 0) return total;
-  const std::int32_t relation =
-      unnamed ? kAiOwn
-              : (player == kNoPlayer ? 0 : relation_between(players, player, set->owner));
+  if (set == nullptr || set->kind != SettlementKind::stronghold) return total;
+  if (sentry_strength(world, *set) <= 0 || set->sentries_ready == 0) return total;
+  const std::int32_t relation = unnamed ? kAiOwn : ai_relation(players, viewer, set->owner);
   if ((relation & sides) == 0) return total;
+  const ClassIndex sentry = graph.find("Sentry");
+  if (!class_is_heir(graph, wanted, sentry)) return total;
   return total + set->sentries_ready;
 }
 
@@ -2885,7 +3050,11 @@ HostOutcome all_enemies_in_holder_impl(CallContext& ctx) {
   if (!players.is_enemy(set->owner, player)) return no;
 
   constexpr std::int32_t kHereAtAll = kAiStaying | kAiLeaving;
-  for (const Squad& squad : heroes->squads().squads()) {
+  SquadTable& table = heroes->squads();
+  for (const SquadKey& key : squads_filed_under(table, node)) {
+    const Squad* found = table.find(key);
+    if (found == nullptr) continue;
+    const Squad& squad = *found;
     if (squad.eval == 0) continue;
     if ((squad_relation(players, player, squad) & kAiEnemy) == 0) continue;
     // A peaceful squad is refused by `squad_presence` (0x0044e1f0 with 0).
@@ -3042,7 +3211,7 @@ SquadKey hero_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest)
   SquadTable& table = heroes.squads();
   const SquadKey existing = table.squad_of(id);
   if (existing != kNoSquad) {
-    if (Squad* squad = table.find(existing); squad != nullptr) squad->dest_gaika = dest;
+    table.set_dest(existing, dest);
     return existing;
   }
   const WorldObject* slot = world.find(id);
@@ -3053,8 +3222,7 @@ SquadKey hero_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest)
     squad->flags = static_cast<std::uint16_t>(
         (slot->state.flags.no_ai ? kSquadFlagNoAi : 0) | squad_flags_by_class(world, id));
     squad->src_gaika = kNoGaika;
-    squad->gaika_in = kNoGaika;
-    squad->dest_gaika = dest;
+    table.set_dest(made, dest);
     squad->state_time = world.time();
   }
   if (const HeroRecord* record = heroes.hero(id); record != nullptr) {
@@ -3213,7 +3381,7 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   // 7a. A leader keeps its squad, learns the destination, and hands the rest on.
   if (leads && current != nullptr) {
     const SquadKey kept = mine;
-    if (Squad* squad = table.find(kept); squad != nullptr) squad->dest_gaika = dest;
+    table.set_dest(kept, dest);
     if (locked) return kept;
     std::vector<ObjectId> followers;
     if (const Squad* squad = table.find(kept); squad != nullptr) {
@@ -3236,7 +3404,7 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
     squad->flags = flags;
     squad->state = state;
     squad->src_gaika = src;
-    squad->dest_gaika = dest;
+    table.set_dest(made, dest);
     squad->state_time = world.time();
   }
   table.prune_empty();
@@ -3244,6 +3412,15 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
 }
 
 }  // namespace
+
+std::int32_t seen_enemy_staying(World& world, HeroSystem& heroes, GaikaId node,
+                                std::int32_t viewer) {
+  // The sweep's and the tail's own walk: a squad's category is 0x0044e250's,
+  // its presence 0x0044e1f0's with peaceful squads absent, refined by
+  // 0x0044eb80; the two bodies also skip a peaceful squad of player 14 or 15,
+  // which the absent presence has already skipped. Then the wall.
+  return gaika_eval(world, heroes, node, kAiStaying, viewer, kAiEnemy, false).enemy;
+}
 
 SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest) {
   return add_to_squad(world, heroes, id, dest, 0);
@@ -3900,7 +4077,10 @@ HostOutcome nearest_hospital_impl(CallContext& ctx) {
     if (set->warehouse.food < kHospitalFood) continue;
 
     std::int32_t enemy = 0;
-    for (const Squad& other : self.heroes->squads().squads()) {
+    for (const SquadKey& key : squads_filed_under(self.heroes->squads(), id)) {
+      const Squad* filed = self.heroes->squads().find(key);
+      if (filed == nullptr) continue;
+      const Squad& other = *filed;
       // The original's first test, and an equivalence here: a strengthless
       // squad adds nothing to a sum. Kept because it is what 0x004318f1 does
       // and because the sum is the only thing the walk produces.
@@ -4049,7 +4229,8 @@ HostOutcome eval_attach_impl(CallContext& ctx) {
 ///      `follow` is false. Otherwise true.
 ///
 /// The mule then follows its army as any unit follows (`WAGON_FOLLOW.VS`),
-/// and the feeder's second path draws on it (`draw_from_food_wagon`).
+/// and a hungry soldier that can see it eats from it (the feeder's open-field
+/// search, `FeederSystem::search_open_field`).
 template <typename Fn>
 void each_peaceful_wagon(World& world, const HeroSystem& heroes, PlayerId player, Fn&& fn) {
   for (const Squad& squad : heroes.squads().squads()) {
@@ -4395,9 +4576,13 @@ namespace {
 /// single-member squads the final pass writes the state to. So here a unit
 /// attached to a hero stays where it is and takes no state, which is the same
 /// place it ends up. **A hero keeps its own squad and that squad takes the
-/// state** -- the one case the reading does not settle, because the
-/// assignment's leader branch was not followed to its end; it is labelled
-/// rather than guessed. `GAIKAIn` and the last attacker are left at their
+/// state** -- where the original moves the hero alone: the join
+/// (0x00445a50) takes one object out of its squad, appends it to the fresh
+/// one and files that squad under the unit's node when it is the first
+/// member, and the assignment's leader branch (0x00446a70) only re-sets the
+/// `DestGAIKA` of the squad the hero is now in. So a regrouped hero leaves
+/// his army in its squad and ends in a single-member squad of his own, which
+/// takes the state. Labelled, not reproduced. `GAIKAIn` and the last attacker are left at their
 /// defaults on a fresh squad, where the original leaves whatever the pooled
 /// slot held. **The old squad's AI order is re-posted on the fresh one** --
 /// same node, same priority as it stands (0x00447527..0x0044755d); see
@@ -4411,9 +4596,10 @@ namespace {
 /// Here each trainee and each enterer gets a squad of its own. Using
 /// `squadize_bodies` instead needs the hero case settled first: 0x00447330 has
 /// no hero branch of its own, 0x00446a70's only re-sets the `DestGAIKA` of the
-/// squad a hero is in, and whether a hero's army follows him into his fresh
-/// squad turns on the join (0x00445a50), which is not read. Until it is, the
-/// one-squad-each reading stays, labelled.
+/// squad a hero is in, and the join (0x00445a50) moves the one object -- so in
+/// the original a hero's army does not follow him into his fresh squad (see
+/// above). The one-squad-each reading stays, labelled, until the merge and
+/// that split are reproduced together.
 ///
 /// ## What the answer is not
 ///
@@ -4723,7 +4909,7 @@ void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const
     Squad* fresh = squads.find(key);
     if (fresh == nullptr) continue;
     fresh->flags = flags;
-    fresh->dest_gaika = dest;
+    squads.set_dest(key, dest);
     fresh->src_gaika = src;
     fresh->last_fight_time = fought;
     fresh->state = state;
@@ -4982,7 +5168,7 @@ std::size_t register_squad_host(HostRegistry& registry) {
   free_fn("NumSquads", 1, &fn_num_squads);  // 3
   free_fn("GetSquad", 2, &fn_get_squad);    // 3
 
-  // The region census. Four arities, one shape; see `census_of`.
+  // The region census. Four arities, one shape; see `gaika_eval`.
   member("Eval", 6, &eval_out_impl);             // 19
   member("Eval", 3, &eval_total_impl);          //  8
   member("Eval", 2, &eval_total_impl);          //  2

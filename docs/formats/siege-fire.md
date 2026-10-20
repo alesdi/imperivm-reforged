@@ -118,13 +118,41 @@ and divided by 100, and applied through the victim's damage virtual
 difference, no experience and nobody credited. A building also gets fire
 marks there (0x004e0b90, presentation).
 
+**Where the shot leaves.** 0x004e22a0 collects the entity's type-3 points
+(0x0053cee0 -> 0x005fd290: raw offsets, table order, at most 64) and picks
+the one at `(n / 2 + sector) % n`, where `n` is the entity's variation count
+(`[entity+0x284]`) and `sector` is 0x005f8530 of the heading to the stored
+point with its y negated. That is the same expression 0x0053db30 sets the
+engine's drawn column with, so the shot leaves from the point the sheet
+draws for the way the engine faces. The offset is added to the engine's
+position as it stands, with no screen round trip. The shipped firing
+catapults have eight variations and eight type-3 points, a ring about 120
+units north of the centre (`Catapult`: `(0, -159)` ... `(-47, -150)`).
+
+**How it flies.** The shot (0x004e47c0) takes the launch point, the aim and
+the catapult class's `shot_tan` (`[class+0xa08]`, read times 0.001) and
+`shot_height` (`[class+0xa0c]`). The ground end of its track is the launch
+point moved `shot_height` south, the ground under a point drawn that high;
+its length `S` is the float distance from there to the aim, and the arc's
+height over the track is a quadratic in the distance travelled, fitted from
+the two heights and the slope. Placing the shot (`vtbl+0x2c`, 0x004e4160)
+posts message `0x33` 1 ms ahead (0x00688240). Its handler (0x004e4650) adds
+10.0 (`[0x007edb08]`) to the distance travelled; while that is still at
+most `S` it re-posts itself 100 ms ahead (0x00688220) and moves the shot;
+past `S` it lands (0x004e4520) and the shot is deleted. So the shot lands
+`1 + 100 * floor(S / 10)` ms after it leaves -- 100 units a second, about
+eight seconds across a catapult's 800-unit range -- and anything that walks
+out of the splash meanwhile is missed.
+
 **This engine** launches the shot when `Attack` is called, timed to leave at
 the attack animation's `action_time` (`Projectile::launched` in the future),
-from the engine's own position rather than a type-3 point, and suspends the
-script for the animation's `duration`. The flight keeps this engine's
-invented speed (`kProjectileSpeed`): the original's shot advances ten units
-per step of its message timer (0x004e4650), and what one step is in game time
-was not settled.
+from `catapult_shot_origin` -- the type-3 point above, with
+`facing_column` standing for 0x005f8530 as it does for every drawn column --
+and suspends the script for the animation's `duration`. The flight is the
+original's, `catapult_shot_flight` of `isqrt` of the squared track: the
+float root differs from it only within a ten-thousandth of a multiple of
+ten. The shot's position interpolates the ground track over the flight; the
+arc is the renderer's.
 
 ## A catapult's other entry points
 
@@ -182,25 +210,26 @@ the receiver.
 `Building::BestTarget` (0x004dcc60 -> 0x004dc1e0 -> 0x004dbb20) sweeps the
 box `±sight` about the tower for **units** the tower may attack, whose class
 `target_factor` is not negative, that are not hidden, and whose surface
-distance is within `sight`. The first such unit is taken. After that a unit
+distance is within `sight`. The first such unit is taken, and sets a "low
+danger" mark when its danger counter (`[unit+0x1b0]`, 0..6, decaying one a
+second; `docs/formats/target-score.md`) is under 4. After that a unit
 nearer than `min_range` is skipped, one within `range` is taken and **ends
-the sweep**, and one beyond `range` replaces the best so far only when it is
-no farther and its danger counter (`[unit+0x1b0]`, 0..6, decaying one a
-second) is at most 3. The unit answered has its danger raised by one
-(0x005d2850). This engine keeps no danger counter (the unit target sweep's
-design gap, shared with `BestTargetInSquadSight`), so every unit reads 0
-here, and the sweep's order is cell rows then cells then id, where the
-original walks each cell's list in its own order.
+the sweep**, and one beyond `range` is skipped when its danger is over 3 and,
+while the mark stands, when it is farther than the best so far; otherwise it
+replaces it. The unit answered has its danger raised by one (0x005d2850).
+This engine keeps the counter (`Combatant::danger`). The sweep walks the
+world's grid as the original's does: cell rows, then cells, then each cell's
+list in the order its objects came into it ([`spatial-index.md`](spatial-index.md)).
 
 ## What is still unknown
 
-* The game-time period of the catapult shot's ten-unit flight step, and so
-  its flight time.
 * `[settlement+0x40]`, which the impact and the `IsValidTarget` virtual both
   require to be set for a building to be hit.
 * What the catapult's state machine does when another animation is already
   playing when `Attack` is called: the attack animation starts when that one
   ends, and the shot and the script's resume move with it. Here the throw
   always starts at once.
-* The type-3 point the shot leaves from, which shortens or lengthens its
-  flight by up to the entity's size.
+* Whether `facing_column` and 0x005f8530 (a tangent table built by
+  0x005f81d0) agree on every heading. Both put a wedge on each of the
+  entity's facings; a heading on a wedge's edge can pick the neighbouring
+  type-3 point, which moves the launch by a few tens of units.

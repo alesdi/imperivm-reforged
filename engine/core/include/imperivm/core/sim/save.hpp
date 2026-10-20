@@ -372,7 +372,36 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// 38). A version-43 file would load a unit walking on from a failed search
 /// as one walking to the end of its old route, and one stopped after it as
 /// arrived when it stands in its band.
-inline constexpr std::uint32_t kStateVectorVersion = 44;
+/// 45: the squad section carries each GAIKA node's squad deque after the
+/// order queues (`SquadTable::filed_under`, `[node+0x18]`), and then the
+/// node manager's MAIKA list (`SquadTable::routes`, `+0x38`; system section
+/// version 39). A version-44 file has none, and every walk of a node's
+/// squads -- `GetSquads`, `Count`, `Eval`, `GetAIControlledUnits` -- reads
+/// the deque in the order its squads arrived: docs/formats/gaika.md.
+/// 46: the movement section carries every hero's formation object
+/// (`sim/formation.hpp`, `[hero+0x2b0]`: its slots, pending units, marks,
+/// sample and flags; system section version 40), and the movement record no
+/// longer carries the shape, the spacing, the lock flag or the radius that
+/// stood in for it. A version-45 file has no slots, so a loaded march would
+/// stand until its hero laid the formation out again.
+/// 47: the world section (its version 36) carries each object's grid arrival
+/// stamp (`SpatialSlot::arrival`) and the next one: the order of a grid
+/// cell's list, which is who came into the cell first and the order every
+/// area sweep answers in (`sim/spatial_index.hpp`). Not hashed. A version-46
+/// file has no stamps, and a load would list every cell in id order.
+/// 48: every combatant carries the danger counter the target searches raise
+/// and read (`Combatant::danger`, `[unit+0x1b0]`, and its stamp
+/// `danger_time`, `[unit+0x1b4]`; system section version 41,
+/// `docs/formats/target-score.md`). A version-47 file would load every unit
+/// as nobody's recent pick, and the next searches would bunch on it.
+/// 49: an object's `idle` is its command queue's head from its start
+/// (`CommandSystem::start_slot`, 0x005aec40 -> 0x005b5160 -> 0x005b4f20),
+/// not a script running beside an empty queue, and a command's `onfinish`
+/// runs inside the end that calls it, so the command section keeps no
+/// finishing commands (system section version 42). A version-48 file would
+/// load every resting object with an empty queue and its `idle` running
+/// outside it, which nothing in this build ends.
+inline constexpr std::uint32_t kStateVectorVersion = 49;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";
