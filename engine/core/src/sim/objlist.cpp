@@ -512,11 +512,10 @@ HostOutcome m_get_objlist(CallContext& ctx) {
 /// `ObjectState::holder`, rather than a list on the holder: `Holder::units`
 /// belongs to `Settlement` and a ship's holder is not a settlement's.
 ///
-/// The result is in ascending object id, which is `World::objects()`' order and
-/// therefore board order for units that boarded in the order they were spawned.
-/// The original's is holder order, and the two differ only for a ship that has
-/// unloaded and reloaded; recorded rather than reproduced, because this engine
-/// has no per-holder list to keep an order in.
+/// The result is in the holder's roster order, the order the units came aboard
+/// (`World::contents_of`: the deque at `[holder+0x30]` appends on entry and
+/// closes up on exit, so a ship that unloads and reloads lists its passengers
+/// in the order of the reload).
 ///
 /// A receiver that is not a ship, or one whose neighbour is not a holder,
 /// answers an **empty list** rather than refusing -- the original dereferences
@@ -533,9 +532,7 @@ HostOutcome m_get_units_on_board(CallContext& ctx) {
   const ObjectId ship = live_object_of(*world, ctx.arg(0));
   const WorldObject* holder = ship == kNoObject ? nullptr : world->find(ship + 1);
   if (holder != nullptr && holder->internal == InternalKind::holder) {
-    for (const WorldObject& slot : world->objects()) {
-      if (slot.state.holder == holder->id) out->push_back(slot.id);
-    }
+    (void)world->contents_of(holder->id, *out);
   }
   return HostOutcome::ok_with(make_objlist_value(list));
 }
@@ -562,10 +559,8 @@ HostOutcome m_get_units_on_board(CallContext& ctx) {
 /// roster -- `Holder::units`, reached through `ObjListPool::roster_of` -- the
 /// answer is a copy of it, in garrison order: two of the four shipped sites
 /// pick a member with `ol[rand(ol.count)]`, so the order is the answer. Any
-/// other holder has no roster here, and membership falls back to the
-/// `ObjectState::holder` back-link in ascending object id, for the reason
-/// `GetUnitsOnBoard` above records; that fallback differs from the original
-/// only for such a holder that has been emptied and refilled.
+/// other holder's roster is `World::contents_of`, in the order its members
+/// came in, as `GetUnitsOnBoard` above records.
 HostOutcome m_get_units_in_same_holder(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetUnitsInSameHolder: no world");

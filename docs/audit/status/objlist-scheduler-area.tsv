@@ -15,14 +15,14 @@
 0x0055ff00	verified	AddList: FIXED -- ordered union, push only when absent; test objlist_addlist_and_removelist_are_set_moves_not_copies
 0x0055f370	verified	Remove: FIXED -- first occurrence only (0x0041ee70), diagnostic when absent; test objlist_remove_and_removelist_take_one_occurrence_per_handle
 0x0055f100	partial	RemoveList: FIXED -- one first-occurrence erase per member of the argument; test objlist_remove_and_removelist_take_one_occurrence_per_handle. Gap: RemoveList(self) walks the list it erases in the original (no shipped site)
-0x005c89f0	partial	GetUnitsOnBoard: copy of the ship holder's deque; engine answers id order since a ship holder keeps no roster here (differs after unload/reload)
+0x005c89f0	verified	GetUnitsOnBoard: a copy (not an alias) of the ship holder's deque [holder+0x30], holder = ship+1; FIXED (spatial-index round): the order is the holder's roster, the order the units came aboard (World::contents_of: each member's stamp of joining, written by put_in_holder, saved), where it was ascending id; test objlist_get_units_on_board_lists_the_passengers_in_the_order_they_came_aboard
 0x005794c0	verified	NearestObj (point): 10,000,000 start, strict less, edge distance 0x005a7900
 0x00579620	verified	NearestObj (object): as point form less the argument's radius (0x005a77b0); invalid argument answers invalid
 0x0055e490	verified	ObjList::Contains: handle scan, argument not resolved
 0x00578d20	verified	Query::Contains: FIXED -- Refresh then handle scan (0x00571870); was refused, trapping the tutorial; test objlist_contains_on_a_query_asks_the_refreshed_result
 0x005616c0	verified	FilterClosest: FIXED -- bounded heap (0x00561450, comparator 0x0055df20, sift 0x0055eb40); ties keep the earlier member; test objlist_filterclosest_is_a_bounded_heap_whose_ties_keep_the_earlier_member
 0x0042c780	partial	IdxToSet: slot table with holes reused first-free (0x005c3a80); engine never despawns a settlement so equal; load-time numbering not read
-0x005df620	partial	GetUnitsInSameHolder: FIXED -- a settlement holder's roster in garrison order (same deque as Settlement::Units); test objlist_get_units_in_same_holder_follows_the_holders_own_roster. Other holders fall back to id order
+0x005df620	verified	GetUnitsInSameHolder: FIXED -- a settlement holder's roster in garrison order (same deque as Settlement::Units); test objlist_get_units_in_same_holder_follows_the_holders_own_roster. FIXED (spatial-index round): any other holder answers its roster in the order its members came in (World::contents_of, as GetUnitsOnBoard), where it was ascending id; test objlist_get_units_on_board_lists_the_passengers_in_the_order_they_came_aboard
 0x00422f50	partial	MaxSetIdx: slot-table length, nulls included; see IdxToSet
 0x00560c10	verified	ObjClass: lookup 0x00409e40, is-a 0x0059a220; unknown name answers empty
 0x005607b0	verified	ObjEnemy: owner's relation bit 0 clear for the player record at player-1

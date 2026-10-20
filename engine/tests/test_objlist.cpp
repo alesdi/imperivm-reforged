@@ -1568,6 +1568,42 @@ TEST(objlist_get_units_on_board_snapshots_the_ships_holder) {
   CHECK(objlist_pool_of(f.world).items(objlist_of(after.value))[0] == b);
 }
 
+/// A holder lists its members in the order they came in: every `CVXHolder`
+/// keeps a deque (`[holder+0x30]`) that the entry 0x00532160 appends to and the
+/// exit 0x00531a80 closes up, and `GetUnitsOnBoard` (0x005c89f0) copies it
+/// front to back. So a unit that steps off and back on is listed last, though
+/// its id is the lowest -- and the order survives a save.
+TEST(objlist_get_units_on_board_lists_the_passengers_in_the_order_they_came_aboard) {
+  Fixture f;
+  const World::ShipIds ship = f.world.spawn_ship(nullptr);
+  REQUIRE(ship.ship != kNoObject);
+  std::vector<ObjectId> crew;
+  for (int i = 0; i < 3; ++i) {
+    const ObjectId id = f.world.spawn(NativeClass::unit, nullptr);
+    (void)f.world.set_health(id, 100);
+    REQUIRE(f.world.put_in_holder(id, ship.holder));
+    crew.push_back(id);
+  }
+  // Boarding again while aboard changes nothing (0x00532160 finds it held).
+  REQUIRE(f.world.put_in_holder(crew[1], ship.holder));
+  REQUIRE(f.world.remove_from_holder(crew[0], pt(10, 10)));
+  REQUIRE(f.world.put_in_holder(crew[0], ship.holder));
+  const script::HostOutcome out =
+      f.call(script::CallKind::member, "GetUnitsOnBoard", {f.obj(ship.ship)});
+  REQUIRE(out.status == script::HostStatus::ok);
+  const std::span<const ObjectId> items = objlist_pool_of(f.world).items(objlist_of(out.value));
+  const std::vector<ObjectId> expected{crew[1], crew[2], crew[0]};
+  CHECK((std::vector<ObjectId>(items.begin(), items.end()) == expected));
+
+  std::vector<std::byte> bytes;
+  f.world.serialize(bytes);
+  World loaded;
+  REQUIRE(loaded.deserialize(bytes).ok());
+  std::vector<ObjectId> held;
+  loaded.contents_of(ship.holder, held);
+  CHECK(held == expected);
+}
+
 /// `GetUnitsInSameHolder` is the holder's whole membership, receiver included.
 ///
 /// `gbr.exe` 0x005df620 assigns the holder's member vector into the new list

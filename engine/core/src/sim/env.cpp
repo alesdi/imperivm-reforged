@@ -117,7 +117,11 @@ std::string env_format_int(std::int32_t value) {
 }
 
 std::string env_format_object(ObjectId id) {
-  return "$$" + env_format_int(static_cast<std::int32_t>(id)) + "$$";
+  // An object's own number; nothing at all is the original's invalid index,
+  // `$$65535$$` (0x006adf70 starts from 0xffff and takes the object's index
+  // only when the handle resolves).
+  const ObjectId written = id == kNoObject ? kCompatNoHandle : id;
+  return "$$" + env_format_int(static_cast<std::int32_t>(written)) + "$$";
 }
 
 ObjectId env_parse_object(std::string_view text) noexcept {
@@ -125,13 +129,18 @@ ObjectId env_parse_object(std::string_view text) noexcept {
   // conversion happened. So the two leading dollars must be there literally,
   // `%d` skips white space and takes a sign, and the trailing `$$` is never
   // checked -- `"$$12"` is object 12. The original then refuses `n` outside
-  // 0..65535 and indexes its object table; this engine's ids are 32-bit and
-  // never reused, so only the lower bound carries over (0 is `kNoObject` here).
+  // 0..65535 and indexes its object table, where 65535 -- the invalid index
+  // `EnvWriteObj` writes for nothing -- holds nothing. This engine's ids are
+  // 32-bit and never reused (`compat_handle`), so the lower bound and the
+  // invalid index carry over (0 is `kNoObject` here) and a number above
+  // 65535 still names the object that has it: no shipped game gets there,
+  // and refusing it would lose an object this engine wrote.
   if (text.size() < 2 || text[0] != '$' || text[1] != '$') return kNoObject;
   std::size_t i = 2;
   bool digits = false;
   const std::int32_t id = crt_atol(text, i, digits);
   if (!digits || id <= 0) return kNoObject;
+  if (static_cast<ObjectId>(id) == kCompatNoHandle) return kNoObject;
   return static_cast<ObjectId>(id);
 }
 
@@ -1147,10 +1156,8 @@ struct EnvTarget {
 //     at that index; a key that decodes to nothing, or to an object no longer
 //     there, pushes the invalid handle.
 //   * `EnvWriteObj` -- `$$%d$$` of the object's index; an invalid handle is
-//     written as index 0xffff (`$$65535$$`), which reads back as nothing. This
-//     engine writes `$$0$$` for it (`env_format_object(kNoObject)`), which
-//     also reads back as nothing; the stored text differs only to a script
-//     that reads an object key with `EnvReadString`, which none does.
+//     written as index 0xffff (`$$65535$$`, `kCompatNoHandle`), which reads
+//     back as nothing, and so it is here (`env_format_object(kNoObject)`).
 //
 // No body suspends, draws a random number or touches anything but the
 // registry. An invalid scope handle is the default answer (`EnvTarget`).

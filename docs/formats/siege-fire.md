@@ -189,8 +189,9 @@ no farther and its danger counter (`[unit+0x1b0]`, 0..6, decaying one a
 second) is at most 3. The unit answered has its danger raised by one
 (0x005d2850). This engine keeps no danger counter (the unit target sweep's
 design gap, shared with `BestTargetInSquadSight`), so every unit reads 0
-here, and the sweep's order is cell rows then cells then id, where the
-original walks each cell's list in its own order.
+here. The sweep walks the world's grid as the original's does: cell rows,
+then cells, then each cell's list in the order its objects came into it
+([`spatial-index.md`](spatial-index.md)).
 
 ## What is still unknown
 

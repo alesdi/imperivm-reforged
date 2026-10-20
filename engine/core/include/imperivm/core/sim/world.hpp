@@ -269,6 +269,19 @@ inline constexpr std::uint32_t kUnitFlagOnMinimap = 0x04000000u;
 /// scan of `data.pak` -- because they are engine-internal. They are
 /// unambiguously state: they occupy handles, other objects reference them by
 /// handle, and they sit inside the hashed slot table.
+/// The order a spatial query answers in.
+///
+/// `grid` is the original's: the walk every one of its area sweeps makes
+/// (rows of 256-unit cells top to bottom, cells left to right, each cell's
+/// list in the order its objects came into it; `sim/spatial_index.hpp`).
+/// `spawn` puts the same answer back into ascending id order, which is what
+/// this engine's queries answered before the grid was the original's, and
+/// what a caller that has not been read against a grid sweep still gets.
+enum class SweepOrder : std::uint8_t {
+  spawn,
+  grid,
+};
+
 enum class InternalKind : std::uint8_t {
   /// An ordinary data-driven object; `WorldObject::object` is non-null.
   none = 0,
@@ -421,8 +434,10 @@ struct WorldObject {
   /// animation on.
   FlightLeg flight;
 
-  /// Where the world's spatial index has filed this object. Derived: not
-  /// hashed, not saved, rebuilt on load. See `sim/spatial_index.hpp`.
+  /// Where the world's spatial index has filed this object: the cell is
+  /// derived from the position, and the arrival stamp -- the object's place in
+  /// its cell's list -- is history, saved and not hashed. See
+  /// `sim/spatial_index.hpp`.
   SpatialSlot spatial;
   /// A gate's portcullis motion, which `gate_raise` turns into how far it is
   /// raised. State: the gate lets units through once it stands above 20, so
@@ -1421,13 +1436,15 @@ class World {
 
   // -- spatial queries ---------------------------------------------------
   //
-  // All of these clear `out` and append in ascending id order.
+  // All of these clear `out` and append in `order`: ascending id unless the
+  // caller asks for the original's grid walk (`SweepOrder`).
 
   /// Objects standing within `radius` of `center`. **A held object is not
   /// found**, by this or any other area query: it stands at `(-1, -1)` in no
   /// grid cell, as in the original (`sim/spatial_index.hpp`).
   std::size_t objects_in_radius(Point center, std::int32_t radius, const ClassFilter& filter,
-                                std::vector<ObjectId>& out) const;
+                                std::vector<ObjectId>& out,
+                                SweepOrder order = SweepOrder::spawn) const;
 
   /// Objects standing inside an axis-aligned box, **corners inclusive**, and
   /// no held object, exactly as `objects_in_radius`.
@@ -1436,7 +1453,8 @@ class World {
   /// builds the spec, which is the one place a map's authoring order reaches.
   std::size_t objects_in_rect(std::int32_t left, std::int32_t top, std::int32_t right,
                               std::int32_t bottom, const ClassFilter& filter,
-                              std::vector<ObjectId>& out) const;
+                              std::vector<ObjectId>& out,
+                              SweepOrder order = SweepOrder::spawn) const;
 
   /// Objects within `radius` of `observer`'s own stored position, inclusive,
   /// excluding the observer itself -- so a held observer looks out from
@@ -1446,19 +1464,25 @@ class World {
   /// is the query's, frozen when it was made (`QuerySpec::radius`); the dead
   /// rules are `evaluate_query`'s.
   std::size_t objects_in_sight(ObjectId observer, std::int32_t radius, const ClassFilter& filter,
-                               std::vector<ObjectId>& out) const;
+                               std::vector<ObjectId>& out,
+                               SweepOrder order = SweepOrder::spawn) const;
 
   /// Objects of a class owned by a player, optionally bounded by a circle.
   /// `radius <= 0` means the whole map, and `player == kNoPlayer` any owner.
+  /// In spawn order the whole map is every object, held or not; in grid order
+  /// it is the grid's walk over the whole map, as 0x004fe860 sweeps it, and so
+  /// nothing held.
   std::size_t objects_of_class_for_player(const ClassFilter& filter, PlayerId player, Point center,
-                                          std::int32_t radius, std::vector<ObjectId>& out) const;
+                                          std::int32_t radius, std::vector<ObjectId>& out,
+                                          SweepOrder order = SweepOrder::spawn) const;
 
   /// The same, bounded by an axis-aligned box instead of a circle. Corners
   /// inclusive, exactly as `objects_in_rect`.
   std::size_t objects_of_class_for_player_in_rect(const ClassFilter& filter, PlayerId player,
                                                   std::int32_t left, std::int32_t top,
                                                   std::int32_t right, std::int32_t bottom,
-                                                  std::vector<ObjectId>& out) const;
+                                                  std::vector<ObjectId>& out,
+                                                  SweepOrder order = SweepOrder::spawn) const;
 
   /// Objects whose owner stands in a given relation to `viewer`.
   ///
@@ -1489,7 +1513,8 @@ class World {
   /// built on, for a caller whose own rule differs from theirs -- `EnemyInRange`
   /// is one.
   std::size_t objects_located_in_rect(std::int32_t left, std::int32_t top, std::int32_t right,
-                                      std::int32_t bottom, std::vector<ObjectId>& out) const;
+                                      std::int32_t bottom, std::vector<ObjectId>& out,
+                                      SweepOrder order = SweepOrder::spawn) const;
 
   /// True when the spatial index agrees with the object table. The simulation
   /// never asks; the tests do, and a build configured with
@@ -1551,7 +1576,13 @@ class World {
   [[nodiscard]] const BoardingTable& boarding() const noexcept { return boarding_; }
   [[nodiscard]] BoardingTable& mutable_boarding() noexcept { return boarding_; }
 
-  /// Everything a holder contains, directly. Ascending id order.
+  /// Everything a holder contains, directly, in the holder's roster order:
+  /// the order they came in. Every `CVXHolder` keeps its members in a deque
+  /// (`[holder+0x30]`): the entry 0x00532160 appends one it does not already
+  /// hold and the exit 0x00531a80 erases it where it stands, so the others
+  /// keep their order. Here each member's stamp of joining
+  /// (`SpatialSlot::arrival`, written by `put_in_holder`) is that order, and
+  /// it is saved.
   std::size_t contents_of(ObjectId holder, std::vector<ObjectId>& out) const;
 
   /// Squared distance between two objects' resolved positions, in world units.
@@ -1836,18 +1867,19 @@ class World {
                     const Entity* entity, ClassIndex class_index);
   /// The shared body of every spatial query: `test(slot, at)` over every
   /// non-internal object whose resolved position `at` lies in `box`, and
-  /// `collect` over those it accepts, in spawn order. `test` must imply
-  /// `box.contains(at)`. Candidates come from the grid when the box is small
-  /// enough to be worth it, and from a straight scan otherwise; the answer is
-  /// the same either way. `filtered` false skips `collect`'s own tests.
+  /// `collect` over those it accepts, in `order`. `test` must imply
+  /// `box.contains(at)`. In grid order the candidates are the grid's walk of
+  /// the box; in spawn order they come from the grid when the box is small
+  /// enough to be worth it, and from a straight scan otherwise, the answer the
+  /// same either way. `filtered` false skips `collect`'s own tests.
   template <typename Test>
   std::size_t sweep(const SpatialBox& box, const ClassFilter& filter, bool filtered,
-                    std::vector<ObjectId>& out, Test&& test) const;
+                    std::vector<ObjectId>& out, SweepOrder order, Test&& test) const;
   template <typename Test>
   std::size_t scan(const ClassFilter& filter, bool filtered, std::vector<ObjectId>& out,
                    Test&& test) const;
   void reindex(WorldObject& slot) { index_.file(slot); }
-  void rebuild_index();
+  void rebuild_index(std::uint64_t next_arrival);
   [[nodiscard]] std::int32_t sight_for_class(ClassIndex index) const noexcept;
 
   Clock clock_{};

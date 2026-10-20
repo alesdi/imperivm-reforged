@@ -1158,7 +1158,13 @@ TEST(a_settlements_unit_list_is_the_garrison_rather_than_a_copy_of_it) {
   const Settlement* row = economy.find(town);
   ObjListPool& pool = objlist_pool_of(world);
   CHECK(pool.items(pool.acquire_alias(script::kNoScript, row->holder.object)).size() == 1);
-  CHECK(pool.items(pool.acquire_alias(script::kNoScript, row->object)).empty());
+  // The settlement object owns the other alias, `Settlement::Buildings`: its
+  // buildings, never the garrison.
+  {
+    const std::span<const ObjectId> built =
+        pool.items(pool.acquire_alias(script::kNoScript, row->object));
+    CHECK(std::find(built.begin(), built.end(), a) == built.end());
+  }
   CHECK(pool.items(pool.acquire_alias(script::kNoScript, row->warehouse.object)).empty());
   CHECK(pool.items(pool.acquire_alias(script::kNoScript, row->anchor)).empty());
 
@@ -1177,7 +1183,9 @@ TEST(a_settlements_unit_list_is_the_garrison_rather_than_a_copy_of_it) {
     REQUIRE(world.deserialize(bytes).ok());
     ObjListPool& after = objlist_pool_of(world);
     CHECK(after.items(after.acquire_alias(script::kNoScript, row->holder.object)).size() == 1);
-    CHECK(after.items(after.acquire_alias(script::kNoScript, row->object)).empty());
+    const std::span<const ObjectId> built =
+        after.items(after.acquire_alias(script::kNoScript, row->object));
+    CHECK(std::find(built.begin(), built.end(), a) == built.end());
   }
 }
 
@@ -2469,11 +2477,18 @@ TEST(economy_buildings_lists_the_settlements_buildings_and_no_units) {
   CHECK(std::find(got.begin(), got.end(), elsewhere) == got.end());
 }
 
-/// The list is a **snapshot**, which is where this engine parts company with
-/// the original -- and it is mutable, which is what makes the divergence safe
-/// to have: clearing it leaves the settlement's own roll alone.
-TEST(economy_buildings_hands_back_a_list_the_script_owns) {
+/// The list is an **alias** of the settlement's member deque, as the original's
+/// is (0x005c3d40 points at the `ObjList` at `[settlement+0x60]` and bumps its
+/// refcount): in the order the buildings joined, and live -- a list taken
+/// before a building joins lists it after. The order is the one every walk over
+/// a settlement's buildings takes (`BestGate` 0x004284e0, `MostDamagedBuilding`
+/// 0x005c38d0), and it survives a save.
+TEST(economy_buildings_is_a_live_alias_in_the_order_the_buildings_joined) {
   AroundBench b;
+  // `late` is spawned first and joins last: id order and join order disagree.
+  const ObjectId late = b.world.spawn(NativeClass::building, nullptr, b.classes.tower);
+  b.world.set_position(late, Point{1300, 1000});
+  b.world.set_health(late, 4000);
   const ObjectId shed = b.building_at(Point{1200, 1000});
 
   const script::HostOutcome out = call_host(b.registry, b.world, script::CallKind::member,
@@ -2481,17 +2496,22 @@ TEST(economy_buildings_hands_back_a_list_the_script_owns) {
   REQUIRE(out.status == script::HostStatus::ok);
   REQUIRE(is_objlist(out.value));
   const ObjListId id = objlist_of(out.value);
-  REQUIRE(objlist_pool_of(b.world).items(id).size() == 2);
-  // No alias: the pool owns this storage. `Units` above answers `holder` here.
-  CHECK(objlist_pool_of(b.world).alias_of(id) == kNoObject);
+  CHECK(objlist_pool_of(b.world).alias_of(id) == b.settlement_object);
+  const auto listed = [&](World& world) {
+    const std::span<const ObjectId> items = objlist_pool_of(world).items(id);
+    return std::vector<ObjectId>(items.begin(), items.end());
+  };
+  CHECK((listed(b.world) == std::vector<ObjectId>{b.anchor, shed}));
 
-  objlist_pool_of(b.world).mutable_items(id)->clear();
-  const Settlement* s = b.economy.settlements().find(b.town);
-  REQUIRE(s != nullptr);
-  CHECK(s->buildings.size() == 2);
-  // And a second call is a second list, seeing the roll unharmed.
-  CHECK(b.members("Buildings", {b.settlement_value()}).size() == 2);
-  CHECK(shed != kNoObject);
+  REQUIRE(b.economy.add_building(b.world, b.town, late, 4000));
+  CHECK((listed(b.world) == std::vector<ObjectId>{b.anchor, shed, late}));
+  CHECK((b.members("Buildings", {b.settlement_value()}) ==
+         std::vector<ObjectId>{b.anchor, shed, late}));
+
+  std::vector<std::byte> bytes;
+  b.world.serialize(bytes);
+  REQUIRE(b.world.deserialize(bytes).ok());
+  CHECK((listed(b.world) == std::vector<ObjectId>{b.anchor, shed, late}));
 }
 
 /// A settlement handle that resolves to nothing is an **empty list**, not a
@@ -4107,6 +4127,36 @@ TEST(attack_set_for_training_picks_the_best_defended_outpost_and_engages) {
   CHECK(b.ask(999999, centre, 3000) == 0);
 }
 
+/// **The defenders around an outpost are swept in the grid's order, and the
+/// sweep stops at two.** 0x004233b0 walks the world's grid over the
+/// building's range (rows of 256-unit cells, cells, each cell's list in the
+/// order its objects came into it), offers only live units of the
+/// independents' (visitor 0x00421de0), counts on from the garrison and stops
+/// when the count reaches two: the exclusive engage names the unit that made
+/// it two.
+TEST(attack_set_for_training_sweeps_the_defenders_in_grid_order_and_stops_at_two) {
+  TrainingGroundBench b;
+  const ObjectId warrior = b.unit_of("Unit", Point{5000, 4000}, 1);
+  // An Iberian outpost straddling a row of cells (y 4352), nobody inside.
+  const auto [iberia, iberia_town] = b.outpost("IOutpost", Point{5000, 4350}, 14, {});
+  (void)iberia_town;
+  // Three slingers within its range of 150. By id: low, high, top. By the
+  // grid: top (the row above), then low and high in the row below.
+  const ObjectId low = b.unit_of("ISlinger", Point{5000, 4400}, 14);
+  const ObjectId high = b.unit_of("ISlinger", Point{5050, 4400}, 14);
+  const ObjectId top = b.unit_of("ISlinger", Point{5000, 4300}, 14);
+  // A dead one and a stranger's, both first in the walk, are not offered.
+  const ObjectId corpse = b.unit_of("ISlinger", Point{4990, 4290}, 14);
+  b.world.set_health(corpse, 0);
+  (void)b.unit_of("ISlinger", Point{4995, 4295}, 2);
+  CHECK(b.ask(warrior, Point{5000, 4350}, 400) == 1);
+  CHECK(b.target(warrior, 0) == iberia);
+  // `top`, then `low` makes two: the sweep stops there, short of `high`.
+  CHECK(b.target(warrior, 1) == low);
+  (void)high;
+  (void)top;
+}
+
 /// **`TSGetAllBarracks` and `BestBarrack` disagree, and the disagreement is
 /// the finding.** The first keeps ruins and skips the C++ downcast; the second
 /// does the opposite. Both run the same eight-name test, so a temple is in
@@ -5671,6 +5721,66 @@ TEST(a_mule_loads_only_from_a_town_hall_whose_owner_it_supports) {
   CHECK(call("LoadGold", {in_foreign, script::Value::integer(500)}).status == script::HostStatus::ok);
   CHECK(call("amount", {in_foreign}).value.as_integer() == 500);
   CHECK(foreign->warehouse.gold == 4500);
+}
+
+/// **A mule in the open loads from the first hall its grid sweep meets.**
+/// 0x005eb4b0 walks the world's grid over the mule's sight -- rows, then
+/// cells, then each cell's list in the order its objects came into it
+/// (`docs/formats/spatial-index.md`) -- so of two supported halls in one
+/// cell the one that stood there first is taken, whatever their ids.
+TEST(a_mule_in_the_open_loads_from_the_hall_first_in_its_grid_cell) {
+  ClassGraph graph;
+  const std::string docs[] = {
+      R"(<class id="Object" cpp_class="CVXDecor" parent=""/>)",
+      R"(<class id="Wagon" cpp_class="CVXWagon" parent="Object"><properties max_load="1000" sight="2000"/></class>)",
+  };
+  const char* names[] = {"object.sc.xml", "wagon.sc.xml"};
+  for (std::size_t i = 0; i < 2; ++i) REQUIRE(graph.add(bytes_of(docs[i]), names[i]).ok());
+  graph.link();
+
+  World world;
+  EconomySystem economy;
+  script::HostRegistry registry;
+  (void)register_all_hosts(registry);
+  world.set_class_graph(&graph);
+  REQUIRE(world.add_system(&economy));
+  economy.start(world);
+  HostContext context;
+  context.world = &world;
+  world.players().set_relation_word(1, 1, kRelationSelf);
+
+  const auto settle = [&](Point at) {
+    SettlementInit init = town_hall();
+    init.owner = 1;
+    init.anchor = world.spawn(NativeClass::town_hall, nullptr);
+    world.set_owner(init.anchor, 1);
+    (void)world.set_position(init.anchor, at);
+    const SettlementId id = economy.create(world, init);
+    economy.find(id)->warehouse.set(Resource::gold, 5000);
+    return id;
+  };
+  const SettlementId older_id = settle(Point{1100, 1100});
+  const SettlementId younger_id = settle(Point{1200, 1200});
+  // The older hall's anchor leaves the cell and comes back: it is now behind.
+  const ObjectId older_hall = economy.find(older_id)->anchor;
+  REQUIRE(world.set_position(older_hall, Point{9000, 9000}));
+  REQUIRE(world.set_position(older_hall, Point{1100, 1100}));
+
+  const ObjectId mule = world.spawn(NativeClass::wagon, nullptr, graph.find("Wagon"));
+  world.set_owner(mule, 1);
+  (void)world.set_position(mule, Point{1000, 1000});
+  script::CallContext ctx;
+  std::vector<script::Value> args{script::Value::object(kTypeObj, mule),
+                                  script::Value::integer(500)};
+  ctx.arguments = args;
+  ctx.user = &context;
+  ctx.name = "LoadGold";
+  ctx.kind = script::CallKind::member;
+  const std::uint32_t index = registry.find(script::CallKind::member, "LoadGold", 1);
+  REQUIRE(index != script::kUnresolvedHost);
+  CHECK(registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+  CHECK(economy.find(younger_id)->warehouse.gold == 4500);
+  CHECK(economy.find(older_id)->warehouse.gold == 5000);
 }
 
 /// The cargo is state: two peers that disagree about a mule's load sell

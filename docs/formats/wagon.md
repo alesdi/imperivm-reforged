@@ -207,8 +207,9 @@ settlement is 1,200 nearer; loads a mule through 0x005eed90 and orders it
   every script write goes through `set_wagon_cargo`, the setter: an emptied
   wagon dies through `CombatSystem::kill`, the unit death with no blow. The
   carrying-food flag is not kept (only the state dump reads it).
-* **Loading** has both arms; the open arm orders candidates by grid row, then
-  column, then id within a cell.
+* **Loading** has both arms; the open arm walks the world's grid in its
+  order: rows, then cells, then each cell's list in the order its objects came
+  into it (`spatial-index.md`).
 * **A settlement's mule and the squad's food wagon are world objects**:
   `make_mule` is 0x005eed90 (the race's class, both clamps, the draw, the
   owner, into the holder), behind `CreateMule*`, `CreateBoat*` and
@@ -218,17 +219,21 @@ settlement is 1,200 nearer; loads a mule through 0x005eed90 and orders it
   remain: the AI's new-unit hook (0x0041f310) files a fresh mule into a squad
   at once, where this engine's `enrol_new_units_in_squads` does it at the next
   turn; and a negative request loads nothing.
-* **Feeding from a wagon** is approximated in its reach only: the feeder's
-  second path (`draw_from_food_wagon`) draws, through the setter, from the
-  fullest food wagon whose running command is aimed at one of the hungry
-  unit's squad-mates, where the original's search (0x005dbba0) sweeps around
-  the unit -- a design of the feeder's, not modelled.
+* **Feeding from a wagon** is the original's search (0x005dbba0,
+  `FeederSystem::search_open_field`): a hungry unit in no holder looks over
+  its sight plus 512 -- the buildings of settlements whose owner grants it
+  share-support, in the store's and then the deque's order, then the world's
+  grid in its walk order for whatever carries food -- and keeps the store
+  (one holding enough ends the grid walk), the fullest food wagon, and a fed
+  comrade (the first holding enough, else the fullest), every one of them
+  one its player grants share-support and it can see (0x005a7870). The draw
+  takes from the store, else `min(want, cargo)` from the wagon through the
+  setter, else half the comrade's food at most. Not modelled: the catapult
+  crew's arm, and 0x00440100's exception for a tent whose holder names an
+  object (every Teuton tent's settlement is passed over).
 
 ## What is still unknown
 
-* Which object a cell holds first: the grid sweeps walk a cell's list in its
-  link order, which nothing here has read; where two candidates share a cell
-  the engine takes them by id.
 * The vtable dispatch from a timer number to `+0x130`/`+0x134` was inferred
   from the two slots holding exactly the two bodies; the dispatcher itself was
   not read.

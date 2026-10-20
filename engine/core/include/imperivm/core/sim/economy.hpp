@@ -630,18 +630,12 @@ void set_wagon_cargo(World& world, ObjectId wagon, std::int32_t value);
 /// with a negative load, which no shipped site asks for.
 ObjectId make_mule(World& world, SettlementId id, Resource kind, std::int32_t amount, bool boat);
 
-/// The feeder's second path: a hungry unit eats from a food wagon following
-/// its squad. The original's food search (0x005dbba0 with the predicate
-/// 0x005d58d0) sweeps around the unit for a store, a food wagon -- the fullest
-/// -- or a fed unit, and draws `min(want, cargo)` from the wagon through the
-/// cargo setter (0x005d3700), so the wagon that gives its last food dies.
-/// **What is approximated is the reach**: that search is the feeder's design
-/// and is not modelled here, so "within reach" is "a live food wagon whose
-/// running command is aimed at one of `members`" -- what `SendFoodWagon`
-/// makes, a mule following the army at 70 (`WAGON_FOLLOW.VS`). The fullest
-/// such wagon, the lowest handle of two equally full. Answers what was taken.
-std::int32_t draw_from_food_wagon(World& world, std::span<const ObjectId> members,
-                                  std::int32_t want);
+/// A settlement's buildings in its member deque's order, the order they
+/// joined (`[settlement+0x60]`, appended as each joins): the back-link's
+/// membership (`World::buildings_in_settlement`) ordered by the roll,
+/// `Settlement::buildings`. What `BestGate`, `MostDamagedBuilding`,
+/// `Settlement::Buildings` and the hungry unit's food search walk.
+void settlement_buildings(const World& world, const Settlement& s, std::vector<ObjectId>& out);
 
 // -- the garrison ----------------------------------------------------------
 //

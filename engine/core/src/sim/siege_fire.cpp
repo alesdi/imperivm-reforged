@@ -16,10 +16,6 @@ namespace imperivm::core::sim {
 
 namespace {
 
-/// The grid both target sweeps walk is 256 units a cell (the `>> 8` in
-/// 0x004dc1e0 and 0x004e2760), row by row and cell by cell.
-constexpr std::int32_t kSweepCell = 256;
-
 /// The type of entity point a fake tower stands on.
 constexpr std::int32_t kTowerPoint = 7;
 
@@ -73,36 +69,23 @@ void mirror_to_towers(World& world, ObjectId catapult, ObjectId target) {
   return slot->object->entity->anim(kAnimAttack);
 }
 
-/// Sort a sweep's candidates into the order the grid walks give them: rows
-/// of 256-unit cells top to bottom, cells left to right. Within one cell the
-/// original follows the cell's own list, which this engine does not keep;
-/// ascending id stands in (labelled in `docs/formats/siege-fire.md`).
-void grid_order(const World& world, std::vector<ObjectId>& ids) {
-  std::stable_sort(ids.begin(), ids.end(), [&world](ObjectId a, ObjectId b) {
-    const Point pa = world.state(a)->position;
-    const Point pb = world.state(b)->position;
-    const std::int32_t ra = pa.y / kSweepCell;
-    const std::int32_t rb = pb.y / kSweepCell;
-    if (ra != rb) return ra < rb;
-    return pa.x / kSweepCell < pb.x / kSweepCell;
-  });
-}
-
-/// The box sweep both entry points start from, already in grid order and
-/// without anything held or not a combatant.
+/// The box sweep both entry points start from, in the grid's walk order --
+/// rows of 256-unit cells top to bottom, cells left to right, each cell's list
+/// in the order its objects came into it (0x004dc1e0 and 0x004e2760 walk the
+/// world's grid; `docs/formats/spatial-index.md`) -- and without anything held
+/// or not a combatant.
 std::vector<ObjectId> sweep_box(const World& world, const CombatSystem& combat, Point centre,
                                 std::int32_t half) {
   std::vector<ObjectId> ids;
   if (half < 0) return ids;
   world.objects_in_rect(centre.x - half, centre.y - half, centre.x + half, centre.y + half,
-                        ClassFilter{}, ids);
+                        ClassFilter{}, ids, SweepOrder::grid);
   ids.erase(std::remove_if(ids.begin(), ids.end(),
                            [&](ObjectId id) {
                              const ObjectState* s = world.state(id);
                              return s == nullptr || s->is_held() || combat.find(id) == nullptr;
                            }),
             ids.end());
-  grid_order(world, ids);
   return ids;
 }
 

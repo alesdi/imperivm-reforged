@@ -1,4 +1,5 @@
-// The object grid. Rationale: sim/spatial_index.hpp.
+// The object grid. Rationale: sim/spatial_index.hpp and
+// docs/formats/spatial-index.md.
 
 #include "imperivm/core/sim/spatial_index.hpp"
 
@@ -10,11 +11,13 @@ namespace imperivm::core::sim {
 
 void SpatialIndex::clear() noexcept {
   cells_.clear();
+  next_arrival_ = 1;
 }
 
 std::int32_t SpatialIndex::axis_cell(std::int64_t v) noexcept {
-  // Arithmetic shift is a floor, so a negative coordinate lands below zero and
-  // is clamped into cell 0 rather than rounded into it.
+  // The original truncates toward zero; for the coordinates a map holds,
+  // which are never below zero, that is the shift. A negative one clamps into
+  // cell 0, which is where truncation puts everything above -256 too.
   const std::int64_t cell = v >> kCellShift;
   if (cell < 0) return 0;
   if (cell >= kCellsPerSide) return kCellsPerSide - 1;
@@ -23,6 +26,10 @@ std::int32_t SpatialIndex::axis_cell(std::int64_t v) noexcept {
 
 std::int32_t SpatialIndex::cell_of(Point at) noexcept {
   return axis_cell(at.y) * kCellsPerSide + axis_cell(at.x);
+}
+
+bool SpatialIndex::stands(const WorldObject& slot) noexcept {
+  return slot.internal == InternalKind::none && !slot.state.is_held();
 }
 
 std::int64_t SpatialIndex::cells_touched(const SpatialBox& box) noexcept {
@@ -35,21 +42,17 @@ std::int64_t SpatialIndex::cells_touched(const SpatialBox& box) noexcept {
 void SpatialIndex::unfile_cell(WorldObject& slot) noexcept {
   if (slot.spatial.cell < 0) return;
   std::vector<Entry>& cell = cells_[static_cast<std::size_t>(slot.spatial.cell)];
-  for (std::size_t i = 0; i < cell.size(); ++i) {
-    if (cell[i].id != slot.id) continue;
-    // Order inside a cell carries nothing -- every query sorts -- so the entry
-    // is swapped out rather than erased.
-    cell[i] = cell.back();
-    cell.pop_back();
-    break;
-  }
+  // Out of the list where it stands, the rest closing up in their order: the
+  // list is the walk's order (0x0053d630 unlinks a node of a doubly linked
+  // list).
+  const auto at = std::find_if(cell.begin(), cell.end(),
+                               [&slot](const Entry& entry) { return entry.id == slot.id; });
+  if (at != cell.end()) cell.erase(at);
   slot.spatial.cell = -1;
 }
 
 void SpatialIndex::file(WorldObject& slot) {
-  // An internal object stands nowhere, and neither does a held one: its
-  // position is `(-1, -1)`, which 0x0053d030 maps to no cell at all.
-  if (slot.internal != InternalKind::none || slot.state.is_held()) {
+  if (!stands(slot)) {
     drop(slot);
     return;
   }
@@ -57,6 +60,8 @@ void SpatialIndex::file(WorldObject& slot) {
   const Point at = slot.state.position;
   const std::int32_t cell = cell_of(at);
   if (cell == slot.spatial.cell) {
+    // Still in its cell: the list is not touched (0x0053f000 relinks only on a
+    // change of cell), only the copy of the position the sweep tests.
     for (Entry& entry : cells_[static_cast<std::size_t>(cell)]) {
       if (entry.id == slot.id) {
         entry.at = at;
@@ -65,11 +70,37 @@ void SpatialIndex::file(WorldObject& slot) {
     }
   }
   unfile_cell(slot);
-  cells_[static_cast<std::size_t>(cell)].push_back(Entry{slot.id, at});
+  // Onto the new cell's tail (0x0053ce50), with the stamp that says so.
+  slot.spatial.arrival = next_arrival_++;
+  cells_[static_cast<std::size_t>(cell)].push_back(Entry{slot.id, at, slot.spatial.arrival});
   slot.spatial.cell = cell;
 }
 
 void SpatialIndex::drop(WorldObject& slot) noexcept { unfile_cell(slot); }
+
+void SpatialIndex::rebuild(std::span<WorldObject> objects, std::uint64_t next_arrival) {
+  cells_.clear();
+  cells_.resize(kCells);
+  next_arrival_ = std::max<std::uint64_t>(next_arrival, 1);
+  for (WorldObject& slot : objects) {
+    slot.spatial.cell = -1;
+    // A held object's stamp is its place in its holder's roster: past it too.
+    next_arrival_ = std::max(next_arrival_, slot.spatial.arrival + 1);
+    if (!stands(slot)) continue;
+    const std::int32_t cell = cell_of(slot.state.position);
+    cells_[static_cast<std::size_t>(cell)].push_back(
+        Entry{slot.id, slot.state.position, slot.spatial.arrival});
+    slot.spatial.cell = cell;
+  }
+  // Each list back into the order its objects came in. The objects are taken
+  // in id order above, so equal stamps -- none, unless a file was written by
+  // hand -- fall back on spawn order.
+  for (std::vector<Entry>& cell : cells_) {
+    std::stable_sort(cell.begin(), cell.end(), [](const Entry& a, const Entry& b) {
+      return a.arrival < b.arrival;
+    });
+  }
+}
 
 void SpatialIndex::gather(const SpatialBox& box, std::vector<ObjectId>& out) const {
   if (cells_.empty() || box.right < box.left || box.bottom < box.top) return;
@@ -89,16 +120,17 @@ void SpatialIndex::gather(const SpatialBox& box, std::vector<ObjectId>& out) con
 bool SpatialIndex::consistent(std::span<const WorldObject> objects) const {
   std::size_t in_grid = 0;
   for (const WorldObject& slot : objects) {
-    if (slot.internal != InternalKind::none || slot.state.is_held()) {
+    if (!stands(slot)) {
       if (slot.spatial.cell >= 0) return false;
       continue;
     }
     if (cells_.empty()) return false;
     if (slot.spatial.cell != cell_of(slot.state.position)) return false;
+    if (slot.spatial.arrival >= next_arrival_) return false;
     bool found = false;
     for (const Entry& entry : cells_[static_cast<std::size_t>(slot.spatial.cell)]) {
       if (entry.id != slot.id) continue;
-      if (entry.at != slot.state.position) return false;
+      if (entry.at != slot.state.position || entry.arrival != slot.spatial.arrival) return false;
       found = true;
       break;
     }
@@ -106,7 +138,12 @@ bool SpatialIndex::consistent(std::span<const WorldObject> objects) const {
     ++in_grid;
   }
   std::size_t filed = 0;
-  for (const std::vector<Entry>& cell : cells_) filed += cell.size();
+  for (const std::vector<Entry>& cell : cells_) {
+    filed += cell.size();
+    for (std::size_t i = 1; i < cell.size(); ++i) {
+      if (cell[i - 1].arrival >= cell[i].arrival) return false;
+    }
+  }
   return filed == in_grid;
 }
 

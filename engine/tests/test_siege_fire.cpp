@@ -504,3 +504,27 @@ TEST(a_tower_takes_the_first_unit_in_range_after_the_first_it_sees) {
   CHECK(best != nearer);
   CHECK(best != first);
 }
+
+/// Inside one grid cell the tower's sweep follows the cell's list, which is
+/// the order its units came into the cell (0x0053f000 relinks onto the tail;
+/// `docs/formats/spatial-index.md`), not their ids. Of two units in range in
+/// one cell the first met is taken and the second, in range, ends the sweep
+/// and is answered: so the answer is whichever came into the cell last.
+TEST(a_towers_sweep_meets_a_cells_units_in_the_order_they_came_into_it) {
+  Bench b;
+  const ObjectId post = b.spawn(NativeClass::outpost, "BOutpost", Point{8000, 8000}, kUs, 5000);
+  const SettlementId town = b.settle(post, kUs);
+  const ObjectId tower = b.spawn(NativeClass::building, "WatchTower", Point{8000, 8000}, kUs, 1500);
+  REQUIRE(b.economy.add_building(b.world, town, tower, 1500));
+  // Both in [min_range, range] and in the cell (8192..8447, 8192..8447).
+  const ObjectId older = b.unit("Swordsman", Point{8200, 8200}, kThem);
+  const ObjectId younger = b.unit("Swordsman", Point{8220, 8220}, kThem);
+  // The older steps out of the cell and back: it is now behind the younger.
+  REQUIRE(b.world.set_position(older, Point{9000, 9000}));
+  REQUIRE(b.world.set_position(older, Point{8200, 8200}));
+  b.world.start();
+  b.run(1);
+  const ObjectId best = b.handle(b.call("BestTarget", {Bench::obj(tower)}));
+  CHECK(best == older);
+  CHECK(best != younger);
+}

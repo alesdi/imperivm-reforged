@@ -307,12 +307,11 @@ TEST(feeder_draws_a_garrisoned_unit_from_the_settlement_store) {
   CHECK(economy.resource(id, Resource::food) <= after_feeding);
 }
 
-/// A unit in the open is **not** fed by this system. The refill for a unit in
-/// the field is `village_behavior_givefood.vs`, which
-/// `DATA\CLASSES\BASEVILLAGE.SC.XML` binds as a behaviour and which reaches the
-/// unit through `SetFood`; the original may also search a radius, but no
-/// shipped file names one and inventing a radius would be inventing a balance
-/// rule.
+/// A unit in the open that can see nothing is **not** fed by this system: its
+/// search (0x005dbba0) takes only what the unit can see (0x005a7870, a
+/// non-zero sight), and this one has none. Its refill is
+/// `village_behavior_givefood.vs`, which `DATA\CLASSES\BASEVILLAGE.SC.XML`
+/// binds as a behaviour and which reaches the unit through `SetFood`.
 TEST(feeder_does_not_feed_a_unit_standing_in_the_open) {
   World world;
   EconomySystem economy;
@@ -342,63 +341,78 @@ TEST(feeder_does_not_feed_a_unit_standing_in_the_open) {
   (void)id;
 }
 
-/// A unit in the open **is** fed from a food wagon following its squad --
-/// the mule `Squad::SendFoodWagon` sends after the army -- through the cargo
-/// setter, a draw at a time (`draw_from_food_wagon`). A unit in no squad, or
-/// in a squad the wagon does not follow, gets nothing; a wagon that is not
-/// following anybody feeds nobody.
-TEST(feeder_draws_a_units_food_from_the_wagon_its_squad_was_sent) {
+/// A hungry unit in the open runs the original's search (0x005dbba0, visitor
+/// 0x005d58d0, draw 0x005d3700) over its sight plus 512: a friendly
+/// settlement's store first, else the fullest food wagon it can see, else a
+/// fed comrade, who gives half its food at most. Among comrades the grid's
+/// walk decides -- rows of 256-unit cells, cells, each cell's list -- and the
+/// first one holding enough is kept; a player the unit's does not grant
+/// share-support offers nothing.
+TEST(feeder_feeds_a_unit_in_the_open_from_what_its_search_finds) {
   World world;
   EconomySystem economy;
-  HeroSystem heroes;
   FeederSystem feeder;
-  CommandSystem commands;
   feeder.set_world_bound(false);
   REQUIRE(world.add_system(&economy));
-  REQUIRE(world.add_system(&heroes));
   REQUIRE(world.add_system(&feeder));
-  REQUIRE(world.add_system(&commands));
 
-  const ObjectId leader = world.spawn(NativeClass::unit, nullptr);
-  const ObjectId mate = world.spawn(NativeClass::unit, nullptr);
-  const ObjectId stranger = world.spawn(NativeClass::unit, nullptr);
-  for (const ObjectId u : {leader, mate, stranger}) {
-    world.set_health(u, 200);
-    FeedingUnit link = unit(u);
-    link.food = 0;
+  const auto soldier = [&](Point at, PlayerId owner, std::int32_t food) {
+    const ObjectId id = world.spawn(NativeClass::unit, nullptr);
+    world.set_health(id, 200);
+    world.set_position(id, at);
+    world.set_owner(id, owner);
+    world.find(id)->sight = 300;
+    FeedingUnit link = unit(id);
+    link.food = food;
     feeder.enrol(link);
-  }
-  const SquadKey key = heroes.squads().create(1, leader);
-  REQUIRE(heroes.squads().join(key, mate));
-  const auto wagon_of = [&](std::int32_t cargo) {
-    const ObjectId wagon = world.spawn(NativeClass::wagon, nullptr);
-    world.set_health(wagon, 400);
-    world.find(wagon)->state.cargo = cargo;
-    world.find(wagon)->state.cargo_resource = static_cast<std::int32_t>(Resource::food);
-    return wagon;
+    return id;
   };
-  // One standing idle with plenty, one following the leader with 30.
-  const ObjectId idle = wagon_of(500);
-  const ObjectId mule = wagon_of(30);
-  Command follow;
-  follow.verb = "follow";
-  follow.arg_kind = CommandArgKind::object;
-  follow.object = leader;
-  follow.started = true;  // running: no scheduler here to start it
-  commands.queue(mule).entries.push_back(follow);
+  // `later` is spawned first, so id order would offer it first; the grid
+  // reaches `first` a row of cells earlier. The stranger is earlier still in
+  // the walk, and is player 2's.
+  const ObjectId later = soldier(Point{1050, 1050}, 1, 20);
+  const ObjectId first = soldier(Point{1050, 760}, 1, 20);
+  const ObjectId stranger = soldier(Point{1000, 740}, 2, 20);
+  const ObjectId eater = soldier(Point{1000, 1000}, 1, 0);
   economy.start(world);
   feeder.start(world);
 
-  // Each unit's next search is due within two seconds; whichever of the two
-  // squad-mates searches first takes its 20 and the other the 10 left, and
-  // the stranger starves.
-  run(world, 400, 3200);
-  CHECK(feeder.food(leader) + feeder.food(mate) == 30);
-  CHECK(feeder.food(leader) > 0);
-  CHECK(feeder.food(mate) > 0);
-  CHECK(feeder.food(stranger) == 0);
-  CHECK(world.find(mule)->state.cargo == 0);
-  CHECK(world.find(idle)->state.cargo == 500);
+  run(world, 200, 200);
+  CHECK(feeder.food(eater) == 10);  // half of `first`'s 20
+  CHECK(feeder.food(first) == 10);
+  CHECK(feeder.food(later) == 20);
+  CHECK(feeder.food(stranger) == 20);
+
+  // A food wagon within sight comes before any comrade: min(want, cargo).
+  const ObjectId wagon = world.spawn(NativeClass::wagon, nullptr);
+  world.set_health(wagon, 400);
+  world.set_position(wagon, Point{1000, 1100});
+  world.set_owner(wagon, 1);
+  world.find(wagon)->state.cargo = 50;
+  world.find(wagon)->state.cargo_resource = static_cast<std::int32_t>(Resource::food);
+  REQUIRE(feeder.write_food(eater, 0));
+  run(world, 200, 200);
+  CHECK(feeder.food(eater) == 20);
+  CHECK(world.find(wagon)->state.cargo == 30);
+  CHECK(feeder.food(first) == 10);
+
+  // And a friendly settlement's store, its building within reach, before
+  // the wagon.
+  const ObjectId hall = world.spawn(NativeClass::building, nullptr);
+  world.set_health(hall, 3000);
+  world.set_position(hall, Point{1200, 1000});
+  world.set_owner(hall, 1);
+  SettlementInit init = town_hall();
+  init.anchor = hall;
+  init.owner = 1;
+  const SettlementId town = economy.create(world, init);
+  REQUIRE(town != kNoSettlement);
+  const std::int32_t stock = economy.resource(town, Resource::food);
+  REQUIRE(feeder.write_food(eater, 0));
+  run(world, 200, 200);
+  CHECK(feeder.food(eater) == 20);
+  CHECK(economy.resource(town, Resource::food) == stock - 20);
+  CHECK(world.find(wagon)->state.cargo == 30);
 }
 
 /// The search delay is drawn from `World::rng()` and from nowhere else: one

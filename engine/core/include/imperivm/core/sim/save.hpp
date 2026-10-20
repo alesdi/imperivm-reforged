@@ -384,7 +384,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// longer carries the shape, the spacing, the lock flag or the radius that
 /// stood in for it. A version-45 file has no slots, so a loaded march would
 /// stand until its hero laid the formation out again.
-inline constexpr std::uint32_t kStateVectorVersion = 46;
+/// 47: the world section (its version 36) carries each object's grid arrival
+/// stamp (`SpatialSlot::arrival`) and the next one: the order of a grid
+/// cell's list, which is who came into the cell first and the order every
+/// area sweep answers in (`sim/spatial_index.hpp`). Not hashed. A version-46
+/// file has no stamps, and a load would list every cell in id order.
+inline constexpr std::uint32_t kStateVectorVersion = 47;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";
