@@ -283,6 +283,7 @@ void ObstructionGrid::label_regions() const {
   constexpr std::int32_t kDy[4] = {-1, 0, 1, 0};
   const std::size_t cells = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
   regions_.assign(cells, 0);
+  region_boxes_.assign(1, CellBox{});
   std::vector<std::uint32_t> queue;
   std::uint32_t next = 0;
   for (std::int32_t y = 0; y < height_; ++y) {
@@ -292,12 +293,17 @@ void ObstructionGrid::label_regions() const {
       // A breadth-first flood over the four orthogonal neighbours.
       ++next;
       regions_[seed] = next;
+      CellBox box{x, y, x, y};
       queue.clear();
       queue.push_back(static_cast<std::uint32_t>(seed));
       for (std::size_t head = 0; head < queue.size(); ++head) {
         const auto w = static_cast<std::uint32_t>(width_);
         const auto qx = static_cast<std::int32_t>(queue[head] % w);
         const auto qy = static_cast<std::int32_t>(queue[head] / w);
+        box.min_x = std::min(box.min_x, qx);
+        box.min_y = std::min(box.min_y, qy);
+        box.max_x = std::max(box.max_x, qx);
+        box.max_y = std::max(box.max_y, qy);
         for (int i = 0; i < 4; ++i) {
           const std::int32_t nx = qx + kDx[i];
           const std::int32_t ny = qy + kDy[i];
@@ -308,9 +314,16 @@ void ObstructionGrid::label_regions() const {
           queue.push_back(static_cast<std::uint32_t>(at));
         }
       }
+      region_boxes_.push_back(box);
     }
   }
   regions_valid_ = true;
+}
+
+ObstructionGrid::CellBox ObstructionGrid::region_box(std::uint32_t region) const {
+  if (!regions_valid_) label_regions();
+  if (region == 0 || region >= region_boxes_.size()) return CellBox{};
+  return region_boxes_[region];
 }
 
 std::size_t ObstructionGrid::count_blocked() const noexcept {
@@ -521,15 +534,34 @@ struct StartRegions {
 
 /// The cell of `regions` whose centre is nearest `goal` in straight distance,
 /// ties to the lower cell index (row by row). False when no cell of the grid
-/// is in them. Rings of growing Chebyshev radius round the goal's cell, each
-/// scanned whole, until no farther ring can hold anything nearer.
+/// is in them. Rings of growing Chebyshev radius round the goal's cell, until
+/// no farther ring can hold anything nearer -- each ring cut to the box that
+/// holds the regions' cells, and only the rings that meet it. A unit in a
+/// small pocket asked for a far goal would otherwise scan most of the map on
+/// every call; the box changes which cells are looked at, never the answer.
 [[nodiscard]] bool nearest_reachable(const ObstructionGrid& grid, const StartRegions& regions,
                                      Point goal, std::int32_t& out_cx, std::int32_t& out_cy) {
+  ObstructionGrid::CellBox box;
+  for (std::size_t i = 0; i < regions.count; ++i) {
+    const ObstructionGrid::CellBox own = grid.region_box(regions.ids[i]);
+    if (own.min_x > own.max_x) continue;
+    if (box.min_x > box.max_x) {
+      box = own;
+      continue;
+    }
+    box.min_x = std::min(box.min_x, own.min_x);
+    box.min_y = std::min(box.min_y, own.min_y);
+    box.max_x = std::max(box.max_x, own.max_x);
+    box.max_y = std::max(box.max_y, own.max_y);
+  }
+  if (box.min_x > box.max_x) return false;
   const std::int32_t gx = ObstructionGrid::cell_of(goal.x);
   const std::int32_t gy = ObstructionGrid::cell_of(goal.y);
+  // The nearest ring that meets the box, and the farthest.
+  const std::int32_t first =
+      std::max({0, box.min_x - gx, gx - box.max_x, box.min_y - gy, gy - box.max_y});
   const std::int32_t reach =
-      std::max({gx < 0 ? -gx : gx, gx - grid.width(), gy < 0 ? -gy : gy, gy - grid.height()}) +
-      std::max(grid.width(), grid.height()) + 1;
+      std::max({gx - box.min_x, box.max_x - gx, gy - box.min_y, box.max_y - gy});
   std::int64_t best = -1;
   std::int64_t best_index = 0;
   const auto consider = [&](std::int32_t x, std::int32_t y) {
@@ -544,7 +576,7 @@ struct StartRegions {
       out_cy = y;
     }
   };
-  for (std::int32_t r = 0; r <= reach; ++r) {
+  for (std::int32_t r = first; r <= reach; ++r) {
     // Every centre on ring `r` is at least `16r - 8` from a goal anywhere in
     // its own cell; once that is beyond the best, nothing farther can win.
     if (best >= 0) {
@@ -556,13 +588,19 @@ struct StartRegions {
       consider(gx, gy);
       continue;
     }
-    for (std::int32_t x = gx - r; x <= gx + r; ++x) {
-      consider(x, gy - r);
-      consider(x, gy + r);
+    // The ring's top and bottom rows, then its two columns between them,
+    // each cut to the box.
+    const std::int32_t x_from = std::max(gx - r, box.min_x);
+    const std::int32_t x_to = std::min(gx + r, box.max_x);
+    for (const std::int32_t y : {gy - r, gy + r}) {
+      if (y < box.min_y || y > box.max_y) continue;
+      for (std::int32_t x = x_from; x <= x_to; ++x) consider(x, y);
     }
-    for (std::int32_t y = gy - r + 1; y <= gy + r - 1; ++y) {
-      consider(gx - r, y);
-      consider(gx + r, y);
+    const std::int32_t y_from = std::max(gy - r + 1, box.min_y);
+    const std::int32_t y_to = std::min(gy + r - 1, box.max_y);
+    for (const std::int32_t x : {gx - r, gx + r}) {
+      if (x < box.min_x || x > box.max_x) continue;
+      for (std::int32_t y = y_from; y <= y_to; ++y) consider(x, y);
     }
   }
   return best >= 0;

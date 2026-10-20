@@ -265,6 +265,18 @@ class ObstructionGrid {
   /// world state, nothing hashes it, and a copy of the grid copies it.
   [[nodiscard]] std::uint32_t region_of(std::int32_t cx, std::int32_t cy) const;
 
+  /// The smallest box of cells, bounds inclusive, holding every cell of a
+  /// region; `min_x > max_x` for region 0 or one the grid does not have. No
+  /// cell outside it is in the region, which is what lets a search for the
+  /// region's cell nearest a point skip the rest of the grid.
+  struct CellBox {
+    std::int32_t min_x = 0;
+    std::int32_t min_y = 0;
+    std::int32_t max_x = -1;
+    std::int32_t max_y = -1;
+  };
+  [[nodiscard]] CellBox region_box(std::uint32_t region) const;
+
  private:
   [[nodiscard]] std::size_t bit_index(std::int32_t cx, std::int32_t cy) const noexcept {
     return static_cast<std::size_t>(cy) * static_cast<std::size_t>(width_) +
@@ -278,6 +290,8 @@ class ObstructionGrid {
   std::int32_t height_ = 0;
   /// `region_of`'s answers, one per cell, valid while `regions_valid_`.
   mutable std::vector<std::uint32_t> regions_;
+  /// Each region's `region_box`, by its number (slot 0 unused).
+  mutable std::vector<CellBox> region_boxes_;
   mutable bool regions_valid_ = false;
 };
 
