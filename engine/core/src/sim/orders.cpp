@@ -63,10 +63,9 @@ bool class_is_a(const ClassGraph& graph, ClassIndex derived, ClassIndex base) no
   return false;
 }
 
-/// The nearest declaration of `sig` walking up from `actor`, or null.
-///
-/// The class graph has already merged same-sig declarations *within* a class;
-/// see the overload note in the header for what that costs.
+/// The nearest declaration of `sig` walking up from `actor`, or null: the
+/// first, which for an overloaded sig is the object form (the overload note in
+/// the header).
 const ClassMethod* find_method(const ClassGraph& graph, ClassIndex actor, std::string_view sig) {
   for (ClassIndex current = actor; current != kNoClass;) {
     const ClassDefinition& definition = graph.at(current);

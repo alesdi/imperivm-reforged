@@ -682,9 +682,6 @@ The reference parser establishes, over all 577 files:
   sensitive; members are written inconsistently (`GetGAIKA` / `GetGaika`) but never in a way that
   forces a decision. Recommend case-insensitive member lookup, case-sensitive locals.
 - **The bracket block.** One occurrence; see [above](#blocks-and-the-bracket-anomaly).
-- **Method overloading in the class tree.** `DATA\CLASSES\UNIT.SC.XML` binds `sig="attack"` twice,
-  to two different scripts, in the same file. Whether the engine takes the first, the last, or
-  selects on the `verify` result is undetermined.
 - **Uncaught-error behaviour.** What happens on a null-handle method call, a division by zero, or
   a missing script binding is unknown. The four dangling `<behavior script=…>` references in the
   class tree prove that at least a missing script is survivable.

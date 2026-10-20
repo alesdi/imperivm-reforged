@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <optional>
 
 #include "imperivm/core/game/class_graph.hpp"
@@ -393,18 +394,46 @@ const CommandSystem::ClassMethods& CommandSystem::methods_for(const ClassGraph& 
   ClassMethods built;
   built.index = index;
   if (index < graph.size()) {
-    // `resolved_methods` merges the ancestry with the nearest declaration
-    // winning, which is what a `<method sig>` on `Unit` inherited by 134 unit
-    // classes needs, and it returns them sorted by sig.
-    for (const ClassMethod& method : graph.resolved_methods(index)) {
-      MethodEntry entry;
-      entry.sig.assign(method.sig);
-      entry.script.assign(method.vs);
-      entry.onfinish.assign(method.onfinish);
-      built.methods.push_back(std::move(entry));
+    // **A class's methods are keyed on the name and the script's signature**,
+    // as the loader keys them (0x0059a830 builds the key, 0x0059ece0 finds or
+    // inserts it, 0x0059ad40 looks it up the same way): `Unit` binds `attack`
+    // on a unit (`unit_attack.vs`, with its verifier) and `attack` on the
+    // ground (`unit_advance.vs`), and both are its methods. The ancestry is
+    // merged root first, a declaration replacing the inherited one of its own
+    // name and signature -- `Bear`'s `attack` on a unit replaces `Unit`'s
+    // and leaves its ground form to its own second declaration -- and
+    // appended after the name's others when its signature is new. A
+    // signature is read only when a name is declared again, since only then
+    // does it decide anything; one that cannot be read matches, which is the
+    // name-only merge this used to be.
+    const std::vector<ClassIndex> chain = graph.ancestry(index);
+    for (auto link = chain.rbegin(); link != chain.rend(); ++link) {
+      for (const ClassMethod& method : graph.at(*link).methods) {
+        MethodEntry entry;
+        entry.sig.assign(method.sig);
+        entry.script.assign(method.vs);
+        entry.onfinish.assign(method.onfinish);
+        auto row = built.methods.end();
+        auto last_of_name = built.methods.end();
+        for (auto it = built.methods.begin(); it != built.methods.end(); ++it) {
+          if (!equal_fold(it->sig, entry.sig)) continue;
+          last_of_name = it;
+          if (row != built.methods.end()) continue;
+          const bool known = (it->shaped || shape_of(*it)) && (entry.shaped || shape_of(entry));
+          if (!known || it->shape == entry.shape) row = it;
+        }
+        if (row != built.methods.end()) {
+          *row = std::move(entry);
+        } else if (last_of_name != built.methods.end()) {
+          built.methods.insert(last_of_name + 1, std::move(entry));
+        } else {
+          const auto at = std::upper_bound(
+              built.methods.begin(), built.methods.end(), entry.sig,
+              [](const std::string& needle, const MethodEntry& e) { return less_fold(needle, e.sig); });
+          built.methods.insert(at, std::move(entry));
+        }
+      }
     }
-    std::sort(built.methods.begin(), built.methods.end(),
-              [](const MethodEntry& a, const MethodEntry& b) { return less_fold(a.sig, b.sig); });
   }
   return *method_cache_.insert(method_cache_.begin() + static_cast<std::ptrdiff_t>(lo),
                                std::move(built));
@@ -428,12 +457,59 @@ const CommandSystem::MethodEntry* CommandSystem::method_row(const ClassMethods& 
   return nullptr;
 }
 
+const CommandSystem::MethodEntry* CommandSystem::method_row(const ClassMethods& methods,
+                                                            std::string_view verb,
+                                                            CommandArgKind kind) {
+  const MethodEntry* first = method_row(methods, verb);
+  if (first == nullptr) return nullptr;
+  const MethodEntry* end = methods.methods.data() + methods.methods.size();
+  if (first + 1 == end || !equal_fold(first[1].sig, verb)) return first;
+  std::string_view wanted;
+  switch (kind) {
+    case CommandArgKind::none: wanted = ""; break;
+    case CommandArgKind::point: wanted = "point"; break;
+    case CommandArgKind::object: wanted = "obj"; break;
+    case CommandArgKind::list_point: wanted = "objlist,point"; break;
+  }
+  for (const MethodEntry* row = first; row != end && equal_fold(row->sig, verb); ++row) {
+    if (!row->shaped || row->shape == wanted) return row;
+  }
+  return nullptr;
+}
+
+bool CommandSystem::shape_of(MethodEntry& entry) const {
+  if (scheduler_ == nullptr || entry.script.empty()) return false;
+  const std::uint32_t index = library_ != nullptr ? library_->chunk_for(entry.script)
+                                                  : scheduler_->find_chunk(entry.script);
+  if (index == script::kNoChunk || index >= scheduler_->chunk_count()) return false;
+  const script::Chunk& chunk = scheduler_->chunk(index);
+  std::string shape;
+  for (std::size_t i = 1; i < chunk.parameter_count && i < chunk.locals.size(); ++i) {
+    if (i > 1) shape.push_back(',');
+    for (const char c : chunk.locals[i].type_name) {
+      shape.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+  }
+  entry.shape = std::move(shape);
+  entry.shaped = true;
+  return true;
+}
+
 std::string_view CommandSystem::script_for(World& world, ObjectId id,
                                            std::string_view verb) const {
   const ClassGraph* graph = world.class_graph();
   const WorldObject* slot = world.find(id);
   if (graph == nullptr || slot == nullptr || slot->class_index == kNoClass) return {};
   const MethodEntry* row = method_row(methods_for(*graph, slot->class_index), verb);
+  return row == nullptr ? std::string_view{} : std::string_view{row->script};
+}
+
+std::string_view CommandSystem::script_for(World& world, ObjectId id, std::string_view verb,
+                                           CommandArgKind kind) const {
+  const ClassGraph* graph = world.class_graph();
+  const WorldObject* slot = world.find(id);
+  if (graph == nullptr || slot == nullptr || slot->class_index == kNoClass) return {};
+  const MethodEntry* row = method_row(methods_for(*graph, slot->class_index), verb, kind);
   return row == nullptr ? std::string_view{} : std::string_view{row->script};
 }
 
@@ -454,7 +530,8 @@ void CommandSystem::finish_command(World& world, ObjectId id, const Command& com
   const ClassGraph* graph = world.class_graph();
   const WorldObject* slot = world.find(id);
   if (graph == nullptr || slot == nullptr || slot->class_index == kNoClass) return;
-  const MethodEntry* row = method_row(methods_for(*graph, slot->class_index), command.verb);
+  const MethodEntry* row =
+      method_row(methods_for(*graph, slot->class_index), command.verb, command.arg_kind);
   if (row == nullptr || row->onfinish.empty()) return;
   const std::uint32_t chunk = library_ != nullptr ? library_->chunk_for(row->onfinish)
                                                   : scheduler_->find_chunk(row->onfinish);
@@ -493,12 +570,13 @@ bool CommandSystem::launch(World& world, ObjectId id, Command& command, GameTime
   command.started = true;
   command.started_at = now;
   if (scheduler_ == nullptr) return true;  // queued, running, never retires
-  return launch_chunk(world, id, command, chunk_of(world, id, command.verb, /*count_miss=*/true));
+  return launch_chunk(world, id, command,
+                      chunk_of(world, id, command.verb, command.arg_kind, /*count_miss=*/true));
 }
 
 std::uint32_t CommandSystem::chunk_of(World& world, ObjectId id, std::string_view verb,
-                                      bool count_miss) {
-  const std::string_view path = script_for(world, id, verb);
+                                      CommandArgKind kind, bool count_miss) {
+  const std::string_view path = script_for(world, id, verb, kind);
   if (path.empty()) return script::kNoChunk;
 
   // **The file has to be compiled before it can be spawned, and nothing else
@@ -643,7 +721,7 @@ void CommandSystem::start_head(World& world, ObjectId id, bool from_pass) {
       (void)launch(world, id, head, world.time());
       break;
     }
-    const std::uint32_t chunk = chunk_of(world, id, head.verb, /*count_miss=*/from_pass);
+    const std::uint32_t chunk = chunk_of(world, id, head.verb, head.arg_kind, /*count_miss=*/from_pass);
     if (chunk != script::kNoChunk) {
       head.started = true;
       head.started_at = world.time();
@@ -1192,7 +1270,7 @@ std::size_t CommandSystem::command_count_named(ObjectId id, std::string_view row
 }
 
 bool CommandSystem::binds(World& world, ObjectId id, std::string_view verb, CommandArgKind kind) {
-  const std::string path(script_for(world, id, verb));
+  const std::string path(script_for(world, id, verb, kind));
   if (path.empty()) return false;
   if (scheduler_ == nullptr) return true;
   const std::uint32_t chunk_index = library_ != nullptr ? library_->chunk_for(path)
@@ -1287,7 +1365,7 @@ bool CommandSystem::dispatch(World& world, std::span<const ObjectId> actors, con
 bool CommandSystem::run_method(World& world, ObjectId id, std::string_view verb,
                                const CommandDef& row) {
   if (scheduler_ == nullptr || world.find(id) == nullptr) return false;
-  const std::string path(script_for(world, id, verb));
+  const std::string path(script_for(world, id, verb, CommandArgKind::none));
   const std::uint32_t chunk = path.empty()                ? script::kNoChunk
                               : library_ != nullptr ? library_->chunk_for(path)
                                                     : scheduler_->find_chunk(path);
@@ -1310,7 +1388,7 @@ void CommandSystem::run_immediate(World& world, ObjectId id, Command command) {
   command.id = world.next_command_id();
   if (!accept(world, id, command)) return;
   if (scheduler_ == nullptr) return;
-  const std::string path(script_for(world, id, command.verb));
+  const std::string path(script_for(world, id, command.verb, command.arg_kind));
   const std::uint32_t chunk = path.empty()                ? script::kNoChunk
                               : library_ != nullptr ? library_->chunk_for(path)
                                                     : scheduler_->find_chunk(path);

@@ -104,6 +104,18 @@ ClassGraph fixture_graph() {
       <method sig="ai_killall" vs="data/subai/hero_ai_killall.vs"/>
     </class>)"),
             "hero.sc.xml");
+  // `heal` declared twice, on a unit and on the ground, as `RPriest` and
+  // `GDruid` declare it; and a class below it that redeclares the unit form
+  // only.
+  graph.add(bytes(R"(<class id="Priest" cpp_class="CVXDruid" parent="Unit">
+      <method sig="heal" vs="data/subai/druid_heal.vs"/>
+      <method sig="heal" vs="data/subai/druid_heal_ground.vs"/>
+    </class>)"),
+            "priest.sc.xml");
+  graph.add(bytes(R"(<class id="Abbot" cpp_class="CVXDruid" parent="Priest">
+      <method sig="heal" vs="data/subai/abbot_heal.vs"/>
+    </class>)"),
+            "abbot.sc.xml");
   // A class that binds nothing at all: a command queued on it can never start,
   // and must be retired rather than block the queue forever.
   graph.add(bytes(R"(<class id="Rock" cpp_class="CVXDecor" parent=""/>)"), "rock.sc.xml");
@@ -3359,6 +3371,52 @@ TEST(add_command_queues_only_a_verb_bound_in_the_shape_it_is_given) {
   REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, at).status == HostStatus::ok);
   CHECK(f.verbs(u) == (std::vector<std::string>{"move", "engage"}));
   CHECK(f.world.command_id_seed() == 502);
+}
+
+/// **A method is its name and its script's signature**: the loader keys a
+/// class's methods on both (0x0059a830, 0x0059ece0) and 0x005aef20 looks them
+/// up on both, so `RPriest`'s two `heal`s -- `druid_heal.vs` on a unit,
+/// `druid_heal_ground.vs` on the ground -- are two methods, and a class below
+/// that redeclares one form keeps the other. Keyed on the name alone, the
+/// ground form was the priest's only `heal`, `AddCommand(true, "heal", tgt)`
+/// in `RPRIEST_ADVANCE.VS` found nothing, and the advance it queues beside it
+/// came round again on the same millisecond for ever (Crossroads, seed 1,
+/// turn 1,015, until the machine ran out of memory).
+TEST(a_verb_declared_on_a_unit_and_on_the_ground_is_two_methods) {
+  ShapeFixture f;
+  f.library.sources.emplace_back("data/subai/druid_heal.vs",
+                                 "// void, Obj This, Obj target\nThis.SetUser(1);\nSleep(500);\n");
+  f.library.sources.emplace_back("data/subai/druid_heal_ground.vs",
+                                 "// void, Obj This, point pt\nThis.SetUser(2);\nSleep(500);\n");
+  f.library.sources.emplace_back("data/subai/abbot_heal.vs",
+                                 "// void, Obj This, Obj target\nThis.SetUser(3);\nSleep(500);\n");
+  const ObjectId priest = f.spawn(f.graph.find("Priest"));
+  const ObjectId abbot = f.spawn(f.graph.find("Abbot"), Point{300, 100});
+  const ObjectId hurt = f.spawn(f.unit_class, Point{200, 100});
+
+  CHECK(f.commands.script_for(f.world, priest, "heal", CommandArgKind::object) ==
+        "data/subai/druid_heal.vs");
+  CHECK(f.commands.script_for(f.world, priest, "heal", CommandArgKind::point) ==
+        "data/subai/druid_heal_ground.vs");
+  CHECK(!f.commands.binds(f.world, priest, "heal", CommandArgKind::none));
+  CHECK(f.commands.script_for(f.world, abbot, "heal", CommandArgKind::object) ==
+        "data/subai/abbot_heal.vs");
+  CHECK(f.commands.script_for(f.world, abbot, "heal", CommandArgKind::point) ==
+        "data/subai/druid_heal_ground.vs");
+
+  // The script's own `AddCommand` finds the unit form and runs it.
+  HostCall heal(f.world, {obj(priest), Value::boolean(false), Value::string("heal"), obj(hurt)});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, heal).status == HostStatus::ok);
+  CHECK(f.verbs(priest) == (std::vector<std::string>{"heal"}));
+  HostCall ground(f.world,
+                  {obj(abbot), Value::boolean(false), Value::string("heal"), pack_point(Point{9, 9})});
+  REQUIRE(invoke(f.registry, CallKind::member, "AddCommand", 3, ground).status == HostStatus::ok);
+  Turn pass;
+  pass.time = f.scheduler.now();
+  f.commands.advance(f.world, pass);
+  f.scheduler.advance(100);
+  CHECK(f.world.find(priest)->state.user == 1);
+  CHECK(f.world.find(abbot)->state.user == 2);
 }
 
 /// A script's `SetCommand` clears the tail **before** it looks the verb up, and

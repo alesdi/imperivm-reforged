@@ -270,12 +270,9 @@
 //     confirms it: both halves are spelled out because the class is overriding
 //     an inherited (move, advance[ctrl]) pair on both sides.
 //
-// ## `<method sig>` is overloaded on the argument's kind, and the class graph
-// drops one half of every overload
+// ## `<method sig>` is overloaded on the argument's kind
 //
-// Sixteen classes declare the same `<method sig>` twice. `sc-xml.md` records
-// this as an unexplained duplicate and assumes last-wins; the shipped file
-// names say plainly what it is:
+// Sixteen classes declare the same `<method sig>` twice:
 //
 //     BDruid:  <method sig="hide" vs="data/subai/druid_hide_unit.vs"/>
 //              <method sig="hide" vs="data/subai/druid_hide_ground.vs"/>
@@ -286,31 +283,17 @@
 //                                   verify="data/subai/unit_attack_verify.vs"/>
 //              <method sig="attack" vs="data/subai/unit_advance.vs"/>
 //
-// `_unit` against `_ground` in one class and `_heal` against `_heal_ground` in
-// another is not a coincidence and not a leftover: **the first declaration is
-// the object-argument form and the second is the point-argument form**, and
-// only the object form carries a verifier, because only the object form has
-// anything to verify. `Unit`'s second `attack` binding `unit_advance.vs` --
-// the *ground*-attack script -- says the same thing a third time.
-//
-// `ClassGraph`'s `upsert` keeps the last of two same-sig declarations, so the
-// object form is gone before this file can see it. Measured over the shipped
-// data: of the 173 `<cmd>` rows in the 108 `<defaultcmd>` blocks, **21 resolve
-// to a different `verify=` under first-wins than under last-wins**, and 20 of
-// those 21 are `attack` (the remaining one is `heal`; `hide`'s two forms both
-// lack a verifier). Every one is an object target, since the point form is the
-// one that survives.
-//
-// The consequence, unmitigated, is that `attack` becomes unconditional and a
-// unit right-clicking its own town hall attacks it -- `attack_independent` and
-// `capture` both verify `IsEnemy` and fail, and `attack` would then pass
-// without asking. **This file does not work around it**, because the fix is one
-// line in a file it does not own: `ClassMethod` needs to keep both forms (or
-// `upsert` must merge `verify` forward), after which `resolve_default_order`
-// picks the object form for an object target with no further change here.
-// `DefaultOrder::unverified` counts the candidates taken on an empty `verify=`
-// so the hole is visible in a run rather than only in this comment, and
-// `test_orders.cpp` pins the loss with a class that declares `attack` twice.
+// **The first is the object-argument form and the second the point-argument
+// form**, and `gbr.exe` keeps both: a class's methods are keyed on the name and
+// the script's signature (`docs/formats/sc-xml.md`). Only the object form
+// carries a verifier, because only it has anything to verify. The class graph
+// keeps both, object form first, so `find_method` gives an object target the
+// object form and its verifier. It used to keep the last: of the 173 `<cmd>`
+// rows in the 108 `<defaultcmd>` blocks, **21 resolved to a different
+// `verify=`**, 20 of them `attack`, and a unit right-clicking its own town
+// hall attacked it, `attack` passing without asking. Every one of the 21 is an
+// object target; no ground block names an overloaded sig whose object form
+// has a verifier.
 //
 // A candidate names a row in `DATA\COMMANDS\*.XML`, not a `<method sig>`
 // directly: the executable's message for a bad one is `Unknown Command: %s`,
@@ -778,10 +761,8 @@ struct DefaultOrder {
   /// `stay_hidden` is one in the shipped data.
   std::size_t unknown_commands = 0;
   /// Candidates that passed because their method binds no `verify=`, rather
-  /// than because a verifier said so. Correct for `approach`, `move` and the
-  /// other 150 unconditional rows; **see the overload note in the file header**
-  /// for the 21 rows where it is currently wrong because the class graph has
-  /// dropped the declaration that carried the verifier.
+  /// than because a verifier said so: `approach`, `move` and the other
+  /// unconditional rows.
   std::size_t unverified = 0;
 };
 

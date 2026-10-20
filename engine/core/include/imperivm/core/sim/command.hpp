@@ -860,13 +860,21 @@ class CommandSystem final : public System {
   /// object nothing has taken a command from.
   [[nodiscard]] std::span<const std::string> disabled_commands(ObjectId id) const noexcept;
 
-  /// The `.vs` file bound to `verb` on `id`'s class, or empty.
+  /// The `.vs` file bound to `verb` on `id`'s class, or empty: the first
+  /// overload, which is all a question of whether the class binds the verb
+  /// at all needs.
   ///
-  /// Resolved through `ClassGraph::resolved_methods`, cached per class index.
-  /// The cache is a pure function of the class graph, so it is not world state
-  /// and is not hashed.
+  /// Resolved through the class graph's declarations, cached per class index.
+  /// The cache is a function of the class graph and of the scripts' compiled
+  /// signatures, so it is not world state and is not hashed.
   [[nodiscard]] std::string_view script_for(World& world, ObjectId id,
                                             std::string_view verb) const;
+  /// The `.vs` file bound to `verb` taking an argument of `kind`, or empty:
+  /// 0x005aef20's lookup by name and shape. A verb declared once answers its
+  /// one script whatever `kind` is (`binds` checks the shape); an overloaded
+  /// one answers the overload whose script takes that argument, or nothing.
+  [[nodiscard]] std::string_view script_for(World& world, ObjectId id, std::string_view verb,
+                                            CommandArgKind kind) const;
 
   // -- the saved game ----------------------------------------------------
   //
@@ -921,10 +929,18 @@ class CommandSystem final : public System {
     std::string sig;
     std::string script;
     std::string onfinish;  ///< `<method onfinish>`, empty when absent
+    /// The script's parameters after the receiver, folded and comma-joined
+    /// (`point`, `obj`, `objlist,point`, empty for none): the half of
+    /// `gbr.exe`'s method key that is not the name. Read only for a sig
+    /// declared more than once down the class's ancestry -- the only case
+    /// where it decides anything -- and only when the script compiles.
+    std::string shape;
+    bool shaped = false;
   };
   struct ClassMethods {
     ClassIndex index = kNoClass;
-    std::vector<MethodEntry> methods;  ///< sorted by folded sig
+    /// Sorted by folded sig; a sig's overloads in declaration order.
+    std::vector<MethodEntry> methods;
   };
 
   [[nodiscard]] std::size_t lower_bound(ObjectId id) const noexcept;
@@ -945,7 +961,8 @@ class CommandSystem final : public System {
   /// The compiled chunk `verb` runs on `id`, compiling it through the library
   /// on a first use; `kNoChunk` when there is none, counted in
   /// `launch_failures` when `count_miss`.
-  std::uint32_t chunk_of(World& world, ObjectId id, std::string_view verb, bool count_miss);
+  std::uint32_t chunk_of(World& world, ObjectId id, std::string_view verb, CommandArgKind kind,
+                         bool count_miss);
   /// `launch`'s second half: spawn `command`'s script from `chunk`.
   bool launch_chunk(World& world, ObjectId id, Command& command, std::uint32_t chunk);
   void retire(Command& command);
@@ -961,6 +978,12 @@ class CommandSystem final : public System {
   /// the cache's shape stays this file's.
   [[nodiscard]] static const MethodEntry* method_row(const ClassMethods& methods,
                                                      std::string_view verb);
+  /// The row for `verb` taking an argument of `kind`: see `script_for`.
+  [[nodiscard]] static const MethodEntry* method_row(const ClassMethods& methods,
+                                                     std::string_view verb, CommandArgKind kind);
+  /// `entry.shape`, from its script's compiled parameters; false when the
+  /// script is not to be had (no library, or it does not compile).
+  bool shape_of(MethodEntry& entry) const;
   const ClassMethods& methods_for(const ClassGraph& graph, ClassIndex index) const;
 
   /// The accept test every insert opens with (0x005b1760): pay, then ask the
