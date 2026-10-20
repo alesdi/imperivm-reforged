@@ -505,7 +505,9 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     # the first capture between them is seed 11's, where p2 takes village #34
     # from p3 at 3,908, after a kill at 3,855. On the eleventh round's, seed 11
     # has none by 6,000 and the first is seed 2's: p3 takes village #25 from p1
-    # at 3,050. The peers are held to a war in
+    # at 3,050. On the twelfth round's seed 2 is still the one: p3's hero
+    # kills a p2 archer at 3,822 and p2 takes village #27 from p3 at 3,908;
+    # seed 7's capture at 2,553 comes before any kill. The peers are held to a war in
     # which that happens; which seed shows it is the AI's, and the capture is
     # asserted on the solo run rather than assumed.
     solo = subprocess.run(
