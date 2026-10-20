@@ -188,6 +188,10 @@ class ObjListPool {
   /// returns. Released with the script that received it.
   ObjListId acquire_temporary(script::ScriptId script);
 
+  /// Hand a temporary to `script`, which did not exist when it was minted:
+  /// a launched command's list argument (`CommandSystem::launch_chunk`).
+  void adopt(ObjListId id, script::ScriptId script) noexcept;
+
   /// Mint a handle that **is** somebody else's list rather than one of its own.
   ///
   /// `Settlement::Units` (`gbr.exe` 0x005c3c70) allocates nothing: it reaches

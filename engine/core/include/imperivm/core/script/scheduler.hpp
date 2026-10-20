@@ -308,6 +308,17 @@ class Scheduler {
 
   /// `AIBreakScript`. Safe to call on a script that is running right now.
   bool kill(ScriptId id);
+  /// Raise the stop flag of the script running now, when that is `id`: the
+  /// script ends as the host call it is in returns, as if the call had
+  /// answered code 2. 0x0069fee0 does this instead of deleting the thread
+  /// when the thread it is asked to end is the current one (`[ctx+0x40]`, read
+  /// by 0x0069d4c0 after every host call); the thread then ends the ordinary
+  /// way, and whatever is told of its end is told it finished. False, and
+  /// nothing raised, for any other script. The flag is cleared as each slice
+  /// opens, so it never outlives the slice that raised it.
+  bool stop(ScriptId id) noexcept;
+  /// The script whose slice is running now, `kNoScript` between slices.
+  [[nodiscard]] ScriptId running() const noexcept { return running_; }
   [[nodiscard]] bool alive(ScriptId id) const;
   [[nodiscard]] const ScriptRecord* find(ScriptId id) const;
   [[nodiscard]] ScriptRecord* find(ScriptId id);
@@ -460,6 +471,10 @@ class Scheduler {
   TeardownHook teardown_hook_ = nullptr;
   PassHook pass_hook_ = nullptr;
   StepHook step_hook_ = nullptr;
+  /// The slice running now and its stop flag (`stop`). Transient: both are
+  /// clear between slices, so neither is saved.
+  ScriptId running_ = kNoScript;
+  bool stop_ = false;
   CallTrace call_trace_ = nullptr;
   void* trace_user_ = nullptr;
   std::uint64_t instruction_budget_ = 1u << 20;

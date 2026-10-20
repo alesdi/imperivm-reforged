@@ -94,6 +94,11 @@ ObjListId ObjListPool::acquire_temporary(script::ScriptId script) {
   return id_of_index(emplace(script, kTemporarySlot));
 }
 
+void ObjListPool::adopt(ObjListId id, script::ScriptId script) noexcept {
+  if (!contains(id)) return;
+  entries_[index_of_id(id)].script = script;
+}
+
 ObjListId ObjListPool::acquire_alias(script::ScriptId script, ObjectId owner) {
   // A temporary in every respect except where its storage is: the handle is
   // the script's and dies with it, the list is somebody else's and does not.

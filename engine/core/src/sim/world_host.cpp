@@ -6984,7 +6984,7 @@ std::vector<ObjectId> receiver_objects_at(World& world, const script::Value& rec
 }  // namespace
 
 void install_deferred_erase(script::Scheduler& scheduler) noexcept {
-  scheduler.set_step_hook([](void* user, script::Scheduler& sched, script::ScriptId) {
+  scheduler.set_step_hook([](void* user, script::Scheduler& sched, script::ScriptId ran) {
     auto* context = static_cast<HostContext*>(user);
     if (context == nullptr || context->world == nullptr) return;
     World& world = *context->world;
@@ -7003,13 +7003,20 @@ void install_deferred_erase(script::Scheduler& scheduler) noexcept {
       (void)reap_departed(sched, world);
     }
     const ObjectId pending = world.deferred_erase();
-    if (pending == kNoObject) return;
-    // Cleared before the erase, not after. The original clears after
-    // (0x005a7ad3) because its overrides read the latch to decide what to skip;
-    // here nothing reads it, and clearing first makes a re-entrant erase
-    // impossible rather than merely unlikely.
-    perform_erase(&sched, world, pending);
-    world.clear_deferred_erase();
+    if (pending != kNoObject) {
+      // Cleared before the erase, not after. The original clears after
+      // (0x005a7ad3) because its overrides read the latch to decide what to
+      // skip; here nothing reads it, and clearing first makes a re-entrant
+      // erase impossible rather than merely unlikely.
+      perform_erase(&sched, world, pending);
+      world.clear_deferred_erase();
+    }
+    // 0x0069f7a0's order: the owner's deferred action (`vtbl+0x24`, the erase
+    // above) first, and then the thread's end (`vtbl+0x1c`): a command whose
+    // script just ended starts the next one here, before any other script
+    // runs. An erased or reaped object's queue is gone with it, so
+    // `after_slice` then finds nothing, as `vtbl+0x24` answering 1 skips it.
+    if (CommandSystem* commands = command_system(world)) commands->after_slice(world, ran);
   });
 }
 

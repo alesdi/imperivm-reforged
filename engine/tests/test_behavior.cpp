@@ -179,7 +179,7 @@ std::int32_t user_of(GameSession& run, ObjectId id) {
 
 }  // namespace
 
-TEST(behaviours_start_on_every_object_in_play_before_any_idle) {
+TEST(each_object_in_play_starts_its_idle_then_its_behaviours) {
   Fixture f;
   auto session = GameSession::create(f.registry, f.inputs, /*seed=*/1);
   REQUIRE(session.ok());
@@ -189,8 +189,10 @@ TEST(behaviours_start_on_every_object_in_play_before_any_idle) {
   // template gets none, and neither object gets the file that is not there.
   REQUIRE(run.start_object_scripts() == 6);
 
-  // Every object's behaviours, own before inherited, then every object's
-  // idle -- in id order, which is what makes the script ids world state.
+  // Object by object, in id order: its idle first -- the slot-0 end its
+  // start virtual opens with pushes and starts it (0x005aec40 ->
+  // 0x005b5160 -> 0x005b4f20) -- then its behaviours, own before inherited.
+  // The order is what makes the script ids world state.
   std::vector<std::pair<ObjectId, std::string>> order;
   for (const script::ScriptRecord& record : run.scheduler().scripts()) {
     CHECK(record.owner.type == kTypeObj);
@@ -198,8 +200,8 @@ TEST(behaviours_start_on_every_object_in_play_before_any_idle) {
     order.emplace_back(record.owner.id, source_of(run, record));
   }
   const std::vector<std::pair<ObjectId, std::string>> expected = {
-      {1, "b_leaf.vs"}, {1, "b_base.vs"}, {2, "b_leaf.vs"},
-      {2, "b_base.vs"}, {1, "idle.vs"},   {2, "idle.vs"},
+      {1, "idle.vs"}, {1, "b_leaf.vs"}, {1, "b_base.vs"},
+      {2, "idle.vs"}, {2, "b_leaf.vs"}, {2, "b_base.vs"},
   };
   CHECK(order == expected);
 
@@ -227,7 +229,7 @@ TEST(a_spawned_object_gets_its_behaviours_and_loses_them_when_it_goes) {
   REQUIRE(copy != kNoObject);
   run.advance(1, 400);
   CHECK(run.report().scripts_started == 9);
-  const std::vector<std::string> mine = {"b_leaf.vs", "b_base.vs", "idle.vs"};
+  const std::vector<std::string> mine = {"idle.vs", "b_leaf.vs", "b_base.vs"};
   CHECK(owned(run, copy) == mine);
   CHECK(user_of(run, copy) == 12);
 
@@ -281,20 +283,22 @@ TEST(a_mutation_swaps_one_classs_behaviours_for_the_others) {
   REQUIRE(id != kNoObject);
   REQUIRE(run.start_object_scripts() == 6 + 4);
   run.advance(1, 400);
-  const std::vector<std::string> before = {"b_leaf.vs", "b_mutate.vs", "b_base.vs", "idle.vs"};
+  const std::vector<std::string> before = {"idle.vs", "b_leaf.vs", "b_mutate.vs", "b_base.vs"};
   CHECK(owned(run, id) == before);
   CHECK(user_of(run, id) == 12);
 
   // `b_mutate.vs` wakes after a second and makes it an `Other`: `Mutant`'s
   // behaviours stop -- the one that asked with them -- and `Other`'s starts.
-  // The idle is not a behaviour and is not theirs to stop. `user` does not
-  // survive a mutation in the original, and the new behaviour's digit lands
-  // on whatever is there.
+  // The idle is not a behaviour: it is the head of the object's command
+  // queue, which the mutation ends (`KillCommand`), and `Other` binds no
+  // idle for the end to start in its place. `user` does not survive a
+  // mutation in the original, and the new behaviour's digit lands on
+  // whatever is there.
   run.advance(4, 400);
   const WorldObject* slot = run.world().find(id);
   REQUIRE(slot != nullptr);
   CHECK(slot->class_index == f.graph.find("Other"));
-  const std::vector<std::string> after = {"idle.vs", "b_other.vs"};
+  const std::vector<std::string> after = {"b_other.vs"};
   CHECK(owned(run, id) == after);
   CHECK(user_of(run, id) % 10 == 3);
   // Nobody else's behaviours were touched.

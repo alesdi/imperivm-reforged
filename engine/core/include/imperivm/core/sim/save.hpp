@@ -394,7 +394,14 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// `danger_time`, `[unit+0x1b4]`; system section version 41,
 /// `docs/formats/target-score.md`). A version-47 file would load every unit
 /// as nobody's recent pick, and the next searches would bunch on it.
-inline constexpr std::uint32_t kStateVectorVersion = 48;
+/// 49: an object's `idle` is its command queue's head from its start
+/// (`CommandSystem::start_slot`, 0x005aec40 -> 0x005b5160 -> 0x005b4f20),
+/// not a script running beside an empty queue, and a command's `onfinish`
+/// runs inside the end that calls it, so the command section keeps no
+/// finishing commands (system section version 42). A version-48 file would
+/// load every resting object with an empty queue and its `idle` running
+/// outside it, which nothing in this build ends.
+inline constexpr std::uint32_t kStateVectorVersion = 49;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";
