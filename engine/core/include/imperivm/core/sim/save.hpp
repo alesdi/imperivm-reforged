@@ -372,7 +372,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// 38). A version-43 file would load a unit walking on from a failed search
 /// as one walking to the end of its old route, and one stopped after it as
 /// arrived when it stands in its band.
-inline constexpr std::uint32_t kStateVectorVersion = 44;
+/// 45: the squad section carries each GAIKA node's squad deque after the
+/// order queues (`SquadTable::filed_under`, `[node+0x18]`), and then the
+/// node manager's MAIKA list (`SquadTable::routes`, `+0x38`; system section
+/// version 39). A version-44 file has none, and every walk of a node's
+/// squads -- `GetSquads`, `Count`, `Eval`, `GetAIControlledUnits` -- reads
+/// the deque in the order its squads arrived: docs/formats/gaika.md.
+inline constexpr std::uint32_t kStateVectorVersion = 45;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

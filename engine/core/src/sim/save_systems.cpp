@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 38;  // 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 39;  // 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -402,6 +402,24 @@ void SquadTable::serialize(std::vector<std::byte>& out) const {
     bytes::put_i64(out, queue.due);
     bytes::put_u32(out, queue.runner);
   }
+  // The node deques, `CVXGlobalAI::Persist`'s per-node `squads` (0x0044ff00),
+  // node by node from 0 and each front to back: the order is the filing
+  // order every walk of a node reads.
+  bytes::put_u32(out, static_cast<std::uint32_t>(filed_.size()));
+  for (const std::vector<SquadKey>& deque : filed_) {
+    bytes::put_u32(out, static_cast<std::uint32_t>(deque.size()));
+    for (const SquadKey& key : deque) {
+      bytes::put_i32(out, key.index);
+      bytes::put_u8(out, key.player);
+    }
+  }
+  // The MAIKA list, front (newest) to back.
+  bytes::put_u32(out, static_cast<std::uint32_t>(routes_.size()));
+  for (const Route& route : routes_) {
+    bytes::put_i32(out, route.src);
+    bytes::put_i32(out, route.dst);
+    bytes::put_i32(out, route.way);
+  }
 }
 
 Status SquadTable::deserialize(std::span<const std::byte> data) {
@@ -449,7 +467,44 @@ Status SquadTable::deserialize(std::span<const std::byte> data) {
       return FormatError::truncated;
     }
   }
+  std::uint32_t nodes = 0;
+  if (!reader.u32(nodes)) return FormatError::truncated;
+  std::vector<std::vector<SquadKey>> filed;
+  for (std::uint32_t n = 0; n < nodes; ++n) {
+    std::uint32_t entries = 0;
+    if (!reader.u32(entries)) return FormatError::truncated;
+    std::vector<SquadKey> deque;
+    for (std::uint32_t i = 0; i < entries; ++i) {
+      SquadKey key;
+      if (!bytes::get_i32(reader, key.index) || !reader.u8(key.player)) {
+        return FormatError::truncated;
+      }
+      deque.push_back(key);
+    }
+    filed.push_back(std::move(deque));
+  }
+  std::uint32_t route_count = 0;
+  if (!reader.u32(route_count)) return FormatError::truncated;
+  if (route_count > kRouteCap) return FormatError::malformed;
+  std::deque<Route> routes;
+  for (std::uint32_t i = 0; i < route_count; ++i) {
+    Route route;
+    if (!bytes::get_i32(reader, route.src) || !bytes::get_i32(reader, route.dst) ||
+        !bytes::get_i32(reader, route.way)) {
+      return FormatError::truncated;
+    }
+    routes.push_back(route);
+  }
   if (const Status status = finish(reader); !status.ok()) return status;
+  // Every entry names a squad the table holds: the deques are filed and
+  // unfiled with the squads, and a handle to nobody is a damaged save.
+  for (const std::vector<SquadKey>& deque : filed) {
+    for (const SquadKey& key : deque) {
+      const bool held = std::any_of(squads.begin(), squads.end(),
+                                    [&](const Squad& squad) { return squad.key == key; });
+      if (!held) return FormatError::malformed;
+    }
+  }
   // A squad's index and its record have to agree, or `OrderDest` would answer
   // one node and the drain send it to another.
   for (const Squad& squad : squads) {
@@ -464,6 +519,8 @@ Status SquadTable::deserialize(std::span<const std::byte> data) {
   }
   squads_ = std::move(squads);
   orders_ = std::move(queues);
+  filed_ = std::move(filed);
+  routes_ = std::move(routes);
   return Status();
 }
 

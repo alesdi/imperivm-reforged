@@ -35,6 +35,7 @@
 #include "imperivm/core/sim/gaika_table.hpp"
 #include "imperivm/core/sim/tick.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/objlist.hpp"
@@ -4400,38 +4401,201 @@ TEST(recruit_passes_over_squads_no_script_should_ever_see) {
   CHECK(pinned->ai_dest == 1);
 }
 
-/// `SetMAIKA` runs and stores nothing, on `GlobalSpellStart`'s footing -- and
-/// the assertion is that it *runs*, because the alternative to a body is
-/// `CHECKMAIKA.VS` stopping.
-///
-/// The original's seven refusals are written out on the body and not
-/// reproduced: with nothing stored none of them can change an answer, and this
-/// test is where that would show if one ever could.
-TEST(set_maika_runs_and_stores_nothing) {
+/// **`SetMAIKA` records its triple at the front of the node manager's MAIKA
+/// list** (0x00421b70 -> 0x0044fc60). It was accepted and dropped. The seven
+/// refusals -- no node table, a zero, two ids equal -- store nothing; an equal
+/// triple moves to the front; the list keeps the newest 512.
+TEST(set_maika_puts_the_triple_at_the_front_of_a_list_of_512) {
   Fixture f;
+  const auto set = [&](std::int32_t a, std::int32_t b, std::int32_t c) {
+    CHECK(f.call(script::CallKind::free_function, "SetMAIKA",
+                 {script::Value::integer(a), script::Value::integer(b),
+                  script::Value::integer(c)},
+                 script::kNoScript)
+              .status == script::HostStatus::ok);
+  };
+  using Route = SquadTable::Route;
+  const auto routes = [&] {
+    const auto& list = f.heroes.squads().routes();
+    return std::vector<Route>(list.begin(), list.end());
+  };
+  // No node table: nothing.
+  set(1, 2, 3);
+  CHECK(routes().empty());
+
   (void)f.make_settlement(1);
   (void)f.make_settlement(1);
   (void)f.make_settlement(1);
   f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
   REQUIRE(f.world.gaika().count() > 0);
-  const std::uint64_t before = f.world.state_hash();
-  const auto set = [&](std::int32_t a, std::int32_t b, std::int32_t c) {
-    return f.call(script::CallKind::free_function, "SetMAIKA",
-                  {script::Value::integer(a), script::Value::integer(b),
-                   script::Value::integer(c)},
-                  script::kNoScript)
-        .status;
+  set(1, 2, 3);
+  CHECK(routes() == std::vector<Route>({Route{1, 2, 3}}));
+  // The refusals.
+  set(0, 2, 3);
+  set(1, 0, 3);
+  set(1, 2, 0);
+  set(1, 1, 3);
+  set(1, 2, 1);
+  set(1, 2, 2);
+  CHECK(routes().size() == 1);
+  // Newest first; a repeat moves to the front rather than being added again.
+  set(3, 2, 1);
+  set(2, 3, 1);
+  CHECK(routes() == std::vector<Route>({Route{2, 3, 1}, Route{3, 2, 1}, Route{1, 2, 3}}));
+  set(1, 2, 3);
+  CHECK(routes() == std::vector<Route>({Route{1, 2, 3}, Route{2, 3, 1}, Route{3, 2, 1}}));
+  // Full: the oldest goes.
+  for (std::int32_t i = 0; i < 600; ++i) f.heroes.squads().record_route(10 + i, 9, 8);
+  CHECK(routes().size() == SquadTable::kRouteCap);
+  CHECK(routes().front() == (Route{609, 9, 8}));
+  CHECK(routes().back() == (Route{98, 9, 8}));
+
+  // And it is saved, in order.
+  std::vector<std::byte> bytes_out;
+  f.heroes.squads().serialize(bytes_out);
+  SquadTable copy;
+  REQUIRE(copy.deserialize(bytes_out).ok());
+  CHECK(copy.routes() == f.heroes.squads().routes());
+}
+
+/// **A squad hit while crossing a node records it as a way-point** (the tail
+/// of 0x0041e6c0): source, heading and the node it stands in, when all three
+/// are named and distinct. This was left out for want of a list.
+TEST(a_squad_hit_between_two_nodes_records_where_it_was_hit) {
+  Fixture f;
+  (void)f.make_settlement(1);
+  (void)f.make_settlement(1);
+  (void)f.make_settlement(1);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  REQUIRE(f.world.gaika().count() >= 3);
+  SquadTable& table = f.heroes.squads();
+  const SquadKey key = table.create(0);
+  const ObjectId unit = f.world.spawn(imperivm::core::NativeClass::unit, nullptr);
+  f.world.set_owner(unit, 0);
+  f.world.set_health(unit, 100);
+  REQUIRE(table.join(key, unit));
+  f.heroes.register_unit(f.world, unit).squad = key;
+  const auto routes = [&] {
+    return std::vector<SquadTable::Route>(table.routes().begin(), table.routes().end());
   };
-  CHECK(set(1, 2, 3) == script::HostStatus::ok);
-  // The triples the original refuses run here too, and none of them is an
-  // error either way.
-  CHECK(set(0, 2, 3) == script::HostStatus::ok);
-  CHECK(set(1, 0, 3) == script::HostStatus::ok);
-  CHECK(set(1, 2, 0) == script::HostStatus::ok);
-  CHECK(set(1, 1, 3) == script::HostStatus::ok);
-  CHECK(set(1, 2, 1) == script::HostStatus::ok);
-  CHECK(set(1, 2, 2) == script::HostStatus::ok);
-  CHECK(f.world.state_hash() == before);
+
+  // Standing in its source: nothing.
+  table.move_in(key, 1);
+  table.set_dest(key, 3);
+  record_squad_attacked(f.world, unit, kNoObject, 100);
+  CHECK(routes().empty());
+  // Crossing node 2 on the way from 1 to 3.
+  table.move_in(key, 2);
+  record_squad_attacked(f.world, unit, kNoObject, 200);
+  CHECK(routes() == std::vector<SquadTable::Route>({{1, 3, 2}}));
+  // Once a tick: the stamp's own gate comes first.
+  table.set_dest(key, 1);
+  REQUIRE(table.post_order(key, 3, 5));
+  record_squad_attacked(f.world, unit, kNoObject, 200);
+  CHECK(routes().size() == 1);
+  // The heading is the order's node, not `DestGAIKA`.
+  table.set_dest(key, 2);
+  record_squad_attacked(f.world, unit, kNoObject, 300);
+  CHECK(routes().size() == 1);   // (1, 3, 2) again: already at the front
+  REQUIRE(table.delete_order(key));
+  table.set_dest(key, 3);
+  // Arrived: heading and standing agree.
+  table.move_in(key, 3);
+  record_squad_attacked(f.world, unit, kNoObject, 400);
+  CHECK(routes().size() == 1);
+}
+
+/// **`Recruit`'s routing filter** (0x0043816e, 0x0043eda0): with a MAIKA
+/// record from the node a squad stands in to the recruiting node whose
+/// way-point `CheckMAIKA.vs` refuses, the squad is dropped, and a recruit the
+/// drops leave short of its minimum is abandoned. It was skipped.
+TEST(recruit_drops_a_squad_whose_route_crosses_a_refused_way_point) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, Squad sq, GAIKA g, GAIKA *gDepend\n"
+                "return sq.No;\n",
+                "DATA/AI/EVALRECRUIT.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, int idPlayer, GAIKA g, int *pOverneed\n"
+                "pOverneed = 1000;\n"
+                "return 1000;\n",
+                "DATA/AI/CALCMAXTAKE.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// bool, Squad sq, GAIKA g\n"
+                "sq.SendTo(g, 100);\n"
+                "return true;\n",
+                "DATA/AI/SENDSQUAD.VS") != script::kNoChunk);
+  // Way-point 3 is refused, every other one passes.
+  REQUIRE(build(f.scheduler, f.registry,
+                "// bool, int idPlayer, GAIKA gSrc, GAIKA gDst, GAIKA gMAIKA\n"
+                "if (gMAIKA == 3) return false;\n"
+                "return true;\n",
+                "DATA/AI/CHECKMAIKA.VS") != script::kNoChunk);
+
+  for (int i = 0; i < 4; ++i) (void)f.make_settlement(0);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  REQUIRE(f.world.gaika().count() >= 4);
+  REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(0)->root;
+
+  SquadTable& table = f.heroes.squads();
+  std::vector<SquadKey> keys;
+  for (std::int32_t i = 0; i < 3; ++i) {
+    const SquadKey key = table.create(0);
+    table.find(key)->eval = 10;
+    keys.push_back(key);
+  }
+  // Squads 1 and 2 stand in node 2, squad 3 in node 4.
+  table.move_in(keys[0], 2);
+  table.move_in(keys[1], 2);
+  table.move_in(keys[2], 4);
+
+  const auto recruit = [&](std::int32_t min_need) {
+    std::vector<script::Value> args{
+        script::Value::integer(1),        script::Value::integer(1),
+        script::Value::integer(min_need), script::Value::integer(1000),
+        script::Value::integer(1000)};
+    const std::uint32_t index = f.registry.find(script::CallKind::member, "Recruit", 4);
+    CHECK(index != script::kUnresolvedHost);
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.host = &f.host;
+    ctx.scheduler = &f.scheduler;
+    ctx.script = root;
+    ctx.user = &f.context;
+    ctx.name = "Recruit";
+    ctx.kind = script::CallKind::member;
+    const script::HostOutcome out = f.registry.entry(index).fn(ctx);
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_integer() ? out.value.as_integer() : -1;
+  };
+  const auto sent = [&](std::size_t which) { return table.find(keys[which])->ai_dest == 1; };
+  const auto reset = [&] {
+    for (const SquadKey key : keys) (void)table.delete_order(key);
+  };
+
+  // A record from 2 to 1 by way of 4, which the script lets through, and one
+  // from 4 to 1 by way of 2: nothing is dropped.
+  table.record_route(2, 1, 4);
+  table.record_route(4, 1, 2);
+  CHECK(recruit(5) == 30);
+  CHECK(sent(0));
+  CHECK(sent(1));
+  CHECK(sent(2));
+  reset();
+
+  // From 2 to 1 by way of 3, refused: both squads standing in 2 are dropped
+  // and the one in 4 goes alone.
+  table.record_route(2, 1, 3);
+  CHECK(recruit(5) == 10);
+  CHECK(!sent(0));
+  CHECK(!sent(1));
+  CHECK(sent(2));
+  reset();
+  // And with a minimum only all three could meet, nobody goes.
+  CHECK(recruit(25) == 0);
+  CHECK(!sent(2));
 }
 
 // --------------------------------------------------------------------------
@@ -4763,6 +4927,34 @@ TEST(gaika_eval_adds_the_settlement_skips_messengers_and_sees_as_the_ai_sees) {
   // A Normal one sees 32000.
   REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
   CHECK(eval6(1)[2] == 18);
+
+  // **`Count/6` is the same walk counting heads** (0x00430a30): the member
+  // count where `Eval` has the strength, the wall's head count `[+0xf4]`
+  // where it has the wall's strength, and the same messengers, sight and
+  // viewer. It used to have a walk of its own that knew none of them.
+  const auto count6 = [&](std::int32_t presence, std::int32_t player) {
+    std::vector<script::Value> args{gaika_value(kHere), script::Value::integer(presence),
+                                    script::Value::integer(player), script::Value::integer(-1),
+                                    script::Value::integer(-1), script::Value::integer(-1),
+                                    script::Value::integer(-1)};
+    const std::uint32_t index = f.registry.find(script::CallKind::member, "Count", 6);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return std::array<std::int32_t, 4>{};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &f.context;
+    CHECK(f.registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+    return std::array<std::int32_t, 4>{args[3].as_integer(), args[4].as_integer(),
+                                       args[5].as_integer(), args[6].as_integer()};
+  };
+  {
+    const auto t = count6(4, 1);
+    CHECK(t[0] == 2);          // the own pair; the two messengers are nobody
+    CHECK(t[2] == 2 + 3 + 1);  // the lurkers, three on the wall, the lingerer
+  }
+  CHECK(count6(1, 1)[2] == 2);  // the two columns, as a Normal AI sees them
+  // A player of 0 is nobody, and every squad is then its own: the wall too.
+  CHECK(count6(4, 0)[0] == 2 + 2 + 3);
 }
 
 /// **`MilitaryPresence` asks the node's settlement when no squad answers**
@@ -4863,118 +5055,194 @@ TEST(ai_enemy_players_eval_ranges_over_the_enemies_squads) {
   CHECK(out[3].as_integer() == 30);
 }
 
-/// **A node is `Explored` for a player once the exploration map shows its
-/// centre explored for that player** -- the `Explored` half of the original's
-/// per-node visibility sweep, which `AiSystem::advance` runs. Without it
-/// `RECRUITER.VS:104-116` skipped every node but home: `Explored` was false
-/// everywhere, and so was `CanExplore`, which asks it of the neighbours.
-TEST(the_ai_sweep_marks_a_node_explored_once_its_centre_is_and_stamps_last_seen) {
+/// **The per-node visibility sweep** (0x0044ecc0, `sweep_gaika`, run on every
+/// node by `AiSystem::advance`): a node is `Explored` and `Revealed` for a
+/// seated AI while that player -- or one whose view its row shares, flag 0x10
+/// -- stands in it, with a squad or by owning its settlement; when that stops,
+/// `Revealed` clears, `LastSeen` is stamped and the enemy strength standing
+/// there is remembered. This marked a node explored from the fog's
+/// exploration map, which the original never consults for a node, stamped
+/// `LastSeen` with "now" while it was explored, and never set `Revealed`.
+TEST(the_sweep_marks_what_a_player_stands_in_and_remembers_it_when_it_leaves) {
   Fixture f;
-  FogSystem fog;
-  // Registered after the AI: the order the session registers them in, so
-  // this turn's sweep reads the map as the previous turn left it.
-  REQUIRE(f.world.add_system(&fog));
-  fog.map().resize(16384);
-
-  const SettlementId near = f.make_settlement(1);
-  const SettlementId away = f.make_settlement(1);
-  ObjectId a_object = kNoObject;
-  ObjectId b_object = kNoObject;
-  {
-    const Settlement* a = f.economy.settlements().find(near);
-    const Settlement* b = f.economy.settlements().find(away);
-    REQUIRE(a != nullptr);
-    REQUIRE(b != nullptr);
-    a_object = a->object;
-    b_object = b->object;
-    CHECK(f.world.set_position(a->anchor, Point{1000, 1000}));
-    CHECK(f.world.set_position(b->anchor, Point{9000, 9000}));
-  }
+  // Node 1 is player 1's town, node 2 player 3's.
+  const SettlementId home = f.make_settlement(1);
+  const SettlementId away = f.make_settlement(3);
   f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
   REQUIRE(f.world.gaika().count() == 2);
-  const GaikaId seen = f.world.gaika().for_settlement(a_object);
-  const GaikaId unseen = f.world.gaika().for_settlement(b_object);
+  const GaikaId mine = f.world.gaika().for_settlement(f.economy.settlements().find(home)->object);
+  const GaikaId theirs =
+      f.world.gaika().for_settlement(f.economy.settlements().find(away)->object);
   f.ai.seed_gaika_view(1, f.world.gaika().count());
-  f.ai.seed_gaika_view(2, f.world.gaika().count());
-  // A slot past the eighth: the map answers true for it everywhere, which is
-  // the original's own short circuit (0x00515958).
-  f.ai.seed_gaika_view(9, f.world.gaika().count());
-  const GaikaView* one = f.ai.gaika_view(1);
-  const GaikaView* two = f.ai.gaika_view(2);
-  const GaikaView* ten = f.ai.gaika_view(9);
-  REQUIRE(one != nullptr);
-  REQUIRE(two != nullptr);
-  REQUIRE(ten != nullptr);
-  const auto explored = [](const GaikaView* view, GaikaId id) {
-    return (view->find(id)->flags & kLaikaExplored) != 0;
+  const auto record = [&](GaikaId id) { return f.ai.gaika_view(1)->find(id); };
+  const auto sweep = [&](GameTime time) {
+    Turn turn;
+    turn.time = time;
+    f.ai.advance(f.world, turn);
+  };
+  SquadTable& table = f.heroes.squads();
+  const auto squad_of = [&](PlayerId owner, std::int32_t eval, GaikaId in) {
+    const SquadKey key = table.create(owner);
+    table.find(key)->eval = eval;
+    table.move_in(key, in);
+    table.set_dest(key, in);
+    return key;
+  };
+  constexpr std::uint16_t kSeen = kLaikaExplored | kLaikaRevealed;
+
+  // Its own town it sees from the start; the other, nothing.
+  sweep(1000);
+  CHECK((record(mine)->flags & kSeen) == kSeen);
+  CHECK((record(theirs)->flags & kSeen) == 0);
+  CHECK(record(theirs)->last_seen == 0);
+
+  // An enemy army of 30 stands in node 2; player 1's scouts walk in.
+  (void)squad_of(3, 30, theirs);
+  const SquadKey scouts = squad_of(1, 5, theirs);
+  sweep(2000);
+  CHECK((record(theirs)->flags & kSeen) == kSeen);
+  CHECK(record(theirs)->last_seen == 0);
+  // Flags already on the record stay: the sweep sets bits.
+  record(theirs)->flags |= kLaikaNoRecruit;
+
+  // They walk out: still explored, no longer revealed, seen last now, and the
+  // 30 remembered.
+  table.move_in(scouts, mine);
+  sweep(3000);
+  CHECK((record(theirs)->flags & kLaikaExplored) != 0);
+  CHECK((record(theirs)->flags & kLaikaRevealed) == 0);
+  CHECK((record(theirs)->flags & kLaikaNoRecruit) != 0);
+  CHECK(record(theirs)->last_seen == 3000);
+  CHECK(record(theirs)->enemies == 30);
+  // Once: a later pass out of sight changes nothing.
+  sweep(4000);
+  CHECK(record(theirs)->last_seen == 3000);
+
+  // An ally standing there is not sight -- unless player 1's row shares its
+  // view with that ally.
+  f.world.players().set(1, 2, Relation::allied, true);
+  (void)squad_of(2, 9, theirs);
+  sweep(5000);
+  CHECK((record(theirs)->flags & kLaikaRevealed) == 0);
+  f.world.players().set(1, 2, Relation::share_view, true);
+  sweep(6000);
+  CHECK((record(theirs)->flags & kLaikaRevealed) != 0);
+
+  // And the scripts read it: `g.Explored(2)`, `g.Revealed(2)`, `g.LastSeen(2)`
+  // are player 1's.
+  const auto ask = [&](const char* name, GaikaId id) {
+    return f.call(script::CallKind::member, name, {gaika_value(id), script::Value::integer(2)},
+                  script::kNoScript)
+        .value;
+  };
+  CHECK(ask("Explored", theirs).truthy_scalar());
+  CHECK(ask("Revealed", theirs).truthy_scalar());
+  CHECK(ask("LastSeen", theirs).as_integer() == 3000);
+}
+
+/// **The two session overrides** (0x0041cb80, 0x0041cbd0): with exploration
+/// off every node is explored, and with fog of war off `Revealed` is
+/// `Explored`. A world with neither rule nor sweep is one where nothing is.
+TEST(explored_and_revealed_answer_the_match_rules_before_the_bits) {
+  Fixture f;
+  (void)f.make_settlement(3);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  f.ai.seed_gaika_view(1, f.world.gaika().count());
+  const auto ask = [&](const char* name) {
+    return f.call(script::CallKind::member, name, {gaika_value(1), script::Value::integer(2)},
+                  script::kNoScript)
+        .value.truthy_scalar();
+  };
+  CHECK(!ask("Explored"));
+  CHECK(!ask("Revealed"));
+  MatchSystem match;
+  REQUIRE(f.world.add_system(&match));
+  MatchRules rules;
+  match.configure(rules, 0, false);
+  CHECK(!ask("Explored"));
+  rules.fog_of_war = false;
+  match.configure(rules, 0, false);
+  CHECK(!ask("Revealed"));  // `Explored`, which is still false
+  rules.exploration = false;
+  match.configure(rules, 0, false);
+  CHECK(ask("Explored"));
+  CHECK(ask("Revealed"));
+  rules.fog_of_war = true;
+  match.configure(rules, 0, false);
+  CHECK(ask("Explored"));
+  CHECK(!ask("Revealed"));  // the bit, which nothing set
+}
+
+/// **`Eval`'s memory tail** (0x0042fc40, 0x0042f670): for a node not revealed
+/// to the asking AI, the staying enemy total is the strength remembered when
+/// sight was lost, corrected by what can be seen there now. This answered
+/// what could be seen.
+TEST(eval_remembers_the_enemy_in_a_node_out_of_sight) {
+  Fixture f;
+  (void)f.make_settlement(1);
+  (void)f.make_settlement(3);
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  constexpr GaikaId kHome = 1;
+  constexpr GaikaId kThere = 2;
+  f.ai.seed_gaika_view(1, f.world.gaika().count());
+  SquadTable& table = f.heroes.squads();
+  const auto squad_of = [&](PlayerId owner, std::int32_t eval, GaikaId in) {
+    const SquadKey key = table.create(owner);
+    table.find(key)->eval = eval;
+    table.move_in(key, in);
+    table.set_dest(key, in);
+    return key;
   };
   const auto sweep = [&](GameTime time) {
     Turn turn;
     turn.time = time;
     f.ai.advance(f.world, turn);
   };
+  const auto enemy6 = [&](std::int32_t presence) {
+    std::vector<script::Value> args{gaika_value(kThere), script::Value::integer(presence),
+                                    script::Value::integer(2), script::Value::integer(-1),
+                                    script::Value::integer(-1), script::Value::integer(-1),
+                                    script::Value::integer(-1)};
+    const std::uint32_t index = f.registry.find(script::CallKind::member, "Eval", 6);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return -1;
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &f.context;
+    CHECK(f.registry.entry(index).fn(ctx).status == script::HostStatus::ok);
+    return args[5].as_integer();
+  };
+  const auto eval3 = [&](std::int32_t sides) {
+    return f.call(script::CallKind::member, "Eval",
+                  {gaika_value(kThere), script::Value::integer(4), script::Value::integer(2),
+                   script::Value::integer(sides)},
+                  script::kNoScript)
+        .value.as_integer();
+  };
 
-  // Nothing seen yet: nothing explored, nothing stamped.
+  const SquadKey army = squad_of(3, 30, kThere);
+  const SquadKey scouts = squad_of(1, 5, kThere);
   sweep(1000);
-  CHECK(!explored(one, seen));
-  CHECK(!explored(one, unseen));
-  CHECK(one->find(seen)->last_seen == 0);
-  CHECK(explored(ten, seen));
-  CHECK(explored(ten, unseen));
-
-  // Player 1 sees the first node's centre. Flags already on the record stay:
-  // the sweep sets a bit, it does not write the word.
-  f.ai.gaika_view(1)->find(seen)->flags |= kLaikaNoRecruit;
-  fog.map().explore(Point{1000, 1000}, 1);
-  sweep(5000);
-  CHECK(explored(one, seen));
-  CHECK((one->find(seen)->flags & kLaikaNoRecruit) != 0);
-  CHECK(one->find(seen)->last_seen == 5000);
-  CHECK(!explored(one, unseen));
-  CHECK(one->find(unseen)->last_seen == 0);
-  // Another player's slot is another player's.
-  CHECK(!explored(two, seen));
-  CHECK(two->find(seen)->last_seen == 0);
-
-  // `LastSeen` follows the sweep for as long as the node is explored, which
-  // is for good: the map only ever gains ground.
-  sweep(7000);
-  CHECK(one->find(seen)->last_seen == 7000);
-
-  // **The centre, not any cell.** A cell beside the second node's centre --
-  // 1,100 units off, in the next 1,024-unit fog cell -- is not its centre.
-  fog.map().explore(Point{9000 - 1100, 9000}, 1);
-  sweep(8000);
-  CHECK(!explored(one, unseen));
-  fog.map().explore(Point{9000, 9000}, 1);
-  sweep(9000);
-  CHECK(explored(one, unseen));
-
-  // And the script reads it: `g.Explored(2)` is player 1's bit.
-  const script::HostOutcome asked =
-      f.call(script::CallKind::member, "Explored", {gaika_value(seen), script::Value::integer(2)},
-             script::kNoScript);
-  CHECK(asked.status == script::HostStatus::ok);
-  CHECK(asked.value.truthy_scalar());
+  // In sight: what is there.
+  CHECK(enemy6(4) == 30);
+  table.move_in(scouts, kHome);
+  sweep(2000);
+  // Out of sight with the army still there: remembered 30, seen 30.
+  CHECK(enemy6(4) == 30);
+  // The army marches off unseen: still 30 -- and the census itself says 0.
+  table.move_in(army, kHome);
+  table.set_dest(army, kHome);
+  CHECK(enemy6(4) == 30);
+  CHECK(eval3(4) == 30);
+  CHECK(eval3(1) == 0);       // the tail is the enemy total's
+  CHECK(enemy6(1) == 0);      // and only with `AI_STAYING` in the mask
+  // A reinforcement arrives unseen: it is seen by the census, and the tail
+  // takes what is seen off the remembered 30 -- so the answer stays 30.
+  (void)squad_of(3, 12, kThere);
+  CHECK(enemy6(4) == 30);
+  // Back in sight: what is there, 12.
+  table.move_in(scouts, kThere);
+  sweep(3000);
+  CHECK(enemy6(4) == 12);
 }
 
-TEST(the_ai_sweep_does_nothing_without_an_exploration_map) {
-  // A world with no fog system -- every synthetic test in this file -- is not
-  // a world where everything is explored.
-  Fixture f;
-  const SettlementId only = f.make_settlement(1);
-  {
-    const Settlement* s = f.economy.settlements().find(only);
-    REQUIRE(s != nullptr);
-    CHECK(f.world.set_position(s->anchor, Point{1000, 1000}));
-  }
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
-  f.ai.seed_gaika_view(1, f.world.gaika().count());
-  Turn turn;
-  turn.time = 4000;
-  f.ai.advance(f.world, turn);
-  const Laika* record = f.ai.gaika_view(1)->find(1);
-  REQUIRE(record != nullptr);
-  CHECK((record->flags & kLaikaExplored) == 0);
-  CHECK(record->last_seen == 0);
-}
