@@ -50,14 +50,14 @@ constexpr std::int32_t kFormationBonusLimit = 1000;
 }
 
 /// The leader's party formation: `[[leader+0x2b0]+0x18]`, the shape
-/// `Hero::SetFormation` chose, which is the movement record's `formation`
-/// here, or the file's default for a hero never given one.
+/// `Hero::SetFormation` chose (`Formation::shape`), or the file's default for
+/// a hero never given one.
 [[nodiscard]] const FormationClassDef* party_formation(World& world, ObjectId leader) {
   const MovementSystem* movement = movement_system(world);
   if (movement == nullptr) return nullptr;
-  const MoveState* move = movement->find(leader);
-  if (move != nullptr && !move->formation.empty()) {
-    if (const FormationClassDef* chosen = movement->formations().find(move->formation)) {
+  const Formation* form = movement->formation(leader);
+  if (form != nullptr && !form->shape.empty()) {
+    if (const FormationClassDef* chosen = movement->formations().find(form->shape)) {
       return chosen;
     }
   }

@@ -163,12 +163,12 @@
 ///     formation with no members, or with that radius 0, answers its
 ///     leader's class `radius` (0x005f235e). Here the formation's route is the
 ///     hero's own while he leads a march (`MoveState::party` is himself, set
-///     by `place_army`), and its radius is `MoveState::form_extent`, which
-///     `place_army` writes from the stations it lays; **an inference** in that
-///     the stations are this engine's layout, not the original's, which also
-///     adds a draw from the world's generator to each offset (0x005f0418,
-///     0x005f043b). A hero with no army record here leads no
-///     march, and takes the unit rule.
+///     by `place_army`), and its radius is the hero's formation object's
+///     (`Formation::radius`, `formation_reach`), laid by the original's
+///     layout (`sim/formation.hpp`). The jitter 0x005f0418 and 0x005f043b
+///     would add is a draw in `[-shape_chaos, shape_chaos]`, and every
+///     formation's `shape_chaos` is 0. A hero with no army record here leads
+///     no march, and takes the unit rule.
 ///   * *Two sides of one gate.* A formation stopped at a gate compares which
 ///     side of it its leader and the member stand (0x00417dc0, 0x005295d0)
 ///     and halts a member on the far side. Not reproduced, for the same reason.

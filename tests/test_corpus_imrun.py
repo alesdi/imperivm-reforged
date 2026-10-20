@@ -1026,6 +1026,13 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
     arrived alone and the army was stood 300 to 700 units behind him. As in
     `gbr.exe`, the march now walks at the formation's pace and lays its last
     stations round the destination, so the army stands formed on him.
+
+    The bounds are measured on the formation object's layout (round 12,
+    `sim/formation.hpp`): a 28-strong `Front` round a hero of radius 45 has its
+    farthest slot about 300 out, and on the way the samples are laid round a
+    centre 333 ahead of him, so the column leads him by up to 515 (turn 20)
+    and stands within 309 of him where he stops (turn 40). Nobody is behind
+    him on the way.
     """
     numantia = game_dir / NUMANTIA
     if not numantia.is_file():
@@ -1057,13 +1064,19 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
     arrived = [int(t) for t, x, y in track if (int(x), int(y)) == NUMANTIA_MARCH]
     assert arrived, track
     # On the way, as at the end, nobody of his army is left behind.
-    for turn in (20, arrived[0]):
+    start = (int(track[0][1]), int(track[0][2]))
+    heading = (NUMANTIA_MARCH[0] - start[0], NUMANTIA_MARCH[1] - start[1])
+    length = (heading[0] * heading[0] + heading[1] * heading[1]) ** 0.5
+    for turn, reach in ((20, 600), (arrived[0], 350)):
         army = [(int(m), int(dx), int(dy), order) for m, dx, dy, order in re.findall(
             rf"^\s+army turn {turn}: (\d+) at \(-?\d+,-?\d+\) off \((-?\d+),(-?\d+)\) order (\S+)$",
             out, re.MULTILINE)]
         assert len(army) >= 20, out[-3000:]
-        far = [a for a in army if a[1] * a[1] + a[2] * a[2] > 300 * 300]
+        far = [a for a in army if a[1] * a[1] + a[2] * a[2] > reach * reach]
         assert not far, (turn, far)
+        if turn == 20:
+            behind = [a for a in army if (a[1] * heading[0] + a[2] * heading[1]) / length < -100]
+            assert not behind, (turn, behind)
     # The march is over, and the army is told to stand. Not on the turn the
     # hero arrives: his `HasPath` (0x0052fe40) stays true while any member's
     # route still follows the march, so `HERO_MOVE.VS` hands out

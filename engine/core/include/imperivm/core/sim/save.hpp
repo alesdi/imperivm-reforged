@@ -378,7 +378,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// version 39). A version-44 file has none, and every walk of a node's
 /// squads -- `GetSquads`, `Count`, `Eval`, `GetAIControlledUnits` -- reads
 /// the deque in the order its squads arrived: docs/formats/gaika.md.
-inline constexpr std::uint32_t kStateVectorVersion = 45;
+/// 46: the movement section carries every hero's formation object
+/// (`sim/formation.hpp`, `[hero+0x2b0]`: its slots, pending units, marks,
+/// sample and flags; system section version 40), and the movement record no
+/// longer carries the shape, the spacing, the lock flag or the radius that
+/// stood in for it. A version-45 file has no slots, so a loaded march would
+/// stand until its hero laid the formation out again.
+inline constexpr std::uint32_t kStateVectorVersion = 46;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

@@ -513,6 +513,17 @@ TEST(form_accept_move_drops_the_members_combat_target) {
   REQUIRE(g.combat.find(g.mine) != nullptr);
   REQUIRE(g.combat.order_attack(g.mine, g.theirs));
 
+  // A member still pending -- attached, not yet laid out -- has no place in
+  // the formation (`[unit+0x1c0]`): the body returns 2 (0x005d7a1c), the
+  // script ends there, and the target stands.
+  CHECK(call(registry, g.world, "FormAcceptMove", 0, {obj(g.mine)}).status ==
+        script::HostStatus::finish);
+  CHECK(g.combat.find(g.mine)->target == g.theirs);
+
+  // With its slot, it gets this far.
+  Formation& form = movement.formation_of(hero);
+  form.pending.clear();
+  form.slots.push_back(FormationSlot{g.mine});
   CHECK(call(registry, g.world, "FormAcceptMove", 0, {obj(g.mine)}).status ==
         script::HostStatus::ok);
   CHECK(g.combat.find(g.mine)->target == kNoObject);

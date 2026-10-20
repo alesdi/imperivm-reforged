@@ -13,6 +13,7 @@
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/fog.hpp"
 #include "imperivm/core/sim/host_context.hpp"
+#include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 
@@ -261,6 +262,9 @@ HeroRecord& HeroSystem::register_hero(World& world, ObjectId id) {
 
 void HeroSystem::forget(World& world, ObjectId id) {
   if (HeroRecord* record = hero(id)) {
+    // The hero's destructor deletes his formation (0x005304b0) without
+    // removing its members one by one, so their routes are not deleted.
+    if (MovementSystem* movement = movement_system(world)) movement->drop_formation(id);
     const std::vector<ObjectId> army = record->army;
     for (const ObjectId member : army) detach(world, member);
     squads_.destroy(record->squad);
@@ -397,6 +401,9 @@ bool HeroSystem::attach(World& world, ObjectId unit_id, ObjectId hero_id) {
   record->squad = leader->squad;
   leader->army.push_back(unit_id);
   squads_.join(leader->squad, unit_id);
+  // The hero's `AddUnit` (0x0052e3e0) puts it in his formation, pending until
+  // the layout runs (0x005f47e0, `sim/formation.hpp`).
+  if (MovementSystem* movement = movement_system(world)) movement->join_formation(hero_id, unit_id);
   // `AttachHero` (0x005ddf50) rebuilds the unit: its new leader's skills.
   recalc_bonuses(world, unit_id);
   return true;
@@ -410,6 +417,11 @@ bool HeroSystem::detach(World& world, ObjectId unit_id) {
     const auto it = std::find(leader->army.begin(), leader->army.end(), unit_id);
     if (it != leader->army.end()) leader->army.erase(it);
     squads_.leave(world, leader->squad, unit_id);
+    // The hero's `RemoveUnit` (0x0052db70): out of his formation, its route
+    // deleted (0x005f3290).
+    if (MovementSystem* movement = movement_system(world)) {
+      movement->leave_formation(world, record->hero, unit_id);
+    }
   }
   record->hero = kNoObject;
   record->squad = kNoSquad;
@@ -1058,6 +1070,9 @@ void HeroSystem::clear_dead(World& world) {
     const auto gone = std::remove_if(army.begin(), army.end(), [&](ObjectId member) {
       if (world.find(member) != nullptr) return false;
       squads_.leave(world, record.squad, member);
+      if (MovementSystem* movement = movement_system(world)) {
+        if (Formation* form = movement->formation(record.id)) (void)formation_remove(*form, member);
+      }
       if (UnitRecord* unit_record = unit(member)) {
         unit_record->hero = kNoObject;
         unit_record->squad = kNoSquad;
@@ -2952,14 +2967,15 @@ HostOutcome fn_drop_item(CallContext& ctx) {
 /// `[hero+0x2b0]`. `Set` writes `pt - (1024, 1024)` into `+0x54/+0x58`; `Has`
 /// answers `(+0x54 | +0x58) != 0`; `Get` reads a **different pair**,
 /// `+0x5c/+0x60`, and adds `(1024, 1024)` back. Between them sits the
-/// party-formation code, which settles a request into the second pair when a
-/// formation completes -- and this engine does not model formation, so the
-/// settled slot is written by nothing.
+/// formation's `SetDest` (0x005f2cc0), which settles a request into the
+/// second pair and clears it when a march is set up -- `FormSetupAndMoveTo`
+/// here (`sim/formation.hpp`); the object form clears both.
 ///
-/// **So `Get` answers `(1024, 1024)` today, and that is the right answer rather
-/// than a placeholder.** It is what the original answers for any hero whose
-/// party has not finished forming, which is most heroes most of the time, and
-/// it is exactly what the three readers are shaped for:
+/// **So `Get` answers `(1024, 1024)` until a march is set up after a request,
+/// and that is the right answer rather than a placeholder.** It is what the
+/// original answers for any hero who has not marched since one, which is most
+/// heroes most of the time, and it is exactly what the three readers are
+/// shaped for:
 ///
 ///     dpt = .GetFinalPartyOrientation() - Point(1024, 1024);
 ///     if (dpt.x != 0 || dpt.y != 0) ...

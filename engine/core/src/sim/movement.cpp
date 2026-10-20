@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <utility>
 
 #include "imperivm/core/game/localization.hpp"
 #include "imperivm/core/script/scheduler.hpp"
@@ -141,13 +142,6 @@ std::uint32_t facing_column(Point facing, std::int32_t variations) noexcept {
 // formations
 // --------------------------------------------------------------------------
 
-FormationPlacement FormationClassDef::placement_of(std::string_view class_name) const noexcept {
-  for (const FormationRole& role : roles) {
-    if (equal_fold(role.class_name, class_name)) return role.placement;
-  }
-  return FormationPlacement::central_block;
-}
-
 Result<FormationTable> FormationTable::parse(std::span<const std::byte> xml) {
   Result<XmlDocument> parsed = XmlDocument::parse(xml);
   if (!parsed) return parsed.error();
@@ -205,13 +199,9 @@ Result<FormationTable> FormationTable::parse(std::span<const std::byte> xml) {
     for (NodeIndex c = doc.child(n, "Class"); c != kNoNode; c = doc.next(c, "Class")) {
       FormationRole role;
       role.class_name.assign(doc.attribute(c, "Name"));
-      if (doc.attribute_int(c, "FrontLine", 0) != 0) {
-        role.placement = FormationPlacement::front_line;
-      } else if (doc.attribute_int(c, "Wings", 0) != 0) {
-        role.placement = FormationPlacement::wings;
-      } else {
-        role.placement = FormationPlacement::central_block;
-      }
+      role.central = doc.attribute_int(c, "CentralBlock", 0);
+      role.front = doc.attribute_int(c, "FrontLine", 0);
+      role.wings = doc.attribute_int(c, "Wings", 0);
       formation.roles.push_back(std::move(role));
     }
     table.formations_.push_back(std::move(formation));
@@ -224,86 +214,6 @@ const FormationClassDef* FormationTable::find(std::string_view name) const noexc
     if (equal_fold(formation.name, name)) return &formation;
   }
   return nullptr;
-}
-
-std::size_t formation_offsets(const FormationClassDef& formation,
-                              std::span<const FormationMember> members, Point facing,
-                              std::span<Point> out) noexcept {
-  const std::size_t count = std::min(members.size(), out.size());
-  if (count == 0) return 0;
-
-  // Bucket by placement, keeping the caller's order within a bucket so that the
-  // same army always lays out the same way.
-  std::size_t counts[3] = {0, 0, 0};
-  for (std::size_t i = 0; i < count; ++i) {
-    counts[static_cast<std::size_t>(members[i].placement)] += 1;
-  }
-
-  // Local axes: +y is forward, which is the axis `OffsetFrontLineByY` names,
-  // and +x is to the right of it.
-  const Point forward = facing.x == 0 && facing.y == 0
-                            ? Point{0, kFacingLength}
-                            : set_length(facing, kFacingLength);
-
-  std::size_t placed[3] = {0, 0, 0};
-  for (std::size_t i = 0; i < count; ++i) {
-    const std::size_t bucket = static_cast<std::size_t>(members[i].placement);
-    const std::size_t n = counts[bucket];
-    const std::size_t slot = placed[bucket]++;
-
-    // Rectangle shape from the declared aspect. Inferred; see the header.
-    std::int32_t columns = static_cast<std::int32_t>(
-        isqrt(static_cast<std::int64_t>(n) * formation.width / formation.height));
-    if (columns < 1) columns = 1;
-    if (static_cast<std::size_t>(columns) > n) columns = static_cast<std::int32_t>(n);
-    const std::int32_t column = static_cast<std::int32_t>(slot % static_cast<std::size_t>(columns));
-    const std::int32_t row = static_cast<std::int32_t>(slot / static_cast<std::size_t>(columns));
-
-    const std::int32_t radius = members[i].formation_radius > 0 ? members[i].formation_radius
-                                                               : kDefaultFormationSpacing / 2;
-    const std::int32_t spacing = 2 * radius;
-
-    // Centre each rank on the leader's axis. The rank a slot lands in may be
-    // short, so the centring uses that rank's own width.
-    const std::int32_t rank_size =
-        std::min<std::int32_t>(columns, static_cast<std::int32_t>(n) - row * columns);
-    std::int32_t local_x = (2 * column - (rank_size - 1)) * spacing / 2;
-    std::int32_t local_y = 0;
-
-    switch (members[i].placement) {
-      case FormationPlacement::front_line:
-        // Ahead of the leader, the first rank at the declared offset and each
-        // further rank one spacing behind it.
-        local_y = formation.offset_front_line_y + row * spacing;
-        break;
-      case FormationPlacement::wings: {
-        // Alternating sides, filling outwards, so an odd count is balanced.
-        const std::int32_t side = (slot % 2 == 0) ? 1 : -1;
-        const std::int32_t depth = static_cast<std::int32_t>(slot / 2);
-        local_x = side * (formation.offset_wings_x + depth * spacing);
-        local_y = formation.offset_wings_y;
-        break;
-      }
-      case FormationPlacement::central_block:
-        // Around the leader, centred on him rather than in front.
-        local_y = -row * spacing;
-        break;
-    }
-
-    // Rotate the local frame into the facing. Local +y maps onto `forward`, so
-    // local +x maps onto forward turned a quarter turn.
-    const std::int64_t fx = forward.x;
-    const std::int64_t fy = forward.y;
-    out[i] = Point{static_cast<std::int32_t>(
-                       (static_cast<std::int64_t>(local_x) * fy +
-                        static_cast<std::int64_t>(local_y) * fx) /
-                       kFacingLength),
-                   static_cast<std::int32_t>(
-                       (-static_cast<std::int64_t>(local_x) * fx +
-                        static_cast<std::int64_t>(local_y) * fy) /
-                       kFacingLength)};
-  }
-  return count;
 }
 
 // --------------------------------------------------------------------------
@@ -391,6 +301,45 @@ void MovementSystem::forget(ObjectId id) {
   if (at < states_.size() && states_[at].id == id) {
     states_.erase(states_.begin() + static_cast<std::ptrdiff_t>(at));
   }
+  drop_formation(id);
+}
+
+void MovementSystem::drop_formation(ObjectId hero) {
+  const auto form = std::lower_bound(
+      formation_objects_.begin(), formation_objects_.end(), hero,
+      [](const Formation& f, ObjectId id) { return f.hero < id; });
+  if (form != formation_objects_.end() && form->hero == hero) formation_objects_.erase(form);
+}
+
+const Formation* MovementSystem::formation(ObjectId hero) const noexcept {
+  const auto it = std::lower_bound(
+      formation_objects_.begin(), formation_objects_.end(), hero,
+      [](const Formation& f, ObjectId id) { return f.hero < id; });
+  return it != formation_objects_.end() && it->hero == hero ? &*it : nullptr;
+}
+
+Formation* MovementSystem::formation(ObjectId hero) noexcept {
+  return const_cast<Formation*>(std::as_const(*this).formation(hero));
+}
+
+Formation& MovementSystem::formation_of(ObjectId hero) {
+  const auto it = std::lower_bound(
+      formation_objects_.begin(), formation_objects_.end(), hero,
+      [](const Formation& f, ObjectId id) { return f.hero < id; });
+  if (it != formation_objects_.end() && it->hero == hero) return *it;
+  Formation made;
+  made.hero = hero;
+  return *formation_objects_.insert(it, std::move(made));
+}
+
+void MovementSystem::join_formation(ObjectId hero, ObjectId unit) {
+  formation_add(formation_of(hero), unit);
+}
+
+void MovementSystem::leave_formation(World& world, ObjectId hero, ObjectId unit) {
+  Formation* form = formation(hero);
+  if (form == nullptr || !formation_remove(*form, unit)) return;
+  if (find(unit) != nullptr) stop(world, unit);
 }
 
 Point MovementSystem::position(World& world, ObjectId id) const noexcept {
@@ -633,7 +582,7 @@ bool MovementSystem::held_at_gate(const World& world, ObjectId id, const MoveSta
     std::int32_t radius = radius_of(world, id);
     std::int32_t floor = 0;
     if (move.party == id) {
-      if (move.form_extent != 0) radius = move.form_extent;
+      radius = formation_reach(formation(id), radius);
       floor = kGateGroupRadius;
     }
     const std::int64_t reach = static_cast<std::int64_t>(radius > floor ? radius : floor) + kGateApproach;
@@ -650,10 +599,10 @@ bool MovementSystem::held_at_gate(const World& world, ObjectId id, const MoveSta
 /// Copy the class properties a `MoveState` carries, once.
 ///
 /// `speed` is the one that matters: without it a unit lays a perfect path and
-/// then walks none of it. `formation_radius` rides along because it is the
-/// other class-resolved field on the record and the two are read from the same
-/// bag. A class that declares neither leaves the defaults, which is what an
-/// object with no class does too.
+/// then walks none of it. A class that declares none leaves the default,
+/// which is what an object with no class does too. (The formation's spacing,
+/// `formation_radius`, used to ride along here; the layout reads it from the
+/// class graph, `formation_class_traits`.)
 void MovementSystem::resolve_class_fields(const World& world, ObjectId id, MoveState& move) {
   if (move.class_resolved) return;
   move.class_resolved = true;
@@ -662,9 +611,6 @@ void MovementSystem::resolve_class_fields(const World& world, ObjectId id, MoveS
   if (slot == nullptr || slot->class_index == kNoClass) return;
   std::int32_t value = 0;
   if (parse_int(classes_->property(slot->class_index, "speed"), value)) move.speed = value;
-  if (parse_int(classes_->property(slot->class_index, "formation_radius"), value)) {
-    move.formation_radius = value;
-  }
 }
 
 MoveOutcome MovementSystem::order_goto(World& world, ObjectId id, Point dest, std::int32_t range,
@@ -1975,8 +1921,11 @@ void MovementSystem::hash(std::uint64_t& accumulator) const {
     // divergence in it is caught a turn before it becomes a divergence in a
     // coordinate. That is the whole value of hashing it.
     hash_u64(accumulator, static_cast<std::uint64_t>(move.progress));
-    // How far a march's route looks ahead of a gate (`sim/gate.hpp`).
-    hash_i32(accumulator, move.form_extent);
+    // How far a march's route looks ahead of a gate (`sim/gate.hpp`): the
+    // radius of the formation this object leads, where it was hashed when it
+    // lived on the movement record.
+    const Formation* form = formation(entry.id);
+    hash_i32(accumulator, form == nullptr ? 0 : form->radius);
     // Deliberately absent: `waypoints`, `path_length`, `path_generation`,
     // `last_outcome`. The route is the pathfinder's output, and the pathfinder
     // is not in the determinism contract -- `pathfinder` is zero in all nine
@@ -2871,7 +2820,9 @@ HostOutcome set_formation_impl(CallContext& ctx) {
   if (!ctx.arg(1).is_string()) return HostOutcome::failed("SetFormation: not a formation name");
   const std::string& name = ctx.arg(1).as_string();
   if (self.movement->formations().find(name) == nullptr) return HostOutcome::ok_void();
-  self.movement->state(self.id).formation = name;
+  Formation& form = self.movement->formation_of(self.id);
+  form.shape = name;
+  form.rebuild = true;
   return HostOutcome::ok_void();
 }
 
@@ -2881,9 +2832,9 @@ HostOutcome set_formation_impl(CallContext& ctx) {
 HostOutcome formation_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::string(std::string())));
-  const MoveState* move = self.movement->find(self.id);
-  const std::string_view name = move != nullptr && !move->formation.empty()
-                                    ? std::string_view(move->formation)
+  const Formation* form = self.movement->formation(self.id);
+  const std::string_view name = form != nullptr && !form->shape.empty()
+                                    ? std::string_view(form->shape)
                                     : self.movement->formations().default_name();
   return HostOutcome::ok_with(Value::string(std::string(name)));
 }
@@ -2891,32 +2842,23 @@ HostOutcome formation_impl(CallContext& ctx) {
 /// `Hero::FormRadius` (0x0052ec40) -- 15 sites, every one a hero sizing its
 /// army: `PathTo(x, .FormRadius, 0)`, `GotoAttack`'s reach. 0 for a receiver
 /// that names nothing; otherwise 0x005f2350 on the hero's formation object:
-/// **the formation's radius** (`[form+0x34]`, the farthest station from the
-/// centre the layout last laid) when the formation has members
-/// (`[form+0x14]`) and that radius is not 0, and **the hero's class `radius`**
-/// (`[class+0x2dc]`) otherwise. Here the formation's radius is
-/// `MoveState::form_extent` and its members the hero's army.
+/// **the formation's radius** (`[form+0x34]`, the farthest slot from the
+/// centre the layout last laid) when the formation has a slot (`[form+0x14]`)
+/// and that radius is not 0, and **the hero's class `radius`**
+/// (`[class+0x2dc]`) otherwise (`formation_reach`).
 ///
-/// This used to answer the class property `formation_radius`, the spacing a
-/// formation's ranks are laid at -- 26 for every unit -- which is neither.
-///
-/// **Approximated:** the original lays the formation out again whenever it is
-/// marked (0x005f4390 -> 0x005f1f60: an army changed, a shape set), and this
-/// engine only when the hero marches (`place_army`). A hero whose army has
-/// grown since its last march answers the old radius here, and one that has
-/// never marched its class radius.
+/// The layout runs only when a sample is placed or `FormKeepMoving` updates
+/// a march (docs/formats/formation.md), so a hero whose army changed since
+/// answers the radius of the last layout, and a unit that joined since is not
+/// a slot: a hero who has never marched answers his class radius whatever
+/// his army.
 HostOutcome form_radius_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return unresolved(self, HostOutcome::ok_with(Value::integer(0)));
-  const HeroSystem* heroes = hero_system_of(*self.world);
-  const HeroRecord* record = heroes == nullptr ? nullptr : heroes->hero(self.id);
-  const MoveState* move = self.movement->find(self.id);
-  if (record != nullptr && !record->army.empty() && move != nullptr && move->form_extent != 0) {
-    return HostOutcome::ok_with(Value::integer(move->form_extent));
-  }
   const WorldObject* slot = self.world->find(self.id);
+  const std::int32_t own = slot == nullptr ? 0 : class_int(*self.world, *slot, "radius");
   return HostOutcome::ok_with(
-      Value::integer(slot == nullptr ? 0 : class_int(*self.world, *slot, "radius")));
+      Value::integer(formation_reach(self.movement->formation(self.id), own)));
 }
 
 // --------------------------------------------------------------------------

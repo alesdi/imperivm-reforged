@@ -2348,7 +2348,7 @@ TEST(a_fast_hero_marches_at_his_armys_pace_and_it_stands_formed_on_him_when_he_s
   }
   for (const ObjectId w : army) movement.stop(f.world, w);
   for (const ObjectId w : army) {
-    CHECK(isqrt(dist_sq(f.world.resolve_position(w), dest)) <= 3 * kDefaultFormationSpacing);
+    CHECK(isqrt(dist_sq(f.world.resolve_position(w), dest)) <= 3 * 52);
     CHECK(movement.find(w)->march_rate == 0);
   }
   // An order that is not a march walks at the unit's own pace again.
@@ -2411,34 +2411,35 @@ struct MarchBench {
 }  // namespace
 
 TEST(a_marchs_pace_is_its_share_of_the_mean_deadline_short_of_133) {
-  // One member, 200 east of the hero on his route, and so 133 short of its
-  // station: the centre stands 333 ahead of him (one 200-unit sample beyond
-  // the 133 a unit is timed short of, 0x00419c78), and a lone member of a
-  // block stands on it. The deadline is the mean over both of the time to
-  // cover the straight distance less 133 (0x005f5850): (200 + 0) / 2 at the
-  // formation's 100, a second. The hero's route to the centre less 133 is
-  // 200, so he is paced at 200 a second -- twice the formation's speed, and
-  // twice his own. The member has nothing left to cover and takes the fast
-  // end of the clamp, two and a half times (0x00419e91, 0x005f2130).
+  // One member, 200 east of the hero on his route. The centre stands 333
+  // ahead of him (one 200-unit sample beyond the 133 a unit is timed short
+  // of, 0x00419c78), facing the way it stepped, and a lone member of a block
+  // stands at the front of its first ring, `15 + 2 * 26` = 67 further on
+  // (0x005f04b0: the hero's `radius`, twice the member's `formation_radius`).
+  // The deadline is the mean over both of the time to cover the straight
+  // distance less 133 (0x005f5850): (200 + 67) / 2 at the formation's 100,
+  // 1,335 ms. The hero's route to the centre less 133 is 200, the member's
+  // to its station 67; each is paced at that over the deadline.
   const Point at[] = {Point{500, 500}};
   MarchBench b(Point{300, 500}, 100, at, 100);
   b.march(Point{4000, 500});
-  CHECK(b.movement.find(b.army[0])->target == (Point{633, 500}));
-  CHECK(b.pace(b.hero) == 200 * kDefaultSpeedFactor);
-  CHECK(b.pace(b.army[0]) == 250 * kDefaultSpeedFactor);
+  CHECK(b.movement.find(b.army[0])->target == (Point{700, 500}));
+  CHECK(b.pace(b.hero) == 200 * kSpeedScale / 1335);
+  CHECK(b.pace(b.army[0]) == 67 * kSpeedScale / 1335);
 }
 
 TEST(the_last_sample_is_the_destination_and_nothing_is_taken_short_of_it) {
   // The destination 200 east of the hero, nearer than a sample: the centre is
   // the route's end, the formation's last sample (`[form+0x88]` cleared,
   // 0x005f5cff), and no 133 comes off either distance. The member's station
-  // is the destination, 223 from it; the deadline is (2,000 + 2,230 + 1) / 2
-  // ms at the formation's 100, and the hero's pace his 200 over it.
+  // is 67 ahead of the destination, 285 from it; the deadline is
+  // (2,000 + 2,850 + 1) / 2 ms at the formation's 100, and the hero's pace
+  // his 200 over it.
   const Point at[] = {Point{300, 600}};
   MarchBench b(Point{300, 500}, 100, at, 100);
   b.march(Point{500, 500});
-  CHECK(b.movement.find(b.army[0])->target == (Point{500, 500}));
-  CHECK(b.pace(b.hero) == 200 * kSpeedScale / 2115);
+  CHECK(b.movement.find(b.army[0])->target == (Point{567, 500}));
+  CHECK(b.pace(b.hero) == 200 * kSpeedScale / 2425);
 }
 
 TEST(a_straggler_is_hurried_and_the_hero_held_back_within_the_clamp) {
@@ -2456,6 +2457,98 @@ TEST(a_straggler_is_hurried_and_the_hero_held_back_within_the_clamp) {
   CHECK(b.pace(b.army[2]) == formation * 5 / 2);
   CHECK(b.pace(b.army[0]) >= formation / 2);
   CHECK(b.pace(b.army[0]) <= formation * 5 / 2);
+}
+
+namespace {
+
+[[nodiscard]] std::int64_t form_radius_of(MarchBench& b) {
+  HostCall call(b.f.world, {obj(b.hero)});
+  return invoke(b.registry, CallKind::member, "FormRadius", 0, call).value.as_integer();
+}
+
+}  // namespace
+
+TEST(a_unit_that_joins_a_march_takes_its_place_at_the_next_layout) {
+  // Joining only puts the unit on the formation's pending list and marks the
+  // layout (0x005f47e0); `FormRadius` answers the last layout's radius until
+  // the layout runs (0x005f2350), and that is in `FormKeepMoving`'s update
+  // (0x005f5e30 -> 0x005f4390), which hands every unit it lays `form_move`.
+  // The hero's class radius is 15 and the warriors' 26: two in a block stand
+  // at the front and back of the first ring, 67 out; three are its short
+  // ring, the front corners 94 out.
+  const Point at[] = {Point{300, 540}, Point{300, 460}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  CHECK(form_radius_of(b) == 15);
+  b.march(Point{3000, 500});
+  CHECK(form_radius_of(b) == 67);
+  for (const ObjectId w : b.army) CHECK(b.f.verbs(w) == std::vector<std::string>{"form_move"});
+
+  const ObjectId late = b.f.spawn(b.f.warrior_class, Point{200, 500});
+  b.heroes.register_unit(b.f.world, late);
+  REQUIRE(b.heroes.attach(b.f.world, late, b.hero));
+  b.movement.state(late).speed = 100;
+  (void)b.f.order(late, "idle");
+  CHECK(form_radius_of(b) == 67);
+  CHECK(b.f.verbs(late) == std::vector<std::string>{"idle"});
+
+  b.f.world.advance(500);
+  HostCall keep(b.f.world, {obj(b.hero), Value::integer(1500)});
+  (void)invoke(b.registry, CallKind::member, "FormKeepMoving", 1, keep);
+  CHECK(b.f.verbs(late) == std::vector<std::string>{"form_move"});
+  CHECK(b.movement.find(late)->goto_active);
+  CHECK(b.movement.find(late)->party == b.hero);
+  CHECK(form_radius_of(b) == 94);
+}
+
+TEST(a_member_that_leaves_the_army_loses_its_route) {
+  // The hero's `RemoveUnit` (0x0052db70 -> 0x005f3290) deletes the leaving
+  // member's route (0x005d3830 with 0), and its slot goes with it.
+  const Point at[] = {Point{300, 540}, Point{300, 460}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  b.march(Point{3000, 500});
+  REQUIRE(b.movement.find(b.army[0])->goto_active);
+  REQUIRE(b.heroes.detach(b.f.world, b.army[0]));
+  CHECK(!b.movement.find(b.army[0])->goto_active);
+  CHECK(!b.movement.find(b.army[0])->has_path);
+  CHECK(b.movement.formation(b.hero)->slots.size() == 1);
+  CHECK(b.movement.formation(b.hero)->rebuild);
+  CHECK(b.movement.find(b.army[1])->goto_active);
+}
+
+TEST(a_requested_orientation_is_settled_by_the_setup_and_faces_the_last_sample) {
+  // `SetDest` (0x005f2cc0) moves a requested orientation into the settled
+  // pair and clears the request; within 200 of the path's end the sample
+  // faces it (0x005f5c7d). Two hundred east, the first sample is the last:
+  // the lone member stands at the front of the block, 67 along the settled
+  // orientation -- south -- and not along the march -- east.
+  const Point at[] = {Point{300, 540}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  HeroRecord* record = b.heroes.hero(b.hero);
+  REQUIRE(record != nullptr);
+  record->party_orientation_request = Point{0, 50};
+  b.march(Point{500, 500});
+  CHECK(record->party_orientation == (Point{0, 50}));
+  CHECK(record->party_orientation_request == (Point{}));
+  CHECK(b.movement.find(b.army[0])->target == (Point{500, 567}));
+}
+
+TEST(a_setup_to_where_the_hero_stands_ends_the_march) {
+  // `HERO_IDLE.VS` after a fight: `.FormSetupAndMoveTo(.pos, 0, 0, true)`.
+  // `SetDest` hands every member with a slot `form_move` (0x005f2b50), and
+  // the first sample cannot step a centre that has nowhere to go: with no
+  // sample laid, `CreateNextSample` ends the march (0x005f5ce5 -> 0x005f2c10)
+  // -- each member loses its route and its `form_move`.
+  const Point at[] = {Point{300, 540}, Point{300, 460}};
+  MarchBench b(Point{300, 500}, 100, at, 100);
+  b.march(Point{1000, 500});
+  for (const ObjectId w : b.army) CHECK(b.f.verbs(w) == std::vector<std::string>{"form_move"});
+  b.f.world.advance(500);
+  b.march(b.f.world.resolve_position(b.hero));
+  for (const ObjectId w : b.army) {
+    CHECK(b.f.verbs(w).empty());
+    CHECK(!b.movement.find(w)->goto_active);
+  }
+  CHECK(b.movement.formation(b.hero)->samples == 0);
 }
 
 TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) {
@@ -2504,7 +2597,7 @@ TEST(form_setup_hands_the_army_form_move_and_the_march_moves_only_its_marchers) 
                            Value::integer(0), Value::boolean(true)});
   REQUIRE(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, setup).status ==
           HostStatus::ok);
-  CHECK(movement.find(hero)->form_lock);
+  CHECK(movement.formation(hero)->should_lock);
   for (const ObjectId w : army) {
     CHECK(f.verbs(w) == std::vector<std::string>{"form_move"});
     CHECK(movement.find(w)->goto_active);
@@ -2770,7 +2863,15 @@ TEST(form_path_left_is_a_distance) {
   HostCall idle(f.world, {obj(hero)});
   CHECK(invoke(registry, CallKind::member, "FormPathLeft", 0, idle).value.as_integer() == 0);
 
+  // A route that is not a march's is not the formation's: 0x0052ebc0
+  // answers 0 while the formation has no route record (`[form+0x84]`).
   movement.order_goto(f.world, hero, Point{900, 100}, 0);
+  HostCall alone(f.world, {obj(hero)});
+  CHECK(invoke(registry, CallKind::member, "FormPathLeft", 0, alone).value.as_integer() == 0);
+
+  // Leading a march, his route stands for the formation's.
+  movement.formation_of(hero).path = true;
+  movement.state(hero).party = hero;
   HostCall walking(f.world, {obj(hero)});
   const std::int32_t left =
       invoke(registry, CallKind::member, "FormPathLeft", 0, walking).value.as_integer();

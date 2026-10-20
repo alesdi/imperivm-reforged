@@ -28,6 +28,7 @@ standard of evidence they are held to.
 | squad record (runtime) | [squad.md](squad.md) | the original's squad: its member and enemy lists, the look that fills the second, and who reads them |
 | route search (runtime) | [pathfinder.md](pathfinder.md) | the original's two route searches, their budgets, what an unreachable goal answers, and when a unit searches again |
 | AI map nodes (runtime) | [gaika.md](gaika.md) | the original's node table: each node's squad deque and who files into it, what a node remembers per player, the `MAIKA` list |
+| formation object (runtime) | [formation.md](formation.md) | the original's formation: its members and pending units, the layout that places them round the hero, the sample that turns it onto the map, and the march that moves it |
 | `ISAV` | [save.md](save.md) | **ours, not the original's** — the saved session we write, and the checklist `gbr.exe` gives for it |
 
 The resolved object model — class tree, native class responsibilities, faction inventory —

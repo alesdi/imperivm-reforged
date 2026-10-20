@@ -237,7 +237,7 @@ TEST(stats_the_formation_pays_while_the_unit_stands_in_it) {
 
   // A formation that takes more than there is stops at zero while standing,
   // and a negative record outside the formation is not floored.
-  b.movement.state(chief).formation = "Ragged";
+  b.movement.formation_of(chief).shape = "Ragged";
   StatBonus minus;
   minus.armour_slash = -10;
   REQUIRE(b.combat.add_bonus(man, minus));
