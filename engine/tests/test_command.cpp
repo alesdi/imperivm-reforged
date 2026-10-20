@@ -3445,6 +3445,40 @@ TEST(a_list_and_point_command_hands_its_script_both) {
   CHECK(f.user(u) == 2321);
 }
 
+/// **A command whose script traps does not start the next inside the pass.**
+/// An `idle` that queues a command and returns, over a command whose script
+/// traps on its first slice, would otherwise end and start one another on
+/// the same instant for ever (`EAGLE_IDLE.VS` over `EAGLE_MOVE.VS` in a
+/// session with no entities, whose `GetAnimDuration(0)` divides by zero).
+/// Bounded: the `idle` counts its runs and stops handing back at fifty, so
+/// the unfixed loop fails here rather than hangs.
+TEST(a_command_whose_script_traps_starts_the_next_at_the_pass_not_at_once) {
+  RunFixture f;
+  install_deferred_erase(f.scheduler);
+  (void)register_global_hosts(f.registry);
+  REQUIRE(f.add_script("// void, Obj This\n"
+                       "This.SetUser(This.user + 1);\n"
+                       "if (This.user > 50) { while (1) Sleep(100000); }\n"
+                       "This.AddCommand(true, \"engage\");\n",
+                       "data/subai/unit_idle.vs"));
+  REQUIRE(f.add_script("// void, Obj This\nint z;\nz = 0;\nz = 1 / z;\n",
+                       "data/subai/unit_engage.vs"));
+  const ObjectId u = f.spawn(f.unit_class);
+  REQUIRE(f.commands.start_slot(f.world, u));
+  f.scheduler.advance(100);
+  // The idle ran once and handed over; `engage` trapped and ended; the next
+  // idle waits for the command pass.
+  CHECK(f.world.find(u)->state.user == 1);
+  // Each command pass starts the next idle, which hands over once more.
+  for (int turn = 0; turn < 3; ++turn) {
+    Turn pass;
+    pass.time = f.scheduler.now();
+    f.commands.advance(f.world, pass);
+    f.scheduler.advance(100);
+  }
+  CHECK(f.world.find(u)->state.user == 4);
+}
+
 TEST(a_command_that_returns_starts_the_next_in_the_same_pass) {
   EndFixture f;
   f.onfinish("");

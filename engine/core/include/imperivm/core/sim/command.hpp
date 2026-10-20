@@ -940,7 +940,7 @@ class CommandSystem final : public System {
   /// 0x005b5160 with 0x005b19f0, the command slot's end: the head's
   /// `onfinish` (run now, `canceled` as its flag), the head popped, and the
   /// next started unless the object is dead.
-  void end_slot(World& world, ObjectId id, bool canceled);
+  void end_slot(World& world, ObjectId id, bool canceled, bool start_next = true);
   bool launch(World& world, ObjectId id, Command& command, GameTime now);
   /// The compiled chunk `verb` runs on `id`, compiling it through the library
   /// on a first use; `kNoChunk` when there is none, counted in
