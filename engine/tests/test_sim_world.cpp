@@ -6532,12 +6532,12 @@ TEST(best_training_target_is_the_nearest_training_unit_unless_an_enemy_is_armed)
   const ObjectId far_partner = unit_at(Point{300, 0}, 1);
   train(far_partner);
   CHECK(best(self) == far_partner);
-  // A tie keeps the one met first: `twin`, also 300 away, is in the first
-  // cell of the row and `far_partner` in the second, so `twin` is met first
-  // though it came later.
+  // A tie goes to the one met later (`<=`): `twin`, also 300 away, is in the
+  // first cell of the row and `far_partner` in the second, so `far_partner`
+  // is met later and keeps it, though `twin` has the higher id.
   const ObjectId twin = unit_at(Point{180, 240}, 1);
   train(twin);
-  CHECK(best(self) == twin);
+  CHECK(best(self) == far_partner);
   CHECK(twin > far_partner);
   const ObjectId near_partner = unit_at(Point{0, 120}, 2);
   train(near_partner);
