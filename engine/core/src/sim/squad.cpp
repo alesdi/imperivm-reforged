@@ -3288,7 +3288,7 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   //    not the holder, which is `[obj+0x154]` -- and when it resolves: a hero
   //    in no squad answers **null**, a unit already in his squad answers it,
   //    and any other is moved to the end of it (0x00446570 -> 0x00445a50).
-  //    `Squadize` dereferences that null at 0x0044756c (`mov ecx, [eax+0x50]`),
+  //    `Squadize` reads the null squad's field at +0x50 (0x0044756c),
   //    a latent crash there and the one place this engine does not follow:
   //    `kNoSquad` comes back, the caller lists nothing, and the body stays in
   //    the fresh squad the walk gave it.
