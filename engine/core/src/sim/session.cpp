@@ -62,6 +62,9 @@ bool parse_authored_int(std::string_view text, std::int32_t& out) noexcept {
 /// makes a loaded object a running one.
 constexpr std::string_view kIdleMethod = "idle";
 
+/// The script 0x004165a0 starts to build the smart pathfinder, as it names it.
+constexpr std::string_view kPathfinderInitScript = "data/pathfinderinit.vs";
+
 /// `"ISES"`, little-endian: the session section's own magic, beside the
 /// systems' in `save_systems.cpp`.
 constexpr std::uint32_t kSessionMagic = 0x53455349u;
@@ -1042,6 +1045,19 @@ std::size_t GameSession::start_match(const MatchOptions& options) {
   if (FogSystem* fog = fog_system_of(impl.world); fog != nullptr) {
     fog->start(impl.world);
     if (!chosen.exploration) fog->map().explore_all();
+  }
+
+  // The smart pathfinder's build, as the shipped `config.ini` (`NewPF = 1`)
+  // has the original start it at map load (0x0040acb0 -> 0x004165a0): a
+  // builder over the grid as it now stands, and `data/pathfinderinit.vs` to
+  // drive it a slice at a time. Until its `SPFDone` the grid search answers
+  // every route. The original frees the builder when the script will not
+  // start; so does this (docs/formats/pathfinder.md).
+  if (impl.chunk_for(kPathfinderInitScript) != script::kNoChunk) {
+    impl.movement.start_smart_build();
+    if (impl.scheduler.spawn_by_name(kPathfinderInitScript) == script::kNoScript) {
+      impl.movement.pathfinder().cancel_smart_build();
+    }
   }
 
   // The condition's script has to be in the library before anything can spawn

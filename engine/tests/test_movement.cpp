@@ -28,6 +28,7 @@
 #include "imperivm/core/game/localization.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
+#include "imperivm/core/sim/grid_search.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/objlist.hpp"
@@ -1029,12 +1030,9 @@ TEST(the_pathfinder_does_not_depend_on_its_scratch_state) {
   CHECK(repeated.expanded == reference.expanded);
 }
 
-TEST(a_reachable_goal_is_found_whatever_the_budget) {
-  // `gbr.exe`'s route search reaches every goal it can: the smart
-  // pathfinder's area search is budgeted at 65,536 areas (0x00413690), which
-  // no map comes near. A search over the grid alone therefore takes no
-  // budget: the grid's regions say beforehand that it will arrive. This one
-  // has to go the long way round a wall, far beyond fifty nodes.
+TEST(a_reachable_goal_is_found_round_a_wall) {
+  // The grid search (0x0041b140) goes the long way round a wall, well within
+  // its 8,000 cells.
   ObstructionGrid grid(64, 64);
   for (std::int32_t y = 0; y < 60; ++y) grid.set_cell(32, y, true);
 
@@ -1042,7 +1040,6 @@ TEST(a_reachable_goal_is_found_whatever_the_budget) {
   PathRequest request;
   request.start = Point{5 * 16 + 8, 5 * 16 + 8};
   request.goal = Point{60 * 16 + 8, 5 * 16 + 8};
-  request.node_budget = 50;
   const Path path = finder.find(grid, request);
   CHECK(path.status == PathStatus::found);
   REQUIRE(!path.waypoints.empty());
@@ -1050,13 +1047,11 @@ TEST(a_reachable_goal_is_found_whatever_the_budget) {
   CHECK(path.expanded > 50);
 }
 
-TEST(an_unreachable_goal_answers_the_reachable_cell_nearest_it_without_a_flood) {
-  // A goal sealed behind a solid wall is in a region the start does not
-  // reach. The original answers status 2 with a route to the area nearest
-  // the goal (0x004138d0: 0x00413690's best area, entered where the line from
-  // the goal first meets it, 0x0040e500); here, to the reachable cell whose
-  // centre is nearest the goal point -- found without flooding the start's
-  // side to learn that the goal is not on it.
+TEST(an_unreachable_goal_answers_the_reachable_cell_nearest_it) {
+  // A goal sealed behind a solid wall: the grid search (0x0041b140) floods
+  // the start's side -- 2,048 cells, inside its budget -- and, its heap
+  // empty, answers status 2 with the route to the expanded cell whose
+  // estimate is least, ended at that cell's centre (0x0041ba00).
   ObstructionGrid grid(64, 64);
   for (std::int32_t y = 0; y < 64; ++y) grid.set_cell(32, y, true);
 
@@ -1069,8 +1064,9 @@ TEST(an_unreachable_goal_answers_the_reachable_cell_nearest_it_without_a_flood) 
   REQUIRE(!path.waypoints.empty());
   CHECK(path.waypoints.back() == (Point{31 * 16 + 8, 40 * 16 + 8}));
   CHECK(path.length > 0);
-  // The start's side holds 2,048 cells; the search goes straight across it.
-  CHECK(path.expanded < 200);
+  // The start's side holds 2,048 cells; the search pops every one.
+  CHECK(path.expanded >= 2048);
+  CHECK(path.expanded <= GridSearch::kBudget + 1);
 
   // Standing on that cell already, there is nowhere nearer to go.
   PathRequest again = request;
@@ -1079,25 +1075,6 @@ TEST(an_unreachable_goal_answers_the_reachable_cell_nearest_it_without_a_flood) 
   CHECK(stay.status == PathStatus::partial);
   CHECK(stay.waypoints.size() == 1);
   CHECK(stay.length == 0);
-}
-
-TEST(a_grids_regions_follow_its_cells) {
-  // Four-connected: two free cells that touch only at a corner are apart,
-  // because the search steps diagonally only past two free orthogonals.
-  ObstructionGrid grid(4, 4);
-  for (std::int32_t i = 0; i < 4; ++i) {
-    for (std::int32_t j = 0; j < 4; ++j) grid.set_cell(i, j, true);
-  }
-  grid.set_cell(0, 0, false);
-  grid.set_cell(1, 1, false);
-  CHECK(grid.region_of(0, 0) != 0);
-  CHECK(grid.region_of(1, 1) != 0);
-  CHECK(grid.region_of(0, 0) != grid.region_of(1, 1));
-  CHECK(grid.region_of(2, 2) == 0);   // blocked
-  CHECK(grid.region_of(-1, 0) == 0);  // off the grid
-  // A change to the grid is seen at once.
-  grid.set_cell(1, 0, false);
-  CHECK(grid.region_of(0, 0) == grid.region_of(1, 1));
 }
 
 // --------------------------------------------------------------------------

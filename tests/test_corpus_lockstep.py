@@ -476,7 +476,7 @@ def test_a_seat_left_and_taken_back_twice_through_the_war(imconform, game_dir):
 
 #: The capture run's game and ceiling: a seed whose computers take a
 #: settlement from one another inside it (see the test).
-CAPTURE_SEED = 2
+CAPTURE_SEED = 8
 CAPTURE_TURNS = 4_000
 
 @pytest.mark.slow
@@ -507,7 +507,10 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     # has none by 6,000 and the first is seed 2's: p3 takes village #25 from p1
     # at 3,050. On the twelfth round's seed 2 is still the one: p3's hero
     # kills a p2 archer at 3,822 and p2 takes village #27 from p3 at 3,908;
-    # seed 7's capture at 2,553 comes before any kill. The peers are held to a war in
+    # seed 7's capture at 2,553 comes before any kill. On the thirteenth round's,
+    # where routes come from the smart pathfinder, seed 2's first capture is at
+    # 5,219 and the first under 4,000 is seed 8's: a p1 archer kills a p3
+    # maceman at 2,045 and p3 takes village #11 from p1 at 3,588. The peers are held to a war in
     # which that happens; which seed shows it is the AI's, and the capture is
     # asserted on the solo run rather than assumed.
     solo = subprocess.run(

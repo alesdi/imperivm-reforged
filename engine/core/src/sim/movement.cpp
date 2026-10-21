@@ -263,6 +263,10 @@ ObstructionGrid& MovementSystem::mutable_grid() noexcept {
   return grid_;
 }
 
+void MovementSystem::start_smart_build() { finder_.start_smart_build(grid_); }
+
+bool MovementSystem::smart_build(SpfCall call) { return finder_.smart_build(call, grid_); }
+
 std::size_t MovementSystem::lower_bound(ObjectId id) const noexcept {
   std::size_t lo = 0;
   std::size_t hi = states_.size();
@@ -418,17 +422,20 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   // that owns a lock, the nearest nobody stands on or has reserved, so a unit
   // whose own side of the target is taken goes round to another.
   const bool owner = lock_owner(id, move);
-  const RingGoal goal = ring_goal(world, owner ? id : kNoObject, from, dest, range, move.min_range);
+  RingGoal goal = ring_goal(world, owner ? id : kNoObject, dest, range, move.min_range);
+  const OwnerSpot owner_test(*this, world, id);
   PathRequest request;
   request.start = from;
   request.goal = goal.at;
-  request.arrival_range = 0;
-  request.node_budget = node_budget_;
+  request.goal_points = goal.points;
+  request.goal_points_given = true;
   request.ignore_passability = ignores_passability(world, id);
+  request.owner = owner ? &owner_test : nullptr;
   // One search, as 0x00419110 runs it: the gates the route crosses, and the
   // search again round those that bar this mover (a mover that ignores
-  // passability walks its straight line regardless; see `sim/gate.hpp`); then
-  // a route that owns a lock is cut back to a free spot.
+  // passability walks its straight line regardless; see `sim/gate.hpp`). A
+  // route that owns a lock and does not arrive is cut back to a free spot
+  // inside the search (0x0041ba00).
   bool cut = false;
   const auto search = [&]() {
     Path found = finder_.find(grid_, request);
@@ -436,11 +443,7 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
       world.gate_lines().refresh(world);
       found = route_past_gates(world, id, from, request, std::move(found));
     }
-    cut = false;
-    if (owner && found.usable() && found.waypoints.size() >= 2) {
-      cut = truncate_to_free(world, id, found.waypoints);
-      if (cut) found.length = polyline_length(found.waypoints);
-    }
+    cut = found.cut;
     return found;
   };
   Path path = search();
@@ -466,7 +469,11 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
     Point spot;
     if (free_spot(world, id, dest, spot) &&
         isqrt(dist_sq(from, dest)) - isqrt(dist_sq(spot, dest)) > kFreeSpotGain) {
-      request.goal = spot;
+      // The spot laid as a band of 0: itself, where a unit can stand, and
+      // struck off like any goal point.
+      goal = ring_goal(world, id, spot, 0, 0);
+      request.goal = goal.at;
+      request.goal_points = goal.points;
       path = search();
       if (path.status == PathStatus::arrived) path.status = PathStatus::partial;
       move.free_spot_aimed = true;
@@ -521,9 +528,13 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   // 0x00418fb0 over the route as it will be walked.
   move.gate_crossings.clear();
   if (!request.ignore_passability) world.gate_lines().crossings(move.waypoints, move.gate_crossings);
-  // A route cut back from a taken end no longer reaches its goal, and one
-  // re-aimed at a free spot was never laid to the band.
-  move.path_complete = path.status == PathStatus::found && !cut && !aimed;
+  // A route cut back from a taken end no longer reaches its goal, one
+  // re-aimed at a free spot was never laid to the band, and one laid with no
+  // goal point left -- status 0 from the straight line's walk to a free spot
+  // (0x0040b580) -- ends on no goal point either, unless it ends inside the
+  // band anyway (a mover that ignores passability, sent onto a wall).
+  move.path_complete = path.status == PathStatus::found && !cut && !aimed &&
+                       (goal.free || within(path.waypoints.back(), dest, range));
   move.has_path = true;
   mark_path(world, id, true);
   move.stride = formation_stride_or_walk(world, id, move);
@@ -550,6 +561,29 @@ Path MovementSystem::route_past_gates(World& world, ObjectId id, Point from,
     if (gate != nullptr && gate_bars(world, *gate, self->state.owner)) ++enemies;
   }
   if (enemies == 0) return first;
+  if (finder_.smart_installed()) {
+    // The smart pathfinder is handed each gate that bars the mover (its
+    // method 0x00414ae0, 0x0041945f..0x00419468): the connections whose
+    // routes meet the gate's axis are closed for one search -- the grid is
+    // not touched -- and opened again after it (0x00415950,
+    // 0x00419537..0x00419548).
+    gates_.clear();
+    lines.enemy_gates(world, self->state.owner, from, world.time(), gates_);
+    std::size_t closed = 0;
+    for (const GateLines::Line* line : gates_) closed += finder_.close_gate(line->gate, line->a, line->b);
+    // Nothing closed is the same search again, and the same route.
+    if (closed == 0) {
+      finder_.open_gates();
+      return first;
+    }
+    ++counters_.gate_searches;
+    Path second = finder_.find(grid_, request);
+    finder_.open_gates();
+    if (first.length <= kGateShortRoute && enemies == 1 && second.status != PathStatus::found) {
+      return first;
+    }
+    return second;
+  }
   // Every gate on the map that bars the mover, laid for one search.
   barrier_.clear();
   lines.lay_enemy_gates(world, self->state.owner, from, world.time(), barrier_);
@@ -830,7 +864,7 @@ constexpr std::int32_t kRingMaxRadius = 1000;
 
 }  // namespace
 
-MovementSystem::RingGoal MovementSystem::ring_goal(const World& world, ObjectId owner, Point from,
+MovementSystem::RingGoal MovementSystem::ring_goal(const World& world, ObjectId owner,
                                                    Point centre, std::int32_t range,
                                                    std::int32_t min_range) const {
   // `0x00417830` gives the search a ring of sixteen points at `r - 1` from the
@@ -924,11 +958,11 @@ MovementSystem::RingGoal MovementSystem::ring_goal(const World& world, ObjectId 
     }
   }
 
-  // The smart pathfinder then routes to the first goal cell its search
-  // reaches. **Inferred:** that cell is read as the goal point nearest the
-  // start in a straight line, the first in ring order on a tie; this engine's
-  // search is its own A*, which is then run to that one point.
-  std::int64_t best = -1;
+  // Every point is handed to the search in the order it was laid, marked
+  // live or struck: the search ends at the first popped cell whose first
+  // point is live, and its straight line runs to the live point nearest the
+  // start (`sim/grid_search.hpp`).
+  ring_goal_points_.clear();
   for (const Point& p : goals) {
     bool struck = false;
     for (const StaticLock& taker : takers) {
@@ -938,13 +972,10 @@ MovementSystem::RingGoal MovementSystem::ring_goal(const World& world, ObjectId 
         break;
       }
     }
-    if (struck) continue;
-    const std::int64_t gap = dist_sq(from, p);
-    if (best < 0 || gap < best) {
-      best = gap;
-      out = RingGoal{p, true};
-    }
+    ring_goal_points_.push_back(GoalPoint{p, !struck});
+    if (!struck) out.free = true;
   }
+  out.points = ring_goal_points_;
   return out;
 }
 
@@ -1055,31 +1086,6 @@ bool MovementSystem::arrival_spot_free(const World& world, ObjectId id, const Mo
   // `IsArrived` asks nothing more than the band.
   if (!lock_owner(id, move)) return true;
   return spot_free(world, id, here, radius_of(world, id));
-}
-
-bool MovementSystem::truncate_to_free(const World& world, ObjectId id,
-                                      std::vector<Point>& waypoints) const {
-  // The smart pathfinder, handed an owner (`0x004141bd` .. `0x00414263`),
-  // walks its route back from the end one cell at a time and stops at the
-  // first cell whose centre is a free spot; it never tests the start's cell,
-  // and a route cut to that cell alone leaves the unit where it stands.
-  // **Inferred:** this engine's route is a smoothed polyline rather than the
-  // search's cell chain, so it is walked back in steps of one cell's width
-  // along its length, and the point tested is the point on the line.
-  const std::int32_t radius = radius_of(world, id);
-  const std::int64_t length = polyline_length(waypoints);
-  for (std::int64_t along = length; along > 0; along -= kCollisionCellSize) {
-    if (along != length && along < kCollisionCellSize) break;
-    std::size_t segment = 0;
-    const Point p = point_along(waypoints, along, &segment);
-    if (!spot_free(world, id, p, radius)) continue;
-    if (along == length) return false;
-    waypoints.resize(segment + 1);
-    if (waypoints.back() != p) waypoints.push_back(p);
-    return true;
-  }
-  waypoints.resize(1);
-  return true;
 }
 
 void MovementSystem::recast(World& world, std::size_t entry, Point here, GameTime now) {
@@ -2489,30 +2495,39 @@ HostOutcome has_path_impl(CallContext& ctx) {
   return answer(false);
 }
 
-/// `PathTo`'s goal: of the sixteen points at exactly `range` round `dest`
-/// (0x00409cf0) that the grid lets a unit stand on (0x00409b80), the one
-/// nearest `from` in a straight line, the first in ring order on a tie; `dest`
-/// itself for a `range` of 0 or when none is passable.
-Point path_to_goal(const ObstructionGrid& grid, Point from, Point dest, std::int32_t range) {
-  if (range <= 0) return dest;
-  Point best_at = dest;
-  std::int64_t best = -1;
-  for (const auto& dir : kRingDirections) {
-    const Point p{
-        truncate_fixed((static_cast<std::int64_t>(dest.x) << kRingShift) +
-                       static_cast<std::int64_t>(range) * dir[0]),
-        truncate_fixed((static_cast<std::int64_t>(dest.y) << kRingShift) +
-                       static_cast<std::int64_t>(range) * dir[1])};
+/// `PathTo`'s goal points: the sixteen at exactly `range` round `dest`
+/// (0x00409cf0), in ring order, each laid only where the grid lets a unit
+/// stand (0x00409b80); `dest` alone for a `range` of 0. Where the search heads
+/// is the one nearest `dest` (the first on a tie, 0x00409c9e), or `dest` when
+/// none is laid (0x0040a34b). `PathTo` names no owner, so none is struck off.
+Point path_to_goals(const ObstructionGrid& grid, Point dest, std::int32_t range,
+                    std::vector<GoalPoint>& out) {
+  out.clear();
+  const auto lay = [&](Point p) {
     const std::int32_t cx = ObstructionGrid::cell_of(p.x);
     const std::int32_t cy = ObstructionGrid::cell_of(p.y);
-    if (!grid.in_bounds(cx, cy) || grid.blocked_cell(cx, cy)) continue;
-    const std::int64_t gap = dist_sq(from, p);
-    if (best < 0 || gap < best) {
-      best = gap;
-      best_at = p;
+    if (grid.in_bounds(cx, cy) && !grid.blocked_cell(cx, cy)) out.push_back(GoalPoint{p, true});
+  };
+  if (range <= 0) {
+    lay(dest);
+  } else {
+    for (const auto& dir : kRingDirections) {
+      lay(Point{truncate_fixed((static_cast<std::int64_t>(dest.x) << kRingShift) +
+                               static_cast<std::int64_t>(range) * dir[0]),
+                truncate_fixed((static_cast<std::int64_t>(dest.y) << kRingShift) +
+                               static_cast<std::int64_t>(range) * dir[1])});
     }
   }
-  return best_at;
+  Point heading = dest;
+  std::int64_t inner = -1;
+  for (const GoalPoint& p : out) {
+    const std::int64_t gap = dist_sq(p.at, dest);
+    if (inner < 0 || gap < inner) {
+      inner = gap;
+      heading = p.at;
+    }
+  }
+  return heading;
 }
 
 /// Where `PathTo` searches from: the unit's position (`vtbl+0x3c`), unless
@@ -2604,8 +2619,10 @@ HostOutcome path_to_impl(CallContext& ctx) {
   if (held_by_carrier(*self.world, self.id)) return HostOutcome::ok_with(Value::integer(1000000));
   PathRequest request;
   request.start = path_to_start(*self.world, self.movement->grid(), self.id, dest);
-  request.goal = path_to_goal(self.movement->grid(), request.start, dest, range);
-  request.arrival_range = 0;
+  std::vector<GoalPoint> goals;
+  request.goal = path_to_goals(self.movement->grid(), dest, range, goals);
+  request.goal_points = goals;
+  request.goal_points_given = true;
   request.ignore_passability = self.movement->ignores_passability(*self.world, self.id);
   const Path path = self.movement->pathfinder().find(self.movement->grid(), request);
   if (!path.usable() || path.length <= 0) return none;

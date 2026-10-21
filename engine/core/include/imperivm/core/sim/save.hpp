@@ -401,7 +401,14 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// finishing commands (system section version 42). A version-48 file would
 /// load every resting object with an empty queue and its `idle` running
 /// outside it, which nothing in this build ends.
-inline constexpr std::uint32_t kStateVectorVersion = 49;
+/// 50: the movement section carries the smart pathfinder's build -- whether
+/// `0x004165a0`'s builder was made and every `SPF*` call made on it since
+/// (`PathFinder::smart_calls`; system section version 43) -- and a load makes
+/// the structure again from the saved map's grid by those calls. Not hashed.
+/// A version-49 file has no build, so a loaded match would route with the
+/// grid search for good while its `pathfinderinit.vs` thread went on calling
+/// commands on a builder that was never made.
+inline constexpr std::uint32_t kStateVectorVersion = 50;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

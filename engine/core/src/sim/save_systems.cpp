@@ -81,7 +81,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 42;  // 42: no finishing commands in the command section (an `onfinish` runs inside the end that calls it), and a command's list (`Command::list`, a ship's `unboard`); 41: every combatant's danger counter and its stamp (`Combatant::danger`, `danger_time`), and a hero's experience pool (`HeroRecord::experience_pool`); 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 43;  // 43: the smart pathfinder's build in the movement section, as the calls that made it (`PathFinder::smart_calls`); 42: no finishing commands in the command section (an `onfinish` runs inside the end that calls it), and a command's list (`Command::list`, a ship's `unboard`); 41: every combatant's danger counter and its stamp (`Combatant::danger`, `danger_time`), and a hero's experience pool (`HeroRecord::experience_pool`); 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -766,6 +766,14 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     put_bool(out, f.path);
     put_bool(out, f.should_lock);
   }
+  // The smart pathfinder's build (`sim/smart_path.hpp`): whether one was
+  // started, and the `SPF*` calls made on it, in order. The structure is a
+  // function of the grid the builder copied -- the map's, which the session
+  // saves -- and of those calls, so a load makes it again rather than
+  // carrying its areas, directions and runs.
+  put_bool(out, finder_.smart_started());
+  bytes::put_u32(out, static_cast<std::uint32_t>(finder_.smart_calls().size()));
+  for (const std::uint8_t call : finder_.smart_calls()) bytes::put_u8(out, call);
 }
 
 Status MovementSystem::deserialize(std::span<const std::byte> data) {
@@ -875,9 +883,25 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
     if (i != 0 && f.hero <= formations.back().hero) return FormatError::malformed;
     formations.push_back(std::move(f));
   }
+  bool smart_started = false;
+  std::uint32_t smart_count = 0;
+  if (!get_bool(reader, smart_started) || !reader.u32(smart_count)) return FormatError::truncated;
+  if (smart_count > reader.remaining()) return FormatError::truncated;
+  std::vector<std::uint8_t> smart_calls;
+  smart_calls.reserve(smart_count);
+  for (std::uint32_t i = 0; i < smart_count; ++i) {
+    std::uint8_t call = 0;
+    if (!reader.u8(call)) return FormatError::truncated;
+    if (call > static_cast<std::uint8_t>(SpfCall::done)) return FormatError::malformed;
+    smart_calls.push_back(call);
+  }
   if (const Status status = finish(reader); !status.ok()) return status;
   states_ = std::move(states);
   formation_objects_ = std::move(formations);
+  // The grid is the saved map's by now (the session sets it ahead of the
+  // systems), so the build made again copies what the original builder did;
+  // the cells its areas finder blocks go back in without a new generation.
+  finder_.replay_smart(smart_started, smart_calls, grid_);
   grid_generation_ = generation;
   static_locks_ = std::move(locks);
   static_locks_built_ = built;

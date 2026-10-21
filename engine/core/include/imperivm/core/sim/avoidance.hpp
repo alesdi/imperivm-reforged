@@ -110,16 +110,15 @@
 //     bit 1 is set at `[retry+0x20]`), which stops the owner on the first
 //     point that is passable and free and walks on otherwise; with no owner
 //     it takes no step. Built: `MovementSystem::request_stop` and `decide`.
-//   * the smart pathfinder, handed the owner (`0x004141bd` .. `0x00414263`),
-//     which cuts a found route back from its end, one cell at a time, to the
-//     first cell whose centre is free, and never tests the start's cell.
-//     Built as `truncate_to_free`, **inferred** onto this engine's smoothed
-//     polyline in steps of a cell's width. The condition at `0x004141cc` is
-//     that the search reached no goal point; this engine cuts every route with
-//     an owner, which comes to the same, because a goal point it can reach is
-//     one nothing covered when it searched (below).
-//   * `0x0040b580`'s walk towards an unreachable goal in radius-sized steps,
-//     inside a search this engine does not have. Not built.
+//   * the grid search, handed the owner (`0x0041ba00`), which cuts a route
+//     that reached no goal cell back along its cells, from the one it gave
+//     up at, to the first whose centre is free -- the start itself when none
+//     is. The smart pathfinder does the same with its own cells
+//     (`0x004141bd` .. `0x00414263`). Built: inside the grid search
+//     (`sim/grid_search.cpp`), the request's `owner`.
+//   * `0x0040b580`'s walk from where the search heads back towards the start
+//     in radius-sized steps, when no goal point is left and the way is open.
+//     Built: the grid search's straight line.
 //   * the free-spot search `0x004180b0`, which the route search `0x00419110`
 //     asks when an owner's search found no goal point left and got nowhere
 //     (`0x00419197`: the path's status 1 and a route of no length). Built:
@@ -134,16 +133,17 @@
 // The search's goal is not the band's centre either. `0x00417830` gives it
 // rings of sixteen points (`0x0040a1e0`, `0x00409cf0`) at `r - 1` for `r` from
 // the range down to the minimum in steps of 40, six at most -- a ring at 0 is
-// the centre once -- and the route ends on the first its search reaches --
-// **inferred** here as the one nearest the unit in a straight line;
-// `MovementSystem::ring_goal`. A route to the centre stepped straight over a
+// the centre once -- and the route ends on the first its search reaches: the
+// straight line's live point nearest the unit, or the A*'s first popped cell
+// whose first point is live (`MovementSystem::ring_goal` lays them, the grid
+// search reads them). A route to the centre stepped straight over a
 // band narrower than a walk step and ended on the target itself, which is
 // where report #13's attackers all stood.
 //
 // ### Going round
 //
-// For an owner, the smart pathfinder strikes goal points off before it
-// searches (`0x0040a310`, at `0x004138fe`): every standing unit and every lock
+// For an owner, either search strikes goal points off before it searches
+// (`0x0040a310`, at `0x0041bc60`'s start and at `0x004138fe`): every standing unit and every lock
 // but the owner's own -- the free-spot test's takers, `0x00409650` -- strikes
 // the points within its radius plus the owner's, **that distance included**,
 // among the bodies whose centre lies in the goal set's box widened by twice
@@ -153,7 +153,8 @@
 // waited before.
 //
 // With no goal point left (status 1) the search heads for the one nearest the
-// centre, as they were added (`[0x008bfc10]`), and the route is cut back. When
+// centre, as they were added (`[0x008bfc10]`): the straight line walks back
+// from it to a free spot, or the A*'s route is cut back. When
 // that gets the unit nowhere, and the retry has not already (flags 8 and 0x40
 // of `[retry+0x20]`), the route search sets flag 8 and asks `0x004180b0`:
 //

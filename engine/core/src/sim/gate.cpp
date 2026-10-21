@@ -299,8 +299,8 @@ void GateLines::crossings(std::span<const Point> route, std::vector<GateCrossing
                    [](const GateCrossing& x, const GateCrossing& y) { return x.at < y.at; });
 }
 
-void GateLines::lay_enemy_gates(const World& world, PlayerId owner, Point from, GameTime now,
-                                CellOverlay& out) const {
+void GateLines::enemy_gates(const World& world, PlayerId owner, Point from, GameTime now,
+                            std::vector<const Line*>& out) const {
   const std::int64_t rubble = kGateRubbleReach;
   for (const Line& line : lines_) {
     const WorldObject* gate = world.find(line.gate);
@@ -309,7 +309,16 @@ void GateLines::lay_enemy_gates(const World& world, PlayerId owner, Point from, 
     // like any other (`isqrt` against 1,500, inclusive).
     if (gate->state.health <= 0 && distance(from, gate->state.position) <= rubble) continue;
     if (gate_fully_open(*gate, now)) continue;
-    for (const GateCell& cell : line.cells) out.add(cell.x, cell.y);
+    out.push_back(&line);
+  }
+}
+
+void GateLines::lay_enemy_gates(const World& world, PlayerId owner, Point from, GameTime now,
+                                CellOverlay& out) const {
+  std::vector<const Line*> laid;
+  enemy_gates(world, owner, from, now, laid);
+  for (const Line* line : laid) {
+    for (const GateCell& cell : line->cells) out.add(cell.x, cell.y);
   }
 }
 
