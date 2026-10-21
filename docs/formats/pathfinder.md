@@ -345,7 +345,17 @@ and -1 when the search answered 0. A unit aboard a ship answers 1,000,000 withou
 
 The goal points are one ring of sixteen at exactly the range round the goal (0x00409cf0,
 each tested passable, 0x00409b80), or the goal alone for a range of 0, so a unit already
-inside the band is answered the walk out to the ring. The start of a unit at `(-1,-1)` is
+inside the band is answered the walk out to the ring. The ring builder stops after its first
+point only for a range of exactly 0: a negative range lays all sixteen points, each the range
+times its direction, which is the same ring at the range's size started from the opposite
+side. So `PathTo(pt, -100)` is answered the walk to the ring of radius 100, not to the point;
+which point is nearest is the same either way, and only a tie between two is broken the other
+way round. The rest of the call adds nothing: the third argument is popped and never read,
+the object form's goal is the target's `posRH` (`vtbl+0xc8`, the position for anything that
+is not a unit) with both class radii added to the range, and no owner is named, so no goal
+point is struck off as taken (0x0040a310 strikes only for an owner). The held start reads
+the holder's settlement and its central building without testing either for null; this
+engine falls back to where the unit resolves instead of faulting. The start of a unit at `(-1,-1)` is
 the exit point of its holder's settlement's central building towards the goal
 (0x005de2b1 .. 0x005de30b: `[holder+0xc]`, `[settlement+0x8c]`, 0x004db6c0 with the class's
 `water_unit`), which takes the door picker's one draw (0x0056fa40) when the building has

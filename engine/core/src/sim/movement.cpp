@@ -2497,7 +2497,10 @@ HostOutcome has_path_impl(CallContext& ctx) {
 
 /// `PathTo`'s goal points: the sixteen at exactly `range` round `dest`
 /// (0x00409cf0), in ring order, each laid only where the grid lets a unit
-/// stand (0x00409b80); `dest` alone for a `range` of 0. Where the search heads
+/// stand (0x00409b80); `dest` alone for a `range` of exactly 0 -- the ring
+/// builder stops after its first point only then, so a negative range lays
+/// the same sixteen points with the ring started from the opposite direction
+/// (`range * dir` turned round). Where the search heads
 /// is the one nearest `dest` (the first on a tie, 0x00409c9e), or `dest` when
 /// none is laid (0x0040a34b). `PathTo` names no owner, so none is struck off.
 Point path_to_goals(const ObstructionGrid& grid, Point dest, std::int32_t range,
@@ -2508,7 +2511,7 @@ Point path_to_goals(const ObstructionGrid& grid, Point dest, std::int32_t range,
     const std::int32_t cy = ObstructionGrid::cell_of(p.y);
     if (grid.in_bounds(cx, cy) && !grid.blocked_cell(cx, cy)) out.push_back(GoalPoint{p, true});
   };
-  if (range <= 0) {
+  if (range == 0) {
     lay(dest);
   } else {
     for (const auto& dir : kRingDirections) {

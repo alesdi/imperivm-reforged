@@ -2143,6 +2143,29 @@ TEST(path_to_answers_the_length_of_a_partial_route) {
   CHECK(invoke(registry, CallKind::member, "PathTo", 3, beyond).value.as_integer() == 21 * 16);
 }
 
+/// `PathTo`'s ring builder (0x00409cf0) stops after one point only for a
+/// range of exactly 0. A negative range is the same ring of sixteen, each
+/// point the range times its direction, so the walk is to the ring at the
+/// range's size and not to the point.
+TEST(path_to_with_a_negative_range_walks_to_the_ring_and_not_the_point) {
+  World world;
+  MovementSystem movement;
+  movement.set_grid(open_field(128));
+  attach(world, movement);
+  HostRegistry registry;
+  register_movement_host(registry);
+
+  const ObjectId unit = spawn_unit(world, movement, Point{1000, 1000}, 100);
+  const auto path_to = [&](std::int32_t range) {
+    HostCall call(world, {Value::object(kTypeObj, unit), pack_point(Point{1300, 1000}),
+                          Value::integer(range), Value::integer(0)});
+    return invoke(registry, CallKind::member, "PathTo", 3, call).value.as_integer();
+  };
+  CHECK(path_to(0) == 300);
+  CHECK(path_to(100) == 200);
+  CHECK(path_to(-100) == 200);
+}
+
 TEST(both_forms_of_goto_drop_the_combat_target) {
   // The point form empties `[unit+0x1a8]` once the unit is out of any holder
   // (0x005d639a), the object form on every entry before anything else
