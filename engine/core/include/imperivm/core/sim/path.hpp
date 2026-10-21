@@ -43,12 +43,15 @@
 // (0x0041bc60, `sim/grid_search.hpp`) answers every request until
 // `DATA\PATHFINDERINIT.VS` has built the *smart pathfinder* (0x004138d0), and
 // the smart pathfinder hands it every request whose goal lies in the start's
-// area or one joined to it. This engine reproduces the grid search and routes
-// with it throughout: the smart pathfinder is not built. The doc's "What
-// differs" says what that changes.
+// area or one joined to it. This engine reproduces both and the switch:
+// `GameSession::start_match` starts the build, the script's `SPFDone`
+// installs the smart pathfinder (`sim/smart_path.hpp`), and `PathFinder::find`
+// asks whichever is installed. The doc's "What differs" lists what is guarded
+// or chosen here.
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <span>
 #include <vector>
@@ -272,6 +275,9 @@ class CellOverlay {
            static_cast<std::uint32_t>(cx);
   }
   std::vector<std::uint64_t> keys_;
+  /// One bit per row of the box, set where a row holds a cell: most tests of
+  /// a long line are answered by it before the search of the keys.
+  std::vector<std::uint64_t> rows_;
   std::int32_t min_x_ = 0;
   std::int32_t min_y_ = 0;
   std::int32_t max_x_ = -1;
@@ -376,14 +382,32 @@ struct Path {
 
 class GridSearch;
 class GoalCells;
+class SmartBuild;
+class SmartPathfinder;
+
+/// The nine `SPF*` commands, in the order `DATA\PATHFINDERINIT.VS` calls
+/// them. The values are saved (`PathFinder::smart_calls`).
+enum class SpfCall : std::uint8_t {
+  find_areas = 0,     ///< `SPFFindAreas_Quant`
+  init_data = 1,      ///< `SPFInitData`
+  init_direction = 2, ///< `SPFInitDirectionData`
+  init_point_to_area = 3, ///< `SPFInitPointToAreaData`
+  init_connect = 4,   ///< `SPFInitConnectData`
+  connect_row = 5,    ///< `SPFCalcConnectHighRes_Quant`
+  increase = 6,       ///< `SPFIncreaseConnect`
+  increase_step = 7,  ///< `SPFIncreaseConnect_Quant`
+  done = 8,           ///< `SPFDone`
+};
 
 /// The route search: the pointer every request goes through
 /// (`[0x008c528c]`, `vtbl+8`).
 ///
-/// It is the grid search (`sim/grid_search.hpp`, 0x0041bc60), as the
-/// original's is before `SPFDone` installs the smart pathfinder (0x004138d0),
-/// which is not built here (docs/formats/pathfinder.md). The scratch arrays
-/// it keeps are not world state and none of them is hashed.
+/// It is the grid search (`sim/grid_search.hpp`, 0x0041bc60) until `SPFDone`
+/// installs the smart pathfinder (`sim/smart_path.hpp`, 0x004138d0), which
+/// the nine `SPF*` commands build on a builder `start_smart_build` makes
+/// (docs/formats/pathfinder.md). The scratch arrays it keeps are not world
+/// state and none of them is hashed; the build is saved as the calls that
+/// made it (`smart_calls`), and a load makes them again.
 class PathFinder {
  public:
   PathFinder();
@@ -395,12 +419,64 @@ class PathFinder {
 
   [[nodiscard]] Path find(const ObstructionGrid& grid, const PathRequest& request);
 
+  /// 0x004165a0's builder, over a copy of `live` as it is now. Nothing while
+  /// a builder exists. Forgets the calls of any earlier build.
+  void start_smart_build(const ObstructionGrid& live);
+  /// The builder freed and nothing of it kept, as 0x004165a0 frees it when
+  /// its script will not start.
+  void cancel_smart_build();
+  /// One `SPF*` command on the builder; the three `_Quant` calls answer
+  /// whether more remains. With no builder it does nothing and answers false
+  /// (the original reads its builder without a test). `live` is the grid
+  /// the search uses: the areas finder's end sets cells blocked in it, and
+  /// the connections are laid over it.
+  bool smart_build(SpfCall call, ObstructionGrid& live);
+  [[nodiscard]] bool smart_building() const noexcept { return build_ != nullptr; }
+  [[nodiscard]] bool smart_installed() const noexcept { return smart_ != nullptr; }
+  [[nodiscard]] const SmartPathfinder* smart() const noexcept { return smart_.get(); }
+
+  /// Whether a build was started, and every command made on it since, in
+  /// order: what a saved game keeps of the smart pathfinder.
+  [[nodiscard]] bool smart_started() const noexcept { return smart_started_; }
+  [[nodiscard]] const std::vector<std::uint8_t>& smart_calls() const noexcept {
+    return smart_calls_;
+  }
+  /// Make the build again from `live` -- the grid as the map laid it, before
+  /// the areas finder blocked anything -- by its calls.
+  void replay_smart(bool started, std::span<const std::uint8_t> calls, ObstructionGrid& live);
+
+  /// The smart pathfinder's gate (its methods 0x00414ae0 and 0x00415950):
+  /// once it is installed a gate is not laid into the grid; every connection
+  /// whose stored route meets the gate's axis `a`..`b` is closed instead,
+  /// until `open_gates`. Answers how many connections it closed; nothing
+  /// before the smart pathfinder is installed. Each gate's connections are
+  /// found once and kept by its id, as the original keeps them.
+  std::size_t close_gate(std::uint32_t gate, Point a, Point b);
+  /// Open every connection `close_gate` closed.
+  void open_gates();
+
   /// Cells the grid search has popped since construction. A diagnostic.
   [[nodiscard]] std::uint64_t total_expanded() const noexcept;
 
  private:
+  bool apply(SpfCall call, ObstructionGrid& live);
+
+  /// A gate's connections, found once (0x00412540) with the axis they were
+  /// found for.
+  struct GateConnections {
+    Point a;
+    Point b;
+    std::vector<std::uint32_t> connections;
+  };
+
   std::unique_ptr<GridSearch> grid_;
   std::unique_ptr<GoalCells> goals_;
+  std::unique_ptr<SmartBuild> build_;
+  std::unique_ptr<SmartPathfinder> smart_;
+  bool smart_started_ = false;
+  std::vector<std::uint8_t> smart_calls_;
+  std::map<std::uint32_t, GateConnections> gate_connections_;
+  std::vector<std::uint32_t> closed_;
 };
 
 /// The goal points a request names, as `PathFinder::find` registers them:

@@ -18,6 +18,7 @@
 #include "imperivm/core/sim/gaika_table.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/match.hpp"
+#include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/player.hpp"
@@ -1227,33 +1228,38 @@ HostOutcome f_ai_start(CallContext& ctx) {
 /// and 0x006a4140) are the original's moments to build; the script exists to
 /// spread the build over frames, `Sleep` by `Sleep`.
 ///
-/// **This engine builds no smart pathfinder.** It routes with the grid
-/// search (0x0041bc60, `sim/grid_search.hpp`) throughout -- what the original
-/// routes with before `SPFDone`, and what `NewPF = 0` routes with for good
-/// (docs/formats/pathfinder.md). So each `_Quant` answers **false**, nothing
-/// remains, and the stages finish at once: the script, if something runs it,
-/// runs its shape in one pass of sleeps and ends, as it does in the original
-/// once the build is through. The AI's own questions (`CheckLsaPath`,
-/// `IsWaterLsa`, `GAIKA::LSA`) never read this structure; they walk the
-/// large-scale areas (`sim/lsa.hpp`).
-///
-/// **What differs, labelled.** The original's `_Quant` answers true for as
-/// many slices as the map needs, so its script runs for many frames where
-/// this one ends at the first; nothing in this engine starts the script at
-/// map load (0x0040acb0 -> 0x004165a0); and `SPFDone` installs nothing. The
-/// nine are bound so the script ends cleanly rather than trapping. Recorded
-/// `partial` for the structure they would build, which is not modelled.
-HostOutcome f_spf_quant(CallContext& ctx) {
+/// **Here** each command is `MovementSystem::smart_build`, which is
+/// `PathFinder::smart_build` on the builder `GameSession::start_match` makes
+/// when it starts the script (`sim/smart_path.hpp`). The stages are the
+/// original's; what this engine does differently is in
+/// docs/formats/pathfinder.md, "What differs". With no builder -- a world
+/// whose session never started the build -- each answers false or nothing
+/// where the original would read a null builder.
+HostOutcome spf_call(CallContext& ctx, SpfCall call, bool answers) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SPF: no world");
-  return HostOutcome::ok_with(Value::boolean(false));
+  MovementSystem* movement = movement_system(*world);
+  const bool more = movement != nullptr && movement->smart_build(call);
+  return answers ? HostOutcome::ok_with(Value::boolean(more)) : HostOutcome::ok_void();
 }
 
-HostOutcome f_spf_step(CallContext& ctx) {
-  World* world = world_of(ctx);
-  if (world == nullptr) return HostOutcome::failed("SPF: no world");
-  return HostOutcome::ok_void();
+HostOutcome f_spf_find_areas(CallContext& ctx) { return spf_call(ctx, SpfCall::find_areas, true); }
+HostOutcome f_spf_init_data(CallContext& ctx) { return spf_call(ctx, SpfCall::init_data, false); }
+HostOutcome f_spf_init_direction(CallContext& ctx) {
+  return spf_call(ctx, SpfCall::init_direction, false);
 }
+HostOutcome f_spf_init_pta(CallContext& ctx) {
+  return spf_call(ctx, SpfCall::init_point_to_area, false);
+}
+HostOutcome f_spf_init_connect(CallContext& ctx) {
+  return spf_call(ctx, SpfCall::init_connect, false);
+}
+HostOutcome f_spf_connect(CallContext& ctx) { return spf_call(ctx, SpfCall::connect_row, true); }
+HostOutcome f_spf_increase(CallContext& ctx) { return spf_call(ctx, SpfCall::increase, false); }
+HostOutcome f_spf_increase_step(CallContext& ctx) {
+  return spf_call(ctx, SpfCall::increase_step, true);
+}
+HostOutcome f_spf_done(CallContext& ctx) { return spf_call(ctx, SpfCall::done, false); }
 
 /// `AIStop(player)` -- 1 site, `3_Great_Losses_Egypt.bfhp`'s `Maps/1/Sequences/
 /// seq2.vs`, and one of the seven messages the trap sweep still prints.
@@ -5043,15 +5049,15 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
   registry.define(kFree, "CheckLsaPath", 3, &f_check_lsa_path);   //  3
   registry.define(kFree, "PrepareAiTransportShip", 5, &f_prepare_ai_transport_ship);  // 1
   // The pathfinder bootstrap, nine names over the one file that drives it.
-  registry.define(kFree, "SPFFindAreas_Quant", 0, &f_spf_quant);            // 1
-  registry.define(kFree, "SPFCalcConnectHighRes_Quant", 0, &f_spf_quant);   // 1
-  registry.define(kFree, "SPFIncreaseConnect_Quant", 0, &f_spf_quant);      // 1
-  registry.define(kFree, "SPFInitData", 0, &f_spf_step);                    // 1
-  registry.define(kFree, "SPFInitDirectionData", 0, &f_spf_step);           // 1
-  registry.define(kFree, "SPFInitPointToAreaData", 0, &f_spf_step);         // 1
-  registry.define(kFree, "SPFInitConnectData", 0, &f_spf_step);             // 1
-  registry.define(kFree, "SPFIncreaseConnect", 0, &f_spf_step);             // 1
-  registry.define(kFree, "SPFDone", 0, &f_spf_step);                        // 1
+  registry.define(kFree, "SPFFindAreas_Quant", 0, &f_spf_find_areas);          // 1
+  registry.define(kFree, "SPFCalcConnectHighRes_Quant", 0, &f_spf_connect);     // 1
+  registry.define(kFree, "SPFIncreaseConnect_Quant", 0, &f_spf_increase_step);  // 1
+  registry.define(kFree, "SPFInitData", 0, &f_spf_init_data);                   // 1
+  registry.define(kFree, "SPFInitDirectionData", 0, &f_spf_init_direction);     // 1
+  registry.define(kFree, "SPFInitPointToAreaData", 0, &f_spf_init_pta);         // 1
+  registry.define(kFree, "SPFInitConnectData", 0, &f_spf_init_connect);         // 1
+  registry.define(kFree, "SPFIncreaseConnect", 0, &f_spf_increase);             // 1
+  registry.define(kFree, "SPFDone", 0, &f_spf_done);                            // 1
   registry.define(kMember, "ApproachingSquads", 2, &m_gaika_approaching_squads);  // 1
   registry.define(kFree, "Eval", 6, &f_eval);                     //  2
   registry.define(kFree, "EnemyPlayersEval", 4, &f_enemy_players_eval);  // 1

@@ -684,8 +684,19 @@ class MovementSystem : public System {
   /// (`goto_active`). What the `Goto` family answers at its re-entry.
   [[nodiscard]] bool is_arrived(const World& world, ObjectId id) const;
 
-  /// The pathfinder. Scratch state only, never hashed, never serialised.
+  /// The pathfinder. Scratch state, never hashed; of it only the smart
+  /// pathfinder's build is saved, as the calls that made it.
   [[nodiscard]] PathFinder& pathfinder() noexcept { return finder_; }
+  [[nodiscard]] const PathFinder& pathfinder() const noexcept { return finder_; }
+
+  /// The smart pathfinder's builder over the grid as it is now (0x004165a0;
+  /// docs/formats/pathfinder.md). Nothing while one exists.
+  void start_smart_build();
+  /// One `SPF*` command (`PathFinder::smart_build`). The cells the areas
+  /// finder blocks at its end go into this system's grid **without** a new
+  /// generation: the original sets the bits in its live grid and searches
+  /// nothing again for it.
+  bool smart_build(SpfCall call);
 
   // -- avoidance ---------------------------------------------------------
 
@@ -815,7 +826,8 @@ class MovementSystem : public System {
   /// path would silently stop where it stood. So is each route's avoidance
   /// state -- stride, hold, step, sidestep offsets, wait, march -- and, after
   /// the table, the ownerless locks with the flag that they were made: none of
-  /// it hashed, all of it needed to resume where the save was taken.
+  /// it hashed, all of it needed to resume where the save was taken. Last,
+  /// the smart pathfinder's build as the `SPF*` calls made on it.
   void serialize(std::vector<std::byte>& out) const;
 
   /// Replace this system's state with the one in `bytes`.
@@ -824,10 +836,11 @@ class MovementSystem : public System {
   /// field has read cleanly, so a truncated or malformed save leaves the system
   /// exactly as it was.
   ///
-  /// **Not restored:** the obstruction grid, the formation table and the node
-  /// budget, which are load-time data the embedder supplies from the map and
-  /// the class data; and `PathFinder`, which the declaration above already
-  /// calls scratch state, never hashed, never serialised.
+  /// **Not restored:** the obstruction grid and the formation table, which are
+  /// load-time data the embedder supplies from the map and the class data --
+  /// the grid must be set first; and `PathFinder`'s scratch. The smart
+  /// pathfinder's build is restored by making its saved calls again over that
+  /// grid (`PathFinder::replay_smart`).
   [[nodiscard]] Status deserialize(std::span<const std::byte> bytes);
 
  private:
@@ -941,6 +954,8 @@ class MovementSystem : public System {
   /// A route search's gate lines, and the crossings it is tested against.
   CellOverlay barrier_;
   std::vector<GateCrossing> crossings_;
+  /// The gates handed to the smart pathfinder for one search.
+  std::vector<const GateLines::Line*> gates_;
   std::vector<Neighbour> neighbours_;
   /// Per entry, the game time its accumulator has been brought up to.
   std::vector<GameTime> since_;

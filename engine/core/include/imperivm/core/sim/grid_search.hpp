@@ -127,13 +127,23 @@ class GridSearch {
   /// connections with (0x00416200).
   Path run(CellView view, const PathRequest& request, const GoalCells& goals, bool both_ways);
 
+  /// 0x0040b580. True when it laid the route (`out` filled). The smart
+  /// pathfinder tries it too (0x004138d0).
+  bool straight_line(const CellView& view, const PathRequest& request, const GoalCells& goals,
+                     Path& out) const;
+
+  /// 0x0041ba00 with no owner, as the smart pathfinder's patch calls it
+  /// (0x00412260): the A* alone from `start` towards `heading`, and the cell
+  /// chain it ends at, start first and corners cut, in `out`.
+  void chain(const CellView& view, Cell start, Point heading, const GoalCells& goals,
+             std::vector<Cell>& out);
+
   /// Cells popped since construction. A diagnostic.
   [[nodiscard]] std::uint64_t total_expanded() const noexcept { return total_expanded_; }
 
  private:
-  /// 0x0040b580. True when it laid the route (`out` filled).
-  bool straight_line(const CellView& view, const PathRequest& request, const GoalCells& goals,
-                     Path& out) const;
+  /// The chain from node `node` back to the start, corners cut, reversed.
+  void build_chain(std::uint32_t node, std::vector<Cell>& out) const;
   /// 0x0041b140: the A\* proper. Answers the end node and whether it is a
   /// goal cell; `goal_point` is the goal point it ends at when it is.
   std::uint32_t astar(const CellView& view, Cell start, Point heading, const GoalCells& goals,

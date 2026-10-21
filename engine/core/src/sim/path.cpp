@@ -3,6 +3,7 @@
 #include "imperivm/core/sim/path.hpp"
 
 #include "imperivm/core/sim/grid_search.hpp"
+#include "imperivm/core/sim/smart_path.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -250,6 +251,7 @@ std::size_t ObstructionGrid::count_blocked() const noexcept {
 
 void CellOverlay::clear() noexcept {
   keys_.clear();
+  rows_.clear();
   min_x_ = 0;
   min_y_ = 0;
   max_x_ = -1;
@@ -272,10 +274,20 @@ void CellOverlay::add(std::int32_t cx, std::int32_t cy) {
 void CellOverlay::seal() {
   std::sort(keys_.begin(), keys_.end());
   keys_.erase(std::unique(keys_.begin(), keys_.end()), keys_.end());
+  rows_.clear();
+  if (keys_.empty()) return;
+  const std::size_t rows = static_cast<std::size_t>(max_y_ - min_y_) + 1;
+  rows_.assign((rows + 63) / 64, 0);
+  for (const std::uint64_t k : keys_) {
+    const std::size_t row = static_cast<std::size_t>(static_cast<std::int32_t>(k >> 32) - min_y_);
+    rows_[row / 64] |= std::uint64_t{1} << (row % 64);
+  }
 }
 
 bool CellOverlay::contains(std::int32_t cx, std::int32_t cy) const noexcept {
   if (cx < min_x_ || cx > max_x_ || cy < min_y_ || cy > max_y_) return false;
+  const std::size_t row = static_cast<std::size_t>(cy - min_y_);
+  if (row / 64 < rows_.size() && ((rows_[row / 64] >> (row % 64)) & 1u) == 0) return false;
   return std::binary_search(keys_.begin(), keys_.end(), key(cx, cy));
 }
 
@@ -356,7 +368,8 @@ Path PathFinder::find(const ObstructionGrid& grid, const PathRequest& request) {
   CellView view;
   view.grid = &grid;
   view.barrier = request.barrier != nullptr && !request.barrier->empty() ? request.barrier : nullptr;
-  Path out = grid_->run(view, request, *goals_, /*both_ways=*/false);
+  Path out = smart_ != nullptr ? smart_->search(*grid_, view, request, *goals_)
+                               : grid_->run(view, request, *goals_, /*both_ways=*/false);
   // A route that goes nowhere is no route: the original answers whether the
   // length is non-zero, and a caller that sees one point lays nothing.
   if (out.waypoints.size() >= 2 && out.length == 0) {
@@ -364,6 +377,101 @@ Path PathFinder::find(const ObstructionGrid& grid, const PathRequest& request) {
     if (out.status == PathStatus::found) out.status = PathStatus::arrived;
   }
   return out;
+}
+
+// --------------------------------------------------------------------------
+// the smart pathfinder's build
+// --------------------------------------------------------------------------
+
+void PathFinder::start_smart_build(const ObstructionGrid& live) {
+  // 0x004165a0: nothing while a builder exists.
+  if (build_ != nullptr) return;
+  build_ = std::make_unique<SmartBuild>(live);
+  smart_started_ = true;
+  smart_calls_.clear();
+}
+
+void PathFinder::cancel_smart_build() {
+  build_.reset();
+  smart_started_ = false;
+  smart_calls_.clear();
+}
+
+bool PathFinder::apply(SpfCall call, ObstructionGrid& live) {
+  switch (call) {
+    case SpfCall::find_areas: return build_->find_areas(live);
+    case SpfCall::init_data: build_->init_data(); return false;
+    case SpfCall::init_direction: build_->init_directions(); return false;
+    case SpfCall::init_point_to_area: build_->init_point_to_area(); return false;
+    case SpfCall::init_connect: build_->init_connect(); return false;
+    case SpfCall::connect_row: return build_->connect_row(*grid_, live);
+    case SpfCall::increase: build_->increase(); return false;
+    case SpfCall::increase_step: return build_->increase_step(*grid_, live);
+    case SpfCall::done: {
+      // 0x0040f8c0: the built structure replaces the grid search, and the
+      // builder goes. A builder that never made one installs nothing here
+      // (the original would install a null object).
+      std::unique_ptr<SmartPathfinder> built = build_->finish();
+      if (built != nullptr) {
+        smart_ = std::move(built);
+        gate_connections_.clear();
+        closed_.clear();
+      }
+      build_.reset();
+      return false;
+    }
+  }
+  return false;
+}
+
+bool PathFinder::smart_build(SpfCall call, ObstructionGrid& live) {
+  if (build_ == nullptr) return false;
+  smart_calls_.push_back(static_cast<std::uint8_t>(call));
+  return apply(call, live);
+}
+
+void PathFinder::replay_smart(bool started, std::span<const std::uint8_t> calls,
+                              ObstructionGrid& live) {
+  build_.reset();
+  smart_.reset();
+  gate_connections_.clear();
+  closed_.clear();
+  smart_started_ = false;
+  smart_calls_.clear();
+  if (!started) return;
+  start_smart_build(live);
+  for (const std::uint8_t call : calls) {
+    if (call > static_cast<std::uint8_t>(SpfCall::done)) continue;
+    (void)smart_build(static_cast<SpfCall>(call), live);
+  }
+}
+
+// --------------------------------------------------------------------------
+// gates, once the smart pathfinder answers
+// --------------------------------------------------------------------------
+
+std::size_t PathFinder::close_gate(std::uint32_t gate, Point a, Point b) {
+  if (smart_ == nullptr) return 0;
+  // 0x00414ae0: the gate's connections are looked up by its id in the
+  // structure's map and found (0x00412540) the first time; then each is
+  // closed. The original never looks again; a gate whose axis has moved is
+  // found again here, which no gate does.
+  auto it = gate_connections_.find(gate);
+  if (it == gate_connections_.end() || it->second.a != a || it->second.b != b) {
+    GateConnections found{a, b, {}};
+    smart_->gate_connections(a, b, found.connections);
+    it = gate_connections_.insert_or_assign(gate, std::move(found)).first;
+  }
+  const std::vector<std::uint32_t>& connections = it->second.connections;
+  smart_->set_closed(connections, true);
+  closed_.insert(closed_.end(), connections.begin(), connections.end());
+  return connections.size();
+}
+
+void PathFinder::open_gates() {
+  // 0x00415950 for each gate laid: its connections opened.
+  if (smart_ != nullptr) smart_->set_closed(closed_, false);
+  closed_.clear();
 }
 
 }  // namespace imperivm::core::sim

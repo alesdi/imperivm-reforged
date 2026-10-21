@@ -263,6 +263,10 @@ ObstructionGrid& MovementSystem::mutable_grid() noexcept {
   return grid_;
 }
 
+void MovementSystem::start_smart_build() { finder_.start_smart_build(grid_); }
+
+bool MovementSystem::smart_build(SpfCall call) { return finder_.smart_build(call, grid_); }
+
 std::size_t MovementSystem::lower_bound(ObjectId id) const noexcept {
   std::size_t lo = 0;
   std::size_t hi = states_.size();
@@ -557,6 +561,29 @@ Path MovementSystem::route_past_gates(World& world, ObjectId id, Point from,
     if (gate != nullptr && gate_bars(world, *gate, self->state.owner)) ++enemies;
   }
   if (enemies == 0) return first;
+  if (finder_.smart_installed()) {
+    // The smart pathfinder is handed each gate that bars the mover (its
+    // method 0x00414ae0, 0x0041945f..0x00419468): the connections whose
+    // routes meet the gate's axis are closed for one search -- the grid is
+    // not touched -- and opened again after it (0x00415950,
+    // 0x00419537..0x00419548).
+    gates_.clear();
+    lines.enemy_gates(world, self->state.owner, from, world.time(), gates_);
+    std::size_t closed = 0;
+    for (const GateLines::Line* line : gates_) closed += finder_.close_gate(line->gate, line->a, line->b);
+    // Nothing closed is the same search again, and the same route.
+    if (closed == 0) {
+      finder_.open_gates();
+      return first;
+    }
+    ++counters_.gate_searches;
+    Path second = finder_.find(grid_, request);
+    finder_.open_gates();
+    if (first.length <= kGateShortRoute && enemies == 1 && second.status != PathStatus::found) {
+      return first;
+    }
+    return second;
+  }
   // Every gate on the map that bars the mover, laid for one search.
   barrier_.clear();
   lines.lay_enemy_gates(world, self->state.owner, from, world.time(), barrier_);

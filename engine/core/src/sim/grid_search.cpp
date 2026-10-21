@@ -393,12 +393,27 @@ Path GridSearch::run(CellView view, const PathRequest& request, const GoalCells&
     }
   }
 
+  build_chain(node, chain_);
+  straighten(view, chain_, both_ways, out.waypoints);
+  out.waypoints.push_back(end);
+  out.waypoints.front() = request.start;
+  out.status = found ? PathStatus::found : PathStatus::partial;
+  if (goals.live().empty()) out.status = PathStatus::no_goal;
+  out.length = polyline_length(out.waypoints);
+  return out;
+}
+
+void GridSearch::build_chain(std::uint32_t node, std::vector<Cell>& out) const {
   // The cell chain, end first: each cell's parent, except that a corner
-  // between two cells a diagonal step apart is cut.
-  chain_.clear();
+  // between two cells a diagonal step apart is cut. Then reversed.
+  const auto cell_at = [this](std::uint32_t n) {
+    return Cell{static_cast<std::int32_t>(n % static_cast<std::uint32_t>(width_)),
+                static_cast<std::int32_t>(n / static_cast<std::uint32_t>(width_))};
+  };
+  out.clear();
   for (std::uint32_t n = node; n != kNoNode;) {
     const Cell here = cell_at(n);
-    chain_.push_back(here);
+    out.push_back(here);
     std::uint32_t next = parent_[n];
     if (next != kNoNode && parent_[next] != kNoNode) {
       const Cell after = cell_at(parent_[next]);
@@ -408,15 +423,21 @@ Path GridSearch::run(CellView view, const PathRequest& request, const GoalCells&
     }
     n = next;
   }
-  std::reverse(chain_.begin(), chain_.end());
+  std::reverse(out.begin(), out.end());
+}
 
-  straighten(view, chain_, both_ways, out.waypoints);
-  out.waypoints.push_back(end);
-  out.waypoints.front() = request.start;
-  out.status = found ? PathStatus::found : PathStatus::partial;
-  if (goals.live().empty()) out.status = PathStatus::no_goal;
-  out.length = polyline_length(out.waypoints);
-  return out;
+void GridSearch::chain(const CellView& view, Cell start, Point heading, const GoalCells& goals,
+                       std::vector<Cell>& out) {
+  out.clear();
+  const ObstructionGrid& grid = *view.grid;
+  if (grid.empty() || !grid.in_bounds(start.x, start.y)) return;
+  reset(grid.width(), grid.height());
+  bool found = false;
+  Point goal_point{};
+  std::uint32_t popped = 0;
+  const std::uint32_t node = astar(view, start, heading, goals, found, goal_point, popped);
+  total_expanded_ += popped;
+  build_chain(node, out);
 }
 
 // --------------------------------------------------------------------------

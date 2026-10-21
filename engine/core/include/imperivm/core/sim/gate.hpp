@@ -100,6 +100,14 @@
 ///      enemy gate is kept when the second does not arrive (0x00419490,
 ///      0x0041954e) -- the unit walks up to that gate and waits there.
 ///
+/// **"Laid" is the installed search's to say** (its methods `+0x10` and `+0xc`,
+/// 0x0041945f and 0x00419537). The grid search lays the line's cells into its
+/// grid. The smart pathfinder, once `SPFDone` has installed it, lays nothing:
+/// it closes every connection whose stored route meets the gate's axis
+/// (0x00414ae0 over 0x00412540) and opens them after the search (0x00415950),
+/// so its near hand-off, straight line and patches all see the bare grid.
+/// See docs/formats/pathfinder.md.
+///
 /// So **a gate never bars its own side's search, open or shut**, and bars an
 /// enemy's search unless it stands fully raised. A friend's route goes
 /// through a closed gate; the step below lets it walk through.
@@ -371,6 +379,10 @@ class GateLines {
   /// and within 1,500 of `from`. Not sealed: the caller seals it.
   void lay_enemy_gates(const World& world, PlayerId owner, Point from, GameTime now,
                        CellOverlay& out) const;
+  /// The gates `lay_enemy_gates` lays, in gate order, appended to `out`: what
+  /// the smart pathfinder is handed instead of their cells.
+  void enemy_gates(const World& world, PlayerId owner, Point from, GameTime now,
+                   std::vector<const Line*>& out) const;
 
  private:
   std::vector<Line> lines_;
