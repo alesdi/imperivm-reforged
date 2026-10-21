@@ -1029,10 +1029,12 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
 
     The bounds are measured on the formation object's layout (round 12,
     `sim/formation.hpp`): a 28-strong `Front` round a hero of radius 45 has its
-    farthest slot about 300 out, and on the way the samples are laid round a
-    centre 333 ahead of him, so the column leads him by up to 515 (turn 20)
-    and stands within 297 of him where he stops (turn 35). Nobody is behind
-    him on the way.
+    farthest slot about 300 out. Since round 14 the samples are laid along the
+    formation's own route, 200 a step, as units near their stations, and the
+    hero walks to the centre like any member; his last search, made once the
+    path is spent, is not struck off by his members' routes to the sample
+    before (a route laid while the march went on holds no lock). Nobody is
+    behind him on the way.
     He is watched every turn: his `HERO_IDLE.VS` takes him off towards the
     Iberians on the turn after his army is told to stand (round 12, where a
     command's end starts the next at once), so a sample every ten turns can

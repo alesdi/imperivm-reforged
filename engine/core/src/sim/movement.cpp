@@ -423,6 +423,8 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   // whose own side of the target is taken goes round to another.
   const bool owner = lock_owner(id, move);
   RingGoal goal = ring_goal(world, owner ? id : kNoObject, dest, range, move.min_range);
+  // What the search makes the route hold, if it lays one (`form_lock_laid`).
+  const bool lays_lock = owner;
   const OwnerSpot owner_test(*this, world, id);
   PathRequest request;
   request.start = from;
@@ -528,6 +530,7 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   fresh_media();
   move.waypoints = path.waypoints;
   move.path_length = path.length;
+  move.form_lock_laid = lays_lock;
   // 0x00418fb0 over the route as it will be walked.
   move.gate_crossings.clear();
   if (!request.ignore_passability) world.gate_lines().crossings(move.waypoints, move.gate_crossings);
@@ -1030,6 +1033,9 @@ bool MovementSystem::owned_lock(const World& world, ObjectId id, StaticLock& loc
   const MoveState* move = find(id);
   // A route that exists has at least two points.
   if (move == nullptr || !move->has_path || !lock_owner(id, *move)) return false;
+  // A route aimed at a formation holds the lock its own search made, if that
+  // search named an owner: one laid while the march was on holds none.
+  if (move->form_aimed && !move->form_lock_laid) return false;
   // `SetMedia` puts it at the route's last point (`vtbl+0x10` of the media),
   // and `0x0040a580` leaves its own radius at 0, which `0x0040a880` reads as
   // the owner's class radius.
@@ -3531,6 +3537,7 @@ bool MovementSystem::formation_next_sample(World& world, ObjectId hero, GameTime
 void MovementSystem::stand_on_station(World& world, ObjectId id, MoveState& move, Point here,
                                       GameTime until) {
   move.waypoints.assign({here, here});
+  move.form_lock_laid = false;
   move.stride = formation_stride_or_walk(world, id, move);
   move.path_length = 0;
   move.progress = 0;

@@ -304,6 +304,15 @@ formation's direction there. A search that lays nothing keeps the route the
 unit had and takes no step; with the formation's path spent it marks the
 route arrived (`[retry+0x20] |= 0x80`), and the unit stops where it stands.
 
+**The lock.** Such a route names its unit an owner only when the
+formation's lock flag is set and its path is spent (0x004178d0). The
+search asks that when it runs and attaches the destination lock it makes to
+the route it lays (0x00419730: 0x00418770, 0x00418d40). So a route laid
+while the march went on holds no lock even after the march is spent; only
+a route searched after the last sample reserves its end. The hero's last
+search is not struck off by his members' routes to the stations of the
+sample before.
+
 ### The blocking gate
 
 The unit's step has a gate test of its own, after the samples and before

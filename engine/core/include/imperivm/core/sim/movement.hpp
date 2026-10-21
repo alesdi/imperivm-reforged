@@ -423,6 +423,13 @@ struct MoveState {
   /// `[retry+0x10]`: the formation's sample count when this route was laid;
   /// -1 to lay it again at the next step.
   std::int32_t form_seen = -1;
+  /// A route aimed at a formation was laid by a search that named its unit an
+  /// owner, and so holds the destination lock that search made (`[retry+0x24]`:
+  /// 0x00419730 asks 0x004178d0 at the search and attaches the lock with the
+  /// path, 0x00418770 and 0x00418d40). One laid while the march was on holds
+  /// none, though its unit is an owner once the march is spent. Any other
+  /// route's lock is `dest_lock`.
+  bool form_lock_laid = false;
 
   /// The unit's own speed in world units per second, after the factor.
   [[nodiscard]] std::int64_t own_rate() const noexcept {

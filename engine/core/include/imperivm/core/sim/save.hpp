@@ -412,7 +412,8 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// the stepper's counters and what is left, its goal and band, whether it
 /// goes on, the sample's deadline and speed, and the units still to be handed
 /// `form_move` -- and every route aimed at a formation says so with the
-/// sample it was laid to (system section version 44). A version-50 file has
+/// sample it was laid to and whether its search made a lock (system section
+/// version 44). A version-50 file has
 /// no formation route, and its marches would stand still at their last
 /// sample.
 inline constexpr std::uint32_t kStateVectorVersion = 51;

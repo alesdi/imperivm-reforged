@@ -780,10 +780,41 @@ TEST(a_march_keeps_its_party_through_a_save) {
   CHECK(fresh.find(member)->party == hero);
   CHECK(fresh.find(member)->form_aimed);
   CHECK(fresh.find(member)->form_seen == -1);
+  CHECK(fresh.find(member)->form_lock_laid == field.move(member).form_lock_laid);
   CHECK(fresh.find(member)->stride == kFormationStride);
   REQUIRE(fresh.formation(hero) != nullptr);
   CHECK(fresh.formation(hero)->going_on);
   CHECK(fresh.formation(hero)->should_lock);
+}
+
+TEST(a_march_route_holds_a_lock_only_when_its_search_named_an_owner) {
+  // `RecastPathfind` (0x00419730) asks 0x004178d0 at the search and attaches
+  // the lock it makes to the route it lays. A member's route laid while the
+  // march goes on names nobody, so it holds no lock -- not even once the
+  // march is spent and its unit is an owner; the route its next search lays
+  // to the last station does.
+  Field field;
+  const ObjectId hero = field.unit("Soldier", Point{100, 100});
+  const ObjectId member = field.unit("Soldier", Point{100, 400});
+  aim_at_station(field, hero, member, Point{900, 400}, /*going_on=*/true, /*lock=*/true);
+  field.world.advance(1);
+  REQUIRE(field.move(member).has_path);
+  REQUIRE(field.move(member).path_length > 0);
+  CHECK(!field.move(member).form_lock_laid);
+  StaticLock lock;
+  CHECK(!field.movement.owned_lock(field.world, member, lock));
+  // The path spent: an owner now, and still no lock on that route.
+  field.movement.formation_of(hero).going_on = false;
+  CHECK(field.movement.lock_owner(member, field.move(member)));
+  CHECK(!field.movement.owned_lock(field.world, member, lock));
+  // Its next sample relaid with the march spent holds one, at the station.
+  field.movement.formation_of(hero).samples = 2;
+  for (int i = 0; i < 20 && field.move(member).form_seen != 2; ++i) field.world.advance(400);
+  REQUIRE(field.move(member).form_seen == 2);
+  REQUIRE(field.move(member).has_path);
+  CHECK(field.move(member).form_lock_laid);
+  REQUIRE(field.movement.owned_lock(field.world, member, lock));
+  CHECK(lock.at == (Point{900, 400}));
 }
 
 TEST(the_formations_route_comes_back_from_a_save_part_stepped) {
