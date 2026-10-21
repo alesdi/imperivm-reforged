@@ -3449,11 +3449,17 @@ ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId af
   const LsaPartition& areas = world.lsa();
   for (const ObjectId id : fresh) {
     if (heroes.squads().squad_of(id) != kNoSquad) continue;
+    // **A unit born inside a holder is not enrolled.** `add_to_squad`'s third
+    // arm used to be read as the holder's squad, which filed such a unit
+    // nowhere; it is the unit's hero (`[obj+0x170]`, 0x00446bcc), which a
+    // recruit has none of, so it would be filed by proximity like a unit on
+    // the map. The hook's only direct callers in `gbr.exe` are a hero's
+    // army changes (0x0052dc03, 0x0052e491), not a unit's birth -- the
+    // once-a-turn sweep over new ids is this engine's reading -- and this
+    // keeps that reading where it stood. **Inferred.**
+    if (const WorldObject* slot = world.find(id); slot != nullptr && slot->state.is_held()) continue;
     // 0x0044e650 at 0x0041e877: for a held unit its `posRH`, the town, and
-    // not the holder record's (0, 0). **An equivalence today**, kept for the
-    // reading: a held unit is in a holder no squad holds, so `add_to_squad`'s
-    // step 3 files it nowhere and never reads the node; the fault sweep says
-    // so, and the regroup below, where it does reach a squad, is tested.
+    // not the holder record's (0, 0).
     const GaikaId under = nodes.at(areas, unit_pos_rh(world, id));
     (void)add_to_squad(world, heroes, id, under, 0);
   }

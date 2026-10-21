@@ -178,6 +178,17 @@ squad it is actually in, which after such a split is not his. `GAIKAIn` and
 the last attacker are left at their defaults on a fresh squad, where the
 original leaves whatever its pooled slot held.
 
+The engine also runs the assignment once a turn over every unit it has not
+seen before (`enrol_new_units_in_squads`), filed at the node under it. In
+`gbr.exe` the hook that does this (0x0041e820) is called directly only from a
+hero's army changes (0x0052dc03, 0x0052e491), so that sweep is this engine's
+reading, and it **skips a unit born inside a holder**. Before the third arm
+was read as the unit's hero, the holder arm filed such a unit nowhere --
+its holder is in no squad -- and the sweep relied on it; read correctly,
+the arm would file every recruit still in its barracks by proximity, and
+one Crossroads match's production fell to a tenth for it. What the original
+does with a unit at its birth is open.
+
 ## What is still unknown
 
 * Where the original fires a look within a pump turn relative to scripts and
