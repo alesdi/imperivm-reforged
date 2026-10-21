@@ -1227,24 +1227,22 @@ HostOutcome f_ai_start(CallContext& ctx) {
 /// and 0x006a4140) are the original's moments to build; the script exists to
 /// spread the build over frames, `Sleep` by `Sleep`.
 ///
-/// **This engine has nothing left to build when the script runs.** Its area
-/// partition and connectivity are computed at map load by the rule
-/// `sim/lsa.hpp` records from 0x00453130, and every question the original
-/// puts to the live structure -- `CheckLsaPath`, `IsWaterLsa`, `GAIKA::LSA` --
-/// is answered from that. So each `_Quant` answers **false**, nothing remains,
-/// and the six stages finish at once: the script runs its shape in one pass
-/// of sleeps and ends, as it does in the original once the build is through.
-/// Nothing here reads the structure the original would have built, which is
-/// what makes the answer derived rather than invented; the day something
-/// does, these nine become the driver of that.
+/// **This engine builds no smart pathfinder.** It routes with the grid
+/// search (0x0041bc60, `sim/grid_search.hpp`) throughout -- what the original
+/// routes with before `SPFDone`, and what `NewPF = 0` routes with for good
+/// (docs/formats/pathfinder.md). So each `_Quant` answers **false**, nothing
+/// remains, and the stages finish at once: the script, if something runs it,
+/// runs its shape in one pass of sleeps and ends, as it does in the original
+/// once the build is through. The AI's own questions (`CheckLsaPath`,
+/// `IsWaterLsa`, `GAIKA::LSA`) never read this structure; they walk the
+/// large-scale areas (`sim/lsa.hpp`).
 ///
 /// **What differs, labelled.** The original's `_Quant` answers true for as
 /// many slices as the map needs, so its script runs for many frames where
-/// this one ends at the first; and nothing in this engine starts the script at
-/// all -- there is no builder and no rebuild moment, the movement pathfinder
-/// being this engine's own design. The nine are bound so the script, if
-/// something runs it, ends cleanly rather than trapping. Recorded `partial`
-/// for that design, not for an unread arm.
+/// this one ends at the first; nothing in this engine starts the script at
+/// map load (0x0040acb0 -> 0x004165a0); and `SPFDone` installs nothing. The
+/// nine are bound so the script ends cleanly rather than trapping. Recorded
+/// `partial` for the structure they would build, which is not modelled.
 HostOutcome f_spf_quant(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SPF: no world");

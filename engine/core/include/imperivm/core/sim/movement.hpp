@@ -602,11 +602,6 @@ class MovementSystem : public System {
   /// route is deleted (0x005d3830 with 0), as the original's last act there.
   void leave_formation(World& world, ObjectId hero, ObjectId unit);
 
-  /// Cap on nodes one search round a gate's line may expand
-  /// (`PathRequest::node_budget`); a search over the grid alone has none. It
-  /// changes routes, so it is world configuration.
-  void set_node_budget(std::uint32_t budget) noexcept { node_budget_ = budget; }
-
   // -- per-object state --------------------------------------------------
 
   [[nodiscard]] MoveState& state(ObjectId id);
@@ -713,18 +708,40 @@ class MovementSystem : public System {
 
   /// What `ring_goal` aims a search at.
   struct RingGoal {
+    /// Where the search heads (`[0x008bfc10]`): the goal point nearest the
+    /// band's centre, before any is struck off, or the centre with none.
     Point at;
-    /// Whether `at` is a goal point the route may end on. `false` is the
-    /// smart pathfinder's status 1: no goal point is left -- none passable,
-    /// or every one taken -- and `at` is only where the search heads.
+    /// Whether any goal point is left. `false` is the search's status 1: no
+    /// goal point is left -- none passable, or every one taken.
     bool free = true;
+    /// Every goal point laid, in order, each marked live or struck off --
+    /// the request's `goal_points`. Valid until the next `ring_goal`.
+    std::span<const GoalPoint> points;
+  };
+
+  /// The request's owner as the search asks about it: `spot_free` with the
+  /// unit's radius (0x0040a990, `[class+0x2dc]`).
+  class OwnerSpot final : public SpotTest {
+   public:
+    OwnerSpot(const MovementSystem& movement, const World& world, ObjectId id)
+        : movement_(movement), world_(world), id_(id), radius_(movement.radius_of(world, id)) {}
+    [[nodiscard]] bool free(Point at) const override {
+      return movement_.spot_free(world_, id_, at, radius_);
+    }
+    [[nodiscard]] std::int32_t radius() const override { return radius_; }
+
+   private:
+    const MovementSystem& movement_;
+    const World& world_;
+    ObjectId id_;
+    std::int32_t radius_;
   };
   /// Where a route for an arrival band ends: `0x00417830`'s goal rings, and
   /// for an `owner` -- the unit, when its order owns a lock; `kNoObject`
   /// otherwise -- without the points a standing unit or another's lock
   /// covers (`0x0040a310`). A `range` of 0 is the centre alone. See the
   /// definition.
-  [[nodiscard]] RingGoal ring_goal(const World& world, ObjectId owner, Point from, Point centre,
+  [[nodiscard]] RingGoal ring_goal(const World& world, ObjectId owner, Point centre,
                                    std::int32_t range, std::int32_t min_range) const;
 
   /// `0x004180b0`: a free spot for `id` out from `centre`, along one heading
@@ -840,9 +857,6 @@ class MovementSystem : public System {
   /// world -- the middle of a turn's cooperative steps. Null reads the world.
   MoveOutcome lay_path(World& world, ObjectId id, MoveState& move, Point goal,
                        std::int32_t range, GameTime now, const Point* from = nullptr);
-  /// Cut a route back to its last free point (`0x004141bd`). Returns whether
-  /// anything was cut.
-  bool truncate_to_free(const World& world, ObjectId id, std::vector<Point>& waypoints) const;
   /// 0x00419110's gates: `first` is the route searched with none laid; when
   /// it crosses a gate that counts the mover an enemy, the search runs again
   /// with every such gate's line laid, and the answer is the route to walk.
@@ -899,7 +913,6 @@ class MovementSystem : public System {
   FormationTable formations_;
   PathFinder finder_;
   std::uint32_t grid_generation_ = 1;
-  std::uint32_t node_budget_ = 20000;
 
   /// World state, saved and (the radius) hashed: see `formation`.
   std::vector<Formation> formation_objects_;
@@ -917,6 +930,7 @@ class MovementSystem : public System {
   mutable std::vector<ObjectId> spot_scratch_;
   /// `ring_goal`'s goal points and what may cover them.
   mutable std::vector<Point> ring_points_;
+  mutable std::vector<GoalPoint> ring_goal_points_;
   mutable std::vector<StaticLock> ring_takers_;
   /// Per entry, how its route is walked this turn: still, step by step, or
   /// the whole turn at once.

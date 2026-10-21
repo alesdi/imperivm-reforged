@@ -72,7 +72,7 @@
 /// **The line is never in the shared grid.** `gbr.exe` writes it into the
 /// map's one grid for the length of a single search and restores the cells
 /// after (0x0052b0c0 keeps what was there, 0x0052a4c0 puts it back), so every
-/// other reader -- the step, the sidestep, `IsPassable3x3`, the regions --
+/// other reader -- the step, the sidestep, `IsPassable3x3` --
 /// sees the gap open. Here that is `CellOverlay`, handed to the one search
 /// that lays it (`PathRequest::barrier`), and the grid is never written.
 ///

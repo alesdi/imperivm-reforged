@@ -1,10 +1,11 @@
 #pragma once
 
-// The obstruction grid, the integer geometry the simulation moves on, and a
-// deterministic A* over both.
+// The obstruction grid, the integer geometry the simulation moves on, and the
+// route search's front door.
 //
 // Specifications: docs/formats/pass.md (the grid container and its polarity),
-//                 docs/engine/projection.md (why the grid is authored, not derived).
+//                 docs/engine/projection.md (why the grid is authored, not derived),
+//                 docs/formats/pathfinder.md (the route search).
 //
 // ## Three facts this file is built on
 //
@@ -26,49 +27,29 @@
 // Of the original's seven hash channels, `pathfinder` is zero in all nine
 // desync dumps: the shipped build kept pathfinding out of the determinism
 // contract (docs/engine/state-vector.md). That is a constraint, not a defect to
-// repair. So nothing in this file is folded into the world hash -- not the open
-// list, not the scratch arrays, not the resulting waypoints.
+// repair. So nothing the search holds is folded into the world hash -- not the
+// heap, not the scratch arrays, not the resulting waypoints.
 //
 // It does *not* follow that the pathfinder may be sloppy. Where units end up
 // **is** hashed, and a path decides that, so the search has to be a pure
-// function of (grid, request):
+// function of (grid, request): integers throughout (the original's own 16.16
+// costs and its integer square root), the original's heap order -- which is a
+// function of the pushes and pops alone, never of addresses -- and no
+// unordered container.
 //
-//   * No floating point. Costs are integers (10 orthogonal, 14 diagonal, an
-//     integer approximation of 10*sqrt(2) accurate to 1%), the heuristic is the
-//     matching octile distance, and every length is an integer square root.
-//   * No unordered container. The open set is a binary heap ordered by the
-//     **total** order `(f, h, cell)`. Ties therefore cannot be broken by
-//     insertion order, which means the sequence of popped nodes is uniquely
-//     determined by the grid and the request -- independent of how the heap
-//     happened to sift, of allocation addresses, and of whether scratch buffers
-//     were reused.
-//   * A fixed neighbour order, listed once in `path.cpp`.
+// ## Which search answers
 //
-// ## Bounded work, and what an unreachable goal answers
-//
-// `gbr.exe` runs two searches (docs/formats/pathfinder.md). The *smart
-// pathfinder* (vtable 0x007ac300, search 0x004138d0), live once
-// `DATA\PATHFINDERINIT.VS` has built it, searches a graph of areas, each grown
-// up to 48 cells from a seed, under a budget of 65,536 areas (0x00413690) that
-// no shipped map comes near: **a goal it can reach, it reaches.** One it cannot
-// answers status 2, "incomplete", with a route to the area nearest the goal
-// point by straight distance, ending where the line from the goal towards that
-// area first enters it (0x0040e500). Only a goal in the start's own area or one
-// touching it goes to the *grid* search (0x0041bc60 -> 0x0041b140), whose
-// budget is 8,000 cells and which answers the expanded cell nearest the goal
-// when the budget runs out.
-//
-// This engine has no areas. It has the same answer from the grid's regions
-// (`ObstructionGrid::region_of`): a goal in a region the start reaches is
-// searched for with no budget and found, and one in another region is answered
-// with a route to the reachable cell nearest the goal point -- a partial route,
-// as the original's status 2. The search therefore never floods a region to
-// learn that the goal is not in it. `PathRequest::node_budget` survives for the
-// one search the regions cannot settle, the one round a gate's line (`barrier`),
-// which only `route_past_gates` makes.
+// `gbr.exe` has two (docs/formats/pathfinder.md). The *grid search*
+// (0x0041bc60, `sim/grid_search.hpp`) answers every request until
+// `DATA\PATHFINDERINIT.VS` has built the *smart pathfinder* (0x004138d0), and
+// the smart pathfinder hands it every request whose goal lies in the start's
+// area or one joined to it. This engine reproduces the grid search and routes
+// with it throughout: the smart pathfinder is not built. The doc's "What
+// differs" says what that changes.
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -253,46 +234,15 @@ class ObstructionGrid {
   /// Set cells. A cross-check against the shipped file, nothing more.
   [[nodiscard]] std::size_t count_blocked() const noexcept;
 
-  /// The region a free cell belongs to: a number from 1 shared by every free
-  /// cell a unit can walk to from it, and 0 for a blocked or off-grid cell.
-  ///
-  /// Regions are the free cells' **four-connected** components. The search
-  /// steps diagonally only where both orthogonal neighbours are free, so
-  /// what it can reach from a cell is exactly that cell's four-connected
-  /// component, and "is the goal in the start's region" is "can the search
-  /// reach it". Numbered in cell order (row by row) the first time anything
-  /// asks after a change, and kept until the next `set_cell`; none of it is
-  /// world state, nothing hashes it, and a copy of the grid copies it.
-  [[nodiscard]] std::uint32_t region_of(std::int32_t cx, std::int32_t cy) const;
-
-  /// The smallest box of cells, bounds inclusive, holding every cell of a
-  /// region; `min_x > max_x` for region 0 or one the grid does not have. No
-  /// cell outside it is in the region, which is what lets a search for the
-  /// region's cell nearest a point skip the rest of the grid.
-  struct CellBox {
-    std::int32_t min_x = 0;
-    std::int32_t min_y = 0;
-    std::int32_t max_x = -1;
-    std::int32_t max_y = -1;
-  };
-  [[nodiscard]] CellBox region_box(std::uint32_t region) const;
-
  private:
   [[nodiscard]] std::size_t bit_index(std::int32_t cx, std::int32_t cy) const noexcept {
     return static_cast<std::size_t>(cy) * static_cast<std::size_t>(width_) +
            static_cast<std::size_t>(cx);
   }
 
-  void label_regions() const;
-
   std::vector<std::uint64_t> words_;
   std::int32_t width_ = 0;
   std::int32_t height_ = 0;
-  /// `region_of`'s answers, one per cell, valid while `regions_valid_`.
-  mutable std::vector<std::uint32_t> regions_;
-  /// Each region's `region_box`, by its number (slot 0 unused).
-  mutable std::vector<CellBox> region_boxes_;
-  mutable bool regions_valid_ = false;
 };
 
 /// Cells one search treats as blocked on top of the grid, and nobody else
@@ -333,121 +283,130 @@ class CellOverlay {
 // --------------------------------------------------------------------------
 
 enum class PathStatus : std::uint8_t {
-  /// Already inside the arrival range; the route is a single point.
+  /// The route goes nowhere: the start is the goal point the search took.
+  /// The original lays the two-point route and answers 0 for its length.
   arrived,
-  /// A complete route to the goal (or into its arrival annulus).
+  /// Status 0: the route ends on a goal point.
   found,
-  /// The goal could not be reached: it lies in a region the start does not
-  /// reach, and the route leads to the reachable cell nearest the goal point
-  /// (the original's status 2, 0x004138d0; what `FormPathLeft` marks with
-  /// 32,000). A search round a gate's line (`barrier`) may also end here when
-  /// its node budget runs out, at the expanded cell nearest the goal.
+  /// Status 2: it does not. The route leads to the cell the search ended at
+  /// -- for the grid search, the expanded cell nearest where it heads when
+  /// its 8,000 cells run out (0x0041b140) -- and `FormPathLeft` marks it
+  /// with 32,000.
   partial,
+  /// Status 1: no goal point was left to end on (every one struck off, or
+  /// none passable), and the route leads towards where the search heads.
+  no_goal,
   /// Nothing to do: no grid, or the start is off the map.
   unreachable,
 };
 
+/// A goal point as the search is handed it (0x00409b80 registers one),
+/// in the order they were laid. `live` is false for one the goal points'
+/// strike-off took (0x0040a310): it still occupies its cell's slot.
+struct GoalPoint {
+  Point at;
+  bool live = true;
+};
+
+/// The request's owner, as the search asks about it: whether a point is a
+/// free spot for it (0x0040a990), and its class radius (`[class+0x2dc]`),
+/// the step of the free-spot walk.
+class SpotTest {
+ public:
+  virtual ~SpotTest() = default;
+  [[nodiscard]] virtual bool free(Point at) const = 0;
+  [[nodiscard]] virtual std::int32_t radius() const = 0;
+};
+
 struct PathRequest {
   Point start;
+  /// Where the search heads (`[0x008bfc10]`): the estimate is measured to
+  /// its cell, and with no goal point left the straight line runs to it. For
+  /// a band, the goal point nearest the band's centre, before any is struck
+  /// off (`MovementSystem::ring_goal`).
   Point goal;
-  /// Stop this far short of `goal`. `Goto`'s second argument, and 0 for a plain
-  /// move. A unit approaching a building stops at its radius rather than
-  /// walking into it.
-  std::int32_t arrival_range = 0;
-  /// Cap on expanded nodes for a search with a `barrier`, the one whose
-  /// reachability the grid's regions cannot settle; reached, the search
-  /// returns its best partial route. A search over the grid alone has no
-  /// budget: the regions say beforehand whether it will arrive, as the
-  /// original's area search, budgeted at 65,536 areas, always does.
-  /// 20,000 nodes covers roughly a 140-cell radius of open ground, which is
-  /// 2,200 world units -- more than a screen.
-  std::uint32_t node_budget = 20000;
-  /// Skip the smoothing pass and return one waypoint per cell. For tests that
-  /// want to see the raw search.
-  bool smooth = true;
+  /// The goal points, in the order they were laid; used when
+  /// `goal_points_given`. Otherwise the goal points are `goal` alone, where
+  /// its cell is on the map and free -- what a range of 0 lays (0x00409cf0).
+  std::span<const GoalPoint> goal_points;
+  bool goal_points_given = false;
   /// The mover's class sets `ignore_passability` (`[class+0x31c]`, stored at
-  /// `0x005a5317`): the route is the straight line from `start` to `goal`,
-  /// whatever the grid says. Every path request `gbr.exe` makes passes that
-  /// field as the pathfinder's last argument (`0x00419986`, `0x005de31e`,
-  /// `0x005de593`), and the smart pathfinder's goal handling (`0x0040b580`)
-  /// answers a non-zero one with a two-point route, start then goal, before
-  /// any search (`0x0040b627` → `0x0040b756`). The sentries are its only
-  /// users: they are placed on a wall's walkway, which the grid blocks, and
-  /// walk along it. *Inferred:* the point list the goal is taken from
-  /// (`0x008c517c`) holds the request's goal.
+  /// `0x005a5317`): the route is the straight line from `start` to the goal
+  /// point nearest it, whatever the grid says. Every path request `gbr.exe`
+  /// makes passes that field as the pathfinder's last argument (`0x00419986`,
+  /// `0x005de31e`, `0x005de593`), and the straight line (`0x0040b580`)
+  /// answers a non-zero one with a two-point route before any search
+  /// (`0x0040b627` -> `0x0040b756`). The sentries are its only users: they
+  /// are placed on a wall's walkway, which the grid blocks, and walk along it.
   bool ignore_passability = false;
   /// Cells blocked for this search alone, on top of the grid: the lines of the
   /// gates that bar this mover (`sim/gate.hpp`). Null or empty is the grid as
-  /// it stands. Every grid test the search makes -- the straight line, the
-  /// goal's free cell, the expansion, the smoothing -- sees them.
+  /// it stands. Every grid test the search makes sees them.
   const CellOverlay* barrier = nullptr;
+  /// The unit whose order owns a destination lock, or null. An owner's
+  /// unfinished route is cut back to a free spot, and with no goal point
+  /// left its straight line walks to one (0x0041ba00, 0x0040b580).
+  const SpotTest* owner = nullptr;
 };
 
 /// A route: a polyline in world units, `waypoints[0]` being `start`.
 struct Path {
   std::vector<Point> waypoints;
   PathStatus status = PathStatus::unreachable;
-  /// Arc length of the polyline, in world units.
+  /// Arc length of the polyline, in world units: the sum of its legs'
+  /// floored roots, which is `+0x34` of the original's path record shifted
+  /// down sixteen bits (0x0041a8f0).
   std::int64_t length = 0;
-  /// Nodes the search expanded. Diagnostics only -- never hashed.
+  /// Cells the grid search popped. Diagnostics only -- never hashed.
   std::uint32_t expanded = 0;
+  /// An owner's route was cut short because where it would end is taken:
+  /// an unfinished one cut back to a free spot (0x0041ba00, 0x004141bd), or
+  /// the straight line with no goal point left finding no free spot on the
+  /// way (0x0040b580). The way is open; the end is not.
+  bool cut = false;
 
+  /// Whether the search laid a route a unit can walk: the original answers
+  /// whether the route's length is non-zero.
   [[nodiscard]] bool usable() const noexcept {
-    return status == PathStatus::found || status == PathStatus::partial;
+    return (status == PathStatus::found || status == PathStatus::partial ||
+            status == PathStatus::no_goal) &&
+           waypoints.size() >= 2;
   }
 };
 
-/// A* over the obstruction grid.
+class GridSearch;
+class GoalCells;
+
+/// The route search: the pointer every request goes through
+/// (`[0x008c528c]`, `vtbl+8`).
 ///
-/// Holds its scratch arrays between calls, sized to the grid, and stamps them
-/// with a generation counter instead of clearing them. That is a pure
-/// optimisation: the arrays are never read before they are written in a given
-/// search, so a fresh `PathFinder` and a reused one produce identical routes.
-/// **None of this is world state and none of it is hashed.**
+/// It is the grid search (`sim/grid_search.hpp`, 0x0041bc60), as the
+/// original's is before `SPFDone` installs the smart pathfinder (0x004138d0),
+/// which is not built here (docs/formats/pathfinder.md). The scratch arrays
+/// it keeps are not world state and none of them is hashed.
 class PathFinder {
  public:
+  PathFinder();
+  ~PathFinder();
+  PathFinder(PathFinder&&) noexcept;
+  PathFinder& operator=(PathFinder&&) noexcept;
+  PathFinder(const PathFinder&) = delete;
+  PathFinder& operator=(const PathFinder&) = delete;
+
   [[nodiscard]] Path find(const ObstructionGrid& grid, const PathRequest& request);
 
-  /// Total nodes expanded since construction. A budget diagnostic.
-  [[nodiscard]] std::uint64_t total_expanded() const noexcept { return total_expanded_; }
+  /// Cells the grid search has popped since construction. A diagnostic.
+  [[nodiscard]] std::uint64_t total_expanded() const noexcept;
 
  private:
-  struct Node {
-    std::int32_t g = 0;
-    std::int32_t f = 0;
-    std::int32_t h = 0;
-    std::uint32_t parent = 0;
-    std::uint32_t generation = 0;
-    bool closed = false;
-  };
-  /// Heap entry. Ordered by `(f, h, cell)`, a total order over distinct cells,
-  /// so the pop sequence does not depend on insertion order.
-  struct Open {
-    std::int32_t f = 0;
-    std::int32_t h = 0;
-    std::uint32_t cell = 0;
-  };
-
-  /// The search over whatever `blocked(cx, cy)` says is blocked: the grid
-  /// alone, or the grid and a request's barrier. A template so that the
-  /// common search, with no barrier, pays nothing for the other.
-  /// `by_regions` is whether `blocked` is the grid alone, so that its regions
-  /// decide reachability; a barrier's search passes false and keeps its budget.
-  template <typename Blocked>
-  Path find_over(const ObstructionGrid& grid, const PathRequest& request, const Blocked& blocked,
-                 bool by_regions);
-  void reset(const ObstructionGrid& grid);
-  void push(Open entry);
-  Open pop();
-
-  std::vector<Node> nodes_;
-  std::vector<Open> heap_;
-  std::vector<std::uint32_t> cells_;  ///< the raw cell route, reused
-  std::int32_t width_ = 0;
-  std::int32_t height_ = 0;
-  std::uint32_t generation_ = 0;
-  std::uint64_t total_expanded_ = 0;
+  std::unique_ptr<GridSearch> grid_;
+  std::unique_ptr<GoalCells> goals_;
 };
+
+/// The goal points a request names, as `PathFinder::find` registers them:
+/// `goal_points` when given, else `goal` alone where its cell is on the map
+/// and free.
+void request_goals(const ObstructionGrid& grid, const PathRequest& request, GoalCells& out);
 
 /// Arc length of a polyline, in world units.
 [[nodiscard]] std::int64_t polyline_length(std::span<const Point> waypoints) noexcept;

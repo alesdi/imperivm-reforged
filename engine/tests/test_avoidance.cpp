@@ -1332,23 +1332,42 @@ TEST(the_lock_flag_survives_a_save_and_is_not_hashed) {
   CHECK(field.move(walker).dest_lock);
 }
 
+namespace {
+
+/// Whether a band's goal points hold `p`, and whether it is live there.
+bool lays(const MovementSystem::RingGoal& goal, Point p, bool live = true) {
+  for (const GoalPoint& g : goal.points) {
+    if (g.at == p) return g.live == live;
+  }
+  return false;
+}
+
+}  // namespace
+
 TEST(a_band_route_ends_on_its_goal_ring) {
   // `0x00417830`: rings of sixteen at `r - 1`, `r` stepping 40 down to the
   // band's inner edge. Due west of the goal the point is (x - (r - 1), y);
   // the ninth direction's cosine is -0.99999873..., which `_ftol` truncates
   // towards zero, and its sine puts y a sixth of a unit off, truncated away.
   Field field;
-  CHECK(field.movement.ring_goal(field.world, kNoObject, Point{100, 500}, Point{900, 500}, 100, 0).at ==
-        (Point{801, 500}));
+  const MovementSystem::RingGoal band =
+      field.movement.ring_goal(field.world, kNoObject, Point{900, 500}, 100, 0);
+  CHECK(lays(band, Point{801, 500}));
   // Due north-east, the third direction: (cos, sin)(0.785) of 99.
-  CHECK(field.movement.ring_goal(field.world, kNoObject, Point{2000, 2000}, Point{900, 500}, 100, 0).at ==
-        (Point{970, 569}));
+  CHECK(lays(band, Point{970, 569}));
+  // Rings at 100, 60 and 20: forty-eight points, all of them free here.
+  CHECK(band.points.size() == 48);
+  // Where the search heads is the point nearest the centre: on the ring of
+  // 20, the south one, which truncation leaves 18 out where the rest are 19.
+  CHECK(band.at == (Point{900, 518}));
   // A range above 1,000 is 1,000 (`SetDest`).
-  CHECK(field.movement.ring_goal(field.world, kNoObject, Point{100, 500}, Point{1900, 500}, 5000, 0).at ==
-        (Point{901, 501}));
+  CHECK(lays(field.movement.ring_goal(field.world, kNoObject, Point{1900, 500}, 5000, 0),
+             Point{901, 501}));
   // No range, no ring: the goal itself.
-  CHECK(field.movement.ring_goal(field.world, kNoObject, Point{100, 500}, Point{900, 500}, 0, 0).at ==
-        (Point{900, 500}));
+  const MovementSystem::RingGoal alone =
+      field.movement.ring_goal(field.world, kNoObject, Point{900, 500}, 0, 0);
+  CHECK(alone.points.size() == 1);
+  CHECK(alone.at == (Point{900, 500}));
 }
 
 TEST(the_free_spot_test_counts_standing_units_and_every_lock_but_not_movers) {
@@ -1462,19 +1481,19 @@ TEST(a_goal_point_is_struck_by_a_body_at_the_two_radii) {
   touching.unit("Post", Point{831, 900});
   const ObjectId near_asker = touching.unit("Soldier", Point{100, 900});
   const MovementSystem::RingGoal near =
-      touching.movement.ring_goal(touching.world, near_asker, Point{100, 900}, kTarget, kBand, 0);
+      touching.movement.ring_goal(touching.world, near_asker, kTarget, kBand, 0);
   CHECK(near.free);
-  CHECK(near.at != (Point{861, 900}));
+  CHECK(lays(near, Point{861, 900}, /*live=*/false));
   Field clear;
   clear.unit("Post", Point{830, 900});
   const ObjectId far_asker = clear.unit("Soldier", Point{100, 900});
   const MovementSystem::RingGoal far =
-      clear.movement.ring_goal(clear.world, far_asker, Point{100, 900}, kTarget, kBand, 0);
+      clear.movement.ring_goal(clear.world, far_asker, kTarget, kBand, 0);
   CHECK(far.free);
-  CHECK(far.at == (Point{861, 900}));
+  CHECK(lays(far, Point{861, 900}));
   // Without an owner -- an order that holds no lock -- nothing is struck.
-  CHECK(touching.movement.ring_goal(touching.world, kNoObject, Point{100, 900}, kTarget, kBand, 0)
-            .at == (Point{861, 900}));
+  CHECK(lays(touching.movement.ring_goal(touching.world, kNoObject, kTarget, kBand, 0),
+             Point{861, 900}));
 }
 
 TEST(a_band_with_every_goal_point_taken_heads_for_the_point_nearest_its_centre) {
@@ -1486,14 +1505,14 @@ TEST(a_band_with_every_goal_point_taken_heads_for_the_point_nearest_its_centre) 
   ring_of_posts(field);
   const ObjectId attacker = field.unit("Soldier", Point{100, 900});
   const MovementSystem::RingGoal goal =
-      field.movement.ring_goal(field.world, attacker, Point{100, 900}, kTarget, kBand, 0);
+      field.movement.ring_goal(field.world, attacker, kTarget, kBand, 0);
   CHECK(!goal.free);
   CHECK(goal.at == kTarget);
   // A band of 39 has no ring at 0: the nearest of its sixteen points at 38,
   // which truncation makes the north-east one, 36.8 out where the rest are
   // 37 or more.
   const MovementSystem::RingGoal ring =
-      field.movement.ring_goal(field.world, attacker, Point{100, 900}, kTarget, 39, 0);
+      field.movement.ring_goal(field.world, attacker, kTarget, 39, 0);
   CHECK(!ring.free);
   CHECK(ring.at == (Point{926, 926}));
 }

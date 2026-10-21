@@ -2,6 +2,8 @@
 
 #include "imperivm/core/sim/path.hpp"
 
+#include "imperivm/core/sim/grid_search.hpp"
+
 #include <algorithm>
 #include <utility>
 
@@ -30,46 +32,6 @@ constexpr std::int32_t kQ15One = 32768;
   const std::int64_t half = denominator / 2;
   return numerator >= 0 ? (numerator + half) / denominator : (numerator - half) / denominator;
 }
-
-/// A* step costs. 14/10 approximates sqrt(2) to within 1%, and both are
-/// integers, which is the whole point.
-constexpr std::int32_t kStepStraight = 10;
-constexpr std::int32_t kStepDiagonal = 14;
-
-/// The neighbour order. Fixed, and listed once: four orthogonals then four
-/// diagonals, each group clockwise from north. Ties in the heap are broken by
-/// cell index rather than by this order, so it does not decide the route -- but
-/// it does decide which of two equal-cost parents a node records, so it is
-/// still part of the definition.
-struct Step {
-  std::int32_t dx;
-  std::int32_t dy;
-  std::int32_t cost;
-};
-constexpr Step kSteps[8] = {
-    {0, -1, kStepStraight}, {1, 0, kStepStraight},  {0, 1, kStepStraight},  {-1, 0, kStepStraight},
-    {1, -1, kStepDiagonal}, {1, 1, kStepDiagonal},  {-1, 1, kStepDiagonal}, {-1, -1, kStepDiagonal},
-};
-
-/// Octile distance in the same units as the step costs: admissible for an
-/// 8-connected grid with these two costs, and exact on open ground, so A*
-/// expands almost nothing when the way is clear.
-[[nodiscard]] constexpr std::int32_t octile(std::int32_t ax, std::int32_t ay, std::int32_t bx,
-                                            std::int32_t by) noexcept {
-  const std::int32_t dx = ax > bx ? ax - bx : bx - ax;
-  const std::int32_t dy = ay > by ? ay - by : by - ay;
-  const std::int32_t lo = dx < dy ? dx : dy;
-  const std::int32_t hi = dx < dy ? dy : dx;
-  return kStepStraight * (hi - lo) + kStepDiagonal * lo;
-}
-
-/// How many waypoints ahead the smoothing pass will look for a shortcut.
-///
-/// Unbounded greedy smoothing is quadratic in the length of the route, and a
-/// route can be a thousand cells long. Sixteen cells is 256 world units, which
-/// is four unit widths -- long enough to straighten every corner a grid search
-/// produces, short enough that smoothing stays linear.
-constexpr std::size_t kSmoothWindow = 16;
 
 /// `ObstructionGrid::line_is_clear` over any notion of blocked.
 template <typename Blocked>
@@ -197,7 +159,6 @@ bool ObstructionGrid::blocked_cell(std::int32_t cx, std::int32_t cy) const noexc
 
 void ObstructionGrid::set_cell(std::int32_t cx, std::int32_t cy, bool blocked) noexcept {
   if (!in_bounds(cx, cy)) return;
-  regions_valid_ = false;
   const std::size_t bit = bit_index(cx, cy);
   const std::uint64_t mask = std::uint64_t{1} << (bit & 63);
   if (blocked) {
@@ -272,59 +233,6 @@ Point ObstructionGrid::nearest_free(Point world, std::int32_t max_rings) const n
       world, max_rings, [this](std::int32_t cx, std::int32_t cy) { return blocked_cell(cx, cy); });
 }
 
-std::uint32_t ObstructionGrid::region_of(std::int32_t cx, std::int32_t cy) const {
-  if (!in_bounds(cx, cy)) return 0;
-  if (!regions_valid_) label_regions();
-  return regions_[bit_index(cx, cy)];
-}
-
-void ObstructionGrid::label_regions() const {
-  constexpr std::int32_t kDx[4] = {0, 1, 0, -1};
-  constexpr std::int32_t kDy[4] = {-1, 0, 1, 0};
-  const std::size_t cells = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
-  regions_.assign(cells, 0);
-  region_boxes_.assign(1, CellBox{});
-  std::vector<std::uint32_t> queue;
-  std::uint32_t next = 0;
-  for (std::int32_t y = 0; y < height_; ++y) {
-    for (std::int32_t x = 0; x < width_; ++x) {
-      const std::size_t seed = bit_index(x, y);
-      if (regions_[seed] != 0 || blocked_cell(x, y)) continue;
-      // A breadth-first flood over the four orthogonal neighbours.
-      ++next;
-      regions_[seed] = next;
-      CellBox box{x, y, x, y};
-      queue.clear();
-      queue.push_back(static_cast<std::uint32_t>(seed));
-      for (std::size_t head = 0; head < queue.size(); ++head) {
-        const auto w = static_cast<std::uint32_t>(width_);
-        const auto qx = static_cast<std::int32_t>(queue[head] % w);
-        const auto qy = static_cast<std::int32_t>(queue[head] / w);
-        box.min_x = std::min(box.min_x, qx);
-        box.min_y = std::min(box.min_y, qy);
-        box.max_x = std::max(box.max_x, qx);
-        box.max_y = std::max(box.max_y, qy);
-        for (int i = 0; i < 4; ++i) {
-          const std::int32_t nx = qx + kDx[i];
-          const std::int32_t ny = qy + kDy[i];
-          if (blocked_cell(nx, ny)) continue;
-          const std::size_t at = bit_index(nx, ny);
-          if (regions_[at] != 0) continue;
-          regions_[at] = next;
-          queue.push_back(static_cast<std::uint32_t>(at));
-        }
-      }
-      region_boxes_.push_back(box);
-    }
-  }
-  regions_valid_ = true;
-}
-
-ObstructionGrid::CellBox ObstructionGrid::region_box(std::uint32_t region) const {
-  if (!regions_valid_) label_regions();
-  if (region == 0 || region >= region_boxes_.size()) return CellBox{};
-  return region_boxes_[region];
-}
 
 std::size_t ObstructionGrid::count_blocked() const noexcept {
   std::size_t total = 0;
@@ -415,415 +323,46 @@ Point point_along(std::span<const Point> waypoints, std::int64_t distance_along,
 }
 
 // --------------------------------------------------------------------------
-// A*
+// the route search
 // --------------------------------------------------------------------------
 
-void PathFinder::reset(const ObstructionGrid& grid) {
-  const std::int32_t width = grid.width();
-  const std::int32_t height = grid.height();
-  if (width != width_ || height != height_) {
-    width_ = width;
-    height_ = height;
-    nodes_.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), Node{});
-    generation_ = 0;
-  }
-  // Wrapping the generation would make a stale node look current, so the
-  // arrays are cleared on the wrap rather than trusted.
-  if (++generation_ == 0) {
-    std::fill(nodes_.begin(), nodes_.end(), Node{});
-    generation_ = 1;
-  }
-  heap_.clear();
-  cells_.clear();
-}
+PathFinder::PathFinder()
+    : grid_(std::make_unique<GridSearch>()), goals_(std::make_unique<GoalCells>()) {}
+PathFinder::~PathFinder() = default;
+PathFinder::PathFinder(PathFinder&&) noexcept = default;
+PathFinder& PathFinder::operator=(PathFinder&&) noexcept = default;
 
-void PathFinder::push(Open entry) {
-  heap_.push_back(entry);
-  std::size_t i = heap_.size() - 1;
-  while (i > 0) {
-    const std::size_t parent = (i - 1) / 2;
-    const Open& p = heap_[parent];
-    const bool higher = entry.f < p.f || (entry.f == p.f && entry.h < p.h) ||
-                        (entry.f == p.f && entry.h == p.h && entry.cell < p.cell);
-    if (!higher) break;
-    heap_[i] = p;
-    i = parent;
-  }
-  heap_[i] = entry;
-}
+std::uint64_t PathFinder::total_expanded() const noexcept { return grid_->total_expanded(); }
 
-PathFinder::Open PathFinder::pop() {
-  const Open top = heap_.front();
-  const Open moved = heap_.back();
-  heap_.pop_back();
-  if (heap_.empty()) return top;
-  std::size_t i = 0;
-  for (;;) {
-    const std::size_t left = 2 * i + 1;
-    if (left >= heap_.size()) break;
-    std::size_t best = left;
-    const std::size_t right = left + 1;
-    if (right < heap_.size()) {
-      const Open& l = heap_[left];
-      const Open& r = heap_[right];
-      const bool right_first = r.f < l.f || (r.f == l.f && r.h < l.h) ||
-                               (r.f == l.f && r.h == l.h && r.cell < l.cell);
-      if (right_first) best = right;
-    }
-    const Open& c = heap_[best];
-    const bool child_first = c.f < moved.f || (c.f == moved.f && c.h < moved.h) ||
-                             (c.f == moved.f && c.h == moved.h && c.cell < moved.cell);
-    if (!child_first) break;
-    heap_[i] = c;
-    i = best;
+void request_goals(const ObstructionGrid& grid, const PathRequest& request, GoalCells& out) {
+  if (request.goal_points_given) {
+    out.assign(request.goal_points);
+    return;
   }
-  heap_[i] = moved;
-  return top;
+  // A range of 0 lays the goal alone (0x00409cf0), and only where a unit can
+  // stand: on the map and on a free cell (0x00409b80).
+  const std::int32_t cx = ObstructionGrid::cell_of(request.goal.x);
+  const std::int32_t cy = ObstructionGrid::cell_of(request.goal.y);
+  if (grid.in_bounds(cx, cy) && !grid.blocked_cell(cx, cy)) {
+    const GoalPoint alone{request.goal, true};
+    out.assign(std::span<const GoalPoint>(&alone, 1));
+  } else {
+    out.assign({});
+  }
 }
 
 Path PathFinder::find(const ObstructionGrid& grid, const PathRequest& request) {
-  if (request.barrier != nullptr && !request.barrier->empty()) {
-    const CellOverlay& barrier = *request.barrier;
-    return find_over(
-        grid, request,
-        [&grid, &barrier](std::int32_t cx, std::int32_t cy) {
-          return grid.blocked_cell(cx, cy) || barrier.contains(cx, cy);
-        },
-        /*by_regions=*/false);
+  request_goals(grid, request, *goals_);
+  CellView view;
+  view.grid = &grid;
+  view.barrier = request.barrier != nullptr && !request.barrier->empty() ? request.barrier : nullptr;
+  Path out = grid_->run(view, request, *goals_, /*both_ways=*/false);
+  // A route that goes nowhere is no route: the original answers whether the
+  // length is non-zero, and a caller that sees one point lays nothing.
+  if (out.waypoints.size() >= 2 && out.length == 0) {
+    out.waypoints.resize(1);
+    if (out.status == PathStatus::found) out.status = PathStatus::arrived;
   }
-  return find_over(
-      grid, request,
-      [&grid](std::int32_t cx, std::int32_t cy) { return grid.blocked_cell(cx, cy); },
-      /*by_regions=*/true);
-}
-
-namespace {
-
-/// The regions a search from `(cx, cy)` can step into: the cell's own, or --
-/// for a start inside an obstruction, which the search leaves by any free
-/// orthogonal neighbour -- each of those neighbours'. At most four.
-struct StartRegions {
-  std::uint32_t ids[4] = {0, 0, 0, 0};
-  std::size_t count = 0;
-
-  [[nodiscard]] bool has(std::uint32_t region) const noexcept {
-    if (region == 0) return false;
-    for (std::size_t i = 0; i < count; ++i) {
-      if (ids[i] == region) return true;
-    }
-    return false;
-  }
-  void add(std::uint32_t region) noexcept {
-    if (region != 0 && !has(region) && count < 4) ids[count++] = region;
-  }
-};
-
-[[nodiscard]] StartRegions start_regions(const ObstructionGrid& grid, std::int32_t cx,
-                                         std::int32_t cy) {
-  StartRegions out;
-  if (!grid.blocked_cell(cx, cy)) {
-    out.add(grid.region_of(cx, cy));
-    return out;
-  }
-  out.add(grid.region_of(cx, cy - 1));
-  out.add(grid.region_of(cx + 1, cy));
-  out.add(grid.region_of(cx, cy + 1));
-  out.add(grid.region_of(cx - 1, cy));
-  return out;
-}
-
-/// The cell of `regions` whose centre is nearest `goal` in straight distance,
-/// ties to the lower cell index (row by row). False when no cell of the grid
-/// is in them. Rings of growing Chebyshev radius round the goal's cell, until
-/// no farther ring can hold anything nearer -- each ring cut to the box that
-/// holds the regions' cells, and only the rings that meet it. A unit in a
-/// small pocket asked for a far goal would otherwise scan most of the map on
-/// every call; the box changes which cells are looked at, never the answer.
-[[nodiscard]] bool nearest_reachable(const ObstructionGrid& grid, const StartRegions& regions,
-                                     Point goal, std::int32_t& out_cx, std::int32_t& out_cy) {
-  ObstructionGrid::CellBox box;
-  for (std::size_t i = 0; i < regions.count; ++i) {
-    const ObstructionGrid::CellBox own = grid.region_box(regions.ids[i]);
-    if (own.min_x > own.max_x) continue;
-    if (box.min_x > box.max_x) {
-      box = own;
-      continue;
-    }
-    box.min_x = std::min(box.min_x, own.min_x);
-    box.min_y = std::min(box.min_y, own.min_y);
-    box.max_x = std::max(box.max_x, own.max_x);
-    box.max_y = std::max(box.max_y, own.max_y);
-  }
-  if (box.min_x > box.max_x) return false;
-  const std::int32_t gx = ObstructionGrid::cell_of(goal.x);
-  const std::int32_t gy = ObstructionGrid::cell_of(goal.y);
-  // The nearest ring that meets the box, and the farthest.
-  const std::int32_t first =
-      std::max({0, box.min_x - gx, gx - box.max_x, box.min_y - gy, gy - box.max_y});
-  const std::int32_t reach =
-      std::max({gx - box.min_x, box.max_x - gx, gy - box.min_y, box.max_y - gy});
-  std::int64_t best = -1;
-  std::int64_t best_index = 0;
-  const auto consider = [&](std::int32_t x, std::int32_t y) {
-    if (!grid.in_bounds(x, y) || !regions.has(grid.region_of(x, y))) return;
-    const Point centre{ObstructionGrid::centre_of(x), ObstructionGrid::centre_of(y)};
-    const std::int64_t d = dist_sq(centre, goal);
-    const std::int64_t index = static_cast<std::int64_t>(y) * grid.width() + x;
-    if (best < 0 || d < best || (d == best && index < best_index)) {
-      best = d;
-      best_index = index;
-      out_cx = x;
-      out_cy = y;
-    }
-  };
-  for (std::int32_t r = first; r <= reach; ++r) {
-    // Every centre on ring `r` is at least `16r - 8` from a goal anywhere in
-    // its own cell; once that is beyond the best, nothing farther can win.
-    if (best >= 0) {
-      const std::int64_t floor = static_cast<std::int64_t>(r) * kCollisionCellSize -
-                                 kCollisionCellSize / 2;
-      if (floor > 0 && floor * floor > best) break;
-    }
-    if (r == 0) {
-      consider(gx, gy);
-      continue;
-    }
-    // The ring's top and bottom rows, then its two columns between them,
-    // each cut to the box.
-    const std::int32_t x_from = std::max(gx - r, box.min_x);
-    const std::int32_t x_to = std::min(gx + r, box.max_x);
-    for (const std::int32_t y : {gy - r, gy + r}) {
-      if (y < box.min_y || y > box.max_y) continue;
-      for (std::int32_t x = x_from; x <= x_to; ++x) consider(x, y);
-    }
-    const std::int32_t y_from = std::max(gy - r + 1, box.min_y);
-    const std::int32_t y_to = std::min(gy + r - 1, box.max_y);
-    for (const std::int32_t x : {gx - r, gx + r}) {
-      if (x < box.min_x || x > box.max_x) continue;
-      for (std::int32_t y = y_from; y <= y_to; ++y) consider(x, y);
-    }
-  }
-  return best >= 0;
-}
-
-}  // namespace
-
-template <typename Blocked>
-Path PathFinder::find_over(const ObstructionGrid& grid, const PathRequest& request,
-                           const Blocked& blocked, bool by_regions) {
-  Path out;
-  if (grid.empty()) return out;
-
-  const std::int32_t start_cx = ObstructionGrid::cell_of(request.start.x);
-  const std::int32_t start_cy = ObstructionGrid::cell_of(request.start.y);
-  if (!grid.in_bounds(start_cx, start_cy)) return out;
-
-  out.waypoints.push_back(request.start);
-
-  // Already there. The arrival test is on squared distance in integers: no
-  // square root, and no floating-point comparison anywhere.
-  if (within(request.start, request.goal, request.arrival_range)) {
-    out.status = PathStatus::arrived;
-    return out;
-  }
-
-  // A clear straight line is the common case for a short move, and running the
-  // search for it would be both slower and rougher. A mover that ignores
-  // passability takes it whatever lies across it.
-  if (request.ignore_passability || line_clear_over(request.start, request.goal, blocked)) {
-    out.waypoints.push_back(request.goal);
-    out.status = PathStatus::found;
-    out.length = polyline_length(out.waypoints);
-    return out;
-  }
-
-  // A goal inside a footprint is ordinary: scripts send units to a building's
-  // position. Retarget to the nearest free cell so the search has something to
-  // reach, and keep the original goal only for the arrival test.
-  Point goal = request.goal;
-  const std::int32_t goal_cx_raw = ObstructionGrid::cell_of(goal.x);
-  const std::int32_t goal_cy_raw = ObstructionGrid::cell_of(goal.y);
-  if (blocked(goal_cx_raw, goal_cy_raw)) goal = nearest_free_over(goal, 32, blocked);
-
-  std::int32_t goal_cx = ObstructionGrid::cell_of(goal.x);
-  std::int32_t goal_cy = ObstructionGrid::cell_of(goal.y);
-
-  // **Whether the search can arrive is the regions' to say, not a budget's**
-  // (docs/formats/pathfinder.md). A goal in a region the start reaches is
-  // searched for with no budget: it is found, as the original's area search
-  // finds every goal it can reach. A goal in another region is not searched
-  // for at all: the route runs to the reachable cell whose centre is nearest
-  // the goal point, and is partial -- the original's status 2, a route to the
-  // area nearest the goal (0x00413690's best area, 0x0040e500's entry into
-  // it). With an arrival band that cell may already be in it, and then the
-  // route is the band's, complete.
-  bool retargeted = false;
-  bool to_nearest = false;
-  std::uint32_t budget = request.node_budget;
-  if (by_regions) {
-    budget = static_cast<std::uint32_t>(grid.width()) * static_cast<std::uint32_t>(grid.height());
-    const StartRegions from = start_regions(grid, start_cx, start_cy);
-    if (!from.has(grid.region_of(goal_cx, goal_cy))) {
-      std::int32_t near_cx = 0;
-      std::int32_t near_cy = 0;
-      if (!nearest_reachable(grid, from, request.goal, near_cx, near_cy) ||
-          (near_cx == start_cx && near_cy == start_cy)) {
-        // Walled in, or already as near as it can get: nowhere to go.
-        out.status = PathStatus::partial;
-        return out;
-      }
-      goal_cx = near_cx;
-      goal_cy = near_cy;
-      retargeted = true;
-      const Point centre{ObstructionGrid::centre_of(near_cx), ObstructionGrid::centre_of(near_cy)};
-      to_nearest = !within(centre, request.goal, request.arrival_range);
-    }
-  }
-
-  reset(grid);
-  const std::int32_t width = grid.width();
-  const auto index_of = [width](std::int32_t cx, std::int32_t cy) {
-    return static_cast<std::uint32_t>(cy) * static_cast<std::uint32_t>(width) +
-           static_cast<std::uint32_t>(cx);
-  };
-
-  // The arrival range in cost units, so the goal test is a cheap comparison on
-  // the heuristic rather than a distance per node.
-  const std::int32_t arrival_cells =
-      request.arrival_range > 0 ? request.arrival_range / kCollisionCellSize : 0;
-
-  const std::uint32_t start_index = index_of(start_cx, start_cy);
-  {
-    Node& node = nodes_[start_index];
-    node = Node{};
-    node.generation = generation_;
-    node.g = 0;
-    node.h = octile(start_cx, start_cy, goal_cx, goal_cy);
-    node.f = node.h;
-    node.parent = start_index;
-  }
-  push(Open{nodes_[start_index].f, nodes_[start_index].h, start_index});
-
-  std::uint32_t best_cell = start_index;
-  std::int32_t best_h = nodes_[start_index].h;
-  std::uint32_t reached = 0;
-  bool found = false;
-
-  while (!heap_.empty()) {
-    const Open top = pop();
-    Node& current = nodes_[top.cell];
-    if (current.generation != generation_ || current.closed) continue;
-    // A stale heap entry for a cell whose cost has since improved.
-    if (top.f != current.f || top.h != current.h) continue;
-    current.closed = true;
-    ++out.expanded;
-    ++total_expanded_;
-
-    const std::int32_t cx = static_cast<std::int32_t>(top.cell % static_cast<std::uint32_t>(width));
-    const std::int32_t cy = static_cast<std::int32_t>(top.cell / static_cast<std::uint32_t>(width));
-
-    if (current.h < best_h || (current.h == best_h && top.cell < best_cell)) {
-      best_h = current.h;
-      best_cell = top.cell;
-    }
-
-    if ((cx == goal_cx && cy == goal_cy) ||
-        (arrival_cells > 0 && octile(cx, cy, goal_cx, goal_cy) <= arrival_cells * kStepStraight)) {
-      reached = top.cell;
-      found = true;
-      break;
-    }
-
-    if (out.expanded >= budget) break;
-
-    const std::int32_t g = current.g;
-    for (const Step& step : kSteps) {
-      const std::int32_t nx = cx + step.dx;
-      const std::int32_t ny = cy + step.dy;
-      if (blocked(nx, ny)) continue;
-      // No corner cutting: a diagonal needs both of its orthogonal neighbours
-      // free, or a unit slides through the corner of a building.
-      if (step.dx != 0 && step.dy != 0) {
-        if (blocked(cx + step.dx, cy) || blocked(cx, cy + step.dy)) continue;
-      }
-      const std::uint32_t neighbour = index_of(nx, ny);
-      Node& node = nodes_[neighbour];
-      if (node.generation != generation_) {
-        node = Node{};
-        node.generation = generation_;
-        node.g = g + step.cost;
-        node.h = octile(nx, ny, goal_cx, goal_cy);
-        node.f = node.g + node.h;
-        node.parent = top.cell;
-        push(Open{node.f, node.h, neighbour});
-        continue;
-      }
-      if (node.closed) continue;
-      const std::int32_t tentative = g + step.cost;
-      if (tentative >= node.g) continue;
-      node.g = tentative;
-      node.f = tentative + node.h;
-      node.parent = top.cell;
-      push(Open{node.f, node.h, neighbour});
-    }
-  }
-
-  const std::uint32_t terminal = found ? reached : best_cell;
-  if (!found && terminal == start_index) {
-    out.status = PathStatus::partial;
-    out.length = 0;
-    return out;
-  }
-
-  // Walk the parents back, then reverse. The chain is finite because every
-  // parent has a strictly smaller `g` except the start, which is its own.
-  cells_.clear();
-  for (std::uint32_t cell = terminal;; cell = nodes_[cell].parent) {
-    cells_.push_back(cell);
-    if (cell == start_index) break;
-    if (cells_.size() > nodes_.size()) break;  // defensive: a corrupt chain
-  }
-  std::reverse(cells_.begin(), cells_.end());
-
-  std::vector<Point> raw;
-  raw.reserve(cells_.size() + 1);
-  raw.push_back(request.start);
-  for (std::size_t i = 1; i < cells_.size(); ++i) {
-    const std::uint32_t cell = cells_[i];
-    const std::int32_t cx = static_cast<std::int32_t>(cell % static_cast<std::uint32_t>(width));
-    const std::int32_t cy = static_cast<std::int32_t>(cell / static_cast<std::uint32_t>(width));
-    raw.push_back(Point{ObstructionGrid::centre_of(cx), ObstructionGrid::centre_of(cy)});
-  }
-  // The real destination, when it is reachable, rather than the centre of its
-  // cell: a unit ordered to a point should stand on the point.
-  if (found && !retargeted && !raw.empty() &&
-      line_clear_over(raw.back(), request.goal, blocked)) {
-    raw.back() = request.goal;
-  }
-
-  if (request.smooth && raw.size() > 2) {
-    std::vector<Point> smoothed;
-    smoothed.reserve(raw.size());
-    smoothed.push_back(raw.front());
-    std::size_t anchor = 0;
-    while (anchor + 1 < raw.size()) {
-      std::size_t furthest = anchor + 1;
-      const std::size_t limit = std::min(raw.size() - 1, anchor + kSmoothWindow);
-      for (std::size_t candidate = limit; candidate > anchor + 1; --candidate) {
-        if (line_clear_over(raw[anchor], raw[candidate], blocked)) {
-          furthest = candidate;
-          break;
-        }
-      }
-      smoothed.push_back(raw[furthest]);
-      anchor = furthest;
-    }
-    raw.swap(smoothed);
-  }
-
-  out.waypoints = std::move(raw);
-  out.status = found && !to_nearest ? PathStatus::found : PathStatus::partial;
-  out.length = polyline_length(out.waypoints);
   return out;
 }
 
