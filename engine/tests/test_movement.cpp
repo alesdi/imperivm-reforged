@@ -404,7 +404,7 @@ constexpr std::string_view kWalkerEntity = R"(<?xml version="1.0"?>
 ///
 /// `MovementSystem::set_formations` had no caller outside these tests, so
 /// `formations()` was empty in every real session, `default_formation()` was
-/// null, and `place_army` returned on its first check -- a hero's warriors have
+/// null, and the march returned on its first check -- a hero's warriors have
 /// never formed up. It is the same shape of gap as the four `session.cpp`
 /// already names beside `set_scheduler`.
 TEST(a_session_loads_the_formation_table_from_its_inputs) {
@@ -2933,7 +2933,17 @@ TEST(a_hero_has_a_path_while_his_column_is_still_marching) {
   (void)f.movement.order_goto(f.world, stray, Point{900, 900}, 0);
   REQUIRE(f.movement.find(stray)->has_path);
   CHECK(!has_path(hero));
+  // Nor is one that merely walks in his party: only a route aimed at his
+  // formation (mode 2, `SetFormation` 0x00417790) is.
   (void)f.movement.order_goto(f.world, marcher, Point{800, 300}, 0, 0, hero);
+  REQUIRE(f.movement.find(marcher)->has_path);
+  CHECK(!has_path(hero));
+  Formation& form = f.movement.formation_of(hero);
+  form.path = true;
+  form.going_on = true;
+  form.samples = 1;
+  form.slots.push_back({marcher, f.world.find(marcher)->class_index, Point{}, Point{800, 300}});
+  f.movement.aim_at_formation(f.world, marcher, hero, false);
   REQUIRE(f.movement.find(marcher)->has_path);
   CHECK(has_path(hero));
 
@@ -2995,4 +3005,65 @@ TEST(set_pos_takes_a_held_unit_out_of_its_holder) {
         HostStatus::ok);
   CHECK(!f.world.state(unit)->is_held());
   CHECK(position_of(f.world, unit) == (Point{800, 800}));
+}
+
+// -- the formation's own route ---------------------------------------------------
+
+/// The formation's route is stepped a leg at a time (0x0041a740): a leg of
+/// 1,000 is five steps of exactly 200, the last the leg's end; the next leg,
+/// 30 long, is one step, and once it is taken nothing is left (0x0041a700).
+TEST(the_formations_route_cuts_each_leg_into_steps_nearest_200) {
+  FormationRoute route;
+  formation_route_lay(route, {Point{0, 0}, Point{1000, 0}, Point{1000, 30}}, true);
+  CHECK(route.remaining == 1030 * 65536);
+  CHECK(formation_route_left(route) == 1030);
+  std::vector<Point> seen;
+  Point p{};
+  while (formation_route_step(route, p)) {
+    seen.push_back(p);
+    formation_route_commit(route);
+  }
+  const std::vector<Point> expected = {Point{200, 0}, Point{400, 0}, Point{600, 0},
+                                       Point{800, 0}, Point{1000, 0}, Point{1000, 30}};
+  CHECK(seen == expected);
+  CHECK(route.remaining == 0);
+  CHECK(formation_route_left(route) == 0);
+}
+
+/// A leg of 3,700 is 19 steps of 194.7 rather than 18 of 205.6: whichever
+/// comes nearer 200. Each point is the leg's start plus the step's 16.16
+/// offset times the step number, shifted right -- floored, so a step west
+/// lands one unit further than a truncation would.
+TEST(a_formation_step_is_the_whole_count_nearest_200_and_its_offset_is_floored) {
+  FormationRoute east;
+  formation_route_lay(east, {Point{300, 500}, Point{4000, 500}}, true);
+  Point p{};
+  REQUIRE(formation_route_step(east, p));
+  CHECK(east.steps == 19);
+  CHECK(p == (Point{494, 500}));
+  formation_route_commit(east);
+  CHECK(formation_route_left(east) == 3505);
+  REQUIRE(formation_route_step(east, p));
+  CHECK(p == (Point{689, 500}));
+
+  FormationRoute west;
+  formation_route_lay(west, {Point{4000, 500}, Point{300, 500}}, true);
+  REQUIRE(formation_route_step(west, p));
+  CHECK(west.steps == 19);
+  CHECK(p == (Point{3805, 500}));
+}
+
+/// A leg of no length takes no step, though what is left of the route is not
+/// spent; and what is left is read as the signed high word of its 16.16 value
+/// (0x0040b890).
+TEST(a_formation_route_leg_of_no_length_takes_no_step) {
+  FormationRoute route;
+  formation_route_lay(route, {Point{100, 100}, Point{100, 100}, Point{300, 100}}, true);
+  Point p{};
+  CHECK(!formation_route_step(route, p));
+  CHECK(formation_route_left(route) == 200);
+
+  FormationRoute far;
+  far.remaining = static_cast<std::int32_t>(40000u * 65536u);
+  CHECK(formation_route_left(far) == 40000 - 65536);
 }

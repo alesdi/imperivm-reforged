@@ -501,13 +501,16 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
     // stood on one point (Alesia: 197 touching pairs, 118 stacked); walking
     // on, the first stands free where it is and every other walks on past it
     // to the next free spot along the way.
-    const bool formation = move.party != kNoObject;
+    const bool formation = move.form_aimed;
     if (!formation) move.route_failed = true;
     if (!formation && walking_on &&
         !stop_branch_halts(world, id, move, from, move.travelled())) {
       move.last_outcome = MoveOutcome::moving;
       return move.last_outcome;
     }
+    // A route aimed at a formation keeps what it had, and answers the failure
+    // to the formation's step (0x00419b20), which takes no step on it.
+    if (formation && walking_on) return MoveOutcome::blocked;
     fresh_media();
     move.has_path = false;
     mark_path(world, id, false);
@@ -609,17 +612,12 @@ bool MovementSystem::held_at_gate(const World& world, ObjectId id, const MoveSta
   // order, so it is the first at or beyond where the unit has got to.
   for (const GateCrossing& crossing : move.gate_crossings) {
     if (crossing.at < travelled) continue;
-    // A unit's own radius, or below zero none (0x004182b0); the route that
-    // moves a formation -- here, its hero's while he leads a march -- takes
-    // the formation's radius, or its leader's when it has none (0x005f2350),
-    // and never less than 275 (0x00418286..0x004182be).
-    std::int32_t radius = radius_of(world, id);
-    std::int32_t floor = 0;
-    if (move.party == id) {
-      radius = formation_reach(formation(id), radius);
-      floor = kGateGroupRadius;
-    }
-    const std::int64_t reach = static_cast<std::int64_t>(radius > floor ? radius : floor) + kGateApproach;
+    // A unit's own radius, or below zero none (0x004182b0). The route that
+    // moves a formation is the formation's own, which takes the formation's
+    // radius and never less than 275 (`formation_gate_bars`); every unit's,
+    // the hero's included, is aimed at its station and takes its own.
+    const std::int32_t radius = radius_of(world, id);
+    const std::int64_t reach = static_cast<std::int64_t>(radius > 0 ? radius : 0) + kGateApproach;
     if (crossing.at - travelled > reach) return false;
     const WorldObject* gate = world.find(crossing.gate);
     const WorldObject* self = world.find(id);
@@ -665,9 +663,10 @@ MoveOutcome MovementSystem::order_goto(World& world, ObjectId id, Point dest, st
   move.min_range = min_range;
   move.goto_active = true;
   move.party = party;
-  // An order that is not a march walks at the unit's own pace; a march's
-  // pace is `place_army`'s to set (`MoveState::march_rate`).
-  if (party == kNoObject) move.march_rate = 0;
+  // An order that is not aimed at a formation walks at the unit's own pace.
+  move.form_aimed = false;
+  move.form_seen = -1;
+  move.march_rate = 0;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
   // `SetDest` and `SetFormation` both clear the stop request (0x00417797).
   move.stop_requested = false;
@@ -689,6 +688,8 @@ MoveOutcome MovementSystem::order_goto_object(World& world, ObjectId id, ObjectI
   move.min_range = min_range;
   move.goto_active = true;
   move.party = kNoObject;
+  move.form_aimed = false;
+  move.form_seen = -1;
   move.march_rate = 0;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
   move.stop_requested = false;
@@ -716,6 +717,8 @@ void MovementSystem::stop(World& world, ObjectId id) {
   move->stop_requested = false;
   move->route_failed = false;
   move->march_rate = 0;
+  move->form_aimed = false;
+  move->form_seen = -1;
   move->last_outcome = MoveOutcome::idle;
 }
 
@@ -758,9 +761,8 @@ void MovementSystem::halt(World& world, ObjectId id, MoveState& move) {
 }
 
 bool MovementSystem::marching(ObjectId id, const MoveState& move) const noexcept {
-  if (move.party == kNoObject || move.party == id) return false;
-  const MoveState* lead = find(move.party);
-  return lead != nullptr && lead->has_path && lead->party == move.party;
+  (void)id;
+  return move.form_aimed && move.party != kNoObject && formation_going_on(move.party);
 }
 
 bool MovementSystem::lock_owner(ObjectId id, const MoveState& move) const noexcept {
@@ -771,7 +773,10 @@ bool MovementSystem::lock_owner(ObjectId id, const MoveState& move) const noexce
   // 0x005f5cff); while the march is on it names nobody. Any other retry names
   // its unit when flag bit 0 is set and the unit's class does not ignore
   // passability -- which `dest_lock` already folds in.
-  if (move.party != kNoObject && move.party != id) return move.dest_lock && !marching(id, move);
+  if (move.form_aimed) {
+    const Formation* form = formation(move.party);
+    return form != nullptr && form->should_lock && !marching(id, move);
+  }
   return move.dest_lock;
 }
 
@@ -1142,17 +1147,36 @@ MovementSystem::OverlapCensus MovementSystem::overlap_census(const World& world)
   return census;
 }
 
-std::int32_t MovementSystem::formation_stride_or_walk(const World& world, ObjectId id,
-                                                      const MoveState& move) const {
-  // A march's followers walk the formation's sampled path; the hero leading
-  // it keeps its own stride (inference 3).
-  if (move.party != kNoObject && move.party != id) return kFormationStride;
+std::int32_t MovementSystem::walk_step(const World& world, ObjectId id,
+                                       const MoveState& move) const {
+  // `0x005d2920`: the walk slot's animation record, `+0x2dc`, which the
+  // entity loader fills from `step` (`0x00600ff6`).
   const WorldObject* slot = world.find(id);
   if (slot == nullptr || slot->object == nullptr || slot->object->entity == nullptr) return 0;
-  // `0x005d2920`: the walk slot's animation record, `+0x2dc`, which the entity
-  // loader fills from `step` (`0x00600ff6`).
   const EntityAnim* walk = slot->object->entity->anim(move.walk_anim);
   return walk == nullptr || walk->step <= 0 ? 0 : walk->step;
+}
+
+std::int32_t MovementSystem::formation_stride_or_walk(const World& world, ObjectId id,
+                                                      const MoveState& move) const {
+  // **Engine choice, labelled: a march's followers step 200.** In
+  // `gbr.exe` a route aimed at a formation is cut by the unit's own walk step
+  // as any other is (`RecastPathfind`, 0x00419730, builds a mode-2 route's
+  // media with 0x005d2920; only the formation's own record takes 200). Here
+  // the stride is also the avoidance's step (`sim/avoidance.hpp`), which is
+  // this engine's model and not the original's, and with the walk step a
+  // column stopped in mid-march -- an AI squad's `ClrCmd` ends its
+  // `form_move` where it walks -- stands in piles: Crossroads seed 5's worst
+  // overlap was 82 against 36 with 200. The followers keep the 200 they had
+  // while the march was the hero's route; the hero keeps his own. The step at
+  // which a follower makes the next sample is the original's, its walk step
+  // (`formation_step`).
+  if (move.form_aimed && move.party != kNoObject && move.party != id) return kFormationStride;
+  const std::int32_t step = walk_step(world, id, move);
+  // A route aimed at a formation with no walk step still has to be stepped,
+  // since its samples are made at its steps, and takes the formation's 200.
+  if (step == 0 && move.form_aimed) return kFormationStride;
+  return step;
 }
 
 void MovementSystem::face(World& world, ObjectId id, Point towards) {
@@ -1176,6 +1200,14 @@ bool MovementSystem::is_arrived(const World& world, ObjectId id) const {
   // walking on to stop, or stopped after a failed search, is not arrived.
   if (move->stopping()) return false;
   const Point here = world.resolve_position(id);
+  // A route aimed at a formation (mode 2) is arrived once the formation's
+  // path is spent and the unit stands on its station exactly (0x00417c4a ..
+  // 0x00417c73: 0x005f22f0, then the position against the slot's sample).
+  if (move->form_aimed) {
+    const Formation* form = formation(move->party);
+    if (form == nullptr || formation_going_on(move->party)) return false;
+    return here == station_of(*form, id);
+  }
   const Point goal =
       move->target_object == kNoObject ? move->target : world.resolve_position(move->target_object);
   return within(here, goal, move->range) && arrival_spot_free(world, id, *move, here);
@@ -1563,6 +1595,19 @@ void MovementSystem::arrive(World& world, std::size_t entry, bool in_range) {
 void MovementSystem::decide(World& world, std::size_t entry, GameTime now) {
   const ObjectId id = states_[entry].id;
   MoveState& move = states_[entry].state;
+  // A route aimed at a formation steps through 0x00419b20 first: laid again
+  // to a new sample, more samples made as the unit nears its station, the
+  // pace set. Laid again, the step is decided afresh at this same instant.
+  if (move.form_aimed && !move.stopping()) {
+    const std::vector<Point>::size_type before = move.waypoints.size();
+    const std::int64_t length_before = move.path_length;
+    const std::int32_t seen_before = move.form_seen;
+    if (formation_step(world, entry, now) == FormStep::done) return;
+    if (move.form_seen != seen_before || move.waypoints.size() != before ||
+        move.path_length != length_before) {
+      if (!move.has_path || move.holding) return;
+    }
+  }
   const std::int64_t travelled = move.progress / kSpeedScale;
   const Point here = cooperative_position(move, move.progress);
 
@@ -1590,23 +1635,17 @@ void MovementSystem::decide(World& world, std::size_t entry, GameTime now) {
       halt(world, id, move);
       return;
     }
-  } else if (at_end && marching(id, move)) {
-    // A member at the end of its station's route while its hero still
-    // marches waits there for the march's next sample: the original
-    // member's route is the formation's (`SetFormation`, 0x00417790), and it
-    // has a next point for as long as the formation's path does. Here the
-    // next station comes with `place_army`'s next call. **Inference 3.**
-    const Point standing = offset_at(move, travelled);
-    move.holding = true;
-    move.hold_until = turn_end_ + 1;
-    move.step_start = travelled;
-    move.step_end = travelled;
-    move.offset_from = standing;
-    move.offset_to = standing;
-    return;
   } else if (at_end || in_range) {
     if (arrival_spot_free(world, id, move, here)) {
+      const bool aimed = move.form_aimed;
       arrive(world, entry, in_range);
+      // At the end of a formation's spent path the unit faces the way the
+      // formation does (0x0053f5f0 on `[form+0x38]`).
+      if (aimed) {
+        if (const Formation* form = formation(move.party); form != nullptr) {
+          set_facing(world, id, move, form->dir);
+        }
+      }
       return;
     }
     if (at_end) {
@@ -1823,6 +1862,7 @@ void MovementSystem::advance(World& world, const Turn& turn) {
       scheduled_[i] = at;
       if (at <= turn.time) queue.emplace(at, states_[i].id, i);
     }
+    deciding_ = true;
     while (!queue.empty()) {
       const auto [at, id, i] = queue.top();
       queue.pop();
@@ -1837,6 +1877,7 @@ void MovementSystem::advance(World& world, const Turn& turn) {
       scheduled_[i] = next;
       if (next <= turn.time) queue.emplace(next, states_[i].id, i);
     }
+    deciding_ = false;
   }
 
   for (std::size_t i = 0; i < count; ++i) {
@@ -2469,7 +2510,7 @@ HostOutcome stop_impl(CallContext& ctx) {
 /// other unit whether it has a route record at all (`[unit+0x148]`).
 ///
 /// A member following the march is one whose route belongs to the hero's
-/// party here (`MoveState::party`, which `place_army` sets). So a hero who has
+/// party here (`MoveState::party`, which `aim_at_formation` sets). So a hero who has
 /// reached the march's end goes on answering true while his column is still
 /// walking to its stations -- `HERO_TELEPORT.VS` and the hero scripts loop
 /// `while (.HasPath)` around `FormKeepMoving`. This used to read the hero's
@@ -2488,7 +2529,8 @@ HostOutcome has_path_impl(CallContext& ctx) {
   if (record == nullptr) return answer(false);
   for (const ObjectId member : record->army) {
     const MoveState* marching = self.movement->find(member);
-    if (marching != nullptr && marching->has_path && marching->party == self.id) {
+    if (marching != nullptr && marching->has_path && marching->form_aimed &&
+        marching->party == self.id) {
       return answer(true);
     }
   }
@@ -3223,6 +3265,430 @@ void register_movement_host(HostRegistry& registry) {
 
   registry.define(free_fn, "IsPassable3x3", 1, &is_passable_3x3_impl);
   registry.define(free_fn, "FormDescription", 1, &form_description_impl);
+}
+
+
+// --------------------------------------------------------------------------
+// the formation's route (docs/formats/formation.md, "The formation's route")
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// How far short of its station a unit aimed at a formation is timed to be,
+/// and how near it may come before the next sample is made, while the
+/// formation's path goes on: 0x85 (0x00419c78, 0x00419e7a, 0x005f589e).
+constexpr std::int64_t kSampleShort = 133;
+
+/// How near the end of the formation's path a settled orientation takes over
+/// the formation's direction (0x005f5c7d, `< 200`).
+constexpr std::int32_t kOrientationReach = 200;
+
+/// The most samples one step makes before it gives up (0x00419b20's loop,
+/// which prints "EndlessLoop" past it).
+constexpr int kFormationStepPasses = 100;
+
+}  // namespace
+
+Point MovementSystem::station_of(const Formation& form, ObjectId id) noexcept {
+  if (id == form.hero) return form.centre;
+  const FormationSlot* slot = form.slot_of(id);
+  return slot == nullptr ? kNoSample : slot->sample;
+}
+
+bool MovementSystem::formation_going_on(ObjectId hero) const noexcept {
+  const Formation* form = formation(hero);
+  // 0x005f22f0 answers "goes on" with no route object as well; a formation
+  // that is gone altogether is this engine's case, and goes nowhere.
+  if (form == nullptr) return false;
+  return !form->path || form->going_on;
+}
+
+Point MovementSystem::formation_position(const World& world, const Formation& form) const {
+  if (form.samples == 0) return world.resolve_position(form.hero);
+  return form.centre;
+}
+
+bool MovementSystem::formation_arrived(const World& world, const Formation& form) const {
+  const Point at = formation_position(world, form);
+  const std::int64_t d = isqrt(dist_sq(at, form.goal));
+  return d >= form.min_range && d <= form.range;
+}
+
+bool MovementSystem::formation_gate_bars(const World& world, const Formation& form) const {
+  const FormationRoute& route = form.route;
+  if (route.gate_crossings.empty()) return false;
+  const WorldObject* hero = world.find(form.hero);
+  if (hero == nullptr) return false;
+  // The route's crossings are kept from its start; what is left of it says
+  // how far along the centre has come.
+  std::int64_t length = 0;
+  for (std::size_t i = 0; i + 1 < route.points.size(); ++i) {
+    length += isqrt(dist_sq(route.points[i], route.points[i + 1]));
+  }
+  const std::int64_t travelled = length - formation_route_left(route);
+  const std::int32_t radius = formation_reach(&form, radius_of(world, form.hero));
+  const std::int64_t reach =
+      static_cast<std::int64_t>(radius > kGateGroupRadius ? radius : kGateGroupRadius) +
+      kGateApproach;
+  for (const GateCrossing& crossing : route.gate_crossings) {
+    if (crossing.at < travelled) continue;
+    if (crossing.at - travelled > reach) return false;
+    const WorldObject* gate = world.find(crossing.gate);
+    if (gate == nullptr) return false;
+    return !gate_waves_through(world, *gate, hero->state.owner, world.time());
+  }
+  return false;
+}
+
+bool MovementSystem::formation_recast(World& world, Formation& form, Point start) {
+  // Standing in its band already, the formation is not searched for, and the
+  // answer is 0 (0x00419730 asks `IsArrived` first).
+  {
+    const std::int64_t d = isqrt(dist_sq(start, form.goal));
+    if (d >= form.min_range && d <= form.range) return false;
+  }
+  RingGoal goal = ring_goal(world, kNoObject, form.goal, form.range, form.min_range);
+  PathRequest request;
+  request.start = start;
+  request.goal = goal.at;
+  request.goal_points = goal.points;
+  request.goal_points_given = true;
+  request.ignore_passability = false;
+  request.owner = nullptr;
+  Path found = finder_.find(grid_, request);
+  world.gate_lines().refresh(world);
+  found = route_past_gates(world, form.hero, start, request, std::move(found));
+  if (!found.usable() || found.waypoints.size() < 2) {
+    // The record built for the search is deleted and the route kept.
+    return formation_route_left(form.route) != 0;
+  }
+  formation_route_lay(form.route, std::move(found.waypoints), found.status == PathStatus::found);
+  world.gate_lines().crossings(form.route.points, form.route.gate_crossings);
+  return formation_route_left(form.route) != 0;
+}
+
+bool MovementSystem::formation_set_dest(World& world, ObjectId hero, Point dest,
+                                        std::int32_t range, std::int32_t min_range, bool lock) {
+  Formation& form = formation_of(hero);
+  form.centre = world.resolve_position(hero);
+  form.should_lock = lock;
+  form.samples = 0;
+  const bool fresh = !form.path;
+  form.path = true;
+  bool laid = false;
+  if (fresh || form.goal != dest || form.range != range || form.min_range != min_range) {
+    // The new-goal branch (0x0041a4c0): the goal taken, and a search.
+    form.goal = dest;
+    form.range = range;
+    form.min_range = min_range;
+    if (fresh) form.route = FormationRoute{};
+    laid = formation_recast(world, form, formation_position(world, form));
+  } else if (!form.route.points.empty() && formation_route_left(form.route) != 0) {
+    // The same goal with route left: kept, unless a gate ahead bars it.
+    laid = !formation_gate_bars(world, form);
+  } else if (!formation_arrived(world, form)) {
+    laid = formation_recast(world, form, formation_position(world, form));
+  } else {
+    laid = !form.route.points.empty() && !formation_gate_bars(world, form);
+  }
+  form.going_on = laid;
+  if (!laid) {
+    form.path = false;
+    form.route = FormationRoute{};
+  }
+  return laid;
+}
+
+bool MovementSystem::formation_retry_step(World& world, Formation& form, Point& out) {
+  // The path follower (0x00419ee0) for a route aimed at no unit: the
+  // formation in its band takes no step.
+  if (formation_arrived(world, form)) return false;
+  const Point from = formation_position(world, form);
+  if (form.route.points.empty() && !formation_recast(world, form, from)) return false;
+  if (!formation_route_step(form.route, out)) {
+    // At the route's end, short of the band: searched again from where the
+    // formation stands, and stepped along the new route unless a gate bars it.
+    if (formation_arrived(world, form) || !formation_recast(world, form, from)) return false;
+    if (formation_gate_bars(world, form)) return false;
+    return formation_route_step(form.route, out);
+  }
+  if (!formation_gate_bars(world, form)) return true;
+  // A gate ahead that bars the hero's side: searched again, and stepped along
+  // the new route only if that one is not barred within reach as well.
+  if (!formation_recast(world, form, from)) return false;
+  if (formation_gate_bars(world, form)) return false;
+  return formation_route_step(form.route, out);
+}
+
+Point MovementSystem::position_now(const World& world, ObjectId id, GameTime now) const {
+  if (deciding_) {
+    const std::size_t i = lower_bound(id);
+    if (i < states_.size() && states_[i].id == id && i < mode_.size() &&
+        mode_[i] == kCooperative && states_[i].state.has_path) {
+      return cooperative_position(states_[i].state, progress_at(i, now));
+    }
+  }
+  return world.resolve_position(id);
+}
+
+void MovementSystem::formation_time_sample(const World& world, Formation& form,
+                                           GameTime now) const {
+  // Who is timed: the hero and every member with a slot, on the map.
+  struct Timed {
+    std::int64_t rate;
+    std::int64_t straight;
+  };
+  std::vector<Timed> timed;
+  const bool going = !form.path || form.going_on;
+  const std::int64_t short_of = going ? kSampleShort : 0;
+  const auto add = [&](ObjectId id, Point station) {
+    const WorldObject* slot = world.find(id);
+    if (slot == nullptr || slot->state.is_held() || station == kNoSample) return;
+    const MoveState* move = find(id);
+    if (move == nullptr || move->own_rate() <= 0) return;
+    const std::int64_t d = isqrt(dist_sq(position_now(world, id, now), station));
+    timed.push_back({move->own_rate(), d > short_of ? d - short_of : 0});
+  };
+  add(form.hero, form.centre);
+  for (const FormationSlot& slot : form.slots) add(slot.unit, slot.sample);
+  if (timed.empty()) {
+    form.speed = 0;
+    form.deadline = now;
+    return;
+  }
+  // `UpdateMinSpeed`: the mean speed, held to one and a half times the
+  // slowest's.
+  std::int64_t sum = 0;
+  std::int64_t slowest = timed.front().rate;
+  for (const Timed& t : timed) {
+    sum += t.rate;
+    slowest = std::min(slowest, t.rate);
+  }
+  const auto n = static_cast<std::int64_t>(timed.size());
+  std::int64_t speed = sum / n;
+  if (2 * speed > 3 * slowest) speed = 3 * slowest / 2;
+  if (speed <= 0) speed = 1;
+  form.speed = speed;
+  // The deadline: now plus the mean time each needs at that speed.
+  std::int64_t total = 0;
+  for (const Timed& t : timed) total += t.straight * kSpeedScale / speed;
+  form.deadline = now + (total + n / 2) / n;
+}
+
+std::int64_t MovementSystem::formation_rate(const Formation& form, const MoveState& move,
+                                            std::int64_t left, GameTime now) const {
+  const std::int64_t speed = form.speed > 0 ? form.speed : std::max<std::int64_t>(move.own_rate(), 1);
+  const std::int64_t slow = std::max<std::int64_t>(speed / 2, 1);
+  const std::int64_t fast = std::max<std::int64_t>(speed * 5 / 2, slow);
+  const bool going = !form.path || form.going_on;
+  const std::int64_t walk = left - (going ? kSampleShort : 0);
+  const std::int64_t time = form.deadline - now;
+  if (time < 1 || walk <= 0) return fast;
+  return std::clamp(walk * kSpeedScale / time, slow, fast);
+}
+
+bool MovementSystem::formation_next_sample(World& world, ObjectId hero) {
+  return formation_next_sample(world, hero, world.time());
+}
+
+bool MovementSystem::formation_next_sample(World& world, ObjectId hero, GameTime now) {
+  Formation* form = formation(hero);
+  if (form == nullptr || !form->path) return false;
+  const Point old = form->centre;
+  Point next = old;
+  if (!formation_retry_step(world, *form, next) || next == old) {
+    // No step: the path is spent (0x005f5cff). Before any sample that ends
+    // the march, which the caller does (0x005f2c10).
+    form->going_on = false;
+    return false;
+  }
+  formation_route_commit(form->route);
+  if (formation_route_left(form->route) == 0) (void)formation_recast(world, *form, next);
+  form->going_on = formation_route_left(form->route) != 0;
+  const Point step{next.x - old.x, next.y - old.y};
+  // A step against the last one: "too radical change in direction".
+  if (static_cast<std::int64_t>(form->dir.x) * step.x +
+          static_cast<std::int64_t>(form->dir.y) * step.y <
+      0) {
+    form->reassign = true;
+  }
+  Point dir = step;
+  if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+    if (const HeroRecord* record = heroes->hero(hero); record != nullptr) {
+      const Point settled = record->party_orientation;
+      if ((settled.x != 0 || settled.y != 0) &&
+          formation_route_left(form->route) < kOrientationReach) {
+        dir = settled;
+      }
+    }
+  }
+  formation_place_sample(world, *form, formations_, next, dir, form->joined);
+  ++form->samples;
+  formation_time_sample(world, *form, now);
+  return true;
+}
+
+void MovementSystem::stand_on_station(World& world, ObjectId id, MoveState& move, Point here,
+                                      GameTime until) {
+  move.waypoints.assign({here, here});
+  move.stride = formation_stride_or_walk(world, id, move);
+  move.path_length = 0;
+  move.progress = 0;
+  move.gate_crossings.clear();
+  move.path_generation = grid_generation_;
+  move.has_path = true;
+  mark_path(world, id, true);
+  reset_cooperation(move, until);
+  move.last_outcome = MoveOutcome::moving;
+}
+
+void MovementSystem::aim_at_formation(World& world, ObjectId id, ObjectId hero, bool lock) {
+  MoveState& move = state(id);
+  resolve_class_fields(world, id, move);
+  if (!move.goto_active || move.stopping() || move.party != hero || !move.form_aimed) {
+    move.free_spot_tried = false;
+  }
+  move.target_object = kNoObject;
+  move.min_range = 0;
+  move.goto_active = true;
+  move.party = hero;
+  move.form_aimed = true;
+  move.dest_lock = lock && !ignores_passability(world, id);
+  move.stop_requested = false;
+  move.route_failed = false;
+  // Only the mode is set: the route to the station is laid at the unit's
+  // next step (0x00419b20, its sample count not yet seen). A route being
+  // walked is kept until then, as the retry keeps its media; with none the
+  // unit stands, its order taken.
+  move.form_seen = -1;
+  const bool walking_on = move.has_path && move.waypoints.size() >= 2 &&
+                          move.travelled() < move.path_length;
+  if (!walking_on) stand_on_station(world, id, move, position(world, id), world.time());
+}
+
+void MovementSystem::reroute_to_station(World& world, ObjectId id) {
+  MoveState* move = find(id);
+  if (move == nullptr || !move->form_aimed) return;
+  const Formation* form = formation(move->party);
+  const Point here = position(world, id);
+  const GameTime now = world.time();
+  const Point station = form == nullptr ? kNoSample : station_of(*form, id);
+  if (form == nullptr || station == kNoSample || here == station) {
+    // Standing on its station, or with none yet: no route, the order kept.
+    stand_on_station(world, id, *move, here, now);
+    move->form_seen = form == nullptr ? -1 : form->samples;
+    return;
+  }
+  move->form_seen = form->samples;
+  if (lay_path(world, id, *move, station, 0, now) == MoveOutcome::blocked) move->form_seen = -1;
+  if (!move->has_path) stand_on_station(world, id, *move, here, now);
+}
+
+MovementSystem::FormStep MovementSystem::formation_step(World& world, std::size_t entry,
+                                                        GameTime now) {
+  const ObjectId id = states_[entry].id;
+  MoveState& move = states_[entry].state;
+  const ObjectId hero = move.party;
+  const Point here = cooperative_position(move, move.progress);
+  // No step this time (the step answers 0): the route, if any, is kept, and
+  // the unit asks again at its next step -- the next turn here.
+  const auto pause = [&]() {
+    const std::int64_t travelled = std::min(move.progress / kSpeedScale, move.path_length);
+    const Point standing = offset_at(move, travelled);
+    move.holding = true;
+    move.hold_until = turn_end_ + 1;
+    move.step_start = travelled;
+    move.step_end = travelled;
+    move.offset_from = standing;
+    move.offset_to = standing;
+  };
+  // 0x00419b20 lays a route to the station afresh (`RecastPathfind`, its
+  // sample count noted) or, standing on it, deletes the route. A search that
+  // lays nothing keeps the route the unit had (0x00419a0f) and takes no step;
+  // with the formation's path spent it marks the route arrived (`[retry+0x20]
+  // |= 0x80`, which `IsArrived` answers 1 for, 0x00417c26), and the unit's
+  // order ends where it stands.
+  const auto relay = [&](Point station) {
+    const Formation* form = formation(hero);
+    move.form_seen = form == nullptr ? -1 : form->samples;
+    set_position(world, id, here);
+    if (here == station) {
+      stand_on_station(world, id, move, here, now);
+      return true;
+    }
+    if (lay_path(world, id, move, station, 0, now, &here) != MoveOutcome::blocked &&
+        move.has_path) {
+      return true;
+    }
+    move.form_seen = -1;
+    if (!formation_going_on(hero)) {
+      if (move.has_path) {
+        arrive(world, entry, true);
+      } else {
+        stop(world, id);
+      }
+    } else if (move.has_path) {
+      pause();
+    } else {
+      stand_on_station(world, id, move, here, turn_end_ + 1);
+    }
+    return false;
+  };
+
+  const Formation* form = formation(hero);
+  if (form == nullptr) {
+    move.form_aimed = false;
+    return FormStep::walk;
+  }
+  if (move.form_seen != form->samples) {
+    const Point station = station_of(*form, id);
+    if (station == kNoSample) {
+      // No place in the formation: none to walk to while it goes on, and
+      // nothing to wait for once its path is spent.
+      if (formation_going_on(hero)) {
+        stand_on_station(world, id, move, here, turn_end_ + 1);
+      } else {
+        set_position(world, id, here);
+        stop(world, id);
+      }
+      return FormStep::done;
+    }
+    if (!relay(station)) return FormStep::done;
+  }
+  for (int pass = 0; pass < kFormationStepPasses; ++pass) {
+    form = formation(hero);
+    const std::int64_t travelled = std::min(move.progress / kSpeedScale, move.path_length);
+    const std::int64_t left = move.has_path ? move.path_length - travelled : 0;
+    if (!formation_going_on(hero)) {
+      // The path is spent: walk what is left, then arrive (`decide`), facing
+      // the formation's way.
+      break;
+    }
+    // The unit's own walk step, whatever its avoidance strides (0x005d4630:
+    // the walk animation's step), or the formation's 200 with none.
+    std::int32_t step = walk_step(world, id, move);
+    if (step == 0) step = kFormationStride;
+    if (left > step / 2 + kSampleShort) break;
+    if (!formation_next_sample(world, hero, now)) {
+      // No sample to be had: this step is not taken, and the path is spent.
+      pause();
+      return FormStep::done;
+    }
+    form = formation(hero);
+    if (form == nullptr) return FormStep::done;
+    const Point station = station_of(*form, id);
+    if (station == kNoSample) {
+      stand_on_station(world, id, move, here, turn_end_ + 1);
+      return FormStep::done;
+    }
+    if (!relay(station)) return FormStep::done;
+  }
+  form = formation(hero);
+  if (form != nullptr && move.has_path) {
+    const std::int64_t travelled = std::min(move.progress / kSpeedScale, move.path_length);
+    move.march_rate = formation_rate(*form, move, move.path_length - travelled, now);
+  }
+  return FormStep::walk;
 }
 
 }  // namespace imperivm::core::sim

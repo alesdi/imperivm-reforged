@@ -143,7 +143,7 @@ struct SessionInputs {
   /// `DATA/FORMATIONS.XML` -- the six formation classes and which is default.
   ///
   /// **Empty is not neutral.** `MovementSystem::formations()` answers null for
-  /// every lookup without it, so `place_army` returns on its first check and a
+  /// every lookup without it, so the march returns on its first check and a
   /// hero's warriors have never formed up in any session this engine has run.
   /// `set_formations` had no caller outside `engine/tests` for as long as the
   /// table has existed, which is the same shape of gap as the four this file

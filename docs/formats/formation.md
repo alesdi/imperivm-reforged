@@ -195,67 +195,185 @@ order, and the flag is cleared.
 ## The route and the march
 
 `SetDest` (0x005f2cc0; the object form 0x005f2ee0 for an object goal) is
-what `FormSetupAndMoveTo` (0x0052e5e0, 0x0052e890) calls. It puts the
-centre on the hero, keeps the lock flag, moves a requested orientation into
-the settled pair and clears the request, zeroes the sample count and the
-blocking gate, and lays the formation's own route (`+0x84`) from there --
-at most 999 of the range (0x0041a4c0). A route laid sets `+0x88` and gives
-every member with a slot `form_move` with the replace flag after deleting its
-route and setting its sample to `(-1, -1)` (0x005f2b50); none laid clears
-`+0x88`, ends every member's running `form_move` (0x005f2c10) and deletes the
-route object. The hero is then given a route of his own aimed at the
-formation (0x00417790) and the first sample is made.
+what `FormSetupAndMoveTo` (0x0052e5e0, 0x0052e890) calls, after it has
+stepped the hero out of any holder and deleted the hero's own route
+(0x005d3830 with 0). `SetDest` puts the centre on the hero, keeps the lock
+flag, moves a requested orientation into the settled pair and clears the
+request, zeroes the sample count and the blocking gate, and lays the
+formation's own route (`+0x84`, below) from there. A route laid sets
+`+0x88` and gives every member with a slot `form_move` with the replace
+flag after deleting its route and setting its sample to `(-1, -1)`
+(0x005f2b50); none laid clears `+0x88`, ends every member's running
+`form_move` (0x005f2c10) and deletes the route object. With a route, the
+setup then aims the hero's own route at the formation (0x00417790, below)
+and makes the first sample.
 
-`CreateNextSample` (0x005f5bd0) steps the centre along the formation's route
-(200 a step); when it has moved, the new direction is the step's, a step
-against the old direction (negative dot product) marks a reassign, and within
-200 of the route's end a settled orientation, if any, takes over the
-direction. Then `PlaceSample` and the next deadline (0x005f5850). At the
-route's end it clears `+0x88`, and a route that never laid a sample ends the
-members' `form_move`. A sample is made when a unit on a route aimed at the
-formation comes within 133 of its station (0x00419b20).
+### The formation's route
+
+The route object is a route record like a unit's, aimed at no unit, whose
+path is stepped 200 at a time (`RecastPathfind`, 0x00419730, builds the
+path with that stride). Its goal is kept in the record, as a unit's is:
+
+* **The point form** (0x0041a4c0) keeps at most 999 of the range.
+* **The object form** (0x0041a5c0) keeps at most 999, and, when the goal is
+  new, at most 920 (0x0041a672 .. 0x0041a68e). The engine applies the 920 to
+  every object setup.
+
+A goal, range and minimum range all equal to the record's last ones keeps
+the route as it is, unless it is barred by a gate, and searches again only
+when it is not arrived; a new one searches afresh. The search is the route
+search every unit uses, from the centre, with no unit to test passability
+for: the formation's goal is the ring at its range round the point, and a
+formation already within its band lays nothing and is arrived (the search
+asks `IsArrived` first, 0x00419730). The search also lists the gates the
+route crosses (0x00418fb0), each as what is left of the route where it
+crosses.
+
+**The path is stepped by legs.** When a route is laid, what is left of it
+(`+0x34`, in 16.16) is the sum of the integer roots of its legs' squared
+lengths. A leg is started when the last one's steps are spent: its length
+`L` (the integer root again) is cut into `n = L / 200` steps or `n + 1`,
+whichever makes a step whose length comes nearer 200 (0x0041a740; `n + 1`
+when `n` is 0). The step's offset is the leg's offset in 16.16 divided by
+that count, and its length the leg's length in 16.16 divided by it. A leg
+of no length takes no step. The next point is the leg's start plus the
+offset times the step number, each coordinate's 16.16 product shifted
+right (floored, not truncated) -- except the leg's last step, which is the
+leg's end exactly. Taking the step (0x0041a700) takes the step's length
+off what is left, and the very last step of the route leaves nothing.
+What is left is answered in whole units as the high word of the 16.16
+value, read as a signed 16-bit number (0x0040b890); `FormPathLeft`
+(0x0052ebc0) answers that, plus 32,000 when the search ended short of its
+goal (0x004185a0), and 0 with no route object.
+
+### The sample
+
+`CreateNextSample` (0x005f5bd0) first sizes the formation's speed
+(`UpdateMinSpeed`, 0x005f5640: the mean of the hero's and every placed
+member's speed, held to one and a half times the slowest), then asks the
+route for its next point through the same retry step a unit's route takes
+(below), so a gate within the formation's reach stops the centre. A point
+answered is taken (the route committed), and then:
+
+* if nothing is left of the route, it is searched again from there, which
+  finds the formation arrived and lays nothing when the point was the
+  goal's;
+* `+0x88` is set to whether anything is left;
+* the step's offset from the old centre is the new direction, and a step
+  against the old direction (negative dot product) marks a reassign;
+* within 200 of the route's end a settled orientation, if any, is the
+  direction instead;
+* `PlaceSample` at the new point, the sample count goes up by one, and the
+  next deadline is timed (0x005f5850).
+
+No point answered, and no sample yet laid, ends the members' `form_move`
+(0x005f2c10); either way `+0x88` is cleared and the call answers 0. So a
+march whose next centre a gate bars is spent there: the hero walks to the
+last centre and arrives, and only a new `FormSetupAndMoveTo` goes on.
+
+**The gate.** The step finds the first gate crossing not yet passed: the
+first one the list holds whose remaining-at-crossing is no more than what is
+left of the route now (0x00418210). It bars the step while the gate bars the
+hero's owner and the crossing is within reach of where the centre stands
+(0x00418260): the formation's radius (`FormRadius`, or the hero class's
+radius with no slot or a radius of 0), never less than 275, plus 210. A
+barred step searches the route again once and asks again; still barred,
+it answers no point.
+
+### The route aimed at the formation
+
+`SetFormation` (0x00417790) aims a unit's route at a formation (the retry's
+mode 2): the hero's own by the setup, and each member's by `FormAcceptMove`
+(0x005d7880), the script `form_move` runs once the member is out of any
+holder. Only the mode is set; the route to the unit's station (its slot's
+sample, the centre for the hero) is laid at the unit's next step.
+
+At each step of such a route (0x00419b20): when a sample has been made since
+the route was laid (the count the route noted, `[retry+0x10]`), it is laid
+again to the station, or deleted when the unit stands on it. Then, for up to
+100 passes: while the formation's path goes on and what is left of the
+unit's route is within half the unit's step and 133, the next sample is made
+and the route laid again to the new station. A sample that cannot be made
+takes no step. The step is then timed: its pace is what is left of the
+route, less 133 while the formation goes on, over the time to the sample's
+deadline, held to between half and two and a half times the formation's
+speed, and the fast end past the deadline (0x00419e52 .. 0x00419ecd,
+0x005f2130). Such a route is arrived when the formation's path is spent and
+the unit stands on its station (0x00417c4a .. 0x00417c73), and faces the
+formation's direction there. A search that lays nothing keeps the route the
+unit had and takes no step; with the formation's path spent it marks the
+route arrived (`[retry+0x20] |= 0x80`), and the unit stops where it stands.
+
+### Keeping it moving
 
 `UpdateMove` (0x005f5e30), the hero's `FormKeepMoving` on its first entry,
-does nothing without a route object. With one, it runs `UpdateRebuild`; when
-that found the layout marked and a sample had been laid, it lays the current
-sample again where it is (`PlaceSample` with the stored centre and
-direction) and re-searches every member's route; otherwise it runs
+does nothing without a route object. With one, it reads the layout's mark,
+runs `UpdateRebuild`, and when the mark was set and a sample had been laid,
+lays the current sample again where it is (`PlaceSample` with the stored
+centre and direction) and searches every member's route to the formation
+again (`[unit+0x148]`, `RecastPathfind`); otherwise it runs
 `UpdateReassign`.
 
-**The pace** (0x005f5260, 0x005f5850, 0x00419e52) is described at
-`pace_march` in `sim/command.cpp`.
+**The pace** (0x005f5640, 0x005f5850): the deadline is the time the
+formation, at its speed, takes to cover the mean over the hero and its
+placed members of the straight distance from each to its station, less 133
+while the path goes on.
 
-**The claim on the stations** (0x005f3fe0, with the gates near the hero
-opened for its flood by 0x005f41b0 and closed again by 0x005f3240) is
-described at `sim/movement.hpp`'s inference 3.
+**The claim on the stations** (0x005f3fe0) is described at
+`sim/movement.hpp`'s inference 3. `PlaceSample` brackets it with the gates
+near the centre (0x005f5b62, 0x005f5b85). Before the flood, 0x005f41b0
+walks every object of every player and picks each gate whose position lies
+within 1,600 of the centre on both axes (a box 3,200 across, not a circle)
+and that is either one the hero's owner may pass (0x005a78e0, the
+diplomacy bit) or one that lets no unit through now (0x00529300: not broken
+to its last tier and raised no more than 20) and is not being opened
+(`[gate+0x208]` not 1). Each gate picked is listed, and its cells on the
+collision grid are saved and rewritten for the flood (0x0052b130: the cells
+of its box in 16-unit cells, kept at `[gate+0x230]`, 0x0052adf0 and
+0x00529e40). After the claim, 0x005f3240 walks the list backwards and puts
+each gate's saved cells back (0x0052a540 -> 0x0052a4c0). What the rewrite
+writes into the cells -- passable or blocked -- was not read (below).
 
 ## What this engine models
 
 `sim/formation.hpp` keeps one `Formation` per hero in the movement system:
 the shape, the slot list with each slot's class, offset and sample, the
 pending list, both marks, the radius, the centre and direction, the sample
-count, whether the route object exists, and the lock flag. Joining and
-leaving are the hero system's `attach` and `detach` (leaving deletes the
-member's route); a hero's death drops the object without removing its
-members one by one. The layout, `PlaceSample`, `UpdateReassign` and
-`FormRadius` are the original's rules above, in integers. The march
-(`place_army` in `sim/command.cpp`) is `SetDest`'s hand-out and settle,
-`UpdateMove` on each `FormKeepMoving`, and `CreateNextSample`; the members
-are sent to their slots' samples, `FormAcceptMove` steps a held member out
-towards its sample and ends the script of one with no slot, and the gate
-step and the stats rebuild read the radius and the shape from the object.
+count, the route object with its goal, path and gate crossings, whether the
+path goes on, the deadline and speed, and the lock flag. Joining and leaving
+are the hero system's `attach` and `detach` (leaving deletes the member's
+route); a hero's death drops the object without removing its members one by
+one. The layout, `PlaceSample`, `UpdateReassign`, `FormRadius`, the route's
+stepping and the sample are the original's rules above, in integers
+(`formation_route_step`, `MovementSystem::formation_next_sample`). The
+setup, `UpdateMove` and the hand-out are `FormSetupAndMoveTo` and
+`FormKeepMoving` in `sim/command.cpp`; the step of a route aimed at the
+formation is `MovementSystem::formation_step`.
 
 Still approximated:
 
-* **The formation's route is the hero's.** The engine lays no route for the
-  formation itself: the hero walks his own, the centre is put
-  `200 + 133` ahead of him along it whenever `place_army` runs (the setup
-  and each `FormKeepMoving`), and a sample is made when that centre has
-  moved. The original's sample is made when a unit nears its station, and
-  the hero walks to the centre.
-* **The members walk their own routes to their samples**, not a route aimed
-  at the formation, and arrive under `MovementSystem::marching`. The pace
-  (`pace_march`) times those routes to the sample's deadline.
+* **A sample made inside the movement step defers its `form_move`.** The
+  layout runs when the sample is placed, and a member it gives a place then
+  is handed `form_move` at the hero's next `FormKeepMoving` rather than at
+  once, since scripts are not run from inside the movement step. A member
+  on the march that is not yet aimed at the formation is aimed there too
+  (`aim_marchers`).
+* **An object goal is its position at the setup.** The original's object
+  form keeps following the object; the engine lays the route to where the
+  object stood.
+* **A follower strides 200.** The original cuts a route aimed at the
+  formation by the unit's own walk step (0x00419730 with 0x005d2920), as
+  any unit's. Here the stride is also the avoidance's step, which is this
+  engine's model; with the walk step a column whose `form_move` an AI
+  squad's `ClrCmd` ends mid-march stood in piles (Crossroads seed 5's worst
+  overlap 82, against 36 with 200). The followers keep the 200; the hero
+  strides his walk step. The half-step test that makes the next sample is
+  the original's, the unit's walk step, and a unit with none takes 200.
+* **The deadline has no animation time** and is not snapped to 100 ms, and
+  the mean speed is an integer mean.
+* **A member standing on its station has a route of no length**, so
+  `HasPath` still answers while the formation goes on; and a member whose
+  search lays nothing while the path goes on stands until the next turn.
 * **The rotation is exact.** The original multiplies by single-precision
   factors in the FPU and truncates; the engine takes the exact quotient and
   truncates (`formation_turn`), which can differ by one unit where a product
@@ -268,6 +386,13 @@ Still approximated:
 * Whether the FPU runs at single or double precision when the rotation is
   taken (Direct3D sets single unless told otherwise); it decides the rare
   off-by-one above.
+* What the gate bracket round the claim writes into a gate's cells
+  (0x00529e40), and so whether the flood goes through the gates near the
+  centre or round them. The claim is not wired, so nothing here depends on
+  it yet.
+* Whether the object form's 920 applies only to a new goal: the cap was
+  read in the new-goal branch, and the engine applies it to every object
+  setup.
 * What a `<Class>` whose three weights are all 0 does: the chooser answers
   no group and the record is written before the first group; no shipped
   entry does it. The engine puts such a record in the central block.

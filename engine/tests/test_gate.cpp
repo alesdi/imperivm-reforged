@@ -669,23 +669,27 @@ void march(World& world, ObjectId hero, Point dest) {
 
 }  // namespace
 
-/// The route that moves a formation looks ahead of a gate by the formation's
+/// The formation's own route looks ahead of a gate by the formation's
 /// radius -- how far its farthest member stands from the centre -- and never
 /// by less than 275, before the 210 (0x00418286..0x004182f6, 0x005f2350,
-/// `[form+0x34]` from 0x005f1f60). Here that route is the hero's while he
-/// leads a march.
+/// `[form+0x34]` from 0x005f1f60); a route aimed at the formation, the
+/// hero's or a member's, by its unit's own radius (mode 2, 0x0041828d).
 ///
 /// A friend sent from (1000, 1900) to (1000, 700) crosses its own gate's axis
 /// 900 along, and with an enemy near the gate it stands once the crossing is
 /// within reach. Alone, a soldier's reach is 15 + 210 = 225: it stands at the
-/// first decision at or past 675 along, 680, at y 1220. A hero leading three
-/// soldiers in a central block -- the short first ring's two front corners
-/// and its back centre, `15 + 2 * 26` = 67 out, so the formation's radius is
-/// `isqrt(2 * 67^2)` = 94 -- reaches max(94, 275) + 210 = 485: he stands at
-/// 440 along, y 1460. A hero whose two soldiers march on the wings, one a
-/// side, 400 off the hero's own radius and one spacing further, 467 out and
-/// 75 ahead, has a formation radius of 472 and reaches 682: he stands at 240
-/// along, y 1660.
+/// first decision at or past 675 along, 680, at y 1220. A formation steps its
+/// centre 200 at a time and takes no step while the crossing is within its
+/// reach of where the centre stands (0x00419ee0 -> 0x00418210, 0x00418260,
+/// searched again once, still barred): its path is spent there
+/// (`CreateNextSample`, 0x005f5cff), and the hero walks to that last centre.
+/// Three soldiers in a central block -- the short first ring's two front
+/// corners and its back centre, `15 + 2 * 26` = 67 out, so the formation's
+/// radius is `isqrt(2 * 67^2)` = 94 -- reach max(94, 275) + 210 = 485: the
+/// centre steps from 400 along, 500 short, to 600, and stops there, y 1300.
+/// Two soldiers on the wings, one a side, 400 off the hero's own radius and
+/// one spacing further, 467 out and 75 ahead, make a formation radius of 472
+/// and reach 682: the centre stops at 400 along, y 1500.
 TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_275) {
   constexpr Point kFar{1000, 1900};
   struct Case {
@@ -698,11 +702,11 @@ TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_27
       {R"(<FormationClass Name="Front" Width="2" Height="1" OffsetFrontLineByY="60"
             OffsetWingsByX="80" OffsetWingsByY="-40">
             <Class Name="Soldier" CentralBlock="1"/></FormationClass>)",
-       {Point{974, 1900}, Point{1026, 1900}, Point{1000, 1952}}, 94, 1460},
+       {Point{974, 1900}, Point{1026, 1900}, Point{1000, 1952}}, 94, 1300},
       {R"(<FormationClass Name="Front" Width="2" Height="1" OffsetFrontLineByY="60"
             OffsetWingsByX="400" OffsetWingsByY="0">
             <Class Name="Soldier" Wings="1"/></FormationClass>)",
-       {Point{600, 1900}, Point{1400, 1900}}, 472, 1660},
+       {Point{600, 1900}, Point{1400, 1900}}, 472, 1500},
   };
   for (const Case& c : cases) {
     HeroSystem heroes;
@@ -734,12 +738,16 @@ TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_27
     }
     march(f.world, hero, Point{1000, 700});
     REQUIRE(f.move(hero).party == hero);
+    REQUIRE(f.move(hero).form_aimed);
     CHECK(f.movement.formation(hero)->radius == c.extent);
-    REQUIRE(f.move(hero).gate_crossings.size() == 1);
-    CHECK(f.move(hero).gate_crossings[0].at == 900);
+    REQUIRE(f.movement.formation(hero)->route.gate_crossings.size() == 1);
+    CHECK(f.movement.formation(hero)->route.gate_crossings[0].at == 900);
 
     CHECK(!f.walk(hero, 15000));
-    CHECK(f.move(hero).has_path);  // waiting, not given up
+    // The path spent short of the gate, the hero on its last centre.
+    CHECK(!f.movement.formation(hero)->going_on);
+    CHECK(!f.move(hero).has_path);
+    CHECK((f.movement.formation(hero)->centre == Point{1000, c.stand_y}));
     CHECK((f.at(hero) == Point{1000, c.stand_y}));
     // The lone soldier, on the far side of the gate's gap, crosses the axis
     // obliquely; it still stands its own reach short of the line.
@@ -758,8 +766,9 @@ TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_27
     REQUIRE(f.movement.deserialize(saved).ok());
     CHECK(f.movement.formation(hero)->radius == c.extent);
 
-    // The gate opening, the march walks on through it.
+    // The gate opening, a march set up again walks on through it.
     f.swing(true);
+    march(f.world, hero, Point{1000, 700});
     CHECK(f.walk(hero, 15000));
   }
 

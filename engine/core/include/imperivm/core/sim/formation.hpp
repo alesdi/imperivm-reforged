@@ -11,8 +11,9 @@
 // relative to the hero (its **offset**, laid by the layout from the shape in
 // `DATA\FORMATIONS.XML`), and where each slot is on the map now (its
 // **sample**, the offset turned into the formation's direction round its
-// centre). The march (`place_army`, `sim/command.cpp`) sends each member to
-// its slot's sample.
+// centre). The formation has a route of its own (`FormationRoute`), along
+// which its centre steps 200 at a time; the hero's and every member's routes
+// are aimed at it (`MovementSystem::aim_at_formation`) and follow its samples.
 //
 // **When things happen is the original's.** Joining and leaving only mark the
 // layout; it reruns when a sample is placed or the hero's `FormKeepMoving`
@@ -22,10 +23,10 @@
 // turned back on itself (`formation_reassign`).
 //
 // **What is still approximated** (docs/formats/formation.md, "What this
-// engine models"): the formation has no route of its own -- the hero's route
-// stands for it, and a sample is placed whenever `place_army` runs -- and the
-// members walk their own routes to their samples. The claim on the stations
-// is not wired (`sim/movement.hpp`, inference 3).
+// engine models"): the claim on the stations is not wired
+// (`sim/movement.hpp`, inference 3), nor is the blocking gate, and the
+// `form_move` hand-out of a sample made inside the movement step waits for the
+// hero's next `FormKeepMoving`.
 
 #include <cstdint>
 #include <span>
@@ -33,6 +34,7 @@
 #include <vector>
 
 #include "imperivm/core/game/class_graph.hpp"
+#include "imperivm/core/sim/gate.hpp"
 #include "imperivm/core/sim/system.hpp"
 
 namespace imperivm::core::sim {
@@ -60,6 +62,54 @@ struct FormationSlot {
 /// The formation's centre before any sample: `(-1, -1)`, as the constructor
 /// (0x005f3a80) leaves it.
 inline constexpr Point kNoSample{-1, -1};
+
+/// The formation's own route (`[form+0x84]`'s path record, `CVXPath` built
+/// with a stride of 200): the points the route search laid, walked a fixed
+/// step at a time by `formation_route_step` and `formation_route_commit`.
+/// docs/formats/formation.md, "The formation's route".
+struct FormationRoute {
+  /// The route as laid, its first point where the search started.
+  std::vector<Point> points;
+  /// `+0x0c`: the index of the point the leg being stepped ends at; 0 before
+  /// the first step.
+  std::int32_t leg = 0;
+  /// `+0x10`: how many steps the leg is cut into.
+  std::int32_t steps = 0;
+  /// `+0x14`: how many of them have been taken.
+  std::int32_t step = 0;
+  /// `+0x1c`, `+0x20`: one step's offset, 16.16.
+  std::int32_t delta_x = 0;
+  std::int32_t delta_y = 0;
+  /// `+0x18`: one step's length, 16.16.
+  std::int32_t step_length = 0;
+  /// `+0x34`: what is left of the route, 16.16 -- the sum of the legs'
+  /// integer roots when laid, less each step taken.
+  std::int32_t remaining = 0;
+  /// The search's status was 0: no 32,000 is added to what is left.
+  bool complete = false;
+  /// The gates the route crosses, in route order (0x00418fb0).
+  std::vector<GateCrossing> gate_crossings;
+};
+
+/// The stride the formation's route is stepped with (`CVXPath(200, 1)` in
+/// `RecastPathfind`, 0x00419730, for a route aimed at no unit).
+inline constexpr std::int32_t kFormationRouteStride = 200;
+
+/// Lay `points` as the route (0x0041a8f0's sum, and the record's fresh
+/// counters).
+void formation_route_lay(FormationRoute& route, std::vector<Point> points, bool complete);
+
+/// The route's next point (`vtbl+8`, 0x0041a740), written to `out`; false
+/// at the route's end. Moving on to the next leg is done here, as the
+/// original does it, so this is not a pure read.
+[[nodiscard]] bool formation_route_step(FormationRoute& route, Point& out) noexcept;
+
+/// Take the step `formation_route_step` answered (`vtbl+0xc`, 0x0041a700).
+void formation_route_commit(FormationRoute& route) noexcept;
+
+/// What is left of the route in whole units (`vtbl+0x14`, 0x0040b890: the
+/// signed high word of `remaining`).
+[[nodiscard]] std::int32_t formation_route_left(const FormationRoute& route) noexcept;
 
 /// `[hero+0x2b0]`.
 struct Formation {
@@ -96,6 +146,26 @@ struct Formation {
   /// `should_lock`, `[form+0x8c]`: `FormSetupAndMoveTo`'s fourth argument --
   /// whether the members own a destination lock once the march is over.
   bool should_lock = false;
+  /// `[form+0x84]`'s route, while `path` says there is one.
+  FormationRoute route;
+  /// `+0x88`: the route goes on past the last sample. Cleared when a
+  /// sample cannot be made (`CreateNextSample`, 0x005f5cff), set while the
+  /// route has something left after one.
+  bool going_on = false;
+  /// The goal the route was laid to, its band and inner bound: the retry's
+  /// own (`SetDest`, 0x0041a4c0), which the route's end searches again for.
+  Point goal{};
+  std::int32_t range = 0;
+  std::int32_t min_range = 0;
+  /// `+0x50`: the time the current sample's stations are to be reached by
+  /// (0x005f5850), and the formation's speed it was timed at (`UpdateMinSpeed`,
+  /// 0x005f5640), in the movement system's rate units.
+  GameTime deadline = 0;
+  std::int64_t speed = 0;
+  /// Units the layout gave a place while a sample was laid in the middle of
+  /// the movement step, still to be handed `form_move` at the hero's next
+  /// `FormKeepMoving` (`update_march`, `sim/command.cpp`).
+  std::vector<ObjectId> joined;
 
   /// Whether `unit` has a slot or is pending.
   [[nodiscard]] bool holds(ObjectId unit) const noexcept;

@@ -98,28 +98,26 @@
 //      assignment, 0x005f3115, cleared by a removal, 0x005f4686), which this
 //      engine keeps as `Formation::slots`. What the avoidance step reads is
 //      still the order: a march's members and its hero carry the hero's id in
-//      `MoveState::party` from the order `place_army` gives them until an
-//      order that is not a march; members step `kFormationStride`, the hero
-//      keeps its own. The original's slot outlasts an order, so a member
-//      sent elsewhere is still of the party there; that was not followed. And the original member's route is the
-//      formation's (`SetFormation`, 0x00417790), which has a next point for
-//      as long as the formation's path does; here a member at the end of its
-//      station's route waits on it while its hero still walks the march
-//      (`MovementSystem::marching`), and only then arrives -- on a free spot
-//      when the march's flag was set, which is when `0x004178d0` names the
-//      member an owner (`lock_owner`).
-//      **The pace is the formation's, and the hero walks it too.** The
-//      original aims the hero's own route at the formation as it does a
-//      member's (0x0052e830), times every step of such a route to reach the
-//      unit's station at the sample's deadline (0x00419e52) and lays each
-//      sample round a centre that steps ahead along the formation's route.
-//      Here the hero's route stands for the formation's, the samples are
-//      laid round a centre ahead of him on it, and each placement gives the
-//      hero and every marching member a pace (`MoveState::march_rate`); see
-//      `march_centre` and `pace_march` in `sim/command.cpp`. Before it, the
-//      hero walked at his own speed and the army chased stations laid where
-//      he stood, so a mounted hero arrived alone and his army was stood
-//      wherever it had got to (playtest #22).
+//      `MoveState::party` from the route aimed at the formation
+//      (`aim_at_formation`, `SetFormation` 0x00417790) until an order that
+//      is not a march. The original's slot outlasts an order, so a member
+//      sent elsewhere is still of the party there; that was not followed.
+//      **The march is the formation's own route.** As in the original, the
+//      formation lays a route of its own from the hero (`SetDest`,
+//      0x005f2cc0), steps its centre 200 at a time along it
+//      (`CreateNextSample`, 0x005f5bd0), and every member's route and the
+//      hero's are aimed at it: at each step a unit lays its route to its
+//      station afresh when a sample has been made since, and makes the next
+//      sample when it is within half its step and 133 of the station
+//      (`formation_step`, 0x00419b20). Each step is timed to reach the
+//      station at the sample's deadline (0x00419e52), so the army and the
+//      hero walk the formation's pace. Such a route arrives once the
+//      formation's path is spent and the unit stands on its station, on a
+//      free spot when the march's flag was set, which is when `0x004178d0`
+//      names the member an owner (`lock_owner`). A follower strides 200 for
+//      the avoidance, the hero his walk step: an engine choice
+//      (`formation_stride_or_walk`). See `docs/formats/formation.md`, "The
+//      formation's route".
 //      **Not reproduced: the original's claim on its stations.**
 //      `CVXFormObj::PlaceSample` (0x005f5a20) ends by moving every station
 //      its member cannot stand on (0x005f5b7b -> 0x005f3fe0): a flood from
@@ -129,14 +127,12 @@
 //      yet taken, and takes it (0x005f29a0); otherwise it goes to the
 //      cheapest reached cell near its station (0x005f25d0, 0x005f2370), a
 //      cell it does not take, so two moved stations can share one. Here
-//      `place_army` sends each member to its station as laid, and one in a
-//      building walks to the nearest point it can reach. Built and measured
-//      on Crossroads, the claim made crowding worse (overlap median 25 -> 38
-//      on seeds 1-6, 28 -> 40 on seeds 7-12), so it is not wired. The likely
-//      reason, not established: members here walk their own routes to the
-//      moved stations, not the formation's samples (above), and a march's
-//      single file, which does not block itself, stops on itself. See
-//      `docs/plan.html`.
+//      each member walks to its station as laid, and one in a building walks
+//      to the nearest point it can reach. Built and measured on Crossroads
+//      while the march was still the hero's route, the claim made crowding
+//      worse (overlap median 25 -> 38 on seeds 1-6, 28 -> 40 on seeds 7-12),
+//      so it is not wired; it has not been measured on the formation's own
+//      route. See `docs/plan.html`.
 //   4. **Birds in the air.** A unit with `in_air` set neither tests nor
 //      blocks. The callback asks only for bit 22 and a health; whether an
 //      airborne flyer is linked into the ground buckets at all was not
@@ -415,11 +411,18 @@ struct MoveState {
   /// route aimed at a formation to reach the unit's station at the sample's
   /// deadline (0x00419e52 .. 0x00419ecd), so a member walks the formation's
   /// pace and not its own, and so does the hero, whose route is aimed at the
-  /// formation too (0x0052e830). `place_army` sets it each time it lays the
-  /// stations (`MarchPace`); any order that is not a march clears it.
+  /// formation too (0x0052e830). The formation's step sets it at each of the
+  /// unit's steps (`formation_rate`); any order that is not a march clears
+  /// it.
   /// **Saved, and not hashed**: path media like the rest of this block, and
   /// what it decides -- where the unit is -- is hashed.
   std::int64_t march_rate = 0;
+  /// The route is aimed at the formation of the hero in `party` (`SetFormation`,
+  /// 0x00417790: the retry's mode 2), and follows its samples.
+  bool form_aimed = false;
+  /// `[retry+0x10]`: the formation's sample count when this route was laid;
+  /// -1 to lay it again at the next step.
+  std::int32_t form_seen = -1;
 
   /// The unit's own speed in world units per second, after the factor.
   [[nodiscard]] std::int64_t own_rate() const noexcept {
@@ -629,9 +632,9 @@ class MovementSystem : public System {
   /// no route at all. A blocked order clears the path, so the shipped idiom
   /// `while (!.Goto(pt, …) && .HasPath)` terminates rather than spinning.
   ///
-  /// `party` is the hero whose formation march this is (`place_army`), or
-  /// `kNoObject` for any other order, which also takes the unit out of a march
-  /// it was in.
+  /// `party` is the hero whose party the unit walks in, or `kNoObject` for
+  /// any other order, which also takes the unit out of a march it was in. A
+  /// march's routes are aimed at the formation instead (`aim_at_formation`).
   ///
   /// `lock_destination` is `SetDest`'s last argument (`MoveState::dest_lock`):
   /// `Goto` and `GotoAttack` pass it, and a route they lay ends on a free spot
@@ -652,12 +655,40 @@ class MovementSystem : public System {
   /// any other stops where it is, as `stop`. Returns whether the unit still
   /// has a route to walk.
   bool request_stop(World& world, ObjectId id);
-  /// Whether `id`'s route belongs to a formation march that is still on: a
-  /// member (not the hero) whose hero still walks the march's route.
-  /// `0x004178d0` asks the formation object the same thing (0x005f22f0:
-  /// whether its path is spent). **Inferred** onto this engine's march, which
-  /// has no formation path of its own: the hero's route stands for it.
+  /// Whether `id`'s route is aimed at a formation (`MoveState::form_aimed`)
+  /// whose path goes on (`formation_going_on`): what `0x004178d0` and the
+  /// formation step ask the formation object (0x005f22f0).
   [[nodiscard]] bool marching(ObjectId id, const MoveState& move) const noexcept;
+
+  // -- the formation's route (docs/formats/formation.md) -------------------
+
+  /// `CVXFormObj::SetDest` (0x005f2cc0) and the retry's `SetDest` under it
+  /// (0x0041a4c0): the centre on the hero, the lock flag, no sample yet, and
+  /// the formation's own route laid to `dest`'s band from where the hero
+  /// stands -- unless the goal, band and inner bound are the route's already,
+  /// when it is searched for only with nothing left of it. Answers whether
+  /// the formation has a route to step along; `going_on` is set to match.
+  /// The caller settles the orientation and hands out `form_move`.
+  bool formation_set_dest(World& world, ObjectId hero, Point dest, std::int32_t range,
+                          std::int32_t min_range, bool lock);
+  /// `CreateNextSample` (0x005f5bd0): the centre one step on along the
+  /// formation's route, the stations laid round it, the sample timed. False
+  /// when no step can be taken, which clears `going_on`.
+  bool formation_next_sample(World& world, ObjectId hero);
+  /// The same at `now`, a decision inside the movement step.
+  bool formation_next_sample(World& world, ObjectId hero, GameTime now);
+  /// `SetFormation` (0x00417790): `id`'s route aimed at `hero`'s formation --
+  /// the hero's own included -- and laid to its station.
+  void aim_at_formation(World& world, ObjectId id, ObjectId hero, bool lock);
+  /// `RecastPathfind` for a unit aimed at a formation: its route laid again to
+  /// its station as it stands now (what `UpdateMove` does for every member
+  /// with a retry once it has laid the current sample again, 0x005f5e30).
+  void reroute_to_station(World& world, ObjectId id);
+  /// 0x005f22f0: false only when the formation has a route and it is spent.
+  [[nodiscard]] bool formation_going_on(ObjectId hero) const noexcept;
+  /// Where `id` stands in `form`: the hero at the centre (0x005f5a84), a
+  /// member at its slot's sample; `kNoSample` for neither.
+  [[nodiscard]] static Point station_of(const Formation& form, ObjectId id) noexcept;
   /// `0x004178d0`: whether `id`'s order owns a destination lock -- the owner
   /// it names, or none. A march member's does once the march is over and the
   /// formation's flag was set; any other order's when `dest_lock` is set.
@@ -887,6 +918,40 @@ class MovementSystem : public System {
   /// stands (`RecastPathfind`, `0x00419730`). A route that cannot move it
   /// stops it there, not arrived.
   void recast(World& world, std::size_t entry, Point here, GameTime now);
+
+  /// `RecastPathfind` for the formation's route (0x00419730 with no unit):
+  /// nothing when the formation stands in its band already; otherwise a
+  /// search from `start` with no owner, gates read for the hero's side.
+  /// Answers whether the route has anything left afterwards.
+  bool formation_recast(World& world, Formation& form, Point start);
+  /// `IsArrived` (0x00417c10) for the formation's route: where the formation
+  /// stands (0x005f21c0: the hero before any sample, the centre after) within
+  /// `[min_range, range]` of the goal by the integer root.
+  [[nodiscard]] bool formation_arrived(const World& world, const Formation& form) const;
+  /// Where the formation stands, 0x005f21c0.
+  [[nodiscard]] Point formation_position(const World& world, const Formation& form) const;
+  /// 0x00418210 and 0x00418260 on the formation's route: the first gate
+  /// still ahead is within `max(275, FormRadius) + 210` and bars the hero's
+  /// side (class 3).
+  [[nodiscard]] bool formation_gate_bars(const World& world, const Formation& form) const;
+  /// The retry's step (0x00419ee0) for the formation's route, into `out`.
+  bool formation_retry_step(World& world, Formation& form, Point& out);
+  /// `UpdateMinSpeed` (0x005f5640) and the sample's deadline (0x005f5850).
+  void formation_time_sample(const World& world, Formation& form, GameTime now) const;
+  /// Where `id` is at `now`: inside the movement step, along its route as
+  /// its account stands then; otherwise where the world has it.
+  [[nodiscard]] Point position_now(const World& world, ObjectId id, GameTime now) const;
+  /// The pace a unit aimed at `form` walks with `left` of its route to go.
+  [[nodiscard]] std::int64_t formation_rate(const Formation& form, const MoveState& move,
+                                            std::int64_t left, GameTime now) const;
+  /// What a step on a route aimed at a formation (0x00419b20) leaves to do:
+  /// walk the route as it now stands, or nothing more at this decision.
+  enum class FormStep { walk, done };
+  FormStep formation_step(World& world, std::size_t entry, GameTime now);
+  /// A unit aimed at a formation standing on its station with no route left
+  /// to walk: its order stays (`HasPath` reads the retry, 0x005d6ebf), and it
+  /// asks again at `until`.
+  void stand_on_station(World& world, ObjectId id, MoveState& move, Point here, GameTime until);
   /// The path follower's stop branch (0x00419ee0 with `[retry+0x20] & 6`):
   /// whether the unit stops at `here` rather than take its route's next step
   /// -- an order that owns no lock, a route with nothing left, a passable free
@@ -917,6 +982,9 @@ class MovementSystem : public System {
   void index_static_locks();
 
   [[nodiscard]] ClassTraits traits_of(const World& world, ObjectId id) const;
+  /// The unit's walk animation's step (0x005d2920), or 0 with none.
+  [[nodiscard]] std::int32_t walk_step(const World& world, ObjectId id,
+                                       const MoveState& move) const;
   [[nodiscard]] std::int32_t formation_stride_or_walk(const World& world, ObjectId id,
                                                       const MoveState& move) const;
 
@@ -951,6 +1019,9 @@ class MovementSystem : public System {
   /// The boundary the running turn began at, and the one it ends at.
   GameTime turn_t0_ = 0;
   GameTime turn_end_ = 0;
+  /// Inside `advance`'s decisions, where `mode_` and `since_` describe the
+  /// turn being stepped.
+  bool deciding_ = false;
   /// A route search's gate lines, and the crossings it is tested against.
   CellOverlay barrier_;
   std::vector<GateCrossing> crossings_;

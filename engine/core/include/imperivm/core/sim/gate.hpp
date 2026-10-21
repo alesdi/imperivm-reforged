@@ -171,7 +171,7 @@
 ///     formation with no members, or with that radius 0, answers its
 ///     leader's class `radius` (0x005f235e). Here the formation's route is the
 ///     hero's own while he leads a march (`MoveState::party` is himself, set
-///     by `place_army`), and its radius is the hero's formation object's
+///     by its formation), and its radius is the hero's formation object's
 ///     (`Formation::radius`, `formation_reach`), laid by the original's
 ///     layout (`sim/formation.hpp`). The jitter 0x005f0418 and 0x005f043b
 ///     would add is a draw in `[-shape_chaos, shape_chaos]`, and every

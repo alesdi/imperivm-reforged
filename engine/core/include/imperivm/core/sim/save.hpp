@@ -408,7 +408,14 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// A version-49 file has no build, so a loaded match would route with the
 /// grid search for good while its `pathfinderinit.vs` thread went on calling
 /// commands on a builder that was never made.
-inline constexpr std::uint32_t kStateVectorVersion = 50;
+/// 51: the movement section carries each formation's own route -- its points,
+/// the stepper's counters and what is left, its goal and band, whether it
+/// goes on, the sample's deadline and speed, and the units still to be handed
+/// `form_move` -- and every route aimed at a formation says so with the
+/// sample it was laid to (system section version 44). A version-50 file has
+/// no formation route, and its marches would stand still at their last
+/// sample.
+inline constexpr std::uint32_t kStateVectorVersion = 51;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

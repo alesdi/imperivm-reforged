@@ -929,7 +929,7 @@ void squad_set_cmd(World& world, Squad& squad, std::int32_t state, std::int32_t 
   // (`[obj+0x2c] & 0x01000000`; 0x0042742d, 0x00427626, 0x0043ece7) and
   // leave the loop on it. An empty slot is skipped untested. A hero's squad is
   // the hero at the front and his army behind him, so the order reaches the
-  // hero alone and the army goes where he leads it (`place_army`); this
+  // hero alone and the army goes where he leads it (his formation); this
   // ordered every soldier of the army as well, each on its own route.
   const std::vector<ObjectId> members = squad.members;
   for (const ObjectId member : members) {
