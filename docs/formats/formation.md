@@ -304,6 +304,32 @@ formation's direction there. A search that lays nothing keeps the route the
 unit had and takes no step; with the formation's path spent it marks the
 route arrived (`[retry+0x20] |= 0x80`), and the unit stops where it stands.
 
+### The blocking gate
+
+The unit's step has a gate test of its own, after the samples and before
+the timing (0x00419ca0): the first crossing of the **unit's** route not yet
+passed (0x00418210), within the unit's own radius plus 210 (mode 2,
+0x00418260), whose gate bars the unit. Barred, the step writes that gate's
+handle into the formation's `blocking_gate` (`+0x90`) and takes no step:
+the unit stands, its route kept, and clears its walking bit
+(`[unit+0x194]` bit 16).
+
+With `+0x90` naming a gate, every unit's step then asks 0x00417dc0 before it
+is timed. A unit whose route has not yet seen that gate notes it (the
+route record's `+0x18`) and compares its side of the gate with the hero's
+(0x005295d0, below); on different sides, the unit's commands are ended
+(`vtbl+0xc0` with 1) and it is detached from the hero (`DetachHero`,
+0x005db190), and the step takes no step. So when a gate shuts on a march,
+the members cut off from the hero by it leave his army; the rest go on.
+`SetDest` sets `+0x90` back to none.
+
+**The side test** (0x005295d0, a member of the gate) answers false for a
+unit in a holder or none, and otherwise lays a throw-away route record for
+the unit to the central building of the gate's settlement (the gate's
+`+0x148`, that object's `+0x8c`) through the point form of `SetDest`, and
+answers whether that route crosses no gate at all: inside the walls is
+true.
+
 ### Keeping it moving
 
 `UpdateMove` (0x005f5e30), the hero's `FormKeepMoving` on its first entry,
@@ -379,7 +405,11 @@ Still approximated:
   truncates (`formation_turn`), which can differ by one unit where a product
   lands within rounding of an integer.
 * **The claim on the stations is not wired**, as before
-  (`sim/movement.hpp`, inference 3), nor is the blocking gate (`+0x90`).
+  (`sim/movement.hpp`, inference 3), nor is the blocking gate (`+0x90`)
+  with its detach of the members a shut gate cuts off. A member barred on
+  its own route holds there under this engine's own gate step
+  (`MovementSystem::held_at_gate`), whose reach is the original's mode-2
+  one; nobody leaves the army for it.
 
 ## What is still unknown
 
