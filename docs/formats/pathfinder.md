@@ -473,8 +473,17 @@ left bare. Each gate's connections are found once and kept by its id.
 * **What is saved.** The original writes its live structure into the saved game
   (`pathfinder`, 0x0040b130); this engine writes the build's calls and makes it again on a
   load. The two agree while the grid is the one the build copied, which in this engine it
-  always is; whether the original restarts its script on a load that restores a finished
-  structure was not read.
+  always is. Neither runs the build script again for a finished structure: the original's
+  map-load entry (0x0040acb0) does nothing at all while a saved game is being restored (the
+  flag at `0x00a8734c`) -- no grid search, no builder, no script -- and the save itself holds
+  the live object (`pathfinder`) and, after it, whether a builder still exists (a bool,
+  `delayed`, 0x004129c0) with the builder's own state (0x00412820). A load makes a builder only
+  when `delayed` was set, and `data/pathfinderinit.vs`, if it was still running, resumes as a
+  saved script rather than starting over. This engine's load does not call the match start
+  either: it replays the recorded calls (`the_build_is_made_again_from_its_calls`) and the
+  script, if it was still running, resumes from the saved scheduler. The mid-war round trip
+  (`tests/test_corpus_imsave.py`, a save at turn 5,500, long after `SPFDone`) re-saves the
+  loaded game byte for byte, which a second build script would break.
 * **When the structure changes.** The original builds it once per map load (0x0040acb0); the
   other caller (0x006a4140) is a console command this engine does not have. Nothing patches it
   as the grid changes, and this engine's grid does not change in play either.
@@ -494,3 +503,14 @@ left bare. Each gate's connections are found once and kept by its id.
   where the straight line's walk back to a free spot gave it status 0 -- unless it ends inside
   the band. The original's `FormPathLeft` reads the status, so for those two routes it adds no
   32,000 where this engine does.
+* **The straightener has a bound here.** The original's (0x0040c6b0) loops until the scan sees
+  the chain's end. Its give-up branch takes back the last point, lays the anchor's centre,
+  resets the limit to 50 and scans again from the same anchor; when no later chain cell is
+  visible from it, that pass is the same every time, so it never ends (the output stays the
+  same size: one point taken back, one laid). And the one-way branch's search for the first
+  hidden cell past the visible one has no bound on the index past the chain's end. A chain
+  the grid search lays itself always sees its next cell -- the corner cut keeps a free
+  corner -- so only a smart pathfinder's patch that fails to bridge its gap can reach either.
+  This engine stops the scan at the chain's end and gives the loop a pass budget (64 per
+  chain cell plus 1,024), after which it lays the anchor and returns, where the original
+  would hang.
