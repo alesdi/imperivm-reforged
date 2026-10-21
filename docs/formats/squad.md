@@ -178,6 +178,19 @@ squad it is actually in, which after such a split is not his. `GAIKAIn` and
 the last attacker are left at their defaults on a fresh squad, where the
 original leaves whatever its pooled slot held.
 
+A unit attached to a hero is moved into his squad, out of the one it was in:
+the hero's `AddUnit` (0x0052e3e0) runs the hook 0x0041e820, whose assignment
+takes the hero arm, and the join takes the unit out of its old squad first.
+The engine used to append it and leave it filed where it was, so a unit the
+sweep below had filed could stand in two squads, and after a detach it could
+be left in another hero's. The AI's orders to that other squad reached it --
+on Crossroads a `ClrCmd` from `AIOSENDSQUAD.VS` on a squad parked at its node
+ended, every few seconds, the `form_move` of men marching out of a hall with
+a different hero, and they stood piled at the door. The engine still files
+the unit in the hero's squad whether or not the AI manager exists, and does
+not run the hook on a detach (0x0052dc03), where the original re-homes the
+unit by the merge rule; a detached unit is in no squad here.
+
 The engine also runs the assignment once a turn over every unit it has not
 seen before (`enrol_new_units_in_squads`), filed at the node under it. In
 `gbr.exe` the hook that does this (0x0041e820) is called directly only from a

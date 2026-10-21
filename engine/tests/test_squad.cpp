@@ -3067,6 +3067,46 @@ TEST(squadize_puts_an_attached_unit_in_its_heros_squad_and_the_order_decides_the
   }
 }
 
+/// A unit has one squad (`[unit+0x174]`): attaching it to a hero takes it out
+/// of the squad it was in (the join, 0x00445a50), and a second attachment out
+/// of the first hero's. It used to be appended to the hero's squad and kept in
+/// its old one, where another squad's `ClrCmd` ended its `form_move`.
+TEST(attaching_a_unit_moves_it_out_of_the_squad_it_was_in) {
+  FormerBench b;
+  const ObjectId unit = b.put(Point{0, 0});
+  const std::vector<SquadKey> seeds = b.squadize(4);
+  REQUIRE(seeds.size() == 1);
+  const SquadKey own = seeds[0];
+  CHECK(b.members(own) == std::vector<ObjectId>({unit}));
+
+  const ObjectId first_hero = b.world.spawn(NativeClass::hero, nullptr, b.graph.find("Unit"));
+  const ObjectId second_hero = b.world.spawn(NativeClass::hero, nullptr, b.graph.find("Unit"));
+  for (const ObjectId hero : {first_hero, second_hero}) {
+    CHECK(b.world.set_position(hero, Point{0, 40}));
+    CHECK(b.world.set_owner(hero, 1));
+    CHECK(b.world.set_health(hero, 100));
+    b.heroes.register_hero(b.world, hero);
+  }
+  b.heroes.register_unit(b.world, unit);
+  const SquadKey first = b.heroes.hero(first_hero)->squad;
+  const SquadKey second = b.heroes.hero(second_hero)->squad;
+  REQUIRE(first.valid());
+  REQUIRE(second.valid());
+
+  REQUIRE(b.heroes.attach(b.world, unit, first_hero));
+  CHECK(b.members(first) == std::vector<ObjectId>({first_hero, unit}));
+  CHECK(b.members(own).empty());
+  CHECK(b.heroes.squads().squad_of(unit) == first);
+
+  REQUIRE(b.heroes.attach(b.world, unit, second_hero));
+  CHECK(b.members(first) == std::vector<ObjectId>({first_hero}));
+  CHECK(b.members(second) == std::vector<ObjectId>({second_hero, unit}));
+
+  REQUIRE(b.heroes.detach(b.world, unit));
+  CHECK(b.members(second) == std::vector<ObjectId>({second_hero}));
+  CHECK(b.heroes.squads().squad_of(unit) == kNoSquad);
+}
+
 /// **The interleaving is load-bearing.** A fresh single-member squad is itself
 /// a merge candidate, so the second body's search sees the first body's settled
 /// squad -- which is why the walk mints one fresh squad at a time rather than

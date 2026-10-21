@@ -554,8 +554,10 @@ class HeroSystem final : public System {
   /// `je`: an army already over a lowered cap still takes one more). Then a
   /// unit already in this hero's army is a success that changes nothing;
   /// otherwise it leaves its present hero (`DetachHero`, 0x005db190), takes
-  /// this one's handle, joins the back of the army deque and the hero's
-  /// squad. True.
+  /// this one's handle, joins the back of the army deque and is moved to
+  /// the end of the hero's squad, out of the squad it was in (the join,
+  /// 0x00445a50, which the hero's `AddUnit` reaches through 0x0041e820): a
+  /// unit is in one squad at a time. True.
   ///
   /// **What it does not refuse** is everything `UNIT_ATTACH.VS` and
   /// `UNIT_ATTACH_VERIFY.VS` test before calling it -- an enemy, a unit with

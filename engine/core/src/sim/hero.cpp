@@ -400,6 +400,17 @@ bool HeroSystem::attach(World& world, ObjectId unit_id, ObjectId hero_id) {
   record->hero = hero_id;
   record->squad = leader->squad;
   leader->army.push_back(unit_id);
+  // **Moved, not added.** A unit has one squad handle (`[unit+0x174]`), and
+  // the join that files it in the hero's squad (0x00445a50, reached from the
+  // hero's `AddUnit` through 0x0041e820 and the assignment's hero arm)
+  // takes it out of the squad it was in first, standing that one down when
+  // it empties. Appended without leaving, a unit filed when it entered the
+  // world stayed in that squad too, and the AI's orders to either squad
+  // reached it: a `ClrCmd` on the squad it had left ended its `form_move`
+  // mid-march.
+  if (const SquadKey was = squads_.squad_of(unit_id); was != leader->squad) {
+    if (was != kNoSquad && leader->squad != kNoSquad) squads_.leave(world, was, unit_id);
+  }
   squads_.join(leader->squad, unit_id);
   // The hero's `AddUnit` (0x0052e3e0) puts it in his formation, pending until
   // the layout runs (0x005f47e0, `sim/formation.hpp`).
