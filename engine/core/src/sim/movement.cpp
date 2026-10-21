@@ -735,7 +735,7 @@ bool MovementSystem::stop_branch_halts(const World& world, ObjectId id, const Mo
   // runs out of route stops there, free spot or not. Nor does it step on
   // before a gate that bars it (0x00419f8a .. 0x00419fa2): where the walk on
   // would wait at the gate, the stop stops there.
-  return !lock_owner(id, move) || travelled >= move.path_length ||
+  return !stop_owner(id, move) || travelled >= move.path_length ||
          (!grid_.blocked(here) && spot_free(world, id, here, radius_of(world, id))) ||
          held_at_gate(world, id, move, travelled);
 }
@@ -783,9 +783,27 @@ bool MovementSystem::lock_owner(ObjectId id, const MoveState& move) const noexce
   return move.dest_lock;
 }
 
+bool MovementSystem::stop_owner(ObjectId id, const MoveState& move) const noexcept {
+  // **Engine choice.** `0x004178d0` names a march member an owner only once
+  // the march is over; while it goes on the stop branch takes no step and the
+  // member stands where the stop found it. A hero's script stops his army
+  // mid-march whenever his own order changes -- `HERO_IDLE.VS` sets every
+  // member still on `form_move` to `idle`, whose `UNIT_IDLE.VS` opens with
+  // `while (!.Stop(1000))` -- and the AI changes a marching hero's order
+  // often (`capture` and `sneak` in turn, a second or two apart, on
+  // Crossroads). Members of one formation pass through one another
+  // (0x005d2f80), so the army stood inside itself wherever it was stopped.
+  // Here such a member walks on along its route to the first free spot, as an
+  // owner does, and as every member did before the march had a route of its
+  // own. Without the flag it stands, as in the original.
+  if (!move.form_aimed) return lock_owner(id, move);
+  const Formation* form = formation(move.party);
+  return form != nullptr && form->should_lock;
+}
+
 bool MovementSystem::request_stop(World& world, ObjectId id) {
   MoveState* move = find(id);
-  if (move == nullptr || !move->has_path || !lock_owner(id, *move)) {
+  if (move == nullptr || !move->has_path || !stop_owner(id, *move)) {
     // With no owner named, the path follower's stop branch takes no step at
     // all (0x00419ef8 -> 0x0041a019): the unit stands where it is.
     stop(world, id);

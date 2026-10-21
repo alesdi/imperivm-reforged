@@ -116,8 +116,10 @@
 //      free spot when the march's flag was set, which is when `0x004178d0`
 //      names the member an owner (`lock_owner`). A follower strides 200 for
 //      the avoidance, the hero his walk step: an engine choice
-//      (`formation_stride_or_walk`). See `docs/formats/formation.md`, "The
-//      formation's route".
+//      (`formation_stride_or_walk`). So is a member stopped while the march
+//      goes on walking on to a free spot when the flag is set (`stop_owner`),
+//      where the original's stands. See `docs/formats/formation.md`, "The
+//      formation's route" and "What this engine models".
 //      **Not reproduced: the original's claim on its stations.**
 //      `CVXFormObj::PlaceSample` (0x005f5a20) ends by moving every station
 //      its member cannot stand on (0x005f5b7b -> 0x005f3fe0): a flood from
@@ -700,6 +702,15 @@ class MovementSystem : public System {
   /// it names, or none. A march member's does once the march is over and the
   /// formation's flag was set; any other order's when `dest_lock` is set.
   [[nodiscard]] bool lock_owner(ObjectId id, const MoveState& move) const noexcept;
+  /// Whether a stop request (`Unit::Stop`, the path follower's stop branch)
+  /// walks `id` on to a free spot rather than standing it where it is:
+  /// `lock_owner`, and **a march member while the march goes on** when the
+  /// formation's flag is set -- an engine choice. The original names no owner
+  /// there (0x004178d0), so a member its hero's script stops mid-march stands
+  /// where it is, and members of one formation never block one another
+  /// (0x005d2f80), so it can stand inside another; see
+  /// `docs/formats/formation.md`, "What this engine models".
+  [[nodiscard]] bool stop_owner(ObjectId id, const MoveState& move) const noexcept;
   /// `Unit.Face(pt)`: look towards a world point. A point on top of the unit
   /// leaves the facing alone, since it names no direction.
   void face(World& world, ObjectId id, Point towards);

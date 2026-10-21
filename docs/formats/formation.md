@@ -404,6 +404,21 @@ Still approximated:
   overlap 82, against 36 with 200). The followers keep the 200; the hero
   strides his walk step. The half-step test that makes the next sample is
   the original's, the unit's walk step, and a unit with none takes 200.
+* **A member stopped mid-march walks on to a free spot** when the march's
+  flag is set. In the original `Unit::Stop` on a member whose route is aimed
+  at the formation names no owner while the path goes on (0x004178d0), so
+  the path follower takes no step and the member stands where the stop
+  found it -- and since members of one formation never block one another
+  (0x005d2f80), that can be inside another member. A hero's script stops
+  his army that way whenever his own order changes: `HERO_IDLE.VS` sets every
+  member still on `form_move` to `idle`, and `UNIT_IDLE.VS` opens with
+  `while (!.Stop(1000))`. On Crossroads the AI changes a marching hero's
+  order often, and with the original's rule whole armies stood inside
+  themselves (worst overlap, seed 4: 274 pairs; seed 11: 207). Here such a
+  member is treated as an owner for the stop alone
+  (`MovementSystem::stop_owner`) and walks on along its route to the first
+  free spot, as every member did before the march had a route of its own.
+  Without the flag it stands, as in the original.
 * **The deadline has no animation time** and is not snapped to 100 ms, and
   the mean speed is an integer mean.
 * **A member standing on its station has a route of no length**, so
