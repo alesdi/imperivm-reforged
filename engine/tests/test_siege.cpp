@@ -302,12 +302,16 @@ TEST(siege_of_a_gate_places_an_engine_crews_it_and_stands_the_rest_back) {
   for (const ObjectId id : crews) {
     CHECK(b.verbs(id) == std::vector<std::string>{"build_catapult"});
     CHECK(b.target_of(id, 0) == engines[0]);
-    // Regrouped: a squad of its own carrying the siege state, stamped now.
+    // Regrouped through `Squadize`'s worker (0x00447330 at 0x00436565): a
+    // fresh squad each, then the assignment, so one engine's crews, standing
+    // twenty apart, merge into one squad of ten carrying the siege state,
+    // stamped by the game clock.
     const Squad* squad = b.heroes.squads().find(b.heroes.squads().squad_of(id));
     REQUIRE(squad != nullptr);
-    CHECK(squad->members.size() == 1);
+    CHECK(squad->key == b.heroes.squads().squad_of(crews[0]));
+    CHECK(squad->members.size() == 10);
     CHECK(squad->state == 7);
-    CHECK(squad->state_time == kNow);
+    CHECK(squad->state_time == b.world.time());
   }
   // Everyone else -- the ten further swordsmen and the four archers -- stands
   // back: 200 then 400 units beyond the engine along the ray from the gate.

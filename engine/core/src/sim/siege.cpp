@@ -589,8 +589,22 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
     if (l.catapult != r.catapult) return l.catapult < r.catapult;  // kNoObject sorts first
     return l.distance_sq < r.distance_sq;
   });
+  // Each engine's crews are regrouped as the walk reaches the next engine's
+  // (0x00436565, whenever the entry's engine differs from the one before) and
+  // once more past the end: one call of the merging worker per engine, so
+  // the crews of one engine merge with each other and with nobody else's.
   std::vector<ObjectId> crews;
+  std::vector<SquadKey> listed;
+  ObjectId group = kNoObject;
+  const auto regroup = [&]() {
+    if (!crews.empty()) squadize_bodies(world, *heroes, crews, siege_state, listed);
+    crews.clear();
+  };
   for (const CrewEntry& entry : plan) {
+    if (entry.catapult != group) {
+      regroup();
+      group = entry.catapult;
+    }
     if (entry.catapult == kNoObject) {
       attackers.push_back(entry.unit);
       continue;
@@ -604,7 +618,7 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
     (void)commands->kill_command(world, entry.unit);
     crews.push_back(entry.unit);
   }
-  if (!crews.empty()) regroup_into_fresh_squads(world, *heroes, crews, siege_state, now);
+  regroup();
   report.crews_inside = inside;
 
   // 8. The attackers.
