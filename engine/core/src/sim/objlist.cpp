@@ -838,9 +838,21 @@ bool erase_first(std::vector<ObjectId>& items, ObjectId id) {
 /// (0x0041ecc0); a member the receiver lacks is passed over silently. So a
 /// handle the receiver holds twice and `other` once survives once -- which
 /// `Add`'s deduplication makes rare, and which is the rule all the same. Order
-/// among the survivors is kept. `ol.RemoveList(ol)` walks the list it is
-/// erasing from in the original, a case no shipped script writes; here the
-/// argument is copied first, so it empties the list.
+/// among the survivors is kept.
+///
+/// `ol.RemoveList(ol)`, which no shipped script writes, walks the list it is
+/// erasing from. The walk goes by absolute position, from the list's start
+/// offset to its live end (offset plus size, re-read each step). Each step
+/// reads the element at the walk's position, which is always the present
+/// front. The scan finds that element at the front, and the erase pops it,
+/// moving the offset up one while the end stays put. So the list empties, one
+/// front at a time, duplicates included.
+///
+/// The last erase leaves the list empty, and the deque then puts its offset
+/// back to 0. The walk is past that end, so it runs on with empty scans until
+/// its 32-bit position wraps round to 0. That is a stall with nothing to show
+/// for it, and it is not reproduced. Here the argument is copied first, which
+/// leaves the same empty list.
 HostOutcome m_remove_list(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RemoveList: no world");
