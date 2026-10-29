@@ -87,11 +87,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "imperivm/core/formats/result.hpp"
+#include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/item.hpp"
 #include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/system.hpp"
@@ -648,6 +651,29 @@ class HeroSystem final : public System {
   /// `m_set_noselect_flag` in sim/world_host.cpp.
   void ai_unregister(World& world, ObjectId id);
 
+  // -- the class tally -------------------------------------------------
+  //
+  // `Count(player, "class")` (0x00422300) reads a per-player map from class
+  // name to a number (0x004441e0 on `[record+0x8c]`), which the AI's register
+  // and unregister keep for the unit's class and every ancestor. See
+  // `docs/formats/class-tally.md`.
+
+  /// The AI register's tally half (0x0041f310 -> 0x00447200): while the AI
+  /// manager exists, a unit that is not a spawn template, does not carry
+  /// `SetNoselectFlag`'s bit, has an owner and is not registered yet is
+  /// counted in its owner's tally, for its class and each ancestor, and
+  /// marked registered (`ObjectFlags::ai_registered`). Nothing else.
+  void ai_register(World& world, ObjectId id);
+
+  /// `Unit::Mutate`'s two tally calls (0x005df1e4, 0x005df287): unless the
+  /// unit carries `SetNoselectFlag`'s bit, its owner's tally loses the old
+  /// class's chain (`from`) and gains the new one's, and it is registered.
+  void ai_mutate(World& world, ObjectId id, ClassIndex from);
+
+  /// What the owner's tally holds for `cls`: 0 when the class has no entry,
+  /// and a negative number when more were taken out than were put in.
+  [[nodiscard]] std::int32_t class_tally(PlayerId player, ClassIndex cls) const;
+
   /// `Hero.IsHeroArmyFull()`.
   [[nodiscard]] bool army_full(ObjectId hero) const;
   /// `Hero.HasArmy()`.
@@ -941,10 +967,16 @@ class HeroSystem final : public System {
   std::vector<UnitRecord> units_;   ///< sorted by id; iteration order is state
   std::vector<HeroRecord> heroes_;  ///< sorted by id
   GameTime now_ = 0;
-  /// The highest object id `enrol_new_units_in_squads` has looked at. Not
-  /// saved: a loaded system starts at 0 and looks at everything once, which
-  /// skips every restored unit and costs one pass.
+  /// The highest object id `enrol_new_units_in_squads` has looked at.
+  /// Saved (section version 18).
   ObjectId squad_watermark_ = 0;
+  /// The sixteen class tallies, keyed on (owner, class): the original's
+  /// per-player map from class name to count. An entry once made is never
+  /// erased, as in the original. Saved and hashed.
+  std::map<std::pair<PlayerId, ClassIndex>, std::int32_t> class_tally_;
+
+  void tally_add(const World& world, PlayerId owner, ClassIndex cls);
+  void tally_take(const World& world, PlayerId owner, ClassIndex cls);
 };
 
 // --------------------------------------------------------------------------

@@ -235,6 +235,12 @@ envelope.
       -- `summoning_death`: `Druid::SetSummoningDeath`'s `[obj+0x1d4]`, which
       -- marks a death as a transformation rather than a casualty. Unlike
       -- `entering` it is read back, by `IsSummoningDeath`.
+      -- Bits 22 to 28 followed (`ondie_fired`, `diseased`, `commands_disabled`,
+      -- `half_damage`, `training`, `towers_posted`, `has_towers`). Version 52
+      -- added bit 29, `force_idle` -- `[unit+0x1b8]`, which `Unit::ForceIdle`
+      -- and `Ship::Idle` raise and the idle activity's draw spends
+      -- ([idle.md](idle.md)) -- and bit 30, `ai_registered`, whether the unit
+      -- is counted in its owner's class tally ([class-tally.md](class-tally.md)).
       i32   parry_mode     `Unit::GetParryMode` -- `[unit+0x1a0]`, 0 or 1.
                            Version 20. Both the setter and the getter are gated
                            on the class carrying the `Parry` special (bit 0 of
@@ -556,7 +562,7 @@ the map identity, the system run order.
 | `combat` | combatants — including `Unit::AddBonus`'s five per-object addends, which nothing but the entry point produces and so nothing could rebuild — projectiles in flight, the undrained event list, per-player level addends, alliance overrides, `now_`, `death_duration_`, `world_bound_` | `CombatConstants`, the class graph, the counter table and mode, the `PlayerTable` pointer, the lazily built `profiles_` cache |
 | `economy` | the settlement store (nested `ISET`), wagons in transit, the wagon id counter, per-settlement statistics, the `start`ed flag | `EconomyRules`, `auto_deliver_` |
 | `feeder` | the chain, the hungry list, `next_tick_`, both accumulators, both cursors | `FeederRules`, `world_bound_`, `draws_from_warehouse_` |
-| `hero` | unit records, hero records — including `army_attacked_at` and `army_attacked_unit`, when this hero's army was last struck and which member — `now_`, the squad table (nested `ISQD`: each squad with its `Enemies` list and when its look next fires, [squad.md](squad.md); then the sixteen AI order queues after the squads — records, free chain, the drain's timer and runner — and each squad's index into its player's) and the item store (nested `IITM`) | `HeroConstants`, the borrowed `ItemCatalog*` |
+| `hero` | unit records, hero records — including `army_attacked_at` and `army_attacked_unit`, when this hero's army was last struck and which member — `now_`, the squad table (nested `ISQD`: each squad with its `Enemies` list and when its look next fires, [squad.md](squad.md); then the sixteen AI order queues after the squads — records, free chain, the drain's timer and runner — and each squad's index into its player's), the item store (nested `IITM`), the enrol sweep's watermark, and the class tallies `Count` reads — a `u32` count, then per entry the owner (`u8`), the class index (`u32`) and the count (`i32`), in key order ([class-tally.md](class-tally.md); section version 45) | `HeroConstants`, the borrowed `ItemCatalog*` |
 | `env` | the environment store (nested `INVS`) and the AI-variable store (nested `IVAR`) | the research catalog, the unit catalog, the AI-variable name table, the `CONST.INI` constants |
 | `command` | every object's queue in id order, and the default verb | the `CommandTable`, the scheduler pointer, `method_cache_` |
 | `match` | the rules, the sixteen player rows — each its control, race, participation, outcome, and thirteen counters: the five score counters the team-score entry points read, and the eight the Statistics screen shows (food spent, units produced, killed, lost and most at once, gold captured, produced and converted) — the human, the multiplayer flag, the difficulty, `end_message_` | nothing |

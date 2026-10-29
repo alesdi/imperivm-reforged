@@ -3448,6 +3448,12 @@ ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId af
   const GaikaTable& nodes = world.gaika();
   const LsaPartition& areas = world.lsa();
   for (const ObjectId id : fresh) {
+    // The register's tally half (0x00447200), for every unit it reaches --
+    // one already filed by a script since its birth, and one born inside a
+    // holder, included: the original registered both where they were placed
+    // (`Place`, `PlaceInHolder`, 0x0041f310), before anything else saw them.
+    // A unit `Place` already registered is skipped by its own flag.
+    heroes.ai_register(world, id);
     if (heroes.squads().squad_of(id) != kNoSquad) continue;
     // **A unit born inside a holder is not enrolled.** `add_to_squad`'s third
     // arm used to be read as the holder's squad, which filed such a unit

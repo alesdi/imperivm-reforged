@@ -29,11 +29,13 @@
 #include "imperivm/core/formats/grid.hpp"
 #include "imperivm/core/formats/ini.hpp"
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/ai_profile.hpp"
 #include "imperivm/core/sim/campaign.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/env.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/rng.hpp"
@@ -784,9 +786,17 @@ TEST(u_enabled_is_a_bit_test_and_check_u_enabled_writes_the_mask) {
   env.units() = shipped_unit_catalog();
   const ClassIndex archer = graph.find("GArcher");
   REQUIRE(archer != kNoClass);
+  // The count is the owner's class tally (docs/formats/class-tally.md), which
+  // the AI's register keeps once its manager exists.
+  HeroSystem heroes;
+  AiSystem ai;
+  REQUIRE(world.add_system(&heroes));
+  REQUIRE(world.add_system(&ai));
+  ai.start_manager();
   for (int i = 0; i < 2; ++i) {
     const ObjectId id = world.spawn(NativeClass::unit, nullptr, archer);
     world.set_owner(id, 1);  // script player 2
+    heroes.ai_register(world, id);
   }
   const auto check = [&](std::int32_t player, std::int32_t max, std::int32_t type) {
     std::vector<script::Value> window;

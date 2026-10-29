@@ -37,6 +37,7 @@
 // the process that wrote it.
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <string_view>
 #include <utility>
@@ -81,7 +82,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 44;  // 44: the formation's own route and its timing in the movement section (`Formation::route`, `going_on`, `goal`, `range`, `min_range`, `deadline`, `speed`, `joined`), and a route aimed at a formation (`MoveState::form_aimed`, `form_seen`, `form_lock_laid`); 43: the smart pathfinder's build in the movement section, as the calls that made it (`PathFinder::smart_calls`); 42: no finishing commands in the command section (an `onfinish` runs inside the end that calls it), and a command's list (`Command::list`, a ship's `unboard`); 41: every combatant's danger counter and its stamp (`Combatant::danger`, `danger_time`), and a hero's experience pool (`HeroRecord::experience_pool`); 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 45;  // 45: the sixteen class tallies `Count` reads in the hero section (`HeroSystem::class_tally_`); 44: the formation's own route and its timing in the movement section (`Formation::route`, `going_on`, `goal`, `range`, `min_range`, `deadline`, `speed`, `joined`), and a route aimed at a formation (`MoveState::form_aimed`, `form_seen`, `form_lock_laid`); 43: the smart pathfinder's build in the movement section, as the calls that made it (`PathFinder::smart_calls`); 42: no finishing commands in the command section (an `onfinish` runs inside the end that calls it), and a command's list (`Command::list`, a ship's `unboard`); 41: every combatant's danger counter and its stamp (`Combatant::danger`, `danger_time`), and a hero's experience pool (`HeroRecord::experience_pool`); 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -1392,6 +1393,15 @@ void HeroSystem::serialize(std::vector<std::byte>& out) const {
   // after the load and nowhere else -- the save sweep's first divergence on
   // a map where units train.
   bytes::put_u32(out, squad_watermark_);
+  // The class tallies (section version 45): a count per (owner, class), in
+  // key order. Not a census to recompute: a tally drifts from the live units
+  // on a conversion, and a load must carry the drift.
+  bytes::put_u32(out, static_cast<std::uint32_t>(class_tally_.size()));
+  for (const auto& [key, count] : class_tally_) {
+    bytes::put_u8(out, key.first);
+    bytes::put_u32(out, key.second);
+    bytes::put_i32(out, count);
+  }
 }
 
 Status HeroSystem::deserialize(std::span<const std::byte> data) {
@@ -1460,6 +1470,21 @@ Status HeroSystem::deserialize(std::span<const std::byte> data) {
   if (const Status status = get_nested(reader, items); !status.ok()) return status;
   ObjectId watermark = 0;
   if (!reader.u32(watermark)) return FormatError::truncated;
+  std::uint32_t tally_count = 0;
+  if (!reader.u32(tally_count)) return FormatError::truncated;
+  std::map<std::pair<PlayerId, ClassIndex>, std::int32_t> tally;
+  for (std::uint32_t i = 0; i < tally_count; ++i) {
+    std::uint8_t player = 0;
+    ClassIndex cls = kNoClass;
+    std::int32_t count = 0;
+    if (!reader.u8(player) || !reader.u32(cls) || !bytes::get_i32(reader, count)) {
+      return FormatError::truncated;
+    }
+    // Written in key order, so each key comes after the last.
+    const std::pair<PlayerId, ClassIndex> key{player, cls};
+    if (!tally.empty() && !(tally.rbegin()->first < key)) return FormatError::malformed;
+    tally.emplace(key, count);
+  }
   if (const Status status = finish(reader); !status.ok()) return status;
 
   now_ = now;
@@ -1468,6 +1493,7 @@ Status HeroSystem::deserialize(std::span<const std::byte> data) {
   squads_ = std::move(squads);
   items_ = std::move(items);
   squad_watermark_ = watermark;
+  class_tally_ = std::move(tally);
   return Status();
 }
 

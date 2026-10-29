@@ -9,6 +9,7 @@
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/script/scheduler.hpp"
+#include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/fog.hpp"
@@ -492,6 +493,19 @@ void HeroSystem::detach_for_death(World& world, ObjectId id) {
 }
 
 void HeroSystem::ai_unregister(World& world, ObjectId id) {
+  // The tally half (0x004448a0 behind 0x0041eee0's gates): a registered unit
+  // with an owner leaves its **present** owner's tally -- which is not the
+  // one it was counted in when it changed hands since -- and is registered no
+  // longer. The gates the callers own (the manager, the template bit, the
+  // noselect bit before it is written) leave a registered unit with an owner
+  // as the only case that reaches the walk.
+  if (ObjectState* state = world.mutable_state(id);
+      state != nullptr && state->flags.ai_registered && state->owner != kNoPlayer) {
+    if (const WorldObject* slot = world.find(id); slot != nullptr) {
+      tally_take(world, state->owner, slot->class_index);
+    }
+    state->flags.ai_registered = false;
+  }
   // Re-found, because `detach` may already have cleared it.
   if (UnitRecord* record = unit(id); record != nullptr) {
     if (record->squad.valid()) (void)squads_.leave(world, record->squad, id);
@@ -510,6 +524,65 @@ void HeroSystem::ai_unregister(World& world, ObjectId id) {
   // (0x00444750), and a script may still hold it: `GS_CAPTURE.VS` reads
   // `squad.Units` after the `Siege` that boards its last man into a catapult
   // (lines 224-226). `advance` prunes it on its next turn.
+}
+
+// --------------------------------------------------------------------------
+// the class tally
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// The class and its ancestors, nearest first, as the original walks them
+/// (the class record's parent link, `[class+0xe4]`). A world with no class
+/// graph has the class alone.
+std::vector<ClassIndex> tally_chain(const World& world, ClassIndex cls) {
+  if (cls == kNoClass) return {};
+  if (const ClassGraph* graph = world.class_graph(); graph != nullptr) return graph->ancestry(cls);
+  return {cls};
+}
+
+}  // namespace
+
+void HeroSystem::tally_add(const World& world, PlayerId owner, ClassIndex cls) {
+  // 0x00447200: an absent name gets an entry of 1, a present one goes up.
+  for (const ClassIndex link : tally_chain(world, cls)) ++class_tally_[{owner, link}];
+}
+
+void HeroSystem::tally_take(const World& world, PlayerId owner, ClassIndex cls) {
+  // 0x004448a0: each present name goes down, unclamped; the first name with
+  // no entry ends the walk, and the ancestors past it keep their counts.
+  for (const ClassIndex link : tally_chain(world, cls)) {
+    const auto at = class_tally_.find({owner, link});
+    if (at == class_tally_.end()) return;
+    --at->second;
+  }
+}
+
+void HeroSystem::ai_register(World& world, ObjectId id) {
+  const AiSystem* ai = ai_system_of(world);
+  if (ai == nullptr || !ai->manager_started()) return;
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr || !slot->state.flags.is_unit) return;
+  ObjectState* state = world.mutable_state(id);
+  if (state == nullptr || state->flags.unspawned || state->flags.noselect) return;
+  if (state->owner == kNoPlayer || state->flags.ai_registered) return;
+  tally_add(world, state->owner, slot->class_index);
+  state->flags.ai_registered = true;
+}
+
+void HeroSystem::ai_mutate(World& world, ObjectId id, ClassIndex from) {
+  const WorldObject* slot = world.find(id);
+  ObjectState* state = world.mutable_state(id);
+  if (slot == nullptr || state == nullptr || state->flags.noselect) return;
+  if (state->owner == kNoPlayer) return;
+  tally_take(world, state->owner, from);
+  tally_add(world, state->owner, slot->class_index);
+  state->flags.ai_registered = true;
+}
+
+std::int32_t HeroSystem::class_tally(PlayerId player, ClassIndex cls) const {
+  const auto at = class_tally_.find({player, cls});
+  return at == class_tally_.end() ? 0 : at->second;
 }
 
 void HeroSystem::on_death(World& world, ObjectId id) {
@@ -1222,6 +1295,12 @@ void HeroSystem::hash(std::uint64_t& accumulator) const {
   }
   squads_.hash(accumulator);
   items_.hash(accumulator);
+  // The class tallies `Count` reads: the AI's build orders branch on them.
+  for (const auto& [key, count] : class_tally_) {
+    fold(accumulator, key.first);
+    fold(accumulator, key.second);
+    fold_i32(accumulator, count);
+  }
 }
 
 // --------------------------------------------------------------------------
