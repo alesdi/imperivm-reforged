@@ -522,7 +522,7 @@ Result<std::unique_ptr<GameSession>> GameSession::create(const script::HostRegis
   if (!inputs.formations.empty()) {
     // A malformed table is refused rather than ignored: an empty one makes
     // every formation lookup answer null, which is the state that kept
-    // `place_army` from ever placing anybody.
+    // the march from ever placing anybody.
     Result<FormationTable> table = FormationTable::parse(inputs.formations);
     if (!table.ok()) return table.error();
     impl.movement.set_formations(std::move(table.value()));

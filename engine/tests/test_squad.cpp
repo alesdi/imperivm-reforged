@@ -2994,37 +2994,117 @@ TEST(squadize_leaves_ships_to_themselves) {
   CHECK(b.members(seeds[2]) == std::vector<ObjectId>({walker}));
 }
 
-/// A unit **inside a holder** belongs wherever its holder belongs -- a crew
-/// moves as the ship's, a garrison as the building's -- and belongs to
-/// **nothing at all** when the holder belongs to nothing, which is a refusal
-/// rather than "leave it where it is".
-TEST(squadize_puts_a_held_unit_in_its_holders_squad) {
+/// A unit **attached to a hero** belongs in the hero's squad (0x00446bcc
+/// reads `[obj+0x170]`, `Unit::hero`): it is moved like any body into a fresh
+/// squad and then put back at the end of whichever squad its hero is in by
+/// then. The hero is moved alone (the join, 0x00445a50, takes one object), so
+/// the list's order decides: a hero listed before his men takes them with him
+/// into his fresh squad, and one listed after them is left alone in his, his
+/// army behind in the squad he led.
+TEST(squadize_puts_an_attached_unit_in_its_heros_squad_and_the_order_decides_the_split) {
+  const auto bench_with_army = [](FormerBench& b, bool hero_first, ObjectId& hero,
+                                  ObjectId& first, ObjectId& second) {
+    if (hero_first) hero = b.put(Point{0, 0}, NativeClass::hero);
+    first = b.put(Point{40, 0});
+    if (!hero_first) hero = b.put(Point{0, 0}, NativeClass::hero);
+    b.heroes.register_hero(b.world, hero);
+    // Attached, but not handed to `Squadize`.
+    second = b.world.spawn(NativeClass::unit, nullptr, b.graph.find("Unit"));
+    CHECK(b.world.set_position(second, Point{0, 40}));
+    CHECK(b.world.set_owner(second, 1));
+    CHECK(b.world.set_health(second, 100));
+    for (const ObjectId id : {first, second}) {
+      b.heroes.register_unit(b.world, id);
+      REQUIRE(b.heroes.attach(b.world, id, hero));
+    }
+  };
+
+  // The hero first: he leaves for a fresh squad, and the man listed after him
+  // follows him there. The one not listed stays where he stood.
+  {
+    FormerBench b;
+    ObjectId hero = kNoObject, first = kNoObject, second = kNoObject;
+    bench_with_army(b, true, hero, first, second);
+    const SquadKey army = b.heroes.hero(hero)->squad;
+    const std::vector<SquadKey> seeds = b.squadize(4);
+    REQUIRE(seeds.size() == 1);
+    CHECK(b.members(seeds[0]) == std::vector<ObjectId>({hero, first}));
+    CHECK(b.heroes.squads().find(seeds[0])->state == 4);
+    CHECK(b.heroes.hero(hero)->squad == seeds[0]);
+    CHECK(b.members(army) == std::vector<ObjectId>({second}));
+    CHECK(b.heroes.hero_of(first) == hero);
+    CHECK(b.heroes.hero_of(second) == hero);
+  }
+  // The man first: he is put back at the end of the squad the hero still
+  // leads, and then the hero leaves it alone.
+  {
+    FormerBench b;
+    ObjectId hero = kNoObject, first = kNoObject, second = kNoObject;
+    bench_with_army(b, false, hero, first, second);
+    const SquadKey army = b.heroes.hero(hero)->squad;
+    const std::vector<SquadKey> seeds = b.squadize(4);
+    REQUIRE(seeds.size() == 1);
+    CHECK(b.members(seeds[0]) == std::vector<ObjectId>({hero}));
+    CHECK(b.heroes.hero(hero)->squad == seeds[0]);
+    CHECK(b.members(army) == std::vector<ObjectId>({second, first}));
+    // Still his army: a squad is not an attachment.
+    CHECK(b.heroes.hero_of(first) == hero);
+    // A member detached afterwards leaves the squad he is in, not his hero's.
+    REQUIRE(b.heroes.detach(b.world, first));
+    CHECK(b.members(army) == std::vector<ObjectId>({second}));
+  }
+  // A held unit is not asked about its holder: a ship's crew goes through the
+  // rule like anyone, and a ship's squad takes nobody.
+  {
+    FormerBench b;
+    const ObjectId ship = b.put(Point{0, 0}, NativeClass::ship);
+    const ObjectId crew = b.put(Point{0, 0});
+    CHECK(b.world.put_in_holder(crew, ship));
+    const std::vector<SquadKey> seeds = b.squadize(1);
+    REQUIRE(seeds.size() == 2);
+    CHECK(b.members(seeds[0]) == std::vector<ObjectId>({ship}));
+    CHECK(b.members(seeds[1]) == std::vector<ObjectId>({crew}));
+  }
+}
+
+/// A unit has one squad (`[unit+0x174]`): attaching it to a hero takes it out
+/// of the squad it was in (the join, 0x00445a50), and a second attachment out
+/// of the first hero's. It used to be appended to the hero's squad and kept in
+/// its old one, where another squad's `ClrCmd` ended its `form_move`.
+TEST(attaching_a_unit_moves_it_out_of_the_squad_it_was_in) {
   FormerBench b;
-  const ObjectId ship = b.put(Point{0, 0}, NativeClass::ship);
-  const ObjectId crew = b.put(Point{0, 0});
-  CHECK(b.world.put_in_holder(crew, ship));
-
-  const std::vector<SquadKey> seeds = b.squadize(1);
-  // One seed: the ship's. The crew is in it and is therefore not a seed.
+  const ObjectId unit = b.put(Point{0, 0});
+  const std::vector<SquadKey> seeds = b.squadize(4);
   REQUIRE(seeds.size() == 1);
-  CHECK(b.members(seeds[0]) == std::vector<ObjectId>({ship, crew}));
+  const SquadKey own = seeds[0];
+  CHECK(b.members(own) == std::vector<ObjectId>({unit}));
 
-  // **A passenger whose carrier is in no squad is named by nothing**, and the
-  // original is worse than that: 0x00446be9 returns null and 0x0044756c
-  // dereferences it at `[eax+0x50]`. This engine answers "no squad" and leaves
-  // the body in the fresh one the walk gave it, which is what the original
-  // leaves behind too -- it never takes that squad away either. The one
-  // difference is that the list does not get an entry, and neither does a
-  // crash.
-  FormerBench alone;
-  const ObjectId cart = alone.world.spawn(NativeClass::wagon, nullptr);
-  CHECK(alone.world.set_owner(cart, 1));
-  const ObjectId rider = alone.put(Point{0, 0});
-  CHECK(alone.world.put_in_holder(rider, cart));
-  CHECK(alone.squadize(1).empty());
-  CHECK(alone.heroes.squads().squad_of(rider) != kNoSquad);
-  CHECK(alone.members(alone.heroes.squads().squad_of(rider)) ==
-        std::vector<ObjectId>({rider}));
+  const ObjectId first_hero = b.world.spawn(NativeClass::hero, nullptr, b.graph.find("Unit"));
+  const ObjectId second_hero = b.world.spawn(NativeClass::hero, nullptr, b.graph.find("Unit"));
+  for (const ObjectId hero : {first_hero, second_hero}) {
+    CHECK(b.world.set_position(hero, Point{0, 40}));
+    CHECK(b.world.set_owner(hero, 1));
+    CHECK(b.world.set_health(hero, 100));
+    b.heroes.register_hero(b.world, hero);
+  }
+  b.heroes.register_unit(b.world, unit);
+  const SquadKey first = b.heroes.hero(first_hero)->squad;
+  const SquadKey second = b.heroes.hero(second_hero)->squad;
+  REQUIRE(first.valid());
+  REQUIRE(second.valid());
+
+  REQUIRE(b.heroes.attach(b.world, unit, first_hero));
+  CHECK(b.members(first) == std::vector<ObjectId>({first_hero, unit}));
+  CHECK(b.members(own).empty());
+  CHECK(b.heroes.squads().squad_of(unit) == first);
+
+  REQUIRE(b.heroes.attach(b.world, unit, second_hero));
+  CHECK(b.members(first) == std::vector<ObjectId>({first_hero}));
+  CHECK(b.members(second) == std::vector<ObjectId>({second_hero, unit}));
+
+  REQUIRE(b.heroes.detach(b.world, unit));
+  CHECK(b.members(second) == std::vector<ObjectId>({second_hero}));
+  CHECK(b.heroes.squads().squad_of(unit) == kNoSquad);
 }
 
 /// **The interleaving is load-bearing.** A fresh single-member squad is itself
@@ -4355,19 +4435,23 @@ TEST(train_starts_when_the_trainable_reach_the_start_threshold) {
   CHECK(f.heroes.squads().find(old) != nullptr);
   CHECK(f.heroes.squads().find(old)->size() == 3);
 
-  // Three able, three wanted: started.
+  // Three able, three wanted: started. The regroup is `Squadize`'s worker
+  // (0x00447330 at 0x00436d5f): each trainee gets a fresh squad and is then
+  // assigned, so the three standing together merge into the first one's.
   CHECK(f.train(list, 4, 3) == 1);
+  const Squad* fresh = f.squad_holding(a);
+  REQUIRE(fresh != nullptr);
+  CHECK(fresh->members == std::vector<ObjectId>({a, b, c}));
+  CHECK(fresh->state == 6);
+  CHECK(fresh->state_time == f.world.time());
   for (const ObjectId id : {a, b, c}) {
     CHECK(f.verb_at(id, 0) == "train");
-    const Squad* fresh = f.squad_holding(id);
-    REQUIRE(fresh != nullptr);
-    CHECK(fresh->size() == 1);
-    CHECK(fresh->state == 6);
-    CHECK(fresh->state_time == f.world.time());
     CHECK(f.heroes.squad_of(id) == fresh->key);
   }
-  // The squad they came from is empty and pruned.
-  CHECK(f.heroes.squads().find(old) == nullptr);
+  // The squad they came from was emptied and pruned: the fresh one is the
+  // only squad left.
+  CHECK(f.heroes.squads().size() == 1);
+  CHECK(f.heroes.squads().find(old) == nullptr || fresh->key == old);
 }
 
 TEST(train_bins_by_every_one_of_the_five_conditions) {
@@ -4398,8 +4482,13 @@ TEST(train_bins_by_every_one_of_the_five_conditions) {
     CHECK(queue->running()->arg_kind == CommandArgKind::object);
     CHECK(queue->running()->object == hall);
     CHECK(f.squad_holding(id)->state == 7);
-    CHECK(f.squad_holding(id)->size() == 1);
   }
+  // The four sent inside merge into one squad. The two trainees do not: the
+  // sentry's no-AI flag rewrites bit 0 of its fresh squad's flags, and the
+  // flags word is one of the merge's nine clauses.
+  CHECK(f.squad_holding(hurt)->members == std::vector<ObjectId>({hurt, capped, mage, plain}));
+  CHECK(f.squad_holding(under)->members == std::vector<ObjectId>({under}));
+  CHECK(f.squad_holding(sentry)->members == std::vector<ObjectId>({sentry}));
   // Exactly one unit at half health is not below it.
   const ObjectId half = f.spawn(f.warrior, 1, 100);
   CHECK(f.train(f.list_of({f.squad({half})}), 4, 1) == 1);
@@ -4603,16 +4692,19 @@ TEST(train_detaches_a_trainee_from_its_hero_and_leaves_the_rest_attached) {
   // The trainee left the army and the squad, and trains in one of its own.
   CHECK(f.heroes.hero_of(warrior) == kNoObject);
   CHECK(f.verb_at(warrior, 0) == "train");
-  CHECK(f.squad_holding(warrior)->key != army);
+  CHECK(f.squad_holding(warrior)->members == std::vector<ObjectId>({warrior}));
   CHECK(f.squad_holding(warrior)->state == 6);
-  // The mage was sent inside and stays attached, in the hero's squad.
+  // The hero and the mage are the enterers, the hero first. The hero moves
+  // alone into a fresh squad, which is listed and takes the state; the mage,
+  // still attached, is moved into one and then put back at the end of the
+  // squad its hero is in by then (0x00446bcc) -- the hero's fresh one.
   CHECK(f.verb_at(mage, 0) == "enter");
   CHECK(f.heroes.hero_of(mage) == hero);
-  CHECK(f.heroes.squads().squad_of(mage) == army);
-  // The hero, in the rest bin, keeps its squad; the state lands on it.
-  CHECK(f.heroes.hero(hero)->squad == army);
-  CHECK(f.heroes.squads().find(army)->state == 7);
-  CHECK(f.heroes.squads().find(army)->size() == 2);
+  const SquadKey led = f.heroes.hero(hero)->squad;
+  CHECK(f.heroes.squads().squad_of(hero) == led);
+  CHECK(f.heroes.squads().squad_of(mage) == led);
+  CHECK(f.heroes.squads().find(led)->members == std::vector<ObjectId>({hero, mage}));
+  CHECK(f.heroes.squads().find(led)->state == 7);
 }
 
 TEST(train_regroups_with_the_old_squads_fields_or_the_class_defaults) {

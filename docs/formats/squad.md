@@ -112,6 +112,96 @@ writes at `+0x6c`..`+0x7c` finds only the constructors.
 The third list (`+0x90`) has no reader found among the functions that
 resolve a squad.
 
+## The regroup and the assignment
+
+One worker (0x00447330) forms squads out of a list of bodies, and it has five
+callers: `Squadize` (0x004255e2), the free `SetNoAIFlag` (0x00435584),
+`Unit::SetNoAIFlag` (0x005de6e5), the siege planner's crews (0x00436565) and
+`SquadList::Train`, once for the units it sends inside (0x00436ce8) and once
+for the ones it trains (0x00436d5f). It empties the caller's squad list, and
+then for each owned body in list order:
+
+1. **A fresh squad of its own.** The body leaves the squad it was in through
+   the join (0x00445a50: out of the old squad, which is stood down when that
+   empties it, the squad handle `[unit+0x174]` set, the body appended and
+   its strength added, and the squad filed under the body's node when it is
+   the first member). The fresh squad copies the old one's flags, both
+   GAIKAs and its last fight, or starts from the class's flags and the node
+   under the body; bit 0 is rewritten from the body's no-AI flag, the lock
+   bit cleared, the old squad's AI order re-posted, and its state is the
+   placeholder `0xffff`. **Nothing here asks whether the body is a hero or
+   attached to one**, and the join moves one object: a hero leaves his army
+   in the squad he led.
+2. **The assignment** (`AddToSquad`, 0x00446a70) on the body, towards the
+   fresh squad's destination.
+3. The squad the assignment answers is listed when it has exactly one member.
+
+Then every listed squad takes the caller's state and the current time.
+
+The assignment's arms, in order:
+
+* a body with the no-select bit (`[obj+0x194] & 0x800000`) answers null;
+* a **hero** with no squad gets one, joins it, and joins every member of his
+  army after him; a hero with one only sets its destination and answers it;
+* a body whose **hero** handle (`[obj+0x170]`, what `Unit::hero` reads,
+  0x005d7380) resolves (0x00446bcc): when the hero is in no squad, null;
+  when the body is already in the hero's squad, that squad; otherwise the
+  body is moved to the end of the hero's squad (0x00446570 -> the join) and
+  that squad is answered;
+* the rest is the merge rule (a body close enough to its own leader stays; a
+  ship and a member of a locked squad do not merge; otherwise the first of
+  the player's squads that accepts it on nine clauses, within 256 units of
+  its front member and under ten members; failing that a leader keeps its
+  squad and a follower starts one), described where the engine keeps it
+  (`add_to_squad` in `sim/squad.cpp`).
+
+So the list's order decides what happens to a hero's army. Listed before his
+men, the hero moves into a fresh squad alone and each man listed after him
+is moved into it by the third arm; a man listed before him is put back at
+the end of the squad the hero still leads, and the hero then leaves it, alone
+in his fresh squad with his army behind him. Units attached to him and not
+listed are not moved either way. Train lists a squad's members front to
+back, and a hero leads his squad, so its enterers usually bring the hero's
+men with him. The siege planner sorts its crews by engine and calls the
+worker once per engine, as its walk reaches the next engine's crews, so one
+engine's crews merge with each other and with nobody else's.
+
+`Squadize` dereferences the assignment's null answer (`[eax+0x50]` at
+0x0044756c): a body whose hero is in no squad would fault there. This engine
+lists nothing for it and leaves the body in its fresh squad.
+
+**This engine** (`squadize_bodies`, `regroup_into_fresh_squads`,
+`add_to_squad` in `sim/squad.cpp`) does the same for all five callers. Its
+hero keeps a record of the squad he is in (`HeroRecord::squad`), which
+follows him into the fresh squad, and a member detached from him leaves the
+squad it is actually in, which after such a split is not his. `GAIKAIn` and
+the last attacker are left at their defaults on a fresh squad, where the
+original leaves whatever its pooled slot held.
+
+A unit attached to a hero is moved into his squad, out of the one it was in:
+the hero's `AddUnit` (0x0052e3e0) runs the hook 0x0041e820, whose assignment
+takes the hero arm, and the join takes the unit out of its old squad first.
+The engine used to append it and leave it filed where it was, so a unit the
+sweep below had filed could stand in two squads, and after a detach it could
+be left in another hero's. The AI's orders to that other squad reached it --
+on Crossroads a `ClrCmd` from `AIOSENDSQUAD.VS` on a squad parked at its node
+ended, every few seconds, the `form_move` of men marching out of a hall with
+a different hero, and they stood piled at the door. The engine still files
+the unit in the hero's squad whether or not the AI manager exists, and does
+not run the hook on a detach (0x0052dc03), where the original re-homes the
+unit by the merge rule; a detached unit is in no squad here.
+
+The engine also runs the assignment once a turn over every unit it has not
+seen before (`enrol_new_units_in_squads`), filed at the node under it. In
+`gbr.exe` the hook that does this (0x0041e820) is called directly only from a
+hero's army changes (0x0052dc03, 0x0052e491), so that sweep is this engine's
+reading, and it **skips a unit born inside a holder**. Before the third arm
+was read as the unit's hero, the holder arm filed such a unit nowhere --
+its holder is in no squad -- and the sweep relied on it; read correctly,
+the arm would file every recruit still in its barracks by proximity, and
+one Crossroads match's production fell to a tenth for it. What the original
+does with a unit at its birth is open.
+
 ## What is still unknown
 
 * Where the original fires a look within a pump turn relative to scripts and

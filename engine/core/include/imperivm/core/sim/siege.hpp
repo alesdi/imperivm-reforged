@@ -50,14 +50,14 @@
 ///    it, aimed at the target, and crewed to its holder's cap.
 /// 7. **Issues the orders.** Each crew leaves its hero, drops its pending
 ///    commands, queues `build_catapult` at its engine and ends what it was
-///    doing; the crews are then regrouped into fresh squads carrying the
-///    siege state and their old squads' AI orders (0x00447330,
-///    `regroup_into_fresh_squads`) -- so a crew's `OrderDest` is still the
-///    besieged node and `GS_SIEGE.VS` does not send it there again. Crews
-///    that found no engine rejoin the attackers. 0x00436490 regroups each
-///    engine's crews as it reaches the next engine's; the regrouping gives
-///    every unit a squad of its own, so one call over all the crews in the
-///    same order makes the same squads.
+///    doing. Each engine's crews are then regrouped as the walk reaches the
+///    next engine's (0x00436565; the plan is sorted by engine) through the
+///    worker `Squadize` uses (0x00447330, `squadize_bodies`): a fresh squad
+///    each, carrying the old squad's AI order -- so a crew's `OrderDest` is
+///    still the besieged node and `GS_SIEGE.VS` does not send it there
+///    again -- then the assignment, which merges one engine's crews under
+///    the proximity rule, and the siege state on the squads left with one
+///    member. Crews that found no engine rejoin the attackers.
 /// 8. **Sends the attackers.** With fewer than ten units crewing (the new
 ///    crews plus whoever was already inside), and either no catapults wanted
 ///    or a majority of melee units among the attackers, everyone attacks --

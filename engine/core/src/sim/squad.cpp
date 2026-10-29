@@ -929,7 +929,7 @@ void squad_set_cmd(World& world, Squad& squad, std::int32_t state, std::int32_t 
   // (`[obj+0x2c] & 0x01000000`; 0x0042742d, 0x00427626, 0x0043ece7) and
   // leave the loop on it. An empty slot is skipped untested. A hero's squad is
   // the hero at the front and his army behind him, so the order reaches the
-  // hero alone and the army goes where he leads it (`place_army`); this
+  // hero alone and the army goes where he leads it (his formation); this
   // ordered every soldier of the army as well, each on its own route.
   const std::vector<ObjectId> members = squad.members;
   for (const ObjectId member : members) {
@@ -3079,8 +3079,9 @@ HostOutcome all_enemies_in_holder_impl(CallContext& ctx) {
 // ## Where the rule comes from
 //
 // `Squadize` (0x00425530) and its worker (0x00447330) are the small half, and
-// **0x00447330 already has a body here**: `regroup_into_fresh_squads`, written
-// for `SquadList::Train` and reused by the siege planner. The rule proper is
+// **0x00447330 has a body here**: `squadize_bodies`, its first step being
+// `regroup_into_fresh_squads`; Train, the siege planner, `Squadize` and both
+// `SetNoAIFlag` bodies all call it. The rule proper is
 // `AddToSquad` (0x00446a70), about 1,900 bytes, which that worker calls once
 // per listed object and which nothing here had needed until now.
 //
@@ -3180,19 +3181,6 @@ void move_member(World& world, HeroSystem& heroes, ObjectId id, SquadKey key) {
   if (UnitRecord* record = heroes.unit(id); record != nullptr) record->squad = key;
 }
 
-/// A unit attached to a hero is not moved, by anything here.
-///
-/// The original has no such case to make, because there a hero's army *is* its
-/// squad and moving a unit out of it is the detachment. Here the two are
-/// separate structures -- `HeroRecord::army` and the squad table -- and moving
-/// one without the other leaves a unit listed in an army it is not in.
-/// `regroup_into_fresh_squads` refuses attached units for exactly this reason
-/// and this agrees with it rather than inventing a second answer.
-[[nodiscard]] bool is_attached(const HeroSystem& heroes, ObjectId id) noexcept {
-  const UnitRecord* record = heroes.unit(id);
-  return record != nullptr && record->hero != kNoObject;
-}
-
 SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest, int depth);
 
 /// The hero arm (0x00446ad7): **a hero's squad is its army**, which
@@ -3270,9 +3258,8 @@ SquadKey hero_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest)
 ///   1. an object carrying `SetNoselectFlag`'s bit belongs nowhere, and the
 ///      answer is no squad at all; see the head of this section;
 ///   2. a **hero** leads its own squad and takes its army with it;
-///   3. a unit **inside a holder** belongs wherever its holder belongs, and to
-///      nothing at all when the holder belongs to nothing: a garrison moves as
-///      the building's, a crew as the ship's;
+///   3. a unit **attached to a hero** belongs in the hero's squad, and to
+///      nothing at all when the hero is in none;
 ///   4. a unit **already close enough to its own leader**, in a squad already
 ///      pointed where the caller wants it and not leading that squad itself,
 ///      stays exactly where it is;
@@ -3296,20 +3283,23 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   // 2.
   if (slot->state.flags.is_hero) return hero_squad(world, heroes, id, dest);
 
-  // 3. A held unit follows its holder. The original reads `[obj+0x170]`, the
-  //    holder handle, and answers **null** when the holder is in no squad --
-  //    not "leave it where it is". `Squadize` then dereferences that null at
-  //    0x0044756c (`mov ecx, [eax+0x50]`), which is a latent crash there and is
-  //    the one place this engine deliberately does not follow: `kNoSquad` comes
-  //    back, the caller lists nothing, and the body stays in the fresh squad
-  //    the walk gave it -- which is where the original leaves it too, since it
-  //    never takes that squad away either.
-  if (slot->state.holder != kNoObject) {
-    const SquadKey holders = table.squad_of(slot->state.holder);
-    if (holders == kNoSquad) return kNoSquad;
-    if (!is_attached(heroes, id)) move_member(world, heroes, id, holders);
+  // 3. A unit attached to a hero belongs in the hero's squad (0x00446bcc).
+  //    The original reads `[obj+0x170]` -- `Unit::hero`'s field (0x005d7380),
+  //    not the holder, which is `[obj+0x154]` -- and when it resolves: a hero
+  //    in no squad answers **null**, a unit already in his squad answers it,
+  //    and any other is moved to the end of it (0x00446570 -> 0x00445a50).
+  //    `Squadize` reads the null squad's field at +0x50 (0x0044756c),
+  //    a latent crash there and the one place this engine does not follow:
+  //    `kNoSquad` comes back, the caller lists nothing, and the body stays in
+  //    the fresh squad the walk gave it.
+  if (const UnitRecord* record = heroes.unit(id);
+      record != nullptr && record->hero != kNoObject && world.find(record->hero) != nullptr) {
+    const SquadKey heros = table.squad_of(record->hero);
+    if (heros == kNoSquad) return kNoSquad;
+    if (table.squad_of(id) == heros) return heros;
+    move_member(world, heroes, id, heros);
     table.prune_empty();
-    return table.squad_of(id);
+    return heros;
   }
 
   const SquadKey mine = table.squad_of(id);
@@ -3341,8 +3331,6 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   // original's and is reachable *there*, where `AddToSquad` has other callers;
   // no test here can tell it from its absence, and the sweep says as much.
   if (!leads && locked) return mine;
-  // And so is a unit attached to a hero, for the reason `is_attached` gives.
-  if (is_attached(heroes, id)) return mine;
 
   // 4.
   if (current != nullptr && current->dest_gaika == dest && !leads && leader != kNoObject &&
@@ -3461,11 +3449,17 @@ ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId af
   const LsaPartition& areas = world.lsa();
   for (const ObjectId id : fresh) {
     if (heroes.squads().squad_of(id) != kNoSquad) continue;
+    // **A unit born inside a holder is not enrolled.** `add_to_squad`'s third
+    // arm used to be read as the holder's squad, which filed such a unit
+    // nowhere; it is the unit's hero (`[obj+0x170]`, 0x00446bcc), which a
+    // recruit has none of, so it would be filed by proximity like a unit on
+    // the map. The hook's only direct callers in `gbr.exe` are a hero's
+    // army changes (0x0052dc03, 0x0052e491), not a unit's birth -- the
+    // once-a-turn sweep over new ids is this engine's reading -- and this
+    // keeps that reading where it stood. **Inferred.**
+    if (const WorldObject* slot = world.find(id); slot != nullptr && slot->state.is_held()) continue;
     // 0x0044e650 at 0x0041e877: for a held unit its `posRH`, the town, and
-    // not the holder record's (0, 0). **An equivalence today**, kept for the
-    // reading: a held unit is in a holder no squad holds, so `add_to_squad`'s
-    // step 3 files it nowhere and never reads the node; the fault sweep says
-    // so, and the regroup below, where it does reach a squad, is tested.
+    // not the holder record's (0, 0).
     const GaikaId under = nodes.at(areas, unit_pos_rh(world, id));
     (void)add_to_squad(world, heroes, id, under, 0);
   }
@@ -4561,45 +4555,28 @@ namespace {
 ///
 /// ## Regrouping (0x00447330)
 ///
-/// Each unit leaves the squad it was in and gets a fresh squad of its own.
-/// The new squad copies the old one's flags, `SrcGAIKA`, `DestGAIKA` and
-/// `LastFightTime`; a unit with no squad starts from the flags its class
-/// implies -- `SF_PEACEFUL` for a `Peaceful` or `Animal`, `SF_SENTRIES` for a
-/// `Sentry`, nothing otherwise -- and `DestGAIKA` at the node under its feet.
-/// Bit 0 is then rewritten from the unit's own no-AI flag and the lock bit
-/// cleared. The state is applied in a final pass over the squads made, with
-/// `state_time` set to now.
+/// Both sets go through the worker `Squadize` uses (0x00447330, called at
+/// 0x00436ce8 for the enterers and 0x00436d5f for the trainees;
+/// `squadize_bodies`). Each body in turn leaves the squad it was in for a
+/// fresh one of its own -- copying the old squad's flags, `SrcGAIKA`,
+/// `DestGAIKA` and `LastFightTime`, or starting from the flags its class
+/// implies (`SF_PEACEFUL` for a `Peaceful` or `Animal`, `SF_SENTRIES` for a
+/// `Sentry`) and the node under its feet; bit 0 rewritten from its own no-AI
+/// flag, the lock bit cleared, and its old squad's AI order re-posted -- and
+/// is then handed to the assignment (0x00446a70), so the bodies of one call
+/// **merge** into each other's fresh squads under the proximity rule. Only the
+/// squads left with one member are listed, and those take the state and the
+/// time. `GAIKAIn` and the last attacker are left at their defaults on a
+/// fresh squad, where the original leaves whatever the pooled slot held.
 ///
-/// The original then runs its per-unit squad assignment (0x00446a70) on every
-/// regrouped unit, and for a unit **still attached to a hero** that moves it
-/// straight back into the hero's squad, which is then not one of the fresh
-/// single-member squads the final pass writes the state to. So here a unit
-/// attached to a hero stays where it is and takes no state, which is the same
-/// place it ends up. **A hero keeps its own squad and that squad takes the
-/// state** -- where the original moves the hero alone: the join
-/// (0x00445a50) takes one object out of its squad, appends it to the fresh
-/// one and files that squad under the unit's node when it is the first
-/// member, and the assignment's leader branch (0x00446a70) only re-sets the
-/// `DestGAIKA` of the squad the hero is now in. So a regrouped hero leaves
-/// his army in its squad and ends in a single-member squad of his own, which
-/// takes the state. Labelled, not reproduced. `GAIKAIn` and the last attacker are left at their
-/// defaults on a fresh squad, where the original leaves whatever the pooled
-/// slot held. **The old squad's AI order is re-posted on the fresh one** --
-/// same node, same priority as it stands (0x00447527..0x0044755d); see
-/// `regroup_into_fresh_squads`.
-///
-/// **A known gap, and a design one: the regroup does not merge.** Train calls
-/// the same worker `Squadize` does (0x00447330, at 0x00436ce8 and 0x00436d5f),
-/// and that worker runs the assignment (0x00446a70) on every body and lists
-/// only the squads left with one member -- so bodies of one call merge into
-/// each other's fresh squads under the proximity rule (`squadize_bodies`).
-/// Here each trainee and each enterer gets a squad of its own. Using
-/// `squadize_bodies` instead needs the hero case settled first: 0x00447330 has
-/// no hero branch of its own, 0x00446a70's only re-sets the `DestGAIKA` of the
-/// squad a hero is in, and the join (0x00445a50) moves the one object -- so in
-/// the original a hero's army does not follow him into his fresh squad (see
-/// above). The one-squad-each reading stays, labelled, until the merge and
-/// that split are reproduced together.
+/// Neither the worker nor the join (0x00445a50) asks whether a body is a hero
+/// or attached to one. A hero is moved alone and leaves his army in the squad
+/// he led; the assignment's hero arm only re-sets the `DestGAIKA` of the squad
+/// he is now in. A unit attached to a hero is moved and then put back, at the
+/// end of whatever squad its hero is in by then (0x00446bcc). So a hero listed
+/// before his men takes them with him into his fresh squad, and one listed
+/// after them is left alone in his, his army behind in the old one: the
+/// original's order decides, and so does this.
 ///
 /// ## What the answer is not
 ///
@@ -4839,12 +4816,13 @@ HostOutcome train_impl(CallContext& ctx) {
     }
     (void)commands->set_command(world, id, "enter", enter);
   }
-  regroup_into_fresh_squads(world, *heroes, to_enter, enter_state, now);
+  std::vector<SquadKey> listed;
+  squadize_bodies(world, *heroes, to_enter, enter_state, listed);
 
   for (const ObjectId id : to_train) {
     if (const WorldObject* slot = world.find(id)) start_training(scan, *slot);
   }
-  regroup_into_fresh_squads(world, *heroes, to_train, train_state, now);
+  squadize_bodies(world, *heroes, to_train, train_state, listed);
 
   return HostOutcome::ok_with(Value::integer(answer));
 }
@@ -4853,7 +4831,10 @@ constexpr std::size_t kEntryCount = 55;
 
 }  // namespace
 
-/// 0x00447330: fresh squads for `units`, then `state` on each.
+/// 0x00447330's first step: a fresh squad for each of `units`, carrying
+/// `state` and `now`. Every body is moved, a hero and a unit attached to one
+/// as well -- the worker asks neither -- and the join (0x00445a50) moves the
+/// one object, so a hero leaves his army in the squad he led.
 void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const ObjectId> units,
                                std::int32_t state, GameTime now) {
   SquadTable& squads = heroes.squads();
@@ -4861,17 +4842,7 @@ void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const
     const WorldObject* slot = world.find(id);
     if (slot == nullptr) continue;
     UnitRecord& record = heroes.register_unit(world, id);
-    // Attached: the assignment pass puts it straight back into the hero's
-    // squad, which is not one the state is written to. It never left here.
-    if (record.hero != kNoObject) continue;
-    if (heroes.is_hero(id)) {
-      // Labelled, not read: a hero keeps its squad and the state lands on it.
-      if (Squad* own = squads.find(record.squad)) {
-        own->state = state;
-        own->state_time = now;
-      }
-      continue;
-    }
+    HeroRecord* led = heroes.hero(id);
     // Membership is the table's, not the record's: a unit put into a squad by
     // `SquadTable::join` alone has a stale record, and leaving the wrong squad
     // would leave it listed twice.
@@ -4903,9 +4874,13 @@ void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const
     // is why the post below takes the slot it left, as the original's does.
     if (old != nullptr) (void)squads.leave(world, old_key, id);
 
-    const SquadKey key = squads.create(slot->state.owner);
+    // A hero leads the squad he is now alone in, as `hero_squad` makes one,
+    // and his record follows him: `attach` joins a new member to the squad
+    // the hero is in (`[hero+0x174]`).
+    const SquadKey key = squads.create(slot->state.owner, led != nullptr ? id : kNoObject);
     (void)squads.join(key, id);
     record.squad = key;
+    if (led != nullptr) led->squad = key;
     Squad* fresh = squads.find(key);
     if (fresh == nullptr) continue;
     fresh->flags = flags;

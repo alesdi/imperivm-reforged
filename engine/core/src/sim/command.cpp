@@ -2822,22 +2822,6 @@ constexpr std::int32_t kCarrierExitPoll = 100;
   return out;
 }
 
-/// Send one marching member to `station`, its slot's sample. A member
-/// already going there -- within `repath_threshold` of it, on this hero's
-/// march -- is left alone, so a marching column does not run a fresh A* per
-/// member per call. The order carries the formation's lock flag
-/// (`Formation::should_lock`), which makes the member free-spot tested once
-/// the march is over (`MovementSystem::lock_owner`).
-void march_member(World& world, MovementSystem& movement, ObjectId hero, ObjectId id,
-                  Point station, bool lock) {
-  const MoveState& member = movement.state(id);
-  if (member.goto_active && member.party == hero &&
-      within(member.target, station, MovementSystem::repath_threshold())) {
-    return;
-  }
-  movement.order_goto(world, id, station, 0, 0, hero, lock);
-}
-
 /// 0x005f4390's hand-out: every unit the layout has just given a place takes
 /// `form_move` with the replace flag (0x005aef20, 0x005b4e90 with 1).
 void hand_out_form_move(World& world, std::span<const ObjectId> joined) {
@@ -2863,248 +2847,91 @@ void end_march(World& world, MovementSystem& movement, const Formation& form) {
   }
 }
 
-/// How far short of its station a unit on a formation route is timed to be
-/// while the formation's path goes on: 0x85, subtracted from every distance
-/// the sample's deadline (0x005f589e, 0x005f59a5) and each step's duration
-/// (0x00419e7a) are taken over, and nowhere once the path is spent.
-constexpr std::int32_t kSampleShort = 133;
-
-/// Where a march's formation is laid, and which way it faces.
-///
-/// The original's formation has a route of its own (`CVXFormObj::SetDest`,
-/// 0x005f2cc0, laid from where the hero stands) and a centre that steps along
-/// it a sample at a time (`CreateNextSample`, 0x005f5bd0, 200 units a step,
-/// `kFormationStride`). Each sample's stations are laid around the new centre
-/// facing the way it moved (`PlaceSample`, 0x005f5a20) -- the hero's own
-/// station *is* the centre (0x005f5a84) -- and a sample is made when a unit
-/// comes within 133 of its station (0x00419c78 .. 0x00419d72). So at the
-/// moment a sample is laid, the centre stands one step beyond the 133 its
-/// leader is timed short of: `kFormationStride + kSampleShort` ahead of him
-/// along the route, or at its end. The sample at the end is the last one
-/// (`[form+0x88]` cleared, 0x005f5cff), and no distance is taken short of it.
-///
-/// **Inferred onto this engine's march**, which has no formation route of its
-/// own: the hero's route stands for it, as it does in `MovementSystem::
-/// marching`, and the samples are laid whenever `place_army` runs -- the
-/// hero's every `FormKeepMoving` -- rather than when the first unit nears its
-/// station. Laying them around the hero where he stood made every station a
-/// place he had already left, and the last of them, laid up to a
-/// `FormKeepMoving` before he arrived, a place short of where he stopped.
-struct MarchCentre {
-  Point at;
-  Point facing;
-  /// Whether this is the route's end: the formation's last sample.
-  bool last = true;
-  /// How far along the hero's route the centre is from him.
-  std::int64_t along = 0;
-  /// How much of the route is left past the centre: the formation's path
-  /// left at the sample (`[[form+0x84]+8]`'s `vtbl+0x14`).
-  std::int64_t left = 0;
-};
-
-[[nodiscard]] MarchCentre march_centre(World& world, MovementSystem& movement, ObjectId hero) {
-  const MoveState& lead = movement.state(hero);
-  MarchCentre centre{world.resolve_position(hero), lead.facing, true, 0};
-  if (!lead.has_path || lead.waypoints.size() < 2) return centre;
-  const std::int64_t travelled = std::min(lead.travelled(), lead.path_length);
-  const std::int64_t ahead = travelled + kFormationStride + kSampleShort;
-  const std::int64_t at = std::min(ahead, lead.path_length);
-  std::size_t segment = 0;
-  centre.at = point_along(lead.waypoints, at, &segment);
-  centre.last = ahead >= lead.path_length;
-  centre.along = at - travelled;
-  centre.left = lead.path_length - at;
-  // The heading the centre moved in, which is the route's leg under it.
-  const std::size_t leg = std::min(segment, lead.waypoints.size() - 2);
-  const Point heading{lead.waypoints[leg + 1].x - lead.waypoints[leg].x,
-                      lead.waypoints[leg + 1].y - lead.waypoints[leg].y};
-  if (heading.x != 0 || heading.y != 0) centre.facing = heading;
-  return centre;
-}
-
-/// Pace a march: the speed each of its units walks at until the stations are
-/// laid again (`MoveState::march_rate`).
-///
-/// **The formation's speed** (`UpdateMinSpeed`, 0x005f5260) is the mean of
-/// the leader's and every member's own speed, held to at most one and a half
-/// times the slowest's (0x005f54c2 .. 0x005f54da). **The sample's deadline**
-/// (0x005f5850) is now plus the mean, over the hero and every member, of the
-/// time each needs at that speed to cover the straight distance to its
-/// station, less 133 while the path goes on. **Each unit's step** on a route
-/// aimed at the formation (0x00419e52) then takes the time left to the
-/// deadline shared over what is left of its route to its station, less the
-/// same 133 -- and is held to between 0.4 and 2 times the step's time at the
-/// formation's speed (0x005f2130), so a unit walks between half and two and a
-/// half times the formation's speed, whatever its own. The hero is one of
-/// them: his route is aimed at the formation (0x0052e830), so he walks its
-/// pace and not his own, and a straggler is hurried as he is held back. A
-/// unit already at its distance, or a deadline already past, takes the fast
-/// end (0x00419e91 writes a duration of 1, which the clamp lifts).
-///
-/// Integer here where the original averages the speeds in floating point
-/// (0x005f5419, 0x005f54b0); its slowest is tracked by step length alone
-/// (0x005f53d9 updates `[esp+0x10]` and not `[esp+0x14]`) where this takes the
-/// whole rate -- an inference that reads the quirk as a slip. Not reproduced:
-/// the time the unit's current animation has left (0x0053cef0), which the
-/// deadline adds per unit, and the snap of a step to the deadline within
-/// 100 ms (0x00419ec1).
-void pace_march(World& world, MovementSystem& movement, ObjectId hero, const MarchCentre& centre,
-                std::span<const ObjectId> marchers, std::span<const Point> stations) {
-  MoveState& lead = movement.state(hero);
-  struct Pacer {
-    MoveState* move;
-    std::int64_t straight;  ///< to its station, for the deadline
-    std::int64_t walk;      ///< along its route to its station, for its pace
-  };
-  std::vector<Pacer> pacers;
-  const std::int64_t short_of = centre.last ? 0 : kSampleShort;
-  const auto less_short = [&](std::int64_t d) { return d > short_of ? d - short_of : 0; };
-  // Only a route can be paced: a hero standing still leads no formation, and
-  // nothing he lays round himself is walked at any pace but its own.
-  if (lead.has_path && lead.own_rate() > 0) {
-    pacers.push_back({&lead,
-                      less_short(isqrt(dist_sq(world.resolve_position(hero), centre.at))),
-                      less_short(centre.along)});
-  }
-  for (std::size_t i = 0; i < marchers.size() && !pacers.empty(); ++i) {
-    MoveState& move = movement.state(marchers[i]);
-    if (move.own_rate() <= 0) continue;  // a unit that cannot walk sets no pace
-    const std::int64_t straight =
-        less_short(isqrt(dist_sq(world.resolve_position(marchers[i]), stations[i])));
-    const std::int64_t walk = move.has_path ? less_short(movement.remaining(marchers[i])) : 0;
-    pacers.push_back({&move, straight, walk});
-  }
-  if (pacers.empty()) {
-    lead.march_rate = 0;
-    return;
-  }
-
-  std::int64_t sum = 0;
-  std::int64_t slowest = pacers.front().move->own_rate();
-  for (const Pacer& p : pacers) {
-    sum += p.move->own_rate();
-    slowest = std::min(slowest, p.move->own_rate());
-  }
-  const auto n = static_cast<std::int64_t>(pacers.size());
-  std::int64_t speed = sum / n;
-  if (2 * speed > 3 * slowest) speed = 3 * slowest / 2;
-  if (speed <= 0) speed = 1;
-
-  std::int64_t total = 0;
-  for (const Pacer& p : pacers) total += p.straight * kSpeedScale / speed;
-  const std::int64_t deadline = (total + n / 2) / n;
-
-  const std::int64_t slow = speed / 2;
-  const std::int64_t fast = speed * 5 / 2;
-  for (const Pacer& p : pacers) {
-    std::int64_t rate = deadline > 0 ? p.walk * kSpeedScale / deadline : fast;
-    if (p.walk <= 0) rate = fast;
-    p.move->march_rate = std::clamp(rate, slow > 0 ? slow : 1, fast);
+/// Every member with a slot that runs `form_move` on the map, and whose route
+/// is not aimed at `hero`'s formation, aimed at it (`SetFormation`,
+/// 0x00417790) -- what its `FormAcceptMove` does once the command's script
+/// runs. A command started by the hand-out may not have run yet, and a world
+/// with no command system runs none: every member marches there.
+void aim_marchers(World& world, MovementSystem& movement, ObjectId hero) {
+  // A command started by the caller may have run a script that made another
+  // hero's formation, which moves the formations in memory: looked up here.
+  const Formation* form = movement.formation(hero);
+  if (form == nullptr || !form->path) return;
+  const bool lock = form->should_lock;
+  std::vector<ObjectId> members;
+  for (const FormationSlot& slot : form->slots) members.push_back(slot.unit);
+  for (const ObjectId id : members) {
+    if (id == kNoObject || world.find(id) == nullptr || !on_march(world, id)) continue;
+    if (const ObjectState* state = world.state(id); state != nullptr && state->is_held()) continue;
+    const MoveState* move = movement.find(id);
+    if (move != nullptr && move->goto_active && move->form_aimed && move->party == hero) continue;
+    movement.aim_at_formation(world, id, hero, lock);
   }
 }
 
-/// How near the end of the formation's path a settled orientation takes
-/// over the formation's direction (0x005f5c7d, `< 200`).
-constexpr std::int64_t kOrientationReach = 200;
-
-/// Move a hero's march on: the formation (`sim/formation.hpp`) updated and
-/// sampled, its members sent to their slots' samples, and the march paced
-/// (`pace_march`). `update` is the hero's `FormKeepMoving`; without it this
-/// is the first sample `FormSetupAndMoveTo` makes.
+/// `UpdateMove` (0x005f5e30), the hero's `FormKeepMoving`: nothing without the
+/// formation's route (`[form+0x84]`). The layout runs if it is marked
+/// (0x005f4390) -- a member joined or left, a shape was set -- and hands
+/// `form_move` to every unit it gave a place; then, when it was marked and a
+/// sample had been laid, the current sample is laid again where it stands
+/// (0x005f5a20) and every member with a route has it searched again to its
+/// station (0x00419730); otherwise the slots are chosen again if that is
+/// marked (0x005f56d0).
 ///
-/// **Nothing without the formation's route** (`Formation::path`): `UpdateMove`
-/// (0x005f5e30) and `CreateNextSample` (0x005f5bd0) both return at once when
-/// `[form+0x84]` is null.
+/// **Samples are not made here.** They are made in the movement step, as
+/// units near their stations (`MovementSystem::formation_step`), and a sample
+/// made there can run the layout too: the units it gave a place are handed
+/// `form_move` here, at the hero's next call, where the original hands it out
+/// at once. A script cannot be started from inside the movement step.
 ///
-/// **The update** (`UpdateMove`) runs the layout if it is marked -- a member
-/// joined or left, a shape was set -- and then, when it ran and a sample had
-/// been laid, lays the current sample again where it stands; otherwise it
-/// chooses the members' slots again if that is marked.
-///
-/// **The next sample** (`CreateNextSample`) is made when the centre has moved
-/// on: here the centre stands `kFormationStride + kSampleShort` ahead of the
-/// hero on his route (`march_centre`), where the original's steps along its
-/// own route as units near their stations. The direction is the step the
-/// centre took; a step against the last one marks the slots for choosing
-/// again ("too radical change in direction", 0x005f5c4b); and within 200 of
-/// the route's end a settled orientation (`FinalPartyOrientation`) takes
-/// over. A centre that cannot move before any sample was laid ends the march
-/// (0x005f2c10): what a setup to where the hero already stands does.
-///
-/// **Only a member running `form_move` is moved.** The original's members
-/// follow the formation's samples through a route aimed at it (0x00417790),
-/// which `UNIT_FORM_MOVE.VS`'s `FormAcceptMove` sets up; a member given any
-/// other command since -- a squad order, `stand_position` at the march's end
-/// -- has a script and a route of its own. **Nor is a member still inside a
-/// holder**: it leaves in its own `FormAcceptMove`, one per exit slot.
-std::size_t place_army(World& world, MovementSystem& movement, HeroSystem& heroes,
-                       ObjectId hero, bool update) {
-  const HeroRecord* record = heroes.hero(hero);
+/// **A member on the march with no route aimed at the formation is aimed at
+/// it** (`SetFormation`, 0x00417790), as its `FormAcceptMove` would: the
+/// fallback for a member whose `form_move` started before it was given a
+/// place, or a world with no command system, where every member marches.
+void update_march(World& world, MovementSystem& movement, ObjectId hero) {
   Formation* form = movement.formation(hero);
-  if (record == nullptr || form == nullptr || !form->path) return 0;
+  if (form == nullptr || !form->path) return;
   const FormationTable& table = movement.formations();
-  std::vector<ObjectId> joined;
-
-  if (update) {
-    const bool marked = form->rebuild;
-    (void)formation_rebuild(world, *form, table, joined);
-    if (form->samples < 1 || !marked) {
-      formation_reassign(world, *form);
-    } else {
-      formation_place_sample(world, *form, table, form->centre, form->dir, joined);
+  std::vector<ObjectId> joined = std::exchange(form->joined, {});
+  const bool marked = form->rebuild;
+  (void)formation_rebuild(world, *form, table, joined);
+  if (form->samples > 0 && marked) {
+    formation_place_sample(world, *form, table, form->centre, form->dir, joined);
+    std::vector<ObjectId> members;
+    for (const FormationSlot& slot : form->slots) members.push_back(slot.unit);
+    for (const ObjectId id : members) {
+      const MoveState* move = movement.find(id);
+      if (move != nullptr && move->goto_active && move->form_aimed) {
+        movement.reroute_to_station(world, id);
+      }
     }
-  }
-
-  const MarchCentre centre = march_centre(world, movement, hero);
-  if (centre.at != form->centre) {
-    const Point step{centre.at.x - form->centre.x, centre.at.y - form->centre.y};
-    if (static_cast<std::int64_t>(form->dir.x) * step.x +
-            static_cast<std::int64_t>(form->dir.y) * step.y <
-        0) {
-      form->reassign = true;
-    }
-    Point dir = step;
-    const Point settled = record->party_orientation;
-    if ((settled.x != 0 || settled.y != 0) && centre.left < kOrientationReach) dir = settled;
-    formation_place_sample(world, *form, table, centre.at, dir, joined);
-    ++form->samples;
-  } else if (form->samples == 0) {
-    end_march(world, movement, *form);
+  } else {
+    formation_reassign(world, *form);
   }
   hand_out_form_move(world, joined);
-  // A command started above may have run a script that made another hero's
-  // formation, which moves the formations in memory: look this one up again.
-  form = movement.formation(hero);
-  if (form == nullptr || form->samples == 0) return 0;
-
-  // The march is one party: its members and the hero leading it do not block
-  // one another's steps (`sim/movement.hpp`, inference 3).
-  movement.state(hero).party = hero;
-  std::vector<ObjectId> marchers;
-  std::vector<Point> marching_to;
-  const bool lock = form->should_lock;
-  const std::vector<FormationSlot> slots = form->slots;
-  for (const FormationSlot& slot : slots) {
-    if (slot.unit == kNoObject || world.find(slot.unit) == nullptr) continue;
-    if (!on_march(world, slot.unit)) continue;
-    if (const ObjectState* state = world.state(slot.unit); state != nullptr && state->is_held()) {
-      continue;
-    }
-    march_member(world, movement, hero, slot.unit, slot.sample, lock);
-    marchers.push_back(slot.unit);
-    marching_to.push_back(slot.sample);
-  }
-  pace_march(world, movement, hero, centre, marchers, marching_to);
-  return slots.size();
+  aim_marchers(world, movement, hero);
 }
 
-/// `FormSetupAndMoveTo(dest, range, min_range, flag)`.
+/// The most of its range the object form of the retry's `SetDest` keeps
+/// (0x0041a672 .. 0x0041a68e).
+constexpr std::int32_t kObjectFormRange = 920;
+
+/// `FormSetupAndMoveTo(dest, range, min_range, flag)` (0x0052e5e0; the object
+/// form 0x0052e890).
 ///
 /// Arguments two and three are the arrival annulus:
 /// `FormSetupAndMoveTo(b, 100, 100, false)` uses both halves, and
 /// `FormSetupAndMoveTo(holder, GetConst("GiveDistance"), 0, true)` names the
-/// second one a distance outright. The fourth is the family's undecided
-/// boolean; see the header.
+/// second one a distance outright. The fourth is the formation's lock flag.
+///
+/// The hero steps out of his holder, his own route is deleted, and the
+/// formation's `SetDest` lays **the formation's own route** from where he
+/// stands (`MovementSystem::formation_set_dest`; docs/formats/formation.md,
+/// "The formation's route"). Laid, every member with a slot is stopped, its
+/// sample cleared and handed `form_move`; the hero's route is aimed at the
+/// formation like a member's (0x00417790), and the first sample is made
+/// (`CreateNextSample`, 0x005f5bd0). Not laid -- the formation is in its band
+/// already, or no way leads there -- the march is ended (0x005f2c10).
 HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
@@ -3124,10 +2951,10 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   } else {
     return HostOutcome::failed(kNoPoint);
   }
-  // The formation's route is laid by `SetDest` (0x005f2cc0 -> 0x0041a4c0),
-  // which keeps at most 999 of the range.
-  const std::int32_t range =
-      point_route_range(ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0);
+  // The retry's `SetDest` keeps at most 999 of the range (0x0041a4c0); the
+  // object form's keeps at most 920 (0x0041a5c0).
+  std::int32_t range = point_route_range(ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0);
+  if (target != kNoObject && range > kObjectFormRange) range = kObjectFormRange;
   const std::int32_t min_range = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
 
   // **The hero steps out of his holder first, and waits his turn to**
@@ -3136,55 +2963,63 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
   // the settlement's last exit is too recent the call suspends for what it
   // answers and runs again whole -- the body never reads its re-entry flag.
   // Nothing of the march is set up until he is out, so neither is the army's
-  // `form_move`. This used to step him out at once whatever the slot said.
+  // `form_move`.
   if (const std::int32_t wait = step_out_wait(*self.world, self.id, dest, now_of(ctx, *self.world));
       wait > 0) {
     return wait_to_step_out(wait);
   }
 
-  // `CVXFormObj::SetDest` (0x005f2cc0; the object form 0x005f2ee0): the
-  // formation's centre on the hero, the lock flag at `[form+0x8c]`, a
+  // His route is deleted (0x005d3830 with 0).
+  self.movement->stop(*self.world, self.id);
+  // `CVXFormObj::SetDest` (0x005f2cc0; the object form 0x005f2ee0): a
   // requested orientation settled (`+0x54` into `+0x5c`, the request
-  // cleared; the object form clears both), no sample yet.
-  Formation& form = self.movement->formation_of(self.id);
-  form.centre = self.world->resolve_position(self.id);
-  form.should_lock = ctx.count() > 4 && ctx.arg(4).truthy_scalar();
-  form.samples = 0;
+  // cleared; the object form clears both), and the route laid.
   if (HeroRecord* record = heroes->hero(self.id)) {
     record->party_orientation = target == kNoObject ? record->party_orientation_request : Point{};
     record->party_orientation_request = Point{};
   }
-  // The formation's route. The hero's own stands for it here, laid as the
-  // original lays his route aimed at the formation (0x00417790).
-  const MoveOutcome outcome =
-      target == kNoObject
-          ? self.movement->order_goto(*self.world, self.id, dest, range, min_range)
-          : self.movement->order_goto_object(*self.world, self.id, target, range, min_range);
-
-  if (outcome == MoveOutcome::blocked) {
+  const bool lock = ctx.count() > 4 && ctx.arg(4).truthy_scalar();
+  if (!self.movement->formation_set_dest(*self.world, self.id, dest, range, min_range, lock)) {
     // No route laid: the march is ended (0x005f2c10) and the route object
     // deleted.
-    form.path = false;
-    end_march(*self.world, *self.movement, form);
+    if (const Formation* form = self.movement->formation(self.id)) {
+      end_march(*self.world, *self.movement, *form);
+    }
     return HostOutcome::ok_void();
   }
   // A route laid: every member with a slot -- not one still pending -- has
   // its route deleted (0x005d3830 with 0), its sample cleared to `(-1, -1)`
   // and `form_move` with the replace flag (0x005f2b50), which ends whatever
-  // it was running. A pending member is handed it by the layout, below.
-  form.path = true;
+  // it was running. A pending member is handed it by the layout.
   std::vector<ObjectId> slotted;
-  for (FormationSlot& slot : form.slots) {
-    slot.sample = kNoSample;
-    slotted.push_back(slot.unit);
+  {
+    Formation& form = self.movement->formation_of(self.id);
+    for (FormationSlot& slot : form.slots) {
+      slot.sample = kNoSample;
+      slotted.push_back(slot.unit);
+    }
   }
   for (const ObjectId member : slotted) {
     if (self.world->find(member) != nullptr) self.movement->stop(*self.world, member);
   }
   hand_out_form_move(*self.world, slotted);
 
-  // And the first sample (`CreateNextSample`, 0x005f5bd0).
-  place_army(*self.world, *self.movement, *heroes, self.id, false);
+  // The hero's route aimed at the formation (0x00417790), and the first
+  // sample (`CreateNextSample`, 0x005f5bd0). A first sample that cannot be
+  // made ends the march (0x005f5dd5).
+  self.movement->aim_at_formation(*self.world, self.id, self.id, lock);
+  if (!self.movement->formation_next_sample(*self.world, self.id)) {
+    if (const Formation* form = self.movement->formation(self.id); form != nullptr && form->samples == 0) {
+      end_march(*self.world, *self.movement, *form);
+      return HostOutcome::ok_void();
+    }
+  }
+  // The units the sample's layout gave a place take `form_move` now: this is
+  // a script's call, where the hand-out (0x005f4390) can run.
+  std::vector<ObjectId> joined;
+  if (Formation* form = self.movement->formation(self.id)) joined = std::exchange(form->joined, {});
+  hand_out_form_move(*self.world, joined);
+  aim_marchers(*self.world, *self.movement, self.id);
   return HostOutcome::ok_void();
 }
 
@@ -3206,30 +3041,24 @@ HostOutcome form_setup_and_move_to_impl(CallContext& ctx) {
 /// (0x00418e90, 0x005d3830), aim it at the party's target (0x00417790), set
 /// its state to 3 -- marching -- and finish.
 ///
-/// **What runs here is the finishing half, and why the rest does not.** The
-/// original's party-move code hands each member a `form_move` command
-/// (0x005f2b50) and a target through that record, and the member fetches the
-/// target itself here. This engine's march (`place_army`) orders each member
-/// on the map straight to its slot's sample through the movement system,
-/// in the same call that hands it `form_move`, before the command's script
-/// first runs. So a member that reaches this call on the map already has its
-/// order, and the answer is to finish, so the script's `while (.HasPath())`
-/// takes over; the member's route then lasts as long as the march does
-/// (`MovementSystem::marching`). **A member with no slot** -- still pending,
-/// or dropped by a layout no `<Class>` entry of its shape matches -- is the
-/// script-ending exit, as the original's with no record at `[unit+0x1c0]`.
+/// **The member's route is aimed at the formation here**
+/// (`MovementSystem::aim_at_formation`), and from then on follows its samples
+/// in the movement step: laid to its station, the next sample made as it
+/// nears it, for as long as the formation's path goes on. A member already
+/// aimed at this formation -- by the hero's `FormKeepMoving`, which aims a
+/// marching member that is not -- is left as it is. **A member with no
+/// slot** -- still pending, or dropped by a layout no `<Class>` entry of its
+/// shape matches -- is the script-ending exit, as the original's with no
+/// record at `[unit+0x1c0]`.
 ///
 /// **A held member leaves here, one exit slot at a time.** Aboard a ship it
 /// polls every 100 ms; in a settlement it asks `garrison_exit` for the slot,
 /// towards its station, and while the settlement's last exit is too recent
-/// the call suspends for the wait it answers and runs again whole. Out, it is
-/// sent to its station as `place_army` sends the others. The station is the
-/// point at `+0x10` of the member's slot record, its sample, which
-/// `form_move`'s hand-out (0x005f2bc5) resets to `(-1, -1)` and the next
-/// sample fills; one not yet filled, or a hero back inside, sends it out
-/// towards the hero and leaves it at the door. Until this, `place_army`
-/// stepped every held member out in the one call that set the march up, and
-/// a column left a town as one pile on its door.
+/// the call suspends for the wait it answers and runs again whole. The
+/// station it steps out towards is the point at `+0x10` of the member's slot
+/// record, its sample, which `form_move`'s hand-out (0x005f2bc5) resets to
+/// `(-1, -1)` and the next sample fills; one not yet filled, or a hero back
+/// inside, sends it out towards the hero.
 ///
 /// **Every member that gets this far drops its combat target** (0x005d798b,
 /// `CombatSystem::drop_target`). A unit with no hero is the original's
@@ -3268,15 +3097,20 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
         lead != nullptr && !lead->is_held() && slot->sample != kNoSample) {
       station = slot->sample;
     }
-    const bool lock = form->should_lock;
     const Point toward = station.value_or(unit_pos_rh(*world, hero));
     if (const std::int32_t wait = step_out_wait(*world, id, toward, now_of(ctx, *world));
         wait > 0) {
       return wait_to_step_out(wait);
     }
-    if (station.has_value() && on_march(*world, id)) {
-      movement->state(hero).party = hero;
-      march_member(*world, *movement, hero, id, *station, lock);
+  }
+  // Out, its route is aimed at the formation (0x00417790) -- unless it
+  // already is, at this one.
+  if (on_march(*world, id)) {
+    form = movement->formation(hero);
+    const MoveState* move = movement->find(id);
+    if (form != nullptr && (move == nullptr || !move->goto_active || !move->form_aimed ||
+                            move->party != hero)) {
+      movement->aim_at_formation(*world, id, hero, form->should_lock);
     }
   }
   if (CombatSystem* combat = combat_system_of(*world); combat != nullptr) {
@@ -3290,12 +3124,9 @@ HostOutcome form_accept_move_impl(CallContext& ctx) {
 /// `HERO_MOVE.VS` is the whole protocol -- `FormSetupAndMoveTo` once, then
 /// `while (.HasPath()) .FormKeepMoving(1500);` -- so this suspends and returns
 /// nothing, and the loop's exit condition is the hero's own path, not this
-/// call's result. Each call is the formation's `UpdateMove` (0x005f5e30) --
-/// the layout rerun if marked, the current sample laid again if it was --
-/// and then its next sample round the march's centre ahead of him
-/// (`place_army`, `march_centre`), pacing every unit of it (`pace_march`),
-/// which is what makes the formation move with him rather than pile up at
-/// the destination he was given or trail behind him.
+/// call's result. Each call is the formation's `UpdateMove` (0x005f5e30,
+/// `update_march`): the layout rerun if marked, the current sample laid again
+/// if it was. The samples themselves are made in the movement step.
 ///
 /// **Two functions answer to this name, and only the unit's drops the
 /// target.** `Hero::FormKeepMoving` (0x0052eaf0) keeps the hero's formation
@@ -3336,7 +3167,9 @@ HostOutcome form_keep_moving_impl(CallContext& ctx) {
       (void)combat->drop_target(self.id);
     }
   }
-  if (heroes != nullptr) place_army(*self.world, *self.movement, *heroes, self.id, true);
+  if (heroes != nullptr && heroes->hero(self.id) != nullptr) {
+    update_march(*self.world, *self.movement, self.id);
+  }
 
   // **The full `ms`, never the ETA.** This used to clamp the wait to
   // `movement->eta(self.id)` and return immediately when there was nothing left
@@ -3373,35 +3206,29 @@ HostOutcome form_keep_moving_impl(CallContext& ctx) {
 }
 
 /// What 0x004185a0 adds to an incomplete path's length.
-constexpr std::int64_t kIncompletePathLeft = 32000;
+constexpr std::int32_t kIncompletePathLeft = 32000;
 
-/// `FormPathLeft()`: world units still to walk on the hero's own route.
+/// `FormPathLeft()`: what is left of the formation's own route.
 ///
 /// Both sites compare it against a radius -- `if (.FormPathLeft() <
 /// .FormRadius() + s.radius) break;` -- so it is a distance and not a time.
 ///
 /// 0x0052ebc0 asks the formation's route record (`[[hero+0x2b0]+0x84]`) and
 /// answers 0 without one -- a hero who has never set a march up, or whose
-/// last setup laid no route (`Formation::path`), whatever he walks; with one,
-/// 0x004185a0 answers what is left of its path **plus 32,000 when the path is
-/// incomplete** -- a route that stops short of its goal never reads as nearly
-/// there. Here the hero's own route stands for the formation's while it is
-/// the march's (`MoveState::party` is himself); a route of any other order
-/// is not the formation's, whose path was spent when he stopped leading it
-/// (approximated, as the march is).
+/// last setup laid no route (`Formation::path`); with one, 0x004185a0
+/// answers what is left of its path (`formation_route_left`, the signed high
+/// word of the 16.16 remainder) **plus 32,000 when the search that laid it
+/// did not reach its goal** -- a route that stops short never reads as nearly
+/// there. The formation's path steps ahead of the hero by its samples, so
+/// this is less than what the hero still has to walk.
 HostOutcome form_path_left_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   const Formation* form = self.movement->formation(self.id);
-  const MoveState* move = self.movement->find(self.id);
-  if (form == nullptr || !form->path || move == nullptr || !move->has_path ||
-      move->party != self.id) {
-    return HostOutcome::ok_with(Value::integer(0));
-  }
-  std::int64_t left = self.movement->remaining(self.id);
-  if (!move->path_complete) left += kIncompletePathLeft;
-  return HostOutcome::ok_with(
-      Value::integer(static_cast<std::int32_t>(std::min<std::int64_t>(left, 0x7FFFFFFF))));
+  if (form == nullptr || !form->path) return HostOutcome::ok_with(Value::integer(0));
+  std::int32_t left = formation_route_left(form->route);
+  if (!form->route.complete) left += kIncompletePathLeft;
+  return HostOutcome::ok_with(Value::integer(left));
 }
 
 /// The number of `define` calls `register_command_host` makes. Kept next to the

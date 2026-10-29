@@ -564,4 +564,96 @@ std::int32_t formation_reach(const Formation* form, std::int32_t class_radius) n
   return class_radius;
 }
 
+// -- the formation's route ------------------------------------------------------
+
+namespace {
+
+/// A 32-bit word as the original's arithmetic leaves it.
+[[nodiscard]] std::int32_t wrap32(std::int64_t v) noexcept {
+  return static_cast<std::int32_t>(static_cast<std::uint32_t>(static_cast<std::uint64_t>(v)));
+}
+
+/// A leg's length: the integer root of its square, the square an unsigned
+/// 32-bit sum as the root is handed it.
+[[nodiscard]] std::uint32_t leg_root(Point from, Point to) noexcept {
+  const auto dx = static_cast<std::uint32_t>(to.x - from.x);
+  const auto dy = static_cast<std::uint32_t>(to.y - from.y);
+  return static_cast<std::uint32_t>(isqrt(static_cast<std::uint32_t>(dx * dx + dy * dy)));
+}
+
+[[nodiscard]] std::int64_t magnitude(std::int64_t v) noexcept { return v < 0 ? -v : v; }
+
+}  // namespace
+
+void formation_route_lay(FormationRoute& route, std::vector<Point> points, bool complete) {
+  route.points = std::move(points);
+  route.leg = 0;
+  route.steps = 0;
+  route.step = 0;
+  route.delta_x = 0;
+  route.delta_y = 0;
+  route.step_length = wrap32(static_cast<std::int64_t>(kFormationRouteStride) * 65536);
+  std::uint32_t total = 0;
+  for (std::size_t i = 0; i + 1 < route.points.size(); ++i) {
+    total += leg_root(route.points[i], route.points[i + 1]) * 65536u;
+  }
+  route.remaining = static_cast<std::int32_t>(total);
+  route.complete = complete;
+  route.gate_crossings.clear();
+}
+
+bool formation_route_step(FormationRoute& route, Point& out) noexcept {
+  if (route.remaining == 0) return false;
+  const auto count = static_cast<std::int32_t>(route.points.size());
+  if (route.step == route.steps) {
+    // The leg is spent: the next one is cut into the whole number of strides
+    // whose length comes nearest the stride, never fewer than one.
+    ++route.leg;
+    if (route.leg >= count) return false;
+    const Point from = route.points[static_cast<std::size_t>(route.leg - 1)];
+    const Point to = route.points[static_cast<std::size_t>(route.leg)];
+    const std::uint32_t length = leg_root(from, to);
+    const std::uint32_t stride = kFormationRouteStride;
+    const std::uint32_t n = length / stride;
+    const std::uint32_t scaled = length * 65536u;
+    const std::int64_t target = static_cast<std::int64_t>(stride) * 65536;
+    const std::int64_t with_n = n == 0 ? 0 : static_cast<std::int64_t>(scaled / n);
+    const std::int64_t with_more = static_cast<std::int64_t>(scaled / (n + 1));
+    const bool more = n == 0 || magnitude(wrap32(with_more - target)) <
+                                    magnitude(wrap32(with_n - target));
+    const auto steps = static_cast<std::int32_t>(more ? n + 1 : n);
+    route.steps = steps;
+    route.delta_x = wrap32(static_cast<std::int64_t>(to.x - from.x) * 65536) / steps;
+    route.delta_y = wrap32(static_cast<std::int64_t>(to.y - from.y) * 65536) / steps;
+    route.step_length = wrap32(more ? with_more : with_n);
+    route.step = 0;
+    // A leg of no length is no step, though the route may go on.
+    if (route.delta_x == 0 && route.delta_y == 0) return false;
+  }
+  const std::int32_t next = route.step + 1;
+  if (next == route.steps) {
+    out = route.points[static_cast<std::size_t>(route.leg)];
+  } else {
+    // An arithmetic shift: the offset is floored, not truncated.
+    const Point from = route.points[static_cast<std::size_t>(route.leg - 1)];
+    const std::int32_t ox = wrap32(static_cast<std::int64_t>(route.delta_x) * next);
+    const std::int32_t oy = wrap32(static_cast<std::int64_t>(route.delta_y) * next);
+    out = Point{from.x + (ox >> 16), from.y + (oy >> 16)};
+  }
+  return true;
+}
+
+void formation_route_commit(FormationRoute& route) noexcept {
+  route.remaining = wrap32(static_cast<std::int64_t>(route.remaining) - route.step_length);
+  ++route.step;
+  if (route.step == route.steps &&
+      route.leg + 1 == static_cast<std::int32_t>(route.points.size())) {
+    route.remaining = 0;
+  }
+}
+
+std::int32_t formation_route_left(const FormationRoute& route) noexcept {
+  return static_cast<std::int16_t>(static_cast<std::uint32_t>(route.remaining) / 65536u);
+}
+
 }  // namespace imperivm::core::sim

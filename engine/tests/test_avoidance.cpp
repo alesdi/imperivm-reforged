@@ -18,7 +18,10 @@
 //     airborne do not block at all. Each is asserted on a position, a clock
 //     or the generator's state -- never on a private field alone.
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -335,21 +338,49 @@ TEST(a_route_with_no_stride_is_walked_as_before) {
   CHECK(field.movement.avoidance().decisions == 0);
 }
 
-TEST(the_stride_is_the_walk_animations_step_or_the_marchs) {
+namespace {
+
+/// `hero`'s formation with a path that goes on, or is spent, and `unit`'s
+/// route aimed at it with its station -- its slot's sample -- at `station`.
+void aim_at_station(Field& field, ObjectId hero, ObjectId unit, Point station, bool going_on,
+                    bool lock) {
+  Formation& form = field.movement.formation_of(hero);
+  form.path = true;
+  form.going_on = going_on;
+  form.should_lock = lock;
+  form.samples = 1;
+  form.slots.push_back({unit, field.world.find(unit)->class_index, Point{}, station});
+  field.movement.aim_at_formation(field.world, unit, hero, lock);
+  // Timed as a sample is (0x005f5850): due when the unit would reach its
+  // station -- 133 short of it while the path goes on -- at its own speed,
+  // so it walks at that.
+  const std::int64_t rate = field.move(unit).own_rate();
+  Formation& timed = field.movement.formation_of(hero);
+  timed.speed = rate;
+  const std::int64_t walk = isqrt(dist_sq(field.at(unit), station)) - (going_on ? 133 : 0);
+  timed.deadline = field.world.time() + walk * kSpeedScale / rate;
+}
+
+}  // namespace
+
+TEST(the_stride_is_the_walk_animations_step_and_a_marchs_followers_step_200) {
   Field field;
   const ObjectId hero = field.unit("Soldier", Point{100, 100});
   const ObjectId member = field.unit("Soldier", Point{100, 200});
   const ObjectId other = field.unit("Soldier", Point{100, 300});
-  field.movement.order_goto(field.world, hero, Point{900, 100}, 0, 0, hero);
-  field.movement.order_goto(field.world, member, Point{900, 200}, 0, 0, hero);
+  aim_at_station(field, hero, member, Point{900, 200}, true, false);
   field.movement.order_goto(field.world, other, Point{900, 300}, 0);
-  // The walk slot's `step`; a march's follower takes the formation's 200, and
-  // the hero leading it keeps its own.
-  CHECK(field.move(hero).stride == 40);
-  CHECK(field.move(member).stride == 200);
+  // The walk slot's `step` for a unit alone. A follower aimed at a formation
+  // steps 200, an engine choice (`formation_stride_or_walk`): the original
+  // cuts its media with its walk step too (0x00419730 with 0x005d2920).
+  CHECK(field.move(member).stride == kFormationStride);
   CHECK(field.move(other).stride == 40);
   CHECK(field.move(member).party == hero);
+  CHECK(field.move(member).form_aimed);
+  // `SetFormation` sets the mode; the route is laid at the next step.
+  CHECK(field.move(member).form_seen == -1);
   CHECK(field.move(other).party == kNoObject);
+  CHECK(!field.move(other).form_aimed);
   // A different walk slot is a different stride, from the next route on.
   field.movement.state(other).walk_anim = 13;
   field.movement.order_goto(field.world, other, Point{900, 350}, 0);
@@ -357,6 +388,7 @@ TEST(the_stride_is_the_walk_animations_step_or_the_marchs) {
   // And an order that is not a march takes the unit out of one.
   field.movement.order_goto(field.world, member, Point{900, 250}, 0);
   CHECK(field.move(member).party == kNoObject);
+  CHECK(!field.move(member).form_aimed);
   CHECK(field.move(member).stride == 40);
 }
 
@@ -739,14 +771,87 @@ TEST(a_march_keeps_its_party_through_a_save) {
   Field field;
   const ObjectId hero = field.unit("Soldier", Point{100, 100});
   const ObjectId member = field.unit("Soldier", Point{100, 200});
-  field.movement.order_goto(field.world, member, Point{900, 200}, 0, 0, hero);
+  aim_at_station(field, hero, member, Point{900, 200}, true, true);
   std::vector<std::byte> bytes;
   field.movement.serialize(bytes);
   MovementSystem fresh;
   REQUIRE(fresh.deserialize(bytes).ok());
   REQUIRE(fresh.find(member) != nullptr);
   CHECK(fresh.find(member)->party == hero);
-  CHECK(fresh.find(member)->stride == 200);
+  CHECK(fresh.find(member)->form_aimed);
+  CHECK(fresh.find(member)->form_seen == -1);
+  CHECK(fresh.find(member)->form_lock_laid == field.move(member).form_lock_laid);
+  CHECK(fresh.find(member)->stride == kFormationStride);
+  REQUIRE(fresh.formation(hero) != nullptr);
+  CHECK(fresh.formation(hero)->going_on);
+  CHECK(fresh.formation(hero)->should_lock);
+}
+
+TEST(a_march_route_holds_a_lock_only_when_its_search_named_an_owner) {
+  // `RecastPathfind` (0x00419730) asks 0x004178d0 at the search and attaches
+  // the lock it makes to the route it lays. A member's route laid while the
+  // march goes on names nobody, so it holds no lock -- not even once the
+  // march is spent and its unit is an owner; the route its next search lays
+  // to the last station does.
+  Field field;
+  const ObjectId hero = field.unit("Soldier", Point{100, 100});
+  const ObjectId member = field.unit("Soldier", Point{100, 400});
+  aim_at_station(field, hero, member, Point{900, 400}, /*going_on=*/true, /*lock=*/true);
+  field.world.advance(1);
+  REQUIRE(field.move(member).has_path);
+  REQUIRE(field.move(member).path_length > 0);
+  CHECK(!field.move(member).form_lock_laid);
+  StaticLock lock;
+  CHECK(!field.movement.owned_lock(field.world, member, lock));
+  // The path spent: an owner now, and still no lock on that route.
+  field.movement.formation_of(hero).going_on = false;
+  CHECK(field.movement.lock_owner(member, field.move(member)));
+  CHECK(!field.movement.owned_lock(field.world, member, lock));
+  // Its next sample relaid with the march spent holds one, at the station.
+  field.movement.formation_of(hero).samples = 2;
+  for (int i = 0; i < 20 && field.move(member).form_seen != 2; ++i) field.world.advance(400);
+  REQUIRE(field.move(member).form_seen == 2);
+  REQUIRE(field.move(member).has_path);
+  CHECK(field.move(member).form_lock_laid);
+  REQUIRE(field.movement.owned_lock(field.world, member, lock));
+  CHECK(lock.at == (Point{900, 400}));
+}
+
+TEST(the_formations_route_comes_back_from_a_save_part_stepped) {
+  // The route record is path media, saved with the formation: a load goes on
+  // stepping it where it was.
+  Field field;
+  const ObjectId hero = field.unit("Soldier", Point{100, 100});
+  REQUIRE(field.movement.formation_set_dest(field.world, hero, Point{1500, 100}, 0, 0, true));
+  REQUIRE(field.movement.formation_next_sample(field.world, hero));
+  const Formation& form = *field.movement.formation(hero);
+  std::vector<std::byte> bytes;
+  field.movement.serialize(bytes);
+  MovementSystem fresh;
+  REQUIRE(fresh.deserialize(bytes).ok());
+  const Formation* back = fresh.formation(hero);
+  REQUIRE(back != nullptr);
+  CHECK(back->route.points == form.route.points);
+  CHECK(back->route.leg == form.route.leg);
+  CHECK(back->route.steps == form.route.steps);
+  CHECK(back->route.step == form.route.step);
+  CHECK(back->route.delta_x == form.route.delta_x);
+  CHECK(back->route.delta_y == form.route.delta_y);
+  CHECK(back->route.step_length == form.route.step_length);
+  CHECK(back->route.remaining == form.route.remaining);
+  CHECK(back->route.complete == form.route.complete);
+  CHECK(back->goal == form.goal);
+  CHECK(back->going_on == form.going_on);
+  CHECK(back->deadline == form.deadline);
+  CHECK(back->speed == form.speed);
+  CHECK(back->samples == 1);
+  FormationRoute a = form.route;
+  FormationRoute b = back->route;
+  Point pa{};
+  Point pb{};
+  REQUIRE(formation_route_step(a, pa));
+  REQUIRE(formation_route_step(b, pb));
+  CHECK(pa == pb);
 }
 
 namespace {
@@ -1695,28 +1800,25 @@ TEST(the_free_spot_flags_survive_a_save_and_are_not_hashed) {
 
 namespace {
 
-/// A march member walking through a fellow member who stands on its line --
-/// one march does not block itself -- and the hero, at (100,900), either
-/// standing (the march is over) or walking far off (it is still on). Five
-/// turns of 800 ms put the walker, from (100,500) at 100 units a second, on
-/// the stander at (500,500).
+/// A march member walking to its station at (900,500) through a fellow of
+/// its party who stands on its line -- one march does not block itself --
+/// with the formation's path either spent or going on (the walker is still
+/// 400 short of its station, so it makes no sample). Five turns of 800 ms put
+/// the walker, from (100,500) at 100 units a second, on the stander at
+/// (500,500).
 struct ThroughAFellow {
   Field field;
   ObjectId hero = kNoObject;
   ObjectId stander = kNoObject;
   ObjectId walker = kNoObject;
 
-  explicit ThroughAFellow(bool hero_marches) {
+  explicit ThroughAFellow(bool hero_marches, bool lock = true) {
     hero = field.unit("Soldier", Point{100, 900});
     stander = field.unit("Soldier", Point{500, 500});
     walker = field.unit("Soldier", Point{100, 500});
-    field.movement.state(hero).party = hero;
-    if (hero_marches) {
-      field.movement.order_goto(field.world, hero, Point{1900, 900}, 0, 0, hero);
-    }
     CHECK(field.movement.order_goto(field.world, stander, Point{500, 500}, 0, 0, hero, true) ==
           MoveOutcome::arrived);
-    field.movement.order_goto(field.world, walker, Point{900, 500}, 0, 0, hero, true);
+    aim_at_station(field, hero, walker, Point{900, 500}, hero_marches, lock);
     for (int i = 0; i < 5; ++i) field.world.advance(800);
   }
   std::int64_t gap() { return isqrt(dist_sq(field.at(walker), field.at(stander))); }
@@ -1740,21 +1842,37 @@ TEST(a_unit_told_to_stop_walks_on_off_the_body_it_is_passing_through) {
   CHECK(!f.field.move(f.walker).has_path);
   CHECK(!f.field.move(f.walker).stop_requested);
   CHECK(f.gap() >= 30);
-  // And it stopped at the first step it tested after the request -- a march
-  // walks `kFormationStride` steps, so (700,500) -- not at its route's end.
+  // And it stopped at the first step it tested after the request -- a
+  // follower's step of 200 on, so (700,500) -- not at its route's end.
   CHECK(f.field.at(f.walker) == (Point{700, 500}));
   CHECK(f.field.move(f.walker).last_outcome == MoveOutcome::idle);
 }
 
-TEST(a_march_member_told_to_stop_while_the_march_is_on_stops_where_it_is) {
+TEST(a_march_member_told_to_stop_while_the_march_is_on_walks_on_when_the_march_was_flagged) {
   // While the formation still has a path, `0x004178d0` names no owner for a
-  // member's retry, and the path follower's stop branch takes no step at all
-  // (0x00419ef8 -> 0x0041a019). The same walker stops on its fellow.
+  // member's retry, and the original's stop branch takes no step at all
+  // (0x00419ef8 -> 0x0041a019): the walker would stop on its fellow. Here a
+  // march whose flag is set walks it on to the first free spot all the same
+  // (`stop_owner`, an engine choice; docs/formats/formation.md), as above.
   ThroughAFellow f(/*hero_marches=*/true);
   REQUIRE(f.field.move(f.walker).has_path);
-  REQUIRE(f.field.move(f.hero).has_path);
+  CHECK(f.gap() < 30);
   CHECK(f.field.movement.marching(f.walker, f.field.move(f.walker)));
   CHECK(!f.field.movement.lock_owner(f.walker, f.field.move(f.walker)));
+  CHECK(f.field.movement.stop_owner(f.walker, f.field.move(f.walker)));
+  CHECK(f.field.movement.request_stop(f.field.world, f.walker));
+  for (int i = 0; i < 3; ++i) f.field.world.advance(800);
+  CHECK(!f.field.move(f.walker).has_path);
+  CHECK(f.gap() >= 30);
+  CHECK(f.field.at(f.walker) == (Point{700, 500}));
+}
+
+TEST(a_march_member_told_to_stop_while_an_unflagged_march_is_on_stops_where_it_is) {
+  // Without the formation's flag nobody is an owner, here as in the original:
+  // the walker stops on its fellow.
+  ThroughAFellow f(/*hero_marches=*/true, /*lock=*/false);
+  REQUIRE(f.field.move(f.walker).has_path);
+  CHECK(!f.field.movement.stop_owner(f.walker, f.field.move(f.walker)));
   const Point before = f.field.at(f.walker);
   CHECK(!f.field.movement.request_stop(f.field.world, f.walker));
   CHECK(!f.field.move(f.walker).has_path);
@@ -1783,27 +1901,49 @@ TEST(a_unit_told_to_stop_with_no_free_spot_ahead_stops_at_its_routes_end) {
   CHECK(field.move(walker).last_outcome == MoveOutcome::idle);
 }
 
-TEST(a_march_member_waits_at_its_station_until_the_march_is_over) {
-  // The original member's route is the formation's (`SetFormation`,
-  // 0x00417790), and it has a next point for as long as the formation's path
-  // does; `UNIT_FORM_MOVE.VS`'s `while (.HasPath())` holds the member to the
-  // march for exactly that long. Here a member at the end of its station's
-  // route waits there with its route while its hero walks, and arrives --
-  // free-spot tested, the march's flag being set -- once he stands.
+TEST(a_march_member_near_its_station_makes_the_next_sample_until_the_path_is_spent) {
+  // The original member's route is aimed at the formation (`SetFormation`,
+  // 0x00417790): within its own half step and 133 of its station while the
+  // formation's path goes on, it makes the next sample (0x00419b20 ->
+  // `CreateNextSample`, 0x005f5bd0) and walks on to its new station. Once
+  // the path is spent it walks to its last station, arrives -- on a free
+  // spot, the march's flag being set -- and faces the formation's way
+  // (0x0053f5f0 on `[form+0x38]`).
   Field field;
   const ObjectId hero = field.unit("Soldier", Point{100, 900});
   const ObjectId member = field.unit("Soldier", Point{100, 500});
-  field.movement.order_goto(field.world, hero, Point{1900, 900}, 0, 0, hero);
-  field.movement.order_goto(field.world, member, Point{300, 500}, 0, 0, hero, true);
-  for (int i = 0; i < 6; ++i) field.world.advance(800);
-  CHECK(field.at(member) == (Point{300, 500}));
-  CHECK(field.move(member).has_path);
-  CHECK(field.world.state(member)->flags.has_active_path);
-  field.movement.stop(field.world, hero);
-  field.world.advance(800);
+  REQUIRE(field.movement.formation_set_dest(field.world, hero, Point{1900, 900}, 0, 0, true));
+  field.movement.aim_at_formation(field.world, hero, hero, true);
+  REQUIRE(field.movement.formation_next_sample(field.world, hero));
+  // The member's slot 400 to the hero's left as the formation faces: north
+  // of the centre while it heads east.
+  {
+    Formation& form = *field.movement.formation(hero);
+    form.slots.push_back({member, field.world.find(member)->class_index, Point{-400, 0}, kNoSample});
+    form.slots.back().sample = formation_turn(form.centre, form.dir, form.slots.back().offset);
+    CHECK(form.centre.y == 900);
+    CHECK(form.centre.x > 100);
+    CHECK(form.slots.back().sample == (Point{form.centre.x, 500}));
+  }
+  field.movement.aim_at_formation(field.world, member, hero, true);
+
+  std::int32_t most = 0;
+  for (int i = 0; i < 60 && field.move(member).has_path; ++i) {
+    field.world.advance(800);
+    most = std::max(most, field.movement.formation(hero)->samples);
+    // The two keep together: neither runs off on its own.
+    CHECK(std::abs(field.at(member).x - field.at(hero).x) <= 400);
+  }
+  CHECK(most > 5);
+  CHECK(!field.movement.formation(hero)->going_on);
   CHECK(!field.move(member).has_path);
+  CHECK(!field.move(hero).has_path);
   CHECK(field.move(member).last_outcome == MoveOutcome::arrived);
-  CHECK(field.at(member) == (Point{300, 500}));
+  // The last sample is the route's end, the hero's station its centre.
+  CHECK(field.at(hero) == (Point{1900, 900}));
+  CHECK(field.at(member) == (Point{1900, 500}));
+  CHECK(field.move(member).facing.x > 0);
+  CHECK(field.move(member).facing.y == 0);
 }
 
 TEST(the_stop_request_and_the_marchs_flag_survive_a_save_and_are_not_hashed) {
@@ -1954,17 +2094,29 @@ TEST(a_unit_walking_on_after_a_failed_search_does_not_chase_its_target) {
 
 TEST(a_march_whose_search_lays_nothing_stops_where_it_stands) {
   // Bit 2 is set only for a retry not aimed at a formation (`[retry+0xc]`,
-  // 0x00419a17): a march member's search that lays nothing drops the route it
-  // was walking and leaves it where it stands, on its fellows.
+  // 0x00419a17). Aimed at a formation whose path is spent, each walks on to
+  // its next step, where the search for its station -- on the full band's
+  // post -- lays nothing: the step takes no step on the route it kept and
+  // marks it arrived (`[retry+0x20] |= 0x80`, 0x00419b20), and it stops
+  // there, on its fellows; the walk on to a free spot is the stop branch's,
+  // which bit 2 alone takes.
   ColumnAtAFullBand c(/*march=*/true);
   for (const ObjectId id : c.column) REQUIRE(c.field.move(id).has_path);
   for (const ObjectId id : c.column) {
-    c.field.movement.order_goto(c.field.world, id, c.centre(), kBand, 0, c.hero, true);
+    aim_at_station(c.field, c.hero, id, c.centre(), false, true);
     CHECK(!c.field.move(id).route_failed);
-    CHECK(!c.field.move(id).has_path);
+    CHECK(c.field.move(id).has_path);
   }
   for (int t = 0; t < 4; ++t) c.field.world.advance(800);
-  for (const ObjectId id : c.column) CHECK(c.field.at(id) == c.ordered_at);
+  for (const ObjectId id : c.column) {
+    CHECK(!c.field.move(id).route_failed);
+    CHECK(!c.field.move(id).has_path);
+    CHECK(c.field.move(id).last_outcome == MoveOutcome::arrived);
+    CHECK(c.field.at(id).x == c.ordered_at.x);
+    CHECK(c.field.at(id).y >= c.ordered_at.y);
+    CHECK(c.field.at(id).y <= c.ordered_at.y + 40);
+  }
+  CHECK(overlapping_pairs(c.field, c.column) > 0);
 }
 
 TEST(a_unit_whose_last_search_laid_nothing_is_not_arrived) {

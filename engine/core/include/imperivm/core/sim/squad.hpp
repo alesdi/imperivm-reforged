@@ -1121,18 +1121,16 @@ void squad_stamp_state(Squad& squad, std::int32_t state, std::int32_t set_flags,
 class World;
 class HeroSystem;
 
-/// 0x00447330, the regrouping `SquadList::Train` ends with: every unit in
-/// `units` leaves the squad it was in and gets a fresh squad of its own,
-/// carrying the old squad's flags, `SrcGAIKA`, `DestGAIKA` and
-/// `LastFightTime`, and its AI order re-posted at the priority it has --
-/// or, for a unit with no squad, the flags its class
-/// implies (`SF_PEACEFUL` for a `Peaceful` or `Animal`, `SF_SENTRIES` for a
-/// `Sentry`) and the node under its feet -- with bit 0 rewritten from the
-/// unit's own no-AI flag and the lock bit cleared. `state` and `now` are
-/// written last, on every squad made. A unit attached to a hero stays in
-/// the hero's squad untouched; a hero keeps its own squad and that squad
-/// takes the state. Empty squads are pruned. See `train_impl` for the
-/// evidence and the one labelled reading.
+/// 0x00447330's first step, per body: every unit in `units` leaves the squad
+/// it was in and gets a fresh squad of its own, carrying the old squad's
+/// flags, `SrcGAIKA`, `DestGAIKA` and `LastFightTime`, and its AI order
+/// re-posted at the priority it has -- or, for a unit with no squad, the
+/// flags its class implies (`SF_PEACEFUL` for a `Peaceful` or `Animal`,
+/// `SF_SENTRIES` for a `Sentry`) and the node under its feet -- with bit 0
+/// rewritten from the unit's own no-AI flag and the lock bit cleared, and
+/// `state` and `now` written on it. A hero and a unit attached to one are
+/// moved like any other (a hero alone, leading his fresh squad). Empty squads
+/// are pruned. `squadize_bodies` is the whole worker and its one caller.
 /// `AddToSquad(unit, dest)` -- 0x00446a70, the rule `Squadize` and the spawn
 /// hook share; `sim/squad.cpp` carries the seven arms. Answers the squad the
 /// unit is in afterwards, or `kNoSquad` for a unit that belongs nowhere.

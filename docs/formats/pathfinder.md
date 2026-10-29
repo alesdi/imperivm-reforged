@@ -345,7 +345,17 @@ and -1 when the search answered 0. A unit aboard a ship answers 1,000,000 withou
 
 The goal points are one ring of sixteen at exactly the range round the goal (0x00409cf0,
 each tested passable, 0x00409b80), or the goal alone for a range of 0, so a unit already
-inside the band is answered the walk out to the ring. The start of a unit at `(-1,-1)` is
+inside the band is answered the walk out to the ring. The ring builder stops after its first
+point only for a range of exactly 0: a negative range lays all sixteen points, each the range
+times its direction, which is the same ring at the range's size started from the opposite
+side. So `PathTo(pt, -100)` is answered the walk to the ring of radius 100, not to the point;
+which point is nearest is the same either way, and only a tie between two is broken the other
+way round. The rest of the call adds nothing: the third argument is popped and never read,
+the object form's goal is the target's `posRH` (`vtbl+0xc8`, the position for anything that
+is not a unit) with both class radii added to the range, and no owner is named, so no goal
+point is struck off as taken (0x0040a310 strikes only for an owner). The held start reads
+the holder's settlement and its central building without testing either for null; this
+engine falls back to where the unit resolves instead of faulting. The start of a unit at `(-1,-1)` is
 the exit point of its holder's settlement's central building towards the goal
 (0x005de2b1 .. 0x005de30b: `[holder+0xc]`, `[settlement+0x8c]`, 0x004db6c0 with the class's
 `water_unit`), which takes the door picker's one draw (0x0056fa40) when the building has
@@ -463,8 +473,17 @@ left bare. Each gate's connections are found once and kept by its id.
 * **What is saved.** The original writes its live structure into the saved game
   (`pathfinder`, 0x0040b130); this engine writes the build's calls and makes it again on a
   load. The two agree while the grid is the one the build copied, which in this engine it
-  always is; whether the original restarts its script on a load that restores a finished
-  structure was not read.
+  always is. Neither runs the build script again for a finished structure: the original's
+  map-load entry (0x0040acb0) does nothing at all while a saved game is being restored (the
+  flag at `0x00a8734c`) -- no grid search, no builder, no script -- and the save itself holds
+  the live object (`pathfinder`) and, after it, whether a builder still exists (a bool,
+  `delayed`, 0x004129c0) with the builder's own state (0x00412820). A load makes a builder only
+  when `delayed` was set, and `data/pathfinderinit.vs`, if it was still running, resumes as a
+  saved script rather than starting over. This engine's load does not call the match start
+  either: it replays the recorded calls (`the_build_is_made_again_from_its_calls`) and the
+  script, if it was still running, resumes from the saved scheduler. The mid-war round trip
+  (`tests/test_corpus_imsave.py`, a save at turn 5,500, long after `SPFDone`) re-saves the
+  loaded game byte for byte, which a second build script would break.
 * **When the structure changes.** The original builds it once per map load (0x0040acb0); the
   other caller (0x006a4140) is a console command this engine does not have. Nothing patches it
   as the grid changes, and this engine's grid does not change in play either.
@@ -484,3 +503,14 @@ left bare. Each gate's connections are found once and kept by its id.
   where the straight line's walk back to a free spot gave it status 0 -- unless it ends inside
   the band. The original's `FormPathLeft` reads the status, so for those two routes it adds no
   32,000 where this engine does.
+* **The straightener has a bound here.** The original's (0x0040c6b0) loops until the scan sees
+  the chain's end. Its give-up branch takes back the last point, lays the anchor's centre,
+  resets the limit to 50 and scans again from the same anchor; when no later chain cell is
+  visible from it, that pass is the same every time, so it never ends (the output stays the
+  same size: one point taken back, one laid). And the one-way branch's search for the first
+  hidden cell past the visible one has no bound on the index past the chain's end. A chain
+  the grid search lays itself always sees its next cell -- the corner cut keeps a free
+  corner -- so only a smart pathfinder's patch that fails to bridge its gap can reach either.
+  This engine stops the scan at the chain's end and gives the loop a pass budget (64 per
+  chain cell plus 1,024), after which it lays the anchor and returns, where the original
+  would hang.
