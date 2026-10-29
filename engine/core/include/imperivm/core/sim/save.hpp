@@ -416,7 +416,14 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// version 44). A version-50 file has
 /// no formation route, and its marches would stand still at their last
 /// sample.
-inline constexpr std::uint32_t kStateVectorVersion = 51;
+/// 52: the object's flag word carries `force_idle` (`[unit+0x1b8]`, which
+/// `Unit::ForceIdle` and `Ship::Idle` raise and the idle activity's first
+/// draw spends, docs/formats/idle.md) and `ai_registered` (the unit counted
+/// in its owner's class tally, docs/formats/class-tally.md), and the hero
+/// section carries the sixteen class tallies `Count` reads (system section
+/// version 45). A version-51 file has no tally, and every `Count` after a
+/// load would answer 0 until the units it counts were born again.
+inline constexpr std::uint32_t kStateVectorVersion = 52;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

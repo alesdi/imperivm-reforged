@@ -153,6 +153,29 @@ bool start(CallContext& ctx, World& world, const WorldObject& slot, std::int32_t
       state != nullptr && state->position == kHeldPosition) {
     return false;
   }
+  // Still the one this call started: the caller suspends for its length,
+  // counted from the script's millisecond, whether or not the world's clock
+  // has already seen it end.
+  return start_anim_at_script_time(ctx, world, id, anim_slot);
+}
+
+}  // namespace
+
+std::int32_t one_shot_time_left(const CallContext& ctx, const World& world,
+                                const WorldObject& slot) {
+  if (!slot.animating || slot.repeat != AnimRepeat::hold) return 0;
+  if (slot.object == nullptr || slot.object->entity == nullptr) return 0;
+  const AnimCursor& cursor = slot.object->anim;
+  if (cursor.anim_slot == kNoAnim) return 0;
+  const EntityAnim* anim = slot.object->entity->anim(cursor.anim_slot);
+  if (anim == nullptr) return 0;
+  const std::int32_t left =
+      anim->duration - cursor.elapsed_ms + static_cast<std::int32_t>(script_lag(ctx, world));
+  return left > 0 ? left : 0;
+}
+
+bool start_anim_at_script_time(const CallContext& ctx, World& world, ObjectId id,
+                               std::int32_t anim_slot) {
   if (!world.play_anim(id, anim_slot, AnimRepeat::hold)) return false;
   const GameTime lag = script_lag(ctx, world);
   WorldObject* object = world.find(id);
@@ -163,11 +186,10 @@ bool start(CallContext& ctx, World& world, const WorldObject& slot, std::int32_t
   const AnimSample sample = object->timeline.sample(cursor.elapsed_ms, object->repeat);
   cursor.step = sample.step;
   if (sample.finished) object->animating = false;
-  // Still the one this call started: the caller suspends for its length,
-  // counted from the script's millisecond, whether or not the world's clock
-  // has already seen it end.
   return true;
 }
+
+namespace {
 
 // --------------------------------------------------------------------------
 // the entry points

@@ -155,7 +155,8 @@ std::int32_t advance_elapsed(std::int32_t cycle_ms, std::int32_t elapsed, GameTi
       (flags.ondie_fired ? 0x400000u : 0u) | (flags.diseased ? 0x800000u : 0u) |
       (flags.commands_disabled ? 0x1000000u : 0u) |
       (flags.half_damage ? 0x2000000u : 0u) | (flags.training ? 0x4000000u : 0u) |
-      (flags.towers_posted ? 0x8000000u : 0u) | (flags.has_towers ? 0x10000000u : 0u));
+      (flags.towers_posted ? 0x8000000u : 0u) | (flags.has_towers ? 0x10000000u : 0u) |
+      (flags.force_idle ? 0x20000000u : 0u) | (flags.ai_registered ? 0x40000000u : 0u));
 }
 
 [[nodiscard]] ObjectFlags unpack_object_flags(std::uint32_t bits) noexcept {
@@ -189,6 +190,8 @@ std::int32_t advance_elapsed(std::int32_t cycle_ms, std::int32_t elapsed, GameTi
   flags.towers_posted = (bits & 0x8000000u) != 0;
   flags.has_towers = (bits & 0x10000000u) != 0;
   flags.training = (bits & 0x4000000u) != 0;
+  flags.force_idle = (bits & 0x20000000u) != 0;
+  flags.ai_registered = (bits & 0x40000000u) != 0;
   return flags;
 }
 
@@ -2631,7 +2634,7 @@ constexpr std::uint8_t kNoNativeClass = 0xFFu;
 /// spots that only bite together: the mask is only reachable through a saved
 /// world that actually carries the bit. See
 /// `save_the_fixture_sets_and_clears_every_writable_flag`.
-constexpr std::uint32_t kObjectFlagMask = 0x1FFFFFFFu;  // 29 bits since `towers_posted` and `has_towers`
+constexpr std::uint32_t kObjectFlagMask = 0x7FFFFFFFu;  // 31 bits since `force_idle` and `ai_registered`
 
 void put_query_spec(std::vector<std::byte>& out, const QuerySpec& spec) {
   bytes::put_u8(out, static_cast<std::uint32_t>(spec.kind));
