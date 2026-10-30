@@ -814,14 +814,15 @@ std::size_t ai_start_players(World& world, script::Scheduler& scheduler,
 ///
 /// Defines, in `sim/host_setup.hpp`'s terms:
 ///
-///   free    `AIGetPlayer/0`, `AIStart/3`, `AIStop/1`, `GetGAIKA/1`, and the
-///           nine `SPF*` names of the pathfinder bootstrap
+///   free    `AIGetPlayer/0`, `AIStart/1..3`, `AIBreakScript/1..2`, `AIStop/1`,
+///           `GetGAIKA/1`, and the nine `SPF*` names of the pathfinder
+///           bootstrap
 ///   member  `EconomyScript/0`, `GetEconomyScript/1`, `RunEconomyScript/1`,
 ///           `TacticScript/0`,  `GetTacticScript/1`,  `RunTacticScript/1`
 ///
 /// and nothing else. In particular it does **not** define `GAIKACount`,
-/// `LAIKA`, any `GAIKA::*` member, or `AIStart`'s one- and two-argument
-/// forms; see the header note for each. `AIStart/3` **is** defined -- see
+/// `LAIKA` or any `GAIKA::*` member; see the header note for each.
+/// `AIStart/3` **is** defined -- see
 /// the note above, and the claim it corrects -- and so is `AIStop/1`, which
 /// is `stop` through the calling script's scheduler.
 std::size_t register_ai_host(script::HostRegistry& registry);

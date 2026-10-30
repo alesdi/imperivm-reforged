@@ -1118,6 +1118,27 @@ HostOutcome f_ai_break_script(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
+/// `AIBreakScript(player, handle)` -- 0x00421d20, no shipped site. The
+/// one-argument body with the seat taken from the first argument, 1-based,
+/// rather than from the calling thread: `player - 1` below 16 with an AI
+/// record runs 0x0041cdc0 on that AI with the handle. The original tests only
+/// the upper bound, so a player of 0 or less reads a record before the player
+/// table; here it is nobody's, as `AIStop`'s out-of-range player is.
+HostOutcome f_ai_break_script_for(CallContext& ctx) {
+  AiSystem* ai = host_ai(ctx);
+  if (ai == nullptr) return HostOutcome::failed("AIBreakScript: no world");
+  if (ctx.scheduler == nullptr) return HostOutcome::failed("AIBreakScript needs a scheduler");
+  if (ctx.count() != 2 || !ctx.arg(0).is_integer() || !ctx.arg(1).is_integer()) {
+    return HostOutcome::failed("AIBreakScript expects a player and a script handle");
+  }
+  const PlayerId player = player_from_script(ctx.arg(0).as_integer());
+  if (player == kNoPlayer) return HostOutcome::ok_void();
+  const AiPlayer* owner = ai->player_ai(player);
+  if (owner == nullptr || !owner->active) return HostOutcome::ok_void();
+  (void)ai->break_run(player, ctx.arg(1).as_integer(), *ctx.scheduler);
+  return HostOutcome::ok_void();
+}
+
 /// `AIStart(player, profile, difficulty)` -- 20 sites, every one of them inside
 /// a map container, and the sole blocker of ten scripts.
 ///
@@ -1203,6 +1224,61 @@ HostOutcome f_ai_start(CallContext& ctx) {
   // `AiSystem::add_profile` uppercases on the way in and `start` looks up by
   // the uppercased name; the check above has made that fold the identity.
   (void)ai_start(*world, player, ctx.arg(1).as_string(), difficulty, *ctx.scheduler);
+  return HostOutcome::ok_void();
+}
+
+/// The difficulty the AI object's constructor (0x0041e100) gives a seat when
+/// the core is handed 0: the seat's `playerdata` difficulty (the settings'
+/// `+0xd0` for the seat) when it is 1, 2 or 3, and 3 otherwise.
+[[nodiscard]] AiDifficulty seat_default_difficulty(const World& world, PlayerId player) {
+  const AiDifficulty seat = ai_difficulty_overlay(world.players().setup(player).difficulty);
+  return seat == AiDifficulty::none ? AiDifficulty::hard : seat;
+}
+
+/// `AIStart(player, profile)` -- 0x00434e60, no shipped site. The
+/// three-argument form's checks without the difficulty: the player 1..16, the
+/// profile matched exactly against the listed (uppercased) names -- the
+/// wrapper's fold into a stack buffer is as dead here as there -- and the
+/// core 0x00434ca0 called with difficulty 0, which leaves the constructor's
+/// (`seat_default_difficulty`). A refusal prints and returns.
+HostOutcome f_ai_start_profile(CallContext& ctx) {
+  World* world = world_of(ctx);
+  AiSystem* ai = host_ai(ctx);
+  if (world == nullptr || ai == nullptr) return HostOutcome::failed("AIStart: no world");
+  if (ctx.scheduler == nullptr) return HostOutcome::failed("AIStart: no scheduler");
+  if (!ctx.arg(0).is_integer() || !ctx.arg(1).is_string()) return HostOutcome::ok_void();
+  const PlayerId player = player_from_script(ctx.arg(0).as_integer());
+  if (player == kNoPlayer) return HostOutcome::ok_void();
+  const std::string_view profile = ctx.arg(1).as_string();
+  if (profile.empty() || upper(profile) != profile) return HostOutcome::ok_void();
+  if (!ai->has_profile(profile)) return HostOutcome::ok_void();  // `invalid AI profile`
+  (void)ai_start(*world, player, profile, seat_default_difficulty(*world, player),
+                 *ctx.scheduler);
+  return HostOutcome::ok_void();
+}
+
+/// `AIStart(player)` -- 0x00434e20, no shipped site. The player 1..16 (else
+/// the same message as the other forms), then the core with no name and
+/// difficulty 0: the new AI object keeps what its constructor (0x0041e100)
+/// copies from the seat's `playerdata` -- its `AI` profile string and its
+/// difficulty (`seat_default_difficulty`). With no name the core makes no
+/// check against the profile list, so a seat whose string names no listed
+/// profile still gets an AI, whose script search (0x0043d030) finds no such
+/// directory and falls back to the plain names: here it is started on the
+/// root profile. The profile's own name is then the root's where the
+/// original keeps the seat's string; nothing reads it but the search.
+HostOutcome f_ai_start_seat(CallContext& ctx) {
+  World* world = world_of(ctx);
+  AiSystem* ai = host_ai(ctx);
+  if (world == nullptr || ai == nullptr) return HostOutcome::failed("AIStart: no world");
+  if (ctx.scheduler == nullptr) return HostOutcome::failed("AIStart: no scheduler");
+  if (!ctx.arg(0).is_integer()) return HostOutcome::ok_void();
+  const PlayerId player = player_from_script(ctx.arg(0).as_integer());
+  if (player == kNoPlayer) return HostOutcome::ok_void();
+  const std::string& seat = world->players().setup(player).ai_script;
+  const std::string_view profile = ai->has_profile(seat) ? std::string_view(seat) : "";
+  (void)ai_start(*world, player, profile, seat_default_difficulty(*world, player),
+                 *ctx.scheduler);
   return HostOutcome::ok_void();
 }
 
@@ -5025,17 +5101,13 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
     registry.define(kFree, "AIRun", arity, &f_ai_run);  // 72 between the spellings
   }
   registry.define(kFree, "AIBreakScript", 1, &f_ai_break_script);  // 74
+  registry.define(kFree, "AIBreakScript", 2, &f_ai_break_script_for);  // 0, 0x00421d20
   registry.define(kFree, "AIStart", 3, &f_ai_start);  // 20, all in containers
+  // The one- and two-argument forms have no shipped site; bound as the
+  // original registers them.
+  registry.define(kFree, "AIStart", 2, &f_ai_start_profile);  // 0, 0x00434e60
+  registry.define(kFree, "AIStart", 1, &f_ai_start_seat);     // 0, 0x00434e20
   registry.define(kFree, "AIStop", 1, &f_ai_stop);     //  1, in a container, and a trap message
-  // The one- and two-argument forms (0x00434e20, 0x00434e60) are **not**
-  // bound: no script in the installation writes either, and the surface
-  // has no entry for them to fill. `ShowNotes`'s precedent. Read, for the day
-  // one is: the one-argument form checks 1..16 and calls the core with no
-  // name and difficulty 0, so the new AI keeps what its constructor
-  // (0x0041e100) seeds -- the seat's own playerdata profile string and its
-  // difficulty, anything outside 1..3 made 3. The two-argument form is the
-  // three-argument one's exact, case-sensitive profile check with difficulty
-  // 0, the same "keep the seat's".
 
   // The AI-helper runner. `RunAIHelper` is registered **eight times** in
   // `gbr.exe` (0x004d4160, arities 2..9, every argument a string; bodies

@@ -3096,8 +3096,10 @@ TEST(ai_registration_overwrites_nothing) {
   // binds as `AIRun` and `Run` bind theirs, + `LSA/1`, `LSA/2` and
   // `GetGAIKA/2`, the point forms no shipped script calls, + the five free
   // `AIRun` arities and `AIBreakScript/1`, the AI's own launcher, which the
-  // eleventh round moved here from the scheduler's builtins.
-  CHECK(solo == 93);
+  // eleventh round moved here from the scheduler's builtins, + `AIStart/1`,
+  // `AIStart/2` and `AIBreakScript/2`, which no shipped script calls and the
+  // fifteenth round binds as the original registers them.
+  CHECK(solo == 96);
   CHECK(with_ai == solo);
   CHECK(everyone > 0);
 
@@ -3189,6 +3191,85 @@ TEST(ai_start_host_entry_matches_the_profile_name_case_sensitively) {
   CHECK(f.ai.active_count() == 1);
   REQUIRE(f.ai.player_ai(3) != nullptr);
   CHECK(f.ai.player_ai(3)->active);
+}
+
+/// `AIStart(player, profile)` (0x00434e60) and `AIStart(player)` (0x00434e20):
+/// the core with difficulty 0 keeps the constructor's, the seat's
+/// `playerdata` difficulty when it is 1..3 and 3 otherwise (0x0041e100); the
+/// two-argument form matches the profile exactly, and the one-argument form
+/// takes the seat's own profile string, starting on the root for a name no
+/// profile has.
+TEST(ai_start_one_and_two_arguments_keep_the_seats_difficulty) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);
+  f.ai.add_profile("DEFENSIVE", &f.profile);
+  f.world.players().setup(1).difficulty = 1;
+  f.world.players().setup(2).difficulty = 0;
+  f.world.players().setup(3).difficulty = 2;
+  f.world.players().setup(3).ai_script = "DEFENSIVE";
+  f.world.players().setup(4).ai_script = "NOSUCH";
+  const auto start = [&](std::vector<script::Value> args) {
+    return f.call(script::CallKind::free_function, "AIStart", args, script::kNoScript).status;
+  };
+  // Two arguments: the exact name, and the seat's difficulty.
+  CHECK(start({script::Value::integer(2), script::Value::string("Defensive")}) ==
+        script::HostStatus::ok);
+  CHECK(f.ai.active_count() == 0);
+  CHECK(start({script::Value::integer(2), script::Value::string("DEFENSIVE")}) ==
+        script::HostStatus::ok);
+  REQUIRE(f.ai.player_ai(1) != nullptr);
+  CHECK(f.ai.player_ai(1)->active);
+  CHECK(f.ai.player_ai(1)->profile == "DEFENSIVE");
+  CHECK(f.ai.player_ai(1)->difficulty == AiDifficulty::easy);
+  // One argument: the seat's profile string and difficulty; outside 1..3 is 3.
+  CHECK(start({script::Value::integer(3)}) == script::HostStatus::ok);
+  REQUIRE(f.ai.player_ai(2) != nullptr);
+  CHECK(f.ai.player_ai(2)->active);
+  CHECK(f.ai.player_ai(2)->profile.empty());
+  CHECK(f.ai.player_ai(2)->difficulty == AiDifficulty::hard);
+  CHECK(start({script::Value::integer(4)}) == script::HostStatus::ok);
+  CHECK(f.ai.player_ai(3)->profile == "DEFENSIVE");
+  CHECK(f.ai.player_ai(3)->difficulty == AiDifficulty::normal);
+  // A name no profile has still gets an AI, on the root's scripts.
+  CHECK(start({script::Value::integer(5)}) == script::HostStatus::ok);
+  CHECK(f.ai.player_ai(4)->active);
+  CHECK(f.ai.player_ai(4)->profile.empty());
+  // Outside 1..16 is the message and nothing else.
+  CHECK(start({script::Value::integer(0)}) == script::HostStatus::ok);
+  CHECK(start({script::Value::integer(17), script::Value::string("DEFENSIVE")}) ==
+        script::HostStatus::ok);
+  CHECK(f.ai.active_count() == 4);
+}
+
+/// `AIBreakScript(player, handle)` (0x00421d20) breaks in the named seat's AI,
+/// whoever calls it.
+TEST(ai_break_script_with_a_player_breaks_in_that_players_ai) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MON.VS") !=
+          script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(f.ai.start(2, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root1 = f.ai.player_ai(1)->root;
+  CHECK(f.call(script::CallKind::free_function, "AIRun", {script::Value::string("MON.VS")}, root1)
+            .value.as_integer() == 4);
+  const script::ScriptId at4 = f.ai.run_script(1, 4, f.scheduler);
+  REQUIRE(at4 != script::kNoScript);
+  const auto stop = [&](std::int32_t player, std::int32_t handle) {
+    return f.call(script::CallKind::free_function, "AIBreakScript",
+                  {script::Value::integer(player), script::Value::integer(handle)},
+                  script::kNoScript)
+        .status;
+  };
+  // Seat 2 (1-based 3) has no thread 4; seat 1 (1-based 2) does.
+  CHECK(stop(3, 4) == script::HostStatus::ok);
+  CHECK(f.scheduler.alive(at4));
+  CHECK(stop(0, 4) == script::HostStatus::ok);
+  CHECK(stop(17, 4) == script::HostStatus::ok);
+  CHECK(f.scheduler.alive(at4));
+  CHECK(stop(2, 4) == script::HostStatus::ok);
+  CHECK(!f.scheduler.alive(at4));
 }
 
 /// Every refusal the original makes is a **return**, not a trap: a mission that
