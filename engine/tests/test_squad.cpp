@@ -4835,30 +4835,43 @@ TEST(train_walks_a_garrisoned_trainee_out_to_a_drawn_point_first) {
   }
 }
 
-// -- squads at placement -----------------------------------------------------
+// -- squads at placement: the move hook ---------------------------------------
 //
-// 0x0041f310: while the AI manager exists, a unit the register sees goes
-// into a squad. `HeroSystem::advance` runs `register_unregistered_units` once a
-// turn over the units on the map no birth registered.
+// 0x0041f530, which a unit's `SetPos` (0x005d39e0) runs with its `posRH`
+// before and after: while the AI manager exists, a unit that is alive, not a
+// template, not noselect and owned, and whose squad handle is empty, goes
+// through the register (0x0041f310) -- counted and filed in a squad. A unit
+// that is never moved is not registered by it. docs/formats/squad.md, "The
+// move hook".
 
-TEST(units_placed_while_the_manager_exists_join_squads_with_their_class_flags) {
+TEST(a_unit_moved_while_the_manager_exists_is_registered_and_joins_a_squad_by_its_class) {
   TrainFixture f;
   AiSystem ai;
   f.world.add_system(&ai);
+  f.world.set_move_hook(&f.heroes);
+  const auto move = [&](ObjectId id, Point at) { (void)f.world.set_position(id, at); };
 
-  // Before the manager exists, nothing is enrolled -- an editor placement, a
+  // Before the manager exists the hook does nothing -- an editor placement, a
   // conformance run with no AI, and the original alike.
   const ObjectId early = f.spawn(f.warrior);
+  move(early, Point{110, 100});
   f.world.advance(1000);
   CHECK(f.heroes.squads().squad_of(early) == kNoSquad);
+  CHECK(!f.world.find(early)->state.flags.ai_registered);
 
   ai.start_manager();
+  // Spawned with no move since the manager: nothing yet. No turn's sweep
+  // registers what stands still.
   const ObjectId soldier = f.spawn(f.warrior);
+  f.world.advance(1000);
+  CHECK(f.heroes.squads().squad_of(soldier) == kNoSquad);
+  CHECK(f.heroes.squads().squad_of(early) == kNoSquad);
+
   const ObjectId hen = f.spawn(f.graph.find("Animal"));
   const ObjectId quiet = f.spawn(f.warrior);
   f.world.find(quiet)->state.flags.no_ai = true;
   // A dead one, an unspawned one and an ownerless one stay out (the hook's
-  // three tests after the manager's).
+  // tests after the manager's).
   const ObjectId corpse = f.spawn(f.warrior, 1, 0);
   const ObjectId ghost = f.spawn(f.warrior);
   f.world.find(ghost)->state.flags.unspawned = true;
@@ -4868,14 +4881,12 @@ TEST(units_placed_while_the_manager_exists_join_squads_with_their_class_flags) {
   const ObjectId filed = f.spawn(f.warrior);
   const SquadKey own = f.squad({filed});
 
-  f.world.advance(1000);
-  // `early` was placed before the manager and **is** picked up once it exists:
-  // the sweep registers every unit on the map that nothing registered, which
-  // (with the manager's drain of its pending list) is how the units a map
-  // placed before the match -- every deer in the reference dumps -- end up
-  // filed. Two soldiers at one point with the same
-  // flags share a squad (`add_to_squad`'s merge arm), whose Leader is its
-  // front member.
+  // Each is moved: the move registers it at once, slot crossing or not.
+  for (const ObjectId id : {early, soldier, hen, quiet, corpse, ghost, stray, filed}) {
+    move(id, Point{100, 100});
+  }
+  // Two soldiers at one point with the same flags share a squad
+  // (`add_to_squad`'s merge arm), whose Leader is its front member.
   REQUIRE(f.squad_holding(early) != nullptr);
   REQUIRE(f.squad_holding(soldier) != nullptr);
   CHECK(f.heroes.squads().squad_of(soldier) == f.heroes.squads().squad_of(early));
@@ -4888,6 +4899,7 @@ TEST(units_placed_while_the_manager_exists_join_squads_with_their_class_flags) {
   CHECK(f.heroes.squads().squad_of(ghost) == kNoSquad);
   CHECK(f.heroes.squads().squad_of(stray) == kNoSquad);
   CHECK(f.heroes.squads().squad_of(filed) == own);
+  CHECK(f.world.find(filed)->state.flags.ai_registered);
   HostCall call(f.world, {pack_squad(f.heroes.squads().squad_of(soldier))});
   const HostOutcome leader = invoke(f.registry, CallKind::member, "Leader", 0, call);
   CHECK(leader.status == HostStatus::ok);
@@ -4903,22 +4915,143 @@ TEST(units_placed_while_the_manager_exists_join_squads_with_their_class_flags) {
   const ObjectId tower = f.world.spawn(NativeClass::building, nullptr, f.hall);
   f.world.set_owner(tower, 1);
   f.world.set_health(tower, 100);
-  f.world.advance(1000);
+  move(tower, Point{300, 300});
   CHECK(f.heroes.squads().squad_of(tower) == kNoSquad);
 
-  // A later placement is enrolled on the next turn, and then left alone:
-  // once it has been seen, leaving its squad does not put it back in one.
-  // 0x0041e820 fires when a unit *enters the world*, and nothing else.
+  // Another owner's unit is filed in a squad of its own, and a turn changes
+  // nothing for a unit that does not move.
   const ObjectId late = f.spawn(f.warrior, 1, 200, 2);
-  f.world.advance(1000);
+  move(late, Point{100, 100});
   REQUIRE(f.squad_holding(late) != nullptr);
   const SquadKey first = f.heroes.squads().squad_of(late);
-  CHECK(first != f.heroes.squads().squad_of(soldier));  // another owner's
+  CHECK(first != f.heroes.squads().squad_of(soldier));
   f.world.advance(1000);
   CHECK(f.heroes.squads().squad_of(late) == first);
-  REQUIRE(f.heroes.squads().leave(first, late));
-  f.world.advance(1000);
-  CHECK(f.heroes.squads().squad_of(late) == kNoSquad);
+}
+
+TEST(a_squad_member_that_walks_out_of_its_leaders_reach_leaves_for_a_squad_of_its_own) {
+  // The hook's other arm: a registered unit whose move crosses a 128-unit
+  // slot is re-homed by `AddToSquad` (0x00446a70) towards its squad's
+  // `DestGAIKA`. A follower within 256 of its squad's front member stays; one
+  // farther, with no other squad of the player's to take it, starts its own,
+  // with the old squad's flags, state and destination.
+  TrainFixture f;
+  AiSystem ai;
+  f.world.add_system(&ai);
+  f.world.set_move_hook(&f.heroes);
+  ai.start_manager();
+  const ObjectId leader = f.spawn(f.warrior);
+  const ObjectId follower = f.spawn(f.warrior);
+  const SquadKey squad = f.squad({leader, follower});
+  f.world.find(leader)->state.flags.ai_registered = true;
+  f.world.find(follower)->state.flags.ai_registered = true;
+  f.heroes.squads().find(squad)->state = 7;
+
+  // Within the slot it stood in: nothing, however far from the leader.
+  (void)f.world.set_position(follower, Point{120, 120});
+  CHECK(f.heroes.squads().squad_of(follower) == squad);
+  // Across a slot, still within 256: stays.
+  (void)f.world.set_position(follower, Point{300, 100});
+  CHECK(f.heroes.squads().squad_of(follower) == squad);
+  // Across a slot and 300 out: a squad of its own.
+  (void)f.world.set_position(follower, Point{400, 100});
+  const SquadKey own = f.heroes.squads().squad_of(follower);
+  CHECK(own != squad);
+  REQUIRE(f.heroes.squads().find(own) != nullptr);
+  CHECK(f.heroes.squads().find(own)->state == 7);
+  CHECK(f.heroes.squads().find(own)->members.size() == 1);
+  CHECK(f.heroes.squads().find(squad)->members.size() == 1);
+  // And walking back within reach of a squad that will take it, it joins.
+  (void)f.world.set_position(follower, Point{150, 100});
+  CHECK(f.heroes.squads().squad_of(follower) == squad);
+}
+
+TEST(a_unit_detached_from_its_hero_is_rehomed_out_of_his_squad) {
+  // The hero's `RemoveUnit` (0x0052db70) ends with 0x0041e820: while the AI
+  // manager exists the unit, no longer attached, goes through `AddToSquad`
+  // towards its squad's destination. The hero is that squad's front member,
+  // so it is not kept as a follower: with no other squad of the player's
+  // near, it starts one of its own with the hero's squad's state.
+  TrainFixture f;
+  AiSystem ai;
+  f.world.add_system(&ai);
+  ai.start_manager();
+  const ObjectId hero = f.world.spawn(NativeClass::hero, nullptr, f.warrior);
+  f.world.set_position(hero, Point{100, 100});
+  f.world.set_owner(hero, 1);
+  f.world.set_health(hero, 200);
+  f.heroes.register_hero(f.world, hero);
+  const ObjectId man = f.spawn(f.warrior);
+  REQUIRE(f.heroes.attach(f.world, man, hero));
+  const SquadKey army = f.heroes.hero(hero)->squad;
+  REQUIRE(f.heroes.squads().squad_of(man) == army);
+  f.heroes.squads().find(army)->state = 5;
+
+  REQUIRE(f.heroes.detach(f.world, man));
+  const SquadKey own = f.heroes.squads().squad_of(man);
+  CHECK(own != kNoSquad);
+  CHECK(own != army);
+  REQUIRE(f.heroes.squads().find(own) != nullptr);
+  CHECK(f.heroes.squads().find(own)->state == 5);
+  CHECK(f.heroes.unit(man)->squad == own);
+  CHECK(f.heroes.squads().squad_of(hero) == army);
+
+  // A dead unit is not re-homed: it leaves its hero and is in no squad.
+  const ObjectId fallen = f.spawn(f.warrior);
+  REQUIRE(f.heroes.attach(f.world, fallen, hero));
+  f.world.set_health(fallen, 0);
+  REQUIRE(f.heroes.detach(f.world, fallen));
+  CHECK(f.heroes.squads().squad_of(fallen) == kNoSquad);
+}
+
+TEST(a_ships_move_carries_its_passengers_squads_locked_into_the_node_under_it) {
+  // A ship's move takes every passenger through the hook on the ship's two
+  // points, its squad locked for the call: a follower stays where it is, and
+  // a squad led from aboard is bound for the node under the ship.
+  TrainFixture f;
+  AiSystem ai;
+  f.world.add_system(&ai);
+  f.world.set_move_hook(&f.heroes);
+  const auto town = [&](Point at) {
+    const ObjectId hall = f.world.spawn(NativeClass::building, nullptr, f.hall);
+    f.world.set_position(hall, at);
+    f.world.set_owner(hall, 1);
+    SettlementInit init;
+    init.settlement_object = hall;
+    init.anchor = hall;
+    init.owner = 1;
+    init.kind = SettlementKind::stronghold;
+    (void)f.economy.settlements().create(init);
+  };
+  town(Point{100, 100});
+  town(Point{20'000, 20'000});
+  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  const GaikaId far = f.world.gaika().at(f.world.lsa(), Point{20'000, 20'000});
+  REQUIRE(far != kNoGaika);
+  REQUIRE(far != f.world.gaika().at(f.world.lsa(), Point{100, 100}));
+
+  const World::ShipIds ship = f.world.spawn_ship(nullptr, f.warrior);
+  REQUIRE(ship.ship != kNoObject);
+  f.world.set_owner(ship.ship, 1);
+  f.world.set_health(ship.ship, 100);
+  (void)f.world.set_position(ship.ship, Point{100, 100});
+  REQUIRE(f.world.find(ship.ship)->object->is_a(NativeClass::ship));
+  const ObjectId a = f.spawn(f.warrior);
+  const ObjectId b = f.spawn(f.warrior);
+  const SquadKey crew = f.squad({a, b});
+  f.world.find(a)->state.flags.ai_registered = true;
+  f.world.find(b)->state.flags.ai_registered = true;
+  REQUIRE(f.world.put_in_holder(a, ship.holder));
+  REQUIRE(f.world.put_in_holder(b, ship.holder));
+  ai.start_manager();
+  f.world.find(ship.ship)->state.flags.ai_registered = true;
+  (void)f.squad({ship.ship});
+
+  (void)f.world.set_position(ship.ship, Point{20'000, 20'000});
+  CHECK(f.heroes.squads().squad_of(a) == crew);
+  CHECK(f.heroes.squads().squad_of(b) == crew);
+  CHECK(f.heroes.squads().find(crew)->dest_gaika == far);
+  CHECK((f.heroes.squads().find(crew)->flags & kSquadLocked) == 0);
 }
 
 // `Unit::SetNoselectFlag(true)` (0x005d8750) is the AI unregister (0x0041eee0),
@@ -5000,12 +5133,15 @@ TEST(a_unit_enrolled_at_placement_is_filed_under_the_node_it_stands_in) {
   const GaikaId here = f.world.gaika().at(f.world.lsa(), Point{100, 100});
   REQUIRE(here != kNoGaika);
 
+  f.world.set_move_hook(&f.heroes);
   ai.start_manager();
   const ObjectId soldier = f.spawn(f.warrior);  // at {100, 100}
   // One already filed under no node at all is not re-homed to the node it
-  // stands in: it did not enter the world this turn.
+  // stands in: it has not moved.
   const ObjectId filed = f.spawn(f.warrior);
   const SquadKey own = f.squad({filed});
+  // Placed: its `SetPos` registers it, filed towards the node under it.
+  (void)f.world.set_position(soldier, Point{100, 100});
   f.world.advance(1000);
   const Squad* squad = f.squad_holding(soldier);
   REQUIRE(squad != nullptr);
@@ -5110,19 +5246,22 @@ TEST(count_reads_the_class_tally_the_register_keeps_for_a_class_and_its_ancestor
   CHECK(count_of(f.world, 2, "horse") == 0);
   CHECK(count_of(f.world, 2, "NoSuchClass") == 0);
 
-  // The turn's sweep -- the move hook's register (0x0041f530) -- registers
-  // what is on the map and was never registered, the early horse among them.
-  // A unit that waits in a holder unregistered is not moved by `SetPos` until
-  // it comes out, and is registered then.
-  const ObjectId inside = horse(1);
-  REQUIRE(f.world.put_in_holder(inside, plain));
+  // No turn registers what stands still. The move hook (0x0041f530) does, at
+  // the unit's next move: the early horse when it is moved, and a unit
+  // unregistered when its forced holder entry (0x005d3e10) runs the hook.
+  f.world.set_move_hook(&f.heroes);
   f.world.advance(100);
+  CHECK(count_of(f.world, 2, "Horse") == 2);
+  (void)f.world.set_position(early, Point{110, 100});
   CHECK(count_of(f.world, 2, "Horse") == 3);
+  CHECK(f.world.find(early)->state.flags.ai_registered);
+  const ObjectId inside = horse(1);  // its owner is set after its position
   CHECK(!f.world.find(inside)->state.flags.ai_registered);
-  REQUIRE(f.world.remove_from_holder(inside, Point{120, 100}));
-  f.world.advance(100);
+  REQUIRE(f.world.put_in_holder(inside, plain));
   CHECK(count_of(f.world, 2, "Horse") == 4);
   CHECK(f.world.find(inside)->state.flags.ai_registered);
+  REQUIRE(f.world.remove_from_holder(inside, Point{120, 100}));
+  CHECK(count_of(f.world, 2, "Horse") == 4);
 
   // A template, a noselect walker and a unit with no owner are not counted.
   const ObjectId flagged = horse(1);

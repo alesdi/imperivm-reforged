@@ -4667,6 +4667,10 @@ constexpr EconomyHostDef kEconomyHosts[] = {
 
        const ObjectId ship = world->spawn_of_class(class_index);
        if (ship == kNoObject) return HostOutcome::ok_with(invalid_handle());
+       // The AI manager is held at zero while the owner, the position and the
+       // holder are set (0x005ef240), so the move hooks those run register
+       // nothing: the ship is registered by `ShowBuildAnimation`.
+       HeroSystem::RegisterHold hold(hero_system_of(*world));
        world->set_owner(ship, s->owner);
 
        Point berth = s->anchor != kNoObject ? world->resolve_position(s->anchor)
@@ -4693,7 +4697,9 @@ constexpr EconomyHostDef kEconomyHosts[] = {
          }
        }
        world->set_position(ship, berth);
-       if (garrison_enter(*world, s->id, ship, /*force=*/false)) enter_settlement(ctx, *s, ship);
+       const bool entered = garrison_enter(*world, s->id, ship, /*force=*/false);
+       hold.release();
+       if (entered) enter_settlement(ctx, *s, ship);
        return HostOutcome::ok_with(Value::object(kTypeObj, ship));
      }},
     // `IsTeutonTent` (0x00420650): the central building's class descriptor

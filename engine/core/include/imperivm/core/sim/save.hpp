@@ -429,7 +429,15 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// squad watermark was (system section version 46): every other birth
 /// registers and files its unit with the AI at once. A version-52 file has a
 /// watermark there.
-inline constexpr std::uint32_t kStateVectorVersion = 53;
+/// 54: the hero section loses `Place`'s deferred-filing list (system section
+/// version 47): the move hook (0x0041f530) registers and files a unit at the
+/// move, `Place`'s included, so nothing waits for a sweep. A version-53 file
+/// has the list between the item store and the tallies.
+/// 55: the movement section carries each formation's blocking gate
+/// (`[form+0x90]`, after `going_on`) and each route's gate it has compared
+/// sides at (`[retry+0x18]`, after `form_lock_laid`), system section version
+/// 48 (docs/formats/formation.md, "The blocking gate").
+inline constexpr std::uint32_t kStateVectorVersion = 55;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

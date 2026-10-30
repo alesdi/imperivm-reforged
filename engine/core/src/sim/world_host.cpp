@@ -795,6 +795,11 @@ HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_vi
   for (const ObjectId templ : templates) {
     const WorldObject* source = world.find(templ);
     if (source == nullptr || !source->state.flags.is_unit) continue;  // the CVXUnit cast
+    // The spawn holds the AI world pointer [0x008c8e50] at zero while it
+    // clones, places, enters and files the copy, so nothing those steps run
+    // -- the move hook of its holder entry among them -- registers it.
+    HeroSystem* heroes = hero_system_of(world);
+    HeroSystem::RegisterHold hold(heroes);
     const bool garrison = to.settlement != kNoSettlement;
     const ObjectId copy = world.spawn_from_template(templ, garrison ? kNoObject : to.holder);
     if (copy == kNoObject) continue;
@@ -806,13 +811,10 @@ HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_vi
     // orders and food. See `feed_from_now`.
     feed_from_now(world, copy);
     items->push_back(copy);
-    // The copy's AI register, last (0x005729f0, 0x00572720): the spawn holds
-    // the AI world pointer [0x008c8e50] at zero while it clones, places,
-    // enters and files, so nothing those steps run registers it, and puts it
-    // back for this one call. Tally and squad, at once.
-    if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
-      heroes->ai_register(world, copy);
-    }
+    // The copy's AI register, last (0x005729f0, 0x00572720): the pointer is
+    // put back for this one call. Tally and squad, at once.
+    hold.release();
+    if (heroes != nullptr) heroes->ai_register(world, copy);
   }
   return HostOutcome::ok_with(make_objlist_value(list));
 }
@@ -1076,19 +1078,16 @@ HostOutcome place_object(World& world, ClassIndex class_index, NativeClass nativ
   // skip anything carrying the spawn-template bit, corroborating bit 27 from
   // a call site that has nothing to do with groups.
   //
-  // **The tally at once, the squad at the next turn**
-  // (`HeroSystem::ai_register_placed`): the owner's class tally counts the
-  // unit before `Place` returns, so `BARRACK_TRAIN.VS`'s
-  // `Count(.player, carCmdParam)` on the next lines counts the recruit it has
-  // just placed. The original also files the unit in a squad here; this
-  // engine files it at the next turn's sweep, and not at all if it has gone
-  // into a holder by then -- a labelled difference, measured in
-  // docs/formats/class-tally.md ("What differs"): filed at once, recruits
-  // walking into their hall are caught by the orders of the squad they
-  // joined, and Crossroads production falls by a third.
-  if (const WorldObject* placed = world.find(id); placed != nullptr && placed->state.flags.is_unit) {
+  // `world.set_position` above is that `SetPos`: the move hook
+  // (`HeroSystem::moved`) has counted the unit in its owner's class tally
+  // and filed it in a squad towards the node under it, so
+  // `BARRACK_TRAIN.VS`'s `Count(.player, carCmdParam)` on the next lines
+  // counts the recruit it has just placed. The second register finds it
+  // registered.
+  if (const WorldObject* placed = world.find(id);
+      placed != nullptr && placed->state.flags.is_unit && placed->state.position.x >= 0) {
     if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
-      heroes->ai_register_placed(world, id);
+      heroes->ai_register(world, id);
     }
   }
   return HostOutcome::ok_with(object_value(id));

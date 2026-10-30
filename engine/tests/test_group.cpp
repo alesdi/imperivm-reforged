@@ -2410,17 +2410,20 @@ struct PlaceFixture {
 /// by name -- and *nothing advanced a turn* in between, so no amount of
 /// reconciling would have helped. The original has no chain to be late for: a
 /// `CVXUnit` is a feeding unit from construction.
-/// **`Place` counts its unit at once and files it in a squad at the next
-/// turn** (class-tally.md, "What differs"): the tally before `Place` returns,
-/// as the register (0x0041f310) has it; the squad filing, which the original
-/// also does there, at the next turn's sweep -- and not at all for a unit that
-/// has gone into a holder by then.
-TEST(place_counts_its_unit_at_once_and_files_it_in_a_squad_at_the_next_turn) {
+/// **`Place` counts its unit and files it in a squad at once**
+/// (class-tally.md): its `SetPos` runs the move hook (0x0041f530), which
+/// finds the squad handle empty and runs the register (0x0041f310) -- the
+/// tally, then `AddToSquad` towards the node under the unit -- before `Place`
+/// returns; `Place`'s own second register finds it registered. Two recruits
+/// placed side by side share a squad (the merge arm).
+TEST(place_counts_its_unit_and_files_it_in_a_squad_at_once) {
   PlaceFixture f;
   AiSystem ai;
   HeroSystem heroes;
   REQUIRE(f.world.add_system(&ai));
   REQUIRE(f.world.add_system(&heroes));
+  heroes.start(f.world);
+  REQUIRE(f.world.move_hook() == &heroes);
   ai.start_manager();
   const auto place = [&](std::int32_t x) {
     const script::HostOutcome out =
@@ -2436,12 +2439,14 @@ TEST(place_counts_its_unit_at_once_and_files_it_in_a_squad_at_the_next_turn) {
   const imperivm::core::ClassIndex hastatus = f.world.find(recruit)->class_index;
   CHECK(heroes.class_tally(2, hastatus) == 2);
   CHECK(f.world.find(recruit)->state.flags.ai_registered);
-  CHECK(heroes.squads().squad_of(recruit) == kNoSquad);
-  REQUIRE(f.world.put_in_holder(inside, recruit));
+  CHECK(f.world.find(inside)->state.flags.ai_registered);
+  const SquadKey filed = heroes.squads().squad_of(recruit);
+  CHECK(filed != kNoSquad);
+  CHECK(heroes.squads().squad_of(inside) == filed);
 
+  // A turn changes neither: nothing is left for a sweep.
   f.world.advance(100);
-  CHECK(heroes.squads().squad_of(recruit) != kNoSquad);
-  CHECK(heroes.squads().squad_of(inside) == kNoSquad);
+  CHECK(heroes.squads().squad_of(recruit) == filed);
   CHECK(heroes.class_tally(2, hastatus) == 2);
 }
 

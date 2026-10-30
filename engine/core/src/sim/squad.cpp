@@ -3414,37 +3414,86 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   return add_to_squad(world, heroes, id, dest, 0);
 }
 
-/// See the declaration. The stand-in for the move hook's register
-/// (0x0041f530): every unit `SetPos` moves while the manager exists, is not
-/// dead, not a spawn template, not flagged by `SetNoselectFlag` and owned,
-/// and whose squad handle is empty, goes through the register (0x0041f310).
-/// A held unit is not moved by `SetPos` until it leaves its holder, which is
-/// itself a `SetPos`, so it waits here until then.
-void register_unregistered_units(World& world, HeroSystem& heroes) {
+bool squad_rehome_hook(World& world, HeroSystem& heroes, ObjectId id) {
+  // 0x0041e820's gates are the move hook's: the manager, a unit that is
+  // alive, not a template, not noselect, and owned.
+  const AiSystem* ai = ai_system_of(world);
+  if (ai == nullptr || !ai->manager_started()) return false;
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr || slot->object == nullptr || !slot->state.flags.is_unit) return false;
+  if (slot->state.health <= 0) return false;
+  if (slot->state.flags.unspawned || slot->state.flags.noselect) return false;
+  if (slot->state.owner == kNoPlayer) return false;
+  // Towards its squad's destination, or the node under it with none.
+  const Squad* squad = squad_containing(heroes, id);
+  const GaikaId dest = squad != nullptr ? squad->dest_gaika
+                                        : world.gaika().at(world.lsa(), unit_pos_rh(world, id));
+  (void)add_to_squad(world, heroes, id, dest);
+  return true;
+}
+
+/// See the declaration, and docs/formats/squad.md, "The move hook", which
+/// this is written from.
+void squad_move_hook(World& world, HeroSystem& heroes, ObjectId id, Point from, Point to) {
+  // The gates: the manager, a unit that is alive, not a spawn template, not
+  // noselect, and owned.
   const AiSystem* ai = ai_system_of(world);
   if (ai == nullptr || !ai->manager_started()) return;
-  // Copied: the register files units in squads, and the object table is
-  // walked by id rather than by reference for the same reason every walker
-  // here copies.
-  std::vector<ObjectId> waiting;
-  for (const WorldObject& slot : world.objects()) {
-    if (slot.object == nullptr || !slot.state.flags.is_unit) continue;
-    if (slot.state.flags.ai_registered) continue;
-    if (slot.state.health <= 0) continue;
-    if (slot.state.flags.unspawned || slot.state.flags.noselect) continue;
-    if (slot.state.owner == kNoPlayer || slot.state.is_held()) continue;
-    waiting.push_back(slot.id);
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr || slot->object == nullptr || !slot->state.flags.is_unit) return;
+  if (slot->state.health <= 0) return;
+  if (slot->state.flags.unspawned || slot->state.flags.noselect) return;
+  if (slot->state.owner == kNoPlayer) return;
+  SquadTable& table = heroes.squads();
+  // An empty squad handle: the register, whatever the move.
+  if (!slot->state.flags.ai_registered) {
+    heroes.ai_register(world, id);
+    return;
   }
-  for (const ObjectId id : waiting) heroes.ai_register(world, id);
-  // `Place`'s units, filed now if they are still on the map and in no squad
-  // (class-tally.md, "What differs"). Each is looked at once.
-  for (const ObjectId id : heroes.take_deferred_filing()) {
-    const WorldObject* slot = world.find(id);
-    if (slot == nullptr || slot->object == nullptr || slot->state.health <= 0) continue;
-    if (slot->state.owner == kNoPlayer || slot->state.is_held()) continue;
-    if (!slot->state.flags.ai_registered || slot->state.flags.noselect) continue;
-    if (heroes.squads().squad_of(id) != kNoSquad) continue;
-    (void)add_to_squad(world, heroes, id, world.gaika().at(world.lsa(), unit_pos_rh(world, id)));
+  // **Engine gap, labelled.** A unit counted in the tally and filed in no
+  // squad -- one detached from its hero, which the original re-homes at the
+  // detach (0x0052dc03) and this engine does not -- has an empty handle in
+  // the original's terms. It is filed towards the node under it, as the
+  // register's add would, without counting it again.
+  if (squad_containing(heroes, id) == nullptr) {
+    (void)add_to_squad(world, heroes, id, world.gaika().at(world.lsa(), to));
+    return;
+  }
+  // Nothing more unless the move crosses a 128-unit slot.
+  if ((from.x >> 7) == (to.x >> 7) && (from.y >> 7) == (to.y >> 7)) return;
+
+  const GaikaId old_node = world.gaika().at(world.lsa(), from);
+  const GaikaId new_node = world.gaika().at(world.lsa(), to);
+  const Squad* squad = squad_containing(heroes, id);
+  // Towards the squad's own destination for a member on the map; towards
+  // the node it now stands in otherwise.
+  GaikaId dest = new_node;
+  if (squad != nullptr && !slot->state.is_held()) dest = squad->dest_gaika;
+  const bool front = squad != nullptr && !squad->members.empty() && squad->members.front() == id;
+  const SquadKey before = squad != nullptr ? squad->key : kNoSquad;
+  (void)add_to_squad(world, heroes, id, dest);
+  // The front member still in the same squad carries it into its new node.
+  if (old_node != new_node && front && table.squad_of(id) == before) {
+    table.move_in(before, new_node);
+  }
+  // A ship carries its passengers: each goes through the hook on the ship's
+  // move, front of the roster first, with its squad locked for the call.
+  if (slot->object->is_a(NativeClass::ship)) {
+    const WorldObject* hold = world.find(id + 1);
+    if (hold == nullptr || hold->internal != InternalKind::holder) return;
+    std::vector<ObjectId> aboard;
+    (void)world.contents_of(hold->id, aboard);
+    for (const ObjectId passenger : aboard) {
+      const Squad* theirs = squad_containing(heroes, passenger);
+      Squad* locked = theirs != nullptr ? table.find(theirs->key) : nullptr;
+      const std::uint16_t flags = locked != nullptr ? locked->flags : 0;
+      const SquadKey key = locked != nullptr ? locked->key : kNoSquad;
+      if (locked != nullptr) locked->flags = static_cast<std::uint16_t>(flags | kSquadLocked);
+      squad_move_hook(world, heroes, passenger, from, to);
+      if (key != kNoSquad) {
+        if (Squad* again = table.find(key); again != nullptr) again->flags = flags;
+      }
+    }
   }
 }
 

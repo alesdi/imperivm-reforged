@@ -494,7 +494,7 @@ inline constexpr GameTime kHeroTickInterval = 1013;
 /// Everything else here is called *by* other systems and by host functions, not
 /// by the turn loop: attachment happens when a command completes, experience
 /// when combat resolves a kill, item use when a script says so.
-class HeroSystem final : public System {
+class HeroSystem final : public System, public UnitMoveHook {
  public:
   HeroSystem() : items_(nullptr) {}
 
@@ -665,20 +665,44 @@ class HeroSystem final : public System {
   /// registered (`ObjectFlags::ai_registered`, the squad handle being set),
   /// and filed in a squad towards the node under it (`add_to_squad`) unless
   /// it is in one already. Every birth the original hands to the AI calls
-  /// this at the moment of the birth; see docs/formats/class-tally.md.
+  /// this at the moment of the birth, and the move hook calls it for a unit
+  /// that moves unregistered; see docs/formats/class-tally.md. Nothing while
+  /// `hold_register` holds it off.
   void ai_register(World& world, ObjectId id);
 
-  /// `Place`'s register (`docs/formats/class-tally.md`, "What differs"): the
-  /// gates and the tally at once, as `ai_register`, but the squad filing
-  /// left to the turn's sweep (`register_unregistered_units`), which files
-  /// the unit then if it is alive, owned, in no squad and not in a holder.
-  void ai_register_placed(World& world, ObjectId id);
+  /// The AI world pointer (`[0x008c8e50]`) held at zero for a scope, as the
+  /// spawns hold it while they clone, place and file a copy, and as
+  /// `CreateShip` holds the manager while it places its ship: the register
+  /// does nothing meanwhile, the move hook's included. Transient within one
+  /// call, so neither saved nor hashed.
+  class RegisterHold {
+   public:
+    explicit RegisterHold(HeroSystem* heroes) noexcept : heroes_(heroes) {
+      if (heroes_ != nullptr) ++heroes_->register_held_;
+    }
+    ~RegisterHold() {
+      if (heroes_ != nullptr) --heroes_->register_held_;
+    }
+    RegisterHold(const RegisterHold&) = delete;
+    RegisterHold& operator=(const RegisterHold&) = delete;
+    /// Put the pointer back early, for the one register the spawn makes.
+    void release() noexcept {
+      if (heroes_ != nullptr) --heroes_->register_held_;
+      heroes_ = nullptr;
+    }
 
-  /// The units `ai_register_placed` left to the sweep, in the order they
-  /// were placed; the sweep takes them all, once.
-  [[nodiscard]] std::vector<ObjectId> take_deferred_filing() noexcept {
-    return std::exchange(deferred_filing_, {});
-  }
+   private:
+    HeroSystem* heroes_;
+  };
+
+  // -- the move hook ---------------------------------------------------
+
+  /// A unit's `posRH` (0x005d3db0), what the move hook measures.
+  [[nodiscard]] Point where(World& world, ObjectId id) override;
+  /// The move hook (0x0041f530) on `id`'s move from `from` to `to`:
+  /// `squad_move_hook` in sim/squad.cpp, docs/formats/squad.md "The move
+  /// hook".
+  void moved(World& world, ObjectId id, Point from, Point to) override;
 
   /// `Unit::SetPlayer`'s AI half (0x005dc3f0) after the owner of a unit has
   /// been written over `previous`: the unregister on `previous`, then the
@@ -992,13 +1016,9 @@ class HeroSystem final : public System {
   /// per-player map from class name to count. An entry once made is never
   /// erased, as in the original. Saved and hashed.
   std::map<std::pair<PlayerId, ClassIndex>, std::int32_t> class_tally_;
-  /// `ai_register_placed`'s units, waiting for the next sweep to file them
-  /// in a squad. Saved (section version 46) and hashed.
-  std::vector<ObjectId> deferred_filing_;
+  /// How many `RegisterHold`s are open. Zero between calls.
+  int register_held_ = 0;
 
-  /// The register: the gates, the tally, and the squad filing at once when
-  /// `file_now`, else left on `deferred_filing_`.
-  void register_unit(World& world, ObjectId id, bool file_now);
   void tally_add(const World& world, PlayerId owner, ClassIndex cls);
   void tally_take(const World& world, PlayerId owner, ClassIndex cls);
 };

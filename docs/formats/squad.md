@@ -209,25 +209,115 @@ be left in another hero's. The AI's orders to that other squad reached it --
 on Crossroads a `ClrCmd` from `AIOSENDSQUAD.VS` on a squad parked at its node
 ended, every few seconds, the `form_move` of men marching out of a hall with
 a different hero, and they stood piled at the door. The engine still files
-the unit in the hero's squad whether or not the AI manager exists, and does
-not run the hook on a detach (0x0052dc03), where the original re-homes the
-unit by the merge rule; a detached unit is in no squad here.
+the unit in the hero's squad whether or not the AI manager exists.
+
+**A detach re-homes the unit.** The hero's `RemoveUnit` (0x0052db70) takes
+the unit out of his army deque and his formation (0x005f3290) and ends with
+the same hook, 0x0041e820. Its gates are the move hook's below (the
+manager, alive, not a template, not noselect, owned); past them the unit is
+handed to `AddToSquad` towards its squad's `DestGAIKA`, or towards the node
+under it (0x0044e650) when it is in none. No longer attached, the unit is in
+the hero's squad, whose front member is the hero, so the fourth arm does not
+keep it: it merges into a squad of the player's that takes it, or starts one
+of its own with the hero's squad's flags, state and destination. A dead unit
+fails the gates and stays until the unregister takes it out. **This
+engine** runs it in `HeroSystem::detach` (`squad_rehome_hook`); before the AI
+manager exists, where the engine's hero squads stand in for the original's
+none, a detached unit leaves the squad instead and the manager's start files
+it.
 
 A unit's first squad comes from the AI register (0x0041f310 -> 0x00447200),
 which files it with `AddToSquad` towards the node under it, at its birth:
-`Place` (here at the next turn; class-tally.md, "What differs"), the
-spawns, a settlement's mules and boats, a shipyard's ship at the end of its
-slide, the manager's start for the units that were there before it, and a
-change of owner. A held unit is filed like one on the map, by the
-node under its holder's settlement; neither the register nor `AddToSquad`
-asks about the holder. `docs/formats/class-tally.md` lists the callers. The
-engine calls `HeroSystem::ai_register` at each of them, and once a turn
-(`register_unregistered_units`) registers any unit on the map that is still
-unregistered -- the move hook's half (0x0041f530), which `SetPos` runs.
+`Place` (through its `SetPos`'s move hook, below), the spawns, a
+settlement's mules and boats, a shipyard's ship at the end of its slide, the
+manager's start for the units that were there before it, a change of owner,
+and any move of a unit still unregistered. A held unit is filed like one on
+the map, by the node under its holder's settlement; neither the register
+nor `AddToSquad` asks about the holder. `docs/formats/class-tally.md` lists
+the callers. The engine calls `HeroSystem::ai_register` at each of them.
 
 Until the fourteenth round the engine filed a unit by a once-a-turn sweep
 over ids it had not seen, which skipped a unit born inside a holder; that
 was this engine's reading, made before the register's callers were read.
+The sweep then stood in for the move hook's register, and its fourth batch
+for `Place`'s filing a turn late; both are gone into the hook.
+
+## The move hook
+
+0x0041f530 runs on every move of a unit. Its callers are the unit's own
+`SetPos` (0x005d39e0, the unit's `vtbl+0x38`), which takes the unit's
+`posRH` (0x005d3db0, `vtbl+0xc8`) before and after the write and hands both
+over, and the forced holder entry (0x005d3e10), which hands over the
+`posRH` outside and the `posRH` inside. A unit walks through that `SetPos`:
+its motion handler (0x0053f6a0, the timer message 0x1b dispatched from
+0x0040a7c0) moves it to each step's end as the step begins, so the hook
+runs at every step of every walk, and at every placement, teleport, holder
+entry and exit.
+
+1. **Gates.** Nothing unless the AI manager exists (`[0x008c8e58]`), and
+   nothing for a unit that is dead (`vtbl+0x50`), a spawn template (bit 27
+   of `+0x2c`), noselect (`[unit+0x194] & 0x800000`) or ownerless
+   (`[unit+0x70]`).
+2. **An empty squad handle** (`[unit+0x174]`) means the register
+   (0x0041f310), whatever the move, and nothing more. So a unit a register
+   skipped is registered the first time it moves; the register's own gates
+   (the AI world pointer `[0x008c8e50]`, which the spawns hold at zero while
+   they clone and place a copy) still apply.
+3. **Within one slot nothing happens.** The two points are taken to 128-unit
+   slots (each coordinate shifted right by 7); equal slots end the hook.
+4. **The nodes.** With the AI up (`[0x008c8e54]`), the old and the new node
+   are the GAIKA nodes under the two points (0x0044e3f0); without it both
+   are 0.
+5. **The re-homing.** The unit's squad is resolved (0x00444190). The
+   destination is that squad's `DestGAIKA` (`[squad+0x24]`) when there is a
+   squad and the unit is in no holder (`[unit+0x154]` is `0xffff`), and the
+   new node otherwise. Whether the unit is its squad's front member
+   (0x00443df0) is noted, and so is its squad handle; then `AddToSquad`
+   (0x00446a70, the assignment above) runs on the unit towards that
+   destination. A follower within 256 of its front member stays; one that
+   has walked farther merges into a squad of its player's that takes it or
+   starts one of its own; a leader that crosses takes its squad's
+   destination again and hands each follower to the same rule; a hero keeps
+   his squad; a unit attached to a hero goes to the hero's.
+6. **The standing node.** When the old and new nodes differ, the handle is
+   the same after the assignment and the unit was the front member, the
+   squad is refiled from the old node to the new one (0x0041eac0 ->
+   0x00450240), which also stamps `SrcGAIKA` the first time.
+7. **A ship's passengers.** For a ship (the `CVXShip` cast), every unit in
+   its holder (`[ship+0x1dc]`), front of the roster first, goes through the
+   hook on the ship's two points, with its squad's lock bit (`+0x30`, bit 3)
+   raised for the call and the squad's flags put back after: a locked
+   follower stays where it is, and a locked leader takes the new node as
+   its squad's destination.
+8. **The sweep.** When the two nodes differ, the per-node visibility sweep
+   (0x0044ecc0) runs on the old node and on the new (gaika.md).
+
+**This engine.** `HeroSystem` is the world's `UnitMoveHook`
+(`World::set_position`, `put_in_holder` and `remove_from_holder` call it
+for a unit with its `posRH` before and after) and runs
+`squad_move_hook` in `sim/squad.cpp`. `Place`'s position write is that
+`SetPos`, so `Place` counts and files its unit at once; the spawns hold
+the register off (`HeroSystem::RegisterHold`) while they clone and place a
+copy, and `CreateShip` while it places its ship.
+
+What still differs, each for what this engine cannot yet do:
+
+* **When a walk crosses a slot.** The original moves the unit to the end of
+  a step as the step begins; this engine walks a unit continuously and
+  writes its position at each step's decision and at the turn's end
+  (`MovementSystem::set_position`, which writes only a position that
+  changed), so a crossing is seen at those writes, up to a step later.
+* **The visibility sweep** runs on every node once a turn
+  (`AiSystem::advance`), not on the two nodes of a crossing.
+* **A unit counted and in no squad** is filed towards the node under it at
+  its next move, without counting it again. In the original such a unit
+  has an empty handle and the register would count it a second time; no
+  path that leaves one was found, and here it is the detach before the AI
+  manager exists.
+* **The standing node is also refiled once a turn** (`revalue_squads`, for
+  the front member's own node), which covers the refiles at a member's
+  leave and at a squad's stand-down that run inside those calls in the
+  original.
 
 ## What is still unknown
 
@@ -237,3 +327,7 @@ was this engine's reading, made before the register's callers were read.
   lists in ascending object id.
 * The reader at 0x00417ab0 and the route step that calls it.
 * Whether anything reads the third list.
+* That every step of a walk reaches the unit's `SetPos` through the motion
+  handler 0x0053f6a0 was read from the handler and its dispatch, not traced
+  from the path follower's step to it; a walk that moved a unit some other
+  way would run the move hook less often.

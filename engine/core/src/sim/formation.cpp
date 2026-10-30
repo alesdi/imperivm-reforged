@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 
 #include "imperivm/core/formats/ini.hpp"
 #include "imperivm/core/sim/movement.hpp"
@@ -492,6 +493,211 @@ Point formation_turn(Point centre, Point dir, Point offset) noexcept {
                centre.y + over_length(-oy * dy + ox * dx, len2)};
 }
 
+// -- the claim on the stations ----------------------------------------------------
+
+namespace {
+
+/// A cell nobody may have, and one the flood has not reached.
+constexpr std::int32_t kClaimNobody = std::numeric_limits<std::int32_t>::max();
+/// A closed cell while the flood runs: the least integer.
+constexpr std::int32_t kClaimClosed = std::numeric_limits<std::int32_t>::min();
+/// A straight and a diagonal step, 16.16.
+constexpr std::int32_t kClaimStraight = 0x10000;
+constexpr std::int32_t kClaimDiagonal = 0x16a09;
+
+/// A world coordinate's cell, divided towards zero.
+[[nodiscard]] constexpr std::int32_t claim_cell(std::int32_t world) noexcept {
+  return world / kCollisionCellSize;
+}
+
+/// Cells `x0..x1` by `y0..y1`, both ends included.
+struct ClaimBox {
+  std::int32_t x0 = 0;
+  std::int32_t y0 = 0;
+  std::int32_t x1 = -1;
+  std::int32_t y1 = -1;
+};
+
+/// The claim's square of cells, each its distance from the centre or
+/// nobody's.
+class ClaimSquare {
+ public:
+  ClaimBox box;
+  std::int32_t columns = 0;
+  std::vector<std::int32_t> cells;
+
+  [[nodiscard]] bool holds(std::int32_t x, std::int32_t y) const noexcept {
+    return x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1;
+  }
+  [[nodiscard]] std::int32_t& at(std::int32_t x, std::int32_t y) noexcept {
+    return cells[static_cast<std::size_t>(y - box.y0) * static_cast<std::size_t>(columns) +
+                 static_cast<std::size_t>(x - box.x0)];
+  }
+
+  /// The cheapest cell of `area` that is somebody's, for a station in cell
+  /// `(sx, sy)`, written to `out` with its cost; the least integer, `out`
+  /// untouched, when there is none.
+  std::int32_t cheapest(ClaimBox area, std::int32_t sx, std::int32_t sy, Point& out) {
+    area.x0 = std::max(area.x0, box.x0);
+    area.x1 = std::min(area.x1, box.x1);
+    area.y0 = std::max(area.y0, box.y0);
+    area.y1 = std::min(area.y1, box.y1);
+    std::int32_t best = kClaimNobody;
+    for (std::int32_t y = area.y0; y <= area.y1; ++y) {
+      for (std::int32_t x = area.x0; x <= area.x1; ++x) {
+        const std::int32_t distance = at(x, y);
+        if (distance == kClaimNobody) continue;
+        const std::int32_t ox = x >= sx ? x - sx : sx - x;
+        const std::int32_t oy = y >= sy ? y - sy : sy - y;
+        const std::int32_t reach = oy < ox ? ox + oy / 2 : oy + ox / 2;
+        const std::int32_t cost = (distance >> 17) + reach * reach;
+        if (cost < best) {
+          best = cost;
+          out = Point{x, y};
+        }
+      }
+    }
+    return best == kClaimNobody ? kClaimClosed : best;
+  }
+};
+
+}  // namespace
+
+void formation_claim_gates(World& world, ObjectId hero, GameTime now, CellOverlay& out) {
+  out.clear();
+  const ObjectState* own = world.state(hero);
+  if (own == nullptr) {
+    out.seal();
+    return;
+  }
+  const Point at = own->position;
+  GateLines& lines = world.gate_lines();
+  lines.refresh(world);
+  for (const GateLines::Line& line : lines.lines()) {
+    if (!line.has_axis) continue;
+    const WorldObject* gate = world.find(line.gate);
+    if (gate == nullptr) continue;
+    const Point where = gate->state.position;
+    if (where.x < at.x - kClaimGateReach || where.x > at.x + kClaimGateReach) continue;
+    if (where.y < at.y - kClaimGateReach || where.y > at.y + kClaimGateReach) continue;
+    const bool enemy = gate_bars(world, *gate, own->owner);
+    const bool shut = !gate_lets_through(*gate, now) && !gate->state.flags.gate_open;
+    if (!enemy && !shut) continue;
+    for (const GateCell& cell : line.cells) out.add(cell.x, cell.y);
+  }
+  out.seal();
+}
+
+void formation_claim_stations(const ObstructionGrid& grid, const CellOverlay& closed,
+                              Point centre, std::int32_t radius,
+                              std::span<const Point> positions, std::span<Point> stations) {
+  if (grid.empty() || stations.empty()) return;
+  // The square: the radius rounded up to whole cells, either side of the
+  // centre's cell, clipped to the map.
+  std::int32_t span = radius;
+  if (span % kCollisionCellSize != 0) span = span - span % kCollisionCellSize + kCollisionCellSize;
+  span /= kCollisionCellSize;
+  const std::int32_t cx = claim_cell(centre.x);
+  const std::int32_t cy = claim_cell(centre.y);
+  ClaimSquare square;
+  square.box = ClaimBox{std::max(cx - span, 0), std::max(cy - span, 0),
+                        std::min(cx + span, grid.width() - 1),
+                        std::min(cy + span, grid.height() - 1)};
+  if (square.box.x0 > square.box.x1 || square.box.y0 > square.box.y1) return;
+  square.columns = square.box.x1 - square.box.x0 + 1;
+  const std::int32_t rows = square.box.y1 - square.box.y0 + 1;
+  square.cells.assign(static_cast<std::size_t>(square.columns) * static_cast<std::size_t>(rows),
+                      kClaimNobody);
+  for (std::int32_t y = square.box.y0; y <= square.box.y1; ++y) {
+    for (std::int32_t x = square.box.x0; x <= square.box.x1; ++x) {
+      if (grid.blocked_cell(x, y) || closed.contains(x, y)) square.at(x, y) = kClaimClosed;
+    }
+  }
+
+  // The flood from the centre's cell, which takes 0 even when closed.
+  if (square.holds(cx, cy)) {
+    const bool centre_closed = square.at(cx, cy) == kClaimClosed;
+    const std::int32_t limit = span << 16;
+    std::vector<Point> queue;
+    std::size_t head = 0;
+    square.at(cx, cy) = 0;
+    queue.push_back(Point{cx, cy});
+    const auto relax = [&](std::int32_t x, std::int32_t y, std::int32_t d) {
+      std::int32_t& cell = square.at(x, y);
+      if (d < cell) {
+        cell = d;
+        queue.push_back(Point{x, y});
+      }
+    };
+    while (head < queue.size()) {
+      const Point c = queue[head++];
+      const std::int32_t d = square.at(c.x, c.y);
+      const std::int32_t straight = d + kClaimStraight;
+      const std::int32_t diagonal = d + kClaimDiagonal;
+      if (diagonal >= limit) continue;
+      const bool above = c.y > square.box.y0;
+      const bool below = c.y < square.box.y1;
+      if (c.x > square.box.x0) {
+        if (above) relax(c.x - 1, c.y - 1, diagonal);
+        relax(c.x - 1, c.y, straight);
+        if (below) relax(c.x - 1, c.y + 1, diagonal);
+      }
+      if (above) relax(c.x, c.y - 1, straight);
+      if (below) relax(c.x, c.y + 1, straight);
+      if (c.x < square.box.x1) {
+        if (above) relax(c.x + 1, c.y - 1, diagonal);
+        relax(c.x + 1, c.y, straight);
+        if (below) relax(c.x + 1, c.y + 1, diagonal);
+      }
+    }
+    if (centre_closed) square.at(cx, cy) = kClaimClosed;
+  }
+  for (std::int32_t& cell : square.cells) {
+    if (cell == kClaimClosed) cell = kClaimNobody;
+  }
+
+  // Each member in turn.
+  for (std::size_t i = 0; i < stations.size(); ++i) {
+    const std::int32_t sx = claim_cell(stations[i].x);
+    const std::int32_t sy = claim_cell(stations[i].y);
+    if (square.holds(sx, sy) && square.at(sx, sy) != kClaimNobody) {
+      square.at(sx, sy) = kClaimNobody;
+      continue;
+    }
+    const ClaimBox between{std::min(cx, sx), std::min(cy, sy), std::max(cx, sx),
+                           std::max(cy, sy)};
+    Point cell;
+    if (square.cheapest(between, sx, sy, cell) == kClaimClosed) {
+      // The strips round the box. One with no cell answers the least
+      // integer, cheaper than anything: the best becomes the cell the last
+      // strip with one wrote, and nothing after beats it.
+      const ClaimBox& g = square.box;
+      std::int32_t best = kClaimNobody;
+      Point written{-7, -7};
+      Point chosen{-7, -7};
+      const auto strip = [&](ClaimBox area, bool last) {
+        const std::int32_t cost = square.cheapest(area, sx, sy, written);
+        if (cost < best) {
+          chosen = written;
+          if (!last) best = cost;
+        }
+      };
+      if (g.x0 < between.x0) strip(ClaimBox{g.x0, g.y0, between.x0 - 1, g.y1}, false);
+      if (between.x1 < g.x1) strip(ClaimBox{between.x1 + 1, g.y0, g.x1, g.y1}, false);
+      if (g.y0 < between.y0) strip(ClaimBox{between.x0, g.y0, between.x1, between.y0 - 1}, false);
+      if (between.y1 < g.y1) strip(ClaimBox{between.x0, between.y1 + 1, between.x1, g.y1}, true);
+      if (chosen.x != -7) {
+        cell = chosen;
+      } else {
+        const Point here = i < positions.size() ? positions[i] : stations[i];
+        cell = Point{claim_cell(here.x), claim_cell(here.y)};
+      }
+    }
+    stations[i] = Point{cell.x * kCollisionCellSize + kCollisionCellSize / 2,
+                        cell.y * kCollisionCellSize + kCollisionCellSize / 2};
+  }
+}
+
 void formation_place_sample(World& world, Formation& form, const FormationTable& table,
                             Point centre, Point dir, std::vector<ObjectId>& joined) {
   // 0x005f5a20: the hero's own record and the formation's centre take the
@@ -500,6 +706,26 @@ void formation_place_sample(World& world, Formation& form, const FormationTable&
   form.dir = dir;
   (void)formation_rebuild(world, form, table, joined);
   for (FormationSlot& slot : form.slots) slot.sample = formation_turn(centre, dir, slot.offset);
+  // Then the stations are claimed, with the gates near the hero laid shut
+  // for the claim alone (0x005f5b62 .. 0x005f5b85).
+  if (MovementSystem* movement = movement_system(world);
+      movement != nullptr && !form.slots.empty()) {
+    const std::int32_t radius = std::max(
+        formation_reach(&form, movement->radius_of(world, form.hero)), kClaimRadiusFloor);
+    CellOverlay gates;
+    formation_claim_gates(world, form.hero, world.time(), gates);
+    std::vector<Point> positions;
+    std::vector<Point> stations;
+    positions.reserve(form.slots.size());
+    stations.reserve(form.slots.size());
+    for (const FormationSlot& slot : form.slots) {
+      positions.push_back(slot.unit != kNoObject ? world.resolve_position(slot.unit)
+                                                 : slot.sample);
+      stations.push_back(slot.sample);
+    }
+    formation_claim_stations(movement->grid(), gates, centre, radius, positions, stations);
+    for (std::size_t i = 0; i < form.slots.size(); ++i) form.slots[i].sample = stations[i];
+  }
   formation_reassign(world, form);
 }
 

@@ -353,6 +353,10 @@ Point MovementSystem::position(World& world, ObjectId id) const noexcept {
 }
 
 void MovementSystem::set_position(World& world, ObjectId id, Point where) const noexcept {
+  // Only a write that moves the unit: the walk's `SetPos` (0x0053f6a0) is
+  // what runs the move hook, and this is also where a standing unit's
+  // position is settled at a turn's end.
+  if (const ObjectState* st = world.state(id); st != nullptr && st->position == where) return;
   world.set_position(id, where);
 }
 
@@ -610,7 +614,7 @@ Path MovementSystem::route_past_gates(World& world, ObjectId id, Point from,
 }
 
 bool MovementSystem::held_at_gate(const World& world, ObjectId id, const MoveState& move,
-                                  std::int64_t travelled) const {
+                                  std::int64_t travelled, ObjectId* barring) const {
   // The first crossing not yet passed (0x00418210): the list is in route
   // order, so it is the first at or beyond where the unit has got to.
   for (const GateCrossing& crossing : move.gate_crossings) {
@@ -626,7 +630,9 @@ bool MovementSystem::held_at_gate(const World& world, ObjectId id, const MoveSta
     const WorldObject* self = world.find(id);
     // A gate that has left the world bars nothing.
     if (gate == nullptr || self == nullptr) return false;
-    return !gate_waves_through(world, *gate, self->state.owner, world.time());
+    if (gate_waves_through(world, *gate, self->state.owner, world.time())) return false;
+    if (barring != nullptr) *barring = crossing.gate;
+    return true;
   }
   return false;
 }
@@ -735,7 +741,7 @@ bool MovementSystem::stop_branch_halts(const World& world, ObjectId id, const Mo
   // runs out of route stops there, free spot or not. Nor does it step on
   // before a gate that bars it (0x00419f8a .. 0x00419fa2): where the walk on
   // would wait at the gate, the stop stops there.
-  return !stop_owner(id, move) || travelled >= move.path_length ||
+  return !lock_owner(id, move) || travelled >= move.path_length ||
          (!grid_.blocked(here) && spot_free(world, id, here, radius_of(world, id))) ||
          held_at_gate(world, id, move, travelled);
 }
@@ -783,29 +789,15 @@ bool MovementSystem::lock_owner(ObjectId id, const MoveState& move) const noexce
   return move.dest_lock;
 }
 
-bool MovementSystem::stop_owner(ObjectId id, const MoveState& move) const noexcept {
-  // **Engine choice.** `0x004178d0` names a march member an owner only once
-  // the march is over; while it goes on the stop branch takes no step and the
-  // member stands where the stop found it. A hero's script stops his army
-  // mid-march whenever his own order changes -- `HERO_IDLE.VS` sets every
-  // member still on `form_move` to `idle`, whose `UNIT_IDLE.VS` opens with
-  // `while (!.Stop(1000))` -- and the AI changes a marching hero's order
-  // often (`capture` and `sneak` in turn, a second or two apart, on
-  // Crossroads). Members of one formation pass through one another
-  // (0x005d2f80), so the army stood inside itself wherever it was stopped.
-  // Here such a member walks on along its route to the first free spot, as an
-  // owner does, and as every member did before the march had a route of its
-  // own. Without the flag it stands, as in the original.
-  if (!move.form_aimed) return lock_owner(id, move);
-  const Formation* form = formation(move.party);
-  return form != nullptr && form->should_lock;
-}
-
 bool MovementSystem::request_stop(World& world, ObjectId id) {
   MoveState* move = find(id);
-  if (move == nullptr || !move->has_path || !stop_owner(id, *move)) {
+  if (move == nullptr || !move->has_path || !lock_owner(id, *move)) {
     // With no owner named, the path follower's stop branch takes no step at
-    // all (0x00419ef8 -> 0x0041a019): the unit stands where it is.
+    // all (0x00419ef8 -> 0x0041a019): the unit stands where it is. A march
+    // member is named no owner while its formation's path goes on
+    // (0x004178d0), so one its hero's script stops mid-march stands where the
+    // stop found it -- inside a fellow, if that is where it was, since the
+    // members of one formation do not block one another (0x005d2f80).
     stop(world, id);
     return false;
   }
@@ -1183,22 +1175,16 @@ std::int32_t MovementSystem::walk_step(const World& world, ObjectId id,
 
 std::int32_t MovementSystem::formation_stride_or_walk(const World& world, ObjectId id,
                                                       const MoveState& move) const {
-  // **Engine choice, labelled: a march's followers step 200.** In
-  // `gbr.exe` a route aimed at a formation is cut by the unit's own walk step
-  // as any other is (`RecastPathfind`, 0x00419730, builds a mode-2 route's
-  // media with 0x005d2920; only the formation's own record takes 200). Here
-  // the stride is also the avoidance's step (`sim/avoidance.hpp`), which is
-  // this engine's model and not the original's, and with the walk step a
-  // column stopped in mid-march -- an AI squad's `ClrCmd` ends its
-  // `form_move` where it walks -- stands in piles: Crossroads seed 5's worst
-  // overlap was 82 against 36 with 200. The followers keep the 200 they had
-  // while the march was the hero's route; the hero keeps his own. The step at
-  // which a follower makes the next sample is the original's, its walk step
-  // (`formation_step`).
-  if (move.form_aimed && move.party != kNoObject && move.party != id) return kFormationStride;
+  // A route is cut by its unit's own walk step: `RecastPathfind` (0x00419730)
+  // builds every route's media with 0x005d2920, a route aimed at a formation
+  // (mode 2) as any other, hero and follower alike. Only the formation's own
+  // record steps 200 (`kFormationRouteStride`).
   const std::int32_t step = walk_step(world, id, move);
-  // A route aimed at a formation with no walk step still has to be stepped,
-  // since its samples are made at its steps, and takes the formation's 200.
+  // **Engine limit, labelled.** A route aimed at a formation has to be
+  // stepped, since its samples are made at its steps (0x00419b20), and this
+  // engine walks a stepless route turn by turn with no step to make them at;
+  // a unit whose walk animation declares no `step` takes the formation's 200
+  // there. What the original's media does with a step of 0 was not read.
   if (step == 0 && move.form_aimed) return kFormationStride;
   return step;
 }
@@ -1681,7 +1667,27 @@ void MovementSystem::decide(World& world, std::size_t entry, GameTime now) {
   // A gate on the route ahead that bars this mover (0x00418260): it stands
   // where it is, the route kept, and asks again on the next turn, when the
   // gate is read again. The cooperative wait is not involved.
-  if (held_at_gate(world, id, move, travelled)) {
+  ObjectId barring = kNoObject;
+  const bool barred = held_at_gate(world, id, move, travelled, &barring);
+  // On a route aimed at a formation (0x00419ca0): the gate that bars it is
+  // the formation's blocking gate, and once there is one, a member whose
+  // route has not yet compared sides at it does so (0x00417dc0). Cut off
+  // from its hero by it, its commands are ended and it leaves his army --
+  // at the end of this turn's movement here -- and it takes no step.
+  bool cut_off = false;
+  if (move.form_aimed) {
+    if (Formation* form = formation(move.party); form != nullptr) {
+      if (barred) form->blocking_gate = barring;
+      if (form->blocking_gate != kNoObject && move.gate_seen != form->blocking_gate) {
+        move.gate_seen = form->blocking_gate;
+        if (gate_cuts_off(world, form->blocking_gate, form->hero, id)) {
+          cut_off_.push_back(CutOff{id, form->hero});
+          cut_off = true;
+        }
+      }
+    }
+  }
+  if (barred || cut_off) {
     ++counters_.gate_waits;
     const Point standing = offset_at(move, travelled);
     move.holding = true;
@@ -1846,6 +1852,20 @@ void MovementSystem::settle(World& world, const Turn& turn, std::size_t entry) {
   move.last_outcome = MoveOutcome::moving;
 }
 
+namespace {
+void end_commands(World& world, ObjectId id);
+}  // namespace
+
+bool MovementSystem::gate_cuts_off(World& world, ObjectId gate, ObjectId hero,
+                                   ObjectId unit) const {
+  const WorldObject* slot = world.find(gate);
+  EconomySystem* economy = economy_of(world);
+  if (slot == nullptr || economy == nullptr) return false;
+  const Settlement* set = economy->settlements().for_object(slot->settlement);
+  if (set == nullptr || set->anchor == kNoObject) return false;
+  return inside_walls(world, hero, set->anchor) != inside_walls(world, unit, set->anchor);
+}
+
 void MovementSystem::advance(World& world, const Turn& turn) {
   if (turn.length <= 0) return;
   const GameTime t0 = turn.time - turn.length;
@@ -1913,6 +1933,22 @@ void MovementSystem::advance(World& world, const Turn& turn) {
       walk_turn(world, turn, entry);
     }
     play_locomotion(world, entry.id, entry.state);
+  }
+
+  // The members a shut gate cut off from their hero (0x00417dc0): their
+  // commands ended (`vtbl+0xc0` with 1), then out of his army (`DetachHero`,
+  // 0x005db190). The original does both inside the member's step; here they
+  // wait for the turn's steps to end, since neither may run inside them.
+  const std::vector<CutOff> cut = std::exchange(cut_off_, {});
+  for (const CutOff& c : cut) {
+    if (world.find(c.unit) == nullptr) continue;
+    end_commands(world, c.unit);
+    if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+      if (const UnitRecord* record = heroes->unit(c.unit);
+          record != nullptr && record->hero == c.hero) {
+        (void)heroes->detach(world, c.unit);
+      }
+    }
   }
 }
 
@@ -3397,6 +3433,8 @@ bool MovementSystem::formation_set_dest(World& world, ObjectId hero, Point dest,
   form.centre = world.resolve_position(hero);
   form.should_lock = lock;
   form.samples = 0;
+  // No gate blocks the new march (`[form+0x90]` to none).
+  form.blocking_gate = kNoObject;
   const bool fresh = !form.path;
   form.path = true;
   bool laid = false;
@@ -3584,8 +3622,10 @@ void MovementSystem::aim_at_formation(World& world, ObjectId id, ObjectId hero, 
   // Only the mode is set: the route to the station is laid at the unit's
   // next step (0x00419b20, its sample count not yet seen). A route being
   // walked is kept until then, as the retry keeps its media; with none the
-  // unit stands, its order taken.
+  // unit stands, its order taken. No blocking gate compared at yet
+  // (`[retry+0x18]` to none).
   move.form_seen = -1;
+  move.gate_seen = kNoObject;
   const bool walking_on = move.has_path && move.waypoints.size() >= 2 &&
                           move.travelled() < move.path_length;
   if (!walking_on) stand_on_station(world, id, move, position(world, id), world.time());

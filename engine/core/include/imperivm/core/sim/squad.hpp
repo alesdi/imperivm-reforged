@@ -1158,19 +1158,24 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
 [[nodiscard]] const Squad* squad_sight_squad(const World& world, const HeroSystem& heroes,
                                              ObjectId unit);
 
-/// Once a turn, the move hook's register (0x0041f530, which `SetPos` runs):
-/// every unit on the map that is alive, owned, not a spawn template, not
-/// flagged by `SetNoselectFlag` and not registered goes through
-/// `HeroSystem::ai_register`, in id order. Every birth registers its unit
-/// at once (docs/formats/class-tally.md); what reaches this is a unit whose
-/// registration was held off -- a ship `CreateShip` made, a unit that changed
-/// owner inside a holder -- and that has since come out onto the map. The
-/// original registers it at that `SetPos`; here at the next turn. Then it
-/// files `Place`'s units of the turn before in a squad
-/// (`HeroSystem::ai_register_placed`; class-tally.md, "What differs"). Only
-/// while the AI manager exists (`AiSystem::manager_started`).
-/// `HeroSystem::advance` is the caller.
-void register_unregistered_units(World& world, HeroSystem& heroes);
+/// The AI's move hook (0x0041f530) on `id`'s move from `from` to `to`, both
+/// its `posRH`: while the AI manager exists, for a unit that is alive, not a
+/// spawn template, not noselect and owned, an empty squad handle means the
+/// register; otherwise, when the move crosses a 128-unit slot, the unit's
+/// squad is re-homed (`add_to_squad`, towards its squad's `DestGAIKA` on the
+/// map and the node it stands in when held), its squad carried into the new
+/// node when it is the front member and stayed in it, and a ship's
+/// passengers taken through the hook with their squads locked.
+/// `HeroSystem::moved` is the caller, from every unit move the world makes;
+/// docs/formats/squad.md, "The move hook".
+void squad_move_hook(World& world, HeroSystem& heroes, ObjectId id, Point from, Point to);
+
+/// 0x0041e820, the hook the hero's `AddUnit` and `RemoveUnit` end with: with
+/// the move hook's gates passed, the unit is re-homed by `add_to_squad`
+/// towards its squad's `DestGAIKA`, or towards the node under it when it is
+/// in none. Answers whether the gates let it run. `HeroSystem::detach` calls
+/// it; docs/formats/squad.md, "The move hook".
+bool squad_rehome_hook(World& world, HeroSystem& heroes, ObjectId id);
 
 void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const ObjectId> units,
                                std::int32_t state, GameTime now);

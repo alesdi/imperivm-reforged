@@ -237,8 +237,10 @@ inline constexpr std::int32_t kSidestepCost = 5;
 /// The score a candidate has to beat: `0xffff` at `0x00416a99`.
 inline constexpr std::int32_t kSidestepUnscored = 0xffff;
 
-/// A formation march's sampled path steps 200 units (`0x0041994c`); every
-/// other route steps its unit's walk stride.
+/// A formation's own sampled path steps 200 units (`0x0041994c`); every
+/// unit's route, one aimed at a formation included, steps its unit's walk
+/// stride. A route aimed at a formation whose unit's walk declares no step
+/// takes this too (`MovementSystem::formation_stride_or_walk`).
 inline constexpr std::int32_t kFormationStride = 200;
 
 /// The free-spot search (`0x004180b0`) draws its heading as `rand(0, 359)`
