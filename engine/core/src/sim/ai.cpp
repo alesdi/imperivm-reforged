@@ -2543,7 +2543,8 @@ HostOutcome m_gaika_military_presence(CallContext& ctx) {
 }
 
 /// A point `length` units beyond `from`, on the ray that leaves `behind` and
-/// passes through it -- 0x00422bd0, whose scale factor arrives in `ebx`.
+/// passes through it -- 0x00422bd0, whose length its callers set (450 for a
+/// gate; the outpost arm's 1,300 is written out where it is used).
 ///
 /// Integer throughout: the length is an `isqrt` and each component is scaled by
 /// a 32-bit multiply and a signed divide, so the result is a little short of
@@ -2710,7 +2711,7 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
   if (best == centre) return answer(centre);
 
   // 450 units beyond the gate, on the ray from the town centre through it --
-  // 0x00422bd0 scaled to `ebx`, which is 0x1c2 here.
+  // 0x00422bd0 with a length of 450.
   const Point out = step_beyond(best, centre, 450);
   // Refused, the running answer is the **gate**: the gate loop has already
   // moved it there (0x00427d9c onward) and the step only replaces it when it
@@ -3562,7 +3563,7 @@ HostOutcome m_settlement_gaika(CallContext& ctx) {
 /// it is handed.
 ///
 ///   * **An `int` is the identity**, with no bounds check on either side --
-///     0x00746ea0 is `xor eax,eax; ret`, which leaves the VM stack untouched so
+///     0x00746ea0 answers 0 and returns at once, which leaves the VM stack untouched so
 ///     the argument *is* the result. `GAIKA::ID` shares the pointer. That was
 ///     established before there was a table and it does not change now: a
 ///     script that walks `GetGAIKA(i)` over `1 .. GAIKACount` is naming nodes

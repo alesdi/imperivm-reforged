@@ -1547,7 +1547,7 @@ HostOutcome send_to_impl(CallContext& ctx) {
   if (ctx.count() < 3) return HostOutcome::ok_void();
   HeroSystem* heroes = hero_system_of(*self.world);
   if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
-  // `movzx edx, bp` at 0x00421598: the node is a word; so is the priority,
+  // At 0x00421598 the node is widened from 16 bits: the node is a word; so is the priority,
   // which the post stores as the dword it is handed and every reader reads as
   // a word (0x004488ea, 0x00448b1b, 0x004474c7).
   const GaikaId dest = static_cast<GaikaId>(static_cast<std::uint16_t>(gaika_of(ctx.arg(1))));
