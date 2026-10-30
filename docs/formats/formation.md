@@ -354,20 +354,81 @@ formation, at its speed, takes to cover the mean over the hero and its
 placed members of the straight distance from each to its station, less 133
 while the path goes on.
 
-**The claim on the stations** (0x005f3fe0) is described at
-`sim/movement.hpp`'s inference 3. `PlaceSample` brackets it with the gates
-near the centre (0x005f5b62, 0x005f5b85). Before the flood, 0x005f41b0
-walks every object of every player and picks each gate whose position lies
-within 1,600 of the centre on both axes (a box 3,200 across, not a circle)
-and that is either one the hero's owner may pass (0x005a78e0, the
-diplomacy bit) or one that lets no unit through now (0x00529300: not broken
-to its last tier and raised no more than 20) and is not being opened
-(`[gate+0x208]` not 1). Each gate picked is listed, and its cells on the
-collision grid are saved and rewritten for the flood (0x0052b130: the cells
-of its box in 16-unit cells, kept at `[gate+0x230]`, 0x0052adf0 and
-0x00529e40). After the claim, 0x005f3240 walks the list backwards and puts
-each gate's saved cells back (0x0052a540 -> 0x0052a4c0). What the rewrite
-writes into the cells -- passable or blocked -- was not read (below).
+### The claim on the stations
+
+`PlaceSample` ends, after every slot's sample is placed and before
+`UpdateReassign`, by moving each station its member cannot have
+(0x005f5b7b -> 0x005f3fe0, the log's `TVXFormUnitCollisionSystem`),
+bracketed by the gates near the hero (0x005f5b62, 0x005f5b85). It does
+nothing for a formation with no slot.
+
+**The gate bracket.** Before the claim, 0x005f41b0 walks every object of
+every player and picks each gate whose position (`vtbl+0x3c`) lies within
+1,600 of the **hero's** position on both axes, ends included (a box 3,200
+across, not a circle), and that either counts the hero an enemy (0x005a78e0,
+`Obj::IsEnemy` with the gate as the viewer: bit 0 of the gate's owner's row
+for the hero's owner clear) or lets no unit through now (0x00529300: not
+destroyed, raised no more than 20) and is not being opened (its target
+`[gate+0x208]` is not open). Each gate picked is listed and its line is laid
+into the collision grid (0x0052b130): the gate's axis (0x00529380) in
+16-unit cells, rounded towards zero, the cells under the line saved
+(0x0052b0c0 -> 0x0052adf0) and then set, each with the cell below it
+(0x00529e40 -> 0x005298f0) -- the line a search lays for a gate that bars
+it (`sim/gate.hpp`, "The barrier"). After the claim, 0x005f3240 walks the
+list backwards and puts each gate's saved cells back (0x0052a540 ->
+0x0052a4c0). So the claim sees every enemy gate near the hero, and every
+shut one of his own side's, as wall: the flood does not go through them
+and no station is kept on them.
+
+**The grid.** The claim's radius is `FormRadius`'s (the formation's radius,
+or the hero class's with no slot or radius 0), raised to 1,024 when below
+it (0x005f5b02). The centre is the sample's centre in 16-unit
+cells, each coordinate divided towards zero; the radius in cells is the
+radius rounded up to a multiple of 16, then divided by 16. The claim's
+cells are the square of that many cells either side of the centre's cell,
+clipped to the map (0x005f2290). Every cell starts **unreached**
+(`0x7fffffff`) when its collision bit is clear and **closed**
+(`0x80000000`) when set (0x005f2520).
+
+**The flood** (0x005f3c60) runs from the centre's cell, which takes 0 even
+when it is closed. It takes cells off the front of a queue; a cell whose
+distance plus a diagonal step (`0x16a09`, 1.41421 in 16.16) is not below
+the radius in cells times `0x10000` expands no further. Otherwise each
+neighbour inside the square, in the order left-above, left, left-below,
+above, below, right-above, right, right-below, takes the cell's distance
+plus `0x10000` (straight) or `0x16a09` (diagonal) when that is less than
+what it holds, and is queued again. A closed cell holds the least integer
+and is never improved. After the flood the centre's cell is closed again if
+it was, and every closed cell becomes unreached: **nobody's**.
+
+**Each member in turn** (0x005f29a0), in slot order: the cell of its
+station (its sample, divided towards zero) is kept when it lies in the
+square and is somebody's, and that cell becomes nobody's -- taken. Otherwise
+the station moves (0x005f25d0) to the centre (`cell * 16 + 8`) of the
+**cheapest** cell that is somebody's:
+
+* The cost of a cell (0x005f2370) is its flood distance shifted right by 17
+  -- half its distance in whole cells -- plus the square of `max + min / 2`
+  of its offset in cells from the station's cell, the halving an integer
+  division. Rows from the top, cells from the left, the first of equal
+  costs kept.
+* First the box from the centre's cell to the station's (0x0048c5d0, a
+  union of the two), clipped to the square. When it has such a cell, that
+  is the one.
+* Otherwise four strips round that box, each clipped to the square and
+  searched only when it is not empty of the square: left of the box over
+  the square's height, right of it the same, above it over the box's
+  width, below it the same. A strip's cheapest cell replaces the best so
+  far when it is cheaper. **A strip with no such cell answers the least
+  integer**, which is cheaper than anything: the best becomes whatever
+  cell the last strip that had one wrote -- which may be a strip whose
+  cell was not the cheapest -- and no later strip can beat it. The last
+  strip's answer is taken without updating the best cost.
+* With no cell at all from the strips, the station moves to the cell its
+  member stands in (`vtbl+0x40`, the unit's position).
+
+A moved station does **not** take its cell, so moved stations can share
+one, and a kept station's cell is lost to every member after it.
 
 ## What this engine models
 
@@ -383,7 +444,10 @@ stepping and the sample are the original's rules above, in integers
 (`formation_route_step`, `MovementSystem::formation_next_sample`). The
 setup, `UpdateMove` and the hand-out are `FormSetupAndMoveTo` and
 `FormKeepMoving` in `sim/command.cpp`; the step of a route aimed at the
-formation is `MovementSystem::formation_step`.
+formation is `MovementSystem::formation_step`. The claim on the stations
+and its gate bracket are `formation_claim_stations` and
+`formation_claim_gates`, which `formation_place_sample` runs with the
+movement system's grid (fourteenth round).
 
 Still approximated:
 
@@ -413,12 +477,25 @@ Still approximated:
   factors in the FPU and truncates; the engine takes the exact quotient and
   truncates (`formation_turn`), which can differ by one unit where a product
   lands within rounding of an integer.
-* **The claim on the stations is not wired**, as before
-  (`sim/movement.hpp`, inference 3), nor is the blocking gate (`+0x90`)
-  with its detach of the members a shut gate cuts off. A member barred on
-  its own route holds there under this engine's own gate step
-  (`MovementSystem::held_at_gate`), whose reach is the original's mode-2
-  one; nobody leaves the army for it.
+* **The claim's gate bracket walks every gate**, in ascending id, where the
+  original walks every object of every player; a gate with no owner would
+  be picked here and perhaps not there. The bracket lays each gate's line
+  into a set of cells the claim treats as closed on top of the grid,
+  rather than writing the grid and putting it back. A gate whose entity
+  gives it no axis is not laid.
+* **The blocking gate is wired** (`Formation::blocking_gate`,
+  `MoveState::gate_seen`, in `MovementSystem::decide` where a route aimed
+  at the formation is held at a gate). A member cut off from its hero has
+  its commands ended and leaves the army once the turn's movement steps are
+  done, rather than inside its own step, since neither may run inside them;
+  it takes no step meanwhile, as in the original. The side test's gate is
+  the one `[form+0x90]` names, which is inferred: the call that reads it
+  was not followed to its receiver. A gate that belongs to no settlement
+  cuts nobody off, where the original reads its settlement handle
+  regardless.
+* **A slot with no unit** has its station moved, when it must move and no
+  strip has a cell, to its own sample's cell; the original reads the
+  slot's unit, which every slot has at a sample.
 
 The stop is the original's: `Unit::Stop` on a member whose route is aimed
 at the formation names no owner while the path goes on (0x004178d0), flag
@@ -434,10 +511,10 @@ hero's script stops his army that way whenever his own order changes
 * Whether the FPU runs at single or double precision when the rotation is
   taken (Direct3D sets single unless told otherwise); it decides the rare
   off-by-one above.
-* What the gate bracket round the claim writes into a gate's cells
-  (0x00529e40), and so whether the flood goes through the gates near the
-  centre or round them. The claim is not wired, so nothing here depends on
-  it yet.
+* What the claim's strip search does when there is no strip at all (the
+  box fills the square): the original then reads a cell it never wrote.
+  This engine moves the station to the cell its member stands in, as with
+  strips that have no cell.
 * Whether the object form's 920 applies only to a new goal: the cap was
   read in the new-goal branch, and the engine applies it to every object
   setup.

@@ -119,21 +119,13 @@
 //      while the march goes on is no owner and stands where it is. See
 //      `docs/formats/formation.md`, "The formation's route" and "What this
 //      engine models".
-//      **Not reproduced: the original's claim on its stations.**
+//      **The claim on the stations is the original's.**
 //      `CVXFormObj::PlaceSample` (0x005f5a20) ends by moving every station
-//      its member cannot stand on (0x005f5b7b -> 0x005f3fe0): a flood from
-//      the sample centre over the collision cells within max(formation
-//      radius, 1,024) (0x005f5b02, 0x005f3c60) marks the cells it reaches;
-//      each member in turn keeps its station's cell if it is reached and not
-//      yet taken, and takes it (0x005f29a0); otherwise it goes to the
-//      cheapest reached cell near its station (0x005f25d0, 0x005f2370), a
-//      cell it does not take, so two moved stations can share one. Here
-//      each member walks to its station as laid, and one in a building walks
-//      to the nearest point it can reach. Built and measured on Crossroads
-//      while the march was still the hero's route, the claim made crowding
-//      worse (overlap median 25 -> 38 on seeds 1-6, 28 -> 40 on seeds 7-12),
-//      so it is not wired; it has not been measured on the formation's own
-//      route. See `docs/plan.html`.
+//      its member cannot have (0x005f3fe0), with the gates near the hero
+//      laid shut for it (0x005f41b0): `formation_claim_stations` and
+//      `formation_claim_gates` in `sim/formation.hpp`, run from
+//      `formation_place_sample`. See `docs/formats/formation.md`, "The
+//      claim on the stations".
 //   4. **Birds in the air.** A unit with `in_air` set neither tests nor
 //      blocks. The callback asks only for bit 22 and a health; whether an
 //      airborne flyer is linked into the ground buckets at all was not
@@ -425,6 +417,10 @@ struct MoveState {
   /// `[retry+0x10]`: the formation's sample count when this route was laid;
   /// -1 to lay it again at the next step.
   std::int32_t form_seen = -1;
+  /// `[retry+0x18]`: the formation's blocking gate this route has already
+  /// compared sides at (0x00417dc0); none from `SetFormation` (0x00417790).
+  /// docs/formats/formation.md, "The blocking gate".
+  ObjectId gate_seen = kNoObject;
   /// A route aimed at a formation was laid by a search that named its unit an
   /// owner, and so holds the destination lock that search made (`[retry+0x24]`:
   /// 0x00419730 asks 0x004178d0 at the search and attaches the lock with the
@@ -920,9 +916,22 @@ class MovementSystem : public System {
   [[nodiscard]] Path route_past_gates(World& world, ObjectId id, Point from,
                                       const PathRequest& request, Path first);
   /// 0x00418210 and 0x00418260: whether the first gate the route crosses
-  /// past `travelled` is within reach and bars the mover, which then stands.
+  /// past `travelled` is within reach and bars the mover, which then stands;
+  /// that gate written to `barring` when given.
   [[nodiscard]] bool held_at_gate(const World& world, ObjectId id, const MoveState& move,
-                                  std::int64_t travelled) const;
+                                  std::int64_t travelled, ObjectId* barring = nullptr) const;
+  /// 0x00417dc0's side test: whether `gate`'s settlement's walls stand
+  /// between `hero` and `unit` -- `Gate::Inside`'s predicate (0x005295d0,
+  /// `inside_walls`) answering differently for the two. False for a gate in
+  /// no settlement.
+  [[nodiscard]] bool gate_cuts_off(World& world, ObjectId gate, ObjectId hero,
+                                   ObjectId unit) const;
+  /// A member a shut gate cut off from its hero during the turn's steps, to
+  /// have its commands ended and leave his army once the steps are done.
+  struct CutOff {
+    ObjectId unit = kNoObject;
+    ObjectId hero = kNoObject;
+  };
   /// `IsArrived`'s free-spot half, for a route that owns a lock.
   [[nodiscard]] bool arrival_spot_free(const World& world, ObjectId id, const MoveState& move,
                                        Point here) const;
@@ -1037,6 +1046,8 @@ class MovementSystem : public System {
   /// A route search's gate lines, and the crossings it is tested against.
   CellOverlay barrier_;
   std::vector<GateCrossing> crossings_;
+  /// The members cut off this turn (`CutOff`); empty between turns.
+  std::vector<CutOff> cut_off_;
   /// The gates handed to the smart pathfinder for one search.
   std::vector<const GateLines::Line*> gates_;
   std::vector<Neighbour> neighbours_;

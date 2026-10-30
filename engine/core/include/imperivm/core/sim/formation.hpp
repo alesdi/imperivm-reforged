@@ -152,6 +152,10 @@ struct Formation {
   /// sample cannot be made (`CreateNextSample`, 0x005f5cff), set while the
   /// route has something left after one.
   bool going_on = false;
+  /// `blocking_gate`, `[form+0x90]`: the gate a member's step last found
+  /// barring it (0x00419ca0); none from `SetDest`. docs/formats/formation.md,
+  /// "The blocking gate".
+  ObjectId blocking_gate = kNoObject;
   /// The goal the route was laid to, its band and inner bound: the retry's
   /// own (`SetDest`, 0x0041a4c0), which the route's end searches again for.
   Point goal{};
@@ -236,8 +240,31 @@ bool formation_rebuild(World& world, Formation& form, const FormationTable& tabl
 /// offset as it is.
 [[nodiscard]] Point formation_turn(Point centre, Point dir, Point offset) noexcept;
 
+/// The gate bracket round the claim (0x005f41b0): into `out`, the line cells
+/// of every gate within 1,600 of `hero` on both axes that counts the hero an
+/// enemy, or that lets no unit through at `now` and is not being opened.
+/// Sealed. docs/formats/formation.md, "The claim on the stations".
+void formation_claim_gates(World& world, ObjectId hero, GameTime now, CellOverlay& out);
+
+/// The claim on the stations (0x005f3fe0): the flood from `centre` over the
+/// cells within `radius` (the caller's, already floored at 1,024), `grid`'s
+/// blocked cells and `closed`'s shut; then each station in turn kept on a
+/// cell that is somebody's, taking it, or moved to the centre of the
+/// cheapest such cell, or with none to the cell of `positions[i]`.
+/// docs/formats/formation.md, "The claim on the stations".
+void formation_claim_stations(const ObstructionGrid& grid, const CellOverlay& closed,
+                              Point centre, std::int32_t radius,
+                              std::span<const Point> positions, std::span<Point> stations);
+
+/// The radius the claim floods within: `FormRadius`, raised to 1,024
+/// (0x005f5b02).
+inline constexpr std::int32_t kClaimRadiusFloor = 1024;
+/// How far from the hero, on each axis, the bracket picks a gate: `0x640`.
+inline constexpr std::int32_t kClaimGateReach = 1600;
+
 /// `PlaceSample` (0x005f5a20): the centre and direction taken, the layout
-/// rerun if marked (`formation_rebuild`), every slot's sample placed, then
+/// rerun if marked (`formation_rebuild`), every slot's sample placed, the
+/// stations claimed (with the movement system's grid), then
 /// `formation_reassign`.
 void formation_place_sample(World& world, Formation& form, const FormationTable& table,
                             Point centre, Point dir, std::vector<ObjectId>& joined);

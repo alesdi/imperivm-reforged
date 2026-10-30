@@ -1361,6 +1361,149 @@ TEST(a_sample_turns_the_offsets_into_the_formations_direction) {
   CHECK(formation_turn(centre, Point{-1, -1}, Point{0, -10}) == (Point{993, 993}));
 }
 
+/// The claim on the stations (0x005f3fe0; docs/formats/formation.md, "The
+/// claim on the stations"). A 64-cell square of open ground, the centre at
+/// (520, 520) -- cell (32, 32) -- and the 1,024 floor: 64 cells either side.
+///
+///   * A station on a cell somebody has is kept exactly, not snapped.
+///   * A station in a wall east of the centre (cells 40..47 by 28..36), at
+///     cell (44, 32): the box from the centre's cell to it is row 32, x
+///     32..44, and an open cell there costs half its distance from the
+///     centre in whole cells plus the square of its distance from cell 44:
+///     x 39 is 3 + 25 = 28, x 38 is 3 + 36. It goes to (39, 32)'s centre.
+///   * Two stations in cell (37, 37): the first keeps it and takes it; the
+///     second goes, within the box (32..37)^2, to (36, 36): four diagonals
+///     from the centre (half: 2) and one cell off (1), 3, where (36, 37) and
+///     (37, 36) cost 3 + 1.
+///   * A station inside a sealed ring (cells 18..22) is on a cell the flood
+///     never reached: nobody's. In the box (20..32)^2 the cheapest is 16,
+///     first met in row order at (23, 20).
+///   * Nothing open anywhere: the cell the member stands in.
+TEST(a_formation_claims_each_member_a_cell_the_flood_reached_and_nobody_took) {
+  ObstructionGrid grid(64, 64);
+  for (std::int32_t x = 40; x <= 47; ++x) {
+    for (std::int32_t y = 28; y <= 36; ++y) grid.set_cell(x, y, true);
+  }
+  for (std::int32_t i = 18; i <= 22; ++i) {
+    grid.set_cell(i, 18, true);
+    grid.set_cell(i, 22, true);
+    grid.set_cell(18, i, true);
+    grid.set_cell(22, i, true);
+  }
+  CellOverlay none;
+  none.seal();
+  constexpr Point kCentre{520, 520};
+  const std::vector<Point> positions(5, Point{100, 900});
+  std::vector<Point> stations{Point{525, 470}, Point{712, 520}, Point{600, 600},
+                              Point{605, 597}, Point{328, 328}};
+  formation_claim_stations(grid, none, kCentre, kClaimRadiusFloor, positions, stations);
+  CHECK((stations[0] == Point{525, 470}));
+  CHECK((stations[1] == Point{632, 520}));
+  CHECK((stations[2] == Point{600, 600}));
+  CHECK((stations[3] == Point{584, 584}));
+  CHECK((stations[4] == Point{376, 328}));
+
+  // Asked for a radius of 32 the square is 2 cells either side and the flood
+  // stops a diagonal short of 2: it reaches the centre's 3 x 3 alone. Of row
+  // 32 the square holds x 32..34, and 34 is not reached: 33 costs 0 + 121
+  // against the centre's 0 + 144.
+  std::vector<Point> near{Point{712, 520}};
+  formation_claim_stations(grid, none, kCentre, 32, positions, near);
+  CHECK((near[0] == Point{536, 520}));
+
+  // Half the distance from the centre counts: from cell (44, 29), (39, 29)
+  // costs 4 + 25 and (39, 30) 3 + 25, so the later row wins.
+  std::vector<Point> high{Point{712, 472}};
+  formation_claim_stations(grid, none, kCentre, kClaimRadiusFloor, positions, high);
+  CHECK((high[0] == Point{632, 488}));
+
+  // A strip with no cell answers below any cost, so it ends the search with
+  // what the strips before it wrote. Everything west of column 30 closed,
+  // and the box from the centre to cell (30, 40) closed too: the box has
+  // nothing, the west strip has nothing, and the member goes to the cell it
+  // stands in, though the strips east and south are open.
+  ObstructionGrid west(64, 64);
+  for (std::int32_t y = 0; y < 64; ++y) {
+    for (std::int32_t x = 0; x < 30; ++x) west.set_cell(x, y, true);
+  }
+  for (std::int32_t x = 30; x <= 32; ++x) {
+    for (std::int32_t y = 32; y <= 40; ++y) west.set_cell(x, y, true);
+  }
+  std::vector<Point> stuck{Point{488, 648}};
+  const std::vector<Point> standing{Point{1000, 900}};
+  formation_claim_stations(west, none, kCentre, kClaimRadiusFloor, standing, stuck);
+  CHECK((stuck[0] == Point{1000, 904}));
+
+  // Nothing open at all.
+  ObstructionGrid shut(64, 64);
+  for (std::int32_t x = 0; x < 64; ++x) {
+    for (std::int32_t y = 0; y < 64; ++y) shut.set_cell(x, y, true);
+  }
+  std::vector<Point> nowhere{Point{712, 520}};
+  formation_claim_stations(shut, none, kCentre, kClaimRadiusFloor, positions, nowhere);
+  CHECK((nowhere[0] == Point{104, 904}));
+
+  // The gate bracket's cells are closed for the claim as the grid's are: a
+  // line across row 30 from x 0 to 63 (and the row below) cuts the north
+  // off, so a station north of it is on a cell nobody has and comes back to
+  // the nearest reached cell in the box, row 32 just south of the line.
+  CellOverlay line;
+  for (std::int32_t x = 0; x < 64; ++x) {
+    line.add(x, 30);
+    line.add(x, 31);
+  }
+  line.seal();
+  ObstructionGrid open(64, 64);
+  std::vector<Point> north{Point{520, 300}};
+  formation_claim_stations(open, line, kCentre, kClaimRadiusFloor, positions, north);
+  CHECK((north[0] == Point{520, 520}));
+  std::vector<Point> bare{Point{520, 300}};
+  formation_claim_stations(open, none, kCentre, kClaimRadiusFloor, positions, bare);
+  CHECK((bare[0] == Point{520, 300}));
+}
+
+/// `PlaceSample` claims the stations it has just placed, with the movement
+/// system's grid: a slot whose sample lands in a wall is moved off it before
+/// the reassign, and one on open ground keeps its sample.
+TEST(placing_a_sample_moves_a_station_that_lands_in_a_wall) {
+  ClassGraph graph = layout_graph();
+  World world;
+  world.set_class_graph(&graph);
+  MovementSystem movement;
+  movement.set_class_graph(&graph);
+  ObstructionGrid grid(128, 128);
+  // A wall across rows 56..58 (y 896..943), under the front slot's sample.
+  for (std::int32_t x = 0; x < 128; ++x) {
+    for (std::int32_t y = 56; y <= 58; ++y) grid.set_cell(x, y, true);
+  }
+  movement.set_grid(std::move(grid));
+  REQUIRE(world.add_system(&movement));
+  Result<FormationTable> table = FormationTable::parse(as_bytes(kBlockXml));
+  REQUIRE(table.ok());
+  const ObjectId hero = world.spawn(NativeClass::hero, nullptr, graph.find("Leader"));
+  REQUIRE(world.set_position(hero, Point{1000, 1000}));
+  const ObjectId a = world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  const ObjectId b = world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
+  REQUIRE(world.set_position(a, Point{1000, 1100}));
+  REQUIRE(world.set_position(b, Point{1000, 1050}));
+  Formation form;
+  form.hero = hero;
+  formation_add(form, a);
+  formation_add(form, b);
+  std::vector<ObjectId> joined;
+  formation_place_sample(world, form, *table, Point{1000, 1000}, Point{0, -1}, joined);
+  REQUIRE(form.slots.size() == 2);
+  // The front slot's sample (1000, 903) is in cell (62, 56), in the wall:
+  // the box from the centre's cell (62, 62) to it holds rows 59..62 open,
+  // and row 59 is cheapest (half of 3 is 1, plus 3 squared): (1000, 952).
+  // The back one, (1000, 1097), stays. The reassign then runs on those.
+  std::vector<Point> samples{form.slots[0].sample, form.slots[1].sample};
+  std::sort(samples.begin(), samples.end(),
+            [](Point l, Point r) { return l.y < r.y; });
+  CHECK((samples[0] == Point{1000, 952}));
+  CHECK((samples[1] == Point{1000, 1097}));
+}
+
 /// Joining only marks the layout, and leaving takes the slot out at once
 /// (0x005f47e0, 0x005f3290): the layout -- the slots' units in slot order,
 /// then the pending ones -- gives each the first slot of its own class, and

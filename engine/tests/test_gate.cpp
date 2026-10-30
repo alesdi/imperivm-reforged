@@ -29,6 +29,7 @@
 #include "imperivm/core/script/bytecode.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/command.hpp"
+#include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/gate.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
@@ -403,6 +404,46 @@ TEST(an_enemys_search_lays_every_gate_that_bars_it_but_an_open_one_and_near_rubb
   f.world.set_health(f.gate, 1000);
   f.world.players().set(0, 1, Relation::allied, true);
   CHECK(laid(1, kSouth) == 0);
+}
+
+/// The gate bracket round a formation's claim (0x005f41b0): every gate
+/// within 1,600 of the hero on both axes that counts him an enemy, open or
+/// not, or that lets no unit through and is not being opened, has its line
+/// laid shut for the claim. docs/formats/formation.md, "The claim on the
+/// stations".
+TEST(a_formations_claim_shuts_the_enemy_gates_near_the_hero_and_his_own_shut_ones) {
+  GateField f;
+  const auto laid = [&](PlayerId owner, Point at) {
+    const ObjectId hero = f.unit(owner, at);
+    CellOverlay overlay;
+    formation_claim_gates(f.world, hero, f.world.time(), overlay);
+    return overlay.size();
+  };
+  CHECK(laid(1, kSouth) == 12);  // an enemy's
+  CHECK(laid(0, kSouth) == 12);  // his own side's, shut
+  // A box, not a circle: 1,600 out on both axes is in, 1,601 is out.
+  CHECK(laid(1, Point{2600, 2600}) == 12);
+  CHECK(laid(1, Point{2601, 1000}) == 0);
+  CHECK(laid(1, Point{1000, 2601}) == 0);
+  // Being opened, his own side's is not laid; the enemy's still is.
+  f.swing(true);
+  f.world.advance(100);
+  CHECK(laid(0, kSouth) == 0);
+  CHECK(laid(1, kSouth) == 12);
+  f.world.advance(2000);  // fully open
+  CHECK(laid(0, kSouth) == 0);
+  CHECK(laid(1, kSouth) == 12);
+  // Closing again, past 20 it still lets units through: not laid; at 20 or
+  // below it does not.
+  f.swing(false);
+  f.world.advance(100);
+  CHECK(laid(0, kSouth) == 0);
+  f.world.advance(2000);
+  CHECK(laid(0, kSouth) == 12);
+  // A destroyed gate lets everyone through.
+  f.world.set_health(f.gate, 0);
+  CHECK(laid(0, kSouth) == 0);
+  CHECK(laid(1, kSouth) == 12);
 }
 
 // --------------------------------------------------------------------------
@@ -924,4 +965,72 @@ TEST(a_unit_whose_way_in_is_a_gateless_gap_reads_as_inside) {
   const ObjectId south = f.unit(1, kSouth);
   CHECK(inside_walls(f.world, west, centre));
   CHECK(!inside_walls(f.world, south, centre));
+}
+
+/// The blocking gate (0x00419ca0, 0x00417dc0; docs/formats/formation.md, "The
+/// blocking gate"). A hero inside the walls marches north, away from the
+/// gate; his one man stands south of it, outside, and his route to his
+/// station crosses the gate, which an enemy near keeps shut to him. Barred,
+/// the step makes the gate the formation's blocking gate, and the man's
+/// route, which has not compared sides at it, finds the walls between him
+/// and his hero (`Gate::Inside`'s predicate, 0x005295d0): his commands are
+/// ended and he leaves the army. With the gate open he walks through and
+/// stays.
+TEST(a_member_a_shut_gate_cuts_off_from_its_hero_leaves_his_army) {
+  for (const bool open : {false, true}) {
+    HeroSystem heroes;
+    GateField f(/*second_gap=*/false, nullptr, &heroes);
+    EconomySystem economy;
+    REQUIRE(f.world.add_system(&economy));
+    Result<FormationTable> formations = FormationTable::parse(bytes_of(
+        R"(<Formations><Default Name="Front"/><FormationClass Name="Front" Width="2" Height="1"
+             OffsetFrontLineByY="60" OffsetWingsByX="80" OffsetWingsByY="-40">
+             <Class Name="Soldier" CentralBlock="1"/></FormationClass></Formations>)"));
+    REQUIRE(formations.ok());
+    f.movement.set_formations(std::move(formations.value()));
+    // The town: its centre north of the wall, the gate one of its own.
+    const ObjectId hall = f.world.spawn(NativeClass::town_hall, nullptr, kNoClass);
+    REQUIRE(f.world.set_position(hall, Point{1000, 500}));
+    f.world.set_owner(hall, 0);
+    SettlementInit init;
+    init.settlement_object = hall;
+    init.anchor = hall;
+    init.owner = 0;
+    init.kind = SettlementKind::stronghold;
+    (void)economy.settlements().create(init);
+    f.gate_slot().settlement = hall;
+    f.gate_slot().state.flags.enemies_near = true;
+    if (open) {
+      f.swing(true);
+      f.world.advance(2100);
+    }
+
+    const ObjectId hero = f.world.spawn(NativeClass::hero, &f.soldier.value(),
+                                        f.graph.find("Soldier"));
+    REQUIRE(f.world.set_position(hero, Point{1000, 700}));
+    f.world.set_health(hero, 100);
+    f.world.set_owner(hero, 0);
+    heroes.register_hero(f.world, hero);
+    const ObjectId man = f.unit(0, Point{1000, 1500});
+    heroes.register_unit(f.world, man);
+    REQUIRE(heroes.attach(f.world, man, hero));
+    REQUIRE(inside_walls(f.world, hero, hall));
+    REQUIRE(!inside_walls(f.world, man, hall));
+
+    march(f.world, hero, Point{1000, 300});
+    REQUIRE(f.move(hero).form_aimed);
+    REQUIRE(f.movement.formation(hero)->blocking_gate == kNoObject);
+    for (int t = 0; t < 8000; t += 100) f.world.advance(100);
+    if (!open) {
+      CHECK(f.movement.formation(hero)->blocking_gate == f.gate);
+      CHECK(f.move(man).gate_seen == f.gate);
+      CHECK(heroes.unit(man)->hero == kNoObject);
+      CHECK(heroes.hero(hero)->army.empty());
+      CHECK(f.at(man).y > kGatePoint.y);
+    } else {
+      CHECK(f.movement.formation(hero)->blocking_gate == kNoObject);
+      CHECK(heroes.unit(man)->hero == hero);
+      CHECK(f.at(man).y < kGatePoint.y);
+    }
+  }
 }

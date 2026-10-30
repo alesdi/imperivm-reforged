@@ -433,7 +433,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// version 47): the move hook (0x0041f530) registers and files a unit at the
 /// move, `Place`'s included, so nothing waits for a sweep. A version-53 file
 /// has the list between the item store and the tallies.
-inline constexpr std::uint32_t kStateVectorVersion = 54;
+/// 55: the movement section carries each formation's blocking gate
+/// (`[form+0x90]`, after `going_on`) and each route's gate it has compared
+/// sides at (`[retry+0x18]`, after `form_lock_laid`), system section version
+/// 48 (docs/formats/formation.md, "The blocking gate").
+inline constexpr std::uint32_t kStateVectorVersion = 55;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";
