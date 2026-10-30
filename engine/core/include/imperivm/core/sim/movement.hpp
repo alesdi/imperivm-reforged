@@ -1150,12 +1150,22 @@ struct GotoOrder {
   /// original's; set by `Goto` and `GotoEnter` (0x005d6810), not by
   /// `GotoAttack`, whose entry point sets the target instead (0x005d6b20).
   bool drop_target = false;
+  /// The call's fourth argument (a byte, 0x005d6655 in `Goto`; the same
+  /// slot in `GotoEnter` and the object forms): with no route laid, play the
+  /// "look around" animation towards the goal and wait at least its length
+  /// (`run_goto`).
+  bool look_around = false;
   /// The object forms' worker (0x005d40c0): `Goto(Obj)` and `GotoAttack`.
   /// A target that is the mover answers true at once; one the mover may not
   /// approach (`goto_may_approach`) lays no route and waits the slice, and so
   /// does a target naming nothing (`target` is then `kNoObject` with this set).
   bool object_form = false;
 };
+
+/// The look-around flag as the family reads it: the argument's low byte.
+[[nodiscard]] inline bool goto_flag(const script::Value& value) noexcept {
+  return value.is_integer() && (value.as_integer() & 0xFF) != 0;
+}
 
 /// The range `SetDest` keeps for a point goal (0x0041a4c0): at most 999.
 [[nodiscard]] constexpr std::int32_t point_route_range(std::int32_t range) noexcept {

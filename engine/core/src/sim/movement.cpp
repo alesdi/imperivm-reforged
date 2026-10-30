@@ -17,6 +17,7 @@
 
 #include "imperivm/core/game/localization.hpp"
 #include "imperivm/core/script/scheduler.hpp"
+#include "imperivm/core/sim/anim.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
@@ -2259,10 +2260,10 @@ struct Self {
 ///
 /// **The answer comes at the re-entry**, as `run_goto` describes for the
 /// whole family: the first run waits the slice, the re-entry answers whether
-/// the unit has arrived. **Not reproduced:** with no route laid the original
-/// plays the "look around" animation when the call's fourth argument is set
-/// (0x0053e6c0 with index 0x13, the script's slot 20) and waits the longer of
-/// the slice and that animation; here the wait is the slice.
+/// the unit has arrived. With no route laid and the call's fourth argument
+/// set, the unit plays its "look around" animation (0x0053e6c0 with index
+/// 0x13, the script's slot 20) towards the goal and the wait is the longer of
+/// the slice and that animation (`goto_tail`).
 HostOutcome goto_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   const bool object_form = ctx.count() > 1 && !is_point(ctx.arg(1));
@@ -2274,6 +2275,7 @@ HostOutcome goto_impl(CallContext& ctx) {
   const std::int32_t range = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
   order.slice = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
   order.give_up = ctx.count() > 5 && ctx.arg(5).is_integer() ? ctx.arg(5).as_integer() : -1;
+  order.look_around = ctx.count() > 4 && goto_flag(ctx.arg(4));
   order.lock_destination = true;
 
   if (!object_form) {
@@ -3093,14 +3095,95 @@ bool goto_may_approach(const World& world, ObjectId mover, ObjectId target) {
 
 namespace {
 
+/// The call's word: what the first run did, which its re-entry reads.
+enum GotoWord : std::int32_t {
+  kGotoNoRoute = 0,
+  kGotoLaid = 1,
+  /// Arrived at the first run with an animation still playing: the word is
+  /// the original's 1, its route record kept, and the re-entry answers true.
+  kGotoArrivedPlaying = 2,
+};
+
 /// The first run's wait: the call suspends and runs again whole -- its
-/// re-entry -- with its word of state saying whether this run laid a route.
-[[nodiscard]] HostOutcome goto_wait(CallContext& ctx, std::int64_t wait, bool laid) {
-  if (ctx.scratch != nullptr) *ctx.scratch = laid ? 1 : 0;
+/// re-entry -- with its word of state saying what this run did.
+[[nodiscard]] HostOutcome goto_wait(CallContext& ctx, std::int64_t wait, GotoWord word) {
+  if (ctx.scratch != nullptr) *ctx.scratch = word;
   HostOutcome out;
   out.status = script::HostStatus::retry;
   out.suspend_for = wait > 0 ? wait : 0;
   return out;
+}
+
+/// The look-around animation's `idx`: the original's index 0x13.
+constexpr std::int32_t kAnimLookAround = 20;
+
+/// The tail of the family's first run, once it has routed (0x005d65a0 ..
+/// 0x005d65f0 in `Goto`, the same in `GotoEnter` and in the object worker
+/// 0x005d40c0): the action mode, the animation and the wait.
+///
+///   * **A route laid**: the action mode becomes the walk (3), and the
+///     animation timer is armed for 1 ms when it is not pending, so the walk
+///     step runs at once (0x005d3b50).
+///   * **No route, the look-around flag set and the entity declaring the
+///     look-around animation**: the mode 0, and that animation started
+///     turned towards the goal (`StartAnimation`, 0x0053e6c0 with index
+///     0x13); the wait is the longer of the slice and its declared length.
+///   * **No route otherwise**: when the timer is not pending and the unit is
+///     not resting in (or playing) the first of its states, the mode 0 and
+///     the unit put back to that state with a transition (0x0053e860).
+///
+/// The wait is then the slice (or the look-around's length), and the unit is
+/// marked to wake the script at its arrival (bit 0x10000), which the walk
+/// step reads; here the walk is the movement system's and the call waits its
+/// slice (docs/formats/animation.md).
+[[nodiscard]] HostOutcome goto_tail(CallContext& ctx, World& world, ObjectId id,
+                                    const GotoOrder& order, Point face, bool laid) {
+  const GameTime now = now_of(ctx, world);
+  std::int64_t wait = order.slice;
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr) return goto_wait(ctx, wait, laid ? kGotoLaid : kGotoNoRoute);
+  if (laid) {
+    world.set_anim_mode(id, 3);
+    if (world.anim_timer_left(*slot, now) == 0) world.arm_anim_timer(id, now, 1);
+    return goto_wait(ctx, wait, kGotoLaid);
+  }
+  const EntityAnim* look = order.look_around && slot->object != nullptr &&
+                                   slot->object->entity != nullptr
+                               ? slot->object->entity->anim(kAnimLookAround)
+                               : nullptr;
+  if (look != nullptr) {
+    world.set_anim_mode(id, 0);
+    (void)start_animation_facing(ctx, world, id, kAnimLookAround, face, 0);
+    wait = std::max<std::int64_t>(wait, look->duration);
+  } else if (world.anim_timer_left(*slot, now) == 0) {
+    // 0x0053cfd0: the playing animation's index, or the resting state's,
+    // both counted from 0 -- so 0 is the first state, or the first animation.
+    const std::int32_t playing = world.anim_slot_at(*slot, now);
+    const std::int32_t index =
+        playing != kNoAnim ? playing - 1 : world.anim_rest_state_at(*slot, now) - 1;
+    if (index != 0) {
+      world.set_anim_mode(id, 0);
+      (void)world.set_anim_state(id, 1, /*transition=*/true, now);
+    }
+  }
+  return goto_wait(ctx, wait, kGotoNoRoute);
+}
+
+/// An arrival at the first run (0x005d6482 .. 0x005d64a8, and 0x005d43c0 in
+/// the worker): the failure stamp cleared, and with an animation still
+/// playing the call waits for its end, the route record kept, and its
+/// re-entry answers true; otherwise the route is dropped and the answer is
+/// true at once.
+[[nodiscard]] HostOutcome goto_arrived(CallContext& ctx, World& world, MovementSystem& movement,
+                                       ObjectId id, MoveState& move) {
+  move.goto_failed_at = kNoGotoFailure;
+  const GameTime now = now_of(ctx, world);
+  if (const WorldObject* slot = world.find(id);
+      slot != nullptr && slot->clock.slot != kNoAnim && now < slot->clock.end()) {
+    return goto_wait(ctx, slot->clock.end() - now, kGotoArrivedPlaying);
+  }
+  movement.stop(world, id);
+  return HostOutcome::ok_with(Value::boolean(true));
 }
 
 }  // namespace
@@ -3126,10 +3209,12 @@ namespace {
 ///   3. **A first run** drops the combat target (the point forms), measures,
 ///      routes and answers true at once when already arrived; otherwise it
 ///      lays the route, notes in the word whether it did, and **suspends for
-///      the whole slice** -- the longer of the slice and the look-around
-///      animation in the original (0x005d65e8), which is not reproduced --
+///      the whole slice** -- or the look-around animation's length when the
+///      call's flag asks for it and it is longer (0x005d65e8, `goto_tail`) --
 ///      however soon the unit will arrive. A first run that lays no route
-///      stamps the failure and may end the script (`GotoOrder::give_up`).
+///      stamps the failure and may end the script (`GotoOrder::give_up`). A
+///      first run that finds the unit arrived while an animation still plays
+///      waits for its end and answers true at the re-entry (`goto_arrived`).
 ///
 /// This used to suspend for the lesser of the slice and the time to arrival
 /// and answer false after it, leaving the loop's next call to find the unit
@@ -3168,6 +3253,10 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   // ever.
   const Point dest =
       order.target == kNoObject ? order.dest : world.resolve_position(order.target);
+  // What the look-around turns towards: the point, or the target where it
+  // stands -- the invalid point, which turns nothing, for a target naming
+  // nothing (0x005d44c0).
+  const Point look_face = order.object_form && order.target == kNoObject ? kHeldPosition : dest;
   bool stepped_out = false;
   if (const ObjectState* state = world.state(id); state != nullptr && state->is_held()) {
     const std::int32_t wait = held_by_carrier(world, id)
@@ -3188,10 +3277,14 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   }
 
   MoveState& move = movement.state(id);
-  // The re-entry (0x005d6340, 0x005d6779, 0x005d41b9).
-  if (!ctx.first_call && !stepped_out && move.goto_active) {
-    const bool laid = ctx.scratch != nullptr && *ctx.scratch != 0;
-    const bool arrived = laid && movement.is_arrived(world, id);
+  // The re-entry (0x005d6340, 0x005d6779, 0x005d41b9). An arrival that
+  // waited out an animation kept its route record and answers on it; here
+  // the record is the word, the arrival band rechecked when an order is live.
+  const std::int32_t word = ctx.scratch != nullptr ? *ctx.scratch : kGotoNoRoute;
+  if (!ctx.first_call && !stepped_out && (move.goto_active || word == kGotoArrivedPlaying)) {
+    const bool arrived = word == kGotoArrivedPlaying
+                             ? !move.goto_active || movement.is_arrived(world, id)
+                             : word == kGotoLaid && movement.is_arrived(world, id);
     if (arrived) movement.stop(world, id);
     return HostOutcome::ok_with(Value::boolean(arrived));
   }
@@ -3207,7 +3300,7 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   if (order.object_form) {
     if (order.target == id) return HostOutcome::ok_with(Value::boolean(true));
     if (order.target == kNoObject || !goto_may_approach(world, id, order.target)) {
-      return goto_wait(ctx, order.slice, /*laid=*/false);
+      return goto_tail(ctx, world, id, order, look_face, /*laid=*/false);
     }
   }
 
@@ -3232,9 +3325,7 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   if (within(here, dest, order.range) &&
       (!order.lock_destination || movement.ignores_passability(world, id) ||
        movement.spot_free(world, id, here, movement.radius_of(world, id)))) {
-    movement.stop(world, id);
-    move.goto_failed_at = kNoGotoFailure;
-    return HostOutcome::ok_with(Value::boolean(true));
+    return goto_arrived(ctx, world, movement, id, move);
   }
 
   // Continuation is keyed on the *order*, not on whether a route exists: a
@@ -3273,11 +3364,7 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
                                   order.lock_destination)
             : movement.order_goto_object(world, id, order.target, order.range, order.min_range,
                                          order.lock_destination);
-    if (outcome == MoveOutcome::arrived) {
-      move.goto_failed_at = kNoGotoFailure;
-      movement.stop(world, id);
-      return HostOutcome::ok_with(Value::boolean(true));
-    }
+    if (outcome == MoveOutcome::arrived) return goto_arrived(ctx, world, movement, id, move);
   }
 
   if (move.has_path) {
@@ -3296,8 +3383,9 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
     }
   }
 
-  // The whole slice, route or none (0x005d65e8); the answer is the re-entry's.
-  return goto_wait(ctx, order.slice, move.has_path);
+  // The whole slice, route or none, or the look-around's length when longer
+  // (0x005d65e8); the answer is the re-entry's.
+  return goto_tail(ctx, world, id, order, look_face, move.has_path);
 }
 
 void register_movement_host(HostRegistry& registry) {

@@ -2553,16 +2553,19 @@ HostOutcome idle_fire(CallContext& ctx, const Self& self, IdleKind kind, std::in
 
 /// `Unit::Idle(ms)`, `Unit::Taunt(ms)` and `Ship::Idle()`; see above.
 HostOutcome idle_activity(CallContext& ctx, const Self& self, std::int64_t ms, IdleKind kind) {
+  // A re-entry is the activity's timer firing for a call made on the map:
+  // the unit's handler decides, held or not (a unit put into a holder
+  // mid-idle runs no step, and its script is not woken).
+  if (!ctx.first_call && ctx.scratch != nullptr) {
+    const std::int64_t budget = static_cast<std::uint32_t>(*ctx.scratch) & kIdleBudgetMask;
+    return idle_fire(ctx, self, kind, budget);
+  }
   const WorldObject* slot = self.world->find(self.id);
   if (slot == nullptr || slot->state.position == kHeldPosition) {
     // The held branch: `ms` in the wait cell and return 1; its re-entry pops
     // the arguments and is done, which is a timed wait.
     if (!ctx.first_call) return HostOutcome::ok_void();
     return HostOutcome::sleep_for(ms > 0 ? ms : 0);
-  }
-  if (!ctx.first_call && ctx.scratch != nullptr) {
-    const std::int64_t budget = static_cast<std::uint32_t>(*ctx.scratch) & kIdleBudgetMask;
-    return idle_fire(ctx, self, kind, budget);
   }
   if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
     (void)combat->stop(self.id);
@@ -2796,6 +2799,7 @@ HostOutcome goto_attack_impl(CallContext& ctx) {
   }
 
   order.slice = ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0;
+  order.look_around = ctx.count() > 3 && goto_flag(ctx.arg(3));
   order.give_up = ctx.count() > 4 && ctx.arg(4).is_integer() ? ctx.arg(4).as_integer() : -1;
   order.lock_destination = true;
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
@@ -2830,6 +2834,7 @@ HostOutcome goto_enter_impl(CallContext& ctx) {
   }
   order.range = point_route_range(ctx.arg(2).is_integer() ? ctx.arg(2).as_integer() : 0);
   order.slice = ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0;
+  order.look_around = ctx.count() > 4 && goto_flag(ctx.arg(4));
   order.give_up = ctx.count() > 5 && ctx.arg(5).is_integer() ? ctx.arg(5).as_integer() : -1;
   // 0x005d6620 drops the combat target on its first pass, once the unit is
   // out of any holder (0x005d6810..0x005d6820), as `Goto`'s point form does.

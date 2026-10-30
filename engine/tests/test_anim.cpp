@@ -662,6 +662,40 @@ TEST(anim_squad_set_state_stamps_the_scripts_millisecond) {
   CHECK(squad->state_time == 730);
 }
 
+/// `SetState(state, set, clear)` on a squad (0x00421380): null-checked, the
+/// state written, the sixteen-bit flags word at `+0x30` set and then
+/// cleared, and the game's running time stamped. Registered by the binary on
+/// the squad receiver; the corpus's two sites are commented out, so it is
+/// bound for what a script could call.
+TEST(anim_squad_set_state_with_flags_sets_then_clears) {
+  AnimBench b;
+  script::Scheduler clock;
+  b.scheduler = &clock;
+  const ObjectId leader = b.spawn();
+  const SquadKey key = b.heroes.squads().create(1, leader);
+  REQUIRE(key.valid());
+  Squad* squad = b.heroes.squads().find(key);
+  REQUIRE(squad != nullptr);
+  squad->flags = 0x0101;
+  clock.set_now(450);
+  CHECK(b.call("SetState", 3, {pack_squad(key), script::Value::integer(3),
+                               script::Value::integer(0x0030), script::Value::integer(0x0110)})
+            .status == script::HostStatus::ok);
+  CHECK(squad->state == 3);
+  // (0x0101 | 0x0030) & ~0x0110 = 0x0021; a set bit the clear names goes.
+  CHECK(squad->flags == 0x0021);
+  CHECK(squad->state_time == 450);
+  // Only sixteen bits are kept.
+  CHECK(b.call("SetState", 3, {pack_squad(key), script::Value::integer(3),
+                               script::Value::integer(0x10004), script::Value::integer(0)})
+            .status == script::HostStatus::ok);
+  CHECK(squad->flags == 0x0025);
+  // A squad naming nothing writes nothing.
+  CHECK(b.call("SetState", 3, {pack_squad(SquadKey{}), script::Value::integer(9),
+                               script::Value::integer(1), script::Value::integer(0)})
+            .status == script::HostStatus::ok);
+}
+
 /// A state's own loop is the pose the object rests in, not a playing animation,
 /// and neither is one that has run to its end.
 ///
@@ -1213,4 +1247,27 @@ TEST(ship_idle_raises_the_force_flag_its_first_draw_spends) {
   CHECK(first.status == script::HostStatus::retry);
   CHECK(first.suspend_for == 264);
   CHECK(!b.world.find(ship)->state.flags.force_idle);
+}
+
+/// **An idle whose mode something else rewrote never wakes its script.** The
+/// activity runs only from the unit's end handler and only while the action
+/// mode is still 4 (0x005d5b60); `StartAnim` sets it to 0 (0x005a9ce0), so
+/// the idle's next firing runs no step, and nothing sends the wake.
+TEST(idle_whose_mode_was_rewritten_never_wakes) {
+  AnimBench b;
+  CommandSystem commands;
+  REQUIRE(b.world.add_system(&commands));
+  const ObjectId unit = b.spawn();
+  b.world.rng().seed(1);
+  IdleCall idle(b, unit, 1000);
+  const script::HostOutcome first = idle.run();
+  REQUIRE(first.status == script::HostStatus::retry);
+  CHECK(b.world.find(unit)->clock.mode == 4);
+  b.call("StartAnim", 2, {AnimBench::obj(unit), script::Value::integer(1),
+                          AnimBench::point(100, 100)});
+  CHECK(b.world.find(unit)->clock.mode == 0);
+  b.world.advance(1500);
+  const script::HostOutcome orphan = idle.run();
+  CHECK(orphan.status == script::HostStatus::retry);
+  CHECK(orphan.suspend_for > 1000000);
 }
