@@ -735,7 +735,7 @@ bool MovementSystem::stop_branch_halts(const World& world, ObjectId id, const Mo
   // runs out of route stops there, free spot or not. Nor does it step on
   // before a gate that bars it (0x00419f8a .. 0x00419fa2): where the walk on
   // would wait at the gate, the stop stops there.
-  return !stop_owner(id, move) || travelled >= move.path_length ||
+  return !lock_owner(id, move) || travelled >= move.path_length ||
          (!grid_.blocked(here) && spot_free(world, id, here, radius_of(world, id))) ||
          held_at_gate(world, id, move, travelled);
 }
@@ -783,29 +783,15 @@ bool MovementSystem::lock_owner(ObjectId id, const MoveState& move) const noexce
   return move.dest_lock;
 }
 
-bool MovementSystem::stop_owner(ObjectId id, const MoveState& move) const noexcept {
-  // **Engine choice.** `0x004178d0` names a march member an owner only once
-  // the march is over; while it goes on the stop branch takes no step and the
-  // member stands where the stop found it. A hero's script stops his army
-  // mid-march whenever his own order changes -- `HERO_IDLE.VS` sets every
-  // member still on `form_move` to `idle`, whose `UNIT_IDLE.VS` opens with
-  // `while (!.Stop(1000))` -- and the AI changes a marching hero's order
-  // often (`capture` and `sneak` in turn, a second or two apart, on
-  // Crossroads). Members of one formation pass through one another
-  // (0x005d2f80), so the army stood inside itself wherever it was stopped.
-  // Here such a member walks on along its route to the first free spot, as an
-  // owner does, and as every member did before the march had a route of its
-  // own. Without the flag it stands, as in the original.
-  if (!move.form_aimed) return lock_owner(id, move);
-  const Formation* form = formation(move.party);
-  return form != nullptr && form->should_lock;
-}
-
 bool MovementSystem::request_stop(World& world, ObjectId id) {
   MoveState* move = find(id);
-  if (move == nullptr || !move->has_path || !stop_owner(id, *move)) {
+  if (move == nullptr || !move->has_path || !lock_owner(id, *move)) {
     // With no owner named, the path follower's stop branch takes no step at
-    // all (0x00419ef8 -> 0x0041a019): the unit stands where it is.
+    // all (0x00419ef8 -> 0x0041a019): the unit stands where it is. A march
+    // member is named no owner while its formation's path goes on
+    // (0x004178d0), so one its hero's script stops mid-march stands where the
+    // stop found it -- inside a fellow, if that is where it was, since the
+    // members of one formation do not block one another (0x005d2f80).
     stop(world, id);
     return false;
   }
@@ -1183,22 +1169,16 @@ std::int32_t MovementSystem::walk_step(const World& world, ObjectId id,
 
 std::int32_t MovementSystem::formation_stride_or_walk(const World& world, ObjectId id,
                                                       const MoveState& move) const {
-  // **Engine choice, labelled: a march's followers step 200.** In
-  // `gbr.exe` a route aimed at a formation is cut by the unit's own walk step
-  // as any other is (`RecastPathfind`, 0x00419730, builds a mode-2 route's
-  // media with 0x005d2920; only the formation's own record takes 200). Here
-  // the stride is also the avoidance's step (`sim/avoidance.hpp`), which is
-  // this engine's model and not the original's, and with the walk step a
-  // column stopped in mid-march -- an AI squad's `ClrCmd` ends its
-  // `form_move` where it walks -- stands in piles: Crossroads seed 5's worst
-  // overlap was 82 against 36 with 200. The followers keep the 200 they had
-  // while the march was the hero's route; the hero keeps his own. The step at
-  // which a follower makes the next sample is the original's, its walk step
-  // (`formation_step`).
-  if (move.form_aimed && move.party != kNoObject && move.party != id) return kFormationStride;
+  // A route is cut by its unit's own walk step: `RecastPathfind` (0x00419730)
+  // builds every route's media with 0x005d2920, a route aimed at a formation
+  // (mode 2) as any other, hero and follower alike. Only the formation's own
+  // record steps 200 (`kFormationRouteStride`).
   const std::int32_t step = walk_step(world, id, move);
-  // A route aimed at a formation with no walk step still has to be stepped,
-  // since its samples are made at its steps, and takes the formation's 200.
+  // **Engine limit, labelled.** A route aimed at a formation has to be
+  // stepped, since its samples are made at its steps (0x00419b20), and this
+  // engine walks a stepless route turn by turn with no step to make them at;
+  // a unit whose walk animation declares no `step` takes the formation's 200
+  // there. What the original's media does with a step of 0 was not read.
   if (step == 0 && move.form_aimed) return kFormationStride;
   return step;
 }

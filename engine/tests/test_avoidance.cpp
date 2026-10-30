@@ -363,17 +363,19 @@ void aim_at_station(Field& field, ObjectId hero, ObjectId unit, Point station, b
 
 }  // namespace
 
-TEST(the_stride_is_the_walk_animations_step_and_a_marchs_followers_step_200) {
+TEST(the_stride_is_the_walk_animations_step_for_a_march_member_too) {
   Field field;
   const ObjectId hero = field.unit("Soldier", Point{100, 100});
   const ObjectId member = field.unit("Soldier", Point{100, 200});
   const ObjectId other = field.unit("Soldier", Point{100, 300});
   aim_at_station(field, hero, member, Point{900, 200}, true, false);
   field.movement.order_goto(field.world, other, Point{900, 300}, 0);
-  // The walk slot's `step` for a unit alone. A follower aimed at a formation
-  // steps 200, an engine choice (`formation_stride_or_walk`): the original
-  // cuts its media with its walk step too (0x00419730 with 0x005d2920).
-  CHECK(field.move(member).stride == kFormationStride);
+  // The walk slot's `step`, for a unit alone and for a follower aimed at a
+  // formation alike: `RecastPathfind` cuts every route's media with the
+  // unit's walk step (0x00419730 with 0x005d2920). Only the formation's own
+  // route steps 200.
+  CHECK(field.move(member).stride == 40);
+  CHECK(field.move(member).stride != kFormationStride);
   CHECK(field.move(other).stride == 40);
   CHECK(field.move(member).party == hero);
   CHECK(field.move(member).form_aimed);
@@ -781,7 +783,7 @@ TEST(a_march_keeps_its_party_through_a_save) {
   CHECK(fresh.find(member)->form_aimed);
   CHECK(fresh.find(member)->form_seen == -1);
   CHECK(fresh.find(member)->form_lock_laid == field.move(member).form_lock_laid);
-  CHECK(fresh.find(member)->stride == kFormationStride);
+  CHECK(fresh.find(member)->stride == field.move(member).stride);
   REQUIRE(fresh.formation(hero) != nullptr);
   CHECK(fresh.formation(hero)->going_on);
   CHECK(fresh.formation(hero)->should_lock);
@@ -1837,48 +1839,36 @@ TEST(a_unit_told_to_stop_walks_on_off_the_body_it_is_passing_through) {
   REQUIRE(f.field.move(f.walker).has_path);
   CHECK(f.gap() < 30);  // drawn through each other, radii 15 and 15
   CHECK(f.field.movement.lock_owner(f.walker, f.field.move(f.walker)));
+  CHECK(f.field.at(f.walker) == (Point{500, 500}));
   CHECK(f.field.movement.request_stop(f.field.world, f.walker));
   for (int i = 0; i < 3; ++i) f.field.world.advance(800);
   CHECK(!f.field.move(f.walker).has_path);
   CHECK(!f.field.move(f.walker).stop_requested);
   CHECK(f.gap() >= 30);
-  // And it stopped at the first step it tested after the request -- a
-  // follower's step of 200 on, so (700,500) -- not at its route's end.
-  CHECK(f.field.at(f.walker) == (Point{700, 500}));
+  // And it stopped at the first step it tested after the request -- its walk
+  // step of 40 on, so (540,500) -- not at its route's end.
+  CHECK(f.field.at(f.walker) == (Point{540, 500}));
   CHECK(f.field.move(f.walker).last_outcome == MoveOutcome::idle);
 }
 
-TEST(a_march_member_told_to_stop_while_the_march_is_on_walks_on_when_the_march_was_flagged) {
+TEST(a_march_member_told_to_stop_while_the_march_is_on_stops_where_it_is) {
   // While the formation still has a path, `0x004178d0` names no owner for a
-  // member's retry, and the original's stop branch takes no step at all
-  // (0x00419ef8 -> 0x0041a019): the walker would stop on its fellow. Here a
-  // march whose flag is set walks it on to the first free spot all the same
-  // (`stop_owner`, an engine choice; docs/formats/formation.md), as above.
-  ThroughAFellow f(/*hero_marches=*/true);
-  REQUIRE(f.field.move(f.walker).has_path);
-  CHECK(f.gap() < 30);
-  CHECK(f.field.movement.marching(f.walker, f.field.move(f.walker)));
-  CHECK(!f.field.movement.lock_owner(f.walker, f.field.move(f.walker)));
-  CHECK(f.field.movement.stop_owner(f.walker, f.field.move(f.walker)));
-  CHECK(f.field.movement.request_stop(f.field.world, f.walker));
-  for (int i = 0; i < 3; ++i) f.field.world.advance(800);
-  CHECK(!f.field.move(f.walker).has_path);
-  CHECK(f.gap() >= 30);
-  CHECK(f.field.at(f.walker) == (Point{700, 500}));
-}
-
-TEST(a_march_member_told_to_stop_while_an_unflagged_march_is_on_stops_where_it_is) {
-  // Without the formation's flag nobody is an owner, here as in the original:
-  // the walker stops on its fellow.
-  ThroughAFellow f(/*hero_marches=*/true, /*lock=*/false);
-  REQUIRE(f.field.move(f.walker).has_path);
-  CHECK(!f.field.movement.stop_owner(f.walker, f.field.move(f.walker)));
-  const Point before = f.field.at(f.walker);
-  CHECK(!f.field.movement.request_stop(f.field.world, f.walker));
-  CHECK(!f.field.move(f.walker).has_path);
-  f.field.world.advance(800);
-  CHECK(f.field.at(f.walker) == before);
-  CHECK(f.gap() < 30);
+  // member's retry, flag or no flag, and the path follower's stop branch
+  // takes no step at all (0x00419ef8 -> 0x0041a019). The same walker stops
+  // on its fellow.
+  for (const bool lock : {true, false}) {
+    ThroughAFellow f(/*hero_marches=*/true, lock);
+    REQUIRE(f.field.move(f.walker).has_path);
+    CHECK(f.gap() < 30);
+    CHECK(f.field.movement.marching(f.walker, f.field.move(f.walker)));
+    CHECK(!f.field.movement.lock_owner(f.walker, f.field.move(f.walker)));
+    const Point before = f.field.at(f.walker);
+    CHECK(!f.field.movement.request_stop(f.field.world, f.walker));
+    CHECK(!f.field.move(f.walker).has_path);
+    f.field.world.advance(800);
+    CHECK(f.field.at(f.walker) == before);
+    CHECK(f.gap() < 30);
+  }
 }
 
 TEST(a_unit_told_to_stop_with_no_free_spot_ahead_stops_at_its_routes_end) {
