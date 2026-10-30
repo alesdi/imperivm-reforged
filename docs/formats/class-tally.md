@@ -22,8 +22,7 @@ name (the class's own `id`, as a string) to a signed count.
   record at `player - 1`, guarded only by `player - 1 < 16`.
   `CheckUEnabled` (0x004243d0) and `GetPlayerUnits(player, class)`'s gate
   (the call at 0x005de807) read the same map. So do `AllyCount` and
-  `EnemyCount` (0x00422473, 0x00422583), which this engine does not yet
-  implement.
+  `EnemyCount` (below).
 * **The add** (0x00447200) walks the unit's class and then each parent in
   turn (the class record's parent link). For each name it adds one,
   creating an entry of 1 for a name that has none. It then files the unit
@@ -115,6 +114,21 @@ Nothing else touches the map:
 * **A change of owner that is not `Unit::SetPlayer`** -- a building's, or a
   settlement's own record -- does not touch the tally, which counts units.
 
+## `AllyCount` and `EnemyCount`
+
+`AllyCount(player, "class")` (0x004223b0) and `EnemyCount(player,
+"class")` (0x004224c0) are registered beside `Count` (0x0043c2d0) and
+differ from each other in one test. The viewer is `player - 1`; when it is
+16 or more the answer is 0. Otherwise each walks the sixteen player records
+in order and asks the relation read (0x0044e250) how the viewer sees that
+player: 1 for the viewer itself, else 2 or 4 by the alliance bit in the
+viewer's own row. `AllyCount` adds the player's tally for the name (the read
+above, 0 for no entry) whenever the answer is not 4, so the viewer's own
+count is part of it; `EnemyCount` adds it whenever the answer is 4. The
+string argument is released and the sum is the result. There is no lower
+bound on the viewer: a player of 0 or less reads a record before the player
+table. No shipped script calls either.
+
 ## How it drifts from the units on the map
 
 * When a registered unit dies, it takes one off its present owner's count.
@@ -170,6 +184,9 @@ Nothing else touches the map:
   because the slide is not modelled (the note on `f_presentation_void` in
   `engine/core/src/sim/world_host.cpp`).
 * **The latch is not modelled**: there is no editor.
+* **`AllyCount` and `EnemyCount` answer 0 for a player of 0 or less**
+  (`fn_side_count` in `engine/core/src/sim/world_host.cpp`), where the
+  original reads memory before the player table.
 
 ## What is still unknown
 
