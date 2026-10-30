@@ -1342,13 +1342,11 @@ HostOutcome load_cargo(CallContext& ctx) {
 ///     and this is the whole reason the entry point exists rather than the
 ///     callers writing `NearestStronghold`.
 ///
-/// **The comparison is by area, not by node**, and that matters here more
-/// than anywhere else in this family. `sim/gaika.hpp` records that this
-/// engine's node partition is an approximation -- one node per settlement --
-/// while the LSA partition is measured and exact. Had the original compared
-/// node identity, no two settlements would ever share one here and this would
-/// answer nothing on every map; it compares the area, so the approximation
-/// does not reach it.
+/// **The comparison is by area, not by node**: the receiver's node's area
+/// (`[node+0x10]`) against the candidate's. Two town halls in one area are
+/// two settlement nodes of the partition (docs/formats/gaika.md), so a node
+/// comparison would answer nothing; the area comparison is what makes the
+/// call useful.
 ///
 /// **The receiver is not excluded**, and that is the original's. A stronghold
 /// asking this of itself gets itself back, at distance zero. Neither shipped

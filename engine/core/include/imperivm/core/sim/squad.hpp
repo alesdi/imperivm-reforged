@@ -695,6 +695,15 @@ class SquadTable {
 [[nodiscard]] std::int32_t seen_enemy_staying(World& world, HeroSystem& heroes, GaikaId node,
                                               std::int32_t viewer);
 
+/// The enemy strength `viewer` sees in `node` **with any presence** --
+/// coming, leaving or staying -- plus the node's settlement's wall when its
+/// owner is an enemy: the walk `CheckLsaPath`'s ship test (0x00441730) makes
+/// of an advancing ship's destination node before it lets the ship carry a
+/// crossing. The same walk as `seen_enemy_staying` with the presence mask
+/// widened; no memory tail.
+[[nodiscard]] std::int32_t enemy_strength_present(World& world, HeroSystem& heroes, GaikaId node,
+                                                  std::int32_t viewer);
+
 /// Node `node`'s deque (`SquadTable::filed_under`) as a copy, for a walk that
 /// may touch the table while it goes.
 [[nodiscard]] inline std::vector<SquadKey> squads_filed_under(SquadTable& table, GaikaId node) {

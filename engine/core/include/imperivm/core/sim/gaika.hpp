@@ -69,72 +69,21 @@
 /// index 0 is reserved, exactly as squad index 0 is (`sim/squad.hpp`) and as
 /// `SS_IDLE`, `GS_NONE` and `ES_NONE` are (`sim/ai_profile.hpp`).
 ///
-/// ## The partition is an approximation, and this section is the record of that
+/// ## The partition is the original's
 ///
-/// **This header used to refuse to model a node table at all.** The refusal was
-/// this, and it still stands as a description of the evidence:
+/// For a while this header recorded a deliberate approximation: one node per
+/// settlement and one per connected region, taken because the slot-grid
+/// builder had not been read and 46% of the remaining call sites sat behind
+/// the table. The builder has since been read end to end -- the passability
+/// areas (0x00453130, `sim/lsa.hpp`) and the node partition over them
+/// (0x0044e050, `docs/formats/gaika.md`, "How the table is built") -- and
+/// `sim/gaika_table.hpp` now reproduces both, so node ids, rectangles, order,
+/// centres, coverage and neighbours are the original's for a map, and
+/// `GetGAIKA(point)` is the slot-grid read 0x0044e3f0 is.
 ///
-/// > `gbr.exe`'s `CVXGlobalAI::Persist()` names its fields -- `GAIKAs`,
-/// > `GAIKASlots`, `slotresx`, `slotresy`, `MAIKAs`, `gaikaset`, `setgaika`,
-/// > and per node `settlement`, `squads`, `coverage`, `adjcount`, `shipcount`,
-/// > `shipneed` -- which is enough to see the *shape*: a fixed-resolution slot
-/// > grid over the map, a node per region, a two-way mapping between nodes and
-/// > settlements. It is **not** enough to say how the grid is cut, what
-/// > `coverage` counts, or what `GAIKA::RunStrat` does when it runs a strategy.
-/// > A `GaikaTable` written from the field names alone would be a guess wearing
-/// > the clothes of a measurement, and every entry point that consumed it would
-/// > inherit the guess.
-///
-/// **That trade has now been taken deliberately, and by the project's owner
-/// rather than by this file.** 314 of the installation's remaining 680
-/// unimplemented call sites sit behind that one refusal -- 46% of everything
-/// left -- and no amount of care anywhere else reaches them. The decision is:
-/// build the partition as a **stated approximation**, ship it, and keep the
-/// evidence for going back.
-///
-/// ### What is measured, and what is approximated
-///
-/// The two halves are not the same kind of claim and must not be read as one:
-///
-///   * **The LSA partition is measured.** An LSA is a connected component of
-///     the map under a movement domain, and `sim/lsa.hpp` computes exactly that
-///     by flood fill over the terrain layer this engine already parses. Its
-///     *numbering* need not match the original's, because no script ever writes
-///     an LSA id down: every shipped use passes one straight from a producer
-///     (`gaika.LSA`, `sq.LSA`) into a consumer (`IsWaterLsa`, `CheckLsaPath`).
-///     The ids are opaque handles and the relation between them is what the
-///     scripts read.
-///   * **The node partition is an approximation, and it is not the original's
-///     cut.** `sim/gaika_table.hpp` builds one node per settlement plus one per
-///     remaining connected region. The original derives its nodes from a slot
-///     grid at `slotresx` x `slotresy` (0x0044e060), which this project cannot
-///     reproduce and does not pretend to.
-///
-/// ### What that costs, named
-///
-///   * **Node ids do not match the original's**, so a save from the retail game
-///     could not be read against this table even if the rest of it were
-///     decodable. Nothing here claims otherwise.
-///   * **`coverage`, `adjcount`, `shipcount` and `shipneed` are still not
-///     modelled.** Nothing in the assigned entry-point list reads them, which
-///     is why they can be left out rather than invented; a future entry point
-///     that wants one is a reason to reopen this, not a reason to guess.
-///   * **The node count differs from the original's**, so `GAIKACount` answers
-///     a different number and any script arithmetic keyed to a specific id --
-///     there is none in the corpus -- would diverge.
-///   * The approximation is **stable and deterministic**: node order is
-///     settlement order, then area order, both of which are already part of the
-///     simulation's definition.
-///
-/// ### How to go back
-///
-/// Everything the refusal asked for is still what would settle it: **a save
-/// file with a `CVXGlobalAI` block decoded against the `Persist` names**, or a
-/// reading of the slot-grid builder at 0x0044e060 complete enough to reproduce
-/// the cut. If either arrives, `GaikaTable::build` is the one function to
-/// replace; the entry points read the table through its accessors and none of
-/// them encodes the partition rule. `docs/plan.html` carries the same note
-/// where the decision is visible to someone who is not reading this file.
+/// What is still not modelled on a node: `shipcount` and `shipneed`, and the
+/// shipyard's two cached areas (0x0044b740), which `WaterLsa` answers on
+/// demand instead (`sim/economy.cpp`).
 
 #include <cstdint>
 

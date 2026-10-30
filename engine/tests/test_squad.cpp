@@ -52,6 +52,7 @@
 #include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
+#include "gaika_stand_in.hpp"
 #include "test.hpp"
 
 using namespace imperivm::core;
@@ -2484,7 +2485,7 @@ TEST(gaika_count_by_class_walks_the_staying_squads_and_then_the_settlement) {
   second.owner = 1;
   second.kind = SettlementKind::stronghold;
   const SettlementId camp = economy.settlements().create(second);
-  world.mutable_gaika().build(world, world.lsa(), economy.settlements());
+  imperivm::test::stand_in_nodes(world, economy.settlements());
   constexpr GaikaId kHere = 1;
   constexpr GaikaId kThere = 2;
   constexpr GaikaId kElsewhere = 7;
@@ -2686,7 +2687,7 @@ TEST(all_enemies_in_holder_asks_the_settlement_first_and_then_the_squads_leaders
   unbuilt.owner = 2;
   unbuilt.kind = SettlementKind::stronghold;
   (void)economy.settlements().create(unbuilt);
-  world.mutable_gaika().build(world, world.lsa(), economy.settlements());
+  imperivm::test::stand_in_nodes(world, economy.settlements());
   constexpr GaikaId kHere = 1;
   constexpr GaikaId kNoWalls = 2;
   constexpr GaikaId kElsewhere = 9;
@@ -5025,7 +5026,7 @@ TEST(a_ships_move_carries_its_passengers_squads_locked_into_the_node_under_it) {
   };
   town(Point{100, 100});
   town(Point{20'000, 20'000});
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   const GaikaId far = f.world.gaika().at(f.world.lsa(), Point{20'000, 20'000});
   REQUIRE(far != kNoGaika);
   REQUIRE(far != f.world.gaika().at(f.world.lsa(), Point{100, 100}));
@@ -5129,7 +5130,7 @@ TEST(a_unit_enrolled_at_placement_is_filed_under_the_node_it_stands_in) {
   init.owner = 1;
   init.kind = SettlementKind::stronghold;
   (void)f.economy.settlements().create(init);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   const GaikaId here = f.world.gaika().at(f.world.lsa(), Point{100, 100});
   REQUIRE(here != kNoGaika);
 
@@ -5178,7 +5179,7 @@ TEST(a_garrisoned_unit_regrouped_from_no_squad_is_sent_to_its_towns_node) {
   };
   (void)town(Point{100, 100});  // the corner's town
   const ObjectId far_holder = town(Point{20'000, 20'000});
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   const GaikaId corner = f.world.gaika().at(f.world.lsa(), Point{0, 0});
   const GaikaId far_town = f.world.gaika().at(f.world.lsa(), Point{20'000, 20'000});
   REQUIRE(corner != kNoGaika);

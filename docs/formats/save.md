@@ -478,18 +478,31 @@ a save is not a promise.
 
 ### `session`
 
-`GameSession`'s own bookkeeping, at its own version **3**. One number, the layer the grid
-was built from, and the templates laid.
+`GameSession`'s own bookkeeping, at its own version **5**. One number, the layer the grid
+was built from, the templates laid, and the AI's node table.
 
 ```
     u32     magic          "ISES"
-    u32     version        3
+    u32     version        5
     u32     script_watermark
     u32     layer_size         bytes that follow; 0 when the map's own layer is in use
     u8[]    layer              a GRID container: `Terrain.pass.grid` as rebuilt
     u32     stamp_count        templates laid at match start, in the order they landed
     struct  stamps[]           u32 template index into RandomMapSettlements, i32 x, i32 y
+    u32     node_count         the real nodes, id 1 first
+    struct  nodes[]            i32 centre x, i32 centre y, i32 area, u32 settlement object,
+                               i32 left, i32 top, i32 right, i32 bottom (slots, inclusive)
+    u32     slot_columns
+    u32     slot_rows
+    u16     slots[]            each 128-unit slot's node id, row by row; 0 for none
 ```
+
+The node table is the partition 0x0044e050 cuts when the match starts (`docs/formats/gaika.md`),
+kept as cut: a load restores it instead of cutting the restored world again, which has lost or
+gained buildings since. Each node's coverage and neighbour list are counted again from the slot
+grid (0x0044a3c0), the original's own derivation; its squads are the squad section's. State
+vector **56** made it the original's cut and added the rectangles and the slot grid (session
+version 5).
 
 `stamps` is what a load needs to lay the templates' ground again: each template copies its
 own terrain onto the map, levels the height under it and takes out the shore where it

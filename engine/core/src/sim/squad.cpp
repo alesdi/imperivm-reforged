@@ -3410,6 +3410,16 @@ std::int32_t seen_enemy_staying(World& world, HeroSystem& heroes, GaikaId node,
   return gaika_eval(world, heroes, node, kAiStaying, viewer, kAiEnemy, false).enemy;
 }
 
+std::int32_t enemy_strength_present(World& world, HeroSystem& heroes, GaikaId node,
+                                    std::int32_t viewer) {
+  // 0x00441730 keeps a squad whose presence has any bit in its low word and
+  // whose category has the enemy bit, and the settlement when the same holds
+  // of what 0x00420c00 answers and its strength is not zero.
+  return gaika_eval(world, heroes, node, kAiComing | kAiLeaving | kAiStaying, viewer, kAiEnemy,
+                    false)
+      .enemy;
+}
+
 SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId dest) {
   return add_to_squad(world, heroes, id, dest, 0);
 }
@@ -4118,9 +4128,9 @@ HostOutcome nearest_hospital_impl(CallContext& ctx) {
     }
     if (enemy > (3 * strength) / 4) continue;
 
-    // The central building's position (0x005c1060), which for a settlement
-    // node is also the node's centre; the sweep says the two cannot be told
-    // apart here, and this reads the one the original reads.
+    // The central building's position (0x005c1060), which is not the node's
+    // centre (the middle of its snapped entrance slot, docs/formats/gaika.md);
+    // this reads the one the original reads.
     const Point there = world.resolve_position(set->anchor);
     const std::int64_t dx = there.x - at.x;
     const std::int64_t dy = there.y - at.y;

@@ -75,9 +75,12 @@ constexpr std::uint32_t kSessionMagic = 0x53455349u;
 /// 4: the AI's nodes follow the templates -- centre, area and settlement each
 ///    -- because a node outlives the town hall it was centred on and a
 ///    rebuild cannot see where a razed one stood. See `GaikaTable::restore`.
-constexpr std::uint32_t kSessionSectionVersion = 4;
-/// One saved node: centre x and y, area, settlement.
-constexpr std::size_t kSavedGaikaNodeBytes = 16;
+/// 5: each node carries its rectangle too, and the node slot grid follows the
+///    nodes -- columns, rows, then one 16-bit id per slot -- now that the
+///    partition is the original's cut (docs/formats/gaika.md).
+constexpr std::uint32_t kSessionSectionVersion = 5;
+/// One saved node: centre x and y, area, settlement, and the four edges.
+constexpr std::size_t kSavedGaikaNodeBytes = 32;
 
 }  // namespace
 
@@ -339,7 +342,8 @@ void GameSession::Impl::seed_economy(const MapObjectList* map,
   // exist and never again: both are a function of the terrain layer and the
   // settlement list *as it stands now*. A load rebuilds the regions and
   // restores the nodes, whose centres a razed town hall no longer shows.
-  // `sim/gaika.hpp` records which half of this is an approximation and why.
+  // The cut reads the doors through the movement grid, so it is made here,
+  // before anything has moved: a cut a turn later differs (docs/formats/gaika.md).
   world.mutable_lsa().build(world.terrain(), movement.grid());
   world.mutable_gaika().build(world, world.lsa(), economy.settlements());
 }
@@ -1433,16 +1437,26 @@ Result<std::vector<std::byte>> GameSession::save(std::string_view map) const {
     bytes::put_i32(session, stamp.origin.x);
     bytes::put_i32(session, stamp.origin.y);
   }
-  // The AI's nodes as they stand, which after a town hall has fallen is not
-  // what a rebuild over the restored world would make.
-  const std::span<const GaikaNode> nodes = impl.world.gaika().nodes();
+  // The AI's nodes and their slot grid as they stand: the partition is cut
+  // once, over the world as the match started, and a rebuild over the
+  // restored world -- its buildings razed or raised since -- would cut it
+  // differently. Coverage and neighbours are counted again from the grid.
+  const GaikaTable& table = impl.world.gaika();
+  const std::span<const GaikaNode> nodes = table.nodes();
   bytes::put_u32(session, static_cast<std::uint32_t>(nodes.size()));
   for (const GaikaNode& node : nodes) {
     bytes::put_i32(session, node.center.x);
     bytes::put_i32(session, node.center.y);
     bytes::put_i32(session, node.lsa);
     bytes::put_u32(session, node.settlement);
+    bytes::put_i32(session, node.rect.left);
+    bytes::put_i32(session, node.rect.top);
+    bytes::put_i32(session, node.rect.right);
+    bytes::put_i32(session, node.rect.bottom);
   }
+  bytes::put_u32(session, static_cast<std::uint32_t>(table.slot_columns()));
+  bytes::put_u32(session, static_cast<std::uint32_t>(table.slot_rows()));
+  for (const std::uint16_t id : table.slot_nodes()) bytes::put_u16(session, id);
 
   SaveInputs inputs;
   inputs.scheduler = &impl.scheduler;
@@ -1573,6 +1587,9 @@ Status GameSession::load(std::span<const std::byte> bytes, std::string_view map,
   // the load re-offered `idle` to every object spawned since the match began.
   // That is a different game, refused as such.
   std::vector<GaikaNode> saved_nodes;
+  std::vector<std::uint16_t> saved_slots;
+  std::int32_t saved_columns = 0;
+  std::int32_t saved_rows = 0;
   {
     const std::span<const std::byte> payload = reader->section(kSessionSection);
     if (!reader->has(kSessionSection)) {
@@ -1622,12 +1639,40 @@ Status GameSession::load(std::span<const std::byte> bytes, std::string_view map,
     saved_nodes.reserve(node_count);
     for (std::uint32_t i = 0; i < node_count; ++i) {
       GaikaNode node;
+      std::int32_t edges[4] = {};
       if (!bytes::get_i32(section, node.center.x) || !bytes::get_i32(section, node.center.y) ||
-          !bytes::get_i32(section, node.lsa) || !section.u32(node.settlement)) {
+          !bytes::get_i32(section, node.lsa) || !section.u32(node.settlement) ||
+          !bytes::get_i32(section, edges[0]) || !bytes::get_i32(section, edges[1]) ||
+          !bytes::get_i32(section, edges[2]) || !bytes::get_i32(section, edges[3])) {
         if (out != nullptr) *out = std::move(summary);
         return Status(FormatError::malformed);
       }
+      for (const std::int32_t edge : edges) {
+        if (edge < -32768 || edge > 32767) {
+          if (out != nullptr) *out = std::move(summary);
+          return Status(FormatError::malformed);
+        }
+      }
+      node.rect = GaikaRect{static_cast<std::int16_t>(edges[0]), static_cast<std::int16_t>(edges[1]),
+                            static_cast<std::int16_t>(edges[2]), static_cast<std::int16_t>(edges[3])};
       saved_nodes.push_back(node);
+    }
+    std::uint32_t slot_columns = 0;
+    std::uint32_t slot_rows = 0;
+    if (!section.u32(slot_columns) || !section.u32(slot_rows) || slot_columns > 0xffff ||
+        slot_rows > 0xffff ||
+        static_cast<std::uint64_t>(slot_columns) * slot_rows * 2 > section.remaining()) {
+      if (out != nullptr) *out = std::move(summary);
+      return Status(FormatError::malformed);
+    }
+    saved_columns = static_cast<std::int32_t>(slot_columns);
+    saved_rows = static_cast<std::int32_t>(slot_rows);
+    saved_slots.resize(static_cast<std::size_t>(slot_columns) * slot_rows);
+    for (std::uint16_t& id : saved_slots) {
+      if (!section.u16(id)) {
+        if (out != nullptr) *out = std::move(summary);
+        return Status(FormatError::malformed);
+      }
     }
     if (section.remaining() != 0) {
       if (out != nullptr) *out = std::move(summary);
@@ -1718,10 +1763,9 @@ Status GameSession::load(std::span<const std::byte> bytes, std::string_view map,
   // unit's path.
   //
   // The areas are a function of the terrain and the grid, both restored by
-  // now, and are rebuilt. **The nodes are not rebuilt but restored**: a node
-  // keeps the centre its town hall had when the table was built, and once
-  // that town hall has been razed no rebuild can find it. `GaikaTable::restore`
-  // says what rebuilding them cost.
+  // now, and are rebuilt. **The nodes are not rebuilt but restored**, with
+  // their slot grid: the partition is cut over the buildings and entrances of
+  // the match's start, and a cut over the restored world would differ.
   impl.world.mutable_lsa().build(impl.world.terrain(), impl.movement.grid());
   for (const GaikaNode& node : saved_nodes) {
     if (node.lsa != kNoLsa && (node.lsa < 1 || static_cast<std::size_t>(node.lsa) > impl.world.lsa().size())) {
@@ -1729,7 +1773,11 @@ Status GameSession::load(std::span<const std::byte> bytes, std::string_view map,
       return Status(FormatError::malformed);
     }
   }
-  impl.world.mutable_gaika().restore(std::move(saved_nodes), impl.world.lsa());
+  if (!impl.world.mutable_gaika().restore(std::move(saved_nodes), saved_columns, saved_rows,
+                                          std::move(saved_slots))) {
+    if (out != nullptr) *out = std::move(summary);
+    return Status(FormatError::malformed);
+  }
 
   if (reader->has(kScriptSection)) {
     impl.prime_library(reader->section(kScriptSection));

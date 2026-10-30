@@ -2148,9 +2148,9 @@ HostOutcome f_stop_ai_helper(CallContext& ctx) {
 // the node table
 // --------------------------------------------------------------------------
 //
-// `sim/gaika.hpp` carries the decision that made these implementable at all
-// and says which half of the partition is an approximation. This section is
-// only the reading of it. The table itself is built once by `GameSession` and
+// `sim/gaika.hpp` describes the table and docs/formats/gaika.md the
+// partition that cuts it, which is the original's. This section is only the
+// reading of it. The table itself is built once by `GameSession` and
 // lives on the world beside the class graph, because it is map-derived
 // configuration and not turn state.
 
@@ -2183,7 +2183,7 @@ HostOutcome f_stop_ai_helper(CallContext& ctx) {
 /// 0x00450a50) and answers nothing, left unbound. No shipped script calls any
 /// but the GAIKA form; the others are bound below, the member one through this
 /// body by the receiver's type. The point-to-node step is `GaikaTable::at`,
-/// this engine's reading of the original's slot grid (`sim/gaika.hpp`).
+/// the original's slot-grid read (0x0044e3f0, `sim/gaika_table.hpp`).
 [[nodiscard]] LsaId lsa_at(World& world, Point where) {
   const GaikaNode* node = world.gaika().find(world.gaika().at(world.lsa(), where));
   return node == nullptr ? kNoLsa : node->lsa;
@@ -2530,7 +2530,7 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
   const auto answer = [](Point p) { return HostOutcome::ok_with(pack_point(p)); };
 
   const GaikaId node = gaika_of(ctx.arg(0));
-  const GaikaNode* here = world->gaika().find(node);
+  const GaikaNode* here = world->gaika().record(node);
   if (here == nullptr) return answer(Point{0, 0});
   if (here->settlement == kNoObject) return answer(here->center);
 
@@ -2538,11 +2538,9 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
   const Settlement* set =
       economy == nullptr ? nullptr : economy->settlements().for_object(here->settlement);
   if (set == nullptr || set->anchor == kNoObject) return answer(here->center);
-  // The settlement's **central building**, which for a settlement node is the
-  // same point as `GaikaNode::center` -- `GaikaTable::build` seeds it from the
-  // anchor's position. The two readings cannot be told apart here and the
-  // sweep says so; it is written as the original writes it, off the settlement,
-  // because the day a node's centre stops being its anchor they part company.
+  // The settlement's **central building**, read off the settlement as the
+  // original reads it -- not the node's centre, which is the middle of the
+  // building's snapped entrance slot.
   const Point centre = world->resolve_position(set->anchor);
 
   const ClassGraph* graph = world->class_graph();
@@ -2602,14 +2600,16 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
 /// it, which `gbr.exe` declares as the same operation with the argument typed
 /// `int` instead of `GAIKA`.
 ///
-/// A settlement node's centre is its central building; a region node's is its
-/// area's centroid. A GAIKA that names no node answers `(0, 0)` rather than a
-/// sentinel, because every shipped site feeds the result straight into a
-/// distance or a `Goto` and none of them tests it.
+/// The record's point as the partition set it (docs/formats/gaika.md): a
+/// settlement node's is the middle of its central building's snapped entrance
+/// slot, a region node's the slot step 10 chose.
 ///
 /// `GAIKA::Center` (0x00422e20) answers the node record's point at `+8`/`+0xc`
 /// through the bare index 0x0044e8e0, and `(0, 0)` only when the node vector
-/// does not exist; node 0 is the reserved record, whose point is `(0, 0)`.
+/// does not exist; node 0 is the reserved record, whose point is `(-1, -1)`
+/// (0x0044cff0 builds it with the record constructor 0x0044f4a0 and never
+/// fills it). An id past the vector reads beyond it there; here it is
+/// `(0, 0)`.
 /// `GetGaikaCenter(int)` (0x00421bc0) is the same read with no vector test.
 /// **`rc.Center` (0x00697ba0) shares the key**, `(Center, 0)` on a `rect`:
 /// `((l + r) / 2, (t + b) / 2)`, C division truncating toward zero. No shipped
@@ -2623,7 +2623,10 @@ HostOutcome m_gaika_center(CallContext& ctx) {
     return HostOutcome::ok_with(
         pack_point(Point{(r->left + r->right) / 2, (r->top + r->bottom) / 2}));
   }
-  const GaikaNode* node = node_of(ctx);
+  World* world = world_of(ctx);
+  const GaikaNode* node = world == nullptr || ctx.count() == 0
+                              ? nullptr
+                              : world->gaika().record(gaika_of(ctx.arg(0)));
   return HostOutcome::ok_with(pack_point(node == nullptr ? Point{} : node->center));
 }
 
@@ -2801,28 +2804,16 @@ HostOutcome m_gaika_dist_to_players(CallContext& ctx) {
 ///
 /// It is not scored and not sorted: settlement order wins.
 ///
-/// ## What this answers today, and why that is the honest answer
+/// ## The node test
 ///
-/// **The squad walk selects nothing on this engine.** Nothing assigns a GAIKA
-/// to any squad and nothing writes `Squad::Eval`, both of which `sim/squad.cpp`
-/// records as standing gaps; either one alone empties the walk. The chain is
-/// written out in full anyway, on that file's own precedent -- it is fully
-/// recovered, and it is what has to be right the day either gap closes.
-///
-/// So the catapult fallback is the observable behaviour, and it is reached:
-/// both callers guard the call with `sq.AIDest == sq.GAIKAIn`, and on this
-/// engine those are both `kNoGaika` and therefore equal.
-///
-/// **The fallback's node test is narrower here than in the original, and that
-/// is the approximation showing through.** `sim/gaika_table.hpp` gives every
-/// settlement its own node centred on its central building, so a catapult *is*
-/// a node centre; `GaikaTable::at` then answers the catapult's own node for the
-/// catapult, and the receiver matches only when that catapult is the nearest
-/// node centre to the receiver inside its area. The original's slot grid makes
-/// a node a region, where any catapult inside it would match. The reading is
-/// the same and the reach is smaller -- "an enemy siege engine right here"
-/// rather than "somewhere in this region" -- and the day the node partition is
-/// measured this widens with no change to the code below.
+/// The node is the original's partition (`sim/gaika_table.hpp`,
+/// docs/formats/gaika.md), so "standing in the receiver's own node" is the
+/// region test it is there: a catapult's settlement is not one the partition
+/// seeds (its central building is none of the five seeded bases), so the
+/// catapult stands in whatever node its slot was cut into, and any catapult
+/// in that node matches. Until the fifteenth round every settlement had a node
+/// centred on itself, and the fallback matched only when the catapult was the
+/// nearest centre to the receiver.
 HostOutcome m_best_target_in_gaika(CallContext& ctx) {
   const Value none = Value::object(script::ObjectRef{script::kNoType, 0});
   World* world = world_of(ctx);
@@ -2999,12 +2990,12 @@ HostOutcome m_laika_flag(CallContext& ctx) {
 /// window with the bottom closed, and it is used here so that the two cannot
 /// disagree about who has a view.
 ///
-/// **The teleport arm is narrower here than there**, and it is the partition
-/// showing through for the second time. Every settlement gets a node centred
-/// on itself and a teleport *is* a settlement, so a teleport is always a node
-/// centre and the node it stands in is its own -- where the original's slot
-/// grid makes a node a region and a teleport shares the node of whatever
-/// region it sits in. The reading is identical; the reach is smaller.
+/// **The teleport arm reads the original's partition** (fifteenth round). A
+/// teleport is a settlement, but not one the partition seeds -- its central
+/// building is none of the five seeded bases -- so it shares the node of
+/// whatever region its slot was cut into, as it does there. Until this round
+/// every settlement had a node of its own and a teleport was always its own
+/// node's centre.
 ///
 /// It used to answer false on every shipped map, because nothing set
 /// `Explored`; `AiSystem::advance` does now, so a node next to one a player has
@@ -3450,12 +3441,11 @@ HostOutcome m_settlement_gaika(CallContext& ctx) {
 ///     established before there was a table and it does not change now: a
 ///     script that walks `GetGAIKA(i)` over `1 .. GAIKACount` is naming nodes
 ///     by index, and clamping here would break the walk rather than protect it.
-///   * **A `point` is the node the place belongs to** -- the nearest node
-///     centre within the point's own area, so a point on an island is never
-///     answered with a node across the water. See `GaikaTable::at`; the
-///     original answers this from its slot grid, which is the part of the
-///     partition this project does not reproduce -- except that a negative
-///     coordinate is no node at all (0x0044e3f0), which it does.
+///   * **A `point` is the node the place belongs to**: the partition's slot
+///     grid read at the point's slot (0x0044e3f0, `GaikaTable::at`). A
+///     negative coordinate is no node; there is no upper bound, so a point
+///     past the right edge reads the next row's slot, and one past the whole
+///     grid is no node here (the original reads past its buffer).
 ///   * **An `Obj` is the node its position belongs to**, which is the same
 ///     question asked one hop earlier. 0x0044e650 reads the raw position and,
 ///     when its `x` is negative, the unit's `posRH` (0x005d3db0): a unit in
@@ -3782,15 +3772,18 @@ HostOutcome f_ships(CallContext& ctx) {
 //     `PrepareAiTransportShip` has given it one it is somebody's crossing and
 //     no longer free. `PrepareAiTransportShip` passes its own verb and point,
 //     so for it a ship already boarding for this very crossing counts;
-//   * `"advance"` -- available when the owning AI's destination node shows no
-//     enemy presence: the ship's squad (`[obj+0x174]`) leads to a player AI
-//     record (0x00444190; none -- available), that record's target node
-//     (0x00444140, with `[+0x24]` as the fallback) to its slot list, and each
-//     slot's enemy count and the node settlement's garrison (0x00420c00) are
-//     summed under the relation category (0x0044e250). That census lives in
-//     the slot grid this engine does not model (`sim/gaika.hpp`), so an
-//     advancing ship **counts** here, and the enemy-presence clause is the
-//     named condition that would withhold it;
+//   * `"advance"` -- available when the ship's AI destination shows no enemy:
+//     the ship's squad (`[obj+0x174]`, 0x00444190; none -- available), its AI
+//     destination (0x00444140, with `DestGAIKA` `[+0x24]` as the fallback --
+//     `squad_ai_dest`), the AI manager (none -- available), and that node's
+//     squad deque walked as `Eval` walks it: each squad with strength whose
+//     category (0x0044e250 off the ship owner's row) has the enemy bit and
+//     whose presence (0x0044e1f0 with peaceful squads absent, refined by
+//     0x0044eb80) is any of coming, leaving or staying adds its strength, and
+//     the node's settlement adds its wall's strength under the same tests
+//     (0x00420c00). A total of zero makes the ship available
+//     (`enemy_strength_present`; fifteenth round -- it used to count every
+//     advancing ship, because the census had no node table to walk);
 //   * anything else -- not this ship; try the next.
 //
 // The comparisons are byte-for-byte on the verb, so they are exact and
@@ -3823,7 +3816,19 @@ HostOutcome f_ships(CallContext& ctx) {
   (void)each_ship_in_area(world, player, lsa, [&](const WorldObject& ship) {
     if (commands->command_count(ship.id) == 0) return false;
     const std::string_view verb = commands->command_name(ship.id, 0);
-    bool available = verb == "idle" || verb == "advance";
+    bool available = verb == "idle";
+    if (verb == "advance") {
+      // The advance clause: the ship's squad, its AI destination (the order's
+      // node, else `DestGAIKA`), and the enemy strength there as the ship's
+      // owner sees it. No squad, no manager or no such node: available.
+      HeroSystem* heroes = hero_system_of(world);
+      const Squad* squad = heroes == nullptr ? nullptr : squad_containing(*heroes, ship.id);
+      const GaikaId node = squad == nullptr ? kNoGaika : squad_ai_dest(*squad);
+      available = squad == nullptr || ai == nullptr || !ai->manager_started() ||
+                  world.gaika().find(node) == nullptr ||
+                  enemy_strength_present(world, *heroes, node,
+                                         static_cast<std::int32_t>(ship.state.owner)) == 0;
+    }
     if (verb == "boardunit") {
       const AiSystem::ShipTransport& carrying = ai == nullptr ? none : ai->ship_transport(ship.id);
       available = carrying.order == order && carrying.where.x == where.x &&
@@ -3979,10 +3984,9 @@ HostOutcome f_check_lsa_path(CallContext& ctx) {
 ///
 /// `ship_for_crossing` is 0x00441730, read once and described above
 /// `lsa_route`: living, the player's, standing in that area, and running
-/// `idle` or `advance`, or `boardunit` while carrying this very order. The
-/// `advance` clause's enemy census is the documented approximation, and the
-/// scan order is the world's rather than the area list's -- both are said
-/// there.
+/// `idle`, `advance` towards a node with no enemy, or `boardunit` while carrying this
+/// very order. The scan order is the world's rather than the area list's, as
+/// said there.
 ///
 /// **Fixed in the tenth round:** the route search here used the empty order,
 /// so a ship boarding for this crossing did not open the sea for its own
@@ -4326,8 +4330,6 @@ struct SpellSite {
 ///
 /// ## What is approximated
 ///
-///   * **The node is this engine's node.** `sim/gaika.hpp` records the
-///     partition trade in full; the reading here is the original's.
 ///   * **`Squad::GAIKAIn` and `Squad::Eval` are refreshed once a turn**
 ///     (`revalue_squads`), where the original writes them inside the move and
 ///     inside the health write. See `sim/squad.hpp`.
@@ -4497,7 +4499,7 @@ struct ProtectCensus {
 ///
 /// ## What is approximated
 ///
-///   * Everything `BestMDPos` lists: this engine's node, the two squad fields
+///   * Everything `BestMDPos` lists: the two squad fields
 ///     refreshed once a turn, and 0x00420c00 left out for the same reason.
 ///   * **Which friendly unit is "last"** in the shield count, above.
 ///   * **No shipped map can reach the sacrifice arm.** `sim/world_host.cpp`
@@ -5034,7 +5036,7 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
   for (std::uint16_t arity = 2; arity <= 9; ++arity) {
     registry.define(kFree, "RunAIHelper", arity, &f_run_ai_helper);         // 285 at 4
   }
-  // -- the node table; see `sim/gaika.hpp` for what it approximates ---------
+  // -- the node table; see `sim/gaika.hpp` -----------------------------------
   registry.define(kMember, "LSA", 0, &m_gaika_lsa);              // 42, and `obj.LSA` (0)
   registry.define(kFree, "LSA", 1, &f_lsa_at);                   //  0, `LSA(pt)`
   registry.define(kFree, "LSA", 2, &f_lsa_at);                   //  0, `LSA(x, y)`

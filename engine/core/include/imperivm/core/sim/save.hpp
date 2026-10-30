@@ -437,7 +437,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// (`[form+0x90]`, after `going_on`) and each route's gate it has compared
 /// sides at (`[retry+0x18]`, after `form_lock_laid`), system section version
 /// 48 (docs/formats/formation.md, "The blocking gate").
-inline constexpr std::uint32_t kStateVectorVersion = 55;
+/// 56: the AI's node table is the original's partition (0x0044e050,
+/// docs/formats/gaika.md): the session section (its version 5) carries each
+/// node's rectangle and the node slot grid, and a node's id, extent, centre
+/// and neighbours are the cut's rather than one per settlement and region.
+inline constexpr std::uint32_t kStateVectorVersion = 56;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";
