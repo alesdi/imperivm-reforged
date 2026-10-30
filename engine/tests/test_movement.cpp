@@ -2331,7 +2331,7 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
 
 TEST(a_search_that_laid_nothing_searches_again_at_the_next_call_whatever_the_draw) {
   // `SetDest` tests the path follower's stop bits before it compares the goal
-  // (`test al, 6` at 0x0041a4da, 0x0041a5da) and takes its new-goal branch
+  // (the stop-bit test at 0x0041a4da, 0x0041a5da) and takes its new-goal branch
   // when one is set: the search runs whatever the draw before it said, and the
   // free-spot search's flag 8 is forgotten (0x0041a594). A search that laid
   // nothing leaves bit 2 (0x00419a1e, `MoveState::route_failed`).

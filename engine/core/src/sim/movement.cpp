@@ -663,7 +663,7 @@ MoveOutcome MovementSystem::order_goto(World& world, ObjectId id, Point dest, st
   // `SetDest` (`0x0041a4c0`) to anywhere else -- another point, band or
   // march -- forgets that the free-spot search has run (`0x0041a594`); so
   // does one to the same goal while a stop bit is set, which takes the same
-  // branch (`test al, 6` at 0x0041a4da). Flag 0x40 survives both.
+  // branch (the stop-bit test at 0x0041a4da). Flag 0x40 survives both.
   if (!move.goto_active || move.stopping() || move.target_object != kNoObject ||
       move.target != dest || move.range != range || move.min_range != min_range ||
       move.party != party) {
@@ -3342,7 +3342,7 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
                           move.min_range == order.min_range;
 
   // A new order always searches. So does a live one whose follower has a
-  // stop bit set: `SetDest` tests them before anything else (`test al, 6` at
+  // stop bit set: `SetDest` tests them before anything else (the stop-bit test at
   // 0x0041a4da / 0x0041a5da) and takes its new-goal branch whenever one is,
   // so after a search that laid nothing (`MoveState::route_failed`) or a
   // `Stop` (`stop_requested`) the unit searches again on every call, whatever

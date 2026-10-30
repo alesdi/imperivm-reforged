@@ -362,7 +362,7 @@ struct MoveState {
   /// walked, if there is one -- and, for a retry not aimed at a formation
   /// (`[retry+0xc]` clear, 0x00419a17), sets this bit (0x00419a1e) and answers
   /// with the path follower's own step (0x00419a48 .. 0x00419a5d). The
-  /// follower (0x00419ee0) tests bits 1 and 2 together (`test al, 6` at
+  /// follower (0x00419ee0) tests bits 1 and 2 together (the stop-bit test at
   /// 0x00419ee9), so a failed search walks the old route on exactly as
   /// `Unit::Stop` does -- to the first passable free spot, for an order that
   /// owns a lock, and not a step for one that does not -- instead of
