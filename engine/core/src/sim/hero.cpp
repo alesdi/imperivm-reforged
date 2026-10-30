@@ -302,6 +302,9 @@ std::vector<ObjectId>* resolve_hero_army(void* user, ObjectId owner) {
 }  // namespace
 
 void HeroSystem::start(World& world) {
+  // The move hook (0x0041f530) runs on every move of a unit from here on;
+  // it does nothing until the AI manager exists.
+  world.set_move_hook(this);
   // The seam `Hero::army` needs (sim/objlist.cpp's `m_army`), installed here
   // for `EconomySystem::start`'s reason: the pool must not learn what a hero is.
   objlist_pool_of(world).set_army_resolver(&resolve_hero_army, &world);
@@ -428,21 +431,28 @@ bool HeroSystem::detach(World& world, ObjectId unit_id) {
   UnitRecord* record = unit(unit_id);
   if (record == nullptr || record->hero == kNoObject) return false;
 
-  if (HeroRecord* leader = hero(record->hero)) {
+  const ObjectId was = record->hero;
+  if (HeroRecord* leader = hero(was)) {
     const auto it = std::find(leader->army.begin(), leader->army.end(), unit_id);
     if (it != leader->army.end()) leader->army.erase(it);
-    // Out of the squad it is in, which is its hero's unless a regroup moved
-    // the hero alone into a fresh one (`regroup_into_fresh_squads`) and left
-    // his army where it stood.
-    squads_.leave(world, squads_.squad_of(unit_id), unit_id);
     // The hero's `RemoveUnit` (0x0052db70): out of his formation, its route
     // deleted (0x005f3290).
     if (MovementSystem* movement = movement_system(world)) {
-      movement->leave_formation(world, record->hero, unit_id);
+      movement->leave_formation(world, was, unit_id);
     }
   }
   record->hero = kNoObject;
-  record->squad = kNoSquad;
+  // `RemoveUnit` ends with the hook 0x0041e820: while the AI manager exists
+  // the unit, no longer attached, is re-homed by the merge rule from the
+  // squad it is in (`squad_rehome_hook`) -- a squad of the player's near it
+  // that will take it, or one of its own. A dead unit is not re-homed; the
+  // unregister takes it out. Before the manager, where this engine's hero
+  // squads stand in for the original's none, it leaves the squad, and the
+  // manager's start files it.
+  if (!squad_rehome_hook(world, *this, unit_id)) {
+    squads_.leave(world, squads_.squad_of(unit_id), unit_id);
+  }
+  if (UnitRecord* again = unit(unit_id); again != nullptr) again->squad = squads_.squad_of(unit_id);
   // `DetachHero` (0x005db190) rebuilds it without them.
   recalc_bonuses(world, unit_id);
   return true;
@@ -561,16 +571,14 @@ void HeroSystem::tally_take(const World& world, PlayerId owner, ClassIndex cls) 
   }
 }
 
-void HeroSystem::ai_register(World& world, ObjectId id) { register_unit(world, id, true); }
-
-void HeroSystem::ai_register_placed(World& world, ObjectId id) { register_unit(world, id, false); }
-
-void HeroSystem::register_unit(World& world, ObjectId id, bool file_now) {
-  // 0x0041f310's gates: the manager (here the AI manager's flag, which also
-  // stands for the AI world pointer [0x008c8e50]; the editor latch
-  // [0x00a8734c] is never up in a game), the spawn-template bit, the
-  // noselect bit, an owner; and the add (0x00447200) only for a unit whose
-  // squad handle is empty, which `ai_registered` stands for.
+void HeroSystem::ai_register(World& world, ObjectId id) {
+  // 0x0041f310's gates: the manager (here the AI manager's flag), the AI
+  // world pointer [0x008c8e50] (`register_held_`, which the spawns hold at
+  // zero while they clone), the editor latch [0x00a8734c] (never up in a
+  // game), the spawn-template bit, the noselect bit, an owner; and the add
+  // (0x00447200) only for a unit whose squad handle is empty, which
+  // `ai_registered` stands for.
+  if (register_held_ > 0) return;
   const AiSystem* ai = ai_system_of(world);
   if (ai == nullptr || !ai->manager_started()) return;
   const WorldObject* slot = world.find(id);
@@ -585,12 +593,14 @@ void HeroSystem::register_unit(World& world, ObjectId id, bool file_now) {
   tally_add(world, state->owner, slot->class_index);
   state->flags.ai_registered = true;
   if (squads_.squad_of(id) != kNoSquad) return;
-  if (!file_now) {
-    deferred_filing_.push_back(id);
-    return;
-  }
   const GaikaId under = world.gaika().at(world.lsa(), unit_pos_rh(world, id));
   (void)add_to_squad(world, *this, id, under);
+}
+
+Point HeroSystem::where(World& world, ObjectId id) { return unit_pos_rh(world, id); }
+
+void HeroSystem::moved(World& world, ObjectId id, Point from, Point to) {
+  squad_move_hook(world, *this, id, from, to);
 }
 
 void HeroSystem::ai_owner_changed(World& world, ObjectId id, PlayerId previous) {
@@ -1287,9 +1297,6 @@ void HeroSystem::advance(World& world, const Turn& turn) {
   const GameTime from = turn.start - 1;
   now_ = turn.end;
   clear_dead(world);
-  // A unit whose registration was held off and that is on the map now: the
-  // move hook's register (0x0041f530), once a turn. See sim/squad.hpp.
-  register_unregistered_units(world, *this);
   run_egoism(world, from, now_);
   run_hero_ticks(world, from, now_);
   expire_effects(world, now_);
@@ -1346,8 +1353,6 @@ void HeroSystem::hash(std::uint64_t& accumulator) const {
   }
   // `Place`'s units the next sweep files: which squad a recruit lands in
   // depends on whether it is filed then.
-  fold(accumulator, static_cast<std::uint32_t>(deferred_filing_.size()));
-  for (const ObjectId id : deferred_filing_) fold(accumulator, id);
 }
 
 // --------------------------------------------------------------------------

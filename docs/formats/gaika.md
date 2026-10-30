@@ -224,13 +224,15 @@ passes (0x0044aaf0, 0x0044b740, 0x0044b840, 0x0044bae0).
   45). Every walker above iterates them in order. They are not part of the
   state hash; the squads they name are.
 * **`Count/6` and `Count/3`** are the walks described above (twelfth round).
-* **Where a squad stands** is refreshed once a tick, for every squad in table
-  order, from its front member's position (`revalue_squads`), rather than at
-  the moment the front member crosses a slot. Two squads that enter a node in
-  the same tick are therefore filed in table order rather than in the order
-  their units moved. The reassessment 0x00446a70 the position tracker runs is
-  not modelled either, so a unit that wanders 256 units from its leader is not
-  split off as the original would split it.
+* **The position tracker** is run from the engine's position writes
+  (squad.md, "The move hook"; fourteenth round): the reassessment
+  0x00446a70 and the front member's refile happen at the write that crosses
+  a slot. A walk writes its position at each step's decision and at the
+  tick's end rather than at each step's start, so a crossing is seen up to a
+  step late. Where a squad stands is also refreshed once a tick, for every
+  squad in table order, from its front member's position
+  (`revalue_squads`), which covers the refiles at a member's leave and at a
+  stand-down.
 * **The table is an approximation** (`GaikaTable`): one node per settlement
   and one per passability area with no settlement, numbered settlements first.
   The partition 0x0044e050 is not reproduced, so node ids, their extents and

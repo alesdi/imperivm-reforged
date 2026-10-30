@@ -86,8 +86,10 @@ of owner, and each calls it at that moment:
 * **The move hook** (0x0041f530), which a unit's `SetPos` runs, and the
   forced holder entry (0x005d3e10) too: for a unit that is alive, not a
   template, not noselect and owned, an empty squad handle means the
-  register, and a set one means its squad is re-homed. So any unit that
-  missed its registration is registered the next time it moves.
+  register, and a set one means its squad is re-homed (squad.md, "The move
+  hook"). So any unit that missed its registration is registered the next
+  time it moves, and a unit that walks is re-homed at every slot it
+  crosses.
 * **`Unit::SetPlayer`** (0x005dc3f0), when the new owner differs from the
   old: the unregister on the old owner (with the manager held at zero while
   the base `SetPlayer` writes the owner), then 0x0041f4d0 -- which checks
@@ -136,20 +138,19 @@ Nothing else touches the map:
 * `HeroSystem::ai_register` is the register: the gates, the tally and the
   squad filing (`add_to_squad` towards the GAIKA node under `posRH`), at
   once. `SpawnGroup`, `SpawnGroupInHolder`, `SpawnNamed`, `make_mule` and
-  `ShowBuildAnimation` call it at the moment the original does.
-* `Place` and `_PlaceEx` call `HeroSystem::ai_register_placed`: the gates
-  and the tally at once, and the squad filing at the next turn's sweep (see
-  "What differs").
+  `ShowBuildAnimation` call it at the moment the original does; the spawns
+  hold it off (`HeroSystem::RegisterHold`, the AI world pointer at zero)
+  while they clone and place the copy, and `CreateShip` while it places its
+  ship.
+* The move hook is `HeroSystem::moved` (`squad_move_hook`), which the world
+  runs on every position write and holder entry or exit of a unit. `Place`
+  and `_PlaceEx` reach it through their position write, so their unit is
+  counted and filed in a squad before `Place` returns, and their second
+  register finds it registered.
 * `HeroSystem::ai_owner_changed` is `Unit::SetPlayer`'s half, run by the
   `SetPlayer` host for a unit.
 * `ai_start_players`, the first time it starts the manager, registers every
   unit not yet registered, in id order: the pending list's drain.
-* `register_unregistered_units` runs once a turn while the manager exists
-  and registers every unit that is alive, owned, not a template, not
-  noselect, not held and not registered: the move hook's register. It then
-  files `Place`'s units of the turn before in a squad, each that is still
-  alive, registered, in no squad and not in a holder; each is looked at
-  once. That list is saved in the hero section.
 * `HeroSystem::ai_unregister` (on death, on erase, in `SetNoselectFlag`
   before the bit is written, and in `ai_owner_changed`) runs the take on
   the present owner.
@@ -158,26 +159,9 @@ Nothing else touches the map:
 
 ## What differs, and why
 
-* **`Place` files its unit in a squad at the next turn, not at once.** The
-  tally is counted at once, as in the original, so `BARRACK_TRAIN.VS`'s
-  `Count` on the line after its `Place` sees the recruit. The squad filing
-  waits for the next turn's sweep, and is skipped for a unit that has
-  entered a holder by then. The reason is measured, not read. On
-  Crossroads, seed 5, 6,000 turns, filing at once made 241 units against
-  379 deferred (main: 393) and 4 captures against 25 (main: 18), and it
-  slowed Balcans from 33 s to 49 s. The likely mechanism, not confirmed: a
-  recruit `BARRACK_TRAIN.VS` places at the barracks' exit and orders to
-  `enter` its hall joins whatever squad stands there, and that squad's
-  orders (`AIOSENDSQUAD.VS`'s `ClrCmd` among them; see `squad.md`) cancel
-  the walk. What keeps the original's recruits walking was not read: it may
-  be the move hook's re-homing at each step, which is not modelled, or the
-  state of the squads they meet.
-* **The move hook runs once a turn, not at every move.** A unit that
-  reaches the map unregistered -- one whose owner changed while it stood
-  in a holder, or a ship `CreateShip` made and a script then moved without
-  `ShowBuildAnimation` -- is registered at the next turn rather than at the
-  move that brought it out. The hook's other arm -- re-homing a registered
-  unit's squad on every move -- is not modelled.
+* **The move hook sees a walk at this engine's position writes**, at each
+  step's decision and the turn's end, rather than at each step's start
+  (squad.md, "The move hook").
 * **The pending list is not modelled as a list.** The drain registers every
   unregistered unit in id order. The original pushes the map's units in
   load order and any a script placed before `LSA()` after them, which is

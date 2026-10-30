@@ -353,6 +353,10 @@ Point MovementSystem::position(World& world, ObjectId id) const noexcept {
 }
 
 void MovementSystem::set_position(World& world, ObjectId id, Point where) const noexcept {
+  // Only a write that moves the unit: the walk's `SetPos` (0x0053f6a0) is
+  // what runs the move hook, and this is also where a standing unit's
+  // position is settled at a turn's end.
+  if (const ObjectState* st = world.state(id); st != nullptr && st->position == where) return;
   world.set_position(id, where);
 }
 

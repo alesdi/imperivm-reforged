@@ -749,8 +749,12 @@ bool World::set_position(ObjectId id, Point to) noexcept {
   // A held object has no position of its own. See the header, and the 6,355
   // positioned objects in the dumps of which not one has a holder.
   if (slot->state.is_held()) return false;
+  // The move hook measures the unit's `posRH` before and after (0x005d39e0).
+  UnitMoveHook* hook = slot->state.flags.is_unit ? move_hook_ : nullptr;
+  const Point from = hook != nullptr ? hook->where(*this, id) : Point{};
   slot->state.position = to;
   reindex(*slot);
+  if (hook != nullptr) hook->moved(*this, id, from, hook->where(*this, id));
   return true;
 }
 
@@ -845,6 +849,10 @@ bool World::put_in_holder(ObjectId id, ObjectId holder) noexcept {
     walk = next->state.holder;
   }
 
+  // The forced holder entry (0x005d3e10) runs the move hook from the unit's
+  // `posRH` outside to its `posRH` inside.
+  UnitMoveHook* hook = slot->state.flags.is_unit ? move_hook_ : nullptr;
+  const Point from = hook != nullptr ? hook->where(*this, id) : Point{};
   const bool joining = slot->state.holder != holder;
   slot->state.holder = holder;
   slot->state.position = kHeldPosition;
@@ -852,15 +860,20 @@ bool World::put_in_holder(ObjectId id, ObjectId holder) noexcept {
   // Onto the back of the holder's roster (0x00532160 appends a member it does
   // not already hold), which is the order `contents_of` answers in.
   if (joining) slot->spatial.arrival = index_.stamp();
+  if (hook != nullptr) hook->moved(*this, id, from, hook->where(*this, id));
   return true;
 }
 
 bool World::remove_from_holder(ObjectId id, Point at) noexcept {
   WorldObject* slot = find(id);
   if (slot == nullptr) return false;
+  // A unit's `SetPos` out of its holder (0x005d39e0) runs the move hook.
+  UnitMoveHook* hook = slot->state.flags.is_unit ? move_hook_ : nullptr;
+  const Point from = hook != nullptr ? hook->where(*this, id) : Point{};
   slot->state.holder = kNoObject;
   slot->state.position = at;
   reindex(*slot);
+  if (hook != nullptr) hook->moved(*this, id, from, hook->where(*this, id));
   return true;
 }
 

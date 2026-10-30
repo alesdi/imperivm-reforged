@@ -752,6 +752,24 @@ struct ObjectState {
   [[nodiscard]] bool is_held() const noexcept { return holder != kNoObject; }
 };
 
+/// What runs on every move of a unit: the AI's move hook (0x0041f530), which
+/// a unit's own `SetPos` (0x005d39e0, `vtbl+0x38`) and its forced holder
+/// entry (0x005d3e10) call with the unit's `posRH` before and after. A unit's
+/// walk reaches it too, since its motion moves it through that `SetPos` at
+/// every step (0x0053f6a0). `World::set_position`, `put_in_holder` and
+/// `remove_from_holder` call it for a unit, after the write; `HeroSystem`
+/// implements it (docs/formats/squad.md, "The move hook") and installs
+/// itself in `start`. Configuration, like the world's observer: not owned,
+/// not hashed, not serialised; null is silence.
+class UnitMoveHook {
+ public:
+  virtual ~UnitMoveHook() = default;
+  /// Where the hook measures a unit from: its `posRH` (0x005d3db0).
+  [[nodiscard]] virtual Point where(World& world, ObjectId id) = 0;
+  /// `id` has moved from `from` to `to`, both as `where` answers them.
+  virtual void moved(World& world, ObjectId id, Point from, Point to) = 0;
+};
+
 /// A unit of simulation behaviour driven by the turn loop.
 ///
 /// Systems are registered with the world in a fixed order and run in that order

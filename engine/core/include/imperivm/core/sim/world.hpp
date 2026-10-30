@@ -973,6 +973,9 @@ class World {
   /// The statistics seam; see `WorldObserver`. Same terms as the hook runner.
   void set_observer(WorldObserver* observer) noexcept { observer_ = observer; }
   [[nodiscard]] WorldObserver* observer() const noexcept { return observer_; }
+  /// The move hook; see `UnitMoveHook`. Same terms as the observer.
+  void set_move_hook(UnitMoveHook* hook) noexcept { move_hook_ = hook; }
+  [[nodiscard]] UnitMoveHook* move_hook() const noexcept { return move_hook_; }
 
   /// The building damage tiers. Configuration, like the class graph beside it:
   /// it comes from `CONST.INI`, is the same on both sides of a save, and is
@@ -1905,6 +1908,7 @@ class World {
   const ClassGraph* classes_ = nullptr;
   ClassHookRunner* hooks_ = nullptr;
   WorldObserver* observer_ = nullptr;
+  UnitMoveHook* move_hook_ = nullptr;
   BuildingStateRules building_states_;
   Grid terrain_;
   LsaPartition lsa_;
