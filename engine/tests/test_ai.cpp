@@ -964,9 +964,10 @@ TEST(get_economy_script_runs_the_script_and_returns_its_value) {
   CHECK(f.scheduler.live_count() == 1);
 }
 
-TEST(get_economy_script_refuses_a_script_that_sleeps) {
-  // A `Sleep` inside a synchronous call has nowhere to suspend to, and quietly
-  // dropping the half-run `Execution` would leave its side effects applied.
+TEST(get_economy_script_answers_0_for_a_script_that_sleeps) {
+  // A `Sleep` inside a synchronous call has nowhere to suspend to: 0x006a0360
+  // answers non-zero for the run, and 0x0043d740 answers 0 for that
+  // (0x0043d7cb). The caller goes on; the failure is in the pass's report.
   Fixture f;
   REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
           script::kNoChunk);
@@ -981,7 +982,41 @@ TEST(get_economy_script_refuses_a_script_that_sleeps) {
   const script::HostOutcome out =
       f.call(script::CallKind::member, "GetEconomyScript",
              {handle, script::Value::integer(2)}, root);
-  CHECK(out.status == script::HostStatus::error);
+  CHECK(out.status == script::HostStatus::ok);
+  CHECK(out.value.as_integer() == 0);
+  CHECK(f.scheduler.run_ready().failed == 1);
+}
+
+/// The GAIKA pair and the tactic pair answer 0 for a callee that traps, as
+/// for one that suspends (0x0043d590, 0x0043d900, 0x0043d820 each test
+/// 0x006a0360's status first), and the trap is reported with the pass.
+TEST(gaika_and_settlement_script_calls_answer_0_when_the_callee_traps) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, GAIKA gaika, int idPlayer\nint z;\nz = 1 / z;\nreturn 7;\n",
+                "DATA/AI/GETGAIKASTRAT.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, int idPlayer, GAIKA g\nint z;\nz = 1 / z;\nreturn 7;\n",
+                "DATA/AI/CALCGAIKAPRIORITY.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, Settlement set, int idPlayer\nint z;\nz = 1 / z;\nreturn 7;\n",
+                "DATA/AI/GETTACTICSCRIPT.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(1)->root;
+  f.ai.seed_gaika_view(1, 4);
+  const script::Value handle = f.settlement_value(f.make_settlement(1));
+  for (const auto& [name, receiver] :
+       {std::pair{"GetStrat", script::Value::integer(2)},
+        std::pair{"CalcPriority", script::Value::integer(2)},
+        std::pair{"GetTacticScript", handle}}) {
+    const script::HostOutcome out =
+        f.call(script::CallKind::member, name, {receiver, script::Value::integer(2)}, root);
+    CHECK(out.status == script::HostStatus::ok);
+    CHECK(out.value.as_integer() == 0);
+  }
+  CHECK(f.scheduler.run_ready().failed == 3);
 }
 
 // --------------------------------------------------------------------------
@@ -1131,10 +1166,9 @@ TEST(ts_adv_hero_skills_answers_a_receiver_that_names_nothing_without_running) {
              root);
   CHECK(out.status == script::HostStatus::ok);
 
-  // A handle that *is* an object but names no live one is a different case: it
-  // reaches the helper, whose own validity guard answers it. That guard is the
-  // shipped script's and not this engine's, so what is asserted is only that
-  // the call completes.
+  // A handle that *is* an object but names no object resolves to nothing in
+  // the object table (0x00426c00 reads `[0xa2a610 + index]`): the same
+  // message, and the helper does not run.
   const script::HostOutcome stale =
       f.call(script::CallKind::member, "TSAdvHeroSkills",
              {script::Value::object(kTypeObj, ObjectId{0x7fffffff}),
@@ -1143,10 +1177,11 @@ TEST(ts_adv_hero_skills_answers_a_receiver_that_names_nothing_without_running) {
   CHECK(stale.status == script::HostStatus::ok);
 }
 
-TEST(ts_adv_hero_skills_refuses_when_the_helper_is_not_loaded) {
-  // `run_script_now`'s rule, and `GetEconomyScript`'s: a named file that is not
-  // in the scheduler is a broken installation rather than a stale handle, and
-  // the name in the report is the name of the entry point that wanted it.
+TEST(ts_adv_hero_skills_goes_on_when_the_helper_is_missing_or_traps) {
+  // 0x006a0360 answers non-zero for a file the library does not hold
+  // (`NOTFOUND`) and for a run that broke; 0x00426c00 prints `TSHeroSkills:
+  // Error running script!` for either and returns. Only the broken run is a
+  // trap to report.
   Fixture f;
   REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
           script::kNoChunk);
@@ -1160,7 +1195,24 @@ TEST(ts_adv_hero_skills_refuses_when_the_helper_is_not_loaded) {
              {script::Value::object(kTypeObj, hero), make_array_value(kTypeIntArray, empty),
               make_array_value(kTypeIntArray, empty)},
              root);
-  CHECK(out.status == script::HostStatus::error);
+  CHECK(out.status == script::HostStatus::ok);
+  CHECK(f.scheduler.run_ready().failed == 0);
+
+  REQUIRE(build(f.scheduler, f.registry,
+                "// void, Hero hero, IntArray* aSkills, IntArray* aSkillLevels\n"
+                "int z;\n"
+                "hero.SetSkill(0, 1);\n"
+                "z = 1 / z;\n",
+                "DATA/AI/TSH_HEROSKILLS.VS") != script::kNoChunk);
+  const script::HostOutcome broke =
+      f.call(script::CallKind::member, "TSAdvHeroSkills",
+             {script::Value::object(kTypeObj, hero), make_array_value(kTypeIntArray, empty),
+              make_array_value(kTypeIntArray, empty)},
+             root);
+  CHECK(broke.status == script::HostStatus::ok);
+  // What the helper did before it broke stands.
+  CHECK(f.heroes.skill(hero, 0) == 1);
+  CHECK(f.scheduler.run_ready().failed == 1);
 }
 
 // --------------------------------------------------------------------------

@@ -891,8 +891,10 @@ int g_sync_depth = 0;
 /// no-op sink; 0x00426680 counts the skill as weight 0, which
 /// `m_ai_get_skill_to_develop` does too. `run_script_or_report` is that
 /// reading: the failure goes to the pass's report, where the trap sweep still
-/// sees it, and the caller answers its default. The four recruiters use it;
-/// the rest still trap, which keeps a broken callee loud. A missing script
+/// sees it, and the caller answers its default. The four recruiters,
+/// `GetEconomyScript`, `GetTacticScript`, `GAIKA::GetStrat`,
+/// `GAIKA::CalcPriority` and `Hero::TSAdvHeroSkills` use it; the rest still
+/// trap, which keeps a broken callee loud. A missing script
 /// file is not a failure of that kind, and each caller answers its own
 /// default for it.
 ///
@@ -1443,9 +1445,11 @@ HostOutcome m_tactic_script(CallContext& ctx) {
 /// through. The answer is the script's return value when the run succeeded
 /// **and the value is not negative**, masked to 16 bits; a negative value, a
 /// script that returns nothing, a missing file or a failed run all answer 0.
-/// No receiver check: an invalid handle is dereferenced. Here a missing file
-/// answers 0 as there, and a callee that traps traps the caller (the shared
-/// `run_script_now`, labelled there) where retail answers 0.
+/// No receiver check: an invalid handle is dereferenced. A failed run -- a
+/// callee that traps or suspends, or a file the library does not hold -- is
+/// 0x006a0360's non-zero status, and the trampoline answers 0 for it
+/// (0x0043d7cb, 0x0043d8ab): here the failure goes to the pass's report
+/// (`run_script_or_report`) and the caller goes on with 0.
 HostOutcome get_script_common(CallContext& ctx, const char* file, const char* what) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed(what);
@@ -1456,8 +1460,9 @@ HostOutcome get_script_common(CallContext& ctx, const char* file, const char* wh
   const std::uint32_t chunk = ai_script_chunk(ctx, owner, file);
   if (chunk == script::kNoChunk) return HostOutcome::ok_with(Value::integer(0));
   Value result;
-  const HostOutcome ran = run_script_now(ctx, chunk, ctx.arguments, what, result);
-  if (ran.status != script::HostStatus::ok) return ran;
+  if (!run_script_or_report(ctx, chunk, ctx.arguments, result)) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
   if (!result.is_integer() || result.as_integer() < 0) {
     return HostOutcome::ok_with(Value::integer(0));
   }
@@ -1603,19 +1608,24 @@ HostOutcome m_ts_adv_hero_skills(CallContext& ctx) {
   // nothing prints and returns without running the helper. A receiver that is
   // not an object handle at all is the same case, and the helper's `if
   // (!hero.IsValid)` would answer it identically if it ran. The search path
-  // is the hero's player (`[[hero+0x70]+8]` into 0x0043d030). A failed run
-  // prints `TSHeroSkills: Error running script!` and returns; here it traps
-  // (`run_script_now`'s labelled gap).
+  // is the hero's player (`[[hero+0x70]+8]` into 0x0043d030). A failed run --
+  // a callee that traps or suspends, or a file the library does not hold --
+  // prints `TSHeroSkills: Error running script!` and returns (0x00426d0f):
+  // reported with the pass here, and the caller goes on.
   if (!ctx.arg(0).is_object()) return HostOutcome::ok_void();
 
+  // The handle resolves through the object table (`[0xa2a610 + index]`); one
+  // that names no object is the invalid-object message, not a run.
   const WorldObject* slot = world->find(ctx.arg(0).as_object().id);
-  const PlayerId owner = slot == nullptr ? kNoPlayer : slot->state.owner;
+  if (slot == nullptr) return HostOutcome::ok_void();
+  const PlayerId owner = slot->state.owner;
   AiSystem* ai = ai_system_of(*world);
   const std::uint32_t chunk = (ai == nullptr || owner == kNoPlayer)
                                   ? ctx.scheduler->find_chunk(kFile)
                                   : ai->find_script(*ctx.scheduler, owner, kFile);
   Value result;
-  return run_script_now(ctx, chunk, ctx.arguments, kWhat, result);
+  (void)run_script_or_report(ctx, chunk, ctx.arguments, result);
+  return HostOutcome::ok_void();
 }
 
 /// `hero.AIGetSkillToDevelop(skill, level)` -- **one call site, and it is the
@@ -3075,8 +3085,10 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
 /// of 16 or more included -- **still runs** the plain file. (A seat below 0
 /// indexes before the player table there; it is read as "no AI" here.) A run
 /// that fails answers 0, as does a negative return; `GetStrat` keeps the low
-/// 16 bits of the rest and `CalcPriority` all 32. The failed-run 0 is
-/// `run_script_now`'s labelled gap here.
+/// 16 bits of the rest and `CalcPriority` all 32. A failed run is a callee
+/// that traps or suspends: 0x006a0360 answers non-zero and both trampolines
+/// answer 0 (0x0043d61b, 0x0043d9ab), so here the failure goes to the pass's
+/// report (`run_script_or_report`) and the caller goes on with 0.
 [[nodiscard]] HostOutcome gaika_script_call(CallContext& ctx, std::string_view file,
                                             const char* what, bool player_first) {
   AiSystem* ai = host_ai(ctx);
@@ -3096,8 +3108,9 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
   const Value args[2] = {player_first ? ctx.arg(1) : ctx.arg(0),
                          player_first ? ctx.arg(0) : ctx.arg(1)};
   Value result;
-  const HostOutcome ran = run_script_now(ctx, chunk, args, what, result);
-  if (ran.status != script::HostStatus::ok) return ran;
+  if (!run_script_or_report(ctx, chunk, args, result)) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
   const std::int32_t value = result.is_integer() ? result.as_integer() : 0;
   if (value < 0) return HostOutcome::ok_with(Value::integer(0));
   // `GetStrat` is the one passing the node first, and the one masked.
