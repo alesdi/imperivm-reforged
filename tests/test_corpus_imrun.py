@@ -812,9 +812,13 @@ P1_INSIDE = (13600, 2700)
 #: stood to be sent in. The west gate, because on the seed above nobody of
 #: p1's holds it open at the order turn, as somebody does the south one.
 P1_WEST_OUTSIDE = (12300, 2050)
-#: When the swordsman is sent in. By then p1's AI has trained a few and marched
-#: them out through its gates.
-ORDER_TURN = 300
+#: When the swordsman is sent in: early, while the ones p1's AI trains first
+#: are still on the map. At 300 they were, until a march's member walked its
+#: own step and a unit was filed in a squad at every move (fourteenth round);
+#: since then p1's first swordsmen go out to the neutral villages and die to
+#: their guards before 300. Which of them lives that long is the AI's war;
+#: the fight at the wall is the placement's, whenever it is staged.
+ORDER_TURN = 60
 #: When the gate test's swordsman is sent in: a turn at which every one of
 #: p1's gates stands closed with nobody near, so the gate it walks through is
 #: shut when it is sent. At 300 on the tenth round's tree p1's two swordsmen
