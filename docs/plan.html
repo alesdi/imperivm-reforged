@@ -171,6 +171,11 @@
     <p>Repository: <a href="https://github.com/alesdi/imperivm-reforged"><code>alesdi/imperivm-reforged</code></a>. It ships no game assets and never will; it reads an installation you already own. Below, <code>$GAME</code> is a retail install.</p>
 
     <div class="note">
+      <div class="eyebrow">How the host audit is judged, from round 14 on</div>
+      <p><strong>The yardstick is <code>gbr.exe</code>, not this engine.</strong> Until every host entry point a shipped script reaches is replicated, the work is a port: each entry point is read end to end, described in prose in <code>docs/formats/</code>, implemented from that prose and tested against what the binary does. <strong>This engine&rsquo;s current game is not a reference</strong> &mdash; its play is the product of partial ports, and a more exact port can raise the piles, slow the AI or end fewer matches. Seed medians are not a merge gate; at most they are run once at the end of a round and written down as an observation. <strong>No engine choice is made to keep a number level:</strong> a labelled departure is only for what the engine cannot yet do, and when an exact port makes play worse, the cause is the next thing to port. A merge is gated on what can be wrong whatever the game does &mdash; the entry point&rsquo;s own tests, traps, determinism and the save round trip, <code>--slow</code> once a round, one timed Balcans run for blowups &mdash; and a corpus test stages what it needs rather than pinning the seed on which the AI happens to do it. Whole-game comparison comes when the hosts are done, against the original game. Rounds 12 to 14 gated on twelve-seed medians against the previous tree, and three departures were made to hold them: followers&rsquo; 200 stride, a stopped march member walking on, and <code>Place</code> filing its unit a turn late. They are reverted to the binary&rsquo;s behaviour.</p>
+    </div>
+
+    <div class="note">
       <div class="eyebrow">Verify the tree, about a minute</div>
       <pre><i># The dependency-free core build is the one that must never break.</i>
 <i># RelWithDebInfo is the default. -DIMPERIVM_SPATIAL_CHECK=ON checks every</i>
