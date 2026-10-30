@@ -187,11 +187,17 @@ TEST(audit_an_unbound_named_entry_survives_a_save) {
 }
 
 TEST(audit_squadlist_is_valid_asks_the_pool) {
-  // `SquadList::IsValid` (0x00421a70): the index lies in the squad-list pool.
+  // `SquadList::IsValid` (0x00421a70): the index lies in the squad-list
+  // pool, which is 1,024 entries for the whole game (0x007a8920) -- in use or
+  // not. A list never claimed and a list released both answer valid; the one
+  // invalid handle is the claim's miss, outside the pool.
   Host h;
   const SquadListId id = h.world.squadlists().acquire(1, 0);
   CHECK(h.truthy("IsValid", {make_squadlist_value(id)}));
-  CHECK(!h.truthy("IsValid", {make_squadlist_value(id + 99)}));
+  CHECK(h.truthy("IsValid", {make_squadlist_value(id + 99)}));
+  CHECK(h.truthy("IsValid", {make_squadlist_value(kSquadListPoolEntries)}));
+  CHECK(!h.truthy("IsValid", {make_squadlist_value(kSquadListPoolEntries + 1)}));
+  CHECK(!h.truthy("IsValid", {make_squadlist_value(kNoSquadList)}));
 }
 
 // --------------------------------------------------------------------------
@@ -270,6 +276,44 @@ TEST(audit_is_empty_answers_true_for_a_gone_query_and_false_for_a_sacrifice) {
   const script::HostOutcome sacrifice = h.member("IsEmpty", {obj(altar)});
   REQUIRE(sacrifice.status == script::HostStatus::ok);
   CHECK(sacrifice.value.as_integer() == 0);
+}
+
+TEST(audit_a_sacrifice_is_empty_once_consume_has_found_no_druid) {
+  // The stop flag `[sacrifice+0x15c]` that `Sacrifice::IsEmpty` (0x00594eb0)
+  // answers is zero from the constructor (0x00595290) and written by the
+  // druid-list prune (0x00595150) at the head of every `Consume` as "nobody
+  // is left on the list". No druid can join a list here, so the first
+  // `Consume` raises it, and it is saved and hashed with the object.
+  Host h;
+  const ObjectId altar = h.spawn(NativeClass::sacrifice, 10);
+  CHECK(!h.truthy("IsEmpty", {obj(altar)}));
+  const std::uint64_t before = h.world.state_hash();
+  const script::HostOutcome paid = h.member("Consume", {obj(altar), num(50), num(1000), num(0)});
+  REQUIRE(paid.status == script::HostStatus::ok);
+  CHECK(paid.value.as_integer() == 0);
+  CHECK(h.truthy("IsEmpty", {obj(altar)}));
+  CHECK(h.world.state_hash() != before);
+
+  // Only a sacrifice carries the flag: `Consume` over anything else leaves
+  // it alone.
+  const ObjectId other = h.spawn(NativeClass::unit, 10);
+  (void)h.member("Consume", {obj(other), num(50), num(1000), num(0)});
+  CHECK(!h.world.find(other)->state.flags.sacrifice_stopped);
+}
+
+TEST(audit_settlement_health_and_stamina_are_the_garrison_holders_zero) {
+  // `Settlement::health` (0x005c1e40) and `Settlement::stamina` (0x005c1f00)
+  // read the garrison holder's `+0x1c` and `+0x24`, which nothing but the
+  // holder's constructor and its own archive exchange writes: 0, whatever
+  // the settlement's object holds. The `Obj` forms read the object.
+  Host h;
+  const ObjectId hall = h.spawn(NativeClass::building, 700);
+  h.world.mutable_state(hall)->stamina = 40;
+  const script::Value settlement = script::Value::object(kTypeSettlement, hall);
+  CHECK(h.integer("health", {settlement}) == 0);
+  CHECK(h.integer("stamina", {settlement}) == 0);
+  CHECK(h.integer("health", {obj(hall)}) == 700);
+  CHECK(h.integer("stamina", {obj(hall)}) == 40);
 }
 
 TEST(audit_pos_and_pos_rh_answer_the_origin_for_an_invalid_receiver) {
@@ -403,6 +447,19 @@ TEST(audit_set_no_ai_flag_regroups_the_unit_so_its_squad_carries_the_flag) {
         script::HostStatus::ok);
   CHECK(!h.world.find(a)->state.flags.no_ai);
   CHECK((squads.find(squads.squad_of(a))->flags & kSquadFlagNoAi) == 0);
+
+  // The worker asks a member only that it resolves and is owned -- not that
+  // it is a unit. An owned building in the list is given a squad of its own;
+  // the flag word itself is written on units alone.
+  const ObjectId tower = h.spawn(NativeClass::building, 300);
+  h.world.set_owner(tower, 1);
+  const ObjectId wild = h.spawn(NativeClass::building, 300);
+  pool.mutable_items(list)->assign({tower, wild});
+  CHECK(h.free("SetNoAIFlag", {make_objlist_value(list), num(1)}).status ==
+        script::HostStatus::ok);
+  CHECK(!h.world.find(tower)->state.flags.no_ai);
+  CHECK(squads.squad_of(tower) != kNoSquad);
+  CHECK(squads.squad_of(wild) == kNoSquad);
 }
 
 // --------------------------------------------------------------------------
@@ -653,6 +710,45 @@ TEST(audit_rot_keeps_the_residue_of_an_exact_half) {
   CHECK(rot(Point{0, 2}, 330) == (Point{-1, 1}));
   CHECK(rot(Point{2, 0}, 240) == (Point{-1, 1}));
   CHECK(rot(Point{2, 0}, 120) == (Point{0, -1}));
+}
+
+TEST(audit_rot_reproduces_the_fpus_roundings_exactly) {
+  // `point::Rot` (0x00697d90): the angle `d * K` rounded to 53 bits, the
+  // FPU's sine and cosine of it at 64 bits, each product and the sum rounded
+  // to 53, then truncated. Expected values from an exact rational evaluation
+  // of those steps (docs/formats/point-rot.md).
+  Host h;
+  const auto rot = [&](Point p, std::int32_t degrees) -> Point {
+    script::Value args[] = {pack_point(p), num(degrees)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &h.context;
+    ctx.name = "Rot";
+    ctx.kind = script::CallKind::member;
+    const std::uint32_t index = h.registry.find(script::CallKind::member, "Rot", 1);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return Point{};
+    (void)h.registry.entry(index).fn(ctx);
+    return unpack_point(args[0]);
+  };
+  // sin(90 K) rounds to exactly 1 at 64 bits; cos(90 K) is 4.5e-11.
+  CHECK(rot(Point{100, 0}, 90) == (Point{0, -100}));
+  CHECK(rot(Point{0, 100}, 90) == (Point{100, 0}));
+  CHECK(rot(Point{-100, 0}, 90) == (Point{0, 100}));
+  CHECK(rot(Point{32767, 0}, 90) == (Point{0, -32767}));
+  CHECK(rot(Point{1000, 1000}, 45) == (Point{1414, 0}));
+  CHECK(rot(Point{-500, 300}, -30) == (Point{-583, 9}));
+  // 360 is not a no-op: sin(360 K) is -1.8e-10, which moves a negative y up
+  // across the integer below it.
+  CHECK(rot(Point{12345, -6789}, 360) == (Point{12345, -6788}));
+  CHECK(rot(Point{100, 0}, 360) == (Point{100, 0}));
+  CHECK(rot(Point{7, 0}, 180) == (Point{-7, 0}));
+  CHECK(rot(Point{0, 7}, 180) == (Point{0, -7}));
+  CHECK(rot(Point{-100, 0}, 180) == (Point{100, 0}));
+  // 270: |sin| a hair under 1 and cos a hair under 0, so 3 becomes 2.
+  CHECK(rot(Point{3, 4}, 270) == (Point{-4, 2}));
+  CHECK(rot(Point{15, 0}, -15) == (Point{14, 3}));
+  CHECK(rot(Point{0, 15}, 15) == (Point{3, 14}));
 }
 
 TEST(audit_traverse_records_the_travellers_whole_view_sharing_side) {

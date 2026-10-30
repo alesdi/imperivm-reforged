@@ -439,10 +439,16 @@ struct ObjectFlags {
   /// 0x00447200) counts the unit in its owner's class tally, lowered where
   /// the unregister (0x0041eee0 -> 0x004448a0) takes it back out. The
   /// engine's squad membership stands in for the handle elsewhere; this is
-  /// kept apart because the engine files some units nowhere that the
-  /// original files (a unit born in a holder). `docs/formats/class-tally.md`.
-  /// **Hashed and saved.**
+  /// kept apart because a squad can let a unit go without the take (a squad
+  /// stood down and pruned), and the register must still see it as
+  /// registered. `docs/formats/class-tally.md`. **Hashed and saved.**
   bool ai_registered = false;
+  /// A sacrifice's stop flag, the int at `[sacrifice+0x15c]`: zero from the
+  /// constructor (0x00595290), and written by the druid-list prune
+  /// (0x00595150) at the head of every `Consume` as "no druid is left on the
+  /// list". `Sacrifice::IsEmpty` (0x00594eb0) answers it.
+  /// `docs/formats/sacrifice.md`. **Hashed and saved.**
+  bool sacrifice_stopped = false;
 };
 
 /// The common header every simulated object carries.

@@ -30,6 +30,9 @@ standard of evidence they are held to.
 | route search (runtime) | [pathfinder.md](pathfinder.md) | the original's two route searches, their budgets, what an unreachable goal answers, and when a unit searches again |
 | AI map nodes (runtime) | [gaika.md](gaika.md) | the original's node table: each node's squad deque and who files into it, what a node remembers per player, the `MAIKA` list |
 | formation object (runtime) | [formation.md](formation.md) | the original's formation: its members and pending units, the layout that places them round the hero, the sample that turns it onto the map, and the march that moves it |
+| `point::Rot` (runtime) | [point-rot.md](point-rot.md) | the original's x87 rotation, step by step, and the integer reproduction of its roundings |
+| sacrifice (runtime) | [sacrifice.md](sacrifice.md) | a sacrifice's stop flag: who writes it and what `IsEmpty` answers |
+| settlement holder (runtime) | [settlement.md](settlement.md) | the garrison holder's `health` and `stamina`, and why both are always 0 |
 | `ISAV` | [save.md](save.md) | **ours, not the original's** — the saved session we write, and the checklist `gbr.exe` gives for it |
 
 The resolved object model — class tree, native class responsibilities, faction inventory —

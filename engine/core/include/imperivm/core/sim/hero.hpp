@@ -658,12 +658,33 @@ class HeroSystem final : public System {
   // and unregister keep for the unit's class and every ancestor. See
   // `docs/formats/class-tally.md`.
 
-  /// The AI register's tally half (0x0041f310 -> 0x00447200): while the AI
-  /// manager exists, a unit that is not a spawn template, does not carry
+  /// The AI register (0x0041f310 -> 0x00447200): while the AI manager
+  /// exists, a unit that is not a spawn template, does not carry
   /// `SetNoselectFlag`'s bit, has an owner and is not registered yet is
-  /// counted in its owner's tally, for its class and each ancestor, and
-  /// marked registered (`ObjectFlags::ai_registered`). Nothing else.
+  /// counted in its owner's tally, for its class and each ancestor, marked
+  /// registered (`ObjectFlags::ai_registered`, the squad handle being set),
+  /// and filed in a squad towards the node under it (`add_to_squad`) unless
+  /// it is in one already. Every birth the original hands to the AI calls
+  /// this at the moment of the birth; see docs/formats/class-tally.md.
   void ai_register(World& world, ObjectId id);
+
+  /// `Place`'s register (`docs/formats/class-tally.md`, "What differs"): the
+  /// gates and the tally at once, as `ai_register`, but the squad filing
+  /// left to the turn's sweep (`register_unregistered_units`), which files
+  /// the unit then if it is alive, owned, in no squad and not in a holder.
+  void ai_register_placed(World& world, ObjectId id);
+
+  /// The units `ai_register_placed` left to the sweep, in the order they
+  /// were placed; the sweep takes them all, once.
+  [[nodiscard]] std::vector<ObjectId> take_deferred_filing() noexcept {
+    return std::exchange(deferred_filing_, {});
+  }
+
+  /// `Unit::SetPlayer`'s AI half (0x005dc3f0) after the owner of a unit has
+  /// been written over `previous`: the unregister on `previous`, then the
+  /// register on the new owner when the unit's `posRH` has no negative
+  /// coordinate (0x0041f4d0). Nothing when the owner did not change.
+  void ai_owner_changed(World& world, ObjectId id, PlayerId previous);
 
   /// `Unit::Mutate`'s two tally calls (0x005df1e4, 0x005df287): unless the
   /// unit carries `SetNoselectFlag`'s bit, its owner's tally loses the old
@@ -967,14 +988,17 @@ class HeroSystem final : public System {
   std::vector<UnitRecord> units_;   ///< sorted by id; iteration order is state
   std::vector<HeroRecord> heroes_;  ///< sorted by id
   GameTime now_ = 0;
-  /// The highest object id `enrol_new_units_in_squads` has looked at.
-  /// Saved (section version 18).
-  ObjectId squad_watermark_ = 0;
   /// The sixteen class tallies, keyed on (owner, class): the original's
   /// per-player map from class name to count. An entry once made is never
   /// erased, as in the original. Saved and hashed.
   std::map<std::pair<PlayerId, ClassIndex>, std::int32_t> class_tally_;
+  /// `ai_register_placed`'s units, waiting for the next sweep to file them
+  /// in a squad. Saved (section version 46) and hashed.
+  std::vector<ObjectId> deferred_filing_;
 
+  /// The register: the gates, the tally, and the squad filing at once when
+  /// `file_now`, else left on `deferred_filing_`.
+  void register_unit(World& world, ObjectId id, bool file_now);
   void tally_add(const World& world, PlayerId owner, ClassIndex cls);
   void tally_take(const World& world, PlayerId owner, ClassIndex cls);
 };

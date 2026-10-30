@@ -423,7 +423,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// section carries the sixteen class tallies `Count` reads (system section
 /// version 45). A version-51 file has no tally, and every `Count` after a
 /// load would answer 0 until the units it counts were born again.
-inline constexpr std::uint32_t kStateVectorVersion = 52;
+/// 53: the object's flag word carries a sacrifice's stop flag
+/// (`sacrifice_stopped`, `[sacrifice+0x15c]`, docs/formats/sacrifice.md),
+/// and the hero section carries `Place`'s deferred-filing list where the
+/// squad watermark was (system section version 46): every other birth
+/// registers and files its unit with the AI at once. A version-52 file has a
+/// watermark there.
+inline constexpr std::uint32_t kStateVectorVersion = 53;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

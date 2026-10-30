@@ -3511,11 +3511,10 @@ void give_settlement_to(CallContext& ctx, EconomySystem& economy, World& world, 
 /// mask in `sim/world.hpp`. Nothing above bit 15 is touched, so
 /// **`SetPlayer` does not take an object out of its squad or party**.
 ///
-/// What this engine cannot reproduce, and does not fake: the AI is told, three
-/// different ways -- 0x0041e970 for a settlement, an engine message for an
-/// object, and 0x0041f4d0 on the unit override. The AI here runs a player's
-/// `Main.vs` rather than keeping a roster of objects, which is the same reason
-/// `place_object` declines 0x0041f310.
+/// The AI is told three different ways -- 0x0041e970 for a settlement, an
+/// engine message for an object, and on the unit override (0x005dc3f0) the
+/// unregister and the register again (`HeroSystem::ai_owner_changed`). Only
+/// the third is reproduced here.
 void give_object_to(CallContext& ctx, EconomySystem* economy, World& world, ObjectId id,
                     PlayerId owner) {
   const WorldObject* slot = world.find(id);
@@ -3551,7 +3550,16 @@ void give_object_to(CallContext& ctx, EconomySystem* economy, World& world, Obje
       (void)commands->kill_command(world, id);
     }
   }
+  const PlayerId previous = slot->state.owner;
   (void)world.set_owner(id, owner);
+  // `Unit::SetPlayer` (0x005dc3f0) on a unit: out of the AI on the owner it
+  // leaves, and back in on the new one while it stands somewhere
+  // (0x0041eee0, 0x0041f4d0). A building has no such override.
+  if (const WorldObject* now = world.find(id); now != nullptr && now->state.flags.is_unit) {
+    if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+      heroes->ai_owner_changed(world, id, previous);
+    }
+  }
 }
 
 
@@ -5797,6 +5805,9 @@ ObjectId make_mule(World& world, SettlementId id, Resource kind, std::int32_t am
   set_wagon_cargo(world, carrier, taken);
   world.set_owner(carrier, s->owner);
   (void)world.put_in_holder(carrier, s->holder.object);
+  // Then the AI register (0x005eee37): counted and filed in a squad at once,
+  // towards the node under the settlement it waits in.
+  if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) heroes->ai_register(world, carrier);
   return carrier;
 }
 

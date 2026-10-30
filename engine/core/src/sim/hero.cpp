@@ -11,6 +11,9 @@
 #include "imperivm/core/script/scheduler.hpp"
 #include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/gaika_table.hpp"
+#include "imperivm/core/sim/lsa.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/fog.hpp"
 #include "imperivm/core/sim/host_context.hpp"
@@ -558,7 +561,16 @@ void HeroSystem::tally_take(const World& world, PlayerId owner, ClassIndex cls) 
   }
 }
 
-void HeroSystem::ai_register(World& world, ObjectId id) {
+void HeroSystem::ai_register(World& world, ObjectId id) { register_unit(world, id, true); }
+
+void HeroSystem::ai_register_placed(World& world, ObjectId id) { register_unit(world, id, false); }
+
+void HeroSystem::register_unit(World& world, ObjectId id, bool file_now) {
+  // 0x0041f310's gates: the manager (here the AI manager's flag, which also
+  // stands for the AI world pointer [0x008c8e50]; the editor latch
+  // [0x00a8734c] is never up in a game), the spawn-template bit, the
+  // noselect bit, an owner; and the add (0x00447200) only for a unit whose
+  // squad handle is empty, which `ai_registered` stands for.
   const AiSystem* ai = ai_system_of(world);
   if (ai == nullptr || !ai->manager_started()) return;
   const WorldObject* slot = world.find(id);
@@ -566,8 +578,39 @@ void HeroSystem::ai_register(World& world, ObjectId id) {
   ObjectState* state = world.mutable_state(id);
   if (state == nullptr || state->flags.unspawned || state->flags.noselect) return;
   if (state->owner == kNoPlayer || state->flags.ai_registered) return;
+  // The add, in its order: the tally for the class and each ancestor, then
+  // `AddToSquad` towards the node under the unit (0x0044e650 on `posRH`,
+  // the holder's town for a held unit). A unit some other path has already
+  // filed keeps its squad.
   tally_add(world, state->owner, slot->class_index);
   state->flags.ai_registered = true;
+  if (squads_.squad_of(id) != kNoSquad) return;
+  if (!file_now) {
+    deferred_filing_.push_back(id);
+    return;
+  }
+  const GaikaId under = world.gaika().at(world.lsa(), unit_pos_rh(world, id));
+  (void)add_to_squad(world, *this, id, under);
+}
+
+void HeroSystem::ai_owner_changed(World& world, ObjectId id, PlayerId previous) {
+  // `Unit::SetPlayer` (0x005dc3f0) for a change of owner: the unregister
+  // (0x0041eee0) runs first, on the owner of that moment -- the one the unit
+  // leaves -- then the owner is written with the manager held off, then
+  // 0x0041f4d0 registers it again when `posRH` reads back with both
+  // coordinates non-negative. The caller has written the owner; the take
+  // goes to `previous`, the owner the original's unregister sees.
+  ObjectState* state = world.mutable_state(id);
+  if (state == nullptr || previous == state->owner) return;
+  const AiSystem* ai = ai_system_of(world);
+  if (ai == nullptr || !ai->manager_started()) return;
+  if (state->flags.unspawned || state->flags.noselect) return;
+  const PlayerId now_owner = state->owner;
+  state->owner = previous;
+  ai_unregister(world, id);
+  state->owner = now_owner;
+  const Point at = unit_pos_rh(world, id);
+  if (at.x >= 0 && at.y >= 0) ai_register(world, id);
 }
 
 void HeroSystem::ai_mutate(World& world, ObjectId id, ClassIndex from) {
@@ -1244,9 +1287,9 @@ void HeroSystem::advance(World& world, const Turn& turn) {
   const GameTime from = turn.start - 1;
   now_ = turn.end;
   clear_dead(world);
-  // Units that entered the world since last turn join a squad, while the AI
-  // manager exists: 0x0041e820's job, done once a turn. See sim/squad.hpp.
-  squad_watermark_ = enrol_new_units_in_squads(world, *this, squad_watermark_);
+  // A unit whose registration was held off and that is on the map now: the
+  // move hook's register (0x0041f530), once a turn. See sim/squad.hpp.
+  register_unregistered_units(world, *this);
   run_egoism(world, from, now_);
   run_hero_ticks(world, from, now_);
   expire_effects(world, now_);
@@ -1301,6 +1344,10 @@ void HeroSystem::hash(std::uint64_t& accumulator) const {
     fold(accumulator, key.second);
     fold_i32(accumulator, count);
   }
+  // `Place`'s units the next sweep files: which squad a recruit lands in
+  // depends on whether it is filed then.
+  fold(accumulator, static_cast<std::uint32_t>(deferred_filing_.size()));
+  for (const ObjectId id : deferred_filing_) fold(accumulator, id);
 }
 
 // --------------------------------------------------------------------------

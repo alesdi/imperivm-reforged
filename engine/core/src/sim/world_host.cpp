@@ -33,6 +33,9 @@
 #include "imperivm/core/sim/objlist.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <limits>
+#include <utility>
 #include <vector>
 
 #include "imperivm/core/script/scheduler.hpp"
@@ -598,6 +601,13 @@ struct MembershipReceiver {
   std::vector<ObjectId> members;
 };
 
+/// Bit 27 of `[obj+0x2c]`: an object `CVXGroup::Add` files in the template
+/// deque and `CVXGroup::Remove` never finds.
+[[nodiscard]] bool is_spawn_template(const World& world, ObjectId id) {
+  const WorldObject* slot = world.find(id);
+  return slot != nullptr && slot->state.flags.unspawned;
+}
+
 [[nodiscard]] MembershipReceiver membership_receiver(CallContext& ctx, World& world) {
   MembershipReceiver out;
   if (ctx.count() == 0) return out;
@@ -627,9 +637,13 @@ struct MembershipReceiver {
 /// `AddToGroup` calls and then loops on `Group("Oasis_Guards").count`.
 ///
 /// The add itself is `CVXGroup::Add` (vtbl+0x3c, 0x00572410): a linear find in
-/// the group's deque, then an append if absent. A template goes to a separate
-/// deque there (`+0x54`, when `[0x00a8734c]` is clear); here the one list keeps
-/// it and every reader leaves templates out, which `GroupTable` documents.
+/// the group's deque, then an append if absent. **Which deque** is decided
+/// first: while the map editor's latch `[0x00a8734c]` is down -- always, in a
+/// game -- a spawn template (bit 27) goes to the template deque (`+0x54`)
+/// and anything else to the live one (`+0x24`); in the editor everything goes
+/// to the live one. Here the one list keeps both, the template bit tells them
+/// apart, and every reader asks for the half it reads, which `GroupTable`
+/// documents. docs/formats/map.md, "Bit 27".
 HostOutcome fn_add_to_group(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("AddToGroup: no world");
@@ -647,7 +661,8 @@ HostOutcome fn_add_to_group(CallContext& ctx) {
 /// and nothing else: `find`, not `intern`, so a misspelling does not leave an
 /// empty group behind for a later `Group(...)` to resolve. The removal is
 /// `CVXGroup::Remove` (0x00572210): the first match in the live deque, erased
-/// in place, order kept.
+/// in place, order kept. **The live deque only**: a spawn template stays in the
+/// group it was authored into, and `SpawnGroup` goes on cloning it.
 HostOutcome fn_remove_from_group(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RemoveFromGroup: no world");
@@ -658,7 +673,10 @@ HostOutcome fn_remove_from_group(CallContext& ctx) {
   if (!receiver.found) return HostOutcome::ok_void();
   const std::int32_t group = world->groups().find(ctx.arg(1).as_string());
   if (group == GroupTable::kNoGroup) return HostOutcome::ok_void();
-  for (const ObjectId id : receiver.members) world->groups().remove(group, id);
+  for (const ObjectId id : receiver.members) {
+    if (is_spawn_template(*world, id)) continue;  // not in the live deque
+    world->groups().remove(group, id);
+  }
   return HostOutcome::ok_void();
 }
 
@@ -672,7 +690,12 @@ HostOutcome fn_remove_from_all_groups(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RemoveFromAllGroups: no world");
   const MembershipReceiver receiver = membership_receiver(ctx, *world);
-  for (const ObjectId id : receiver.members) world->groups().remove_from_all(id);
+  for (const ObjectId id : receiver.members) {
+    // `Remove` on each group, which reads the live deque: a template keeps
+    // every group it is a template of.
+    if (is_spawn_template(*world, id)) continue;
+    world->groups().remove_from_all(id);
+  }
   return HostOutcome::ok_void();
 }
 
@@ -783,6 +806,13 @@ HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_vi
     // orders and food. See `feed_from_now`.
     feed_from_now(world, copy);
     items->push_back(copy);
+    // The copy's AI register, last (0x005729f0, 0x00572720): the spawn holds
+    // the AI world pointer [0x008c8e50] at zero while it clones, places,
+    // enters and files, so nothing those steps run registers it, and puts it
+    // back for this one call. Tally and squad, at once.
+    if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+      heroes->ai_register(world, copy);
+    }
   }
   return HostOutcome::ok_with(make_objlist_value(list));
 }
@@ -853,6 +883,10 @@ HostOutcome fn_spawn_named(CallContext& ctx) {
   // that arrives mid-turn has to be in the feeding chain before the sequence
   // that spawned it starts giving it orders.
   feed_from_now(*world, copy);
+  // The AI register last, as `SpawnGroup`'s copies have it (0x00571f39).
+  if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
+    heroes->ai_register(*world, copy);
+  }
   return HostOutcome::ok_with(Value::object(kTypeObj, copy));
 }
 
@@ -1035,20 +1069,26 @@ HostOutcome place_object(World& world, ClassIndex class_index, NativeClass nativ
   feed_from_now(world, id);
   if (!scriptable) return HostOutcome::ok_with(invalid_object());
 
-  // Then the AI hand-off (0x0041f310), which the original performs for a
-  // `CVXUnit` whose position reads back with `x >= 0` -- and which skips
-  // anything carrying the spawn-template bit, corroborating bit 27 from a call
-  // site that has nothing to do with groups.
+  // Then the AI hand-off (0x0041f310): the unit's own `SetPos` (0x005d39e0)
+  // runs the move hook (0x0041f530), which registers a unit whose squad
+  // handle is empty, and `Place` calls the register again for a `CVXUnit`
+  // whose position reads back with `x >= 0`, which finds it registered. Both
+  // skip anything carrying the spawn-template bit, corroborating bit 27 from
+  // a call site that has nothing to do with groups.
   //
-  // **Its tally half is here, at once** (`HeroSystem::ai_register`): the
-  // owner's class tally counts the unit before `Place` returns, so
-  // `BARRACK_TRAIN.VS`'s `Count(.player, carCmdParam)` on the next lines
-  // counts the recruit it has just placed. The squad half -- filing the unit
-  // -- is the per-turn sweep's (`enrol_new_units_in_squads`), which skips the
-  // tally for a unit already registered here.
+  // **The tally at once, the squad at the next turn**
+  // (`HeroSystem::ai_register_placed`): the owner's class tally counts the
+  // unit before `Place` returns, so `BARRACK_TRAIN.VS`'s
+  // `Count(.player, carCmdParam)` on the next lines counts the recruit it has
+  // just placed. The original also files the unit in a squad here; this
+  // engine files it at the next turn's sweep, and not at all if it has gone
+  // into a holder by then -- a labelled difference, measured in
+  // docs/formats/class-tally.md ("What differs"): filed at once, recruits
+  // walking into their hall are caught by the orders of the squad they
+  // joined, and Crossroads production falls by a third.
   if (const WorldObject* placed = world.find(id); placed != nullptr && placed->state.flags.is_unit) {
     if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
-      heroes->ai_register(world, id);
+      heroes->ai_register_placed(world, id);
     }
   }
   return HostOutcome::ok_with(object_value(id));
@@ -1475,10 +1515,12 @@ HostOutcome fn_place_ex(CallContext& ctx) {
 /// the unit's bit and stopped there until the host audit read the bodies, on
 /// a reading of the call as a post to the AI that nothing received.
 ///
-/// **One labelled gap:** the original also feeds a building or a corpse in the
-/// list to the worker. A non-unit is left out here -- no shipped list holds
-/// one, and a squad of buildings is nothing this engine's AI can carry --
-/// while a dying unit goes through as in the original.
+/// **The worker takes every member, unit or not.** 0x00447330 asks each
+/// member only that it resolves and has an owner (`[obj+0x70]`); there is no
+/// unit test and no death test in it. So a building or a corpse in the list
+/// is regrouped like a unit -- a squad of its own, `AddToSquad` -- exactly as
+/// `squadize_bodies` does for anything it is handed. No shipped list holds
+/// one.
 template <bool kFiltered>
 HostOutcome set_no_ai_flag(CallContext& ctx, std::size_t value_index) {
   World* world = world_of(ctx);
@@ -1503,7 +1545,7 @@ HostOutcome set_no_ai_flag(CallContext& ctx, std::size_t value_index) {
     if (!kFiltered || (slot->state.flags.is_unit && !object_is_dead(*slot))) {
       if (ObjectState* state = world->mutable_state(id); state != nullptr) state->flags.no_ai = wanted;
     }
-    if (slot->state.flags.is_unit) bodies.push_back(id);
+    bodies.push_back(id);
   }
 
   if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr && !bodies.empty()) {
@@ -1715,13 +1757,24 @@ HostOutcome m_named_obj_obj(CallContext& ctx) {
 ///     membership of the named map (0x00571ac0 via 0x00571a40), which every
 ///     handle `GetNamedObj` gives holds, so it asks whether the *name* exists,
 ///     not whether its object lives -- `IsDead` is that question. A group
-///     query asks the group map (0x00571c10); the sight queries answer 1
-///     (0x00444560). Here a named handle is valid while its table entry is,
-///     and a query while its object resolves.
+///     query asks the group map (0x00571c10); every other kind -- sight,
+///     units in settlement, set operation, player-flags, class-player,
+///     circle, rectangle -- answers 1 (0x00444560). The two maps drop an
+///     entry only when both are replaced on entering a new map (0x004d04d0),
+///     which only `ChangeMap` causes; it has no shipped call and is not
+///     implemented. So within a map a query whose handle resolves is valid,
+///     and that is the answer here: a named handle while its table entry
+///     exists, a query while its object resolves.
+///     docs/formats/query-model.md.
 ///   * `SquadList::IsValid` (0x00421a70): the receiver is an index into the
 ///     squad-list pool (0x008c8dc4/0x008c8dc8, 16-byte entries, 0x0043ed70),
-///     valid while it lies inside the pool. `SquadListPool::contains` is the
-///     nearest question this pool answers (a live entry); no shipped site asks.
+///     valid while it lies inside the pool -- and the pool is a vector of
+///     1,024 entries sized once by its static constructor (0x007a8920) and
+///     never resized, so every index from 0 to 1,023 is valid, a released
+///     list's included (the release, 0x0043ff60, only frees the deque and
+///     clears the in-use word at `+0xc`). The claim (0x0043ed10) answers -1
+///     when all 1,024 are in use, and -1 is the one handle that is invalid.
+///     Here a handle is the index plus one. docs/formats/squad.md.
 HostOutcome m_is_valid(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("IsValid: no world");
@@ -1730,8 +1783,9 @@ HostOutcome m_is_valid(CallContext& ctx) {
         Value::boolean(named_index_of(*world, ctx.arg(0)) != NamedObjectTable::kNoName));
   }
   if (is_squadlist(ctx.arg(0))) {
+    const SquadListId list = squadlist_of(ctx.arg(0));
     return HostOutcome::ok_with(
-        Value::boolean(world->squadlists().contains(squadlist_of(ctx.arg(0)))));
+        Value::boolean(list != kNoSquadList && list <= kSquadListPoolEntries));
   }
   return HostOutcome::ok_with(Value::boolean(object_of(*world, ctx.arg(0)) != nullptr));
 }
@@ -1938,11 +1992,13 @@ HostOutcome m_pos_rh(CallContext& ctx) {
 /// `Settlement::health` (0x005c1e40) and `Settlement::stamina` (0x005c1f00)
 /// read the settlement's **garrison holder** -- the 16-bit handle at
 /// `[settlement+0x5e]`, the holder `UnitsCount` and `max_units` read -- at
-/// `+0x1c` and `+0x24`, 0 on a miss. The holder constructor (0x00531de0)
-/// zeroes `+0x14..+0x24` and no writer of those two fields was found, so they
-/// are probably always 0; here a settlement receiver answers the settlement
-/// object's own health and stamina, which are 0 too. No shipped site asks a
-/// settlement either.
+/// `+0x1c` and `+0x24`, 0 on a miss. **Both are always 0.** The holder
+/// constructor (0x00531de0) zeroes `+0x14..+0x24`, and the one other writer
+/// of the two fields is the holder's own archive exchange (0x00531fb0, the
+/// `Holder` record's `health` and `stamina`), which loads back what a save
+/// wrote from the same zero; no map file carries a `Holder` record. So a
+/// settlement receiver answers 0 here, whatever its objects hold.
+/// docs/formats/settlement.md.
 HostOutcome m_health(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("health: no world");
@@ -1954,6 +2010,9 @@ HostOutcome m_health(CallContext& ctx) {
       }
     }
     return HostOutcome::ok_with(Value::integer(total));
+  }
+  if (ctx.arg(0).is_object() && ctx.arg(0).as_object().type == kTypeSettlement) {
+    return HostOutcome::ok_with(Value::integer(0));
   }
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   return HostOutcome::ok_with(Value::integer(slot != nullptr ? slot->state.health : 0));
@@ -2008,6 +2067,10 @@ HostOutcome m_max_health(CallContext& ctx) {
 HostOutcome m_stamina(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("stamina: no world");
+  // `Settlement::stamina`: the garrison holder's `+0x24`, always 0 (`m_health`).
+  if (ctx.arg(0).is_object() && ctx.arg(0).as_object().type == kTypeSettlement) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   return HostOutcome::ok_with(Value::integer(slot != nullptr ? slot->state.stamina : 0));
 }
@@ -3710,6 +3773,10 @@ HostOutcome m_set_build_frame(CallContext& ctx) {
 ///     until its first order takes it out, and `IsBuilding` is never true.
 ///     Reproducing it needs a suspending entry with its own state and a
 ///     fixed-point stand-in for the easing; recorded for a round of its own.
+///     **The AI hand-off is reproduced** (`m_show_build_animation`): the ship
+///     `CreateShip` built with the AI manager held off (0x005ef240) is
+///     registered -- tallied and filed in a squad -- by this call, at once
+///     rather than at the end of the slide.
 ///   * `Obj::SetDebug/1` -- 1 site, and it is `DEBUG_SELECTION.VS` walking the
 ///     current selection to turn a debug overlay on. 0x005abcb0 normalises the
 ///     argument to 0 or 1 and calls the object's `vtbl+0xd4`.
@@ -3724,6 +3791,19 @@ HostOutcome f_presentation_void(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("presentation: no world");
   (void)object_of(*world, ctx.arg(0));
+  return HostOutcome::ok_void();
+}
+
+/// `Ship::ShowBuildAnimation`'s simulation half: the AI register at its end
+/// (0x0041f310, after the slide), which is the only register the new ship
+/// gets -- `CreateShip` holds the AI manager at zero while it sets the owner,
+/// the position and the holder. The slide itself is the labelled gap above.
+HostOutcome m_show_build_animation(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr) return HostOutcome::failed("ShowBuildAnimation: no world");
+  const WorldObject* slot = object_of(*world, ctx.arg(0));
+  if (slot == nullptr) return HostOutcome::ok_void();
+  if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) heroes->ai_register(*world, slot->id);
   return HostOutcome::ok_void();
 }
 
@@ -3978,19 +4058,23 @@ HostOutcome m_add_druid(CallContext& ctx) {
 /// sleep slot (0x00a77eac) and answers the suspend code, so the script sleeps
 /// `period` and re-enters; on the re-entry, or at once when the bool is
 /// clear, it hands `price` and `period` to the core at 0x00596050 and pushes
-/// what that returns. The core is the ritual's economy: 0 outright while the
-/// stop flag at `[sacrifice+0x15c]` is set, otherwise `price` spread over the
-/// druids on the list at `+0x14c` -- each paying from its health, none below
-/// a tenth of its maximum -- and the health obtained is the answer. A ritual
-/// with nobody on its list divides by that nobody at 0x00596204, which no
-/// shipped path reaches: a sacrifice is started by the druid it lists.
+/// what that returns. The core is the ritual's economy, and it opens with the
+/// druid-list prune (0x00595150, with the sacrifice clock's now): every entry
+/// whose druid is gone, is down to a tenth of its maximum health or whose
+/// lease has run out leaves the list (and its druid's `[+0x1cc]` goes back to
+/// 0xffff), and **the stop flag `[sacrifice+0x15c]` is written as "the list is
+/// empty"**. Then 0 outright while the flag is set, otherwise `price` spread
+/// over the druids left -- each paying from its health, none below a tenth of
+/// its maximum -- and the health obtained is the answer. So an empty list
+/// never reaches the division at 0x00596204: the prune has stopped the ritual
+/// first. docs/formats/sacrifice.md.
 ///
 /// **No druid can be on that list here**, for the reason `AddDruid` gives, so
-/// the answer after the wait is what an empty ritual yields, 0, rather than
-/// the fault -- the one reading available. The wait is reproduced because the
-/// script's shape depends on it: one period, then the ghost dies. The receiver
-/// is not checked, because the original does not check it either; it resolves
-/// it or carries a null into the core.
+/// the prune always finds it empty: the flag goes up on the sacrifice, which
+/// `IsEmpty` then answers, and the answer is 0. The wait is reproduced because
+/// the script's shape depends on it: one period, then the ghost dies. The
+/// receiver is not checked, because the original does not check it either; it
+/// resolves it or carries a null into the core.
 HostOutcome m_consume(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Consume: no world");
@@ -4003,6 +4087,12 @@ HostOutcome m_consume(CallContext& ctx) {
             ? ctx.arg(2).as_integer()
             : 0;
     return outcome;
+  }
+  if (const WorldObject* slot = object_of(*world, ctx.arg(0));
+      slot != nullptr && slot->object != nullptr && slot->object->is_a(NativeClass::sacrifice)) {
+    if (ObjectState* state = world->mutable_state(slot->id); state != nullptr) {
+      state->flags.sacrifice_stopped = true;
+    }
   }
   return HostOutcome::ok_with(Value::integer(0));
 }
@@ -6163,12 +6253,15 @@ HostOutcome m_erase(CallContext& ctx) {
 ///     cached list while it is fresh, and once due a refresh -- or, for the
 ///     area, sight, player-flags and party kinds, a sweep that only counts.
 ///   * `Sacrifice::IsEmpty` (0x00594eb0): the handle check -- a miss answers
-///     true -- then the stop flag at `[sacrifice+0x15c]`, the one `Consume`'s
-///     core (0x00596050) reads. Nothing in this engine sets it (there is no
-///     sacrifice machinery; see `m_get_sacrifice`), so a resolved sacrifice
-///     answers false. The two share this registration because the registry
-///     keys on (kind, name, arity); an `Obj` receiver that is not a query is
-///     the sacrifice form.
+///     true -- then the stop flag at `[sacrifice+0x15c]`
+///     (`ObjectFlags::sacrifice_stopped`): zero from the constructor
+///     (0x00595290) and written only by the druid-list prune at the head of
+///     `Consume`'s core (0x00595150), as "no druid is left". So a sacrifice
+///     answers false until its first `Consume`, and after that whether that
+///     `Consume` found its list empty -- which, with no druid able to join one
+///     here, it always does (`m_consume`). The two share this registration
+///     because the registry keys on (kind, name, arity); an `Obj` receiver
+///     that is not a query is the sacrifice form.
 ///
 /// Both used to trap, which stopped a script on a handle whose object had
 /// gone where the original answers "empty" and goes on.
@@ -6177,7 +6270,9 @@ HostOutcome m_query_is_empty(CallContext& ctx) {
   if (world == nullptr) return HostOutcome::failed("IsEmpty: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_with(Value::boolean(true));
-  if (slot->internal != InternalKind::query) return HostOutcome::ok_with(Value::boolean(false));
+  if (slot->internal != InternalKind::query) {
+    return HostOutcome::ok_with(Value::boolean(slot->state.flags.sacrifice_stopped));
+  }
   world->purge_query(slot->id);
   return HostOutcome::ok_with(
       Value::boolean(world->query_is_empty(slot->id, script_clock(ctx, *world))));
@@ -6390,12 +6485,12 @@ HostOutcome m_rect_height(CallContext& ctx) { return m_rect_edge(ctx, 5); }
 // -- rotation ---------------------------------------------------------------
 //
 // `point::Rot(degrees)`, body 0x00697d90, 385 shipped sites. **The original is
-// x87 floating point** -- `fildl`, `fmull 0x7ac490`, `fsin`, `fcos`, and two
-// calls to the MSVC `_ftol2` truncation helper at 0x00763870 -- and the
-// constant it multiplies by is 0.017453292519444445, which is not `pi/180` but
+// x87 floating point** -- the degrees loaded as an integer, multiplied by the
+// double at 0x7ac490, the FPU's sine and cosine of the product, and two calls
+// to the MSVC `_ftol2` truncation helper at 0x00763870 -- and the constant it
+// multiplies by is 0.017453292519444445, which is not `pi/180` but
 // `3.1415926535/180`, pi truncated to eleven digits. This core has no floating
-// point and will not acquire any, so the reproduction is integer, and it is
-// exact where the corpus lives and labelled where it is not.
+// point and will not acquire any, so the reproduction is integer, and exact.
 //
 // The rotation is
 //
@@ -6408,164 +6503,145 @@ HostOutcome m_rect_height(CallContext& ctx) { return m_rect_edge(ctx, 5); }
 // from any host entry point and its movement callers are not disturbed here,
 // but the two conventions now coexist and that is recorded rather than hidden.
 //
-// ## The cardinals are exact, and that is 82% of the corpus
+// ## Reproduced exactly, in integers
 //
-// 316 of the 385 sites pass the literal 90, and there `cos(90 * K)` is not zero
-// -- it is 4.4896592e-11 -- while `sin` is exactly 1. Because every coordinate
-// a map can hold is under 32,768, the product `x * 4.49e-11` is under 6e-6, far
-// inside one unit, so truncation toward zero turns the tiny term into an exact
-// +/-1 adjustment decided by two signs. **`Rot(90)` is therefore not
-// `(y, -x)`**: it is that, biased. `(3, -7)` becomes `(-6, -3)`, and the
-// shipped four-`Rot(90)` patrol square does not close -- it drifts by one unit
-// per corner. Reproducing that needs no floating point at all, only the sign of
-// each vanishing term, which is what `Cardinal` below carries.
+// The FPU's values are not a mystery to be approximated. The angle is
+// `d * K` rounded to 53 bits (the multiply runs under the default precision
+// control); the FPU's sine and cosine of it keep the x87's 64-bit
+// significand, precision control not applying to them; each product with an integer
+// coordinate is rounded to 53 bits, so is the sum, and `_ftol2` truncates
+// toward zero. `tools/gen_rot_table.py` computes the two 64-bit values for
+// every whole degree from 0 to 360 offline, in exact rational arithmetic,
+// into `rot_table.inc`; the three roundings and the truncation are done here
+// on integers (`X87Number`). docs/formats/point-rot.md.
 //
-// `Rot(360)` is not the identity for the same reason, and one shipped site
-// reaches it (`rand(361)`); `Rot(0)` is, because `sin(0)` and `cos(0)` are
-// exact.
+// That is what makes `Rot(90)` biased -- `cos(90 * K)` is 4.4896592e-11, so
+// the product of a coordinate under 32,768 with it survives the 53-bit sum and
+// decides the truncation by its sign -- and it is why `Rot(30)` of `(0, 2)` is
+// `(0, 1)`: `sin(30 * K)` is a hair under one half. Both fall out of the
+// arithmetic rather than being special cases.
 //
-// ## Everything else is a Q30 table, and diverges by at most one unit
-//
-// The other 69 sites pass a random angle, where matching the x87 bit-for-bit
-// would mean shipping `fsin`/`fcos`'s own outputs -- measurable only on an x87,
-// not readable from `gbr.exe`. The table below is `sin(d * K)` and
-// `cos(d * K)` at Q30, generated from **the retail constant** rather than from
-// `pi/180`, so it carries the original's own eleven-digit truncation. A Q30
-// product of a coordinate under 32,768 is within about 3e-5 of the double the
-// original computes, so the two agree unless the true product falls that close
-// to an integer. **That residue is the labelled divergence**: at most one unit
-// per component, on angles that were drawn from the RNG in the first place.
-constexpr std::int32_t kQ30Shift = 30;
+// **Labelled.** The table assumes the FPU's sine and cosine return the correctly
+// rounded value of the true function at the rounded angle; the x87's 66-bit
+// pi moves the two near 180 and 360 degrees by about 1e-20, which no
+// truncation here can see. A negative angle uses `sin(-a) = -sin(a)` and
+// `cos(-a) = cos(a)`, which the FPU keeps exactly. Beyond a full turn the
+// angle is reduced to within one, where the original hands the raw product to
+// the FPU; no shipped site is outside [-30, 360].
 
-constexpr std::int32_t kSinQ30[361] = {
-    0, 18739379, 37473049, 56195305, 74900443, 93582766, 112236583, 130856211,
-    149435979, 167970228, 186453311, 204879599, 223243478, 241539355, 259761657, 277904834,
-    295963357, 313931728, 331804471, 349576144, 367241333, 384794656, 402230767, 419544355,
-    436730145, 453782903, 470697435, 487468587, 504091252, 520560366, 536870912, 553017922,
-    568996477, 584801711, 600428808, 615873009, 631129609, 646193961, 661061475, 675727625,
-    690187940, 704438018, 718473518, 732290163, 745883746, 759250125, 772385229, 785285058,
-    797945680, 810363241, 822533958, 834454122, 846120104, 857528349, 868675383, 879557810,
-    890172315, 900515665, 910584710, 920376381, 929887697, 939115760, 948057759, 956710970,
-    965072759, 973140576, 980911966, 988384560, 995556083, 1002424350, 1008987269, 1015242840,
-    1021189159, 1026824413, 1032146887, 1037154959, 1041847103, 1046221891, 1050277989, 1054014162,
-    1057429273, 1060522280, 1063292242, 1065738315, 1067859754, 1069655912, 1071126243, 1072270298,
-    1073087729, 1073578288, 1073741824, 1073578288, 1073087729, 1072270298, 1071126243, 1069655912,
-    1067859754, 1065738315, 1063292242, 1060522280, 1057429273, 1054014162, 1050277989, 1046221891,
-    1041847103, 1037154959, 1032146887, 1026824413, 1021189159, 1015242840, 1008987269, 1002424350,
-    995556083, 988384560, 980911966, 973140576, 965072759, 956710971, 948057759, 939115760,
-    929887697, 920376381, 910584710, 900515665, 890172315, 879557810, 868675383, 857528349,
-    846120104, 834454122, 822533958, 810363241, 797945680, 785285058, 772385229, 759250125,
-    745883746, 732290163, 718473518, 704438018, 690187941, 675727625, 661061476, 646193961,
-    631129609, 615873009, 600428808, 584801711, 568996477, 553017922, 536870912, 520560366,
-    504091252, 487468587, 470697435, 453782903, 436730145, 419544355, 402230767, 384794656,
-    367241333, 349576144, 331804471, 313931728, 295963357, 277904834, 259761658, 241539355,
-    223243478, 204879599, 186453311, 167970228, 149435979, 130856211, 112236583, 93582766,
-    74900443, 56195305, 37473049, 18739379, 0, -18739379, -37473049, -56195305,
-    -74900443, -93582766, -112236583, -130856211, -149435979, -167970228, -186453311, -204879599,
-    -223243478, -241539355, -259761657, -277904833, -295963357, -313931727, -331804471, -349576144,
-    -367241332, -384794656, -402230767, -419544354, -436730145, -453782903, -470697435, -487468587,
-    -504091252, -520560366, -536870912, -553017922, -568996477, -584801711, -600428808, -615873009,
-    -631129609, -646193961, -661061475, -675727624, -690187940, -704438018, -718473518, -732290163,
-    -745883746, -759250125, -772385229, -785285057, -797945680, -810363241, -822533958, -834454122,
-    -846120104, -857528349, -868675383, -879557810, -890172315, -900515665, -910584710, -920376381,
-    -929887697, -939115760, -948057759, -956710970, -965072759, -973140576, -980911966, -988384560,
-    -995556083, -1002424350, -1008987269, -1015242840, -1021189158, -1026824413, -1032146887, -1037154959,
-    -1041847103, -1046221891, -1050277989, -1054014162, -1057429273, -1060522280, -1063292242, -1065738315,
-    -1067859754, -1069655912, -1071126243, -1072270298, -1073087729, -1073578288, -1073741824, -1073578288,
-    -1073087729, -1072270298, -1071126243, -1069655912, -1067859754, -1065738315, -1063292242, -1060522280,
-    -1057429273, -1054014162, -1050277989, -1046221891, -1041847103, -1037154959, -1032146887, -1026824413,
-    -1021189159, -1015242840, -1008987269, -1002424350, -995556083, -988384560, -980911966, -973140576,
-    -965072759, -956710971, -948057759, -939115760, -929887697, -920376381, -910584710, -900515665,
-    -890172315, -879557810, -868675383, -857528349, -846120104, -834454122, -822533958, -810363241,
-    -797945681, -785285058, -772385229, -759250125, -745883746, -732290163, -718473518, -704438019,
-    -690187941, -675727625, -661061476, -646193961, -631129609, -615873009, -600428808, -584801711,
-    -568996477, -553017922, -536870912, -520560366, -504091252, -487468587, -470697435, -453782903,
-    -436730145, -419544355, -402230767, -384794656, -367241333, -349576144, -331804471, -313931728,
-    -295963357, -277904834, -259761658, -241539356, -223243478, -204879599, -186453311, -167970228,
-    -149435979, -130856211, -112236583, -93582766, -74900444, -56195305, -37473049, -18739379,
-    0,
+/// One x87 value as the table stores it: sign * significand * 2^exponent.
+struct X87Table {
+  std::int8_t sign;
+  std::uint64_t significand;
+  std::int16_t exponent;
 };
 
-constexpr std::int32_t kCosQ30[361] = {
-    1073741824, 1073578288, 1073087729, 1072270298, 1071126243, 1069655912, 1067859754, 1065738315,
-    1063292242, 1060522280, 1057429273, 1054014162, 1050277989, 1046221891, 1041847103, 1037154959,
-    1032146887, 1026824413, 1021189159, 1015242840, 1008987269, 1002424350, 995556083, 988384560,
-    980911966, 973140576, 965072759, 956710970, 948057759, 939115760, 929887697, 920376381,
-    910584710, 900515665, 890172315, 879557810, 868675383, 857528349, 846120104, 834454122,
-    822533958, 810363241, 797945680, 785285058, 772385229, 759250125, 745883746, 732290163,
-    718473518, 704438018, 690187940, 675727625, 661061476, 646193961, 631129609, 615873009,
-    600428808, 584801711, 568996477, 553017922, 536870912, 520560366, 504091252, 487468587,
-    470697435, 453782903, 436730145, 419544355, 402230767, 384794656, 367241333, 349576144,
-    331804471, 313931728, 295963357, 277904834, 259761657, 241539355, 223243478, 204879599,
-    186453311, 167970228, 149435979, 130856211, 112236583, 93582766, 74900443, 56195305,
-    37473049, 18739379, 0, -18739379, -37473049, -56195305, -74900443, -93582766,
-    -112236583, -130856211, -149435979, -167970228, -186453311, -204879599, -223243478, -241539355,
-    -259761657, -277904834, -295963357, -313931727, -331804471, -349576144, -367241332, -384794656,
-    -402230767, -419544355, -436730145, -453782903, -470697435, -487468587, -504091252, -520560366,
-    -536870912, -553017922, -568996477, -584801711, -600428808, -615873009, -631129609, -646193961,
-    -661061475, -675727625, -690187940, -704438018, -718473518, -732290163, -745883746, -759250125,
-    -772385229, -785285058, -797945680, -810363241, -822533958, -834454122, -846120104, -857528349,
-    -868675383, -879557810, -890172315, -900515665, -910584710, -920376381, -929887697, -939115760,
-    -948057759, -956710970, -965072759, -973140576, -980911966, -988384560, -995556083, -1002424350,
-    -1008987269, -1015242840, -1021189159, -1026824413, -1032146887, -1037154959, -1041847103, -1046221891,
-    -1050277989, -1054014162, -1057429273, -1060522280, -1063292242, -1065738315, -1067859754, -1069655912,
-    -1071126243, -1072270298, -1073087729, -1073578288, -1073741824, -1073578288, -1073087729, -1072270298,
-    -1071126243, -1069655912, -1067859754, -1065738315, -1063292242, -1060522280, -1057429273, -1054014162,
-    -1050277989, -1046221891, -1041847103, -1037154959, -1032146887, -1026824413, -1021189159, -1015242840,
-    -1008987269, -1002424350, -995556083, -988384560, -980911966, -973140576, -965072759, -956710971,
-    -948057759, -939115760, -929887697, -920376381, -910584710, -900515665, -890172315, -879557810,
-    -868675383, -857528349, -846120104, -834454122, -822533958, -810363241, -797945680, -785285058,
-    -772385229, -759250125, -745883746, -732290163, -718473518, -704438019, -690187941, -675727625,
-    -661061476, -646193961, -631129609, -615873009, -600428808, -584801711, -568996477, -553017922,
-    -536870912, -520560366, -504091252, -487468587, -470697435, -453782903, -436730145, -419544355,
-    -402230767, -384794656, -367241333, -349576144, -331804471, -313931728, -295963357, -277904834,
-    -259761658, -241539356, -223243478, -204879599, -186453311, -167970228, -149435979, -130856211,
-    -112236583, -93582766, -74900443, -56195305, -37473049, -18739379, 0, 18739379,
-    37473049, 56195305, 74900443, 93582766, 112236583, 130856211, 149435979, 167970228,
-    186453311, 204879599, 223243478, 241539355, 259761657, 277904833, 295963357, 313931727,
-    331804471, 349576144, 367241332, 384794656, 402230767, 419544354, 436730145, 453782903,
-    470697435, 487468587, 504091252, 520560366, 536870912, 553017922, 568996477, 584801711,
-    600428808, 615873009, 631129609, 646193961, 661061475, 675727624, 690187940, 704438018,
-    718473518, 732290163, 745883746, 759250125, 772385229, 785285057, 797945680, 810363241,
-    822533958, 834454122, 846120104, 857528349, 868675383, 879557810, 890172315, 900515665,
-    910584710, 920376381, 929887697, 939115760, 948057759, 956710970, 965072759, 973140576,
-    980911966, 988384560, 995556083, 1002424350, 1008987269, 1015242840, 1021189158, 1026824413,
-    1032146887, 1037154959, 1041847103, 1046221891, 1050277989, 1054014162, 1057429273, 1060522280,
-    1063292242, 1065738315, 1067859754, 1069655912, 1071126243, 1072270298, 1073087729, 1073578288,
-    1073741824,
+struct X87SinCos {
+  X87Table sin;
+  X87Table cos;
 };
 
-/// A cardinal angle, where the true cosine or sine is a vanishing quantity
-/// rather than zero. `unit` is the exact part; `epsilon` is the *sign* of what
-/// is left, and its magnitude never matters because it cannot reach one unit.
-struct Cardinal {
-  std::int32_t degrees;
-  std::int32_t cos_unit;
-  std::int32_t cos_epsilon;
-  std::int32_t sin_unit;
-  std::int32_t sin_epsilon;
+constexpr X87SinCos kRotTable[361] = {
+#include "rot_table.inc"
 };
 
-/// Read off the five angles a shipped script can pass, evaluated with the
-/// retail constant: cos(90) = +4.49e-11, sin(180) = +8.98e-11,
-/// cos(270) = -1.35e-10, sin(360) = -1.80e-10. Only `Rot(0)` is clean.
-constexpr Cardinal kCardinals[] = {
-    {0, 1, 0, 0, 0},   {90, 0, +1, 1, 0},   {180, -1, 0, 0, +1},
-    {270, 0, -1, -1, 0}, {360, 1, 0, 0, -1},
+__extension__ typedef unsigned __int128 U128;
+
+/// An exact binary number, sign * magnitude * 2^exponent, with the roundings
+/// the FPU applies. After `round53` the magnitude is either zero or exactly 53
+/// bits wide, so the exponent is the weight of its last bit.
+struct X87Number {
+  std::int32_t sign = 0;
+  U128 magnitude = 0;
+  std::int32_t exponent = 0;
 };
 
-/// `trunc(exact + epsilon)` where `|epsilon| < 1` and `sign` is its sign.
-///
-/// Truncation is toward zero, so a vanishing term only ever moves the result
-/// when it points *away* from zero from a non-zero integer.
-[[nodiscard]] std::int64_t truncate_with(std::int64_t exact, std::int32_t sign) noexcept {
-  if (sign > 0 && exact < 0) return exact + 1;
-  if (sign < 0 && exact > 0) return exact - 1;
-  return exact;
+[[nodiscard]] std::int32_t bit_length(U128 v) noexcept {
+  const auto high = static_cast<std::uint64_t>(v >> 64);
+  if (high != 0) return 128 - std::countl_zero(high);
+  return 64 - std::countl_zero(static_cast<std::uint64_t>(v));
 }
 
-[[nodiscard]] constexpr std::int32_t sign_of(std::int64_t v) noexcept {
-  return v > 0 ? 1 : (v < 0 ? -1 : 0);
+/// Round to a 53-bit significand, nearest-even, and normalise to exactly 53.
+[[nodiscard]] X87Number round53(X87Number v) noexcept {
+  if (v.magnitude == 0) return X87Number{};
+  const std::int32_t length = bit_length(v.magnitude);
+  if (length > 53) {
+    const std::int32_t shift = length - 53;
+    U128 keep = v.magnitude >> shift;
+    const U128 rest = v.magnitude - (keep << shift);
+    const U128 half = U128{1} << (shift - 1);
+    if (rest > half || (rest == half && (keep & 1) != 0)) ++keep;
+    v.exponent += shift;
+    if (keep == (U128{1} << 53)) {
+      keep >>= 1;
+      ++v.exponent;
+    }
+    v.magnitude = keep;
+  } else if (length < 53) {
+    v.magnitude <<= (53 - length);
+    v.exponent -= 53 - length;
+  }
+  return v;
+}
+
+/// An integer coordinate times a table value, rounded to 53 bits as the FPU's
+/// multiply rounds it under the default precision control.
+[[nodiscard]] X87Number x87_mul(std::int64_t x, const X87Table& t) noexcept {
+  if (x == 0 || t.sign == 0) return X87Number{};
+  X87Number out;
+  out.sign = (x < 0 ? -1 : 1) * t.sign;
+  out.magnitude = static_cast<U128>(x < 0 ? -x : x) * t.significand;
+  out.exponent = t.exponent;
+  return round53(out);
+}
+
+/// `a + b` (`b` negated first when `subtract`), rounded to 53 bits as the FPU's
+/// add rounds it.
+/// Both operands are `round53`'s output.
+[[nodiscard]] X87Number x87_add(X87Number a, X87Number b, bool subtract) noexcept {
+  if (subtract) b.sign = -b.sign;
+  if (b.sign == 0) return a;
+  if (a.sign == 0) return b;
+  if (a.exponent < b.exponent) std::swap(a, b);
+  const std::int32_t shift = a.exponent - b.exponent;
+  // Past 72 bits `b` is under a quarter of `a`'s last bit and cannot move the
+  // rounding, and shifting further would not fit.
+  if (shift > 72) return a;
+  const U128 big = a.magnitude << shift;
+  X87Number out;
+  out.exponent = b.exponent;
+  if (a.sign == b.sign) {
+    out.sign = a.sign;
+    out.magnitude = big + b.magnitude;
+  } else if (big >= b.magnitude) {
+    out.sign = a.sign;
+    out.magnitude = big - b.magnitude;
+  } else {
+    out.sign = b.sign;
+    out.magnitude = b.magnitude - big;
+  }
+  return round53(out);
+}
+
+/// `_ftol2` (0x00763870): truncate toward zero; outside `int32` the integer
+/// indefinite, 0x80000000.
+[[nodiscard]] std::int32_t x87_truncate(const X87Number& v) noexcept {
+  constexpr std::int32_t kIndefinite = std::numeric_limits<std::int32_t>::min();
+  if (v.sign == 0) return 0;
+  U128 whole = 0;
+  if (v.exponent >= 0) {
+    if (bit_length(v.magnitude) + v.exponent > 32) return kIndefinite;
+    whole = v.magnitude << v.exponent;
+  } else {
+    whole = v.exponent <= -128 ? U128{0} : v.magnitude >> (-v.exponent);
+  }
+  if (v.sign > 0) {
+    if (whole > static_cast<U128>(std::numeric_limits<std::int32_t>::max())) return kIndefinite;
+    return static_cast<std::int32_t>(whole);
+  }
+  if (whole > (U128{1} << 31)) return kIndefinite;
+  return static_cast<std::int32_t>(-static_cast<std::int64_t>(whole));
 }
 
 }  // namespace
@@ -6670,71 +6746,21 @@ ObjectId place_catapult(World& world, ClassIndex class_index, Point at, std::int
 }
 
 Point rotate_like_gbr(Point v, std::int32_t degrees) noexcept {
+  // Within a turn the table holds the FPU's own values; 360 is its own row
+  // (`sin(360 * K)` is -1.8e-10, not 0). Beyond a turn: reduced, labelled.
+  std::int32_t d = degrees;
+  if (d > 360 || d < -360) d %= 360;
+  const bool negative = d < 0;
+  const X87SinCos& row = kRotTable[negative ? -d : d];
+  X87Table sine = row.sin;
+  if (negative) sine.sign = static_cast<std::int8_t>(-sine.sign);
+  const X87Table& cosine = row.cos;
   const std::int64_t x = v.x;
   const std::int64_t y = v.y;
-
-  for (const Cardinal& c : kCardinals) {
-    // `sin` is odd and `cos` even, in the FPU as in the mathematics, so a
-    // negative cardinal is the same angle with both sine terms flipped.
-    for (const std::int32_t turn : {1, -1}) {
-      if (degrees != c.degrees * turn) continue;
-      const std::int64_t sin_unit = static_cast<std::int64_t>(c.sin_unit) * turn;
-      const std::int64_t sin_eps = static_cast<std::int64_t>(c.sin_epsilon) * turn;
-      // The vanishing terms, kept as signs. Their magnitudes are under 6e-6 for
-      // any coordinate a map can hold, so they can only ever move a truncation
-      // by one -- and only away from zero.
-      const std::int32_t x_eps = sign_of(x * c.cos_epsilon + y * sin_eps);
-      const std::int32_t y_eps = sign_of(y * c.cos_epsilon - x * sin_eps);
-      return Point{
-          static_cast<std::int32_t>(truncate_with(x * c.cos_unit + y * sin_unit, x_eps)),
-          static_cast<std::int32_t>(truncate_with(y * c.cos_unit - x * sin_unit, y_eps))};
-    }
-  }
-
-  // The table path. Negative angles use the odd/even symmetry, which is exact;
-  // beyond a full turn the angle is reduced, which the original does *not* do
-  // -- it hands the raw product to `fsin`, whose own argument reduction uses a
-  // different pi. No shipped site is outside [-30, 360].
-  std::int32_t d = degrees % 360;
-  const bool negate = d < 0;
-  if (negate) d = -d;
-  const std::int64_t cos_q = kCosQ30[d];
-  const std::int64_t sin_q = negate ? -static_cast<std::int64_t>(kSinQ30[d]) : kSinQ30[d];
-  constexpr std::int64_t kOne = std::int64_t{1} << kQ30Shift;
-  constexpr std::int64_t kHalf = kOne / 2;
-
-  // **The halves keep their residue too.** Where the true sine or cosine is
-  // exactly +/-1/2 -- sine at 30, 150, 210, 330, cosine at 60, 120, 240, 300
-  // -- the Q30 entry is exact, and the original's is not: its angle is `d * K`
-  // with K just under pi/180, so the value is off by about 1e-11 with the sign
-  // of `-cos(d)` for a sine and `+sin(d)` for a cosine (the derivative, times a
-  // short angle). That residue decides the truncation exactly when the product
-  // is an integer, which happens when the other term vanishes -- `Rot(30)` of
-  // `(0, 2)` is `(0, 1)` in the original, not `(1, 1)`. A negative angle
-  // flips the sine's residue with the sine. The guard on the other term keeps
-  // the sign from deciding a sum whose irrational half the table only
-  // approximates.
-  const auto sign_of_q = [](std::int64_t q) { return q > 0 ? 1 : (q < 0 ? -1 : 0); };
-  const std::int32_t sin_eps =
-      (kSinQ30[d] == kHalf || kSinQ30[d] == -kHalf) ? -sign_of_q(kCosQ30[d]) * (negate ? -1 : 1) : 0;
-  const std::int32_t cos_eps =
-      (kCosQ30[d] == kHalf || kCosQ30[d] == -kHalf) ? sign_of_q(kSinQ30[d]) : 0;
-  const auto component = [&](std::int64_t exact_q, std::int64_t residue,
-                             bool other_term_vanishes) -> std::int32_t {
-    // Integer division truncates toward zero, which is what `_ftol2` does.
-    if (residue != 0 && other_term_vanishes && exact_q % kOne == 0) {
-      return static_cast<std::int32_t>(truncate_with(exact_q / kOne, sign_of(residue)));
-    }
-    return static_cast<std::int32_t>(exact_q / kOne);
-  };
-  // x' = x cos + y sin: with the sine a half the cosine term must vanish (x
-  // = 0), with the cosine a half the sine term must (y = 0). The same for y'.
-  const std::int64_t x_residue = x * cos_eps + y * sin_eps;
-  const std::int64_t y_residue = y * cos_eps - x * sin_eps;
-  const bool x_exact = (sin_eps != 0 && x == 0) || (cos_eps != 0 && y == 0);
-  const bool y_exact = (sin_eps != 0 && y == 0) || (cos_eps != 0 && x == 0);
-  return Point{component(x * cos_q + y * sin_q, x_residue, x_exact),
-               component(y * cos_q - x * sin_q, y_residue, y_exact)};
+  // x' = x cos + y sin, y' = y cos - x sin: each product rounded, then the sum.
+  const X87Number nx = x87_add(x87_mul(x, cosine), x87_mul(y, sine), false);
+  const X87Number ny = x87_add(x87_mul(y, cosine), x87_mul(x, sine), true);
+  return Point{x87_truncate(nx), x87_truncate(ny)};
 }
 
 namespace {
@@ -7457,7 +7483,7 @@ std::size_t register_world_host(script::HostRegistry& registry) {
   // Three presentation requests, one body; see the note above it.
   def(kMember, "PopTransportationUI", 0, &f_presentation_void);         // 2
   def(kMember, "SetBuildFrame", 1, &m_set_build_frame);                 // 2
-  def(kMember, "ShowBuildAnimation", 1, &f_presentation_void);          // 1
+  def(kMember, "ShowBuildAnimation", 1, &m_show_build_animation);          // 1
   def(kMember, "SetDebug", 1, &f_presentation_void);                    // 1
   def(kMember, "IsPeasantAmbient", 0, &m_is_peasant_ambient);           // 1
   def(kMember, "SetSight", 1, &m_set_sight);                            // 4

@@ -112,6 +112,28 @@ writes at `+0x6c`..`+0x7c` finds only the constructors.
 The third list (`+0x90`) has no reader found among the functions that
 resolve a squad.
 
+## The squad-list pool
+
+A `SquadList` handle is an index into one pool of squad lists for the whole
+game: a vector of 1,024 entries of 16 bytes, made by a static constructor
+(0x007a8920) and never grown, shrunk or cleared. Each entry is a deque and an
+in-use word at `+0xc`.
+
+* **The claim** (0x0043ed10) walks the pool from the front and takes the
+  first entry whose in-use word is zero. When all 1,024 are in use it
+  answers -1.
+* **The release** (0x0043ff60) empties the entry's deque and zeroes its
+  in-use word. The index stays a valid index.
+* **`SquadList::IsValid`** (0x00421a70, by way of 0x0043ed70) answers only
+  whether the index lies inside the pool: from 0 to 1,023. So a list that
+  was released, or never claimed, answers valid, and the one handle that
+  answers invalid is the claim's -1.
+
+The engine's handles are the index plus one (`kNoSquadList` is 0), so valid
+handles run from 1 to 1,024 (`kSquadListPoolEntries`). Its pool grows on
+demand rather than being 1,024 entries from the start, and never answers
+the full pool's -1; a script could tell only by holding 1,024 lists at once.
+
 ## The regroup and the assignment
 
 One worker (0x00447330) forms squads out of a list of bodies, and it has five
@@ -191,16 +213,21 @@ the unit in the hero's squad whether or not the AI manager exists, and does
 not run the hook on a detach (0x0052dc03), where the original re-homes the
 unit by the merge rule; a detached unit is in no squad here.
 
-The engine also runs the assignment once a turn over every unit it has not
-seen before (`enrol_new_units_in_squads`), filed at the node under it. In
-`gbr.exe` the hook that does this (0x0041e820) is called directly only from a
-hero's army changes (0x0052dc03, 0x0052e491), so that sweep is this engine's
-reading, and it **skips a unit born inside a holder**. Before the third arm
-was read as the unit's hero, the holder arm filed such a unit nowhere --
-its holder is in no squad -- and the sweep relied on it; read correctly,
-the arm would file every recruit still in its barracks by proximity, and
-one Crossroads match's production fell to a tenth for it. What the original
-does with a unit at its birth is open.
+A unit's first squad comes from the AI register (0x0041f310 -> 0x00447200),
+which files it with `AddToSquad` towards the node under it, at its birth:
+`Place` (here at the next turn; class-tally.md, "What differs"), the
+spawns, a settlement's mules and boats, a shipyard's ship at the end of its
+slide, the manager's start for the units that were there before it, and a
+change of owner. A held unit is filed like one on the map, by the
+node under its holder's settlement; neither the register nor `AddToSquad`
+asks about the holder. `docs/formats/class-tally.md` lists the callers. The
+engine calls `HeroSystem::ai_register` at each of them, and once a turn
+(`register_unregistered_units`) registers any unit on the map that is still
+unregistered -- the move hook's half (0x0041f530), which `SetPos` runs.
+
+Until the fourteenth round the engine filed a unit by a once-a-turn sweep
+over ids it had not seen, which skipped a unit born inside a holder; that
+was this engine's reading, made before the register's callers were read.
 
 ## What is still unknown
 

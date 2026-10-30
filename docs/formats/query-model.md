@@ -196,6 +196,25 @@ joined (the roll's order, which is the deque's), rebuilt from the roll on each a
 here is rows carrying per-building figures, so a write *through* that handle does not reach it,
 where the original's would. No shipped site writes through the list.
 
+## `IsValid`: is the query still registered
+
+`Query::IsValid` and `NamedObj::IsValid` share one body (0x00577af0): the handle must
+resolve, and then the query's own "registered" test, its virtual slot `+0x2c`, must answer
+true. A miss prints and answers false. Which test runs depends on the kind:
+
+| kind | vtable | the test |
+|---|---|---|
+| group (`Group(name)`) | 0x007c47e8 | the group map `[0x009bdac8]` holds this query (0x00571c10, 0x00571a40) |
+| named object (`GetNamedObj`) | 0x007c4830 | the named-object map `[0x009bdacc]` holds it (0x00571ac0) |
+| sight, units in settlement, set operation, player-flags, class-player, circle, rectangle | 0x007bccb8, 0x007bcb28, 0x007bcbc8, 0x007bcc68, 0x007bcc18, 0x007bcdf8, 0x007bce48 | always true (0x00444560) |
+
+So only a group or a named-object query can answer false once its handle resolves, and only
+when its map no longer holds it. Neither map ever drops an entry in a game: they are replaced
+whole only on entering a new map (0x004d04d0), which `ChangeMap` causes, and no shipped
+script calls `ChangeMap`. Within one map, therefore, every query whose handle resolves is
+valid. The engine answers `IsValid` from the handle, which is the same answer; `ChangeMap`
+is not implemented.
+
 ## What is still unknown
 
 * **Bit 26 of `[obj+0x2c]`** refuses an object from `EnemyObjs`'s one-object test (0x004f8b16);

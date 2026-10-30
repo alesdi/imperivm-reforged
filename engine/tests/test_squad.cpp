@@ -4837,9 +4837,9 @@ TEST(train_walks_a_garrisoned_trainee_out_to_a_drawn_point_first) {
 
 // -- squads at placement -----------------------------------------------------
 //
-// 0x0041e820: while the AI manager exists, a unit that enters the world goes
-// into a squad. `HeroSystem::advance` runs `enrol_new_units_in_squads` once a
-// turn over the ids it has not seen.
+// 0x0041f310: while the AI manager exists, a unit the register sees goes
+// into a squad. `HeroSystem::advance` runs `register_unregistered_units` once a
+// turn over the units on the map no birth registered.
 
 TEST(units_placed_while_the_manager_exists_join_squads_with_their_class_flags) {
   TrainFixture f;
@@ -4870,9 +4870,10 @@ TEST(units_placed_while_the_manager_exists_join_squads_with_their_class_flags) {
 
   f.world.advance(1000);
   // `early` was placed before the manager and **is** picked up once it exists:
-  // the watermark does not move while there is no manager, which is how the
-  // units a map placed before the match bootstrap -- every deer in the
-  // reference dumps -- end up filed. Two soldiers at one point with the same
+  // the sweep registers every unit on the map that nothing registered, which
+  // (with the manager's drain of its pending list) is how the units a map
+  // placed before the match -- every deer in the reference dumps -- end up
+  // filed. Two soldiers at one point with the same
   // flags share a squad (`add_to_squad`'s merge arm), whose Leader is its
   // front member.
   REQUIRE(f.squad_holding(early) != nullptr);
@@ -5109,10 +5110,16 @@ TEST(count_reads_the_class_tally_the_register_keeps_for_a_class_and_its_ancestor
   CHECK(count_of(f.world, 2, "horse") == 0);
   CHECK(count_of(f.world, 2, "NoSuchClass") == 0);
 
-  // The turn's sweep registers what it has not seen, the early horse among
-  // them, and a held unit as one on the map.
+  // The turn's sweep -- the move hook's register (0x0041f530) -- registers
+  // what is on the map and was never registered, the early horse among them.
+  // A unit that waits in a holder unregistered is not moved by `SetPos` until
+  // it comes out, and is registered then.
   const ObjectId inside = horse(1);
   REQUIRE(f.world.put_in_holder(inside, plain));
+  f.world.advance(100);
+  CHECK(count_of(f.world, 2, "Horse") == 3);
+  CHECK(!f.world.find(inside)->state.flags.ai_registered);
+  REQUIRE(f.world.remove_from_holder(inside, Point{120, 100}));
   f.world.advance(100);
   CHECK(count_of(f.world, 2, "Horse") == 4);
   CHECK(f.world.find(inside)->state.flags.ai_registered);
@@ -5148,7 +5155,9 @@ TEST(the_class_tally_drifts_from_the_census_when_a_unit_changes_hands) {
   const ObjectId turncoat = horse(1);
   const ObjectId other = horse(1);
   (void)other;
-  f.world.set_owner(turncoat, 2);  // converted: no tally moves
+  // Converted by a path that writes the owner alone (the bare `World`
+  // write; `Unit::SetPlayer`'s own path is the test below): no tally moves.
+  f.world.set_owner(turncoat, 2);
   CHECK(count_of(f.world, 2, "Horse") == 2);
   CHECK(count_of(f.world, 3, "Horse") == 0);
   f.heroes.ai_unregister(f.world, turncoat);  // it dies under player 3
@@ -5171,6 +5180,55 @@ TEST(the_class_tally_drifts_from_the_census_when_a_unit_changes_hands) {
   // A second unregister finds the unit no longer registered.
   f.heroes.ai_unregister(f.world, own);
   CHECK(count_of(f.world, 3, "Horse") == -1);
+}
+
+/// **`Unit::SetPlayer` moves a unit's registration** (0x005dc3f0): when the
+/// owner changes, the unregister runs on the owner it leaves (0x0041eee0,
+/// the take and out of its squad), and once the new owner is written the
+/// register runs again on it (0x0041f4d0, gated on `posRH` having no negative
+/// coordinate). The same owner again moves nothing.
+TEST(set_player_moves_a_unit_from_the_tally_it_leaves_to_the_one_it_joins) {
+  Fixture f;
+  AiSystem ai;
+  REQUIRE(f.world.add_system(&ai));
+  ai.start_manager();
+  HostRegistry registry;
+  register_economy_hosts(registry);
+  const auto set_player = [&](ObjectId id, std::int32_t player) {
+    HostCall call(f.world, {obj(id), Value::integer(player)});
+    CHECK(invoke(registry, CallKind::member, "SetPlayer", 1, call).status == HostStatus::ok);
+  };
+  const auto horse = [&](PlayerId owner) {
+    const ObjectId id = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Horse"));
+    f.world.set_position(id, Point{100, 100});
+    f.world.set_owner(id, owner);
+    f.world.set_health(id, 100);
+    f.heroes.ai_register(f.world, id);
+    return id;
+  };
+  const ObjectId turncoat = horse(1);
+  REQUIRE(f.heroes.squads().squad_of(turncoat) != kNoSquad);
+  set_player(turncoat, 3);
+  CHECK(f.world.find(turncoat)->state.owner == 2);
+  CHECK(count_of(f.world, 2, "Horse") == 0);
+  CHECK(count_of(f.world, 3, "Horse") == 1);
+  CHECK(count_of(f.world, 3, "Unit") == 1);
+  CHECK(f.world.find(turncoat)->state.flags.ai_registered);
+  const SquadKey after = f.heroes.squads().squad_of(turncoat);
+  REQUIRE(after != kNoSquad);
+  CHECK(after.player == 2);
+
+  set_player(turncoat, 3);  // the same owner: nothing moves
+  CHECK(count_of(f.world, 3, "Horse") == 1);
+  CHECK(f.heroes.squads().squad_of(turncoat) == after);
+
+  // A noselect unit is out of the AI and the change does not bring it in.
+  const ObjectId quiet = horse(1);
+  f.heroes.ai_unregister(f.world, quiet);
+  f.world.mutable_state(quiet)->flags.noselect = true;
+  set_player(quiet, 3);
+  CHECK(count_of(f.world, 3, "Horse") == 1);
+  CHECK(!f.world.find(quiet)->state.flags.ai_registered);
 }
 
 /// The tally is saved with the hero section, entries at 0 and below included,
