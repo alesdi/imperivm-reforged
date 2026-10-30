@@ -222,6 +222,42 @@ TEST(audit_set_visible_on_a_gone_object_is_a_no_op_and_takes_a_list) {
   CHECK(h.world.find(b)->state.flags.hidden);
 }
 
+TEST(audit_set_visible_on_a_list_reaches_each_heros_army_first) {
+  // `ObjList::SetVisible` (0x0055ea60): for a member carrying the hero bit,
+  // every resolving member of its army (hero+0x1cc) first, then the list's
+  // own members. The army is reached through the list's hero only.
+  Host h;
+  HeroSystem heroes;
+  REQUIRE(h.world.add_system(&heroes));
+  const ObjectId hero = h.spawn(NativeClass::hero, 100);
+  h.world.set_owner(hero, 1);
+  REQUIRE(h.world.find(hero)->state.flags.is_hero);
+  heroes.register_hero(h.world, hero).max_army = 4;
+  const ObjectId soldier = h.unit(1, Point{30, 30});
+  (void)heroes.register_unit(h.world, soldier);
+  REQUIRE(heroes.attach(h.world, soldier, hero));
+  const ObjectId bystander = h.unit(1, Point{40, 40});
+
+  ObjListPool& pool = objlist_pool_of(h.world);
+  const ObjListId list = pool.acquire(1, 0);
+  pool.mutable_items(list)->assign({hero});
+  CHECK(h.member("SetVisible", {make_objlist_value(list), num(0)}).status ==
+        script::HostStatus::ok);
+  CHECK(h.world.find(hero)->state.flags.hidden);
+  CHECK(h.world.find(soldier)->state.flags.hidden);
+  CHECK(!h.world.find(bystander)->state.flags.hidden);
+
+  // `Obj::SetVisible` on the hero alone leaves the army as it is.
+  CHECK(h.member("SetVisible", {obj(hero), num(1)}).status == script::HostStatus::ok);
+  CHECK(!h.world.find(hero)->state.flags.hidden);
+  CHECK(h.world.find(soldier)->state.flags.hidden);
+  // The gate is the hero bit, not the record.
+  h.world.mutable_state(hero)->flags.is_hero = false;
+  CHECK(h.member("SetVisible", {make_objlist_value(list), num(1)}).status ==
+        script::HostStatus::ok);
+  CHECK(h.world.find(soldier)->state.flags.hidden);
+}
+
 TEST(audit_can_see_reads_the_target_first_and_a_hidden_one_through_shared_view) {
   // `Obj::CanSee` (0x005ab9d0): the argument is checked first; a visible one
   // is seen without the receiver; a hidden one when its owner shares view

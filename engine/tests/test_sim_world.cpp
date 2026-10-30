@@ -4229,6 +4229,7 @@ struct SpecialsGraph {
   ClassIndex bowman = kNoClass;
   ClassIndex veteran_bowman = kNoClass;
   ClassIndex broken_bowman = kNoClass;
+  ClassIndex sloppy = kNoClass;
 
   SpecialsGraph() {
     const std::string docs[] = {
@@ -4259,13 +4260,19 @@ struct SpecialsGraph {
         // declares and which reads as "no projectile" all the same.
         R"(<class id="BrokenBowman" parent="Unit" cpp_class="CVXUnit"><properties
              projectile_class="**Invalid**"/></class>)",
+        // Tokens the class reader's exact compare refuses -- the wrong case,
+        // the script constant's spelling -- and one a tab pads, which it
+        // trims and accepts.
+        R"(<class id="Sloppy" parent="Unit" cpp_class="CVXUnit"><properties
+             unit_specials="rage,defense_skill,	Sneak	, Curse"/></class>)",
     };
     const char* names[] = {"unit.sc.xml",     "crow.sc.xml",   "veteran.sc.xml",
                            "plain.sc.xml",    "sentry.sc.xml", "ram.sc.xml",
                            "peaceful.sc.xml", "peasant.sc.xml", "baseanimal.sc.xml",
                            "animal.sc.xml",   "deer.sc.xml",   "lionm.sc.xml",
-                           "bowman.sc.xml",   "vbowman.sc.xml", "bbowman.sc.xml"};
-    for (int i = 0; i < 15; ++i) graph.add(bytes_of(docs[i]), names[i]);
+                           "bowman.sc.xml",   "vbowman.sc.xml", "bbowman.sc.xml",
+                           "sloppy.sc.xml"};
+    for (int i = 0; i < 16; ++i) graph.add(bytes_of(docs[i]), names[i]);
     graph.link();
     crow = graph.find("Crow");
     veteran = graph.find("Veteran");
@@ -4279,6 +4286,7 @@ struct SpecialsGraph {
     bowman = graph.find("Bowman");
     veteran_bowman = graph.find("VeteranBowman");
     broken_bowman = graph.find("BrokenBowman");
+    sloppy = graph.find("Sloppy");
   }
 };
 
@@ -4354,11 +4362,10 @@ constexpr std::int32_t kSneak = 26;
 /// script's constant and the property's token are the same table.
 ///
 /// `curse` is 35 in `sim/globals.cpp` and `Curse` is entry 35 in the
-/// executable's table; lowercasing and turning spaces into underscores is the
-/// whole of the difference between the two spellings. A token that resolves to
-/// nothing is skipped in silence, which is what the reader must do with
-/// `Revitalize` -- the one special the corpus names that the executable's table
-/// does not have, and which `sim/globals.cpp` already refuses by name.
+/// executable's table at 0x00824bf0. The class reader (0x005a3785) compares
+/// each trimmed token **exactly** against that table, so `rage` and
+/// `defense_skill` set nothing, and a token that matches nothing --
+/// `Revitalize`, which is no entry of the table -- is skipped in silence.
 TEST(sim_has_special_reads_the_classes_unit_specials_list) {
   SpecialsBench b;
   const ObjectId veteran = b.unit(b.classes.veteran, Point{0, 0});
@@ -4370,6 +4377,11 @@ TEST(sim_has_special_reads_the_classes_unit_specials_list) {
   // A class that declares none has none, rather than answering for its parent's
   // or for nothing at all.
   CHECK(!b.has(plain, kRage));
+  const ObjectId sloppy = b.unit(b.classes.sloppy, Point{0, 0});
+  CHECK(!b.has(sloppy, kRage));
+  CHECK(!b.has(sloppy, kDefenseSkill));
+  CHECK(b.has(sloppy, kSneak));
+  CHECK(b.has(sloppy, 35));
 
   // `0x005d8d70` refuses an index of 36 or more *before* it shifts, and a
   // negative one is refused here rather than reproducing a shift by a negative

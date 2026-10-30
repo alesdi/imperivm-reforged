@@ -33,6 +33,7 @@
 #include "imperivm/core/sim/objlist.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <limits>
 #include <utility>
@@ -1999,9 +2000,12 @@ HostOutcome m_is_visible(CallContext& ctx) {
 ///     refresh (presentation). The argument is visibility; the bit is
 ///     hiddenness.
 ///   * `ObjList::SetVisible` (0x0055ea60): first, for every member that
-///     resolves and carries the hero bit, the same 0x005a7600 on every live
-///     member of the hero's army (the list at hero+0x1cc); then on every live
-///     member of the list. No shipped site has an `ObjList` receiver.
+///     resolves and carries the hero bit (`[obj+0x2c] & 0x1000000`), the
+///     same 0x005a7600 on every member of the hero's army (the list at
+///     hero+0x1cc) that resolves (0x0055ea00); then on every member of the
+///     list that resolves. No test of life on either pass, and none of
+///     whether the army member is still the hero's. No shipped site has an
+///     `ObjList` receiver.
 HostOutcome m_set_visible(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetVisible: no world");
@@ -2014,9 +2018,12 @@ HostOutcome m_set_visible(CallContext& ctx) {
     const std::vector<ObjectId> members(items.begin(), items.end());
     if (const HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
       for (const ObjectId id : members) {
-        const HeroRecord* hero = world->find(id) == nullptr ? nullptr : heroes->hero(id);
+        const WorldObject* slot = world->find(id);
+        if (slot == nullptr || !slot->state.flags.is_hero) continue;
+        const HeroRecord* hero = heroes->hero(id);
         if (hero == nullptr) continue;
-        for (const ObjectId soldier : hero->army) apply(soldier);
+        const std::vector<ObjectId> army = hero->army;
+        for (const ObjectId soldier : army) apply(soldier);
       }
     }
     for (const ObjectId id : members) apply(id);
@@ -5469,24 +5476,33 @@ HostOutcome m_set_minimap_flag(CallContext& ctx) {
 ///
 /// `Unit::HasSpecial(int)` (`0x005d8d70`) tests one bit of a 64-bit word at
 /// `[obj+0x198]`/`[obj+0x19c]`, refusing an index of 36 or more before it
-/// shifts. The word is filled at construction from the class's `unit_specials`
-/// property, whose comma-separated tokens the class reader resolves against a
-/// 36-entry name table -- **the same table `sim/globals.cpp` already carries**,
-/// because the script-side constants `sneak`, `curse`, `cripple` and the rest
-/// are indices into it. `curse` is 35 there and `Curse` is entry 35 here; they
-/// are one table seen from two sides.
+/// shifts. The unit constructor copies the word from the class (`+0x2bc`),
+/// which the class reader fills from the `unit_specials` property
+/// (0x005a3785): the value is cut at each comma (0x0059a700), each piece
+/// trimmed of spaces and tabs at both ends, and the piece compared
+/// **exactly**, case and all (0x00426df0, through 0x00409350), against the
+/// 36 names of the table at 0x00824bf0 in order; the first that matches sets
+/// its bit, and a piece that matches none sets nothing. The table's index is
+/// the bit, and it is the same numbering as the script constants `parry` ..
+/// `curse` in `sim/globals.cpp` -- checked name by name. Every one of the 34
+/// distinct tokens the shipped classes write matches an entry exactly.
 ///
 /// So this reads the class rather than a per-object copy. `Unit::SetSpecial`
 /// exists in the executable and could make the two differ, and it has **zero
 /// shipped call sites** -- it is not in `declare_shipped_surface` and nothing
 /// can reach it, so the copy could not diverge from the class if it existed.
-///
-/// The property's tokens are display names (`"Rage, Defense skill"`) where the
-/// constants are identifiers (`defense_skill`); lowercasing and turning spaces
-/// into underscores is the whole of the difference, and it is checked against
-/// the table rather than assumed -- a token that resolves to nothing is skipped
-/// in silence, which is what the reader must do with `revitalize`, the one
-/// special the corpus names that the executable's table does not have.
+inline constexpr std::array<std::string_view, kUnitSpecialsCount> kUnitSpecialNames = {
+    "Parry",         "Drain",          "Ferocity",          "Triple strike",
+    "Deflection",    "Active",         "Life steal",        "Determination",
+    "Combat skill",  "Toughness",      "Offensive tactics", "Defensive tactics",
+    "Penetration",   "Spike armor",    "Bleeding attack",   "Attack skill",
+    "Defense skill", "Death blow",     "Power strike",      "Expertise",
+    "Charge",        "Regeneration",   "Rage",              "Revenge",
+    "Triumph",       "Disease attack", "Sneak",             "Invisibility",
+    "Learning",      "Teaching",       "Freedom",           "Cripple",
+    "Healing",       "Keen sight",     "Trample",           "Curse",
+};
+
 /// `freedom`'s bit in the specials word, which the hero constructor sets.
 inline constexpr std::int32_t kSpecialFreedom = 30;
 
@@ -5508,14 +5524,11 @@ inline constexpr std::int32_t kSpecialFreedom = 30;
     while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) {
       token.remove_suffix(1);
     }
-    if (token.empty()) continue;
-    std::string key;
-    key.reserve(token.size());
-    for (const char c : token) {
-      key.push_back(c == ' ' ? '_' : static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c));
+    for (std::size_t i = 0; i < kUnitSpecialNames.size(); ++i) {
+      if (token != kUnitSpecialNames[i]) continue;
+      if (static_cast<std::int32_t>(i) == index) return true;
+      break;
     }
-    std::int32_t value = 0;
-    if (engine_constant(key, value) && value == index) return true;
   }
   return false;
 }
@@ -5677,12 +5690,13 @@ HostOutcome fn_is_point_in_water(CallContext& ctx) {
 ///      reads the receiver's record through a null object and faults. That is
 ///      a fault, not a behaviour, and answers false here.
 ///
-/// **A player's own bit** is inferred to be in its own word: SetRelation
-/// skips the diagonal (0x005653ae), and the record's initialiser was not
-/// found. The other reader of the same word settles it in practice --
-/// `RevealHiddenEnemyUnits` (sim/player_host.cpp) reveals the hidden objects
-/// whose owner bit is *not* in it, which without the self bit would unmask a
-/// player's own stealthed units -- so the same owner sees its own.
+/// **A player's own bit is in its own word from the start**: the record's
+/// initialiser (0x00564660) stores the player's index and writes its one-hot
+/// bit into `+0xc` and into `+0x14`, `+0x18`, `+0x1c` and `+0x20` alike (and
+/// every other player's into the enemy mask `+0x10`), and SetRelation skips
+/// the diagonal (0x005653ae), so nothing takes it out. So the same owner sees
+/// its own hidden objects, which is also what keeps `RevealHiddenEnemyUnits`
+/// (sim/player_host.cpp) from unmasking a player's own stealthed units.
 ///
 /// Every caster script calls it twice per target -- once as a validity gate
 /// before approaching and again after `Sleep(.TimeToActionMoment())`,
@@ -6302,21 +6316,26 @@ HostOutcome m_gate_set(CallContext& ctx) {
 // `sim/hooks.hpp` is the seam that closes that, and `perform_erase` fires it
 // below on the same terms `CombatSystem::enter_dying` does.
 //
-// **Holder eviction.** `0x0052fc20`, the holder family's override, evicts its
-// contents (`0x52fb00`) before erasing -- and skips that when the deferral latch
-// is set, so a holder that erases itself from its own script orphans what it
-// holds and one erased from outside does not. Nothing in the corpus erases a
-// holder: holders are the settlement's internal sub-objects and a ship's
-// composite half, and all 47 sites name a unit, a sacrifice, a wagon, a grave,
-// a ship or a query.
+// **What the deferral latch skips.** Two destroy overrides read the latch
+// at `[0x009bdb14]`, and what they skip under it is not what this file used to
+// say. `0x0052fc20` is the **hero's** (`vtbl + 0x94` of the table its
+// constructor 0x0052ffd0 installs, not a holder's): the `ondie` hook, then --
+// unless the latch is set -- the army's eviction (`0x0052fb00`: each member
+// still bound to this hero is detached through `DetachHero`, 0x005db190,
+// stale entries popped), then the unit body. The unit body (`0x005db230`):
+// the hook again (latched, so once), then, while the global at
+// `[0x009c0824]` is clear: -- the latch clear too -- `DetachHero` from its own
+// hero and the path dropped (0x005d3830 with null), and out of its squad
+// (0x0041eee0) whatever the latch; then the object half (0x005a7580).
 //
-// Two more of the original's differences between an immediate and a deferred
-// erase are unobservable here rather than omitted, and that is worth saying
-// plainly. The unit override skips `RemoveFromHolder` and `SetAlive(false)` when
-// the latch is set; here the object is gone from the world either way, its
-// holder link is a field on the object that went with it, and nothing reads the
-// liveness of an id that no longer resolves.
-
+// So a hero or an army member that erases itself from its own script stays
+// bound: the army keeps the erased handle and the member its hero link. Here
+// `HeroSystem::on_erase` detaches on every erase. **Partial:** of the six
+// shipped self-erases, `IMILITAMAN_CONVERT.VS` erases a unit that may serve in
+// a hero's army; what the stale handle then does to the army (its count
+// `[hero+0x1e4]`, the cap test, the readers that skip a handle that no longer
+// resolves) is the next thing to read before the skip is reproduced.
+//
 /// Take one object out of the world, now.
 ///
 /// `ctx.scheduler` may be null -- a bare `Vm` run has none -- in which case the
