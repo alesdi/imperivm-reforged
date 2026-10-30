@@ -460,6 +460,20 @@ its members onto the field. `gbr.exe` shows both ends of that:
   group's *template* deque at `+0x54` when the bit is set and in its live deque at
   `+0x24` when it is clear. `CVXGroup::Spawn` (`0x00572760`) iterates the template
   deque, and clears this bit on each copy it mints so the copy files itself live.
+* The routing in `Add` has one more gate: it applies only while the map editor's latch
+  `[0x00a8734c]` is down. The editor (its menu button, its command-line mode, its own
+  start) raises the latch and every way of starting a game lowers it, so in a game a
+  template always goes to the template deque; in the editor every object goes to the live
+  one. `Add` is a find in the chosen deque and an append when the object is absent.
+* `CVXGroup::Remove` (`0x00572210`) looks in the **live deque only**: it erases the first
+  match there and leaves the template deque alone. `RemoveFromGroup` and
+  `RemoveFromAllGroups`, in their `Obj`, `ObjList` and `Query` forms, all go through it,
+  so a script cannot take a template out of a group; the group goes on spawning it. An
+  object's death or erasure (`0x005adf50`) walks every group, asks whether the live
+  deque holds the object and removes it there, which again never meets a template.
+* `CVXGroup::Spawn` hands each copy to the AI register at the end of that copy, with the
+  AI's world pointer held at zero for everything before; see
+  [`class-tally.md`](class-tally.md).
 * Every collection path skips it: the area-query grid sweep at `0x004fc6f4`, the
   `ObjList` collector at `0x0041f4e1`, and some forty other sites, all
   `test [obj + 0x2c], 0x8000000` / `jne skip`.

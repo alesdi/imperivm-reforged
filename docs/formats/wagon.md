@@ -215,10 +215,10 @@ settlement is 1,200 nearer; loads a mule through 0x005eed90 and orders it
   owner, into the holder), behind `CreateMule*`, `CreateBoat*` and
   `SendFoodWagon`; the calling script walks the mule where it goes, and
   `WAGON_UNLOAD.VS` delivers it. `FoodComing` and `SendFoodWagon` walk the
-  player's peaceful squads and the wagons' running commands. Two differences
-  remain: the AI's new-unit hook (0x0041f310) files a fresh mule into a squad
-  at once, where this engine's `enrol_new_units_in_squads` does it at the next
-  turn; and a negative request loads nothing.
+  player's peaceful squads and the wagons' running commands. The mule is
+  handed to the AI register (0x0041f310) last, inside its holder, and filed
+  in a squad there and then (`class-tally.md`). One difference remains: a
+  negative request loads nothing.
 * **Feeding from a wagon** is the original's search (0x005dbba0,
   `FeederSystem::search_open_field`): a hungry unit in no holder looks over
   its sight plus 512 -- the buildings of settlements whose owner grants it

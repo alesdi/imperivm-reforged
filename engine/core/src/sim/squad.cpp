@@ -1982,7 +1982,7 @@ constexpr std::int32_t kAiEnemy = 4;
 ///     with no heading at all that stands here is leaving**, not staying: the
 ///     heading 0 is simply "elsewhere" (0x0044e235). This answered staying for
 ///     it. Every squad the placement files has a `DestGAIKA` (its own node,
-///     `enrol_new_units_in_squads`), so the case is a squad stood down to no
+///     `HeroSystem::ai_register`), so the case is a squad stood down to no
 ///     node, or one formed at a point no node covers.
 ///
 /// **Which squads are asked is the node's deque** (0x004395f4 reads
@@ -3092,7 +3092,7 @@ HostOutcome all_enemies_in_holder_impl(CallContext& ctx) {
 //     noselect` here, which the six shipped sites set on ambient walkers --
 //     fish, hens, villagers, messengers -- and which the flag's own setter
 //     pairs with the AI unregister. So a walker is never in a squad: tested
-//     here and in `enrol_new_units_in_squads`.
+//     here and in the AI register (`HeroSystem::ai_register`).
 //
 // Named once, so that no reader has to wonder whether they were missed:
 //
@@ -3414,62 +3414,38 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
   return add_to_squad(world, heroes, id, dest, 0);
 }
 
-/// See the declaration. The five tests are 0x0041e820's, in its order: the
-/// manager exists, the unit is alive (`vtbl+0x50`, `IsDead`), it is not
-/// unspawned (`kSyncUnspawned`), it does not carry `SetNoselectFlag`'s bit
-/// (`[obj+0x194] & 0x800000`), it has an owner (`[obj+0x70]`).
-///
-/// **The node is the one under the unit** (0x0044e650, `GetGAIKA(pos)`), and
-/// a unit already in a squad is skipped rather than re-homed: the hook's own
-/// re-home arm is for a unit that arrives already filed -- a loaded one --
-/// and this engine restores squads whole.
-///
-/// Once a turn, over the ids the last turn had not seen, which is the same
-/// "on the instant there, once a turn here" reading `Squad::GAIKAIn` and
-/// `Squad::Eval` already live with; a script that places a unit and reads
-/// `MilEval` on the same line sees last turn's number, and none does.
-ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId after) {
+/// See the declaration. The stand-in for the move hook's register
+/// (0x0041f530): every unit `SetPos` moves while the manager exists, is not
+/// dead, not a spawn template, not flagged by `SetNoselectFlag` and owned,
+/// and whose squad handle is empty, goes through the register (0x0041f310).
+/// A held unit is not moved by `SetPos` until it leaves its holder, which is
+/// itself a `SetPos`, so it waits here until then.
+void register_unregistered_units(World& world, HeroSystem& heroes) {
   const AiSystem* ai = ai_system_of(world);
-  if (ai == nullptr || !ai->manager_started()) return after;
-  ObjectId highest = after;
-  // Copied: `add_to_squad` creates squads, and the object table is walked by
-  // id rather than by reference for the same reason every walker here copies.
-  std::vector<ObjectId> fresh;
+  if (ai == nullptr || !ai->manager_started()) return;
+  // Copied: the register files units in squads, and the object table is
+  // walked by id rather than by reference for the same reason every walker
+  // here copies.
+  std::vector<ObjectId> waiting;
   for (const WorldObject& slot : world.objects()) {
-    if (slot.id > highest) highest = slot.id;
-    if (slot.id <= after) continue;
     if (slot.object == nullptr || !slot.state.flags.is_unit) continue;
+    if (slot.state.flags.ai_registered) continue;
     if (slot.state.health <= 0) continue;
-    if (slot.state.flags.unspawned) continue;
-    if (slot.state.flags.noselect) continue;
-    if (slot.state.owner == kNoPlayer) continue;
-    fresh.push_back(slot.id);
+    if (slot.state.flags.unspawned || slot.state.flags.noselect) continue;
+    if (slot.state.owner == kNoPlayer || slot.state.is_held()) continue;
+    waiting.push_back(slot.id);
   }
-  const GaikaTable& nodes = world.gaika();
-  const LsaPartition& areas = world.lsa();
-  for (const ObjectId id : fresh) {
-    // The register's tally half (0x00447200), for every unit it reaches --
-    // one already filed by a script since its birth, and one born inside a
-    // holder, included: the original registered both where they were placed
-    // (`Place`, `PlaceInHolder`, 0x0041f310), before anything else saw them.
-    // A unit `Place` already registered is skipped by its own flag.
-    heroes.ai_register(world, id);
+  for (const ObjectId id : waiting) heroes.ai_register(world, id);
+  // `Place`'s units, filed now if they are still on the map and in no squad
+  // (class-tally.md, "What differs"). Each is looked at once.
+  for (const ObjectId id : heroes.take_deferred_filing()) {
+    const WorldObject* slot = world.find(id);
+    if (slot == nullptr || slot->object == nullptr || slot->state.health <= 0) continue;
+    if (slot->state.owner == kNoPlayer || slot->state.is_held()) continue;
+    if (!slot->state.flags.ai_registered || slot->state.flags.noselect) continue;
     if (heroes.squads().squad_of(id) != kNoSquad) continue;
-    // **A unit born inside a holder is not enrolled.** `add_to_squad`'s third
-    // arm used to be read as the holder's squad, which filed such a unit
-    // nowhere; it is the unit's hero (`[obj+0x170]`, 0x00446bcc), which a
-    // recruit has none of, so it would be filed by proximity like a unit on
-    // the map. The hook's only direct callers in `gbr.exe` are a hero's
-    // army changes (0x0052dc03, 0x0052e491), not a unit's birth -- the
-    // once-a-turn sweep over new ids is this engine's reading -- and this
-    // keeps that reading where it stood. **Inferred.**
-    if (const WorldObject* slot = world.find(id); slot != nullptr && slot->state.is_held()) continue;
-    // 0x0044e650 at 0x0041e877: for a held unit its `posRH`, the town, and
-    // not the holder record's (0, 0).
-    const GaikaId under = nodes.at(areas, unit_pos_rh(world, id));
-    (void)add_to_squad(world, heroes, id, under, 0);
+    (void)add_to_squad(world, heroes, id, world.gaika().at(world.lsa(), unit_pos_rh(world, id)));
   }
-  return highest;
 }
 
 namespace {

@@ -24,6 +24,8 @@
 #include <vector>
 
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/ai.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/feeder.hpp"
@@ -1481,6 +1483,81 @@ TEST(add_to_group_creates_the_group_and_remove_from_group_refuses_it) {
   CHECK(world.groups().size() == before + 1);  // the empty group keeps its index
 }
 
+/// `CVXGroup::Remove` (0x00572210) looks in the live deque only, and a spawn
+/// template is filed in the other one (`CVXGroup::Add`, 0x00572410, while the
+/// map editor's latch is down). So neither `RemoveFromGroup` nor
+/// `RemoveFromAllGroups` takes a template out of anything: the group goes on
+/// spawning it.
+TEST(remove_from_group_leaves_a_spawn_template_where_it_was_authored) {
+  SpawnFixture f;
+  World& world = f.map.world;
+  const ObjectId templ = TemplateMap::spawned(1);
+  const std::int32_t garrison = world.groups().find("Garrison");
+  const std::int32_t both = world.groups().find("Both");
+
+  REQUIRE(f.call_member("RemoveFromGroup", {f.obj(templ), script::Value::string("Garrison")})
+              .status == script::HostStatus::ok);
+  CHECK(world.groups().contains(garrison, templ));
+  REQUIRE(f.call_member("RemoveFromAllGroups", {f.obj(templ)}).status == script::HostStatus::ok);
+  CHECK(world.groups().contains(garrison, templ));
+  CHECK(world.groups().contains(both, templ));
+
+  const script::HostOutcome out = f.call("SpawnGroup", {script::Value::string("Garrison")});
+  REQUIRE(out.status == script::HostStatus::ok);
+  CHECK(f.list_of(out.value).size() == 2);
+
+  // A live member in the same groups does leave them.
+  const ObjectId live = TemplateMap::spawned(0);
+  REQUIRE(world.groups().contains(both, live));
+  REQUIRE(f.call_member("RemoveFromAllGroups", {f.obj(live)}).status == script::HostStatus::ok);
+  CHECK(!world.groups().contains(both, live));
+}
+
+/// `SpawnFixture` with the AI's manager up and a hero system to keep its
+/// tally and squads.
+struct SpawnAiFixture : SpawnFixture {
+  AiSystem ai;
+  HeroSystem heroes;
+  SpawnAiFixture() {
+    REQUIRE(map.world.add_system(&ai));
+    REQUIRE(map.world.add_system(&heroes));
+    ai.start_manager();
+  }
+};
+
+/// **A spawned copy is registered with the AI before `SpawnGroup` returns**
+/// (0x00572760 restores the AI world pointer around one call to the register,
+/// 0x0041f310, at the end of each copy): counted in its owner's tally and
+/// filed in a squad, so the line after the spawn reads both. `SpawnNamed`'s
+/// copy the same (0x00571d40). The templates are never registered.
+TEST(spawn_group_registers_each_copy_with_the_ai_at_once) {
+  SpawnAiFixture f;
+  World& world = f.map.world;
+  const imperivm::core::ClassIndex hastatus = world.find(TemplateMap::spawned(1))->class_index;
+  CHECK(f.heroes.class_tally(1, hastatus) == 0);
+
+  // `SpawnNamed` first: `SpawnGroup`'s copy of the same template would take
+  // the name over.
+  const script::HostOutcome named = f.call("SpawnNamed", {script::Value::string("NO_Scipio")});
+  REQUIRE(named.value.is_object());
+  const WorldObject* scipio = world.find(named.value.as_object().id);
+  REQUIRE(scipio != nullptr);
+  CHECK(scipio->state.flags.ai_registered);
+  CHECK(f.heroes.class_tally(1, hastatus) == 1);
+
+  const script::HostOutcome out = f.call("SpawnGroup", {script::Value::string("Garrison")});
+  REQUIRE(out.status == script::HostStatus::ok);
+  const std::span<const ObjectId> made = f.list_of(out.value);
+  REQUIRE(made.size() == 2);
+  CHECK(f.heroes.class_tally(1, hastatus) == 3);
+  for (const ObjectId copy : made) {
+    CHECK(world.find(copy)->state.flags.ai_registered);
+    CHECK(f.heroes.squads().squad_of(copy) != kNoSquad);
+  }
+  CHECK(!world.find(TemplateMap::spawned(1))->state.flags.ai_registered);
+  CHECK(f.heroes.squads().squad_of(TemplateMap::spawned(1)) == kNoSquad);
+}
+
 TEST(membership_takes_an_object_a_list_or_a_query_as_its_receiver) {
   // Each of these is three registrations in `gbr.exe` -- `Obj`, `ObjList` and
   // `Query` -- and one entry here, because the registry keys on
@@ -2333,6 +2410,41 @@ struct PlaceFixture {
 /// by name -- and *nothing advanced a turn* in between, so no amount of
 /// reconciling would have helped. The original has no chain to be late for: a
 /// `CVXUnit` is a feeding unit from construction.
+/// **`Place` counts its unit at once and files it in a squad at the next
+/// turn** (class-tally.md, "What differs"): the tally before `Place` returns,
+/// as the register (0x0041f310) has it; the squad filing, which the original
+/// also does there, at the next turn's sweep -- and not at all for a unit that
+/// has gone into a holder by then.
+TEST(place_counts_its_unit_at_once_and_files_it_in_a_squad_at_the_next_turn) {
+  PlaceFixture f;
+  AiSystem ai;
+  HeroSystem heroes;
+  REQUIRE(f.world.add_system(&ai));
+  REQUIRE(f.world.add_system(&heroes));
+  ai.start_manager();
+  const auto place = [&](std::int32_t x) {
+    const script::HostOutcome out =
+        f.call("Place", {script::Value::string("RHastatus"), PlaceFixture::point(x, 900),
+                         script::Value::integer(3)});
+    CHECK(out.status == script::HostStatus::ok);
+    return PlaceFixture::id_of(out.value);
+  };
+  const ObjectId recruit = place(700);
+  const ObjectId inside = place(760);
+  REQUIRE(recruit != kNoObject);
+  REQUIRE(inside != kNoObject);
+  const imperivm::core::ClassIndex hastatus = f.world.find(recruit)->class_index;
+  CHECK(heroes.class_tally(2, hastatus) == 2);
+  CHECK(f.world.find(recruit)->state.flags.ai_registered);
+  CHECK(heroes.squads().squad_of(recruit) == kNoSquad);
+  REQUIRE(f.world.put_in_holder(inside, recruit));
+
+  f.world.advance(100);
+  CHECK(heroes.squads().squad_of(recruit) != kNoSquad);
+  CHECK(heroes.squads().squad_of(inside) == kNoSquad);
+  CHECK(heroes.class_tally(2, hastatus) == 2);
+}
+
 TEST(a_placed_unit_joins_the_feeding_chain_in_the_same_turn) {
   PlaceFixture f;
   REQUIRE(f.feeder.total_unit_count() == 0);

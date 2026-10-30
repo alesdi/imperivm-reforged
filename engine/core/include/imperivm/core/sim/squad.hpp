@@ -917,6 +917,12 @@ inline constexpr SquadListId kNoSquadList = 0;
 /// will have to consult.
 inline constexpr std::uint16_t kSquadLocked = 0x0008;
 
+/// The original's squad-list pool: 1,024 entries, made once by a static
+/// constructor (0x007a8920) and never resized. `SquadList::IsValid` answers
+/// whether a handle lies inside it (0x0043ed70), and a handle is the pool
+/// index plus one here, so the valid handles are 1 to 1,024.
+inline constexpr SquadListId kSquadListPoolEntries = 1024;
+
 [[nodiscard]] script::Value make_squadlist_value(SquadListId id) noexcept;
 [[nodiscard]] bool is_squadlist(const script::Value& value) noexcept;
 /// `kNoSquadList` when `value` is not a `SquadList` handle.
@@ -1152,13 +1158,19 @@ SquadKey add_to_squad(World& world, HeroSystem& heroes, ObjectId id, GaikaId des
 [[nodiscard]] const Squad* squad_sight_squad(const World& world, const HeroSystem& heroes,
                                              ObjectId unit);
 
-/// 0x0041e820, the hook the object manager runs when a unit enters the world,
-/// run over every unit with an id above `after` that is alive, owned, not
-/// flagged by `SetNoselectFlag` and in no squad: each is put through `add_to_squad` toward the node under it. Only
-/// while the AI manager exists (`AiSystem::manager_started`), which is the
-/// original's own gate. Returns the highest id looked at, for the caller to
-/// pass back next turn. `HeroSystem::advance` is the caller.
-ObjectId enrol_new_units_in_squads(World& world, HeroSystem& heroes, ObjectId after);
+/// Once a turn, the move hook's register (0x0041f530, which `SetPos` runs):
+/// every unit on the map that is alive, owned, not a spawn template, not
+/// flagged by `SetNoselectFlag` and not registered goes through
+/// `HeroSystem::ai_register`, in id order. Every birth registers its unit
+/// at once (docs/formats/class-tally.md); what reaches this is a unit whose
+/// registration was held off -- a ship `CreateShip` made, a unit that changed
+/// owner inside a holder -- and that has since come out onto the map. The
+/// original registers it at that `SetPos`; here at the next turn. Then it
+/// files `Place`'s units of the turn before in a squad
+/// (`HeroSystem::ai_register_placed`; class-tally.md, "What differs"). Only
+/// while the AI manager exists (`AiSystem::manager_started`).
+/// `HeroSystem::advance` is the caller.
+void register_unregistered_units(World& world, HeroSystem& heroes);
 
 void regroup_into_fresh_squads(World& world, HeroSystem& heroes, std::span<const ObjectId> units,
                                std::int32_t state, GameTime now);

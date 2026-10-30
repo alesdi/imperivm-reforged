@@ -730,6 +730,7 @@ std::size_t ai_start_players(World& world, script::Scheduler& scheduler,
   if (ai == nullptr) return 0;
   // The manager exists from here on whether or not any player starts: the
   // original writes `[0x8c8e58]` before it looks at a single player record.
+  const bool first_start = !ai->manager_started();
   ai->start_manager();
   std::size_t started = 0;
   for (PlayerId player = 0; player < kPlayerCount; ++player) {
@@ -746,6 +747,23 @@ std::size_t ai_start_players(World& world, script::Scheduler& scheduler,
       ++started;
     } else if (refused != nullptr) {
       refused->emplace_back(player, status);
+    }
+  }
+  // Then the pending list (0x00450aa0, after the player records): every unit
+  // the register saw before the AI existed -- the map's own, pushed by the
+  // loader (0x0054f181), and any a script placed since -- is registered now,
+  // in the order it was pushed, which is id order here. The register's own
+  // gates are asked again at the drain; nothing there asks whether the unit
+  // still lives or stands in a holder.
+  if (first_start) {
+    if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+      std::vector<ObjectId> pending;
+      for (const WorldObject& slot : world.objects()) {
+        if (slot.object != nullptr && slot.state.flags.is_unit && !slot.state.flags.ai_registered) {
+          pending.push_back(slot.id);
+        }
+      }
+      for (const ObjectId id : pending) heroes->ai_register(world, id);
     }
   }
   return started;

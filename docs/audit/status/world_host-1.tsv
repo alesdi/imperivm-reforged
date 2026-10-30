@@ -6,11 +6,11 @@
 0x005530a0	verified	purges dead (vtbl+0x50) then front object; empty -> invalid; also the NamedObj->Obj conversion (object_of)
 0x005add20	verified	raw [obj+0x24/0x28]; miss (0,0), not the held marker
 0x00422cf0	verified	front member's posRH, (-1,-1) for none; a handle naming no squad faults in the original, (-1,-1) here
-0x00577af0	partial	handle check then vtbl+0x2c "registered": named map (name exists), group map, sight queries 1; other query subclasses not enumerated, deregistration not read
+0x00577af0	verified	handle check then vtbl+0x2c 'registered': group (vtbl 0x7c47e8, 0x00571c10) and named object (0x7c4830, 0x00571ac0) ask their maps [0x009bdac8]/[0x009bdacc]; sight, units in settlement, set op, player-flags, class-player, circle, rect (0x7bccb8, 0x7bcb28, 0x7bcbc8, 0x7bcc68, 0x7bcc18, 0x7bcdf8, 0x7bce48) answer 1 (0x00444560); the maps drop entries only when both are replaced entering a new map (0x004d04d0), i.e. ChangeMap, 0 shipped sites; docs/formats/query-model.md. What differs: ChangeMap not implemented, so the map test is the handle test here
 0x005ab1d0	verified	handle check only (table slot + offset non-null), no print; a corpse is valid
-0x00421a70	partial	index within the squad-list pool (0x0043ed70); engine asks for a live entry, which differs only for a released one (0 sites)
+0x00421a70	verified	index within the squad-list pool (0x0043ed70): 1,024 entries from the static ctor (0x007a8920), never resized, so a released or never-claimed list is valid and only the claim's -1 (0x0043ed10, pool full) is not (fixed: the engine asked for a live entry); docs/formats/squad.md; test audit_squadlist_is_valid_asks_the_pool. What differs: the engine's pool grows on demand and never answers -1
 0x00579320	verified	miss -> true (was a trap); purge (vtbl+0x1c, 0x00572c10) then vtbl+0x28: the cached list while fresh, once due a refresh (class-player, settlement, set-op) or a counting sweep that stores nothing (area, sight, flags, party) -- FIXED in the query-model round (World::query_is_empty); test a_stale_area_query_answers_is_empty_by_a_sweep_that_stores_nothing
-0x00594eb0	partial	miss -> true; stop flag [+0x15c] never set here (no sacrifice machinery), so a sacrifice answers false
+0x00594eb0	verified	miss -> true; else the stop flag [+0x15c] (ObjectFlags::sacrifice_stopped): zero from the ctor (0x00595290), written only by the druid-list prune (0x00595150) at the head of Consume's core (0x00596050) as 'no druid left' (fixed: never set here); docs/formats/sacrifice.md; test audit_a_sacrifice_is_empty_once_consume_has_found_no_druid. What differs: no druid can join a list here, so Consume always raises it and nothing lowers it
 0x005ad8a0	verified	vtbl+0xc8 (unit: unit_pos_rh, else raw); miss (0,0) silently
 0x00553000	verified	invalid -> dead; else purge then deque empty; a named building at no health is not dead
 0x005aae50	verified	invalid or vtbl+0x50 (health==0, never for the 7 non-catapult building vtables): object_is_dead
@@ -40,15 +40,15 @@
 0x004dcdd0	verified	16-bit settlement slot [bld+0x148] as a handle; miss -> invalid; no 0xffff guard (faults) -> invalid here
 0x004219a0	verified	node at index*0x24 of 0x008c8e54, settlement pointer +0x14 or invalid; no print
 0x005ada80	verified	[obj+0xc0]; miss 0
-0x005c1e40	partial	garrison holder [settlement+0x5e] +0x1c; no writer found (ctor 0x00531de0 zeroes it); engine answers the settlement's own health, 0; 0 sites
+0x005c1e40	verified	garrison holder [settlement+0x5e] +0x1c, miss 0; written only by the holder ctor (0x00531de0, zero) and the holder's archive exchange (0x00531fb0), and no map carries a Holder record, so always 0 (fixed: answered the settlement object's health); docs/formats/settlement.md; test audit_settlement_health_and_stamina_are_the_garrison_holders_zero
 0x00427740	verified	sum of [+0xc0] over members with a live slot; no bounds check; empty 0
 0x005adae0	verified	[obj+0xc4]; miss 0; ctor seeds from class maxstamina, engine for combatants only (no other class declares one)
-0x005c1f00	partial	garrison holder +0x24; same as Settlement::health
+0x005c1f00	verified	garrison holder +0x24, always 0 for the reason Settlement::health gives (fixed: answered the object's stamina); same test
 0x005d8b90	verified	[obj+0xc4], same field as Obj::stamina
 0x005adcc0	verified	[obj+0xd0] (WorldObject::sight); miss 0
 0x005adb40	verified	[obj+0xc8], class max plus bonuses (CombatSystem) or class maxhealth; miss 0
 0x00427800	verified	sum of [+0xc8] over live members
-0x005ad450	partial	whole string as one exact case-sensitive key (0x00409e40/0x00409350), then walk [class+0xe4]; fixed (was a comma list); altid keying of the map 0x009bdb00 not traced
+0x005ad450	partial	whole string as one exact case-sensitive key (0x00409e40/0x00409350), then walk [class+0xe4]; fixed (was a comma list). Round 14: altid is read only by the class loader (0x0059f540, into class+0x20; id into class+4); the insert into the map at 0x009bdb00 was not found, so whether an altid is also a key is still open -- unobservable in the corpus: 95 of 821 classes carry an altid and no shipped IsHeirOf literal names one that is not also an id
 0x005aa350	verified	floor isqrt of the stored-position distance to the point, less own radius; miss -1 (was 0, and measured from the holder)
 0x005aa3e0	verified	argument then receiver checked (-1 each); 0x005a77b0: stored positions, less both radii
 0x004dce60	verified	unit then receiver checked; nearest door (0x0056fba0) of the land/water list by the unit class's water_unit (+0xb30) from the unit's stored position; fallbacks unit pos / building pos / (0,0); no life test (fixed: health test, ship-class flag, holder walk)
@@ -73,7 +73,7 @@
 0x005cdcb0	verified	ORs the traveller's record word +0x18 (share-view side, self included) into [tp+0x214] (fixed: was the one bit); 1..16 only
 0x005cdc40	partial	instance fields [tp+0x20c/0x210] copied from the class by the loader 0x005cd950; miss pushes (0xffff|garbage, 0), (-1,-1) here; agree on every shipped class
 0x005d87d0	verified	bit 0x4000000 of the unit flag word; miss no-op
-0x00435470	partial	bit 0x40000 of [+0x194] on live units only, then the whole list to the Squadize worker 0x00447330 at state 0 (fixed: the regroup was missing); non-units left out of the regroup (labelled; 0 shipped)
+0x00435470	verified	bit 0x40000 of [+0x194] on live units only, then the whole list to the Squadize worker 0x00447330 at state 0, which takes every member that resolves and is owned, unit or not (fixed round 14: non-units were left out of the regroup); test audit_set_no_ai_flag_regroups_the_unit_so_its_squad_carries_the_flag
 0x005de600	verified	handle check, bit 0x40000 with no unit/death test, then a one-element list to 0x00447330 at state 0 (fixed)
 0x00573260	verified	op 0, sort-by-handle merge (0x004ffbe0) of the operands' purged cached lists (FIXED: composed fresh evaluations); interned on (op, a, b) (0x004fe490, FIXED: minted per call), 2000 ms cache, refcount as a pass-end reachability sweep with operands reached through the set op (labelled: destroyed at pass end, not at release); tests in test_query_cache.cpp
 0x005733f0	verified	op 1; walks the operand with the shorter refresh period (vtbl+0x30, tie walks the right; FIXED: walked the smaller count, test intersect_walks_the_operand_with_the_shorter_refresh_period), each member asked of the other's vtbl+0x24 (cached / live / refresh); interned, cached, swept (query-model round). FIXED (spatial-index round): an area operand's list is in the grid's walk order, as its refresh makes it (docs/formats/spatial-index.md)
@@ -85,17 +85,17 @@
 0x005775e0	verified	(x,y,r,class) circle, dist2<=r2: r=0 the spot, r<0 nothing, dead excluded, comma list allowed (fixed); interned on (x,y,r,class) (0x004ff860), 1000 ms cache, stale Contains bare d2<=r2 (0x004f8c60) (FIXED, query-model round). FIXED (spatial-index round): the circle sweep 0x004fde60 answers in the grid's order; test a_query_answers_in_grid_order_and_a_load_keeps_it
 0x00574160	partial	(str, str): exact name scan, miss invalid; whole-string class else invalid (fixed); interned (0x004fe080) with a 2000 ms cache and swept (FIXED, query-model round). Left: garrison back-link gap labelled
 0x00574b80	partial	(Settlement, str): receiver check, then as above
-0x005b6730	partial	handle check before any group lookup (fixed: created the group anyway), then CVXGroup::Add; template-deque routing on [0x00a8734c] not read
-0x00561970	partial	no receiver check, group always made, members that resolve and are not dead (fixed); template routing not read
+0x005b6730	verified	handle check before any group lookup (fixed: created the group anyway), then CVXGroup::Add (0x00572410): while the map editor's latch [0x00a8734c] is down -- always in a game: raised only by the editor (menu 0x006d8590, command line 0x0074d590, editor start 0x00749d40), lowered by every game start -- a spawn template (bit 27) goes to the template deque +0x54 and anything else to the live deque +0x24; find, then append if absent (docs/formats/map.md, Bit 27). What differs: one list per group with the template bit telling the halves apart, every reader asking for its half
+0x00561970	verified	no receiver check, group always made, members that resolve and are not dead (fixed); CVXGroup::Add's routing read as for Obj::AddToGroup (0x005b6730): latch is the editor's, template deque in a game. What differs: as 0x005b6730
 0x0057a550	verified	handle check, then purge and the cached list (vtbl+0x1c, +0x20, refreshed when due), every resolving member -- FIXED: evaluated afresh (query-model round, receiver_objects)
-0x005b4630	partial	handle check; group miss does nothing; CVXGroup::Remove (0x00572210) on the live deque; template deque not read
-0x0055f720	partial	members that resolve and are not dead (fixed); as above
+0x005b4630	verified	handle check; group miss does nothing; CVXGroup::Remove (0x00572210) erases the first match in the live deque only -- a spawn template is never removed and the group goes on spawning it (fixed round 14: the engine removed templates too); test remove_from_group_leaves_a_spawn_template_where_it_was_authored
+0x0055f720	verified	members that resolve and are not dead (fixed); Remove on the live deque only, templates kept (fixed round 14), as 0x005b4630
 0x0057a970	verified	handle check, purge and the cached list -- FIXED: evaluated afresh (query-model round, receiver_objects)
-0x005b69b0	partial	every group in the dictionary (0x004909f0), Remove on each; as the Obj form above
-0x00563250	partial	members that resolve and are not dead (fixed); as above
+0x005b69b0	verified	every group in the dictionary (0x004909f0), Remove on each, live deque only: a template keeps every group it is a template of (fixed round 14); death/erase (0x005adf50) is the same walk; test remove_from_group_leaves_a_spawn_template_where_it_was_authored
+0x00563250	verified	members that resolve and are not dead (fixed); Remove on each group's live deque, templates kept (fixed round 14), as 0x005b69b0
 0x0057ab80	verified	handle check, purge and the cached list -- FIXED: evaluated afresh (query-model round, receiver_objects)
 0x00697cb0	verified	in place, low edge then high per axis, unnormalised
-0x00697d90	partial	x87 trunc(x cos + y sin), trunc(y cos - x sin) with K = 3.1415926535/180; cardinals and the eight +/-1/2 entries keep the residue's sign (fixed for the halves); other angles a Q30 table, at most one unit off where a product falls within ~3e-5 of an integer; 53-bit precision control assumed
+0x00697d90	verified	x87 trunc(x cos + y sin), trunc(y cos - x sin): d*K (K = 0x1.1df46a2506b91p-6) rounded to 53 bits, the FPU's sine/cosine at 64 bits, each product and the sum rounded to 53, _ftol2 truncation (fixed round 14: Q30 table replaced by an exact integer emulation over a generated table, tools/gen_rot_table.py -> rot_table.inc); docs/formats/point-rot.md; test audit_rot_reproduces_the_fpus_roundings_exactly. What differs: the table assumes correctly rounded sine/cosine (x87's 66-bit pi moves them ~1e-20, invisible to the truncation); |d| > 360 reduced (0 shipped sites)
 0x006950e0	verified	by-reference x / rect::left (offset 0) for assignment; the engine answers the read, 0 shipped sites assign
 0x006952b0	verified	by-value first dword
 0x00695290	verified	by-reference y / rect::top (offset +4); read only here, 0 shipped sites assign
@@ -109,8 +109,8 @@
 0x00695360	verified	32-bit squares and sum, floor root of the unsigned sum (fixed: was 64-bit)
 0x005bd3e0	verified	no world -> unchanged; x to [0, w-2], y to [0, h-2] (high corner from [world+0xbc/0xc0] - 1)
 0x004c6650	verified	(0, 0, w-1, h-1) copied from [world+0xb4]
-0x00576790	partial	group map lookup, miss -> empty list; clones templates in order, non-unit copies skipped (fixed); the 0x0041f310 hand-off and next-turn behaviour start are labelled
-0x005769b0	partial	group, then exact settlement name scan; copies enter the garrison forced (0x005d3e10) with the onenter hook (fixed: only the holder link was set); hook order vs. name/group filing differs (labelled)
-0x00576e00	partial	group, then the object's holder (vtbl+0xe4): ship -> ship+1, building -> its settlement's garrison; none -> empty list, no spawn (fixed: spawned into the object itself); a holder passed directly is inferred
-0x005a8710	partial	player 1..16, inclusive map rect unless (-1,-1), class, CVXScriptObj cast then SetPlayer/SetPos; the cast subtree is inferred (labelled), 0x0041f310 hand-off not modelled
-0x005a8980	partial	class first, clamp inset 48 low then high, no player check; same labelled gaps as Place
+0x00576790	partial	group map lookup, miss -> empty list; clones templates in order, non-unit copies skipped (fixed); FIXED round 14: CVXGroup::Spawn (0x00572760) holds the AI world pointer [0x008c8e50] at zero while it clones, places and files each copy and restores it for one register call (0x0041f310) at the end of each copy -- tally and AddToSquad at once (HeroSystem::ai_register), test spawn_group_registers_each_copy_with_the_ai_at_once, docs/formats/class-tally.md. Still labelled: the copies' behaviour scripts start next turn
+0x005769b0	partial	group, then exact settlement name scan; copies enter the garrison forced (0x005d3e10) with the onenter hook (fixed: only the holder link was set); FIXED round 14: each copy registered with the AI last (0x005724a0 holds [0x008c8e50] at zero and restores it for the register), held copies filed in a squad like any other; hook order vs. name/group filing differs (labelled)
+0x00576e00	partial	group, then the object's holder (vtbl+0xe4): ship -> ship+1, building -> its settlement's garrison; none -> empty list, no spawn (fixed: spawned into the object itself); FIXED round 14: the AI register per copy as 0x005769b0; a holder passed directly is inferred
+0x005a8710	partial	player 1..16, inclusive map rect unless (-1,-1), class, CVXScriptObj cast then SetPlayer/SetPos, then the register (0x0041f310) for a unit at x >= 0 -- the unit's own SetPos has run the move hook (0x0041f530), which registers it and files it in a squad at once; FIXED round 14: the tally at once (HeroSystem::ai_register_placed); test place_counts_its_unit_at_once_and_files_it_in_a_squad_at_the_next_turn. What differs (class-tally.md): the squad filing at the next turn's sweep, skipped for a unit in a holder by then -- filed at once, Crossroads seed 5 production fell 379 -> 241 and captures 25 -> 4 (recruits walking into their hall caught by their squad's orders); the cast subtree is inferred (labelled)
+0x005a8980	partial	class first, clamp inset 48 low then high, no player check; the AI register as Place (tally at once, squad filing at the next turn, labelled); the cast subtree inferred as in Place
