@@ -5236,10 +5236,12 @@ HostOutcome m_get_flags(CallContext& ctx) {
 /// flagged unit from being *picked* is the select paths' own test of the bit
 /// (sim/orders.cpp).
 ///
-/// **One gap, labelled.** The owner AI's tallies 0x004448a0 decrements -- a
-/// count and a summed power per kind at `[[owner+0x8c]+0x24..0x30]`, and a
-/// count per class name -- are not running counters in this engine; nothing
-/// here keeps them for the unregister to correct.
+/// **One gap, labelled.** Of the owner AI's tallies 0x004448a0 decrements,
+/// the count per class name is kept and taken (`HeroSystem::ai_unregister`,
+/// docs/formats/class-tally.md); the count and the summed census power per
+/// kind at `[[owner+0x8c]+0x24..0x30]` (two pairs, chosen by 0x005402f0) are
+/// not running counters in this engine, and their readers are still to be
+/// read.
 HostOutcome m_set_noselect_flag(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SetNoselectFlag: no world");
