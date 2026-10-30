@@ -2591,18 +2591,29 @@ HostOutcome m_gaika_military_presence(CallContext& ctx) {
 ///     refused -- the original tests all four edges inclusively and does not
 ///     clamp -- and the answer is then **the gate itself**, because the gate
 ///     loop wrote it into the running answer before the step was tried;
-///   * when it is a heir of **`Outpost`** (0x00440060) there is a second
-///     branch, and it is the one thing here not read to the end. Its guards
-///     are: the settlement's owner is not **player 15**, the neutral-passive
-///     pseudo-player; the settlement's owner is hostile to the *unit's* owner,
-///     read off the settlement owner's row and so the same one-directional
-///     rule `Gate::AllEnemiesInHolder` uses; and an object the settlement holds
-///     at `[+0x5e]` resolves and has a non-null `[+0x40]`. What survives those
-///     is a **1,300**-unit offset from the central building along a direction
-///     built from two points this project has not identified, and it is bounds
-///     tested the same way. **This engine answers the central building position
-///     for an outpost**, which is where the original's own running answer sits
-///     when any of those guards refuses, and is a place a squad can walk to.
+///   * when it is not, but is a heir of **`Outpost`** (0x00440060), a second
+///     branch (0x00427d6b) whose guards are: the settlement's owner is not
+///     **player 15**, the neutral-passive pseudo-player; the settlement's
+///     owner is hostile to the *unit's* owner, read off the settlement owner's
+///     row (`[owner+0x24+unit_owner*4] & 1` clear) and so the same
+///     one-directional rule `Gate::AllEnemiesInHolder` uses; and the garrison
+///     holder (`[+0x5e]`) holds someone (`[holder+0x40]`, what `UnitsCount`
+///     reads). What survives those is 0x00422bd0 with a length of **1,300**,
+///     handed the settlement's position and **the sum of the unit's position
+///     and the settlement's**: its direction is the settlement's position less
+///     that sum, which is the unit's position taken as a vector from the map's
+///     origin and negated. So the point is the settlement's position moved
+///     1,300 units (each component `-u * 1300 / |u|`, truncated, `|u|` the
+///     floored root; a unit at the origin moves it nowhere) **towards the
+///     map's origin from wherever the unit stands**, whatever side of the
+///     outpost the unit is on. It is bounds tested as the gate's is; refused,
+///     the offset turned a quarter (`(-dy, dx)`) is tried, then the other
+///     quarter (`(dy, -dx)`), and with both refused the answer is the
+///     settlement's position;
+///   * a heir of neither answers the settlement's position.
+///
+/// The unit's position is its own (`vtbl+0x3c`), which for a unit inside a
+/// holder is `(-1, -1)`, not the holder's.
 ///
 /// The order of the two class tests is the executable's and **not** this
 /// engine's `SettlementKind`: `kind_of` asks `Outpost` before `BaseTownhall`
@@ -2636,13 +2647,48 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
     const ClassIndex index = graph->find(base);
     return index != kNoClass && world->class_is_a(set->anchor, index);
   };
-  // `BaseTownhall` first, which is the executable's order and not `kind_of`'s.
-  if (!heir_of("BaseTownhall")) return answer(centre);
-
   if (!ctx.arg(1).is_object()) return answer(centre);
   const WorldObject* unit = world->find(ctx.arg(1).as_object().id);
   if (unit == nullptr) return answer(centre);
-  const Point from = world->resolve_position(unit->id);
+  // The unit's own position (`vtbl+0x3c`): `(-1, -1)` for one in a holder.
+  const Point from = unit->state.position;
+
+  // The bounds test, which the original runs against the map rectangle and
+  // which **refuses** rather than clamping. A world with no match to ask has no
+  // rectangle to be outside of, so it skips the test rather than failing it:
+  // refusing everything there would make the entry point answer the town centre
+  // in every synthetic world, which is a different function.
+  const MatchSystem* match = match_system_of(*world);
+  const std::int32_t extent = match == nullptr ? 0 : match->rules().map_size;
+  const auto on_map = [extent](Point p) {
+    if (extent <= 0) return true;
+    const std::int32_t edge = extent - 1;
+    return p.x >= 0 && p.x <= edge && p.y >= 0 && p.y <= edge;
+  };
+
+  // `BaseTownhall` first, which is the executable's order and not `kind_of`'s.
+  if (!heir_of("BaseTownhall")) {
+    if (!heir_of("Outpost")) return answer(centre);
+    if (set->owner == PlayerId{15}) return answer(centre);
+    if (!world->players().is_enemy(set->owner, unit->state.owner)) return answer(centre);
+    if (set->holder.count() == 0) return answer(centre);
+    // 0x00422bd0 handed (centre, from + centre): the direction is `-from`.
+    const std::int64_t ux = from.x;
+    const std::int64_t uy = from.y;
+    const std::int64_t len = isqrt(ux * ux + uy * uy);
+    const std::int64_t dx = len != 0 ? -ux * 1300 / len : -ux;
+    const std::int64_t dy = len != 0 ? -uy * 1300 / len : -uy;
+    const Point out{centre.x + static_cast<std::int32_t>(dx),
+                    centre.y + static_cast<std::int32_t>(dy)};
+    if (on_map(out)) return answer(out);
+    const Point left{centre.x - static_cast<std::int32_t>(dy),
+                     centre.y + static_cast<std::int32_t>(dx)};
+    if (on_map(left)) return answer(left);
+    const Point right{centre.x + static_cast<std::int32_t>(dy),
+                      centre.y - static_cast<std::int32_t>(dx)};
+    if (on_map(right)) return answer(right);
+    return answer(centre);
+  }
 
   // The nearest gate to the unit, with the original's own initial best of
   // 200,000 -- a distance no pair of points on a shipped map reaches, so it is
@@ -2666,19 +2712,10 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
   // 450 units beyond the gate, on the ray from the town centre through it --
   // 0x00422bd0 scaled to `ebx`, which is 0x1c2 here.
   const Point out = step_beyond(best, centre, 450);
-  // The bounds test, which the original runs against the map rectangle and
-  // which **refuses** rather than clamping. A world with no match to ask has no
-  // rectangle to be outside of, so it skips the test rather than failing it:
-  // refusing everything there would make the entry point answer the town centre
-  // in every synthetic world, which is a different function.
-  const MatchSystem* match = match_system_of(*world);
-  const std::int32_t extent = match == nullptr ? 0 : match->rules().map_size;
-  if (extent <= 0) return answer(out);
-  const std::int32_t edge = extent - 1;
   // Refused, the running answer is the **gate**: the gate loop has already
   // moved it there (0x00427d9c onward) and the step only replaces it when it
   // passes all four edges.
-  if (out.x < 0 || out.x > edge || out.y < 0 || out.y > edge) return answer(best);
+  if (!on_map(out)) return answer(best);
   return answer(out);
 }
 

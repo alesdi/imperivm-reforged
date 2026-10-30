@@ -195,6 +195,30 @@ watched. `EvalNeighbors` (0x00430800) sums that census over the node's
 neighbours, passing over a stronghold, a Teuton tent or an independent guarded
 outpost, and -- with its flag -- any neighbour not revealed to the asker.
 
+## Where a squad sent to a node goes
+
+`GAIKA::GetDestPoint(unit)` (0x00427b80) answers `(0, 0)` without a node
+table or a record, the record's centre for a node with no settlement, and
+otherwise starts from the settlement's position. The unit's position is its
+own stored one, `(-1, -1)` while it is inside a holder.
+
+* A settlement that is a heir of `BaseTownhall` (0x0043ffc0): the gate among
+  its buildings nearest the unit (an initial best of 200,000), then 450 units
+  beyond it on the line from the settlement through it (0x00422bd0). That
+  point is kept when it lies inside the map rectangle, all four edges
+  inclusive (0x004092b0); otherwise the answer is the gate.
+* Otherwise a heir of `Outpost` (0x00440060), when its owner is not player 15,
+  the owner's row for the unit's owner lacks the ceasefire bit, and its
+  garrison holds someone: 0x00422bd0 with a length of 1,300 is handed the
+  settlement's position and the sum of the unit's position and the
+  settlement's, so the step from the settlement is the unit's position as a
+  vector from the map's origin, negated and scaled to 1,300 (each component
+  times 1,300 over the floored root of the squared length, truncated; no step
+  for a unit at the origin). The point is kept when inside the rectangle;
+  else the step turned a quarter one way `(-dy, dx)`, then the other
+  `(dy, -dx)`; with all three outside, the settlement's position.
+* Anything else: the settlement's position.
+
 ## The `MAIKA` list
 
 A deque of (source, destination, way-point) triples at the manager's `+0x38`,
