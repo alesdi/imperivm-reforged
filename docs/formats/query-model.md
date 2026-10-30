@@ -77,7 +77,11 @@ The slots `+0x3c`/`+0x40` split the kinds in two:
   rectangle's (0x004f8c10) is the four inclusive corners and nothing else; sight's (0x004f91a0)
   is "the observer can see it" (0x005a7870: a non-zero observer sight `[obj+0xd0]` and the
   edge-to-edge distance, 0x005a77b0, within it -- the observer's whole sight, not the query's
-  frozen radius of sight less 100), then the class, then visibility for `VisibleObjsInSight`;
+  frozen radius of sight less 100), then the class, then visibility for `VisibleObjsInSight`
+  (the object's own test 0x005b1030: a `DefItemHolder` is seen, an object whose owner bit is
+  in the observer player's word `+0x18` is seen, a hidden one otherwise is not, and the rest
+  ask the fog map through 0x0053e970 -- which the engine does not keep in the sim, so they
+  count as seen there, labelled);
   player-flags (0x004f8ad0) is the relation mask against the object's owner bit, then the
   class; party (0x004f97c0) is a scan of the session's party.
 
@@ -150,6 +154,14 @@ matches; only a miss allocates (and a new object is appended to the pool and reg
 | attached units (0x004ff190) | 0x00996a64 | |
 | group (0x005765a0) | the name map at 0x009bdac8 | the name; a miss creates the group |
 | party (0x004fa6e0) | the singleton at 0x00996a0c | |
+
+The sight query's visible flag (`[query+0x78]`, 1 from `VisibleObjsInSight`, 0 from
+`ObjsInSight` and `ObjsInRange`) is not fog of war in the refresh (0x004ff080) or the counting
+sweep (0x004fef80): both hand it to the visitor (0x004fca30), which then takes the observer's
+player record word `+0x18` (0x00514080) as its side mask -- the player's own bit and the bit of
+every player sharing view with it -- where the plain form takes every bit. The grid sweep
+(0x004fd9c0) admits an object with the hidden bit (`0x200000`) only when that mask holds its
+owner's bit; a visible object passes either way.
 
 Class strings are compared as strings. The engine interns every constructor entry point
 through `World::intern_query`, keyed by the whole `QuerySpec` -- each kind's key with the class

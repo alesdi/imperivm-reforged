@@ -318,11 +318,10 @@ struct QuerySpec {
 
   ClassFilter filter;
 
-  /// `VisibleObjsInSight` rather than `ObjsInSight`. Visibility is fog of war,
-  /// which the shipped build kept out of the sync hash (`exploration` is zero
-  /// in all nine dumps), so this flag is recorded and **not yet applied**:
-  /// applying it would pull fog into hashed state, which is exactly what the
-  /// zeroed channel forbids.
+  /// `VisibleObjsInSight` rather than `ObjsInSight` (`[query+0x78]`). Not fog
+  /// of war: the refresh's visitor turns it into a side mask, the observer's
+  /// player word `+0x18`, and the sweep admits a hidden object only when that
+  /// mask holds its owner's bit (`World::objects_in_sight`).
   bool visible_only = false;
 
   /// `CVXSetOpQuery`'s two operands, themselves query handles.

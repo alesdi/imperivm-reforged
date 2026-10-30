@@ -1136,7 +1136,7 @@ std::size_t World::objects_located_in_rect(std::int32_t left, std::int32_t top,
 
 std::size_t World::objects_in_sight(ObjectId observer, std::int32_t radius,
                                     const ClassFilter& filter, std::vector<ObjectId>& out,
-                                    SweepOrder order) const {
+                                    SweepOrder order, bool visible_only) const {
   out.clear();
   const WorldObject* watcher = find(observer);
   if (watcher == nullptr || radius < 0) return 0;
@@ -1145,10 +1145,23 @@ std::size_t World::objects_in_sight(ObjectId observer, std::int32_t radius,
   // the map's corner, and not from its holder; nothing it stands in is asked.
   const Point eye = watcher->state.position;
   const std::int64_t limit = static_cast<std::int64_t>(radius) * static_cast<std::int64_t>(radius);
+  // The side mask (0x004fca30 from 0x00514080): every bit for the plain form,
+  // the observer's player record `+0x18` for the visible one -- its own bit
+  // and those of the players sharing view with it. A hidden object passes
+  // when the mask holds its owner's bit (0x004fd9c0); an unowned one has no
+  // bit to hold.
+  const PlayerId viewer = watcher->state.owner;
+  const auto admitted = [&](const WorldObject& slot) {
+    if (!visible_only || !slot.state.flags.hidden) return true;
+    const PlayerId owner = slot.state.owner;
+    if (owner == kNoPlayer || viewer == kNoPlayer) return false;
+    return owner == viewer || players_.has(owner, viewer, Relation::share_view);
+  };
   return sweep(box_around(eye, radius), filter, true, out, order,
                [&](const WorldObject& slot, Point at) {
                  // Nobody sees themselves (0x004fcc30 refuses the observer).
-                 return slot.id != observer && at != kHeldPosition && dist2(at, eye) <= limit;
+                 return slot.id != observer && at != kHeldPosition && dist2(at, eye) <= limit &&
+                        admitted(slot);
                });
 }
 
@@ -1591,7 +1604,8 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
       // observer that is gone **or dead** (0x004ff0cd, 0x004ff0dc).
       const WorldObject* watcher = find(spec->subject);
       if (watcher == nullptr || object_is_dead(*watcher)) return 0;
-      return living(objects_in_sight(spec->subject, spec->radius, spec->filter, out, kGrid));
+      return living(objects_in_sight(spec->subject, spec->radius, spec->filter, out, kGrid,
+                                     spec->visible_only));
     }
 
     case QueryKind::map_area_circle: {
@@ -1991,9 +2005,16 @@ bool World::query_matches_live(ObjectId query, const QuerySpec& spec, ObjectId m
       // object's class passes the filter. **Not** the radius the refresh
       // sweeps (`[query+0x74]`, sight less 100), not a death test, and the
       // observer is not left out: it is at distance minus two radii from
-      // itself. `VisibleObjsInSight`'s visibility arm (`[query+0x78]`, the
-      // object's `vtbl + 0x74` for the observer's player) is fog, which this
-      // engine keeps out of the sim, as the refresh does.
+      // itself.
+      //
+      // `VisibleObjsInSight`'s arm (`[query+0x78]` set) then asks the object's
+      // `vtbl + 0x74` (0x005b1030) for the observer's player record: a class
+      // whose id is `DefItemHolder` is seen; so is an object whose owner bit
+      // is in the record's word `+0x18` (the side mask the refresh uses); a
+      // hidden one otherwise is not; and the rest go to 0x0053e970, which
+      // refuses an object at `(-1, -1)` and otherwise asks the fog map.
+      // **The fog is not asked here** -- it stays out of the sim -- so such
+      // an object is taken as seen (labelled).
       const WorldObject* watcher = find(spec.subject);
       if (watcher == nullptr || watcher->sight == 0) return false;
       const std::int64_t centres = isqrt(dist2(watcher->state.position, at));
@@ -2002,7 +2023,20 @@ bool World::query_matches_live(ObjectId query, const QuerySpec& spec, ObjectId m
         return parse_int(classes_->property(object.class_index, "radius"), 0);
       };
       if (centres - radius(*watcher) - radius(*slot) > watcher->sight) return false;
-      return matches_filter(*slot, spec.filter);
+      if (!matches_filter(*slot, spec.filter)) return false;
+      if (!spec.visible_only) return true;
+      if (classes_ != nullptr && slot->class_index != kNoClass &&
+          classes_->at(slot->class_index).id == "DefItemHolder") {
+        return true;
+      }
+      const PlayerId owner = slot->state.owner;
+      const PlayerId viewer = watcher->state.owner;
+      if (owner != kNoPlayer && viewer != kNoPlayer &&
+          (owner == viewer || players_.has(owner, viewer, Relation::share_view))) {
+        return true;
+      }
+      if (slot->state.flags.hidden) return false;
+      return at != kHeldPosition;
     }
     case QueryKind::player_flags:
     case QueryKind::party: {

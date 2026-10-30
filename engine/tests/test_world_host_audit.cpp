@@ -625,6 +625,31 @@ TEST(audit_objs_in_sight_freezes_sight_less_one_hundred_and_ignores_a_dead_eye) 
   CHECK(members_of(h, q).empty());
 }
 
+TEST(audit_visible_objs_in_sight_masks_the_hidden_by_shared_view) {
+  // `VisibleObjsInSight` (0x00575ef0) sets the query's flag `[query+0x78]`;
+  // the visitor (0x004fca30) then takes the observer's player word `+0x18`
+  // as its side mask, and the sweep (0x004fd9c0) admits a hidden object only
+  // when that mask holds its owner's bit -- the observer's own side, or a
+  // player sharing view with it. `ObjsInSight` takes every bit.
+  Host h;
+  const ObjectId eye = h.unit(0, Point{1000, 1000});
+  h.world.find(eye)->sight = 600;
+  const ObjectId mate = h.unit(0, Point{1100, 1000});
+  const ObjectId sneak = h.unit(1, Point{1200, 1000});
+  const ObjectId plain = h.unit(1, Point{1300, 1000});
+  h.world.mutable_state(mate)->flags.hidden = true;
+  h.world.mutable_state(sneak)->flags.hidden = true;
+  h.world.players().set_relation_word(1, 0, 0);
+
+  const script::Value seen = h.free("VisibleObjsInSight", {obj(eye), str("")}).value;
+  const script::Value all = h.free("ObjsInSight", {obj(eye), str("")}).value;
+  CHECK((members_of(h, all) == std::vector<ObjectId>{mate, sneak, plain}));
+  CHECK((members_of(h, seen) == std::vector<ObjectId>{mate, plain}));
+  // Player 1 shares view with player 0: its word toward 0 carries 0x10.
+  h.world.players().set_relation_word(1, 0, kRelationFriendly);
+  CHECK((members_of(h, seen) == std::vector<ObjectId>{mate, sneak, plain}));
+}
+
 TEST(audit_objs_in_range_is_a_sight_query_that_leaves_its_object_out) {
   // 0x00576130 calls 0x004fee10 with the script's radius.
   Host h;

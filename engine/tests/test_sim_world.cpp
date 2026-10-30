@@ -6562,6 +6562,21 @@ TEST(cover_of_mercy_action_shelters_the_friendly_units_under_it) {
   CHECK(sheltered(far));
   CHECK(b.world.state(far)->sheltered_by == second);
 
+  // A hidden unit passes the collector only when its owner's bit is in the
+  // cover owner's side mask (`[player+0x18]`): the owner's own side, or a
+  // player that shares view with it -- not every ally.
+  const ObjectId hidden_own = unit_at(Point{0, 60}, 1);
+  const ObjectId hidden_ally = unit_at(Point{60, 0}, 2);
+  b.world.mutable_state(hidden_own)->flags.hidden = true;
+  b.world.mutable_state(hidden_ally)->flags.hidden = true;
+  b.world.players().set(2, 1, Relation::share_view, false);
+  CHECK(act(cover));
+  CHECK(sheltered(hidden_own));
+  CHECK(!sheltered(hidden_ally));
+  b.world.players().set(2, 1, Relation::share_view, true);
+  CHECK(act(cover));
+  CHECK(sheltered(hidden_ally));
+
   // A handle to nothing does nothing.
   CHECK(act(999999));
   CHECK(sheltered(far));

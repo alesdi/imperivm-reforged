@@ -345,10 +345,14 @@ HostOutcome fn_rand(CallContext& ctx) {
 /// observer itself excluded (`World::evaluate_query`). This read the live
 /// sight, whole, and swept the whole map when it was 0, until the host audit.
 ///
-/// The visibility restriction of the `Visible` form is recorded on the spec and
-/// **not applied**: fog of war is one of the four hash channels the shipped
-/// build left at zero in all nine dumps, and filtering on it here would pull it
-/// back into hashed state.
+/// The `Visible` form passes 1 for the query's flag at `[query+0x78]`, and it
+/// is **not** fog of war: the refresh (0x004ff080) and the counting sweep
+/// (0x004fef80) hand the flag to the visitor (0x004fca30), which takes the
+/// observer's player record word `+0x18` as its side mask where the plain form
+/// takes every bit; the sweep (0x004fd9c0) then lets a hidden object
+/// (`0x200000`) through only when the mask holds its owner's bit -- the
+/// owner's own, or a player who shares view with the observer's, as `CanSee`
+/// reads the same word. A visible object passes either way.
 template <bool kVisible>
 HostOutcome fn_objs_in_sight(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -4383,9 +4387,12 @@ HostOutcome m_mist_action(CallContext& ctx) {
 /// tests each unit's owner bit, the low half of `[obj+0x2c]`, against that
 /// mask, so **an unowned unit, whose owner half is zero, is not sheltered**;
 /// it also skips templates and lets a hidden unit through only when its
-/// owner is in the cover owner's side mask (`[player+0x18]`), which is not
-/// modelled -- a hidden friendly unit is sheltered here. No life test. An
-/// invalid receiver does nothing.
+/// owner's bit is in the cover owner's side mask (`[player+0x18]`, the
+/// visitor's second word from 0x00514080): the owner's own bit, which the
+/// record's initialiser 0x00564660 puts there, and the bit of every player
+/// that shares view with the owner (SetRelation 0x005652f0). So a hidden
+/// ally that does not share view stands under the cover unsheltered. No life
+/// test. An invalid receiver does nothing.
 HostOutcome m_cover_of_mercy_action(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("CoverOfMercyAction: no world");
@@ -4416,6 +4423,11 @@ HostOutcome m_cover_of_mercy_action(CallContext& ctx) {
     if (slot == nullptr || !slot->state.flags.is_unit) continue;
     // The owner bit against the friendly mask: no owner, no bit, no shelter.
     if (!PlayerTable::is_valid(slot->state.owner) || players.is_enemy(owner, slot->state.owner)) {
+      continue;
+    }
+    // The side mask: a hidden unit only for its own side or a sharer of view.
+    if (slot->state.flags.hidden && slot->state.owner != owner &&
+        !players.has(slot->state.owner, owner, Relation::share_view)) {
       continue;
     }
     if (ObjectState* state = world->mutable_state(id); state != nullptr) {

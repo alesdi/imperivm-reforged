@@ -1481,9 +1481,17 @@ class World {
   /// of 0 sees only its own spot and a negative one sees nothing. The radius
   /// is the query's, frozen when it was made (`QuerySpec::radius`); the dead
   /// rules are `evaluate_query`'s.
+  ///
+  /// `visible_only` is `VisibleObjsInSight`'s flag (`[query+0x78]`), which the
+  /// sweep's visitor (0x004fca30) turns into a side mask: the observer's
+  /// player record word `+0x18` -- its own bit and the bit of every player
+  /// that shares view with it -- where the plain form takes every bit. The
+  /// sweep then admits an object carrying the hidden bit (`0x200000`) only
+  /// when the mask holds a bit of its owner (0x004fd9c0). Not fog of war.
   std::size_t objects_in_sight(ObjectId observer, std::int32_t radius, const ClassFilter& filter,
                                std::vector<ObjectId>& out,
-                               SweepOrder order = SweepOrder::spawn) const;
+                               SweepOrder order = SweepOrder::spawn,
+                               bool visible_only = false) const;
 
   /// Objects of a class owned by a player, optionally bounded by a circle.
   /// `radius <= 0` means the whole map, and `player == kNoPlayer` any owner.
