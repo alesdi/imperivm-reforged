@@ -675,16 +675,30 @@ TEST(fog_the_map_survives_a_save_and_is_not_in_the_hash) {
   // not have produced: flip one cell's slot-5 bits and the load is refused.
   std::vector<std::byte> forged = rim_bytes;
   {
-    // The first cell word sits after the 8-byte section header, the side and
-    // the count; find slot 5's first partial cell and set it to full.
+    // The first cell word sits after the 8-byte section header, the
+    // explored-everywhere byte, the side and the count; find slot 5's first
+    // partial cell and set it to full.
     const std::size_t index = static_cast<std::size_t>(mine[0].index);
-    const std::size_t at = 8 + 4 + 4 + index * 2;
+    const std::size_t at = 8 + 1 + 4 + 4 + index * 2;
     auto word = static_cast<std::uint16_t>(static_cast<std::uint8_t>(forged[at]) |
                                            (static_cast<std::uint8_t>(forged[at + 1]) << 8));
     word = static_cast<std::uint16_t>(word | (3u << (2 * mine[0].slot)));
     forged[at] = static_cast<std::byte>(word & 0xFF);
     forged[at + 1] = static_cast<std::byte>(word >> 8);
   }
+  // The explored-everywhere flag `ExploreAll` raises comes back with it, and
+  // a fresh map has it down.
+  CHECK(!again.fog.map().explored_everywhere());
+  Bench all;
+  all.fog.map().explore_all();
+  CHECK(all.fog.map().explored_everywhere());
+  std::vector<std::byte> all_bytes;
+  all.fog.serialize(all_bytes);
+  REQUIRE(again.fog.deserialize(all_bytes).ok());
+  CHECK(again.fog.map().explored_everywhere());
+  REQUIRE(again.fog.deserialize(rim_bytes).ok());
+  CHECK(!again.fog.map().explored_everywhere());
+
   Bench refused;
   refused.fog.map().explore(pt(100, 100), 2);
   CHECK(!refused.fog.deserialize(forged).ok());

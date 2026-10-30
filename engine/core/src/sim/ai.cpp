@@ -624,18 +624,18 @@ Laika* laika_for(World& world, std::int32_t viewer, GaikaId node) noexcept {
   return view == nullptr ? nullptr : view->find(node);
 }
 
-// 0x0041cb80 takes one of two overrides before the bit, chosen by 0x005bde80
-// (a single-player game whose settings carry `+0xdc4`): the session's
-// exploration setting (`+0xda0 == 0`), or else the exploration map's
-// explored-everywhere flag (`[[world+0xb0]+0xf0]`, which only 0x005157c0 --
-// `ExploreAll`, and the load with exploration off -- sets). The match rule
-// is read for both: a load with exploration off is the one way the flag is
-// set at the start, and the rule is the one the session keeps. A script's
-// `ExploreAll` in a match with exploration on is where the two part (the
-// scenario path would answer yes everywhere from then on); labelled.
+// 0x0041cb80 takes one of two overrides before the bit, chosen by 0x005bde80,
+// which answers whether a recorded demo is being played back (single-player
+// settings with `playdemo`, `+0xdc4`): then the session's exploration setting
+// (`+0xda0 == 0`), and otherwise -- every game played -- the exploration map's
+// explored-everywhere flag (`[[world+0xb0]+0xf0]`), which only 0x005157c0
+// raises: the game's start with exploration off (0x00526200), a script's
+// `ExploreAll` (0x006a42a0), and two more callers (0x00524090, 0x00749d40)
+// this engine does not reach. This engine plays back no demo, so it reads
+// the flag.
 bool laika_explored(World& world, const Laika& record) noexcept {
-  if (const MatchSystem* match = match_system_of(world);
-      match != nullptr && !match->rules().exploration) {
+  if (const FogSystem* fog = fog_system_of(world);
+      fog != nullptr && fog->map().explored_everywhere()) {
     return true;
   }
   return (record.flags & kLaikaExplored) != 0;

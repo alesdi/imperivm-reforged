@@ -5274,10 +5274,13 @@ TEST(the_sweep_marks_what_a_player_stands_in_and_remembers_it_when_it_leaves) {
   CHECK(ask("LastSeen", theirs).as_integer() == 3000);
 }
 
-/// **The two session overrides** (0x0041cb80, 0x0041cbd0): with exploration
-/// off every node is explored, and with fog of war off `Revealed` is
-/// `Explored`. A world with neither rule nor sweep is one where nothing is.
-TEST(explored_and_revealed_answer_the_match_rules_before_the_bits) {
+/// **The two overrides** (0x0041cb80, 0x0041cbd0): once the exploration map
+/// is explored everywhere -- `ExploreAll`, which the game's start runs when
+/// exploration is off -- every node is explored, and with fog of war off
+/// `Revealed` is `Explored`. The session's exploration rule itself is read
+/// only while a demo plays back, which this engine never does. A world with
+/// neither flag nor sweep is one where nothing is.
+TEST(explored_and_revealed_answer_the_overrides_before_the_bits) {
   Fixture f;
   (void)f.make_settlement(3);
   imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
@@ -5297,14 +5300,27 @@ TEST(explored_and_revealed_answer_the_match_rules_before_the_bits) {
   rules.fog_of_war = false;
   match.configure(rules, 0, false);
   CHECK(!ask("Revealed"));  // `Explored`, which is still false
+  // The rule alone is not the flag.
   rules.exploration = false;
   match.configure(rules, 0, false);
+  CHECK(!ask("Explored"));
+  FogSystem fog;
+  REQUIRE(f.world.add_system(&fog));
+  CHECK(!ask("Explored"));
+  // A script's `ExploreAll` raises it, whatever the rule says.
+  rules.exploration = true;
+  match.configure(rules, 0, false);
+  CHECK(f.call(script::CallKind::free_function, "ExploreAll", {}, script::kNoScript).status ==
+        script::HostStatus::ok);
   CHECK(ask("Explored"));
   CHECK(ask("Revealed"));
   rules.fog_of_war = true;
   match.configure(rules, 0, false);
   CHECK(ask("Explored"));
   CHECK(!ask("Revealed"));  // the bit, which nothing set
+  // A fresh map has the flag down again (0x005179d0).
+  fog.map().resize(4096);
+  CHECK(!ask("Explored"));
 }
 
 /// **`Eval`'s memory tail** (0x0042fc40, 0x0042f670): for a node not revealed

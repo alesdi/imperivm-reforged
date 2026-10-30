@@ -726,10 +726,10 @@ class AiSystem final : public System {
 [[nodiscard]] Laika* laika_for(World& world, std::int32_t viewer, GaikaId node) noexcept;
 
 /// 0x0041cb80, what `GAIKA::Explored` and every explored test reads: true when
-/// the match has exploration off (`MatchRules::exploration`, the session's
-/// `+0xda0`; the original's scenario path reads the exploration map's
-/// explored-everywhere flag instead, which `ExploreAll` sets -- see the note
-/// at the body), else bit 0x02.
+/// the exploration map is explored everywhere (`ExplorationMap::
+/// explored_everywhere`, which `ExploreAll` raises, the game's start among its
+/// callers when exploration is off; the session rule is read instead only
+/// while a demo plays back -- see the note at the body), else bit 0x02.
 [[nodiscard]] bool laika_explored(World& world, const Laika& record) noexcept;
 
 /// 0x0041cbd0, `GAIKA::Revealed`: with fog of war on, bit 0x04; with it off,

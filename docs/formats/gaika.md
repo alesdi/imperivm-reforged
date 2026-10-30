@@ -163,8 +163,15 @@ Each AI player's record keeps one `0x18`-byte record per node (`[ai+0x30]`,
 mapped by the 16-bit table at `[ai+0x40]`): a flags byte at `+2`, the enemy
 strength last seen at `+8`, and the turn it was last seen at `+0xc`.
 
-* `Explored` (0x0042ae70 -> 0x0041cb80) answers true when exploration is off
-  for the session, else bit `0x02`.
+* `Explored` (0x0042ae70 -> 0x0041cb80) answers true when the exploration
+  map is explored everywhere, else bit `0x02`. That flag (`[map+0xf0]`) is
+  zero from the map's constructor (0x005179d0) and raised by `ExploreAll`
+  (0x005157c0) alone, whose callers are the game's start when exploration is
+  off (0x00526200), a script's `ExploreAll` (0x006a42a0), the match's end
+  when no human player is left (0x00524090) and 0x00749d40. Only while a
+  recorded demo plays back (0x005bde80) is the session's exploration setting
+  read instead. The node's record is found through `[ai+0x40]`; a player of
+  0 or less, a node past the index table or an index of 0 answers false.
 * `Revealed` (0x0042b270 -> 0x0041cbd0) answers bit `0x04` when fog of war is
   on, else `Explored`.
 * `LastSeen` (0x0042b320) answers `+0xc`.
@@ -419,11 +426,12 @@ their entrances as they stand when the AI manager starts; the AI's save
   are not kept; `WaterLsa` derives its answer (`sim/economy.cpp`).
 * **The per-player memory is the sweep's** (`sweep_gaika`), run on every
   node once a tick after the squads' standing is refreshed, where the
-  original runs it on the nodes a unit crosses between. `Explored` and
-  `Revealed` read the match's exploration and fog rules first; the scenario
-  path's explored-everywhere flag, which a script's `ExploreAll` sets in a
-  match with exploration on, is not kept. `Eval/6`, `Eval/3` and
-  `EvalNeighbors` add the memory tail.
+  original runs it on the nodes a unit crosses between. `Explored` reads the
+  exploration map's explored-everywhere flag first (`ExplorationMap::
+  explored_everywhere`; this engine plays back no demo, so the session rule
+  is never read there), and `Revealed` the match's fog rule. The flag is
+  saved with the fog section, which the original's persist does not do.
+  `Eval/6`, `Eval/3` and `EvalNeighbors` add the memory tail.
 * **The `MAIKA` list is kept** (`SquadTable::routes`, saved, newest first,
   512 at most): `SetMAIKA` and the attacked hook (`record_squad_attacked`)
   record into it, and `Recruit` runs the routing filter over it.

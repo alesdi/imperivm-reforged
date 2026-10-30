@@ -208,8 +208,16 @@ class ExplorationMap {
   /// in `mask` (a `viewflags` word, low byte).
   void explore_circle_mask(Point centre, std::int32_t radius, std::uint32_t mask);
 
-  /// `ExploreAll()`. Every cell, every slot, fully.
+  /// `ExploreAll()`. Every cell, every slot, fully, and the map's
+  /// explored-everywhere flag (`[map+0xf0]`, 0x005157c0's first write).
   void explore_all();
+
+  /// The explored-everywhere flag: 0 from the map's constructor (0x005179d0)
+  /// and 1 from `ExploreAll` on; nothing else writes it. `GAIKA::Explored`
+  /// reads it (0x0041cb80). The original's `Exploration` persist (0x00517860)
+  /// does not write it; this engine saves it (the fog section).
+  [[nodiscard]] bool explored_everywhere() const noexcept { return everywhere_; }
+  void set_explored_everywhere(bool everywhere) noexcept { everywhere_ = everywhere; }
 
   /// The cells as the original packs them: one `uint16` a cell, two bits a
   /// slot, slot `s` at bits `2s..2s+1`.
@@ -239,6 +247,7 @@ class ExplorationMap {
 
   std::int32_t side_ = 0;
   std::vector<std::uint16_t> cells_;
+  bool everywhere_ = false;
   /// Per slot, the partial cells' records, keyed by cell index. **Iteration
   /// order is state**: this is a `std::map` so that the save and every walk are
   /// in index order.
