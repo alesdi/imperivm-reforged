@@ -1263,25 +1263,29 @@ std::size_t World::units_in_settlement(ObjectId settlement, const ClassFilter& f
   const bool want_ring = scope != SettlementScope::garrison;
 
   if (want_garrison) {
-    // **A divergence, and it is this engine's, not the original's.**
-    // `Settlement::CollectUnits` walks the settlement's *holder* -- the vector
-    // at `holder + 0x28`, reached through the handle at `settlement + 0x5e` --
-    // in holder order, filtered by `IsHeirOf` and by nothing else. This walks
-    // the objects that carry a settlement back-link instead, because on every
-    // retail map that is the only place the answer exists: `sim/session.cpp`
-    // populates `WorldObject::settlement` from `map.obj.xml` and calls
-    // `EconomySystem::add_building` for nothing, so `Settlement::holder.units`
-    // is empty at load and stays empty until a script issues `AddUnit`. The two
-    // readings agree on a settlement built through `AddUnit` and disagree on
-    // every settlement a map file declares; picking the holder here would
-    // answer every shipped call site with an empty list. Closing this means
-    // filing map-declared units into the holder at load, which moves the world
-    // hash of every map, so it is recorded rather than done in passing.
-    for (const WorldObject& slot : objects_) {
-      if (slot.internal != InternalKind::none) continue;
-      if (slot.settlement != settlement) continue;
-      if (!slot.state.flags.is_unit) continue;
-      collect(slot, filter, out);
+    // The garrison: the settlement's **holder**, the handle at
+    // `[settlement+0x5e]`. `Settlement::CollectUnits` copies the holder's
+    // list (`holder + 0x28`, 0x00438330) and walks the copy in roster order,
+    // keeping each member whose class is an heir of the argument (its
+    // `[obj+0x3c]`, 0x0059a220) -- no other test: not alive, not template,
+    // not unit. Here the roster is `contents_of`, the members in the order
+    // they came in, and the holder is the object after the settlement, as
+    // the composite is allocated (`spawn_settlement`; the loader's triple).
+    //
+    // A shipped map files no unit into a settlement -- only buildings are
+    // `<settlement>` members -- so a garrison is what entered it in play:
+    // `AddUnit`, `EnterSettlement`, a spawn into the holder, the sentries.
+    // This used to walk the objects carrying a settlement back-link instead,
+    // which no unit carries, and so answered every garrison empty.
+    const ObjectId holder = settlement + 1;
+    const WorldObject* box = find(holder);
+    if (box != nullptr && box->internal == InternalKind::holder) {
+      std::vector<ObjectId> roster;
+      (void)contents_of(holder, roster);
+      for (const ObjectId id : roster) {
+        const WorldObject* member = find(id);
+        if (member != nullptr && matches_filter(*member, filter)) out.push_back(id);
+      }
     }
   }
 
@@ -1295,10 +1299,10 @@ std::size_t World::units_in_settlement(ObjectId settlement, const ClassFilter& f
   // `settlement + 0x68`, reads each building's sight from `[building + 0xd0]`,
   // fetches its position through `vtbl + 0x3c`, and hands `(pos, sight,
   // sight * sight)` to the grid sweep at 0x005c5120. The buildings come from
-  // the back-link here for the same reason the garrison does not: on a retail
-  // map `Settlement::buildings` is empty and the back-link is what the loader
-  // writes. Unlike the garrison the two cannot disagree in the other
-  // direction, because `EconomySystem::add_building` writes both.
+  // the back-link here: the loader writes it on every `<settlement>` member,
+  // and `EconomySystem::add_building` writes it beside the building roll, so
+  // the two cannot disagree. (Not their order -- the roll's -- which the sort
+  // below makes moot.)
   //
   // Four filters in the sweep's inner loop (0x005c5272-0x005c52ba), in its
   // order: a non-zero flag word, castable to the object class, **not dead**

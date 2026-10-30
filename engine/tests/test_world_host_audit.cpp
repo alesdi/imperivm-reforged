@@ -377,6 +377,39 @@ TEST(audit_is_heir_of_takes_the_whole_string_as_one_class_name) {
   CHECK(!h.truthy("IsHeirOf", {obj(9999), str("Unit")}));
 }
 
+TEST(audit_is_heir_of_finds_an_altid_with_the_first_claim_and_an_id_first) {
+  // `CVXScriptClass::AddClass` (0x005a7090) keys the class map by `id`, then
+  // by an `altid` that is not its own `id` and not yet a key. Files in order:
+  // `GTavern` claims `Tavern` first, `ITavern`'s claim is dropped, and the
+  // `altid` `Fort` loses to the class whose `id` it is.
+  imperivm::core::ClassGraph graph;
+  const std::string docs[] = {
+      R"(<class id="Object" cpp_class="CVXDecor"><properties/></class>)",
+      R"(<class id="BaseTavern" parent="Object" cpp_class="CVXTavern"><properties/></class>)",
+      R"(<class id="GTavern" altid="Tavern" parent="BaseTavern" cpp_class="CVXTavern"><properties/></class>)",
+      R"(<class id="ITavern" altid="Tavern" parent="Object" cpp_class="CVXTavern"><properties/></class>)",
+      R"(<class id="Keep" altid="Fort" parent="Object" cpp_class="CVXBuilding"><properties/></class>)",
+      R"(<class id="Fort" parent="Object" cpp_class="CVXBuilding"><properties/></class>)",
+  };
+  const char* names[] = {"OBJECT.SC.XML", "BASETAVERN.SC.XML", "GTAVERN.SC.XML",
+                         "ITAVERN.SC.XML", "KEEP.SC.XML", "ZFORT.SC.XML"};
+  for (int i = 0; i < 6; ++i) {
+    graph.add({reinterpret_cast<const std::byte*>(docs[i].data()), docs[i].size()}, names[i]);
+  }
+  graph.link();
+  Host h;
+  h.world.set_class_graph(&graph);
+  const ObjectId g = h.world.spawn(NativeClass::tavern, nullptr, graph.find("GTavern"));
+  const ObjectId i = h.world.spawn(NativeClass::tavern, nullptr, graph.find("ITavern"));
+  const ObjectId keep = h.world.spawn(NativeClass::building, nullptr, graph.find("Keep"));
+
+  CHECK(h.truthy("IsHeirOf", {obj(g), str("Tavern")}));
+  CHECK(!h.truthy("IsHeirOf", {obj(i), str("Tavern")}));
+  CHECK(h.truthy("IsHeirOf", {obj(i), str("ITavern")}));
+  CHECK(!h.truthy("IsHeirOf", {obj(keep), str("Fort")}));
+  CHECK(h.truthy("IsHeirOf", {obj(keep), str("Keep")}));
+}
+
 // --------------------------------------------------------------------------
 // units and buildings: SetLastAttackTime, HasSpecial, Teleport::Traverse
 // --------------------------------------------------------------------------
@@ -726,6 +759,31 @@ TEST(audit_point_set_answers_the_point_and_lengths_wrap_at_32_bits) {
   CHECK(set_len(Point{16000, 0}, 200000) == (Point{-68435, 0}));
   CHECK(set_len(Point{65536, 0}, 10) == (Point{0, 10}));
   CHECK(set_len(Point{3, 4}, 10) == (Point{6, 8}));
+}
+
+TEST(audit_rect_set_stores_the_four_edges_as_given) {
+  // `rect::Set` (0x00697aa0), arity four: left, top, right, bottom into the
+  // referenced rect, unordered and unchecked, and no answer. `Set` at arity
+  // two is still the point's.
+  Host h;
+  script::Value args[] = {pack_rect(h.world, RectTable::Rect{0, 0, 9, 9}), num(50), num(-4),
+                          num(10), num(7)};
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &h.context;
+  ctx.name = "Set";
+  ctx.kind = script::CallKind::member;
+  const std::uint32_t index = h.registry.find(script::CallKind::member, "Set", 4);
+  REQUIRE(index != script::kUnresolvedHost);
+  const script::HostOutcome out = h.registry.entry(index).fn(ctx);
+  REQUIRE(out.status == script::HostStatus::ok);
+  CHECK(out.value.is_nil());
+  CHECK(h.integer("left", {args[0]}) == 50);
+  CHECK(h.integer("top", {args[0]}) == -4);
+  CHECK(h.integer("right", {args[0]}) == 10);
+  CHECK(h.integer("bottom", {args[0]}) == 7);
+  CHECK(h.member("Set", {pack_rect(h.world, RectTable::Rect{}), num(1), num(2), str("x"),
+                         num(4)}).status != script::HostStatus::ok);
 }
 
 TEST(audit_rot_keeps_the_residue_of_an_exact_half) {

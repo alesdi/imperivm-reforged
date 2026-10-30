@@ -2768,9 +2768,22 @@ HostOutcome m_dist_to(CallContext& ctx) {
 /// 0x00431f10), compared exactly and case-sensitively (0x00409350): no comma
 /// list, no trimming. No match answers false; otherwise it walks the parent
 /// links (`[class+0xe4]`) up from the object's class (`[obj+0x3c]`) and answers
-/// whether it reaches the found one. `ClassGraph::lookup` also falls back to
-/// an `altid`; whether the original's map is keyed by those too was not
-/// traced. This parsed a comma list until the host audit, so
+/// whether it reaches the found one.
+///
+/// **The map is keyed by `altid` too.** `CVXScriptClass::AddClass`
+/// (0x005a7090) loads each `.sc.xml` in the directory listing's order, sets
+/// the map entry under the class's `id` (assigning, so a later `id` replaces
+/// whatever held the name, an earlier `altid` included), and then, when the
+/// class has an `altid` that differs from its own `id` and is not yet a key,
+/// inserts it under the `altid` too. So an `id` always wins and the first
+/// class to claim an `altid` keeps it: `ClassGraph::lookup`, over the class
+/// files in the pack's order, which is sorted and is the order this engine
+/// adds them in. `Tavern`, `Village` and `Townhall` are each claimed by
+/// several classes and go to the first in that order; `Inn` is a class's own
+/// `id` and `altid` at once and is skipped. The one case the two differ on is
+/// a second file declaring an `id` already loaded -- the original's map then
+/// names the later class, `ClassGraph` keeps the first -- and no shipped pack
+/// has one. This parsed a comma list until the host audit, so
 /// `IsHeirOf("Fort,Unit")` was true of a soldier; no shipped literal has a
 /// comma or a space, and the sites that pass a variable pass one name.
 HostOutcome m_is_heir_of(CallContext& ctx) {
@@ -6487,10 +6500,8 @@ HostOutcome m_point_y(CallContext& ctx) {
 /// bare statement, so the answer was never read -- and was nothing here until
 /// the host audit.
 ///
-/// `rect::Set` (0x00697aa0) is a different entry point that the ledger joins to
-/// this name: `void, rect&, int, int, int, int`, arity **four**, storing
-/// left, top, right and bottom. No shipped site calls it and it is not bound,
-/// as this file does for every registered name the corpus never reaches.
+/// `rect::Set` (0x00697aa0) is a different entry point under the same name,
+/// at arity four: `m_rect_set`.
 HostOutcome m_point_set(CallContext& ctx) {
   if (!ctx.arg(1).is_integer() || !ctx.arg(2).is_integer()) {
     return HostOutcome::failed("Set: expected two integers");
@@ -6559,6 +6570,26 @@ HostOutcome m_point_into_rect(CallContext& ctx) {
   if (p.y < r->top) p.y = r->top;
   if (p.y > r->bottom) p.y = r->bottom;
   ctx.out(0) = pack_point(p);
+  return HostOutcome::ok_void();
+}
+
+/// `rc.Set(left, top, right, bottom)` (0x00697aa0) -- registered `void,
+/// rect&, int, int, int, int`. It pops the four integers and the reference
+/// and stores them into the referenced rect as given, in its four dwords
+/// left, top, right, bottom: no ordering of the edges, no check, and no
+/// answer. No shipped site calls it.
+HostOutcome m_rect_set(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr) return HostOutcome::failed("Set: no world");
+  if (unpack_rect(*world, ctx.arg(0)) == nullptr) {
+    return HostOutcome::failed("Set: receiver is not a rect");
+  }
+  for (std::size_t i = 1; i <= 4; ++i) {
+    if (!ctx.arg(i).is_integer()) return HostOutcome::failed("Set: expected four integers");
+  }
+  const RectTable::Rect r{ctx.arg(1).as_integer(), ctx.arg(2).as_integer(),
+                          ctx.arg(3).as_integer(), ctx.arg(4).as_integer()};
+  ctx.out(0) = pack_rect(*world, r);
   return HostOutcome::ok_void();
 }
 
@@ -7784,6 +7815,7 @@ std::size_t register_world_host(script::HostRegistry& registry) {
   // because it is how a `<group type="0">` name reaches its object.
   def(kMember, "obj", 0, &m_named_obj_obj);     // 1174
   def(kMember, "Set", 2, &m_point_set);         // 66
+  def(kMember, "Set", 4, &m_rect_set);          // 0
   def(kMember, "Rot", 1, &m_point_rot);         // 385
   def(kMember, "SetLen", 1, &m_point_set_len);  // 73
   def(kMember, "IntoRect", 1, &m_point_into_rect);   // 398

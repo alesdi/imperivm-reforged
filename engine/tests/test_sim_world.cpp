@@ -896,7 +896,10 @@ TEST(sim_settlement_queries_split_units_from_buildings) {
   const ObjectId stray = world.spawn(NativeClass::unit, nullptr);
   (void)world.set_health(stray, 100);  // alive: see object_is_dead
   world.find(hall)->settlement = town.settlement;
-  world.find(guard)->settlement = town.settlement;
+  // The garrison is the settlement's holder (`[settlement+0x5e]`), walked by
+  // `Settlement::CollectUnits` (0x005c58f0); a back-link on a unit is not it.
+  REQUIRE(world.put_in_holder(guard, town.holder));
+  world.find(stray)->settlement = town.settlement;
 
   std::vector<ObjectId> found;
   CHECK(world.units_in_settlement(town.settlement, ClassFilter{}, found) == 1);
@@ -1034,44 +1037,35 @@ TEST(sim_the_three_settlement_scopes_are_three_different_answers) {
   world.find(tower)->sight = 400;
   world.find(tower)->state.health = 5000;
 
-  // The garrison: linked to the settlement and standing inside the tower.
-  // Spawned *after* the outsider so that `both`'s sort is observable -- an
-  // implementation that sorted only the part the ring appended would leave
-  // this one first.
+  // Two in the garrison, in the holder, entered in the order second, first --
+  // so mode 0's roster order is not ascending -- and one outsider standing
+  // inside the tower's sight. Spawned *after* the outsider so that `both`'s
+  // sort is observable.
   const ObjectId outsider = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
-  const ObjectId garrison = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
+  const ObjectId first = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
+  const ObjectId second = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
   world.set_position(outsider, pt(100, 0));
-  world.set_position(garrison, pt(50, 0));
-  world.find(outsider)->state.health = 10;
-  world.find(garrison)->state.health = 10;
-  world.find(garrison)->settlement = town.settlement;
+  for (ObjectId id : {outsider, first, second}) world.find(id)->state.health = 10;
+  REQUIRE(world.put_in_holder(second, town.holder));
+  REQUIRE(world.put_in_holder(first, town.holder));
 
   const ClassFilter soldiers = ClassFilter::of(tiny.soldier);
   std::vector<ObjectId> found;
-  CHECK(world.units_in_settlement(town.settlement, soldiers, found,
-                                  SettlementScope::garrison) == 1);
-  CHECK(found[0] == garrison);
-  CHECK(world.units_in_settlement(town.settlement, soldiers, found,
-                                  SettlementScope::ring) == 2);
-  CHECK(world.units_in_settlement(town.settlement, soldiers, found,
-                                  SettlementScope::both) == 2);
-  // `both` is a union, not a concatenation: the garrison entry the ring also
-  // found collapses to one, and the whole list comes out ascending because
-  // 0x005c5ac3 sorts from the list's `begin`, not from where the ring started.
-  CHECK(found[0] == outsider && found[1] == garrison);
-  CHECK(found[0] < found[1]);
-
-  // A garrisoned unit -- one actually inside a holder -- is *not* in the ring.
-  // It holds `(-1, -1)` and occupies no grid cell in the original, and
-  // resolving it to its holder's position here would make the ring a superset
-  // of the garrison and collapse the distinction the mode encodes.
-  const ObjectId inside = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
-  world.set_position(inside, pt(10, 0));
-  world.find(inside)->state.health = 10;
-  REQUIRE(world.put_in_holder(inside, town.holder));
-  CHECK(world.units_in_settlement(town.settlement, soldiers, found,
-                                  SettlementScope::ring) == 2);
-  for (ObjectId id : found) CHECK(id != inside);
+  // The garrison in roster order, no sort (0x005c5a0a jumps past it).
+  REQUIRE(world.units_in_settlement(town.settlement, soldiers, found,
+                                    SettlementScope::garrison) == 2);
+  CHECK(found[0] == second && found[1] == first);
+  // The ring: the outsider, and **not** the garrison, which holds `(-1, -1)`
+  // and occupies no grid cell in the original -- resolving it to its
+  // holder's position would make the ring a superset of the garrison.
+  REQUIRE(world.units_in_settlement(town.settlement, soldiers, found,
+                                    SettlementScope::ring) == 1);
+  CHECK(found[0] == outsider);
+  // `both` is a union sorted from the list's `begin` (0x005c5ac3), not from
+  // where the ring started, so the garrison's roster order is lost.
+  REQUIRE(world.units_in_settlement(town.settlement, soldiers, found,
+                                    SettlementScope::both) == 3);
+  CHECK(found[0] == outsider && found[1] == first && found[2] == second);
 }
 
 /// The scope is interned state in the original -- 0x004fe0fb compares it before
