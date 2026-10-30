@@ -1108,7 +1108,15 @@ struct Staging {
     World& world = run.world();
     if (place) {
       if (MovementSystem* move = movement_system(world)) move->stop(world, id);
-      const bool placed = world.set_position(id, at);
+      // A garrisoned unit is taken out where it is stood, as `imrun` does.
+      const ObjectState* before = world.state(id);
+      bool placed = false;
+      if (before != nullptr && before->is_held()) {
+        placed = world.remove_from_holder(id, at);
+        (void)garrison_forget(world, id);
+      } else {
+        placed = world.set_position(id, at);
+      }
       if (ObjectState* state = world.mutable_state(id); placed && state != nullptr) {
         state->flags.no_ai = true;
         if (HeroSystem* heroes = hero_system_of(world)) {

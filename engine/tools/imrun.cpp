@@ -800,7 +800,17 @@ int main(int argc, char** argv) {
       if (sim::MovementSystem* move = sim::movement_system(run.world())) {
         move->stop(run.world(), goto_id);
       }
-      const bool placed = run.world().set_position(goto_id, sim::Point{place_x, place_y});
+      // A unit its AI has put in a garrison is taken out of it there, as
+      // `ExitHolder` takes one out (off the roster too), so the staging does
+      // not depend on where the AI keeps its soldiers.
+      const sim::ObjectState* before = run.world().state(goto_id);
+      bool placed = false;
+      if (before != nullptr && before->is_held()) {
+        placed = run.world().remove_from_holder(goto_id, sim::Point{place_x, place_y});
+        (void)sim::garrison_forget(run.world(), goto_id);
+      } else {
+        placed = run.world().set_position(goto_id, sim::Point{place_x, place_y});
+      }
       // And out of its AI's hands: its no-AI flag set, as a map can author it
       // (`UNITFLAG_NOAI`), and a squad of its own, which takes `SF_NOAI` from
       // that flag (0x00447330), so `SQUADMONITOR.VS` passes it by. What the
