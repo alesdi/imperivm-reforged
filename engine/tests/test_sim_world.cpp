@@ -896,7 +896,10 @@ TEST(sim_settlement_queries_split_units_from_buildings) {
   const ObjectId stray = world.spawn(NativeClass::unit, nullptr);
   (void)world.set_health(stray, 100);  // alive: see object_is_dead
   world.find(hall)->settlement = town.settlement;
-  world.find(guard)->settlement = town.settlement;
+  // The garrison is the settlement's holder (`[settlement+0x5e]`), walked by
+  // `Settlement::CollectUnits` (0x005c58f0); a back-link on a unit is not it.
+  REQUIRE(world.put_in_holder(guard, town.holder));
+  world.find(stray)->settlement = town.settlement;
 
   std::vector<ObjectId> found;
   CHECK(world.units_in_settlement(town.settlement, ClassFilter{}, found) == 1);
@@ -1034,44 +1037,35 @@ TEST(sim_the_three_settlement_scopes_are_three_different_answers) {
   world.find(tower)->sight = 400;
   world.find(tower)->state.health = 5000;
 
-  // The garrison: linked to the settlement and standing inside the tower.
-  // Spawned *after* the outsider so that `both`'s sort is observable -- an
-  // implementation that sorted only the part the ring appended would leave
-  // this one first.
+  // Two in the garrison, in the holder, entered in the order second, first --
+  // so mode 0's roster order is not ascending -- and one outsider standing
+  // inside the tower's sight. Spawned *after* the outsider so that `both`'s
+  // sort is observable.
   const ObjectId outsider = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
-  const ObjectId garrison = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
+  const ObjectId first = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
+  const ObjectId second = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
   world.set_position(outsider, pt(100, 0));
-  world.set_position(garrison, pt(50, 0));
-  world.find(outsider)->state.health = 10;
-  world.find(garrison)->state.health = 10;
-  world.find(garrison)->settlement = town.settlement;
+  for (ObjectId id : {outsider, first, second}) world.find(id)->state.health = 10;
+  REQUIRE(world.put_in_holder(second, town.holder));
+  REQUIRE(world.put_in_holder(first, town.holder));
 
   const ClassFilter soldiers = ClassFilter::of(tiny.soldier);
   std::vector<ObjectId> found;
-  CHECK(world.units_in_settlement(town.settlement, soldiers, found,
-                                  SettlementScope::garrison) == 1);
-  CHECK(found[0] == garrison);
-  CHECK(world.units_in_settlement(town.settlement, soldiers, found,
-                                  SettlementScope::ring) == 2);
-  CHECK(world.units_in_settlement(town.settlement, soldiers, found,
-                                  SettlementScope::both) == 2);
-  // `both` is a union, not a concatenation: the garrison entry the ring also
-  // found collapses to one, and the whole list comes out ascending because
-  // 0x005c5ac3 sorts from the list's `begin`, not from where the ring started.
-  CHECK(found[0] == outsider && found[1] == garrison);
-  CHECK(found[0] < found[1]);
-
-  // A garrisoned unit -- one actually inside a holder -- is *not* in the ring.
-  // It holds `(-1, -1)` and occupies no grid cell in the original, and
-  // resolving it to its holder's position here would make the ring a superset
-  // of the garrison and collapse the distinction the mode encodes.
-  const ObjectId inside = world.spawn(NativeClass::unit, nullptr, tiny.soldier);
-  world.set_position(inside, pt(10, 0));
-  world.find(inside)->state.health = 10;
-  REQUIRE(world.put_in_holder(inside, town.holder));
-  CHECK(world.units_in_settlement(town.settlement, soldiers, found,
-                                  SettlementScope::ring) == 2);
-  for (ObjectId id : found) CHECK(id != inside);
+  // The garrison in roster order, no sort (0x005c5a0a jumps past it).
+  REQUIRE(world.units_in_settlement(town.settlement, soldiers, found,
+                                    SettlementScope::garrison) == 2);
+  CHECK(found[0] == second && found[1] == first);
+  // The ring: the outsider, and **not** the garrison, which holds `(-1, -1)`
+  // and occupies no grid cell in the original -- resolving it to its
+  // holder's position would make the ring a superset of the garrison.
+  REQUIRE(world.units_in_settlement(town.settlement, soldiers, found,
+                                    SettlementScope::ring) == 1);
+  CHECK(found[0] == outsider);
+  // `both` is a union sorted from the list's `begin` (0x005c5ac3), not from
+  // where the ring started, so the garrison's roster order is lost.
+  REQUIRE(world.units_in_settlement(town.settlement, soldiers, found,
+                                    SettlementScope::both) == 3);
+  CHECK(found[0] == outsider && found[1] == first && found[2] == second);
 }
 
 /// The scope is interned state in the original -- 0x004fe0fb compares it before
@@ -4235,6 +4229,7 @@ struct SpecialsGraph {
   ClassIndex bowman = kNoClass;
   ClassIndex veteran_bowman = kNoClass;
   ClassIndex broken_bowman = kNoClass;
+  ClassIndex sloppy = kNoClass;
 
   SpecialsGraph() {
     const std::string docs[] = {
@@ -4265,13 +4260,19 @@ struct SpecialsGraph {
         // declares and which reads as "no projectile" all the same.
         R"(<class id="BrokenBowman" parent="Unit" cpp_class="CVXUnit"><properties
              projectile_class="**Invalid**"/></class>)",
+        // Tokens the class reader's exact compare refuses -- the wrong case,
+        // the script constant's spelling -- and one a tab pads, which it
+        // trims and accepts.
+        R"(<class id="Sloppy" parent="Unit" cpp_class="CVXUnit"><properties
+             unit_specials="rage,defense_skill,	Sneak	, Curse"/></class>)",
     };
     const char* names[] = {"unit.sc.xml",     "crow.sc.xml",   "veteran.sc.xml",
                            "plain.sc.xml",    "sentry.sc.xml", "ram.sc.xml",
                            "peaceful.sc.xml", "peasant.sc.xml", "baseanimal.sc.xml",
                            "animal.sc.xml",   "deer.sc.xml",   "lionm.sc.xml",
-                           "bowman.sc.xml",   "vbowman.sc.xml", "bbowman.sc.xml"};
-    for (int i = 0; i < 15; ++i) graph.add(bytes_of(docs[i]), names[i]);
+                           "bowman.sc.xml",   "vbowman.sc.xml", "bbowman.sc.xml",
+                           "sloppy.sc.xml"};
+    for (int i = 0; i < 16; ++i) graph.add(bytes_of(docs[i]), names[i]);
     graph.link();
     crow = graph.find("Crow");
     veteran = graph.find("Veteran");
@@ -4285,6 +4286,7 @@ struct SpecialsGraph {
     bowman = graph.find("Bowman");
     veteran_bowman = graph.find("VeteranBowman");
     broken_bowman = graph.find("BrokenBowman");
+    sloppy = graph.find("Sloppy");
   }
 };
 
@@ -4360,11 +4362,10 @@ constexpr std::int32_t kSneak = 26;
 /// script's constant and the property's token are the same table.
 ///
 /// `curse` is 35 in `sim/globals.cpp` and `Curse` is entry 35 in the
-/// executable's table; lowercasing and turning spaces into underscores is the
-/// whole of the difference between the two spellings. A token that resolves to
-/// nothing is skipped in silence, which is what the reader must do with
-/// `Revitalize` -- the one special the corpus names that the executable's table
-/// does not have, and which `sim/globals.cpp` already refuses by name.
+/// executable's table at 0x00824bf0. The class reader (0x005a3785) compares
+/// each trimmed token **exactly** against that table, so `rage` and
+/// `defense_skill` set nothing, and a token that matches nothing --
+/// `Revitalize`, which is no entry of the table -- is skipped in silence.
 TEST(sim_has_special_reads_the_classes_unit_specials_list) {
   SpecialsBench b;
   const ObjectId veteran = b.unit(b.classes.veteran, Point{0, 0});
@@ -4376,6 +4377,11 @@ TEST(sim_has_special_reads_the_classes_unit_specials_list) {
   // A class that declares none has none, rather than answering for its parent's
   // or for nothing at all.
   CHECK(!b.has(plain, kRage));
+  const ObjectId sloppy = b.unit(b.classes.sloppy, Point{0, 0});
+  CHECK(!b.has(sloppy, kRage));
+  CHECK(!b.has(sloppy, kDefenseSkill));
+  CHECK(b.has(sloppy, kSneak));
+  CHECK(b.has(sloppy, 35));
 
   // `0x005d8d70` refuses an index of 36 or more *before* it shifts, and a
   // negative one is refused here rather than reproducing a shift by a negative
@@ -6555,6 +6561,21 @@ TEST(cover_of_mercy_action_shelters_the_friendly_units_under_it) {
   CHECK(act(cover));
   CHECK(sheltered(far));
   CHECK(b.world.state(far)->sheltered_by == second);
+
+  // A hidden unit passes the collector only when its owner's bit is in the
+  // cover owner's side mask (`[player+0x18]`): the owner's own side, or a
+  // player that shares view with it -- not every ally.
+  const ObjectId hidden_own = unit_at(Point{0, 60}, 1);
+  const ObjectId hidden_ally = unit_at(Point{60, 0}, 2);
+  b.world.mutable_state(hidden_own)->flags.hidden = true;
+  b.world.mutable_state(hidden_ally)->flags.hidden = true;
+  b.world.players().set(2, 1, Relation::share_view, false);
+  CHECK(act(cover));
+  CHECK(sheltered(hidden_own));
+  CHECK(!sheltered(hidden_ally));
+  b.world.players().set(2, 1, Relation::share_view, true);
+  CHECK(act(cover));
+  CHECK(sheltered(hidden_ally));
 
   // A handle to nothing does nothing.
   CHECK(act(999999));

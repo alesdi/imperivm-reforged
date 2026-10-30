@@ -554,7 +554,7 @@ std::size_t World::templates_in_group(std::int32_t group, std::vector<ObjectId>&
   return out.size();
 }
 
-ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
+ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder, bool file) {
   const WorldObject* source = find(templ);
   if (source == nullptr || source->internal != InternalKind::none) return kNoObject;
   if (!source->state.flags.unspawned) return kNoObject;
@@ -566,6 +566,11 @@ ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
   const ObjectState state = source->state;
   const ClassIndex class_index = source->class_index;
   const ObjectId settlement = source->settlement;
+  // Two more of the copy virtual's fields (the script-object half, 0x005b1610):
+  // the display string at `[obj+0xa0]` and the sight at `[obj+0xd0]`, which
+  // `SetSight` may have moved off the class's.
+  const std::string display_name = source->display_name;
+  const std::int32_t sight = source->sight;
   const ObjectId copy = spawn(source->object->native_class(), source->object->entity, class_index);
   WorldObject* fresh = find(copy);
   if (fresh == nullptr) return kNoObject;
@@ -581,6 +586,8 @@ ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
   fresh->state.flags.unspawned = false;
   reindex(*fresh);  // the template's position, or its holder
   fresh->settlement = settlement;
+  fresh->display_name = display_name;
+  fresh->sight = sight;
   if (observer_ != nullptr && state.owner != kNoPlayer) observer_->owner_set(*this, copy, kNoPlayer, state.owner);
 
   if (holder != kNoObject) {
@@ -588,7 +595,11 @@ ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
     // `kHeldPosition` on its own, which is the invariant a held object has.
     put_in_holder(copy, holder);
   }
+  if (file) file_like_template(templ, copy);
+  return copy;
+}
 
+void World::file_like_template(ObjectId templ, ObjectId copy) {
   // Names follow the object into play. `bind` would refuse, because the name
   // is already bound -- to the template -- so this is the one caller that has
   // to overwrite. See `NamedObjectTable::rebind`.
@@ -606,7 +617,6 @@ ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
     if (!groups_.contains(g, templ)) continue;
     groups_.add(g, copy);
   }
-  return copy;
 }
 
 ObjectId World::spawn_of_class(ClassIndex class_index) {
@@ -1126,7 +1136,7 @@ std::size_t World::objects_located_in_rect(std::int32_t left, std::int32_t top,
 
 std::size_t World::objects_in_sight(ObjectId observer, std::int32_t radius,
                                     const ClassFilter& filter, std::vector<ObjectId>& out,
-                                    SweepOrder order) const {
+                                    SweepOrder order, bool visible_only) const {
   out.clear();
   const WorldObject* watcher = find(observer);
   if (watcher == nullptr || radius < 0) return 0;
@@ -1135,10 +1145,23 @@ std::size_t World::objects_in_sight(ObjectId observer, std::int32_t radius,
   // the map's corner, and not from its holder; nothing it stands in is asked.
   const Point eye = watcher->state.position;
   const std::int64_t limit = static_cast<std::int64_t>(radius) * static_cast<std::int64_t>(radius);
+  // The side mask (0x004fca30 from 0x00514080): every bit for the plain form,
+  // the observer's player record `+0x18` for the visible one -- its own bit
+  // and those of the players sharing view with it. A hidden object passes
+  // when the mask holds its owner's bit (0x004fd9c0); an unowned one has no
+  // bit to hold.
+  const PlayerId viewer = watcher->state.owner;
+  const auto admitted = [&](const WorldObject& slot) {
+    if (!visible_only || !slot.state.flags.hidden) return true;
+    const PlayerId owner = slot.state.owner;
+    if (owner == kNoPlayer || viewer == kNoPlayer) return false;
+    return owner == viewer || players_.has(owner, viewer, Relation::share_view);
+  };
   return sweep(box_around(eye, radius), filter, true, out, order,
                [&](const WorldObject& slot, Point at) {
                  // Nobody sees themselves (0x004fcc30 refuses the observer).
-                 return slot.id != observer && at != kHeldPosition && dist2(at, eye) <= limit;
+                 return slot.id != observer && at != kHeldPosition && dist2(at, eye) <= limit &&
+                        admitted(slot);
                });
 }
 
@@ -1253,25 +1276,29 @@ std::size_t World::units_in_settlement(ObjectId settlement, const ClassFilter& f
   const bool want_ring = scope != SettlementScope::garrison;
 
   if (want_garrison) {
-    // **A divergence, and it is this engine's, not the original's.**
-    // `Settlement::CollectUnits` walks the settlement's *holder* -- the vector
-    // at `holder + 0x28`, reached through the handle at `settlement + 0x5e` --
-    // in holder order, filtered by `IsHeirOf` and by nothing else. This walks
-    // the objects that carry a settlement back-link instead, because on every
-    // retail map that is the only place the answer exists: `sim/session.cpp`
-    // populates `WorldObject::settlement` from `map.obj.xml` and calls
-    // `EconomySystem::add_building` for nothing, so `Settlement::holder.units`
-    // is empty at load and stays empty until a script issues `AddUnit`. The two
-    // readings agree on a settlement built through `AddUnit` and disagree on
-    // every settlement a map file declares; picking the holder here would
-    // answer every shipped call site with an empty list. Closing this means
-    // filing map-declared units into the holder at load, which moves the world
-    // hash of every map, so it is recorded rather than done in passing.
-    for (const WorldObject& slot : objects_) {
-      if (slot.internal != InternalKind::none) continue;
-      if (slot.settlement != settlement) continue;
-      if (!slot.state.flags.is_unit) continue;
-      collect(slot, filter, out);
+    // The garrison: the settlement's **holder**, the handle at
+    // `[settlement+0x5e]`. `Settlement::CollectUnits` copies the holder's
+    // list (`holder + 0x28`, 0x00438330) and walks the copy in roster order,
+    // keeping each member whose class is an heir of the argument (its
+    // `[obj+0x3c]`, 0x0059a220) -- no other test: not alive, not template,
+    // not unit. Here the roster is `contents_of`, the members in the order
+    // they came in, and the holder is the object after the settlement, as
+    // the composite is allocated (`spawn_settlement`; the loader's triple).
+    //
+    // A shipped map files no unit into a settlement -- only buildings are
+    // `<settlement>` members -- so a garrison is what entered it in play:
+    // `AddUnit`, `EnterSettlement`, a spawn into the holder, the sentries.
+    // This used to walk the objects carrying a settlement back-link instead,
+    // which no unit carries, and so answered every garrison empty.
+    const ObjectId holder = settlement + 1;
+    const WorldObject* box = find(holder);
+    if (box != nullptr && box->internal == InternalKind::holder) {
+      std::vector<ObjectId> roster;
+      (void)contents_of(holder, roster);
+      for (const ObjectId id : roster) {
+        const WorldObject* member = find(id);
+        if (member != nullptr && matches_filter(*member, filter)) out.push_back(id);
+      }
     }
   }
 
@@ -1285,10 +1312,10 @@ std::size_t World::units_in_settlement(ObjectId settlement, const ClassFilter& f
   // `settlement + 0x68`, reads each building's sight from `[building + 0xd0]`,
   // fetches its position through `vtbl + 0x3c`, and hands `(pos, sight,
   // sight * sight)` to the grid sweep at 0x005c5120. The buildings come from
-  // the back-link here for the same reason the garrison does not: on a retail
-  // map `Settlement::buildings` is empty and the back-link is what the loader
-  // writes. Unlike the garrison the two cannot disagree in the other
-  // direction, because `EconomySystem::add_building` writes both.
+  // the back-link here: the loader writes it on every `<settlement>` member,
+  // and `EconomySystem::add_building` writes it beside the building roll, so
+  // the two cannot disagree. (Not their order -- the roll's -- which the sort
+  // below makes moot.)
   //
   // Four filters in the sweep's inner loop (0x005c5272-0x005c52ba), in its
   // order: a non-zero flag word, castable to the object class, **not dead**
@@ -1577,7 +1604,8 @@ std::size_t World::evaluate_query(ObjectId id, std::vector<ObjectId>& out,
       // observer that is gone **or dead** (0x004ff0cd, 0x004ff0dc).
       const WorldObject* watcher = find(spec->subject);
       if (watcher == nullptr || object_is_dead(*watcher)) return 0;
-      return living(objects_in_sight(spec->subject, spec->radius, spec->filter, out, kGrid));
+      return living(objects_in_sight(spec->subject, spec->radius, spec->filter, out, kGrid,
+                                     spec->visible_only));
     }
 
     case QueryKind::map_area_circle: {
@@ -1977,9 +2005,16 @@ bool World::query_matches_live(ObjectId query, const QuerySpec& spec, ObjectId m
       // object's class passes the filter. **Not** the radius the refresh
       // sweeps (`[query+0x74]`, sight less 100), not a death test, and the
       // observer is not left out: it is at distance minus two radii from
-      // itself. `VisibleObjsInSight`'s visibility arm (`[query+0x78]`, the
-      // object's `vtbl + 0x74` for the observer's player) is fog, which this
-      // engine keeps out of the sim, as the refresh does.
+      // itself.
+      //
+      // `VisibleObjsInSight`'s arm (`[query+0x78]` set) then asks the object's
+      // `vtbl + 0x74` (0x005b1030) for the observer's player record: a class
+      // whose id is `DefItemHolder` is seen; so is an object whose owner bit
+      // is in the record's word `+0x18` (the side mask the refresh uses); a
+      // hidden one otherwise is not; and the rest go to 0x0053e970, which
+      // refuses an object at `(-1, -1)` and otherwise asks the fog map.
+      // **The fog is not asked here** -- it stays out of the sim -- so such
+      // an object is taken as seen (labelled).
       const WorldObject* watcher = find(spec.subject);
       if (watcher == nullptr || watcher->sight == 0) return false;
       const std::int64_t centres = isqrt(dist2(watcher->state.position, at));
@@ -1988,7 +2023,20 @@ bool World::query_matches_live(ObjectId query, const QuerySpec& spec, ObjectId m
         return parse_int(classes_->property(object.class_index, "radius"), 0);
       };
       if (centres - radius(*watcher) - radius(*slot) > watcher->sight) return false;
-      return matches_filter(*slot, spec.filter);
+      if (!matches_filter(*slot, spec.filter)) return false;
+      if (!spec.visible_only) return true;
+      if (classes_ != nullptr && slot->class_index != kNoClass &&
+          classes_->at(slot->class_index).id == "DefItemHolder") {
+        return true;
+      }
+      const PlayerId owner = slot->state.owner;
+      const PlayerId viewer = watcher->state.owner;
+      if (owner != kNoPlayer && viewer != kNoPlayer &&
+          (owner == viewer || players_.has(owner, viewer, Relation::share_view))) {
+        return true;
+      }
+      if (slot->state.flags.hidden) return false;
+      return at != kHeldPosition;
     }
     case QueryKind::player_flags:
     case QueryKind::party: {

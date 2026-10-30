@@ -491,14 +491,17 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     if not path.is_file():
         pytest.skip(f"{CROSSROADS} is not in this installation")
     # Who is where at the order's turn: p1's village by its map position, and
-    # the first p3 foot soldier standing on the map -- or, when p3's AI keeps
-    # them all in its garrison then, the first held one, which `IMRUN_PLACE`
-    # takes out of the garrison where it stands it.
+    # the first p3 foot soldier or hero standing on the map -- or, when p3's
+    # AI keeps them all in its garrison then, the first held one, which
+    # `IMRUN_PLACE` takes out of the garrison where it stands it. Which of
+    # them p3 has then is the AI's: since the fifteenth round's ports it is
+    # a Teuton side whose only foot soldiers out are hidden huntresses and
+    # sentries on guard, and its hero is the unit sent.
     first = subprocess.run(
         [str(imrun), str(game_dir), str(path), str(CAPTURE_ORDER_TURN), str(LENGTH),
          "--seed", str(CAPTURE_SEED)],
         capture_output=True, text=True, timeout=600,
-        env={**os.environ, "IMRUN_OBJECTS": "Village,Swordsman,Footman,Axe,Guardian"},
+        env={**os.environ, "IMRUN_OBJECTS": "Village,Swordsman,Footman,Axe,Guardian,Hero"},
     )
     assert first.returncode == 0, first.stdout + first.stderr
     listed = [(int(i), cls, int(p), int(x), int(y)) for i, cls, p, x, y in

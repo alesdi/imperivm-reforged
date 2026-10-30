@@ -114,9 +114,14 @@ used where data outside the class graph wants to name a class generically:
 ```
 
 Three `altid` values are claimed by more than one class — `Tavern` (3), `Village` (3),
-`Townhall` (2) — so an `altid` lookup is not unique and the engine presumably takes the first or
-last registration. One `altid` (`Inn`) collides with a real `id`. **A loader must therefore resolve
-`id` first and only fall back to `altid`.** With that rule, every `projectile_class`,
+`Townhall` (2) — and one `altid` (`Inn`) is its own class's `id`. The registry is one map from
+name to class, filled by `CVXScriptClass::AddClass` (`0x005a7090`) once per `.sc.xml` in the
+directory listing's order (the pack's entry order, which is sorted): it loads the file, assigns
+the map entry under the `id` — so a later `id` replaces anything that held the name — and then,
+if the `altid` is non-empty, differs from the class's own `id` and is not yet a key, inserts it
+under the `altid`. **So `id` wins, then the first class in file order to claim an `altid`**:
+`Tavern` is `GTavern`'s, `Village` `GVillage`'s, `Townhall` `GTownhall`'s, and `Inn` is skipped
+as an altid. A duplicate `id` would go to the later file; none ships. With that rule, every `projectile_class`,
 `projectile_explosion`, `projectile_shadow`, `projectile_fire`, `building_projectile_class`,
 `sentry_class_name`, `select_class` and `defender_cls_*` value in the corpus resolves to a class.
 

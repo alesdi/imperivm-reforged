@@ -474,6 +474,27 @@ its members onto the field. `gbr.exe` shows both ends of that:
 * `CVXGroup::Spawn` hands each copy to the AI register at the end of that copy, with the
   AI's world pointer held at zero for everything before; see
   [`class-tally.md`](class-tally.md).
+* **What a copy is.** The template's clone virtual (`vtbl+0x30`; `0x005d35b0` for a
+  `CVXUnit`) builds a fresh object of the template's class, **calls its start virtual**
+  (`vtbl+0x2c`, `0x005aec40`: the class's `idle` pushed and started, the class
+  behaviours spawned into slots 1..) and then has the template copy itself onto it
+  (`vtbl+0x34`). So the copy's scripts exist inside the `SpawnGroup` call, before
+  anything else is done to it. The copy takes, base class first: position, the flag word
+  or-ed in and the facing (`0x0053ce00`); owner through `SetPlayer`, health, stamina,
+  their maxima, sight, range, minimum range, attack, both armours and the display string
+  (`0x005b1610`); the holder word, the food, the **experience `[+0x180]` and the stored
+  level `[+0x184]`, raw**, the second flag word and the icon string (`0x005dd2d0`); for a
+  hero, `max_army` and the 25 skill bytes (`0x0052db20`); for a wagon, its cargo
+  (`0x005eadd0`). `Spawn` then clears this bit on the copy, sets the unit bit and, for a
+  hero, the hero bit, hands a party member to the party list, places the copy at the
+  template's position and facing, files it under the template's names (the table at
+  `0x009bdad0`) and groups (`0x009bdac8`), gives it **new items of the template's item
+  names**, in inventory order (`0x00571c20`), appends it to the spawned list it hands
+  back, and registers it. The holder twin (`0x005724a0`) and `SpawnNamed`'s body
+  (`0x00571d40`) are the same steps, the first entering the holder (`0x005d3e10`) in
+  place of the position. Across the shipped maps 7,217 of the 10,610 templates carry a
+  `Level` above 0, 170 carry items and 86 hero skills, so a copy that started from its
+  class would arrive a recruit.
 * Every collection path skips it: the area-query grid sweep at `0x004fc6f4`, the
   `ObjList` collector at `0x0041f4e1`, and some forty other sites, all
   `test [obj + 0x2c], 0x8000000` / `jne skip`.
@@ -1496,7 +1517,7 @@ Cross-checks against the class graph, run separately because they need the packs
   record and hands the spawn itself to `CVXNamedObjQuery::Spawn` (`0x00571d40`), which is
   `CVXGroup::Spawn`'s body for one element: the same `0x08000000` template test, the same
   clone through the object's own `vtbl + 0x30`, the same clear of the template bit on the
-  copy, and then the same two walks — the group table at `0x009bdad0` and the named-object
+  copy, and then the same two walks — the named-object table at `0x009bdad0` and the group
   table at `0x009bdac8` — filing the copy wherever the template was a member. The rebind is
   in the shared spawn, not in either caller, which is why one `World::spawn_from_template`
   answers for both.

@@ -78,10 +78,10 @@ constexpr std::int32_t kEnoughCrews = 10;
   return class_int(world, slot, "damage");
 }
 
-/// `Unit::HasSpecial(30)`: the `freedom` token of the class's `unit_specials`,
-/// matched the way `sim/world_host.cpp`'s `class_has_special` matches --
-/// lowercased, spaces to underscores -- so the two readers cannot drift on a
-/// token they both accept.
+/// `Unit::HasSpecial(30)`: the `Freedom` token of the class's `unit_specials`,
+/// matched the way the class reader matches it (0x005a3785, and
+/// `sim/world_host.cpp`'s `class_has_special`): cut at commas, spaces and
+/// tabs trimmed, compared exactly, case and all.
 [[nodiscard]] bool has_freedom(const World& world, const WorldObject& slot) {
   const ClassGraph* graph = world.class_graph();
   if (graph == nullptr || slot.class_index == kNoClass) return false;
@@ -91,19 +91,13 @@ constexpr std::int32_t kEnoughCrews = 10;
     const std::size_t comma = list.find(',', at);
     std::string_view token =
         list.substr(at, comma == std::string_view::npos ? std::string_view::npos : comma - at);
-    while (!token.empty() && std::isspace(static_cast<unsigned char>(token.front()))) {
+    while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) {
       token.remove_prefix(1);
     }
-    while (!token.empty() && std::isspace(static_cast<unsigned char>(token.back()))) {
+    while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) {
       token.remove_suffix(1);
     }
-    std::string normalised;
-    normalised.reserve(token.size());
-    for (const char c : token) {
-      normalised.push_back(c == ' ' ? '_'
-                                    : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    if (normalised == "freedom") return true;
+    if (token == "Freedom") return true;
     if (comma == std::string_view::npos) break;
     at = comma + 1;
   }

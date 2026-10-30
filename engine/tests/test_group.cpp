@@ -26,6 +26,7 @@
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/item.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/feeder.hpp"
@@ -1213,6 +1214,22 @@ class OneScript final : public ScriptResolver {
   std::string text_;
 };
 
+/// A `ScriptResolver` over two in-memory files.
+class TwoScripts final : public ScriptResolver {
+ public:
+  TwoScripts(std::string path_a, std::string text_a, std::string path_b, std::string text_b)
+      : a_(std::move(path_a)), ta_(std::move(text_a)), b_(std::move(path_b)),
+        tb_(std::move(text_b)) {}
+  std::span<const std::byte> source(std::string_view path) override {
+    if (path == a_) return bytes_of(ta_);
+    if (path == b_) return bytes_of(tb_);
+    return {};
+  }
+
+ private:
+  std::string a_, ta_, b_, tb_;
+};
+
 /// Two classes, both binding an `idle` method, so that every object the map
 /// places wants a script and the only thing deciding whether it gets one is
 /// whether it is in play.
@@ -1556,6 +1573,212 @@ TEST(spawn_group_registers_each_copy_with_the_ai_at_once) {
   }
   CHECK(!world.find(TemplateMap::spawned(1))->state.flags.ai_registered);
   CHECK(f.heroes.squads().squad_of(TemplateMap::spawned(1)) == kNoSquad);
+}
+
+namespace {
+
+/// Records, at each start, the newest object and whether the AI had it yet.
+struct SpawnStarter final : ObjectStarter {
+  World* world = nullptr;
+  std::vector<ObjectId> newest;
+  std::vector<bool> registered_then;
+  void start_new_objects() override {
+    const ObjectId id = world->next_id() - 1;
+    newest.push_back(id);
+    const WorldObject* slot = world->find(id);
+    registered_then.push_back(slot != nullptr && slot->state.flags.ai_registered);
+  }
+};
+
+constexpr std::string_view kSpawnItemsXml = R"(<items>
+  <item id="King's Belt" level="0" name="King's belt" important="yes">
+    <bonus health="600" damage="0" armor_slash="10" armor_pierce="10" level="0" experience="0"/>
+  </item>
+  <item id="Boar teeth" level="0" name="Boar teeth" important="yes">
+    <bonus health="0" damage="0" armor_slash="0" armor_pierce="0" level="0" experience="0"/>
+  </item>
+</items>)";
+
+}  // namespace
+
+/// **Each copy is started as it is cloned** (0x005d35b0: a fresh object, its
+/// start virtual, then the template's copy onto it), so its `idle` and
+/// behaviours are on the scheduler inside `SpawnGroup`, one copy after
+/// another -- and before the AI has it, which is the spawn's last step.
+/// `SpawnNamed`'s clone the same.
+TEST(spawn_group_starts_each_copy_as_it_clones_it) {
+  SpawnAiFixture f;
+  SpawnStarter starter;
+  starter.world = &f.map.world;
+  f.context.starter = &starter;
+
+  const script::HostOutcome out = f.call("SpawnGroup", {script::Value::string("Garrison")});
+  REQUIRE(out.status == script::HostStatus::ok);
+  const std::span<const ObjectId> made = f.list_of(out.value);
+  REQUIRE(made.size() == 2);
+  REQUIRE(starter.newest.size() == 2);
+  CHECK(starter.newest[0] == made[0]);
+  CHECK(starter.newest[1] == made[1]);
+  CHECK(!starter.registered_then[0]);
+  CHECK(!starter.registered_then[1]);
+
+  const script::HostOutcome named = f.call("SpawnNamed", {script::Value::string("NO_Standing")});
+  // `NO_Standing` names an object in play, so nothing is cloned or started.
+  CHECK(starter.newest.size() == 2);
+  (void)named;
+}
+
+/// **A copy carries its template's experience, food and items** (the unit
+/// copy 0x005dd2d0 writes `[+0x180]` and `[+0x16c]` raw; 0x00571c20 mints each of the template's
+/// items anew by name, in inventory order, for the copy). The template keeps
+/// its own items, and the copy's are new objects.
+TEST(a_spawned_copy_carries_its_templates_experience_food_and_items) {
+  SpawnAiFixture f;
+  World& world = f.map.world;
+  ItemCatalog catalog;
+  REQUIRE(catalog.load(bytes_of(kSpawnItemsXml)).ok());
+  ItemStore& items = f.heroes.items();
+  items.set_catalog(&catalog);
+
+  FeederSystem feeder;
+  REQUIRE(world.add_system(&feeder));
+
+  const ObjectId templ = TemplateMap::spawned(1);
+  (void)f.heroes.register_unit(world, templ);
+  REQUIRE(f.heroes.set_experience(templ, 12345));
+  REQUIRE(feeder.enrol_if_eligible(world, templ));
+  REQUIRE(feeder.write_food(templ, 3));
+  const ObjectId belt = items.add(world, templ, "King's Belt");
+  const ObjectId teeth = items.add(world, templ, "Boar teeth");
+  REQUIRE(belt != kNoObject);
+  REQUIRE(teeth != kNoObject);
+
+  const script::HostOutcome out = f.call("SpawnGroup", {script::Value::string("Garrison")});
+  const std::span<const ObjectId> made = f.list_of(out.value);
+  REQUIRE(made.size() == 2);
+  // `Garrison` is authored 2, 1: the second copy is template 1's.
+  const ObjectId copy = made[1];
+  REQUIRE(f.heroes.unit(copy) != nullptr);
+  CHECK(f.heroes.unit(copy)->experience == 12345);
+  // The other copy's template had no experience written.
+  CHECK(f.heroes.unit(made[0]) == nullptr || f.heroes.unit(made[0])->experience == 0);
+  // The food, raw (the unit copy's `[+0x16c]`); the other template has no
+  // record here, and its copy arrives at the class's maximum.
+  CHECK(feeder.food(copy) == 3);
+  CHECK(feeder.food(made[0]) == feeder.max_food(made[0]));
+
+  std::vector<ObjectId> held;
+  REQUIRE(items.contents_for(copy, held) == 2);
+  CHECK(held[0] != belt);
+  CHECK(held[1] != teeth);
+  CHECK(items.find(held[0])->type == catalog.find("King's Belt"));
+  CHECK(items.find(held[1])->type == catalog.find("Boar teeth"));
+  std::vector<ObjectId> kept;
+  CHECK(items.contents_for(templ, kept) == 2);
+  CHECK(items.contents_for(made[0], held) == 0);
+}
+
+namespace {
+
+ClassGraph hero_template_graph() {
+  ClassGraph graph;
+  graph.add(bytes_of(R"(<class id="Object" cpp_class="CVXDecor"><properties sight="0"/></class>)"),
+            "object.sc.xml");
+  graph.add(bytes_of(R"(<class id="Caesar" parent="Object" cpp_class="CVXHero"><properties sight="100" maxhealth="50"/></class>)"),
+            "caesar.sc.xml");
+  graph.link();
+  return graph;
+}
+
+/// One hero placed in play and one hero template, in a group of its own.
+constexpr std::string_view kHeroTemplateDocument = R"(<mapobject>
+	<scriptobj class="Caesar" num="0" player="1" x="100" y="100" flags="0xA1400001" dir.x="0" dir.y="1"/>
+	<scriptobj class="Caesar" num="1" player="1" x="700" y="900" flags="0xA9400001" dir.x="0" dir.y="1"/>
+	<group name="Reinforcement" type="1">
+		<obj num="1"/>
+	</group>
+</mapobject>)";
+
+}  // namespace
+
+/// **A hero's copy carries the skill points and the army cap** (the hero copy
+/// 0x0052db20: `[+0x1f8]` and the 25 skill bytes from `[+0x1fc]`, raw).
+TEST(a_spawned_hero_carries_its_templates_skills_and_army_cap) {
+  ClassGraph graph = hero_template_graph();
+  auto parsed = MapObjectList::parse(bytes_of(kHeroTemplateDocument));
+  REQUIRE(parsed.ok());
+  World world;
+  world.populate_from_map(parsed.value(), graph);
+  AiSystem ai;
+  HeroSystem heroes;
+  REQUIRE(world.add_system(&ai));
+  REQUIRE(world.add_system(&heroes));
+  ai.start_manager();
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  (void)register_world_host(registry);
+  (void)register_objlist_host(registry);
+  HostContext context;
+  context.world = &world;
+
+  const ObjectId templ = 2;
+  REQUIRE(world.find(templ) != nullptr);
+  REQUIRE(world.find(templ)->state.flags.unspawned);
+  HeroRecord& record = heroes.register_hero(world, templ);
+  record.max_army = 37;
+  REQUIRE(heroes.load_skill(templ, HeroSkill::leadership, 4));
+
+  const std::uint32_t index =
+      registry.find(script::CallKind::free_function, "SpawnGroup", 1);
+  REQUIRE(index != script::kUnresolvedHost);
+  std::vector<script::Value> args{script::Value::string("Reinforcement")};
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &context;
+  ctx.name = "SpawnGroup";
+  ctx.kind = script::CallKind::free_function;
+  ctx.script = 7;
+  const script::HostOutcome out = registry.entry(index).fn(ctx);
+  REQUIRE(out.status == script::HostStatus::ok);
+  const std::span<const ObjectId> made = objlist_pool_of(world).items(objlist_of(out.value));
+  REQUIRE(made.size() == 1);
+  const HeroRecord* copy = heroes.hero(made[0]);
+  REQUIRE(copy != nullptr);
+  CHECK(copy->max_army == 37);
+  CHECK(heroes.skill(made[0], HeroSkill::leadership) == 4);
+}
+
+/// **Through the session: a copy's `idle` starts in the pass that spawned
+/// it**, not at the next turn's sweep, and the sweep does not start it again.
+TEST(a_scripted_spawn_starts_its_copies_in_the_same_pass) {
+  script::HostRegistry registry;
+  register_all_hosts(registry);
+  ClassGraph graph = idle_graph();
+  TwoScripts scripts("unit_idle.vs", "//void, Obj This\nSleep(100000);\n",
+                     "sequences/seq0.vs", "//void\nSpawnGroup(\"Garrison\");\n");
+
+  SessionInputs inputs;
+  inputs.classes = &graph;
+  inputs.scripts = &scripts;
+  inputs.map_objects = bytes_of(kTemplateDocument);
+
+  auto session = GameSession::create(registry, inputs, /*seed=*/1);
+  REQUIRE(session.ok());
+  GameSession& run = *session.value();
+  REQUIRE(run.start_object_scripts() == 2);
+  const SequenceRef manifest[] = {
+      SequenceRef{"Spawn", "CurrentGame/sequences/seq0.vs", "", true},
+  };
+  REQUIRE(run.start_sequences(std::span(manifest), /*base=*/"") == 1);
+  CHECK(run.report().scripts_started == 3);
+
+  // One turn: the sequence spawns the two copies and each starts its `idle`
+  // there and then.
+  run.advance(1, 400);
+  CHECK(run.report().scripts_started == 5);
+  // And the next turn's sweep finds nothing left to start.
+  run.advance(1, 400);
+  CHECK(run.report().scripts_started == 5);
 }
 
 TEST(membership_takes_an_object_a_list_or_a_query_as_its_receiver) {
@@ -2336,13 +2559,17 @@ struct PlaceGraph {
         // The other two things a ram is for.
         R"(<class id="Gate" parent="Object" cpp_class="CVXGate"><properties sight="300" maxhealth="500"/></class>)",
         R"(<class id="BaseShipyard" parent="Object" cpp_class="CVXBuilding"><properties sight="300" maxhealth="500"/></class>)",
+        // A feedback, which the factory builds but which is no script object,
+        // and a catapult shot, which the factory does not build at all.
+        R"(<class id="Sparks" parent="Object" cpp_class="CVXFeedback"><properties sight="0" maxhealth="3"/></class>)",
+        R"(<class id="Bolt" parent="Object" cpp_class="CVXCatapultShot"><properties sight="0" maxhealth="1"/></class>)",
     };
     const char* names[] = {"object.sc.xml", "hastatus.sc.xml", "watcheye.sc.xml",
                            "smoke.sc.xml", "trireme.sc.xml", "rcatapult.sc.xml",
                            "gcatapult.sc.xml", "coverofmercy.sc.xml", "greatercover.sc.xml",
                            "tower.sc.xml", "outpost.sc.xml", "gauloutpost.sc.xml", "barn.sc.xml",
-                           "gate.sc.xml", "baseshipyard.sc.xml"};
-    for (int i = 0; i < 15; ++i) graph.add(bytes_of(docs[i]), names[i]);
+                           "gate.sc.xml", "baseshipyard.sc.xml", "sparks.sc.xml", "bolt.sc.xml"};
+    for (int i = 0; i < 17; ++i) graph.add(bytes_of(docs[i]), names[i]);
     graph.link();
   }
 };
@@ -2629,6 +2856,102 @@ TEST(place_a_script_object_class_keeps_its_owner_and_its_handle) {
   const WorldObject* eye = f.world.find(made);
   REQUIRE(eye != nullptr);
   CHECK(eye->state.owner == 2);
+}
+
+/// **The cast subtree, read from the image.** Each factory type's cast
+/// virtual compares its own class id and tail-calls its parent's; a
+/// `CVXFeedback` walks `CVXFeedback`, `CVXMapObj`, `CVXScriptable` and never
+/// meets `CVXScriptObj`, so `Place` positions it, writes no owner and hands
+/// back the invalid handle. A building's chain does meet it.
+TEST(place_a_feedback_class_places_it_unowned_and_hands_back_no_handle) {
+  PlaceFixture f;
+  const std::size_t before = f.world.size();
+  const script::HostOutcome out =
+      f.call("Place", {script::Value::string("Sparks"), PlaceFixture::point(300, 400),
+                       script::Value::integer(3)});
+  REQUIRE(out.status == script::HostStatus::ok);
+  CHECK(PlaceFixture::id_of(out.value) == kNoObject);
+  REQUIRE(f.world.size() == before + 1);
+  const WorldObject& sparks = f.world.objects().back();
+  CHECK(sparks.state.position.x == 300);
+  CHECK(sparks.state.position.y == 400);
+  CHECK(sparks.state.owner == kNoPlayer);
+
+  const script::HostOutcome tower =
+      f.call("Place", {script::Value::string("Tower"), PlaceFixture::point(300, 400),
+                       script::Value::integer(3)});
+  REQUIRE(PlaceFixture::id_of(tower.value) != kNoObject);
+  CHECK(f.world.find(PlaceFixture::id_of(tower.value))->state.owner == 2);
+}
+
+/// **The factory builds only the `cpp_class` names it lists** (0x0059dcd0, an
+/// exact comparison each): a `CVXCatapultShot` class is not among them, so
+/// nothing is constructed, `Place` hands back the invalid handle and
+/// `_PlaceEx` the same, and the world is as it was.
+TEST(place_and_place_ex_build_nothing_for_a_class_the_factory_does_not_list) {
+  PlaceFixture f;
+  const std::size_t before = f.world.size();
+  const script::HostOutcome placed =
+      f.call("Place", {script::Value::string("Bolt"), PlaceFixture::point(300, 400),
+                       script::Value::integer(3)});
+  REQUIRE(placed.status == script::HostStatus::ok);
+  CHECK(PlaceFixture::id_of(placed.value) == kNoObject);
+  const script::HostOutcome ex =
+      f.call("_PlaceEx", {script::Value::string("Bolt"), script::Value::integer(300),
+                          script::Value::integer(400), script::Value::integer(3)});
+  REQUIRE(ex.status == script::HostStatus::ok);
+  CHECK(PlaceFixture::id_of(ex.value) == kNoObject);
+  CHECK(f.world.size() == before);
+}
+
+namespace {
+
+/// An `ObjectStarter` that records, at each start, the newest object and what
+/// had been done to it by then.
+struct RecordingStarter final : ObjectStarter {
+  World* world = nullptr;
+  std::vector<ObjectId> newest;
+  std::vector<PlayerId> owner_then;
+  std::vector<bool> registered_then;
+  void start_new_objects() override {
+    const ObjectId id = world->next_id() - 1;
+    newest.push_back(id);
+    const WorldObject* slot = world->find(id);
+    owner_then.push_back(slot != nullptr ? slot->state.owner : kNoPlayer);
+    registered_then.push_back(slot != nullptr && slot->state.flags.ai_registered);
+  }
+};
+
+}  // namespace
+
+/// **`Place` starts its object inside the call, before it owns it.** The
+/// factory calls the start virtual (0x005aec40: the `idle`, then the
+/// behaviours) as it builds, and `Place`'s `SetPlayer` and `SetPos` come
+/// after; `_PlaceEx` builds the same way. A class the factory does not build
+/// starts nothing.
+TEST(place_starts_what_it_builds_before_it_owns_it) {
+  PlaceFixture f;
+  RecordingStarter starter;
+  starter.world = &f.world;
+  f.context.starter = &starter;
+  const script::HostOutcome out =
+      f.call("Place", {script::Value::string("RHastatus"), PlaceFixture::point(700, 900),
+                       script::Value::integer(3)});
+  const ObjectId made = PlaceFixture::id_of(out.value);
+  REQUIRE(made != kNoObject);
+  REQUIRE(starter.newest.size() == 1);
+  CHECK(starter.newest[0] == made);
+  CHECK(starter.owner_then[0] == kNoPlayer);
+  CHECK(f.world.find(made)->state.owner == 2);
+
+  const script::HostOutcome ex =
+      f.call("_PlaceEx", {script::Value::string("WatchEye"), script::Value::integer(300),
+                          script::Value::integer(400), script::Value::integer(1)});
+  REQUIRE(PlaceFixture::id_of(ex.value) != kNoObject);
+  CHECK(starter.newest.size() == 2);
+  (void)f.call("Place", {script::Value::string("Bolt"), PlaceFixture::point(300, 400),
+                         script::Value::integer(3)});
+  CHECK(starter.newest.size() == 2);
 }
 
 TEST(place_ex_clamps_where_place_refuses) {

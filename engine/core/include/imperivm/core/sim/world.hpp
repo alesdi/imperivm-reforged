@@ -1111,9 +1111,24 @@ class World {
   /// link. The template keeps its own position either way.
   ///
   /// **The copy does not get its idle script here.** Starting scripts needs the
-  /// class graph and the chunk library, which are `GameSession`'s; it sweeps
-  /// for objects with no script at the top of each turn.
-  ObjectId spawn_from_template(ObjectId templ, ObjectId holder = kNoObject);
+  /// class graph and the chunk library, which are `GameSession`'s: the spawn
+  /// entry points start the copy through `HostContext::starter` the moment it
+  /// exists, as the original's clone does, and the session sweeps for
+  /// anything else at the top of each turn. Nor does it carry what the
+  /// systems keep of the template -- experience, a hero's skills, the items:
+  /// `carry_template_unit` and its neighbours in `sim/world_host.cpp` do that
+  /// for the entry points.
+  ///
+  /// `file` false leaves steps 4 and 5 to the caller's `file_like_template`:
+  /// the holder twin (0x005724a0) enters the copy into its holder, onenter
+  /// hook and all, *before* it files it under the template's names and
+  /// groups, and the garrison entry is the caller's.
+  ObjectId spawn_from_template(ObjectId templ, ObjectId holder = kNoObject, bool file = true);
+
+  /// Steps 4 and 5 of `spawn_from_template`: every name bound to `templ`
+  /// rebound to `copy` (the table at `0x009bdad0`), then `copy` added to every
+  /// group whose template half holds `templ` (`0x009bdac8`).
+  void file_like_template(ObjectId templ, ObjectId copy);
 
   /// Mint one object of `class_index`, the way a *script* spawns rather than
   /// the way a map does.
@@ -1466,9 +1481,17 @@ class World {
   /// of 0 sees only its own spot and a negative one sees nothing. The radius
   /// is the query's, frozen when it was made (`QuerySpec::radius`); the dead
   /// rules are `evaluate_query`'s.
+  ///
+  /// `visible_only` is `VisibleObjsInSight`'s flag (`[query+0x78]`), which the
+  /// sweep's visitor (0x004fca30) turns into a side mask: the observer's
+  /// player record word `+0x18` -- its own bit and the bit of every player
+  /// that shares view with it -- where the plain form takes every bit. The
+  /// sweep then admits an object carrying the hidden bit (`0x200000`) only
+  /// when the mask holds a bit of its owner (0x004fd9c0). Not fog of war.
   std::size_t objects_in_sight(ObjectId observer, std::int32_t radius, const ClassFilter& filter,
                                std::vector<ObjectId>& out,
-                               SweepOrder order = SweepOrder::spawn) const;
+                               SweepOrder order = SweepOrder::spawn,
+                               bool visible_only = false) const;
 
   /// Objects of a class owned by a player, optionally bounded by a circle.
   /// `radius <= 0` means the whole map, and `player == kNoPlayer` any owner.

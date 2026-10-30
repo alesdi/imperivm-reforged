@@ -2541,11 +2541,14 @@ TEST(economy_buildings_and_objects_around_answer_empty_for_a_dead_settlement) {
 /// shipped script reached until this entry point was bound.
 TEST(economy_objects_around_takes_the_garrison_and_the_ring) {
   AroundBench b;
-  // In the settlement (the back-link the garrison half walks), but standing
-  // far outside every tower's sight.
+  // In the settlement's holder, the roster the garrison half walks
+  // (0x005c58f0 copies `holder + 0x28`), and so on no grid cell any tower's
+  // sight could reach.
   const ObjectId garrisoned = b.unit_at(b.classes.military, Point{40'000, 40'000});
   REQUIRE(b.world.find(garrisoned) != nullptr);
-  b.world.find(garrisoned)->settlement = b.settlement_object;
+  const Settlement* s = b.economy.settlements().for_object(b.settlement_object);
+  REQUIRE(s != nullptr);
+  REQUIRE(garrison_enter(b.world, s->id, garrisoned, /*force=*/true));
 
   // Outside the settlement, inside the anchor tower's 500 of sight.
   const ObjectId neighbour = b.unit_at(b.classes.military, Point{1400, 1000});

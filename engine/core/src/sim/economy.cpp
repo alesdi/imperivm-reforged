@@ -4245,10 +4245,9 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // different name, reached without a query object at all.
     //
     // The two halves and every filter in them are `World::units_in_settlement`'s
-    // and are documented there, including the one divergence this inherits: the
-    // garrison half walks the objects carrying a settlement back-link rather
-    // than the holder's own vector, because on a retail map the holder is empty.
-    // So is the sort-and-unique the original does at 0x005c5ac3, which is why
+    // and are documented there: the garrison half walks the holder's roster,
+    // the ring each building's own sight. So is the sort-and-unique the
+    // original does at 0x005c5ac3, which is why
     // one soldier standing inside two towers' sight is healed once.
     //
     // **A list, not a query.** The return type word is 0x17 (`ObjList`) and the

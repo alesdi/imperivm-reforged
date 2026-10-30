@@ -434,8 +434,11 @@ void erase_object(script::CallContext& ctx, World& world, ObjectId id);
 /// the engine at `at` for the 1-based `player`, at one point of health, reveals
 /// the build sight, and allocates the settlement every placed siege engine
 /// anchors -- the record `GetHolderSett` on a crewman walks and whose holder
-/// caps the crew. `kNoObject` when nothing was created.
+/// caps the crew. `kNoObject` when nothing was created. `starter`, when an
+/// entry point passes one, starts the engine as the factory builds it (see
+/// `ObjectStarter`); the siege planner has none, and the session's sweep
+/// starts its engines at the next turn.
 [[nodiscard]] ObjectId place_catapult(World& world, ClassIndex class_index, Point at,
-                                      std::int32_t player);
+                                      std::int32_t player, ObjectStarter* starter = nullptr);
 
 }  // namespace imperivm::core::sim

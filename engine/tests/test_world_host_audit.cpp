@@ -18,6 +18,7 @@
 #include "imperivm/core/sim/settlement.hpp"
 #include "imperivm/core/sim/globals.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/hooks.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/objlist.hpp"
@@ -221,6 +222,42 @@ TEST(audit_set_visible_on_a_gone_object_is_a_no_op_and_takes_a_list) {
   CHECK(h.world.find(b)->state.flags.hidden);
 }
 
+TEST(audit_set_visible_on_a_list_reaches_each_heros_army_first) {
+  // `ObjList::SetVisible` (0x0055ea60): for a member carrying the hero bit,
+  // every resolving member of its army (hero+0x1cc) first, then the list's
+  // own members. The army is reached through the list's hero only.
+  Host h;
+  HeroSystem heroes;
+  REQUIRE(h.world.add_system(&heroes));
+  const ObjectId hero = h.spawn(NativeClass::hero, 100);
+  h.world.set_owner(hero, 1);
+  REQUIRE(h.world.find(hero)->state.flags.is_hero);
+  heroes.register_hero(h.world, hero).max_army = 4;
+  const ObjectId soldier = h.unit(1, Point{30, 30});
+  (void)heroes.register_unit(h.world, soldier);
+  REQUIRE(heroes.attach(h.world, soldier, hero));
+  const ObjectId bystander = h.unit(1, Point{40, 40});
+
+  ObjListPool& pool = objlist_pool_of(h.world);
+  const ObjListId list = pool.acquire(1, 0);
+  pool.mutable_items(list)->assign({hero});
+  CHECK(h.member("SetVisible", {make_objlist_value(list), num(0)}).status ==
+        script::HostStatus::ok);
+  CHECK(h.world.find(hero)->state.flags.hidden);
+  CHECK(h.world.find(soldier)->state.flags.hidden);
+  CHECK(!h.world.find(bystander)->state.flags.hidden);
+
+  // `Obj::SetVisible` on the hero alone leaves the army as it is.
+  CHECK(h.member("SetVisible", {obj(hero), num(1)}).status == script::HostStatus::ok);
+  CHECK(!h.world.find(hero)->state.flags.hidden);
+  CHECK(h.world.find(soldier)->state.flags.hidden);
+  // The gate is the hero bit, not the record.
+  h.world.mutable_state(hero)->flags.is_hero = false;
+  CHECK(h.member("SetVisible", {make_objlist_value(list), num(1)}).status ==
+        script::HostStatus::ok);
+  CHECK(h.world.find(soldier)->state.flags.hidden);
+}
+
 TEST(audit_can_see_reads_the_target_first_and_a_hidden_one_through_shared_view) {
   // `Obj::CanSee` (0x005ab9d0): the argument is checked first; a visible one
   // is seen without the receiver; a hidden one when its owner shares view
@@ -374,6 +411,39 @@ TEST(audit_is_heir_of_takes_the_whole_string_as_one_class_name) {
   CHECK(!h.truthy("IsHeirOf", {obj(soldier), str("Fort,Unit")}));
   CHECK(!h.truthy("IsHeirOf", {obj(soldier), str(" Unit")}));
   CHECK(!h.truthy("IsHeirOf", {obj(9999), str("Unit")}));
+}
+
+TEST(audit_is_heir_of_finds_an_altid_with_the_first_claim_and_an_id_first) {
+  // `CVXScriptClass::AddClass` (0x005a7090) keys the class map by `id`, then
+  // by an `altid` that is not its own `id` and not yet a key. Files in order:
+  // `GTavern` claims `Tavern` first, `ITavern`'s claim is dropped, and the
+  // `altid` `Fort` loses to the class whose `id` it is.
+  imperivm::core::ClassGraph graph;
+  const std::string docs[] = {
+      R"(<class id="Object" cpp_class="CVXDecor"><properties/></class>)",
+      R"(<class id="BaseTavern" parent="Object" cpp_class="CVXTavern"><properties/></class>)",
+      R"(<class id="GTavern" altid="Tavern" parent="BaseTavern" cpp_class="CVXTavern"><properties/></class>)",
+      R"(<class id="ITavern" altid="Tavern" parent="Object" cpp_class="CVXTavern"><properties/></class>)",
+      R"(<class id="Keep" altid="Fort" parent="Object" cpp_class="CVXBuilding"><properties/></class>)",
+      R"(<class id="Fort" parent="Object" cpp_class="CVXBuilding"><properties/></class>)",
+  };
+  const char* names[] = {"OBJECT.SC.XML", "BASETAVERN.SC.XML", "GTAVERN.SC.XML",
+                         "ITAVERN.SC.XML", "KEEP.SC.XML", "ZFORT.SC.XML"};
+  for (int i = 0; i < 6; ++i) {
+    graph.add({reinterpret_cast<const std::byte*>(docs[i].data()), docs[i].size()}, names[i]);
+  }
+  graph.link();
+  Host h;
+  h.world.set_class_graph(&graph);
+  const ObjectId g = h.world.spawn(NativeClass::tavern, nullptr, graph.find("GTavern"));
+  const ObjectId i = h.world.spawn(NativeClass::tavern, nullptr, graph.find("ITavern"));
+  const ObjectId keep = h.world.spawn(NativeClass::building, nullptr, graph.find("Keep"));
+
+  CHECK(h.truthy("IsHeirOf", {obj(g), str("Tavern")}));
+  CHECK(!h.truthy("IsHeirOf", {obj(i), str("Tavern")}));
+  CHECK(h.truthy("IsHeirOf", {obj(i), str("ITavern")}));
+  CHECK(!h.truthy("IsHeirOf", {obj(keep), str("Fort")}));
+  CHECK(h.truthy("IsHeirOf", {obj(keep), str("Keep")}));
 }
 
 // --------------------------------------------------------------------------
@@ -555,6 +625,31 @@ TEST(audit_objs_in_sight_freezes_sight_less_one_hundred_and_ignores_a_dead_eye) 
   CHECK(members_of(h, q).empty());
 }
 
+TEST(audit_visible_objs_in_sight_masks_the_hidden_by_shared_view) {
+  // `VisibleObjsInSight` (0x00575ef0) sets the query's flag `[query+0x78]`;
+  // the visitor (0x004fca30) then takes the observer's player word `+0x18`
+  // as its side mask, and the sweep (0x004fd9c0) admits a hidden object only
+  // when that mask holds its owner's bit -- the observer's own side, or a
+  // player sharing view with it. `ObjsInSight` takes every bit.
+  Host h;
+  const ObjectId eye = h.unit(0, Point{1000, 1000});
+  h.world.find(eye)->sight = 600;
+  const ObjectId mate = h.unit(0, Point{1100, 1000});
+  const ObjectId sneak = h.unit(1, Point{1200, 1000});
+  const ObjectId plain = h.unit(1, Point{1300, 1000});
+  h.world.mutable_state(mate)->flags.hidden = true;
+  h.world.mutable_state(sneak)->flags.hidden = true;
+  h.world.players().set_relation_word(1, 0, 0);
+
+  const script::Value seen = h.free("VisibleObjsInSight", {obj(eye), str("")}).value;
+  const script::Value all = h.free("ObjsInSight", {obj(eye), str("")}).value;
+  CHECK((members_of(h, all) == std::vector<ObjectId>{mate, sneak, plain}));
+  CHECK((members_of(h, seen) == std::vector<ObjectId>{mate, plain}));
+  // Player 1 shares view with player 0: its word toward 0 carries 0x10.
+  h.world.players().set_relation_word(1, 0, kRelationFriendly);
+  CHECK((members_of(h, seen) == std::vector<ObjectId>{mate, sneak, plain}));
+}
+
 TEST(audit_objs_in_range_is_a_sight_query_that_leaves_its_object_out) {
   // 0x00576130 calls 0x004fee10 with the script's radius.
   Host h;
@@ -648,6 +743,53 @@ TEST(audit_spawn_group_in_holder_enters_the_garrison_roster_past_its_cap) {
   CHECK(h.world.find(copies[0])->state.holder == s->holder.object);
 }
 
+namespace {
+
+/// Notes, at each `onenter`, whether the copy was in group `G` yet.
+struct EnterProbe final : ClassHookRunner {
+  World* world = nullptr;
+  std::vector<bool> grouped_then;
+  bool run_class_hook(ClassHook hook, ObjectId subject, ObjectId) override {
+    if (hook != ClassHook::on_enter) return false;
+    const std::int32_t g = world->groups().find("G");
+    grouped_then.push_back(g != GroupTable::kNoGroup && world->groups().contains(g, subject));
+    return true;
+  }
+};
+
+}  // namespace
+
+TEST(audit_spawn_group_in_holder_enters_before_it_files_the_copy) {
+  // 0x005724a0: the holder entry 0x005d3e10 (its `onenter` hook among it)
+  // comes before the walks of the named-object and group tables, so the hook
+  // finds the copy in none of the template's groups yet.
+  Host h;
+  EconomySystem economy;
+  REQUIRE(h.world.add_system(&economy));
+  economy.start(h.world);
+  SettlementInit init;
+  init.owner = 0;
+  init.kind = SettlementKind::stronghold;
+  init.name = "S_T";
+  init.max_units = 4;
+  REQUIRE(economy.create(h.world, init) != kNoSettlement);
+  EnterProbe probe;
+  probe.world = &h.world;
+  h.world.set_hook_runner(&probe);
+
+  const ObjectId templ = h.unit(0, Point{300, 300});
+  h.world.mutable_state(templ)->flags.unspawned = true;
+  h.world.groups().add(h.world.group_index("G"), templ);
+
+  const script::HostOutcome out = h.free("SpawnGroupInHolder", {str("G"), str("S_T")});
+  const std::span<const ObjectId> copies = objlist_pool_of(h.world).items(objlist_of(out.value));
+  REQUIRE(copies.size() == 1);
+  REQUIRE(probe.grouped_then.size() == 1);
+  CHECK(!probe.grouped_then[0]);
+  CHECK(h.world.groups().contains(h.world.groups().find("G"), copies[0]));
+  h.world.set_hook_runner(nullptr);
+}
+
 TEST(audit_point_set_answers_the_point_and_lengths_wrap_at_32_bits) {
   // `point::Set` (0x00697c50) returns the point it stores; `Len` (0x00695360),
   // `Dist` (0x00695310) and `SetLen` (0x00697d10) square, add and multiply in
@@ -678,6 +820,31 @@ TEST(audit_point_set_answers_the_point_and_lengths_wrap_at_32_bits) {
   CHECK(set_len(Point{16000, 0}, 200000) == (Point{-68435, 0}));
   CHECK(set_len(Point{65536, 0}, 10) == (Point{0, 10}));
   CHECK(set_len(Point{3, 4}, 10) == (Point{6, 8}));
+}
+
+TEST(audit_rect_set_stores_the_four_edges_as_given) {
+  // `rect::Set` (0x00697aa0), arity four: left, top, right, bottom into the
+  // referenced rect, unordered and unchecked, and no answer. `Set` at arity
+  // two is still the point's.
+  Host h;
+  script::Value args[] = {pack_rect(h.world, RectTable::Rect{0, 0, 9, 9}), num(50), num(-4),
+                          num(10), num(7)};
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &h.context;
+  ctx.name = "Set";
+  ctx.kind = script::CallKind::member;
+  const std::uint32_t index = h.registry.find(script::CallKind::member, "Set", 4);
+  REQUIRE(index != script::kUnresolvedHost);
+  const script::HostOutcome out = h.registry.entry(index).fn(ctx);
+  REQUIRE(out.status == script::HostStatus::ok);
+  CHECK(out.value.is_nil());
+  CHECK(h.integer("left", {args[0]}) == 50);
+  CHECK(h.integer("top", {args[0]}) == -4);
+  CHECK(h.integer("right", {args[0]}) == 10);
+  CHECK(h.integer("bottom", {args[0]}) == 7);
+  CHECK(h.member("Set", {pack_rect(h.world, RectTable::Rect{}), num(1), num(2), str("x"),
+                         num(4)}).status != script::HostStatus::ok);
 }
 
 TEST(audit_rot_keeps_the_residue_of_an_exact_half) {
