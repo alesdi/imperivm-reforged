@@ -964,9 +964,10 @@ TEST(get_economy_script_runs_the_script_and_returns_its_value) {
   CHECK(f.scheduler.live_count() == 1);
 }
 
-TEST(get_economy_script_refuses_a_script_that_sleeps) {
-  // A `Sleep` inside a synchronous call has nowhere to suspend to, and quietly
-  // dropping the half-run `Execution` would leave its side effects applied.
+TEST(get_economy_script_answers_0_for_a_script_that_sleeps) {
+  // A `Sleep` inside a synchronous call has nowhere to suspend to: 0x006a0360
+  // answers non-zero for the run, and 0x0043d740 answers 0 for that
+  // (0x0043d7cb). The caller goes on; the failure is in the pass's report.
   Fixture f;
   REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
           script::kNoChunk);
@@ -981,7 +982,41 @@ TEST(get_economy_script_refuses_a_script_that_sleeps) {
   const script::HostOutcome out =
       f.call(script::CallKind::member, "GetEconomyScript",
              {handle, script::Value::integer(2)}, root);
-  CHECK(out.status == script::HostStatus::error);
+  CHECK(out.status == script::HostStatus::ok);
+  CHECK(out.value.as_integer() == 0);
+  CHECK(f.scheduler.run_ready().failed == 1);
+}
+
+/// The GAIKA pair and the tactic pair answer 0 for a callee that traps, as
+/// for one that suspends (0x0043d590, 0x0043d900, 0x0043d820 each test
+/// 0x006a0360's status first), and the trap is reported with the pass.
+TEST(gaika_and_settlement_script_calls_answer_0_when_the_callee_traps) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, GAIKA gaika, int idPlayer\nint z;\nz = 1 / z;\nreturn 7;\n",
+                "DATA/AI/GETGAIKASTRAT.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, int idPlayer, GAIKA g\nint z;\nz = 1 / z;\nreturn 7;\n",
+                "DATA/AI/CALCGAIKAPRIORITY.VS") != script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry,
+                "// int, Settlement set, int idPlayer\nint z;\nz = 1 / z;\nreturn 7;\n",
+                "DATA/AI/GETTACTICSCRIPT.VS") != script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root = f.ai.player_ai(1)->root;
+  f.ai.seed_gaika_view(1, 4);
+  const script::Value handle = f.settlement_value(f.make_settlement(1));
+  for (const auto& [name, receiver] :
+       {std::pair{"GetStrat", script::Value::integer(2)},
+        std::pair{"CalcPriority", script::Value::integer(2)},
+        std::pair{"GetTacticScript", handle}}) {
+    const script::HostOutcome out =
+        f.call(script::CallKind::member, name, {receiver, script::Value::integer(2)}, root);
+    CHECK(out.status == script::HostStatus::ok);
+    CHECK(out.value.as_integer() == 0);
+  }
+  CHECK(f.scheduler.run_ready().failed == 3);
 }
 
 // --------------------------------------------------------------------------
@@ -1131,10 +1166,9 @@ TEST(ts_adv_hero_skills_answers_a_receiver_that_names_nothing_without_running) {
              root);
   CHECK(out.status == script::HostStatus::ok);
 
-  // A handle that *is* an object but names no live one is a different case: it
-  // reaches the helper, whose own validity guard answers it. That guard is the
-  // shipped script's and not this engine's, so what is asserted is only that
-  // the call completes.
+  // A handle that *is* an object but names no object resolves to nothing in
+  // the object table (0x00426c00 reads `[0xa2a610 + index]`): the same
+  // message, and the helper does not run.
   const script::HostOutcome stale =
       f.call(script::CallKind::member, "TSAdvHeroSkills",
              {script::Value::object(kTypeObj, ObjectId{0x7fffffff}),
@@ -1143,10 +1177,11 @@ TEST(ts_adv_hero_skills_answers_a_receiver_that_names_nothing_without_running) {
   CHECK(stale.status == script::HostStatus::ok);
 }
 
-TEST(ts_adv_hero_skills_refuses_when_the_helper_is_not_loaded) {
-  // `run_script_now`'s rule, and `GetEconomyScript`'s: a named file that is not
-  // in the scheduler is a broken installation rather than a stale handle, and
-  // the name in the report is the name of the entry point that wanted it.
+TEST(ts_adv_hero_skills_goes_on_when_the_helper_is_missing_or_traps) {
+  // 0x006a0360 answers non-zero for a file the library does not hold
+  // (`NOTFOUND`) and for a run that broke; 0x00426c00 prints `TSHeroSkills:
+  // Error running script!` for either and returns. Only the broken run is a
+  // trap to report.
   Fixture f;
   REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
           script::kNoChunk);
@@ -1160,7 +1195,24 @@ TEST(ts_adv_hero_skills_refuses_when_the_helper_is_not_loaded) {
              {script::Value::object(kTypeObj, hero), make_array_value(kTypeIntArray, empty),
               make_array_value(kTypeIntArray, empty)},
              root);
-  CHECK(out.status == script::HostStatus::error);
+  CHECK(out.status == script::HostStatus::ok);
+  CHECK(f.scheduler.run_ready().failed == 0);
+
+  REQUIRE(build(f.scheduler, f.registry,
+                "// void, Hero hero, IntArray* aSkills, IntArray* aSkillLevels\n"
+                "int z;\n"
+                "hero.SetSkill(0, 1);\n"
+                "z = 1 / z;\n",
+                "DATA/AI/TSH_HEROSKILLS.VS") != script::kNoChunk);
+  const script::HostOutcome broke =
+      f.call(script::CallKind::member, "TSAdvHeroSkills",
+             {script::Value::object(kTypeObj, hero), make_array_value(kTypeIntArray, empty),
+              make_array_value(kTypeIntArray, empty)},
+             root);
+  CHECK(broke.status == script::HostStatus::ok);
+  // What the helper did before it broke stands.
+  CHECK(f.heroes.skill(hero, 0) == 1);
+  CHECK(f.scheduler.run_ready().failed == 1);
 }
 
 // --------------------------------------------------------------------------
@@ -3044,8 +3096,10 @@ TEST(ai_registration_overwrites_nothing) {
   // binds as `AIRun` and `Run` bind theirs, + `LSA/1`, `LSA/2` and
   // `GetGAIKA/2`, the point forms no shipped script calls, + the five free
   // `AIRun` arities and `AIBreakScript/1`, the AI's own launcher, which the
-  // eleventh round moved here from the scheduler's builtins.
-  CHECK(solo == 93);
+  // eleventh round moved here from the scheduler's builtins, + `AIStart/1`,
+  // `AIStart/2` and `AIBreakScript/2`, which no shipped script calls and the
+  // fifteenth round binds as the original registers them.
+  CHECK(solo == 96);
   CHECK(with_ai == solo);
   CHECK(everyone > 0);
 
@@ -3137,6 +3191,85 @@ TEST(ai_start_host_entry_matches_the_profile_name_case_sensitively) {
   CHECK(f.ai.active_count() == 1);
   REQUIRE(f.ai.player_ai(3) != nullptr);
   CHECK(f.ai.player_ai(3)->active);
+}
+
+/// `AIStart(player, profile)` (0x00434e60) and `AIStart(player)` (0x00434e20):
+/// the core with difficulty 0 keeps the constructor's, the seat's
+/// `playerdata` difficulty when it is 1..3 and 3 otherwise (0x0041e100); the
+/// two-argument form matches the profile exactly, and the one-argument form
+/// takes the seat's own profile string, starting on the root for a name no
+/// profile has.
+TEST(ai_start_one_and_two_arguments_keep_the_seats_difficulty) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\n", "DATA/AI/MAIN.VS") != script::kNoChunk);
+  f.ai.add_profile("DEFENSIVE", &f.profile);
+  f.world.players().setup(1).difficulty = 1;
+  f.world.players().setup(2).difficulty = 0;
+  f.world.players().setup(3).difficulty = 2;
+  f.world.players().setup(3).ai_script = "DEFENSIVE";
+  f.world.players().setup(4).ai_script = "NOSUCH";
+  const auto start = [&](std::vector<script::Value> args) {
+    return f.call(script::CallKind::free_function, "AIStart", args, script::kNoScript).status;
+  };
+  // Two arguments: the exact name, and the seat's difficulty.
+  CHECK(start({script::Value::integer(2), script::Value::string("Defensive")}) ==
+        script::HostStatus::ok);
+  CHECK(f.ai.active_count() == 0);
+  CHECK(start({script::Value::integer(2), script::Value::string("DEFENSIVE")}) ==
+        script::HostStatus::ok);
+  REQUIRE(f.ai.player_ai(1) != nullptr);
+  CHECK(f.ai.player_ai(1)->active);
+  CHECK(f.ai.player_ai(1)->profile == "DEFENSIVE");
+  CHECK(f.ai.player_ai(1)->difficulty == AiDifficulty::easy);
+  // One argument: the seat's profile string and difficulty; outside 1..3 is 3.
+  CHECK(start({script::Value::integer(3)}) == script::HostStatus::ok);
+  REQUIRE(f.ai.player_ai(2) != nullptr);
+  CHECK(f.ai.player_ai(2)->active);
+  CHECK(f.ai.player_ai(2)->profile.empty());
+  CHECK(f.ai.player_ai(2)->difficulty == AiDifficulty::hard);
+  CHECK(start({script::Value::integer(4)}) == script::HostStatus::ok);
+  CHECK(f.ai.player_ai(3)->profile == "DEFENSIVE");
+  CHECK(f.ai.player_ai(3)->difficulty == AiDifficulty::normal);
+  // A name no profile has still gets an AI, on the root's scripts.
+  CHECK(start({script::Value::integer(5)}) == script::HostStatus::ok);
+  CHECK(f.ai.player_ai(4)->active);
+  CHECK(f.ai.player_ai(4)->profile.empty());
+  // Outside 1..16 is the message and nothing else.
+  CHECK(start({script::Value::integer(0)}) == script::HostStatus::ok);
+  CHECK(start({script::Value::integer(17), script::Value::string("DEFENSIVE")}) ==
+        script::HostStatus::ok);
+  CHECK(f.ai.active_count() == 4);
+}
+
+/// `AIBreakScript(player, handle)` (0x00421d20) breaks in the named seat's AI,
+/// whoever calls it.
+TEST(ai_break_script_with_a_player_breaks_in_that_players_ai) {
+  Fixture f;
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MAIN.VS") !=
+          script::kNoChunk);
+  REQUIRE(build(f.scheduler, f.registry, "// void\nSleep(100000);\n", "DATA/AI/MON.VS") !=
+          script::kNoChunk);
+  CHECK(f.ai.start(1, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  CHECK(f.ai.start(2, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
+  const script::ScriptId root1 = f.ai.player_ai(1)->root;
+  CHECK(f.call(script::CallKind::free_function, "AIRun", {script::Value::string("MON.VS")}, root1)
+            .value.as_integer() == 4);
+  const script::ScriptId at4 = f.ai.run_script(1, 4, f.scheduler);
+  REQUIRE(at4 != script::kNoScript);
+  const auto stop = [&](std::int32_t player, std::int32_t handle) {
+    return f.call(script::CallKind::free_function, "AIBreakScript",
+                  {script::Value::integer(player), script::Value::integer(handle)},
+                  script::kNoScript)
+        .status;
+  };
+  // Seat 2 (1-based 3) has no thread 4; seat 1 (1-based 2) does.
+  CHECK(stop(3, 4) == script::HostStatus::ok);
+  CHECK(f.scheduler.alive(at4));
+  CHECK(stop(0, 4) == script::HostStatus::ok);
+  CHECK(stop(17, 4) == script::HostStatus::ok);
+  CHECK(f.scheduler.alive(at4));
+  CHECK(stop(2, 4) == script::HostStatus::ok);
+  CHECK(!f.scheduler.alive(at4));
 }
 
 /// Every refusal the original makes is a **return**, not a trap: a mission that
@@ -5141,10 +5274,13 @@ TEST(the_sweep_marks_what_a_player_stands_in_and_remembers_it_when_it_leaves) {
   CHECK(ask("LastSeen", theirs).as_integer() == 3000);
 }
 
-/// **The two session overrides** (0x0041cb80, 0x0041cbd0): with exploration
-/// off every node is explored, and with fog of war off `Revealed` is
-/// `Explored`. A world with neither rule nor sweep is one where nothing is.
-TEST(explored_and_revealed_answer_the_match_rules_before_the_bits) {
+/// **The two overrides** (0x0041cb80, 0x0041cbd0): once the exploration map
+/// is explored everywhere -- `ExploreAll`, which the game's start runs when
+/// exploration is off -- every node is explored, and with fog of war off
+/// `Revealed` is `Explored`. The session's exploration rule itself is read
+/// only while a demo plays back, which this engine never does. A world with
+/// neither flag nor sweep is one where nothing is.
+TEST(explored_and_revealed_answer_the_overrides_before_the_bits) {
   Fixture f;
   (void)f.make_settlement(3);
   imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
@@ -5164,14 +5300,27 @@ TEST(explored_and_revealed_answer_the_match_rules_before_the_bits) {
   rules.fog_of_war = false;
   match.configure(rules, 0, false);
   CHECK(!ask("Revealed"));  // `Explored`, which is still false
+  // The rule alone is not the flag.
   rules.exploration = false;
   match.configure(rules, 0, false);
+  CHECK(!ask("Explored"));
+  FogSystem fog;
+  REQUIRE(f.world.add_system(&fog));
+  CHECK(!ask("Explored"));
+  // A script's `ExploreAll` raises it, whatever the rule says.
+  rules.exploration = true;
+  match.configure(rules, 0, false);
+  CHECK(f.call(script::CallKind::free_function, "ExploreAll", {}, script::kNoScript).status ==
+        script::HostStatus::ok);
   CHECK(ask("Explored"));
   CHECK(ask("Revealed"));
   rules.fog_of_war = true;
   match.configure(rules, 0, false);
   CHECK(ask("Explored"));
   CHECK(!ask("Revealed"));  // the bit, which nothing set
+  // A fresh map has the flag down again (0x005179d0).
+  fog.map().resize(4096);
+  CHECK(!ask("Explored"));
 }
 
 /// **`Eval`'s memory tail** (0x0042fc40, 0x0042f670): for a node not revealed

@@ -2204,6 +2204,9 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   Fixture f;
   HostRegistry registry;
   register_squad_host(registry);
+  // The node manager exists (every census answers 0 without it); the squads
+  // below are filed by hand under nodes it need not have cut.
+  REQUIRE(f.world.mutable_gaika().restore({}, 64, 64, std::vector<std::uint16_t>(64 * 64, 0)));
 
   // Player 0 is asking. 1 is its ally, 2 its enemy, and 3 one it has granted a
   // truce that 3 has not returned -- which `Eval` counts as an ally (0x0044e250
@@ -2280,7 +2283,8 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   // two-argument form answers *own*, which is what `GSH_INTERRUPTPASSING.VS`
   // names it: `lown = g.Eval(AI_LEAVING, AIPlayer)`.
   const auto total = [&](std::uint16_t arity, std::int32_t presence, std::int32_t sides) {
-    std::vector<Value> args{gaika_value(kHere), Value::integer(presence), Value::integer(1)};
+    std::vector<Value> args{gaika_value(kHere), Value::integer(presence)};
+    if (arity >= 2) args.push_back(Value::integer(1));
     if (arity == 3) args.push_back(Value::integer(sides));
     HostCall call(f.world, {});
     call.arguments = args;
@@ -2295,6 +2299,27 @@ TEST(the_gaika_census_sums_strength_by_presence_and_by_side) {
   CHECK(total(3, 4, 0xFFFF) == 100 + 40 + 999);
   CHECK(total(2, 4, 0) == 100);   // defaults to AI_OWN
   CHECK(total(2, 2, 0) == 0);
+  // The one-argument form (0x0042f1a0) has no player and asks no category:
+  // every squad with strength is counted, whoever's.
+  CHECK(total(1, 4, 0) == 100 + 40 + 999);
+  CHECK(total(1, 2, 0) == 250);
+  CHECK(total(1, 0xFFFF, 0) == 100 + 40 + 250 + 7 + 999);
+  // Without the node manager every form answers 0, and the six-argument one
+  // writes three zeros and leaves `enemy_hidden` as the caller had it.
+  {
+    f.world.mutable_gaika().clear();
+    CHECK(total(1, 0xFFFF, 0) == 0);
+    CHECK(total(2, 4, 0) == 0);
+    CHECK(total(3, 0xFFFF, 0xFFFF) == 0);
+    HostCall call(f.world, {gaika_value(kHere), Value::integer(0xFFFF), Value::integer(1),
+                            Value::integer(-1), Value::integer(-1), Value::integer(-1),
+                            Value::integer(-1)});
+    CHECK(invoke(registry, CallKind::member, "Eval", 6, call).status == HostStatus::ok);
+    CHECK(call.arguments[3].as_integer() == 0);
+    CHECK(call.arguments[5].as_integer() == 0);
+    CHECK(call.arguments[6].as_integer() == -1);
+    REQUIRE(f.world.mutable_gaika().restore({}, 64, 64, std::vector<std::uint16_t>(64 * 64, 0)));
+  }
 
   // A squad with no strength is skipped by both, which is the original's first
   // test and the reason `Eval` and `Count` can disagree about whether a node is
@@ -4118,7 +4143,7 @@ TEST(every_squad_entry_point_refuses_a_null_user_rather_than_dereferencing) {
       {"Eval", 0, 1},       {"Count", 1, 2},     {"SrcGAIKA", 0, 1},
       {"DestGAIKA", 0, 1},  {"OrderDest", 0, 1},
       // The region census: four arities of one shape, plus its neighbour form.
-      {"Eval", 6, 7},       {"Eval", 3, 4},      {"Eval", 2, 3},
+      {"Eval", 6, 7},       {"Eval", 3, 4},      {"Eval", 2, 3},      {"Eval", 1, 2},
       {"Count", 6, 7},      {"EvalNeighbors", 6, 7},
       // The per-class count, whose class name is the fourth argument, and the
       // garrison predicate beside it.

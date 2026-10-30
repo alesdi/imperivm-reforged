@@ -21,6 +21,8 @@ namespace imperivm::core::sim {
 // --------------------------------------------------------------------------
 
 void ExplorationMap::resize(std::int32_t extent) {
+  // A fresh map, as the constructor (0x005179d0) makes one: the flag down.
+  everywhere_ = false;
   for (auto& records : fine_) records.clear();
   if (extent <= 0) {
     side_ = 0;
@@ -244,7 +246,9 @@ void ExplorationMap::explore_circle(Point centre, std::int32_t radius, std::int3
 
 void ExplorationMap::explore_all() {
   // `ExploreAll()` (0x005157c0) fills every half-word with 0xFFFF: state 3 for
-  // every slot, and no record has anything left to say.
+  // every slot, and no record has anything left to say. It raises the
+  // explored-everywhere flag first, whatever the grid holds.
+  everywhere_ = true;
   std::fill(cells_.begin(), cells_.end(), static_cast<std::uint16_t>(0xFFFFu));
   for (auto& records : fine_) records.clear();
 }

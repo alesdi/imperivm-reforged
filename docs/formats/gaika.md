@@ -163,8 +163,15 @@ Each AI player's record keeps one `0x18`-byte record per node (`[ai+0x30]`,
 mapped by the 16-bit table at `[ai+0x40]`): a flags byte at `+2`, the enemy
 strength last seen at `+8`, and the turn it was last seen at `+0xc`.
 
-* `Explored` (0x0042ae70 -> 0x0041cb80) answers true when exploration is off
-  for the session, else bit `0x02`.
+* `Explored` (0x0042ae70 -> 0x0041cb80) answers true when the exploration
+  map is explored everywhere, else bit `0x02`. That flag (`[map+0xf0]`) is
+  zero from the map's constructor (0x005179d0) and raised by `ExploreAll`
+  (0x005157c0) alone, whose callers are the game's start when exploration is
+  off (0x00526200), a script's `ExploreAll` (0x006a42a0), the match's end
+  when no human player is left (0x00524090) and 0x00749d40. Only while a
+  recorded demo plays back (0x005bde80) is the session's exploration setting
+  read instead. The node's record is found through `[ai+0x40]`; a player of
+  0 or less, a node past the index table or an index of 0 answers false.
 * `Revealed` (0x0042b270 -> 0x0041cbd0) answers bit `0x04` when fog of war is
   on, else `Explored`.
 * `LastSeen` (0x0042b320) answers `+0xc`.
@@ -187,6 +194,30 @@ for the enemy staying in an unwatched node is what was there when it was last
 watched. `EvalNeighbors` (0x00430800) sums that census over the node's
 neighbours, passing over a stronghold, a Teuton tent or an independent guarded
 outpost, and -- with its flag -- any neighbour not revealed to the asker.
+
+## Where a squad sent to a node goes
+
+`GAIKA::GetDestPoint(unit)` (0x00427b80) answers `(0, 0)` without a node
+table or a record, the record's centre for a node with no settlement, and
+otherwise starts from the settlement's position. The unit's position is its
+own stored one, `(-1, -1)` while it is inside a holder.
+
+* A settlement that is a heir of `BaseTownhall` (0x0043ffc0): the gate among
+  its buildings nearest the unit (an initial best of 200,000), then 450 units
+  beyond it on the line from the settlement through it (0x00422bd0). That
+  point is kept when it lies inside the map rectangle, all four edges
+  inclusive (0x004092b0); otherwise the answer is the gate.
+* Otherwise a heir of `Outpost` (0x00440060), when its owner is not player 15,
+  the owner's row for the unit's owner lacks the ceasefire bit, and its
+  garrison holds someone: 0x00422bd0 with a length of 1,300 is handed the
+  settlement's position and the sum of the unit's position and the
+  settlement's, so the step from the settlement is the unit's position as a
+  vector from the map's origin, negated and scaled to 1,300 (each component
+  times 1,300 over the floored root of the squared length, truncated; no step
+  for a unit at the origin). The point is kept when inside the rectangle;
+  else the step turned a quarter one way `(-dy, dx)`, then the other
+  `(dy, -dx)`; with all three outside, the settlement's position.
+* Anything else: the settlement's position.
 
 ## The `MAIKA` list
 
@@ -419,11 +450,12 @@ their entrances as they stand when the AI manager starts; the AI's save
   are not kept; `WaterLsa` derives its answer (`sim/economy.cpp`).
 * **The per-player memory is the sweep's** (`sweep_gaika`), run on every
   node once a tick after the squads' standing is refreshed, where the
-  original runs it on the nodes a unit crosses between. `Explored` and
-  `Revealed` read the match's exploration and fog rules first; the scenario
-  path's explored-everywhere flag, which a script's `ExploreAll` sets in a
-  match with exploration on, is not kept. `Eval/6`, `Eval/3` and
-  `EvalNeighbors` add the memory tail.
+  original runs it on the nodes a unit crosses between. `Explored` reads the
+  exploration map's explored-everywhere flag first (`ExplorationMap::
+  explored_everywhere`; this engine plays back no demo, so the session rule
+  is never read there), and `Revealed` the match's fog rule. The flag is
+  saved with the fog section, which the original's persist does not do.
+  `Eval/6`, `Eval/3` and `EvalNeighbors` add the memory tail.
 * **The `MAIKA` list is kept** (`SquadTable::routes`, saved, newest first,
   512 at most): `SetMAIKA` and the attacked hook (`record_squad_attacked`)
   record into it, and `Recruit` runs the routing filter over it.

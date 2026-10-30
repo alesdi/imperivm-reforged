@@ -726,10 +726,10 @@ class AiSystem final : public System {
 [[nodiscard]] Laika* laika_for(World& world, std::int32_t viewer, GaikaId node) noexcept;
 
 /// 0x0041cb80, what `GAIKA::Explored` and every explored test reads: true when
-/// the match has exploration off (`MatchRules::exploration`, the session's
-/// `+0xda0`; the original's scenario path reads the exploration map's
-/// explored-everywhere flag instead, which `ExploreAll` sets -- see the note
-/// at the body), else bit 0x02.
+/// the exploration map is explored everywhere (`ExplorationMap::
+/// explored_everywhere`, which `ExploreAll` raises, the game's start among its
+/// callers when exploration is off; the session rule is read instead only
+/// while a demo plays back -- see the note at the body), else bit 0x02.
 [[nodiscard]] bool laika_explored(World& world, const Laika& record) noexcept;
 
 /// 0x0041cbd0, `GAIKA::Revealed`: with fog of war on, bit 0x04; with it off,
@@ -814,14 +814,15 @@ std::size_t ai_start_players(World& world, script::Scheduler& scheduler,
 ///
 /// Defines, in `sim/host_setup.hpp`'s terms:
 ///
-///   free    `AIGetPlayer/0`, `AIStart/3`, `AIStop/1`, `GetGAIKA/1`, and the
-///           nine `SPF*` names of the pathfinder bootstrap
+///   free    `AIGetPlayer/0`, `AIStart/1..3`, `AIBreakScript/1..2`, `AIStop/1`,
+///           `GetGAIKA/1`, and the nine `SPF*` names of the pathfinder
+///           bootstrap
 ///   member  `EconomyScript/0`, `GetEconomyScript/1`, `RunEconomyScript/1`,
 ///           `TacticScript/0`,  `GetTacticScript/1`,  `RunTacticScript/1`
 ///
 /// and nothing else. In particular it does **not** define `GAIKACount`,
-/// `LAIKA`, any `GAIKA::*` member, or `AIStart`'s one- and two-argument
-/// forms; see the header note for each. `AIStart/3` **is** defined -- see
+/// `LAIKA` or any `GAIKA::*` member; see the header note for each.
+/// `AIStart/3` **is** defined -- see
 /// the note above, and the claim it corrects -- and so is `AIStop/1`, which
 /// is `stop` through the calling script's scheduler.
 std::size_t register_ai_host(script::HostRegistry& registry);

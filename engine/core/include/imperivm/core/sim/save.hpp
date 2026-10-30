@@ -441,7 +441,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// docs/formats/gaika.md): the session section (its version 5) carries each
 /// node's rectangle and the node slot grid, and a node's id, extent, centre
 /// and neighbours are the cut's rather than one per settlement and region.
-inline constexpr std::uint32_t kStateVectorVersion = 56;
+/// 57: the fog section (system section version 49) carries the exploration
+/// map's explored-everywhere flag (`[map+0xf0]`, which `ExploreAll` raises
+/// and `GAIKA::Explored` reads, 0x0041cb80). A version-56 file has none, and
+/// a load would answer every node unexplored after a script's `ExploreAll`.
+inline constexpr std::uint32_t kStateVectorVersion = 57;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

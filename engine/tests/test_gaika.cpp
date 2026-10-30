@@ -5347,6 +5347,94 @@ TEST(gaika_dest_point_answers_a_region_nodes_own_centre) {
   CHECK(unpack_point(out.value) == other->center);
 }
 
+/// `GAIKA::GetDestPoint(unit)` at an **outpost** (0x00427d6b): 1,300 units
+/// from the settlement towards the map's origin from where the unit stands,
+/// tried as it is, then turned a quarter each way, and only for a garrisoned
+/// outpost of a player hostile to the unit's owner and not player 15.
+TEST(gaika_dest_point_steps_off_an_outpost_away_from_the_unit) {
+  WallBench b;
+  b.graph.add(bytes_of(R"(<class id="Outpost" cpp_class="CVXTownHall" parent=""/>)"),
+              "outpost.sc.xml");
+  b.graph.add(bytes_of(R"(<class id="ROutpost" cpp_class="CVXTownHall" parent="Outpost"/>)"),
+              "routpost.sc.xml");
+  b.graph.link();
+  const ObjectId hall = b.world.spawn(NativeClass::building, nullptr, b.graph.find("ROutpost"));
+  CHECK(b.world.set_position(hall, in_cell(3, 3)));
+  SettlementInit init;
+  init.kind = SettlementKind::outpost;
+  init.anchor = hall;
+  init.owner = 1;
+  const SettlementId post = b.economy.create(b.world, init);
+  Settlement* set = b.economy.settlements().find(post);
+  REQUIRE(set != nullptr);
+  const Point centre = b.world.resolve_position(set->anchor);
+  REQUIRE(centre == (Point{224, 224}));
+  b.rebuild();
+  const GaikaId node = b.world.gaika().for_settlement(set->object);
+  REQUIRE(node != kNoGaika);
+
+  const ObjectId unit = b.invader(1, 1);
+  const auto ask = [&](Point from) {
+    CHECK(b.world.set_position(unit, from));
+    const script::HostOutcome out =
+        b.call(script::CallKind::member, "GetDestPoint", 1,
+               {gaika_value(node), script::Value::object(kTypeObj, unit)});
+    CHECK(out.status == script::HostStatus::ok);
+    return unpack_point(out.value);
+  };
+
+  // An empty garrison leaves the settlement's position.
+  CHECK(ask(Point{300, 400}) == centre);
+  const ObjectId inside = b.invader(3, 3);
+  CHECK(set->holder.force_add(inside));
+
+  // The step is `-u * 1300 / |u|` from the settlement, `u` the unit's
+  // position, whichever side of the outpost the unit stands on: the unit at
+  // (300, 400) is south-east of the outpost's (224, 224) and the point still
+  // goes north-west. With no match rectangle nothing is refused.
+  CHECK(ask(Point{300, 400}) == (Point{224 - 780, 224 - 1040}));
+  // Each component truncates toward zero over the floored root (223).
+  CHECK(ask(Point{100, 200}) == (Point{224 - 582, 224 - 1165}));
+
+  // Refused by the map, the quarter turn `(-dy, dx)` is tried first...
+  MatchSystem* match = match_system_of(b.world);
+  REQUIRE(match != nullptr);
+  MatchRules rules;
+  rules.map_size = 100000;
+  match->configure(rules, 0, false);
+  CHECK(ask(Point{0, 400}) == (Point{224 + 1300, 224}));
+  // ...then `(dy, -dx)`...
+  CHECK(ask(Point{400, 0}) == (Point{224, 224 + 1300}));
+  // ...and with all three off the map, the settlement's position.
+  CHECK(ask(Point{300, 400}) == centre);
+
+  // The unit's own position is read, `(-1, -1)` for one inside a holder, not
+  // the holder's: the step is then (1300, 1300), from a root of 1.
+  {
+    const ObjectId tower = b.world.spawn(NativeClass::building, nullptr, b.graph.find("Gate"));
+    CHECK(b.world.set_position(tower, in_cell(5, 5)));
+    CHECK(b.world.put_in_holder(unit, tower));
+    const script::HostOutcome out =
+        b.call(script::CallKind::member, "GetDestPoint", 1,
+               {gaika_value(node), script::Value::object(kTypeObj, unit)});
+    CHECK(unpack_point(out.value) == (Point{224 + 1300, 224 + 1300}));
+    CHECK(b.world.remove_from_holder(unit, in_cell(1, 1)));
+  }
+
+  // The relation is read off the outpost owner's row: a ceasefire the unit's
+  // owner grants changes nothing, one the outpost's owner grants refuses.
+  b.world.players().set(2, 1, Relation::ceasefire, true);
+  CHECK(ask(Point{0, 400}) == (Point{224 + 1300, 224}));
+  b.world.players().set(1, 2, Relation::ceasefire, true);
+  CHECK(ask(Point{0, 400}) == centre);
+  b.world.players().set(1, 2, Relation::ceasefire, false);
+  CHECK(ask(Point{0, 400}) == (Point{224 + 1300, 224}));
+
+  // Player 15's outposts are never stepped off.
+  set->owner = 15;
+  CHECK(ask(Point{0, 400}) == centre);
+}
+
 /// `squad.UseTeleport(tel, nState, cmd, pt)` -- the one entry point in this
 /// family that gives a squad a **three-order itinerary**: walk to the
 /// teleport, step through it, walk on from the far side.

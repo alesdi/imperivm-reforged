@@ -1547,7 +1547,7 @@ HostOutcome send_to_impl(CallContext& ctx) {
   if (ctx.count() < 3) return HostOutcome::ok_void();
   HeroSystem* heroes = hero_system_of(*self.world);
   if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
-  // `movzx edx, bp` at 0x00421598: the node is a word; so is the priority,
+  // At 0x00421598 the node is widened from 16 bits: the node is a word; so is the priority,
   // which the post stores as the dword it is handed and every reader reads as
   // a word (0x004488ea, 0x00448b1b, 0x004474c7).
   const GaikaId dest = static_cast<GaikaId>(static_cast<std::uint16_t>(gaika_of(ctx.arg(1))));
@@ -2584,9 +2584,14 @@ void add_squad_to_buckets(World& world, Census& out, std::int32_t category, cons
 ///      corrected by what can be seen there now. The record is the visibility
 ///      sweep's (`sweep_gaika`, 0x0044ecc0); twelfth round.
 ///
-/// The six-argument form's failure arm writes three out-parameters and leaves
-/// `enemy_hidden` as it was, but it is reached only when the node vector does
-/// not exist at all; here all four are always written.
+/// Without the node manager (`[0x008c8e54]`, the table `built` here) every
+/// form answers 0 and the six-argument form writes 0 to three out-parameters
+/// and leaves `enemy_hidden` as it was (`eval_out_impl`).
+///
+/// A viewer of 0 or less with `AI_STAYING` asked reaches the memory tail's
+/// player-record read in the three- and six-argument bodies, which test only
+/// `viewer < 16`, so the original reads a record before the player table
+/// there; no shipped call passes such a player, and here it has no record.
 ///
 [[nodiscard]] Census gaika_eval(World& world, HeroSystem& heroes, GaikaId node,
                                 std::int32_t presence, std::int32_t viewer, std::int32_t sides,
@@ -2679,6 +2684,14 @@ HostOutcome eval_out_impl(CallContext& ctx) {
   if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
   if (ctx.count() < 7) return HostOutcome::failed("Eval: expected four out-parameters");
   const CensusCall call = census_args(ctx);
+  // No node manager: three zeros, and `enemy_hidden` left as the caller had it
+  // (0x0043027c..0x00430290).
+  if (!world->gaika().built()) {
+    ctx.out(3) = Value::integer(0);
+    ctx.out(4) = Value::integer(0);
+    ctx.out(5) = Value::integer(0);
+    return HostOutcome::ok_void();
+  }
   const Census census = gaika_eval(*world, *heroes, call.node, call.presence, call.viewer,
                                    0xFFFF, true, false, /*memory=*/true);
   ctx.out(3) = Value::integer(census.own);
@@ -2694,13 +2707,19 @@ HostOutcome eval_out_impl(CallContext& ctx) {
 /// The two-argument form answers the *own* total -- its gate is `category &
 /// 1` (0x0042f4db) -- which is what `GSH_INTERRUPTPASSING.VS:9`'s `lown =
 /// g.Eval(AI_LEAVING, AIPlayer)` names it. The one-argument form (0x0042f1a0,
-/// presence alone, every squad counted as category 1 against a viewer of -1)
-/// has no shipped call site and is not bound, `ShowNotes`'s precedent.
+/// `g.Eval(presence)`) has no player: it asks no category of a squad, which
+/// is every squad counted as category 1 against a viewer of -1, and hands
+/// 0x00420c00 a viewer of -1 too, so the wall is category 1; it has no
+/// memory tail. No shipped script calls it; it is bound, as the original
+/// registers it.
 HostOutcome eval_total_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
   HeroSystem* heroes = hero_system_of(*world);
   if (heroes == nullptr) return HostOutcome::failed(kNoHeroes);
+  // Every form answers 0 without the node manager.
+  if (!world->gaika().built()) return HostOutcome::ok_with(Value::integer(0));
+  // `census_args` leaves the viewer at -1 for the one-argument form.
   const CensusCall call = census_args(ctx);
   const std::int32_t sides =
       ctx.count() > 3 ? (ctx.arg(3).is_integer() ? ctx.arg(3).as_integer() : 0) : kAiOwn;
@@ -4868,7 +4887,7 @@ HostOutcome train_impl(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(answer));
 }
 
-constexpr std::size_t kEntryCount = 55;
+constexpr std::size_t kEntryCount = 56;
 
 }  // namespace
 
@@ -5188,6 +5207,7 @@ std::size_t register_squad_host(HostRegistry& registry) {
   member("Eval", 6, &eval_out_impl);             // 19
   member("Eval", 3, &eval_total_impl);          //  8
   member("Eval", 2, &eval_total_impl);          //  2
+  member("Eval", 1, &eval_total_impl);          //  0, 0x0042f1a0
   member("Count", 6, &census_out_impl<true>);   //  5
   member("EvalNeighbors", 6, &eval_neighbors_impl);  // 1
   // Read to the end at last; see `count_class_impl` for what the argument

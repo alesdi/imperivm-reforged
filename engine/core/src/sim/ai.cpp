@@ -624,18 +624,18 @@ Laika* laika_for(World& world, std::int32_t viewer, GaikaId node) noexcept {
   return view == nullptr ? nullptr : view->find(node);
 }
 
-// 0x0041cb80 takes one of two overrides before the bit, chosen by 0x005bde80
-// (a single-player game whose settings carry `+0xdc4`): the session's
-// exploration setting (`+0xda0 == 0`), or else the exploration map's
-// explored-everywhere flag (`[[world+0xb0]+0xf0]`, which only 0x005157c0 --
-// `ExploreAll`, and the load with exploration off -- sets). The match rule
-// is read for both: a load with exploration off is the one way the flag is
-// set at the start, and the rule is the one the session keeps. A script's
-// `ExploreAll` in a match with exploration on is where the two part (the
-// scenario path would answer yes everywhere from then on); labelled.
+// 0x0041cb80 takes one of two overrides before the bit, chosen by 0x005bde80,
+// which answers whether a recorded demo is being played back (single-player
+// settings with `playdemo`, `+0xdc4`): then the session's exploration setting
+// (`+0xda0 == 0`), and otherwise -- every game played -- the exploration map's
+// explored-everywhere flag (`[[world+0xb0]+0xf0]`), which only 0x005157c0
+// raises: the game's start with exploration off (0x00526200), a script's
+// `ExploreAll` (0x006a42a0), and two more callers (0x00524090, 0x00749d40)
+// this engine does not reach. This engine plays back no demo, so it reads
+// the flag.
 bool laika_explored(World& world, const Laika& record) noexcept {
-  if (const MatchSystem* match = match_system_of(world);
-      match != nullptr && !match->rules().exploration) {
+  if (const FogSystem* fog = fog_system_of(world);
+      fog != nullptr && fog->map().explored_everywhere()) {
     return true;
   }
   return (record.flags & kLaikaExplored) != 0;
@@ -891,8 +891,10 @@ int g_sync_depth = 0;
 /// no-op sink; 0x00426680 counts the skill as weight 0, which
 /// `m_ai_get_skill_to_develop` does too. `run_script_or_report` is that
 /// reading: the failure goes to the pass's report, where the trap sweep still
-/// sees it, and the caller answers its default. The four recruiters use it;
-/// the rest still trap, which keeps a broken callee loud. A missing script
+/// sees it, and the caller answers its default. The four recruiters,
+/// `GetEconomyScript`, `GetTacticScript`, `GAIKA::GetStrat`,
+/// `GAIKA::CalcPriority` and `Hero::TSAdvHeroSkills` use it; the rest still
+/// trap, which keeps a broken callee loud. A missing script
 /// file is not a failure of that kind, and each caller answers its own
 /// default for it.
 ///
@@ -1116,6 +1118,27 @@ HostOutcome f_ai_break_script(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
+/// `AIBreakScript(player, handle)` -- 0x00421d20, no shipped site. The
+/// one-argument body with the seat taken from the first argument, 1-based,
+/// rather than from the calling thread: `player - 1` below 16 with an AI
+/// record runs 0x0041cdc0 on that AI with the handle. The original tests only
+/// the upper bound, so a player of 0 or less reads a record before the player
+/// table; here it is nobody's, as `AIStop`'s out-of-range player is.
+HostOutcome f_ai_break_script_for(CallContext& ctx) {
+  AiSystem* ai = host_ai(ctx);
+  if (ai == nullptr) return HostOutcome::failed("AIBreakScript: no world");
+  if (ctx.scheduler == nullptr) return HostOutcome::failed("AIBreakScript needs a scheduler");
+  if (ctx.count() != 2 || !ctx.arg(0).is_integer() || !ctx.arg(1).is_integer()) {
+    return HostOutcome::failed("AIBreakScript expects a player and a script handle");
+  }
+  const PlayerId player = player_from_script(ctx.arg(0).as_integer());
+  if (player == kNoPlayer) return HostOutcome::ok_void();
+  const AiPlayer* owner = ai->player_ai(player);
+  if (owner == nullptr || !owner->active) return HostOutcome::ok_void();
+  (void)ai->break_run(player, ctx.arg(1).as_integer(), *ctx.scheduler);
+  return HostOutcome::ok_void();
+}
+
 /// `AIStart(player, profile, difficulty)` -- 20 sites, every one of them inside
 /// a map container, and the sole blocker of ten scripts.
 ///
@@ -1201,6 +1224,61 @@ HostOutcome f_ai_start(CallContext& ctx) {
   // `AiSystem::add_profile` uppercases on the way in and `start` looks up by
   // the uppercased name; the check above has made that fold the identity.
   (void)ai_start(*world, player, ctx.arg(1).as_string(), difficulty, *ctx.scheduler);
+  return HostOutcome::ok_void();
+}
+
+/// The difficulty the AI object's constructor (0x0041e100) gives a seat when
+/// the core is handed 0: the seat's `playerdata` difficulty (the settings'
+/// `+0xd0` for the seat) when it is 1, 2 or 3, and 3 otherwise.
+[[nodiscard]] AiDifficulty seat_default_difficulty(const World& world, PlayerId player) {
+  const AiDifficulty seat = ai_difficulty_overlay(world.players().setup(player).difficulty);
+  return seat == AiDifficulty::none ? AiDifficulty::hard : seat;
+}
+
+/// `AIStart(player, profile)` -- 0x00434e60, no shipped site. The
+/// three-argument form's checks without the difficulty: the player 1..16, the
+/// profile matched exactly against the listed (uppercased) names -- the
+/// wrapper's fold into a stack buffer is as dead here as there -- and the
+/// core 0x00434ca0 called with difficulty 0, which leaves the constructor's
+/// (`seat_default_difficulty`). A refusal prints and returns.
+HostOutcome f_ai_start_profile(CallContext& ctx) {
+  World* world = world_of(ctx);
+  AiSystem* ai = host_ai(ctx);
+  if (world == nullptr || ai == nullptr) return HostOutcome::failed("AIStart: no world");
+  if (ctx.scheduler == nullptr) return HostOutcome::failed("AIStart: no scheduler");
+  if (!ctx.arg(0).is_integer() || !ctx.arg(1).is_string()) return HostOutcome::ok_void();
+  const PlayerId player = player_from_script(ctx.arg(0).as_integer());
+  if (player == kNoPlayer) return HostOutcome::ok_void();
+  const std::string_view profile = ctx.arg(1).as_string();
+  if (profile.empty() || upper(profile) != profile) return HostOutcome::ok_void();
+  if (!ai->has_profile(profile)) return HostOutcome::ok_void();  // `invalid AI profile`
+  (void)ai_start(*world, player, profile, seat_default_difficulty(*world, player),
+                 *ctx.scheduler);
+  return HostOutcome::ok_void();
+}
+
+/// `AIStart(player)` -- 0x00434e20, no shipped site. The player 1..16 (else
+/// the same message as the other forms), then the core with no name and
+/// difficulty 0: the new AI object keeps what its constructor (0x0041e100)
+/// copies from the seat's `playerdata` -- its `AI` profile string and its
+/// difficulty (`seat_default_difficulty`). With no name the core makes no
+/// check against the profile list, so a seat whose string names no listed
+/// profile still gets an AI, whose script search (0x0043d030) finds no such
+/// directory and falls back to the plain names: here it is started on the
+/// root profile. The profile's own name is then the root's where the
+/// original keeps the seat's string; nothing reads it but the search.
+HostOutcome f_ai_start_seat(CallContext& ctx) {
+  World* world = world_of(ctx);
+  AiSystem* ai = host_ai(ctx);
+  if (world == nullptr || ai == nullptr) return HostOutcome::failed("AIStart: no world");
+  if (ctx.scheduler == nullptr) return HostOutcome::failed("AIStart: no scheduler");
+  if (!ctx.arg(0).is_integer()) return HostOutcome::ok_void();
+  const PlayerId player = player_from_script(ctx.arg(0).as_integer());
+  if (player == kNoPlayer) return HostOutcome::ok_void();
+  const std::string& seat = world->players().setup(player).ai_script;
+  const std::string_view profile = ai->has_profile(seat) ? std::string_view(seat) : "";
+  (void)ai_start(*world, player, profile, seat_default_difficulty(*world, player),
+                 *ctx.scheduler);
   return HostOutcome::ok_void();
 }
 
@@ -1443,9 +1521,11 @@ HostOutcome m_tactic_script(CallContext& ctx) {
 /// through. The answer is the script's return value when the run succeeded
 /// **and the value is not negative**, masked to 16 bits; a negative value, a
 /// script that returns nothing, a missing file or a failed run all answer 0.
-/// No receiver check: an invalid handle is dereferenced. Here a missing file
-/// answers 0 as there, and a callee that traps traps the caller (the shared
-/// `run_script_now`, labelled there) where retail answers 0.
+/// No receiver check: an invalid handle is dereferenced. A failed run -- a
+/// callee that traps or suspends, or a file the library does not hold -- is
+/// 0x006a0360's non-zero status, and the trampoline answers 0 for it
+/// (0x0043d7cb, 0x0043d8ab): here the failure goes to the pass's report
+/// (`run_script_or_report`) and the caller goes on with 0.
 HostOutcome get_script_common(CallContext& ctx, const char* file, const char* what) {
   AiSystem* ai = host_ai(ctx);
   if (ai == nullptr) return HostOutcome::failed(what);
@@ -1456,8 +1536,9 @@ HostOutcome get_script_common(CallContext& ctx, const char* file, const char* wh
   const std::uint32_t chunk = ai_script_chunk(ctx, owner, file);
   if (chunk == script::kNoChunk) return HostOutcome::ok_with(Value::integer(0));
   Value result;
-  const HostOutcome ran = run_script_now(ctx, chunk, ctx.arguments, what, result);
-  if (ran.status != script::HostStatus::ok) return ran;
+  if (!run_script_or_report(ctx, chunk, ctx.arguments, result)) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
   if (!result.is_integer() || result.as_integer() < 0) {
     return HostOutcome::ok_with(Value::integer(0));
   }
@@ -1603,19 +1684,24 @@ HostOutcome m_ts_adv_hero_skills(CallContext& ctx) {
   // nothing prints and returns without running the helper. A receiver that is
   // not an object handle at all is the same case, and the helper's `if
   // (!hero.IsValid)` would answer it identically if it ran. The search path
-  // is the hero's player (`[[hero+0x70]+8]` into 0x0043d030). A failed run
-  // prints `TSHeroSkills: Error running script!` and returns; here it traps
-  // (`run_script_now`'s labelled gap).
+  // is the hero's player (`[[hero+0x70]+8]` into 0x0043d030). A failed run --
+  // a callee that traps or suspends, or a file the library does not hold --
+  // prints `TSHeroSkills: Error running script!` and returns (0x00426d0f):
+  // reported with the pass here, and the caller goes on.
   if (!ctx.arg(0).is_object()) return HostOutcome::ok_void();
 
+  // The handle resolves through the object table (`[0xa2a610 + index]`); one
+  // that names no object is the invalid-object message, not a run.
   const WorldObject* slot = world->find(ctx.arg(0).as_object().id);
-  const PlayerId owner = slot == nullptr ? kNoPlayer : slot->state.owner;
+  if (slot == nullptr) return HostOutcome::ok_void();
+  const PlayerId owner = slot->state.owner;
   AiSystem* ai = ai_system_of(*world);
   const std::uint32_t chunk = (ai == nullptr || owner == kNoPlayer)
                                   ? ctx.scheduler->find_chunk(kFile)
                                   : ai->find_script(*ctx.scheduler, owner, kFile);
   Value result;
-  return run_script_now(ctx, chunk, ctx.arguments, kWhat, result);
+  (void)run_script_or_report(ctx, chunk, ctx.arguments, result);
+  return HostOutcome::ok_void();
 }
 
 /// `hero.AIGetSkillToDevelop(skill, level)` -- **one call site, and it is the
@@ -2457,7 +2543,8 @@ HostOutcome m_gaika_military_presence(CallContext& ctx) {
 }
 
 /// A point `length` units beyond `from`, on the ray that leaves `behind` and
-/// passes through it -- 0x00422bd0, whose scale factor arrives in `ebx`.
+/// passes through it -- 0x00422bd0, whose length its callers set (450 for a
+/// gate; the outpost arm's 1,300 is written out where it is used).
 ///
 /// Integer throughout: the length is an `isqrt` and each component is scaled by
 /// a 32-bit multiply and a signed divide, so the result is a little short of
@@ -2505,18 +2592,29 @@ HostOutcome m_gaika_military_presence(CallContext& ctx) {
 ///     refused -- the original tests all four edges inclusively and does not
 ///     clamp -- and the answer is then **the gate itself**, because the gate
 ///     loop wrote it into the running answer before the step was tried;
-///   * when it is a heir of **`Outpost`** (0x00440060) there is a second
-///     branch, and it is the one thing here not read to the end. Its guards
-///     are: the settlement's owner is not **player 15**, the neutral-passive
-///     pseudo-player; the settlement's owner is hostile to the *unit's* owner,
-///     read off the settlement owner's row and so the same one-directional
-///     rule `Gate::AllEnemiesInHolder` uses; and an object the settlement holds
-///     at `[+0x5e]` resolves and has a non-null `[+0x40]`. What survives those
-///     is a **1,300**-unit offset from the central building along a direction
-///     built from two points this project has not identified, and it is bounds
-///     tested the same way. **This engine answers the central building position
-///     for an outpost**, which is where the original's own running answer sits
-///     when any of those guards refuses, and is a place a squad can walk to.
+///   * when it is not, but is a heir of **`Outpost`** (0x00440060), a second
+///     branch (0x00427d6b) whose guards are: the settlement's owner is not
+///     **player 15**, the neutral-passive pseudo-player; the settlement's
+///     owner is hostile to the *unit's* owner, read off the settlement owner's
+///     row (`[owner+0x24+unit_owner*4] & 1` clear) and so the same
+///     one-directional rule `Gate::AllEnemiesInHolder` uses; and the garrison
+///     holder (`[+0x5e]`) holds someone (`[holder+0x40]`, what `UnitsCount`
+///     reads). What survives those is 0x00422bd0 with a length of **1,300**,
+///     handed the settlement's position and **the sum of the unit's position
+///     and the settlement's**: its direction is the settlement's position less
+///     that sum, which is the unit's position taken as a vector from the map's
+///     origin and negated. So the point is the settlement's position moved
+///     1,300 units (each component `-u * 1300 / |u|`, truncated, `|u|` the
+///     floored root; a unit at the origin moves it nowhere) **towards the
+///     map's origin from wherever the unit stands**, whatever side of the
+///     outpost the unit is on. It is bounds tested as the gate's is; refused,
+///     the offset turned a quarter (`(-dy, dx)`) is tried, then the other
+///     quarter (`(dy, -dx)`), and with both refused the answer is the
+///     settlement's position;
+///   * a heir of neither answers the settlement's position.
+///
+/// The unit's position is its own (`vtbl+0x3c`), which for a unit inside a
+/// holder is `(-1, -1)`, not the holder's.
 ///
 /// The order of the two class tests is the executable's and **not** this
 /// engine's `SettlementKind`: `kind_of` asks `Outpost` before `BaseTownhall`
@@ -2550,13 +2648,48 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
     const ClassIndex index = graph->find(base);
     return index != kNoClass && world->class_is_a(set->anchor, index);
   };
-  // `BaseTownhall` first, which is the executable's order and not `kind_of`'s.
-  if (!heir_of("BaseTownhall")) return answer(centre);
-
   if (!ctx.arg(1).is_object()) return answer(centre);
   const WorldObject* unit = world->find(ctx.arg(1).as_object().id);
   if (unit == nullptr) return answer(centre);
-  const Point from = world->resolve_position(unit->id);
+  // The unit's own position (`vtbl+0x3c`): `(-1, -1)` for one in a holder.
+  const Point from = unit->state.position;
+
+  // The bounds test, which the original runs against the map rectangle and
+  // which **refuses** rather than clamping. A world with no match to ask has no
+  // rectangle to be outside of, so it skips the test rather than failing it:
+  // refusing everything there would make the entry point answer the town centre
+  // in every synthetic world, which is a different function.
+  const MatchSystem* match = match_system_of(*world);
+  const std::int32_t extent = match == nullptr ? 0 : match->rules().map_size;
+  const auto on_map = [extent](Point p) {
+    if (extent <= 0) return true;
+    const std::int32_t edge = extent - 1;
+    return p.x >= 0 && p.x <= edge && p.y >= 0 && p.y <= edge;
+  };
+
+  // `BaseTownhall` first, which is the executable's order and not `kind_of`'s.
+  if (!heir_of("BaseTownhall")) {
+    if (!heir_of("Outpost")) return answer(centre);
+    if (set->owner == PlayerId{15}) return answer(centre);
+    if (!world->players().is_enemy(set->owner, unit->state.owner)) return answer(centre);
+    if (set->holder.count() == 0) return answer(centre);
+    // 0x00422bd0 handed (centre, from + centre): the direction is `-from`.
+    const std::int64_t ux = from.x;
+    const std::int64_t uy = from.y;
+    const std::int64_t len = isqrt(ux * ux + uy * uy);
+    const std::int64_t dx = len != 0 ? -ux * 1300 / len : -ux;
+    const std::int64_t dy = len != 0 ? -uy * 1300 / len : -uy;
+    const Point out{centre.x + static_cast<std::int32_t>(dx),
+                    centre.y + static_cast<std::int32_t>(dy)};
+    if (on_map(out)) return answer(out);
+    const Point left{centre.x - static_cast<std::int32_t>(dy),
+                     centre.y + static_cast<std::int32_t>(dx)};
+    if (on_map(left)) return answer(left);
+    const Point right{centre.x + static_cast<std::int32_t>(dy),
+                      centre.y - static_cast<std::int32_t>(dx)};
+    if (on_map(right)) return answer(right);
+    return answer(centre);
+  }
 
   // The nearest gate to the unit, with the original's own initial best of
   // 200,000 -- a distance no pair of points on a shipped map reaches, so it is
@@ -2578,21 +2711,12 @@ HostOutcome m_gaika_dest_point(CallContext& ctx) {
   if (best == centre) return answer(centre);
 
   // 450 units beyond the gate, on the ray from the town centre through it --
-  // 0x00422bd0 scaled to `ebx`, which is 0x1c2 here.
+  // 0x00422bd0 with a length of 450.
   const Point out = step_beyond(best, centre, 450);
-  // The bounds test, which the original runs against the map rectangle and
-  // which **refuses** rather than clamping. A world with no match to ask has no
-  // rectangle to be outside of, so it skips the test rather than failing it:
-  // refusing everything there would make the entry point answer the town centre
-  // in every synthetic world, which is a different function.
-  const MatchSystem* match = match_system_of(*world);
-  const std::int32_t extent = match == nullptr ? 0 : match->rules().map_size;
-  if (extent <= 0) return answer(out);
-  const std::int32_t edge = extent - 1;
   // Refused, the running answer is the **gate**: the gate loop has already
   // moved it there (0x00427d9c onward) and the step only replaces it when it
   // passes all four edges.
-  if (out.x < 0 || out.x > edge || out.y < 0 || out.y > edge) return answer(best);
+  if (!on_map(out)) return answer(best);
   return answer(out);
 }
 
@@ -3075,8 +3199,10 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
 /// of 16 or more included -- **still runs** the plain file. (A seat below 0
 /// indexes before the player table there; it is read as "no AI" here.) A run
 /// that fails answers 0, as does a negative return; `GetStrat` keeps the low
-/// 16 bits of the rest and `CalcPriority` all 32. The failed-run 0 is
-/// `run_script_now`'s labelled gap here.
+/// 16 bits of the rest and `CalcPriority` all 32. A failed run is a callee
+/// that traps or suspends: 0x006a0360 answers non-zero and both trampolines
+/// answer 0 (0x0043d61b, 0x0043d9ab), so here the failure goes to the pass's
+/// report (`run_script_or_report`) and the caller goes on with 0.
 [[nodiscard]] HostOutcome gaika_script_call(CallContext& ctx, std::string_view file,
                                             const char* what, bool player_first) {
   AiSystem* ai = host_ai(ctx);
@@ -3096,8 +3222,9 @@ HostOutcome m_laika_set_flag(CallContext& ctx) {
   const Value args[2] = {player_first ? ctx.arg(1) : ctx.arg(0),
                          player_first ? ctx.arg(0) : ctx.arg(1)};
   Value result;
-  const HostOutcome ran = run_script_now(ctx, chunk, args, what, result);
-  if (ran.status != script::HostStatus::ok) return ran;
+  if (!run_script_or_report(ctx, chunk, args, result)) {
+    return HostOutcome::ok_with(Value::integer(0));
+  }
   const std::int32_t value = result.is_integer() ? result.as_integer() : 0;
   if (value < 0) return HostOutcome::ok_with(Value::integer(0));
   // `GetStrat` is the one passing the node first, and the one masked.
@@ -3436,7 +3563,7 @@ HostOutcome m_settlement_gaika(CallContext& ctx) {
 /// it is handed.
 ///
 ///   * **An `int` is the identity**, with no bounds check on either side --
-///     0x00746ea0 is `xor eax,eax; ret`, which leaves the VM stack untouched so
+///     0x00746ea0 answers 0 and returns at once, which leaves the VM stack untouched so
 ///     the argument *is* the result. `GAIKA::ID` shares the pointer. That was
 ///     established before there was a table and it does not change now: a
 ///     script that walks `GetGAIKA(i)` over `1 .. GAIKACount` is naming nodes
@@ -5012,17 +5139,13 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
     registry.define(kFree, "AIRun", arity, &f_ai_run);  // 72 between the spellings
   }
   registry.define(kFree, "AIBreakScript", 1, &f_ai_break_script);  // 74
+  registry.define(kFree, "AIBreakScript", 2, &f_ai_break_script_for);  // 0, 0x00421d20
   registry.define(kFree, "AIStart", 3, &f_ai_start);  // 20, all in containers
+  // The one- and two-argument forms have no shipped site; bound as the
+  // original registers them.
+  registry.define(kFree, "AIStart", 2, &f_ai_start_profile);  // 0, 0x00434e60
+  registry.define(kFree, "AIStart", 1, &f_ai_start_seat);     // 0, 0x00434e20
   registry.define(kFree, "AIStop", 1, &f_ai_stop);     //  1, in a container, and a trap message
-  // The one- and two-argument forms (0x00434e20, 0x00434e60) are **not**
-  // bound: no script in the installation writes either, and the surface
-  // has no entry for them to fill. `ShowNotes`'s precedent. Read, for the day
-  // one is: the one-argument form checks 1..16 and calls the core with no
-  // name and difficulty 0, so the new AI keeps what its constructor
-  // (0x0041e100) seeds -- the seat's own playerdata profile string and its
-  // difficulty, anything outside 1..3 made 3. The two-argument form is the
-  // three-argument one's exact, case-sensitive profile check with difficulty
-  // 0, the same "keep the seat's".
 
   // The AI-helper runner. `RunAIHelper` is registered **eight times** in
   // `gbr.exe` (0x004d4160, arities 2..9, every argument a string; bodies
