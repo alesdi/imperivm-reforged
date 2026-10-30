@@ -554,7 +554,7 @@ std::size_t World::templates_in_group(std::int32_t group, std::vector<ObjectId>&
   return out.size();
 }
 
-ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
+ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder, bool file) {
   const WorldObject* source = find(templ);
   if (source == nullptr || source->internal != InternalKind::none) return kNoObject;
   if (!source->state.flags.unspawned) return kNoObject;
@@ -566,6 +566,11 @@ ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
   const ObjectState state = source->state;
   const ClassIndex class_index = source->class_index;
   const ObjectId settlement = source->settlement;
+  // Two more of the copy virtual's fields (the script-object half, 0x005b1610):
+  // the display string at `[obj+0xa0]` and the sight at `[obj+0xd0]`, which
+  // `SetSight` may have moved off the class's.
+  const std::string display_name = source->display_name;
+  const std::int32_t sight = source->sight;
   const ObjectId copy = spawn(source->object->native_class(), source->object->entity, class_index);
   WorldObject* fresh = find(copy);
   if (fresh == nullptr) return kNoObject;
@@ -581,6 +586,8 @@ ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
   fresh->state.flags.unspawned = false;
   reindex(*fresh);  // the template's position, or its holder
   fresh->settlement = settlement;
+  fresh->display_name = display_name;
+  fresh->sight = sight;
   if (observer_ != nullptr && state.owner != kNoPlayer) observer_->owner_set(*this, copy, kNoPlayer, state.owner);
 
   if (holder != kNoObject) {
@@ -588,7 +595,11 @@ ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
     // `kHeldPosition` on its own, which is the invariant a held object has.
     put_in_holder(copy, holder);
   }
+  if (file) file_like_template(templ, copy);
+  return copy;
+}
 
+void World::file_like_template(ObjectId templ, ObjectId copy) {
   // Names follow the object into play. `bind` would refuse, because the name
   // is already bound -- to the template -- so this is the one caller that has
   // to overwrite. See `NamedObjectTable::rebind`.
@@ -606,7 +617,6 @@ ObjectId World::spawn_from_template(ObjectId templ, ObjectId holder) {
     if (!groups_.contains(g, templ)) continue;
     groups_.add(g, copy);
   }
-  return copy;
 }
 
 ObjectId World::spawn_of_class(ClassIndex class_index) {

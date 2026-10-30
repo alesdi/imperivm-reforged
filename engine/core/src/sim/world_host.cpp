@@ -734,6 +734,99 @@ HostOutcome fn_get_group_size(CallContext& ctx) {
   return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(live.size())));
 }
 
+/// Where an entry point that constructs starts what it built, or null.
+[[nodiscard]] ObjectStarter* starter_of(CallContext& ctx) noexcept {
+  const HostContext* host = host_context_of(ctx);
+  return host != nullptr ? host->starter : nullptr;
+}
+
+/// What a spawned copy carries of its template that this engine keeps in a
+/// system rather than on the object.
+///
+/// The clone (`vtbl+0x30`) builds a fresh object of the template's class,
+/// starts it, and has the **template** copy itself onto it (`vtbl+0x34`). The
+/// copy chain, base first:
+///
+///   * the map-object half (0x0053ce00): the position, the flag word or-ed in
+///     (`vtbl+0x44`), the facing at `[+0x48]`/`[+0x4c]`;
+///   * the script-object half (0x005b1610): the owner through `SetPlayer`,
+///     health, stamina, their maxima, sight, range and minimum range, attack,
+///     the two armours, and the display string at `[+0xa0]`;
+///   * the unit half (0x005dd2d0): the holder word, the food `[+0x16c]` (and
+///     the hungry bit `0x20000000` from it), **the experience `[+0x180]`** and
+///     the stored level `[+0x184]` raw, the second flag word `[+0x194]`, and
+///     the icon string at `[+0x190]`;
+///   * a hero (0x0052db20): `max_army` `[+0x1f8]` and the 25 skill bytes from
+///     `[+0x1fc]`, raw; a wagon (0x005eadd0) its cargo.
+///
+/// `World::spawn_from_template` copies what lives on the object here (the
+/// state -- a wagon's cargo and its resource among it -- the display name,
+/// the sight); the maxima, attack, range and armours
+/// are rebuilt from the class and the level, which is the template's once the
+/// experience is; the stored level follows the experience for the same reason.
+/// This carries the rest:
+///
+///   * `carry_template_unit` -- the experience, written as it is, with no
+///     nobility lift and no rebuild (a raw store, as the copy's is);
+///   * `carry_template_hero` -- the skill points and `max_army`;
+///   * `carry_template_items` -- after the copy is filed, 0x00571c20: the
+///     copy's own items removed (it has none), then, for each of the
+///     template's items in inventory order, a **new** item minted by that
+///     item's name (0x00535640, full charges) and handed to the copy's add
+///     virtual (`vtbl+0xec`), which is `AddItem`'s path.
+///
+///   * `carry_template_food` -- once the copy is in the feeding chain, the
+///     template's food written raw (`FeederSystem::write_food`), hungry when
+///     it is nothing, as the unit copy sets or clears its fed bit
+///     `0x20000000` from it.
+///
+/// What the template's own food is by then is the feeder's business: this
+/// engine's chain holds templates and runs their food down like anyone's,
+/// and whether the original's feed timer (key `0x1f`, 0x005dbba0) runs on a
+/// template was not read -- the next thing to read if copies arrive hungry.
+/// The facing and the icon string are not modelled for a copy: both are
+/// presentation.
+void carry_template_unit(World& world, ObjectId templ, ObjectId copy) {
+  HeroSystem* heroes = hero_system_of(world);
+  if (heroes == nullptr) return;
+  const UnitRecord* from = heroes->unit(templ);
+  if (from == nullptr) return;
+  const std::int32_t experience = from->experience;
+  heroes->register_unit(world, copy).experience = experience;
+}
+
+void carry_template_hero(World& world, ObjectId templ, ObjectId copy) {
+  HeroSystem* heroes = hero_system_of(world);
+  if (heroes == nullptr) return;
+  const HeroRecord* from = heroes->hero(templ);
+  if (from == nullptr) return;
+  const auto skills = from->skills;
+  const std::int32_t max_army = from->max_army;
+  HeroRecord* to = heroes->hero(copy);
+  if (to == nullptr) to = &heroes->register_hero(world, copy);
+  to->skills = skills;
+  to->max_army = max_army;
+}
+
+void carry_template_food(World& world, ObjectId templ, ObjectId copy) {
+  FeederSystem* feeder = feeder_of(world);
+  if (feeder == nullptr || !feeder->has_food_record(templ)) return;
+  (void)feeder->write_food(copy, feeder->food(templ));
+}
+
+void carry_template_items(World& world, ObjectId templ, ObjectId copy) {
+  HeroSystem* heroes = hero_system_of(world);
+  if (heroes == nullptr) return;
+  ItemStore& store = heroes->items();
+  std::vector<ObjectId> held;
+  (void)store.contents_for(templ, held);
+  for (const ObjectId item : held) {
+    const ItemInstance* instance = store.find(item);
+    if (instance == nullptr) continue;
+    (void)store.add(world, copy, instance->type);
+  }
+}
+
 /// Where a spawned copy goes. `holder` alone is a carrier's holder record --
 /// the copy is put in it (`put_in_holder`) as the template is spawned;
 /// `settlement` set means a settlement's garrison, entered after the spawn.
@@ -765,9 +858,10 @@ struct SpawnDestination {
 /// settlement's holder that is `garrison_enter(..., force)` and the hook, as
 /// `Settlement::AddUnit`'s path fires it; a ship's holder keeps no roster
 /// here, so its copies are put in it and no hook runs (its composite is no
-/// settlement). The original enters the holder before it files the copy under
-/// the template's names and groups; here the names and groups come first,
-/// which no hook a shipped class binds can tell apart.
+/// settlement). Either way the copy is in its holder, and the hook has run,
+/// before it is filed under the template's names and groups, which is the
+/// original's order: an `onenter` hook that asks the copy's groups or looks
+/// the name up finds neither yet.
 HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_view name,
                                   const SpawnDestination& to, bool found = true) {
   ObjListPool& pool = objlist_pool_of(world);
@@ -801,20 +895,41 @@ HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_vi
     HeroSystem* heroes = hero_system_of(world);
     HeroSystem::RegisterHold hold(heroes);
     const bool garrison = to.settlement != kNoSettlement;
-    const ObjectId copy = world.spawn_from_template(templ, garrison ? kNoObject : to.holder);
+    const ObjectId copy =
+        world.spawn_from_template(templ, garrison ? kNoObject : to.holder, /*file=*/!garrison);
     if (copy == kNoObject) continue;
-    if (garrison && garrison_enter(world, to.settlement, copy, /*force=*/true)) {
-      (void)fire_class_hook(world, ClassHook::on_enter, copy, to.settlement_object);
+    // The clone starts the copy as it builds it (0x005d35b0: the start
+    // virtual, then the template's copy onto it): its `idle` and behaviours
+    // are on the scheduler before anything below runs. See `ObjectStarter`.
+    if (ObjectStarter* starter = starter_of(ctx); starter != nullptr) {
+      starter->start_new_objects();
+    }
+    carry_template_unit(world, templ, copy);
+    if (garrison) {
+      // The holder twin enters the copy (0x005d3e10), onenter hook and all,
+      // and only then files it under the template's names and groups.
+      if (garrison_enter(world, to.settlement, copy, /*force=*/true)) {
+        (void)fire_class_hook(world, ClassHook::on_enter, copy, to.settlement_object);
+      }
+      world.file_like_template(templ, copy);
     }
     // Same reason as `Place`: a reinforcement that arrives mid-turn must be in
     // the feeding chain before the sequence that spawned it starts giving it
     // orders and food. See `feed_from_now`.
     feed_from_now(world, copy);
+    carry_template_food(world, templ, copy);
+    // Filed under the template's names and groups (above, in the spawn),
+    // then the template's items (0x00571c20), then onto the spawned list
+    // (0x0041f290).
+    carry_template_items(world, templ, copy);
     items->push_back(copy);
     // The copy's AI register, last (0x005729f0, 0x00572720): the pointer is
     // put back for this one call. Tally and squad, at once.
     hold.release();
     if (heroes != nullptr) heroes->ai_register(world, copy);
+    // A hero's skill points and army cap, which the clone copied: here onto
+    // the record the register has minted (see `carry_template_unit`).
+    carry_template_hero(world, templ, copy);
   }
   return HostOutcome::ok_with(make_objlist_value(list));
 }
@@ -835,9 +950,19 @@ HostOutcome spawn_group_into_list(CallContext& ctx, World& world, std::string_vi
 /// no map declares gets an empty list and runs on, and `find` rather than
 /// `intern` is what keeps this from minting the group as a side effect.
 ///
-/// **Partial:** each copy is also handed to 0x0041f310, which files it on a
-/// pending list behind global gates that no script reads (labelled at
-/// `place_object`), and its behaviours start at the next turn's sweep.
+/// The group map is the table at `[0x009bdac8]` (the one the spawn's second
+/// walk adds the copies to); the named-object table it rebinds names in is
+/// at `[0x009bdad0]`.
+///
+/// Each copy, in the template deque's order: cloned and **started** there and
+/// then (its `idle` and behaviours, `ObjectStarter`), carrying the template's
+/// state (`carry_template_unit`); the template bit cleared and the unit bit
+/// set, the hero bit for a hero; a party member's copy handed to the party
+/// list (0x00572840 -- no template carries the party bit, which nothing sets
+/// at load, so it is never reached); placed at the template's position and
+/// facing; filed under the template's names and groups; given the template's
+/// items; appended to the group's spawned list (0x0041f290), which this hands
+/// back; and registered with the AI, last.
 HostOutcome fn_spawn_group(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SpawnGroup: no world");
@@ -858,7 +983,7 @@ HostOutcome fn_spawn_group(CallContext& ctx) {
 /// is `CVXGroup::Spawn`'s body for one element: test the bound object's
 /// 0x08000000 flag, clone it through the object's own `vtbl + 0x30`, clear the
 /// template bit on the copy, then walk **both** global tables -- the group
-/// table at 0x009bdad0 and the named-object table at 0x009bdac8 -- filing the
+/// table at 0x009bdac8 and the named-object table at 0x009bdad0 -- filing the
 /// copy wherever the template was a member. `World::spawn_from_template` is
 /// already that function, rebinding names included, because `SpawnGroup` needs
 /// the same walk; `docs/formats/map.md` left "whether `SpawnNamed` rebinds too"
@@ -881,14 +1006,23 @@ HostOutcome fn_spawn_named(CallContext& ctx) {
   const ObjectId bound = world->named_objects().object(ctx.arg(0).as_string());
   const ObjectId copy = world->spawn_from_template(bound);
   if (copy == kNoObject) return HostOutcome::ok_with(invalid_object());
+  // Started as the clone builds it, and carrying what the clone copies, as
+  // `spawn_group_into_list`'s copies do (`carry_template_unit`).
+  if (ObjectStarter* starter = starter_of(ctx); starter != nullptr) {
+    starter->start_new_objects();
+  }
+  carry_template_unit(*world, bound, copy);
   // The same reason `spawn_group_into_list` feeds its copies: a reinforcement
   // that arrives mid-turn has to be in the feeding chain before the sequence
   // that spawned it starts giving it orders.
   feed_from_now(*world, copy);
+  carry_template_food(*world, bound, copy);
+  carry_template_items(*world, bound, copy);  // 0x00571c20, after the filing
   // The AI register last, as `SpawnGroup`'s copies have it (0x00571f39).
   if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
     heroes->ai_register(*world, copy);
   }
+  carry_template_hero(*world, bound, copy);
   return HostOutcome::ok_with(Value::object(kTypeObj, copy));
 }
 
@@ -907,17 +1041,26 @@ HostOutcome fn_spawn_named(CallContext& ctx) {
 ///     (`[settlement+0x5e]`), entering each copy into the garrison.
 ///   * **`(str, Obj)`** (0x00576e00, whose own diagnostic calls it
 ///     `SpawnGroupInShip`): the group first, then **the object's holder** --
-///     its `vtbl + 0xe4`, the virtual the `UIHolder` strip asks: a ship's
-///     holder record, the settlement holder of an object that belongs to a
-///     settlement, nothing otherwise. Nothing is *"SpawnGroupInHolder invalid
-///     holder"* and an empty list, **and nothing spawns**. An invalid handle
-///     faults the original; an empty list here.
+///     its `vtbl + 0xe4`, the virtual the `UIHolder` strip asks. Read per
+///     class from the factory's constructors: a ship answers its holder
+///     record (`[ship+0x1dc]`, 0x005c6920); a building, a town hall, an
+///     outpost and the rest of the building line answer their settlement's
+///     holder (`[building+0x148]`, then the settlement's `[+0x5e]`,
+///     0x004d9ee0); a script object, a unit and everything else answer
+///     nothing (0x00746ea0). Nothing is *"SpawnGroupInHolder invalid
+///     holder"* and an empty list, **and nothing spawns**.
+///
+/// A holder record itself is not a script object -- its table has four
+/// entries, nothing at `+0xe4` -- so it is never its own answer, and no
+/// script can hold its handle anyway; here it takes the "nothing" path. An
+/// invalid handle, or a building in no settlement, faults the original (the
+/// first has no table, the second reads through the null settlement); both
+/// answer an empty list here, a labelled departure for a fault.
 ///
 /// The `Obj` form put the copies in the *ship object itself* for a while, so
 /// `GetUnitsOnBoard` (which reads the holder at ship + 1) never saw them --
 /// `4_Great_Battles_Egypt` seq2 hands the boarded army to player 1 that way --
-/// and it spawned into any object at all. A holder object passed directly
-/// answers itself here; that arm is inferred, and no shipped site takes it.
+/// and it spawned into any object at all.
 HostOutcome fn_spawn_group_in_holder(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("SpawnGroupInHolder: no world");
@@ -957,17 +1100,31 @@ HostOutcome fn_spawn_group_in_holder(CallContext& ctx) {
     to.holder = holder->id;
     return spawn_group_into_list(ctx, *world, group, to);
   }
-  if (target->internal == InternalKind::holder) {
-    SpawnDestination to;
-    to.holder = target->id;
-    return spawn_group_into_list(ctx, *world, group, to);
-  }
   if (target->settlement != kNoObject && economy != nullptr) {
     if (const Settlement* s = economy->settlements().for_object(target->settlement); s != nullptr) {
       return into_settlement(*s);
     }
   }
   return nowhere();
+}
+
+/// Whether the class factory builds an object for a native class at all.
+///
+/// `Place` and `_PlaceEx` create through 0x005a66a0, which looks the class up
+/// and hands it to the factory 0x0059dcd0. The factory compares the class's
+/// `cpp_class` string **exactly** against a fixed list -- `CVXScriptObj` and
+/// `CVXUnit` first, then `CVXBuilding`, `CVXBarrack`, `CVXTownHall`, `CVXHero`,
+/// `CVXDruid`, `CVXGhost`, `CVXWagon`, `CVXCatapult`, `CVXItemHolder`,
+/// `CVXArea`, `CVXAdvArea`, `CVXSacrifice`, `CVXProtectiveSacrifice`,
+/// `CVXAreaEffect`, `CVXDecor`, `CVXFeedback`, `CVXMapObj`, `CVXGate`,
+/// `CVXTavern`, `CVXTeleport`, `CVXOutpost`, `CVXShip`, `CVXFlyingUnit` -- and
+/// for anything else constructs nothing and answers "bad parameters". The out
+/// pointer stays null, so `Place` prints its class diagnostic and hands back
+/// the invalid handle, and `_PlaceEx` its `PlaceEx cannot create object`, and
+/// **nothing is placed**. Of this engine's native classes, `CVXCatapultShot`
+/// and `CVXDestLock` are the two the list leaves out.
+[[nodiscard]] bool factory_constructs(NativeClass native) noexcept {
+  return native != NativeClass::catapult_shot && native != NativeClass::dest_lock;
 }
 
 /// Whether `Place`'s cast to `CVXScriptObj` succeeds for a class.
@@ -978,56 +1135,42 @@ HostOutcome fn_spawn_group_in_holder(CallContext& ctx) {
 /// observable things and nothing else: on a hit the object gets `SetPlayer`
 /// and the script gets its handle back; on a miss the object is placed all the
 /// same, no owner is written, and the script gets the invalid handle --
-/// `_PlaceEx` logging `MapObj created (%s)` (0x007c8f88) as it goes. That
-/// message is not an error. It is the executable naming the excluded set.
+/// `_PlaceEx` logging `MapObj created (%s)` (0x007c8f88) as it goes.
+///
+/// **Read from the image, not inferred.** The cast is each object's cast
+/// virtual, reached through its virtual base (slot 1 of the virtual base's
+/// table): it compares the asked-for class id with its own and otherwise
+/// tail-calls its parent's. Walking that chain from the virtual-base table
+/// each factory constructor writes gives, for every type the factory builds:
+///
+/// | constructed as | its cast chain |
+/// |---|---|
+/// | `CVXUnit` and its six (`CVXHero`, `CVXDruid`, `CVXGhost`, `CVXWagon`, `CVXShip`, `CVXFlyingUnit`) | own id, `CVXUnit`, `CVXScriptObj`, `CVXMapObj`, `CVXScriptable` |
+/// | `CVXBuilding` and its seven (`CVXBarrack`, `CVXTownHall`, `CVXCatapult`, `CVXGate`, `CVXTavern`, `CVXTeleport`, `CVXOutpost`) | own id, `CVXBuilding`, `CVXScriptObj`, ... |
+/// | `CVXItemHolder`, `CVXArea` (and `CVXAdvArea`), `CVXSacrifice` (and `CVXProtectiveSacrifice`), `CVXAreaEffect`, `CVXScriptObj` | own id, `CVXScriptObj`, ... |
+/// | `CVXDecor` (built as a `CVXDecorObj`, 0x005fcd30) | `CVXDecorObj`, `CVXMapObj`, `CVXScriptable` |
+/// | `CVXFeedback` (0x005180d0) | `CVXFeedback`, `CVXMapObj`, `CVXScriptable` |
+/// | `CVXMapObj` (0x0053d4d0) | `CVXMapObj`, `CVXScriptable` |
+///
+/// So exactly three fail the cast: `CVXDecor`, `CVXFeedback` and `CVXMapObj`.
+/// That agrees with the corpus measurement this function used to rest on --
+/// of the 173 call sites naming a class literally, nought of nineteen bare
+/// `CVXDecor` sites keeps what `Place` hands back, against 46 of 46 elsewhere
+/// -- and it settles the classes no shipped site names: a building, a gate,
+/// an item holder or an area effect is a script object, and a feedback is
+/// not. (The factory builds a feedback down a branch of its own -- started,
+/// set at (100, 100), its animation begun -- and `Place` then moves it to
+/// the point asked for, which is the non-script branch here.)
 ///
 /// **The obvious spelling of this test is wrong here.** `NativeClass`'s parent
 /// table is the shipped data's `cpp_class` hierarchy from docs/data-model.md,
 /// in which `script_obj` and `unit` are *siblings* under `decor`; `gbr.exe`'s
-/// own C++ inheritance is not that tree, and
+/// own C++ inheritance is the table above, and
 /// `native_class_is_a(native, script_obj)` would refuse every unit the corpus
 /// places.
-///
-/// The corpus settles which way round it is, and the control is the half that
-/// makes it a measurement. Of the 173 call sites naming a class literally,
-/// resolved through the class graph to a `cpp_class`:
-///
-/// | `cpp_class`     | handle used | handle discarded |
-/// |-----------------|-------------|------------------|
-/// | `CVXUnit`       |          32 |                0 |
-/// | `CVXGhost`      |           7 |                0 |
-/// | `CVXHero`       |           1 |                0 |
-/// | `CVXFlyingUnit` |           1 |                0 |
-/// | `CVXWagon`      |           1 |                0 |
-/// | `CVXAreaEffect` |           1 |                0 |
-/// | `CVXScriptObj`  |           3 |               94 |
-/// | `CVXDecor`      |           0 |               19 |
-///
-/// **Nought of nineteen** bare-`CVXDecor` sites keeps what `Place` hands back,
-/// against 46 of 46 elsewhere that do -- and a script that assigns the result
-/// of a call it knows returns nothing is not a thing anybody writes. The 19 are
-/// `ChimneySmoke`, `Mist`, the blacksmith and temple fires, the barrack horses:
-/// animated scenery, which is what `CVXDecor` is the base of.
-///
-/// So the excluded set is read as **bare `CVXDecor` and `CVXMapObj`**: the
-/// executable's own diagnostic names the second, no class-id global for
-/// `CVXDecor` exists anywhere in the image -- nothing ever casts *to* it, which
-/// is what a root looks like -- and `CVXMapObj` is the one the class table
-/// already describes as drawn but not simulated.
-///
-/// **Labelled inference, and here is the alternative.** No shipped call site
-/// names a `CVXBuilding`, `CVXGate`, `CVXItemHolder`, `CVXFeedback` or
-/// `CVXCatapultShot` class, so the corpus cannot say which side those fall.
-/// This reads them as script objects, because every one of them declares an
-/// `idle` method in the class graph and being scriptable is what the name says.
-/// The competing reading -- that the subtree is only `CVXScriptObj` and
-/// `CVXUnit` and their descendants -- explains the same table, and the way to
-/// separate them is `CVXUnit`'s `Cast` chain in the image, which has not been
-/// walked. Erring towards the handle is deliberate: a wrong sentinel kills a
-/// script that assigns it, while a wrong handle places an object the original
-/// places too.
 [[nodiscard]] bool places_as_script_object(NativeClass native) noexcept {
-  return native != NativeClass::decor && native != NativeClass::map_obj;
+  return native != NativeClass::decor && native != NativeClass::map_obj &&
+         native != NativeClass::feedback;
 }
 
 /// The half `Place` and `_PlaceEx` do the same way: create, own, position.
@@ -1061,9 +1204,14 @@ void feed_from_now(World& world, ObjectId id) {
 }
 
 HostOutcome place_object(World& world, ClassIndex class_index, NativeClass native, Point at,
-                         std::int32_t player) {
+                         std::int32_t player, ObjectStarter* starter = nullptr) {
+  if (!factory_constructs(native)) return HostOutcome::ok_with(invalid_object());
   const ObjectId id = world.spawn_of_class(class_index);
   if (id == kNoObject) return HostOutcome::ok_with(invalid_object());
+  // The factory starts what it builds before it hands it back (0x0059dd59,
+  // the start virtual): the `idle` and the behaviours, ahead of the owner and
+  // the position below. See `ObjectStarter`.
+  if (starter != nullptr) starter->start_new_objects();
 
   const bool scriptable = places_as_script_object(native);
   if (scriptable) world.set_owner(id, static_cast<PlayerId>(player - 1));
@@ -1142,7 +1290,7 @@ HostOutcome fn_place(CallContext& ctx) {
   const Result<NativeClass> native = native_class_from_name(graph->at(class_index).cpp_class);
   if (!native) return HostOutcome::ok_with(invalid_object());
 
-  return place_object(*world, class_index, *native, at, player);
+  return place_object(*world, class_index, *native, at, player, starter_of(ctx));
 }
 
 /// `PlaceCatapult(x, y, player, race)` -- 1 site, and it was the sole blocker
@@ -1192,7 +1340,8 @@ HostOutcome fn_place_catapult(CallContext& ctx) {
   if (class_index == kNoClass) return HostOutcome::ok_with(invalid_object());
 
   const Point at{ctx.arg(0).as_integer(), ctx.arg(1).as_integer()};
-  const ObjectId id = place_catapult(*world, class_index, at, ctx.arg(2).as_integer());
+  const ObjectId id =
+      place_catapult(*world, class_index, at, ctx.arg(2).as_integer(), starter_of(ctx));
   return HostOutcome::ok_with(id == kNoObject ? invalid_object() : object_value(id));
 }
 
@@ -1482,7 +1631,8 @@ HostOutcome fn_place_ex(CallContext& ctx) {
   if (at.y < low) at.y = low;
   if (at.y > high) at.y = high;
 
-  return place_object(*world, class_index, *native, at, ctx.arg(3).as_integer());
+  return place_object(*world, class_index, *native, at, ctx.arg(3).as_integer(),
+                      starter_of(ctx));
 }
 
 /// `SetNoAIFlag(ObjList, bool)` -- 121 sites -- and `Unit::SetNoAIFlag(bool)`
@@ -6713,13 +6863,14 @@ std::string_view catapult_class_for_race(std::int32_t race) noexcept {
   return kByRace[race];
 }
 
-ObjectId place_catapult(World& world, ClassIndex class_index, Point at, std::int32_t player) {
+ObjectId place_catapult(World& world, ClassIndex class_index, Point at, std::int32_t player,
+                        ObjectStarter* starter) {
   const ClassGraph* graph = world.class_graph();
   if (graph == nullptr || class_index == kNoClass) return kNoObject;
   const Result<NativeClass> native = native_class_from_name(graph->at(class_index).cpp_class);
   if (!native) return kNoObject;
 
-  const HostOutcome placed = place_object(world, class_index, *native, at, player);
+  const HostOutcome placed = place_object(world, class_index, *native, at, player, starter);
   if (placed.status != script::HostStatus::ok || !placed.value.is_object() ||
       placed.value.as_object().type != kTypeObj) {
     return kNoObject;

@@ -103,6 +103,33 @@ class ScriptLibrary {
   virtual std::uint32_t chunk_for(std::string_view path) = 0;
 };
 
+/// A way for a host function to start the objects it has just constructed.
+///
+/// **What the original does at construction.** Every factory path in
+/// `gbr.exe` -- the class factory 0x0059dcd0 that `Place` and `_PlaceEx` reach
+/// through 0x005a66a0, and every unit class's clone virtual (`vtbl+0x30`,
+/// 0x005d35b0 for `CVXUnit`) that `SpawnGroup`'s spawn calls on a template --
+/// calls the new object's start virtual (`vtbl+0x2c`, 0x005aec40) before it
+/// hands the object back: the object's `idle` is pushed and started, and its
+/// class behaviours are spawned into slots 1.. -- inside the entry point, not
+/// a turn later.
+///
+/// The session's sweep (`GameSession::start_object_scripts`) is what starts
+/// objects here, against a watermark of object ids; this seam lets an entry
+/// point that constructs run that sweep at the moment the original's start
+/// virtual runs. Everything at or above the watermark is started, in id order,
+/// and the watermark moves past it, so nothing is started twice.
+///
+/// Null is a real case -- a test that builds a world by hand has no session --
+/// and a session that never asked for object scripts starts nothing here
+/// either.
+class ObjectStarter {
+ public:
+  virtual ~ObjectStarter() = default;
+  /// Start every object constructed since the last start, in id order.
+  virtual void start_new_objects() = 0;
+};
+
 /// Everything a host function needs that it cannot reach through the world.
 struct HostContext {
   World* world = nullptr;
@@ -144,6 +171,10 @@ struct HostContext {
   /// `ScriptLibrary` above for why this is here rather than at the session
   /// layer, and why null must degrade rather than fail.
   ScriptLibrary* library = nullptr;
+
+  /// Where a host function that constructs objects starts them, or null. See
+  /// `ObjectStarter` above.
+  ObjectStarter* starter = nullptr;
 
   /// The `<cmd name>` whose tooltip is being built, or empty.
   ///

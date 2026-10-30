@@ -91,7 +91,7 @@ constexpr std::size_t kSavedGaikaNodeBytes = 32;
 /// it. The systems are members rather than allocations because `World` does not
 /// own them -- deliberately, so that four domains' allocation does not end up
 /// in one vector -- which makes their lifetime this class's problem.
-struct GameSession::Impl : ScriptLibrary, ClassHookRunner {
+struct GameSession::Impl : ScriptLibrary, ClassHookRunner, ObjectStarter {
   const script::HostRegistry* registry = nullptr;
 
   World world;
@@ -219,6 +219,16 @@ struct GameSession::Impl : ScriptLibrary, ClassHookRunner {
   /// scheduler at once, which is what makes it the implementation rather than
   /// the seam. See `sim/hooks.hpp`.
   bool run_class_hook(ClassHook hook, ObjectId subject, ObjectId argument) override;
+
+  /// The sweep `GameSession::start_object_scripts` runs: every object at or
+  /// above the watermark, in id order, its `idle` then its behaviours, and
+  /// the watermark moved past them. Returns how many scripts started.
+  std::size_t sweep_object_scripts();
+  /// And the whole of `ObjectStarter`: the sweep, at the moment an entry point
+  /// constructs, for a session that runs object scripts at all.
+  void start_new_objects() override {
+    if (object_scripts_wanted) (void)sweep_object_scripts();
+  }
 
   void collect_traps(const script::RunReport& report);
   void seed_economy(const MapObjectList* map, const World::PopulateReport* loaded);
@@ -769,6 +779,9 @@ Result<std::unique_ptr<GameSession>> GameSession::create(const script::HostRegis
   // The compile-on-demand seam. Only `RunAIHelper` uses it, and only because
   // its file name comes from a running script rather than from a manifest.
   impl.context.library = &impl;
+  // And the start an entry point that constructs runs at once (`Place`,
+  // `SpawnGroup`): the original's start virtual is part of construction.
+  impl.context.starter = &impl;
 
   impl.scheduler.set_registry(&registry);
   impl.scheduler.set_host(&impl.host);
@@ -1138,8 +1151,12 @@ std::size_t GameSession::start_bonuses(std::span<const std::string> scripts) {
 }
 
 std::size_t GameSession::start_object_scripts() {
-  Impl& impl = *impl_;
-  impl.object_scripts_wanted = true;
+  impl_->object_scripts_wanted = true;
+  return impl_->sweep_object_scripts();
+}
+
+std::size_t GameSession::Impl::sweep_object_scripts() {
+  Impl& impl = *this;
   if (impl.classes == nullptr || impl.scripts == nullptr) return 0;
 
   // Everything below the watermark has already been offered its scripts, so a
@@ -1284,10 +1301,11 @@ void GameSession::advance(std::uint64_t turns, std::int32_t turn_length) {
     // by the same slice of game time, and the scheduler's clock is the one
     // `Sleep` counts against.
     impl.world.advance(turn_length);
-    // Anything spawned since the last turn gets its class's `idle` method now,
-    // before it is asked to do anything. `SpawnGroup` is what makes this more
-    // than a load-time concern: a mission's reinforcements arrive mid-match and
-    // a unit with no idle script is a unit that stands still forever.
+    // Anything made since the last turn and not yet started gets its class's
+    // `idle` method now, before it is asked to do anything. An entry point
+    // that constructs -- `Place`, `SpawnGroup` -- starts its objects inside
+    // the call, as the original's start virtual does (`ObjectStarter`); what
+    // is left here is what the systems made during the turn.
     if (impl.object_scripts_wanted) start_object_scripts();
     // Before the scripts run, so nothing observes a selection holding an id
     // that this turn's combat despawned.

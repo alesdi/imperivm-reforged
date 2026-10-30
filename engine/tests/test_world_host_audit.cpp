@@ -18,6 +18,7 @@
 #include "imperivm/core/sim/settlement.hpp"
 #include "imperivm/core/sim/globals.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/hooks.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/objlist.hpp"
@@ -646,6 +647,53 @@ TEST(audit_spawn_group_in_holder_enters_the_garrison_roster_past_its_cap) {
   REQUIRE(s != nullptr);
   CHECK(s->holder.contains(copies[0]));
   CHECK(h.world.find(copies[0])->state.holder == s->holder.object);
+}
+
+namespace {
+
+/// Notes, at each `onenter`, whether the copy was in group `G` yet.
+struct EnterProbe final : ClassHookRunner {
+  World* world = nullptr;
+  std::vector<bool> grouped_then;
+  bool run_class_hook(ClassHook hook, ObjectId subject, ObjectId) override {
+    if (hook != ClassHook::on_enter) return false;
+    const std::int32_t g = world->groups().find("G");
+    grouped_then.push_back(g != GroupTable::kNoGroup && world->groups().contains(g, subject));
+    return true;
+  }
+};
+
+}  // namespace
+
+TEST(audit_spawn_group_in_holder_enters_before_it_files_the_copy) {
+  // 0x005724a0: the holder entry 0x005d3e10 (its `onenter` hook among it)
+  // comes before the walks of the named-object and group tables, so the hook
+  // finds the copy in none of the template's groups yet.
+  Host h;
+  EconomySystem economy;
+  REQUIRE(h.world.add_system(&economy));
+  economy.start(h.world);
+  SettlementInit init;
+  init.owner = 0;
+  init.kind = SettlementKind::stronghold;
+  init.name = "S_T";
+  init.max_units = 4;
+  REQUIRE(economy.create(h.world, init) != kNoSettlement);
+  EnterProbe probe;
+  probe.world = &h.world;
+  h.world.set_hook_runner(&probe);
+
+  const ObjectId templ = h.unit(0, Point{300, 300});
+  h.world.mutable_state(templ)->flags.unspawned = true;
+  h.world.groups().add(h.world.group_index("G"), templ);
+
+  const script::HostOutcome out = h.free("SpawnGroupInHolder", {str("G"), str("S_T")});
+  const std::span<const ObjectId> copies = objlist_pool_of(h.world).items(objlist_of(out.value));
+  REQUIRE(copies.size() == 1);
+  REQUIRE(probe.grouped_then.size() == 1);
+  CHECK(!probe.grouped_then[0]);
+  CHECK(h.world.groups().contains(h.world.groups().find("G"), copies[0]));
+  h.world.set_hook_runner(nullptr);
 }
 
 TEST(audit_point_set_answers_the_point_and_lengths_wrap_at_32_bits) {

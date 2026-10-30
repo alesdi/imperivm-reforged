@@ -1111,9 +1111,24 @@ class World {
   /// link. The template keeps its own position either way.
   ///
   /// **The copy does not get its idle script here.** Starting scripts needs the
-  /// class graph and the chunk library, which are `GameSession`'s; it sweeps
-  /// for objects with no script at the top of each turn.
-  ObjectId spawn_from_template(ObjectId templ, ObjectId holder = kNoObject);
+  /// class graph and the chunk library, which are `GameSession`'s: the spawn
+  /// entry points start the copy through `HostContext::starter` the moment it
+  /// exists, as the original's clone does, and the session sweeps for
+  /// anything else at the top of each turn. Nor does it carry what the
+  /// systems keep of the template -- experience, a hero's skills, the items:
+  /// `carry_template_unit` and its neighbours in `sim/world_host.cpp` do that
+  /// for the entry points.
+  ///
+  /// `file` false leaves steps 4 and 5 to the caller's `file_like_template`:
+  /// the holder twin (0x005724a0) enters the copy into its holder, onenter
+  /// hook and all, *before* it files it under the template's names and
+  /// groups, and the garrison entry is the caller's.
+  ObjectId spawn_from_template(ObjectId templ, ObjectId holder = kNoObject, bool file = true);
+
+  /// Steps 4 and 5 of `spawn_from_template`: every name bound to `templ`
+  /// rebound to `copy` (the table at `0x009bdad0`), then `copy` added to every
+  /// group whose template half holds `templ` (`0x009bdac8`).
+  void file_like_template(ObjectId templ, ObjectId copy);
 
   /// Mint one object of `class_index`, the way a *script* spawns rather than
   /// the way a map does.
