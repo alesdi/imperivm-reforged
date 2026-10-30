@@ -553,6 +553,12 @@ TEST(objlist_remove_and_removelist_take_one_occurrence_per_handle) {
   CHECK(f.call(script::CallKind::member, "Remove", {list, f.obj(stranger)}).status ==
         script::HostStatus::ok);
   CHECK(objlist_pool_of(f.world).items(objlist_of(list)).size() == 2);
+
+  // `ol.RemoveList(ol)`: the walk reads the list it erases from, and each
+  // step finds and erases the front, so the list empties -- duplicates too.
+  *objlist_pool_of(f.world).mutable_items(objlist_of(list)) = {a, b, a, b, a};
+  f.call(script::CallKind::member, "RemoveList", {list, list});
+  CHECK(objlist_pool_of(f.world).items(objlist_of(list)).empty());
 }
 
 TEST(objlist_remove_takes_an_object_or_a_list) {

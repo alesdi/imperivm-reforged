@@ -324,10 +324,12 @@ std::size_t start_behaviors(script::Scheduler& scheduler, ScriptLibrary& library
 std::size_t stop_behaviors(script::Scheduler& scheduler, ScriptLibrary& library,
                            const World& world, ObjectId id, ClassIndex class_index);
 
-/// How many objects of a class `player` owns: `Count(idPlayer, class)`'s
-/// answer, shared with `CheckUEnabled`, which asks the original's same
-/// per-player class-count map (0x004441e0 on `[record+0x8c]`) for the same
-/// number. `player` is a `PlayerId`; `kNoPlayer` counts nothing.
+/// What `player`'s class tally holds for the class named exactly so (by id):
+/// `Count(idPlayer, class)`'s answer, shared with `CheckUEnabled` and the
+/// `GetPlayerUnits` gate, which ask the original's same per-player map
+/// (0x004441e0 on `[record+0x8c]`). Not a census: see
+/// `docs/formats/class-tally.md`. `player` is a `PlayerId`; `kNoPlayer`
+/// answers 0.
 [[nodiscard]] std::int32_t player_class_count(World& world, PlayerId player,
                                               std::string_view class_name);
 

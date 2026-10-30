@@ -425,6 +425,24 @@ struct ObjectFlags {
   /// back on a unit, and gates the mirror of the target onto the towers
   /// (`SetTarget`, `ClearTarget`, `ClearTowerTarget`). **Hashed and saved.**
   bool has_towers = false;
+  /// `Unit::ForceIdle`'s flag, the int at `[unit+0x1b8]`: `ForceIdle`
+  /// (0x005d88b0) and `Ship::Idle` (0x005c6ea0) write 1, and its one reader,
+  /// the idle activity (0x005d2ca0), plays its fidget at the first draw that
+  /// is allowed to draw whatever the draw says and drops the flag there. A
+  /// flag the activity never got to draw for -- a budget shorter than the
+  /// animation, a unit walking on another slot -- stays up for the next idle.
+  /// `docs/formats/idle.md`. **Hashed and saved**: it decides when a fidget
+  /// starts, which decides when the script wakes.
+  bool force_idle = false;
+  /// The original's squad handle `[unit+0x174]` read as *registered with
+  /// the owner's AI*: raised where the AI's register (0x0041f310 ->
+  /// 0x00447200) counts the unit in its owner's class tally, lowered where
+  /// the unregister (0x0041eee0 -> 0x004448a0) takes it back out. The
+  /// engine's squad membership stands in for the handle elsewhere; this is
+  /// kept apart because the engine files some units nowhere that the
+  /// original files (a unit born in a holder). `docs/formats/class-tally.md`.
+  /// **Hashed and saved.**
+  bool ai_registered = false;
 };
 
 /// The common header every simulated object carries.

@@ -124,6 +124,7 @@
 #include <cstdint>
 
 #include "imperivm/core/game/entity.hpp"
+#include "imperivm/core/game/registry.hpp"
 #include "imperivm/core/script/host.hpp"
 
 namespace imperivm::core::sim {
@@ -155,5 +156,25 @@ std::size_t register_anim_host(script::HostRegistry& registry);
 
 /// The table's size, so a caller can assert against it.
 [[nodiscard]] std::size_t anim_host_entry_count() noexcept;
+
+class World;
+struct WorldObject;
+
+/// What is left, at the running script's millisecond, of a one-shot animation
+/// the object is playing -- one started to run once and hand control back
+/// (`AnimRepeat::hold`), as an attack, a death or a fidget is -- or 0 for
+/// none. The original's animation timer (id 0x1b, armed by `StartAnimation`,
+/// 0x0053e6c0) is pending for exactly that long, and the idle activity's
+/// setter (0x005a7680) runs the activity at once only when it is not
+/// (0x0053cfc0); see `docs/formats/idle.md`.
+[[nodiscard]] std::int32_t one_shot_time_left(const script::CallContext& ctx, const World& world,
+                                              const WorldObject& slot);
+
+/// Start animation `anim_slot` on `id`, held, **at the running script's
+/// millisecond**: the cursor is brought forward by the part of the turn the
+/// world has already lived through, as the animation entry points do. False
+/// when the entity declares no such animation.
+bool start_anim_at_script_time(const script::CallContext& ctx, World& world, core::ObjectId id,
+                               std::int32_t anim_slot);
 
 }  // namespace imperivm::core::sim

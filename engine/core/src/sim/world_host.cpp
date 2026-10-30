@@ -1040,13 +1040,17 @@ HostOutcome place_object(World& world, ClassIndex class_index, NativeClass nativ
   // anything carrying the spawn-template bit, corroborating bit 27 from a call
   // site that has nothing to do with groups.
   //
-  // **This engine has no counterpart and does not fake one.** Its AI runs a
-  // player's `Main.vs` rather than keeping a roster of objects, and what a
-  // freshly placed unit actually needs -- its class's `idle` method -- it gets
-  // from `GameSession`'s per-turn sweep for objects with no script, the same
-  // sweep a `SpawnGroup` copy relies on. The divergence is that nothing here
-  // reads the template bit at this point, and nothing needs to: a template is
-  // never the thing `Place` just created.
+  // **Its tally half is here, at once** (`HeroSystem::ai_register`): the
+  // owner's class tally counts the unit before `Place` returns, so
+  // `BARRACK_TRAIN.VS`'s `Count(.player, carCmdParam)` on the next lines
+  // counts the recruit it has just placed. The squad half -- filing the unit
+  // -- is the per-turn sweep's (`enrol_new_units_in_squads`), which skips the
+  // tally for a unit already registered here.
+  if (const WorldObject* placed = world.find(id); placed != nullptr && placed->state.flags.is_unit) {
+    if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+      heroes->ai_register(world, id);
+    }
+  }
   return HostOutcome::ok_with(object_value(id));
 }
 
@@ -1556,44 +1560,50 @@ HostOutcome fn_set_op(CallContext& ctx) {
   return HostOutcome::ok_with(query_value(world->intern_query(spec)));
 }
 
-/// `Count(player, "class")` -- how many objects of a class a player owns.
+/// `Count(player, "class")` -- what the player's class tally holds for the
+/// class.
 ///
 /// The one free function here that answers immediately rather than minting a
 /// query object. It has to: the corpus assigns its result to an `int`, so no
 /// handle escapes, and minting a query per call would leak a handle per call
-/// and shift every later allocation. The dumps show no query type that would
-/// correspond to it.
+/// and shift every later allocation.
 ///
 /// **The original does not count; it reads a counter.** 0x00422300 takes the
 /// player record at `player - 1` (guarded only by `player - 1 < 16`, so 0 and
-/// below read a record that is not there) and asks 0x004441e0, which looks the
-/// class-name string up in a map the record keeps (0x00444030, tree header at
-/// `record+0x1c`) and answers the number stored in the node (`+0x10`), or 0
-/// when the name has no node. What fills that map -- whether it keeps a count
-/// for each class and each of its ancestors, and whether a unit leaves it on
-/// death or on removal -- was not traced. This engine counts the player's live
-/// objects that are the class or descend from it, which is the same number
-/// exactly when the map is kept that way.
+/// below read a record that is not there; answered 0 here) and asks 0x004441e0
+/// on the record's squad holder (`[record+0x8c]`), which looks the class-name
+/// string up in the holder's map (0x00444030) and answers the number in the
+/// node, or 0 when the name has no node. The map is the AI's class tally:
+/// the register (0x0041f310 -> 0x00447200) adds one for the unit's class and
+/// each ancestor, the unregister (0x0041eee0 -> 0x004448a0) takes one away,
+/// both on the owner of the moment. `HeroSystem::class_tally` is it, and
+/// `docs/formats/class-tally.md` says where it parts from a census: a unit
+/// counts from its registration (at once for `Place`, at the turn's sweep
+/// for other births) to its death, inside a holder as on the map, and a unit
+/// that changed hands stays in its first owner's count and leaves its new
+/// owner's when it dies.
+///
+/// The name is looked up as a class **id**, exactly: the map is keyed on the
+/// class's own name, so an `altid` has no node.
 HostOutcome fn_count(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("Count: no world");
   const PlayerId player = player_arg(ctx.arg(0));
-  // See `fn_class_player_objs`: `kNoPlayer` here would mean *every* owner.
-  if (player == kNoPlayer) return HostOutcome::ok_with(Value::integer(0));
-  std::vector<ObjectId> found;
-  const std::size_t n = world->objects_of_class_for_player(filter_arg(*world, ctx.arg(1)), player,
-                                                           Point{}, 0, found);
-  return HostOutcome::ok_with(Value::integer(static_cast<std::int32_t>(n)));
+  if (player == kNoPlayer || !ctx.arg(1).is_string()) return HostOutcome::ok_with(Value::integer(0));
+  return HostOutcome::ok_with(
+      Value::integer(player_class_count(*world, player, ctx.arg(1).as_string())));
 }
 
 }  // namespace
 
 std::int32_t player_class_count(World& world, PlayerId player, std::string_view class_name) {
   if (player == kNoPlayer) return 0;
-  std::vector<ObjectId> found;
-  const std::size_t n = world.objects_of_class_for_player(
-      ClassFilter::parse(class_name, world.class_graph()), player, Point{}, 0, found);
-  return static_cast<std::int32_t>(n);
+  const HeroSystem* heroes = hero_system_of(world);
+  const ClassGraph* graph = world.class_graph();
+  if (heroes == nullptr || graph == nullptr) return 0;
+  const ClassIndex cls = graph->find(class_name);
+  if (cls == kNoClass) return 0;
+  return heroes->class_tally(player, cls);
 }
 
 namespace {
@@ -3469,9 +3479,20 @@ HostOutcome m_mutate(CallContext& ctx) {
     (void)start_behaviors(*ctx.scheduler, *host->library, *world, self);
   }
 
+  // The AI's half (0x005df1e4 and 0x005df287): the old object is taken out
+  // of its owner's class tally and its squad (0x004448a0), and the new one is
+  // put into both (0x00447200: the tally, then `AddToSquad` towards the node
+  // under it). Neither runs for a unit carrying `SetNoselectFlag`'s bit; the
+  // squad leave here does, as it always has. `docs/formats/class-tally.md`.
   if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) {
     const SquadKey key = heroes->squads().squad_of(self);
     if (key.valid()) (void)heroes->squads().leave(*world, key, self);
+    const WorldObject* now = world->find(self);
+    if (now != nullptr && !now->state.flags.noselect && now->state.owner != kNoPlayer) {
+      heroes->ai_mutate(*world, self, from);
+      const GaikaId under = world->gaika().at(world->lsa(), unit_pos_rh(*world, self));
+      (void)add_to_squad(*world, *heroes, self, under);
+    }
   }
   if (CommandSystem* commands = command_system(*world); commands != nullptr) {
     (void)commands->clear_commands(*world, self);

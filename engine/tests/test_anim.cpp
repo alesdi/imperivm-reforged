@@ -892,3 +892,158 @@ TEST(idle_draws_for_a_fidget_every_hundred_ms_and_spends_its_whole_budget) {
   CHECK(held.suspend_for == 1000);
   CHECK(b.world.rng().state() == before);
 }
+
+namespace {
+
+/// One `Idle(ms)` call on `unit` through the registry, first run or re-entry.
+struct IdleCall {
+  AnimBench& b;
+  std::vector<script::Value> args;
+  std::int32_t word = 0;
+  script::CallContext ctx;
+  script::HostFn fn = nullptr;
+
+  IdleCall(AnimBench& bench, ObjectId unit, std::int32_t ms) : b(bench) {
+    args = {script::Value::object(kTypeObj, unit), script::Value::integer(ms)};
+    ctx.arguments = args;
+    ctx.user = &b.context;
+    ctx.name = "Idle";
+    ctx.kind = script::CallKind::member;
+    ctx.scratch = &word;
+    const std::uint32_t index = b.registry.find(script::CallKind::member, "Idle", 1);
+    REQUIRE(index != script::kUnresolvedHost);
+    fn = b.registry.entry(index).fn;
+  }
+
+  script::HostOutcome run() {
+    const script::HostOutcome out = fn(ctx);
+    ctx.first_call = false;
+    return out;
+  }
+};
+
+/// The first `t` at which `rand(1, 15)` says 1 from `seed`, or -1 within
+/// `budget` less the 264 ms fidget.
+std::int64_t first_fidget(std::uint32_t seed, std::int64_t budget) {
+  Rng probe(seed);
+  for (std::int64_t t = 0; t <= budget - 264; t += 100) {
+    if (probe.between(1, 15) == 1) return t;
+  }
+  return -1;
+}
+
+}  // namespace
+
+/// **`ForceIdle`'s flag is kept on the unit and spent by the next draw**
+/// (0x005d88b0 writes `[unit+0x1b8]`; 0x005d2ca0 reads it). With it up, the
+/// first draw plays the fidget at once whatever it says -- and is still
+/// drawn -- and the flag drops. A seed whose first draw is not 1 tells the
+/// two apart: unforced, that idle waits past `t = 0`.
+TEST(force_idle_keeps_its_flag_until_a_draw_spends_it) {
+  // A seed whose first `rand(1, 15)` is not 1.
+  std::uint32_t seed = 1;
+  while (first_fidget(seed, 1000) == 0) ++seed;
+
+  AnimBench b;
+  CommandSystem commands;
+  REQUIRE(b.world.add_system(&commands));
+  const ObjectId unit = b.spawn();
+  CHECK(b.call("ForceIdle", 0, {AnimBench::obj(unit)}).status == script::HostStatus::ok);
+  CHECK(b.world.find(unit)->state.flags.force_idle);
+
+  b.world.rng().seed(seed);
+  Rng probe(seed);
+  (void)probe.between(1, 15);
+  IdleCall idle(b, unit, 1000);
+  const script::HostOutcome first = idle.run();
+  CHECK(first.status == script::HostStatus::retry);
+  // The fidget at `t = 0`: wait its length; one draw spent; the flag down.
+  CHECK(first.suspend_for == 264);
+  CHECK(b.world.rng().state() == probe.state());
+  CHECK(!b.world.find(unit)->state.flags.force_idle);
+  CHECK(b.world.find(unit)->object->anim.anim_slot == 13);
+
+  // A budget shorter than the fidget draws nothing, and the flag waits.
+  const ObjectId other = b.spawn();
+  CHECK(b.call("ForceIdle", 0, {AnimBench::obj(other)}).status == script::HostStatus::ok);
+  const std::uint32_t before = b.world.rng().state();
+  IdleCall brief(b, other, 200);
+  const script::HostOutcome held = brief.run();
+  CHECK(held.status == script::HostStatus::retry);
+  CHECK(held.suspend_for == 200);
+  CHECK(b.world.rng().state() == before);
+  CHECK(b.world.find(other)->state.flags.force_idle);
+}
+
+/// **The first step waits out a one-shot animation already in flight.** The
+/// activity setter (0x005a7680) runs the activity at once only when the
+/// unit's animation timer is not pending (0x0053cfc0); otherwise the
+/// animation's end runs it (0x0053f6a0). So an `Idle` called 100 ms into a
+/// 300 ms attack lead-in waits 200 ms with no draw, then takes its first step
+/// with the whole budget. The state's own loop is a pose, not in flight.
+TEST(idle_waits_out_an_animation_already_in_flight_before_its_first_step) {
+  AnimBench b;
+  CommandSystem commands;
+  REQUIRE(b.world.add_system(&commands));
+  const ObjectId unit = b.spawn();
+  REQUIRE(b.world.play_anim(unit, 19, AnimRepeat::hold));
+  b.world.advance(100);
+  REQUIRE(b.world.find(unit)->animating);
+
+  b.world.rng().seed(777);
+  const std::uint32_t before = b.world.rng().state();
+  IdleCall idle(b, unit, 1000);
+  const script::HostOutcome first = idle.run();
+  CHECK(first.status == script::HostStatus::retry);
+  CHECK(first.suspend_for == 200);
+  CHECK(b.world.rng().state() == before);
+
+  // The re-entry is the first step, over the whole 1,000.
+  b.world.advance(200);
+  const std::int64_t t = first_fidget(777, 1000);
+  const script::HostOutcome step = idle.run();
+  CHECK(step.status == script::HostStatus::retry);
+  if (t < 0) {
+    CHECK(step.suspend_for == 1000);
+  } else if (t == 0) {
+    CHECK(step.suspend_for == 264);
+  } else {
+    CHECK(step.suspend_for == t);
+  }
+  CHECK(b.world.rng().state() != before);
+
+  // A unit resting in its state's loop is not in flight: the step is at once.
+  const ObjectId resting = b.spawn();
+  REQUIRE(b.world.enter_state(resting, 1));
+  b.world.rng().seed(777);
+  IdleCall now(b, resting, 1000);
+  const script::HostOutcome at_once = now.run();
+  CHECK(b.world.rng().state() != Rng(777).state());
+  CHECK(at_once.status == script::HostStatus::retry);
+}
+
+/// `Ship::Idle` raises the same flag (0x005c6ea0 writes `[ship+0x1b8] = 1`),
+/// so a ship's idle plays its fidget at its first draw; and the flag is the
+/// unit's, so a draw spends it whoever raised it.
+TEST(ship_idle_raises_the_force_flag_its_first_draw_spends) {
+  AnimBench b;
+  CommandSystem commands;
+  REQUIRE(b.world.add_system(&commands));
+  const ObjectId ship = b.spawn();
+  b.world.rng().seed(4);
+  const std::uint32_t index = b.registry.find(script::CallKind::member, "Idle", 0);
+  REQUIRE(index != script::kUnresolvedHost);
+  std::vector<script::Value> args{AnimBench::obj(ship)};
+  std::int32_t word = 0;
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &b.context;
+  ctx.name = "Idle";
+  ctx.kind = script::CallKind::member;
+  ctx.scratch = &word;
+  const script::HostOutcome first = b.registry.entry(index).fn(ctx);
+  // The budget is the idle animation's own 264 ms, and the fidget fills it.
+  CHECK(first.status == script::HostStatus::retry);
+  CHECK(first.suspend_for == 264);
+  CHECK(!b.world.find(ship)->state.flags.force_idle);
+}

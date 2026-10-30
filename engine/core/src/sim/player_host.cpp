@@ -313,11 +313,10 @@ HostOutcome fn_player_flags_query(CallContext& ctx) {
 ///         squad whose front member is an heir of `BaseMage` or of `Hero`;
 ///       - anything else: every member heir of the class.
 ///
-/// **Approximated:** the tally gate is taken as "some member of the player's
-/// squads is an heir of the class", which is what the tally counts for
-/// members still in their squads; the walk answers nothing in every other
-/// case anyway. A member is listed by its handle whether or not it still
-/// resolves, as the original pushes it.
+/// The tally gate is `HeroSystem::class_tally`, the map `Count` reads
+/// (`docs/formats/class-tally.md`): a class the player's tally holds 0 for
+/// lists nothing, whatever its squads hold. A member is listed by its handle
+/// whether or not it still resolves, as the original pushes it.
 HostOutcome fn_get_player_units(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetPlayerUnits: no world");
@@ -365,11 +364,9 @@ HostOutcome fn_get_player_units(CallContext& ctx) {
   const ClassIndex hero = graph->find("Hero");
   const ClassIndex mage = graph->find("BaseMage");
 
-  bool counted = false;  // the tally gate
-  squads_of_player([&](const Squad& squad) {
-    for (const ObjectId member : squad.members) counted = counted || heir(member, cls);
-  });
-  if (!counted) return HostOutcome::ok_with(make_objlist_value(list));
+  // The tally gate (0x005de807): the holder's class tally for the class must
+  // be non-zero -- negative included.
+  if (heroes->class_tally(player, cls) == 0) return HostOutcome::ok_with(make_objlist_value(list));
 
   if (class_heir(hero)) {
     squads_of_player([&](const Squad& squad) {

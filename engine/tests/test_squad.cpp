@@ -1976,6 +1976,17 @@ TEST(get_player_units_by_class_takes_the_three_arms) {
   REQUIRE(f.heroes.squads().join(line, soldier));
   REQUIRE(f.heroes.squads().join(line, stray));
 
+  // The gate is the class tally `Count` reads (0x005de807): nobody counted
+  // yet -- no AI manager has registered them -- and nothing is listed,
+  // whatever the squads hold.
+  CHECK(listed("Unit").empty());
+  AiSystem ai;
+  REQUIRE(f.world.add_system(&ai));
+  ai.start_manager();
+  for (const ObjectId id : {hero, guard, mage, apprentice, stray, soldier}) {
+    f.heroes.ai_register(f.world, id);
+  }
+
   CHECK((listed("Hero") == std::vector<ObjectId>{hero}));
   // The stray mage is in a squad a soldier leads.
   CHECK((listed("BaseMage") == std::vector<ObjectId>{apprentice, mage}));
@@ -5044,4 +5055,145 @@ TEST(a_garrisoned_unit_regrouped_from_no_squad_is_sent_to_its_towns_node) {
   regroup_into_fresh_squads(f.world, f.heroes, units, 9, f.world.time());
   REQUIRE(f.squad_holding(loose) != nullptr);
   CHECK(f.squad_holding(loose)->dest_gaika == far_town);
+}
+
+// --------------------------------------------------------------------------
+// the class tally `Count` reads
+// --------------------------------------------------------------------------
+
+namespace {
+
+std::int32_t count_of(World& world, std::int32_t player, const char* cls) {
+  HostRegistry registry;
+  register_world_host(registry);
+  HostCall call(world, {Value::integer(player), Value::string(cls)});
+  const HostOutcome out = invoke(registry, CallKind::free_function, "Count", 2, call);
+  CHECK(out.status == HostStatus::ok);
+  return out.value.is_integer() ? out.value.as_integer() : -999;
+}
+
+}  // namespace
+
+/// **`Count` is a tally, kept by the AI's register and unregister**
+/// (0x00422300 -> 0x004441e0; 0x00447200 adds, 0x004448a0 takes). A unit
+/// counts for its class and every ancestor from its registration, inside a
+/// holder as on the map; once only, whatever calls register it; and not at
+/// all before the AI manager exists. The name is an id, exactly.
+TEST(count_reads_the_class_tally_the_register_keeps_for_a_class_and_its_ancestors) {
+  Fixture f;
+  AiSystem ai;
+  REQUIRE(f.world.add_system(&ai));
+  const auto horse = [&](PlayerId owner) {
+    const ObjectId id = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Horse"));
+    f.world.set_position(id, Point{100, 100});
+    f.world.set_owner(id, owner);
+    f.world.set_health(id, 100);
+    return id;
+  };
+  const ObjectId early = horse(1);
+  f.heroes.ai_register(f.world, early);  // no manager: nothing
+  CHECK(count_of(f.world, 2, "Horse") == 0);
+  CHECK(!f.world.find(early)->state.flags.ai_registered);
+
+  ai.start_manager();
+  const ObjectId a = horse(1);
+  const ObjectId b = horse(1);
+  const ObjectId plain = f.spawn(Point{200, 100}, 1);
+  for (const ObjectId id : {a, b, plain}) f.heroes.ai_register(f.world, id);
+  f.heroes.ai_register(f.world, a);  // once only
+  CHECK(count_of(f.world, 2, "Horse") == 2);
+  CHECK(count_of(f.world, 2, "Unit") == 3);
+  CHECK(count_of(f.world, 3, "Horse") == 0);
+  // Not a census: the horse placed before the manager is not counted, and a
+  // name that is no class id has no entry.
+  CHECK(count_of(f.world, 2, "horse") == 0);
+  CHECK(count_of(f.world, 2, "NoSuchClass") == 0);
+
+  // The turn's sweep registers what it has not seen, the early horse among
+  // them, and a held unit as one on the map.
+  const ObjectId inside = horse(1);
+  REQUIRE(f.world.put_in_holder(inside, plain));
+  f.world.advance(100);
+  CHECK(count_of(f.world, 2, "Horse") == 4);
+  CHECK(f.world.find(inside)->state.flags.ai_registered);
+
+  // A template, a noselect walker and a unit with no owner are not counted.
+  const ObjectId flagged = horse(1);
+  f.world.mutable_state(flagged)->flags.noselect = true;
+  const ObjectId nobody = horse(kNoPlayer);
+  f.heroes.ai_register(f.world, flagged);
+  f.heroes.ai_register(f.world, nobody);
+  CHECK(count_of(f.world, 2, "Horse") == 4);
+}
+
+/// **The unregister takes the unit off its present owner's tally**
+/// (0x0041eee0 reads `[obj+0x70]` when it dies), so a unit that changed
+/// hands stays in its first owner's count and is taken off its new owner's:
+/// down from the new owner's own horses when there are some, and nowhere
+/// when the new owner's tally has no entry for its class (0x004448a0 ends
+/// its walk at the first name with no entry). The count is not clamped.
+TEST(the_class_tally_drifts_from_the_census_when_a_unit_changes_hands) {
+  Fixture f;
+  AiSystem ai;
+  REQUIRE(f.world.add_system(&ai));
+  ai.start_manager();
+  const auto horse = [&](PlayerId owner) {
+    const ObjectId id = f.world.spawn(NativeClass::unit, nullptr, f.graph.find("Horse"));
+    f.world.set_position(id, Point{100, 100});
+    f.world.set_owner(id, owner);
+    f.world.set_health(id, 100);
+    f.heroes.ai_register(f.world, id);
+    return id;
+  };
+  const ObjectId turncoat = horse(1);
+  const ObjectId other = horse(1);
+  (void)other;
+  f.world.set_owner(turncoat, 2);  // converted: no tally moves
+  CHECK(count_of(f.world, 2, "Horse") == 2);
+  CHECK(count_of(f.world, 3, "Horse") == 0);
+  f.heroes.ai_unregister(f.world, turncoat);  // it dies under player 3
+  // Player 3 has no `Horse` entry: the walk ends at once, `Unit` untouched.
+  CHECK(count_of(f.world, 3, "Horse") == 0);
+  CHECK(count_of(f.world, 3, "Unit") == 0);
+  CHECK(count_of(f.world, 2, "Horse") == 2);
+  CHECK(!f.world.find(turncoat)->state.flags.ai_registered);
+
+  // With an entry, the new owner's count goes down -- below the census.
+  const ObjectId own = horse(2);
+  (void)own;
+  const ObjectId second = horse(1);
+  f.world.set_owner(second, 2);
+  f.heroes.ai_unregister(f.world, second);
+  CHECK(count_of(f.world, 3, "Horse") == 0);
+  CHECK(count_of(f.world, 3, "Unit") == 0);
+  f.heroes.ai_unregister(f.world, own);
+  CHECK(count_of(f.world, 3, "Horse") == -1);
+  // A second unregister finds the unit no longer registered.
+  f.heroes.ai_unregister(f.world, own);
+  CHECK(count_of(f.world, 3, "Horse") == -1);
+}
+
+/// The tally is saved with the hero section, entries at 0 and below included,
+/// and hashed: two worlds that disagree about it disagree about the hash.
+TEST(the_class_tally_is_saved_and_hashed) {
+  Fixture f;
+  AiSystem ai;
+  REQUIRE(f.world.add_system(&ai));
+  ai.start_manager();
+  const ObjectId id = f.spawn();
+  const std::uint64_t before = f.world.state_hash();
+  f.heroes.ai_register(f.world, id);
+  CHECK(f.world.state_hash() != before);
+  std::vector<std::byte> saved;
+  f.heroes.serialize(saved);
+  HeroSystem restored;
+  REQUIRE(restored.deserialize(saved).ok());
+  CHECK(restored.class_tally(1, f.unit_class) == 1);
+  f.heroes.ai_unregister(f.world, id);
+  CHECK(f.heroes.class_tally(1, f.unit_class) == 0);
+  saved.clear();
+  f.heroes.serialize(saved);
+  HeroSystem again;
+  REQUIRE(again.deserialize(saved).ok());
+  CHECK(again.class_tally(1, f.unit_class) == 0);
 }

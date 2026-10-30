@@ -13,6 +13,7 @@
 
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/script/scheduler.hpp"
+#include "imperivm/core/sim/anim.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/entrance.hpp"
@@ -2432,10 +2433,11 @@ HostOutcome get_cmd_stamina_cost_impl(CallContext& ctx) {
 /// first run drops the target and takes the first step, and each step that
 /// waits answers `retry` for the time to the next one, keeping the budget
 /// and a fidget still to start in the call's word (`CallContext::scratch`);
-/// the step that wakes the script answers done. **Approximated:** the
-/// original holds the first step while an animation the unit was already
-/// playing runs out (its timer 0x1b); here it is taken at once. The fidget
-/// starts on the world's clock, not the script's millisecond.
+/// the step that wakes the script answers done. The first step waits out a
+/// one-shot animation the unit is already playing (the original's timer
+/// 0x1b is pending, so the setter does not run the activity, and the
+/// animation's end does), and a fidget starts on the script's millisecond.
+/// `docs/formats/idle.md` is the whole description, with what is left out.
 ///
 /// A handle that names no object is held for `ms` as before: the original
 /// dereferences null there, which is a fault rather than a behaviour, and a
@@ -2470,8 +2472,7 @@ constexpr std::uint32_t kIdleAnimShift = 24;
 }
 
 /// One step of the activity with `budget` left; see above.
-HostOutcome idle_step(CallContext& ctx, const Self& self, IdleKind kind, std::int64_t budget,
-                      bool force) {
+HostOutcome idle_step(CallContext& ctx, const Self& self, IdleKind kind, std::int64_t budget) {
   World& world = *self.world;
   const WorldObject* slot = world.find(self.id);
   // Table index + 1 is the entity's `idx`.
@@ -2495,12 +2496,16 @@ HostOutcome idle_step(CallContext& ctx, const Self& self, IdleKind kind, std::in
     if (length >= 0 && length <= budget) {
       for (std::int64_t t = 0; t <= budget - length; t += 100) {
         if (!walk_index_zero) continue;
-        const bool fidget =
-            world.rng().between(1, kind == IdleKind::idle ? 15 : 3) == 1 || force;
-        if (!fidget) continue;
+        // The draw comes first and is spent whether or not the flag is up
+        // (0x005d2d70); the flag only decides a draw that said no.
+        const bool drawn = world.rng().between(1, kind == IdleKind::idle ? 15 : 3) == 1;
+        ObjectState* state = world.mutable_state(self.id);
+        const bool forced = state != nullptr && state->flags.force_idle;
+        if (!drawn && !forced) continue;
+        if (state != nullptr) state->flags.force_idle = false;
         const std::int64_t left = budget - (t + length);
         if (t > 0) return idle_wait(ctx, t, left, chosen);
-        (void)world.play_anim(self.id, chosen, AnimRepeat::hold);
+        (void)start_anim_at_script_time(ctx, world, self.id, chosen);
         return idle_wait(ctx, length, left, 0);
       }
     }
@@ -2514,8 +2519,7 @@ HostOutcome idle_step(CallContext& ctx, const Self& self, IdleKind kind, std::in
 }
 
 /// `Unit::Idle(ms)`, `Unit::Taunt(ms)` and `Ship::Idle()`; see above.
-HostOutcome idle_activity(CallContext& ctx, const Self& self, std::int64_t ms, IdleKind kind,
-                          bool force = false) {
+HostOutcome idle_activity(CallContext& ctx, const Self& self, std::int64_t ms, IdleKind kind) {
   const WorldObject* slot = self.world->find(self.id);
   if (slot == nullptr || slot->state.position == kHeldPosition) {
     // The held branch: `ms` in the wait cell and return 1; its re-entry pops
@@ -2528,15 +2532,25 @@ HostOutcome idle_activity(CallContext& ctx, const Self& self, std::int64_t ms, I
     const std::int64_t budget = word & kIdleBudgetMask;
     const auto pending = static_cast<std::int32_t>(word >> kIdleAnimShift);
     if (pending != 0) {
-      (void)self.world->play_anim(self.id, pending, AnimRepeat::hold);
+      (void)start_anim_at_script_time(ctx, *self.world, self.id, pending);
       return idle_wait(ctx, entity_anim_length(*slot, pending), budget, 0);
     }
-    return idle_step(ctx, self, kind, budget, false);
+    return idle_step(ctx, self, kind, budget);
   }
   if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
     (void)combat->stop(self.id);
   }
-  return idle_step(ctx, self, kind, ms > 0 ? ms : 0, force);
+  const std::int64_t budget = ms > 0 ? ms : 0;
+  // The setter runs the activity at once only when the unit's animation
+  // timer is not pending (0x005a7680 -> 0x0053cfc0); an animation already in
+  // flight runs out first, and its end runs the first step (0x0053f6a0 ->
+  // `vtbl+0x54`). The step then has the whole budget.
+  slot = self.world->find(self.id);
+  if (slot != nullptr) {
+    const std::int32_t in_flight = one_shot_time_left(ctx, *self.world, *slot);
+    if (in_flight > 0) return idle_wait(ctx, in_flight, budget, 0);
+  }
+  return idle_step(ctx, self, kind, budget);
 }
 
 HostOutcome idle_impl(CallContext& ctx) {
@@ -2548,9 +2562,13 @@ HostOutcome idle_impl(CallContext& ctx) {
   }
   // `Ship::Idle()` (0x005c6ea0): the budget is the length of the ship's own
   // idle animation (table index 12, `[entity+0x149c]` -> `+0x4c`) and the
-  // force flag `[ship+0x1b8]` goes up, so its first step plays the fidget
-  // whatever the draw. **Not read:** the `[ship+0x1cc]` gate under which it
-  // sets no activity at all.
+  // force flag `[ship+0x1b8]` goes up, so its first step that draws plays
+  // the fidget whatever the draw. The gate before it, `[ship+0x1cc]`, is the
+  // shipyard launch's flag (0x005c6a60 raises it for the slide out of the
+  // yard and drops it at the end); under it no flag, no activity and no
+  // target drop, and the script waits for a wake nothing sends. This engine
+  // does not run the launch (see `f_presentation_void` in world_host.cpp),
+  // so the gate is never up here.
   // A ship with no such animation is a null dereference in the original;
   // here it idles `kDefaultIdleSlice`, which keeps `SHIP_IDLE.VS`'s loop from
   // spinning.
@@ -2560,7 +2578,14 @@ HostOutcome idle_impl(CallContext& ctx) {
     const std::int32_t own = entity_anim_length(*slot, 13);
     if (own >= 0) ms = own;
   }
-  return idle_activity(ctx, self, ms, IdleKind::idle, /*force=*/true);
+  // The flag goes up on the first run only: the re-entries are the
+  // activity's own steps, which the original takes without calling back.
+  if (ctx.first_call) {
+    if (ObjectState* state = self.world->mutable_state(self.id); state != nullptr) {
+      state->flags.force_idle = true;
+    }
+  }
+  return idle_activity(ctx, self, ms, IdleKind::idle);
 }
 
 /// `ForceIdle()` -- one shipped site, `HEN_IDLE.VS`, on the line before its
@@ -2574,18 +2599,23 @@ HostOutcome idle_impl(CallContext& ctx) {
 /// writes the same 1 into the same slot, which is the second reading of it and
 /// agrees.
 ///
-/// **Not reproduced:** the flag. `Idle` now takes the activity's steps
-/// (`idle_activity`), and the flag would make the next step's first draw
-/// play its fidget whatever it says; but a flag kept on the unit is state to
-/// save and to agree on, and its one shipped writer is a hen. `Ship::Idle`'s
-/// own force is the call's, and is passed to its first step directly.
+/// The flag is `ObjectFlags::force_idle`, kept on the object, saved and
+/// hashed: the next step that draws plays its fidget whatever the draw says
+/// and drops it, and a flag no step drew for stays up for the next idle.
+/// `Ship::Idle` raises the same flag. No dead test: the original writes the
+/// word into any object the handle resolves to.
 ///
 /// It still resolves its receiver, because the original does and because
 /// answering without looking is how an entry point stops being a test of
 /// anything.
 HostOutcome force_idle_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
+  // A handle naming nothing prints into the discarded sink and returns.
+  if (self.error == kNoReceiver) return HostOutcome::ok_void();
   if (!self.ok()) return HostOutcome::failed(self.error);
+  if (ObjectState* state = self.world->mutable_state(self.id); state != nullptr) {
+    state->flags.force_idle = true;
+  }
   return HostOutcome::ok_void();
 }
 

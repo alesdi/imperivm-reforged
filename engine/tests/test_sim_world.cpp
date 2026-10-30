@@ -2776,16 +2776,31 @@ TEST(world_host_reads_a_player_argument_as_the_script_writes_it_one_based) {
   // interesting half: of the 33 sites in all 885 shipped scripts that pass a
   // literal to one of the three, the values are 1, 2, 3, 4 and 5 -- and 0 does
   // not occur once. Read 0-based, 0 would be the commonest value.
+  //
+  // `Count` reads the owner's class tally (docs/formats/class-tally.md), so
+  // the units here are registered with a started AI manager.
   World world;
-  const ObjectId first = world.spawn(NativeClass::unit, nullptr);
-  (void)world.set_health(first, 100);  // alive: see object_is_dead
-  const ObjectId second = world.spawn(NativeClass::unit, nullptr);
-  (void)world.set_health(second, 100);  // alive: see object_is_dead
-  const ObjectId third = world.spawn(NativeClass::unit, nullptr);
-  (void)world.set_health(third, 100);  // alive: see object_is_dead
-  world.set_owner(first, 0);
-  world.set_owner(second, 1);
-  world.set_owner(third, 1);
+  ClassGraph graph;
+  REQUIRE(graph.add(bytes_of(R"(<class id="Unit" cpp_class="CVXUnit"/>)"), "unit.sc.xml").ok());
+  graph.link();
+  world.set_class_graph(&graph);
+  const ClassIndex unit_class = graph.find("Unit");
+  HeroSystem heroes;
+  AiSystem ai;
+  REQUIRE(world.add_system(&heroes));
+  REQUIRE(world.add_system(&ai));
+  ai.start_manager();
+  const auto born = [&](PlayerId owner) {
+    const ObjectId id = world.spawn(NativeClass::unit, nullptr, unit_class);
+    (void)world.set_health(id, 100);  // alive: see object_is_dead
+    world.set_owner(id, owner);
+    heroes.ai_register(world, id);
+    return id;
+  };
+  const ObjectId first = born(0);
+  const ObjectId second = born(1);
+  const ObjectId third = born(1);
+  (void)first;
 
   script::HostRegistry registry;
   script::declare_shipped_surface(registry);
@@ -2816,12 +2831,12 @@ TEST(world_host_reads_a_player_argument_as_the_script_writes_it_one_based) {
   // `Count(player, "class")` answers immediately with an integer, so it needs
   // no query handle and reads the miscount directly.
   const script::HostOutcome one =
-      call("Count", {script::Value::integer(1), script::Value::string("")});
+      call("Count", {script::Value::integer(1), script::Value::string("Unit")});
   REQUIRE(one.status == script::HostStatus::ok);
   CHECK(one.value.as_integer() == 1);  // script 1 is PlayerId 0, which owns one
 
   const script::HostOutcome two =
-      call("Count", {script::Value::integer(2), script::Value::string("")});
+      call("Count", {script::Value::integer(2), script::Value::string("Unit")});
   REQUIRE(two.status == script::HostStatus::ok);
   CHECK(two.value.as_integer() == 2);  // script 2 is PlayerId 1, which owns two
 
@@ -2834,26 +2849,24 @@ TEST(world_host_reads_a_player_argument_as_the_script_writes_it_one_based) {
   // safe; no shipped script passes 0, which is a reason to choose deliberately
   // rather than a reason not to choose.
   const script::HostOutcome zero =
-      call("Count", {script::Value::integer(0), script::Value::string("")});
+      call("Count", {script::Value::integer(0), script::Value::string("Unit")});
   REQUIRE(zero.status == script::HostStatus::ok);
   CHECK(zero.value.as_integer() == 0);
 
   // 16 is the last valid script number and must not be rejected; 17 must be.
-  const ObjectId last = world.spawn(NativeClass::unit, nullptr);
-  (void)world.set_health(last, 100);  // alive: see object_is_dead
-  world.set_owner(last, 15);
+  (void)born(15);
   const script::HostOutcome sixteen =
-      call("Count", {script::Value::integer(16), script::Value::string("")});
+      call("Count", {script::Value::integer(16), script::Value::string("Unit")});
   REQUIRE(sixteen.status == script::HostStatus::ok);
   CHECK(sixteen.value.as_integer() == 1);
   const script::HostOutcome seventeen =
-      call("Count", {script::Value::integer(17), script::Value::string("")});
+      call("Count", {script::Value::integer(17), script::Value::string("Unit")});
   REQUIRE(seventeen.status == script::HostStatus::ok);
   CHECK(seventeen.value.as_integer() == 0);
 
   // The same conversion, through a query rather than a count.
   const script::HostOutcome objs =
-      call("ClassPlayerObjs", {script::Value::string(""), script::Value::integer(2)});
+      call("ClassPlayerObjs", {script::Value::string("Unit"), script::Value::integer(2)});
   REQUIRE(objs.status == script::HostStatus::ok);
   std::vector<ObjectId> found;
   world.evaluate_query(objs.value.as_object().id, found);
@@ -6961,10 +6974,11 @@ TEST(mutate_carries_health_stamina_position_owner_and_two_flag_bits) {
   CHECK(slot->state.user == 0);
 }
 
-/// The squad is cleared outright, the commands go with the object that had
-/// them, and the combatant is re-classed rather than replaced -- so what it has
+/// The squad it was in is left and the new object is filed afresh with its
+/// tally traded, the commands go with the object that had them, and the
+/// combatant is re-classed rather than replaced -- so what it has
 /// learnt survives and what it was doing does not.
-TEST(mutate_clears_the_squad_and_the_commands_and_re_classes_the_combatant) {
+TEST(mutate_refiles_the_squad_and_the_tally_clears_the_commands_and_re_classes_the_combatant) {
   MutateBench b;
   const ObjectId who = b.unit(b.rider, 1);
   const ObjectId prey = b.unit(b.archer, 2);
@@ -6983,9 +6997,24 @@ TEST(mutate_clears_the_squad_and_the_commands_and_re_classes_the_combatant) {
   before->target = prey;
   before->attacks = 3;
 
+  // Counted as a rider in its owner's class tally, as the AI's register
+  // leaves it.
+  AiSystem ai;
+  REQUIRE(b.world.add_system(&ai));
+  ai.start_manager();
+  b.heroes.ai_register(b.world, who);
+  REQUIRE(b.heroes.class_tally(1, b.rider) == 1);
+
   b.mutate(who, "TTeutonArcher");
 
-  CHECK(!b.heroes.squads().squad_of(who).valid());
+  // Out of the squad it was in, and filed anew by the new object's register
+  // (0x00447200 ends in `AddToSquad`); the tally trades a rider for an
+  // archer (0x004448a0, then 0x00447200).
+  CHECK(b.heroes.squads().squad_of(who).valid());
+  CHECK(b.heroes.squads().squad_of(who) != key);
+  CHECK(b.heroes.class_tally(1, b.rider) == 0);
+  CHECK(b.heroes.class_tally(1, b.archer) == 1);
+  CHECK(b.world.find(who)->state.flags.ai_registered);
   CHECK(b.commands.command_count(who) == 0);
   const Combatant* after = b.combat.find(who);
   REQUIRE(after != nullptr);

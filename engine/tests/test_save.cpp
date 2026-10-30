@@ -193,6 +193,8 @@ void populate(World& world, std::uint32_t seed) {
     slot->state.flags.training = phase(19);
     slot->state.flags.towers_posted = phase(20);
     slot->state.flags.has_towers = phase(21);
+    slot->state.flags.force_idle = phase(22);
+    slot->state.flags.ai_registered = phase(23);
     // The flight altitudes, for the same reason: two ints that only
     // `Flying::PlayAnim` writes, and a build that dropped either would
     // round-trip clean over a fixture that left them at zero.
@@ -415,6 +417,8 @@ TEST(save_the_fixture_sets_and_clears_every_writable_flag) {
       {"diseased", &ObjectFlags::diseased},
       {"towers_posted", &ObjectFlags::towers_posted},
       {"has_towers", &ObjectFlags::has_towers},
+      {"force_idle", &ObjectFlags::force_idle},
+      {"ai_registered", &ObjectFlags::ai_registered},
   };
 
   for (const Named& named : kWritable) {
@@ -501,6 +505,8 @@ TEST(save_world_restores_every_field_it_claims) {
     CHECK(x.state.flags.training == y.state.flags.training);
     CHECK(x.state.flags.towers_posted == y.state.flags.towers_posted);
     CHECK(x.state.flags.has_towers == y.state.flags.has_towers);
+    CHECK(x.state.flags.force_idle == y.state.flags.force_idle);
+    CHECK(x.state.flags.ai_registered == y.state.flags.ai_registered);
     CHECK(x.state.catapult_target == y.state.catapult_target);
     CHECK(x.state.z_from == y.state.z_from);
     CHECK(x.state.damage_taken == y.state.damage_taken);
