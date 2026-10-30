@@ -147,6 +147,7 @@ void LsaPartition::build(const Grid& terrain, const ObstructionGrid& passability
         areas_.push_back(LsaArea{});
         LsaArea& area = areas_.back();
         area.cells = static_cast<std::int32_t>(claimed.size());
+        area.coverage = coverage;
         std::int64_t sum_x = 0;
         std::int64_t sum_y = 0;
         for (const std::size_t cell : claimed) {

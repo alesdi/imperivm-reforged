@@ -1635,6 +1635,38 @@ HostOutcome fn_count(CallContext& ctx) {
       Value::integer(player_class_count(*world, player, ctx.arg(1).as_string())));
 }
 
+/// `AllyCount(player, "class")` (0x004223b0) and `EnemyCount(player,
+/// "class")` (0x004224c0), registered beside `Count` (0x0043c2d0, 0x0043c2e6)
+/// and read whole (docs/formats/class-tally.md). Each walks all sixteen player
+/// records in order and asks 0x0044e250 how the 0-based viewer `player - 1`
+/// sees that player: `AllyCount` adds the class tally of every player whose
+/// answer is not 4 (`AI_ENEMY`) -- so the viewer's own count is in it, and
+/// so are the allies' -- and `EnemyCount` adds the tally of every player whose
+/// answer is 4. The tally is `Count`'s read (0x004441e0), 0 for a name with no
+/// entry. A viewer of 16 or more answers 0, as there.
+///
+/// **Departure, labelled:** a player of 0 or less makes the original read a
+/// record from before the player table (the bound is `player - 1 < 16` with
+/// no lower one), which this engine does not reproduce; it answers 0, as
+/// `Eval` does for the same case. No shipped script calls either.
+template <bool kEnemies>
+HostOutcome fn_side_count(CallContext& ctx) {
+  World* world = world_of(ctx);
+  if (world == nullptr) return HostOutcome::failed("AllyCount/EnemyCount: no world");
+  const PlayerId viewer = player_arg(ctx.arg(0));
+  if (viewer == kNoPlayer || !ctx.arg(1).is_string()) return HostOutcome::ok_with(Value::integer(0));
+  constexpr std::int32_t kAiEnemy = 4;
+  std::int32_t total = 0;
+  for (std::uint32_t p = 0; p < kPlayerCount; ++p) {
+    const auto other = static_cast<PlayerId>(p);
+    const bool enemy =
+        ai_relation(world->players(), static_cast<std::int32_t>(viewer), other) == kAiEnemy;
+    if (enemy != kEnemies) continue;
+    total += player_class_count(*world, other, ctx.arg(1).as_string());
+  }
+  return HostOutcome::ok_with(Value::integer(total));
+}
+
 }  // namespace
 
 std::int32_t player_class_count(World& world, PlayerId player, std::string_view class_name) {
@@ -7369,6 +7401,8 @@ std::size_t register_world_host(script::HostRegistry& registry) {
   def(kFree, "rand", 1, &fn_rand);                          // 341 call sites
   def(kFree, "Intersect", 2, &fn_set_op<SetOp::intersect>);  // 64
   def(kFree, "Count", 2, &fn_count);                         // 56
+  def(kFree, "AllyCount", 2, &fn_side_count<false>);         // no shipped site
+  def(kFree, "EnemyCount", 2, &fn_side_count<true>);         // no shipped site
   def(kFree, "ClassPlayerObjs", 2, &fn_class_player_objs);   // 37
   def(kFree, "ObjsInSight", 2, &fn_objs_in_sight<false>);           // 36
   def(kFree, "Union", 2, &fn_set_op<SetOp::set_union>);      // 36

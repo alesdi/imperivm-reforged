@@ -287,7 +287,8 @@ TEST(settlement_template_anchor_keeps_the_cell_offset_and_stays_inside_the_map) 
 }
 
 TEST(start_match_makes_every_mutable_settlement_into_the_owners_race) {
-  Bench b;
+  // Ground, so that the partition has areas to cut and the town gets a node.
+  Bench b(kMap, /*with_ground=*/true);
   const EconomySystem& economy = b.economy();
   const Settlement* mine = economy.settlements().find_by_name("S_Mine");
   REQUIRE(mine != nullptr);
@@ -387,12 +388,17 @@ TEST(start_match_makes_every_mutable_settlement_into_the_owners_race) {
   CHECK(theirs->warehouse.gold == 5000);
 
   // The node table was rebuilt over the new anchors: the town's node is
-  // centred where its new hall stands, not where the placeholder stood.
+  // centred on the middle of the slot its new hall stands in -- one open
+  // area, so the snap keeps the hall's own slot. (The placeholder at
+  // (2000, 2000) stood in the same slot, 15 each way, so the centre alone
+  // cannot tell the two apart; the node's settlement and the slot under the
+  // new hall are what this asserts.)
   const GaikaTable& nodes = b.world().gaika();
   const GaikaId node = nodes.for_settlement(mine->object);
   REQUIRE(node != kNoGaika);
   REQUIRE(nodes.find(node) != nullptr);
-  CHECK(nodes.find(node)->center == hall_at);
+  CHECK(nodes.find(node)->center == (Point{hall_at.x / 128 * 128 + 64, hall_at.y / 128 * 128 + 64}));
+  CHECK(nodes.at(b.world().lsa(), hall_at) == node);
 }
 
 TEST(a_mutable_settlement_nobody_has_a_race_for_takes_gaul) {
@@ -636,17 +642,20 @@ TEST(a_razed_town_hall_leaves_its_node_where_it_stood_across_a_save) {
   const ObjectId town = mine->object;
   const ObjectId hall = mine->anchor;
   const Point hall_at = b.world().find(hall)->state.position;
+  // The middle of the hall's slot, which is where the partition centres a
+  // settlement node on open ground.
+  const Point centre{hall_at.x / 128 * 128 + 64, hall_at.y / 128 * 128 + 64};
   const GaikaTable& before = b.world().gaika();
   const GaikaId node = before.for_settlement(town);
   REQUIRE(node != kNoGaika);
-  REQUIRE(before.find(node)->center == hall_at);
+  REQUIRE(before.find(node)->center == centre);
   REQUIRE(before.find(node)->lsa != kNoLsa);
   REQUIRE(!before.neighbours(node).empty());
 
   // The hall falls. The running table keeps the node where it was.
   REQUIRE(b.session->world().despawn(hall));
   REQUIRE(b.world().find(hall) == nullptr);
-  CHECK(before.find(node)->center == hall_at);
+  CHECK(before.find(node)->center == centre);
   const Point beside{hall_at.x + 40, hall_at.y + 40};
   const GaikaId filed = before.at(b.world().lsa(), beside);
   CHECK(filed == node);
@@ -668,7 +677,7 @@ TEST(a_razed_town_hall_leaves_its_node_where_it_stood_across_a_save) {
     const auto c = after.neighbours(id);
     CHECK(std::vector<GaikaId>(a.begin(), a.end()) == std::vector<GaikaId>(c.begin(), c.end()));
   }
-  CHECK(after.find(node)->center == hall_at);
+  CHECK(after.find(node)->center == centre);
   CHECK(after.at(again.world().lsa(), beside) == filed);
 
   // And a second save of the restored game is the first, byte for byte.
@@ -728,8 +737,13 @@ TEST(a_save_whose_nodes_name_no_area_is_refused) {
   const auto reader = SaveReader::open(saved.value());
   REQUIRE(reader.ok());
   const std::span<const std::byte> section = reader->section(kSessionSection);
-  // The nodes close the section, sixteen bytes each, after their count.
+  // The nodes, thirty-two bytes each after their count, and then the slot
+  // grid -- its columns, its rows and a 16-bit id per slot -- close the
+  // section.
   const std::size_t end = static_cast<std::size_t>(section.data() - saved.value().data()) + section.size();
+  const std::size_t grid = 8 + 2 * static_cast<std::size_t>(b.world().gaika().slot_columns()) *
+                                   static_cast<std::size_t>(b.world().gaika().slot_rows());
+  REQUIRE(grid > 8);
   const auto put = [](std::vector<std::byte>& bytes, std::size_t at, std::uint32_t value) {
     for (std::size_t i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::byte>((value >> (8 * i)) & 0xffu);
   };
@@ -740,13 +754,22 @@ TEST(a_save_whose_nodes_name_no_area_is_refused) {
   }
   for (const std::uint32_t lsa : {static_cast<std::uint32_t>(b.world().lsa().size() + 1), 0xffffffffu}) {
     std::vector<std::byte> bad = saved.value();
-    put(bad, end - 8, lsa);  // the last node's area
+    put(bad, end - grid - 24, lsa);  // the last node's area
     Bench again(kMap, /*with_ground=*/true);
     CHECK(!again.session->load(bad).ok());
   }
   {
     std::vector<std::byte> bad = saved.value();
-    put(bad, end - 4 - 16 * static_cast<std::size_t>(count), 0xffffffffu);  // the count
+    put(bad, end - grid - 4 - 32 * static_cast<std::size_t>(count), 0xffffffffu);  // the count
+    Bench again(kMap, /*with_ground=*/true);
+    CHECK(!again.session->load(bad).ok());
+  }
+  {
+    // A slot naming a node past the last.
+    std::vector<std::byte> bad = saved.value();
+    const auto past = static_cast<std::uint32_t>(count + 1);
+    bad[end - 2] = static_cast<std::byte>(past & 0xffu);
+    bad[end - 1] = static_cast<std::byte>((past >> 8) & 0xffu);
     Bench again(kMap, /*with_ground=*/true);
     CHECK(!again.session->load(bad).ok());
   }

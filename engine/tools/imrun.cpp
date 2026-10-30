@@ -16,6 +16,7 @@
 // It lives outside engine/core because it opens files, which core may not.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <map>
 #include <cstdlib>
@@ -38,6 +39,7 @@
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/gate.hpp"
+#include "imperivm/core/sim/gaika_table.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/orders.hpp"
@@ -798,7 +800,17 @@ int main(int argc, char** argv) {
       if (sim::MovementSystem* move = sim::movement_system(run.world())) {
         move->stop(run.world(), goto_id);
       }
-      const bool placed = run.world().set_position(goto_id, sim::Point{place_x, place_y});
+      // A unit its AI has put in a garrison is taken out of it there, as
+      // `ExitHolder` takes one out (off the roster too), so the staging does
+      // not depend on where the AI keeps its soldiers.
+      const sim::ObjectState* before = run.world().state(goto_id);
+      bool placed = false;
+      if (before != nullptr && before->is_held()) {
+        placed = run.world().remove_from_holder(goto_id, sim::Point{place_x, place_y});
+        (void)sim::garrison_forget(run.world(), goto_id);
+      } else {
+        placed = run.world().set_position(goto_id, sim::Point{place_x, place_y});
+      }
       // And out of its AI's hands: its no-AI flag set, as a map can author it
       // (`UNITFLAG_NOAI`), and a squad of its own, which takes `SF_NOAI` from
       // that flag (0x00447330), so `SQUADMONITOR.VS` passes it by. What the
@@ -1134,6 +1146,43 @@ int main(int argc, char** argv) {
       }
       for (const auto& [verb, count] : commands->launch_failures()) {
         std::printf("            %5zu  %s  (could not be launched)\n", count, verb.c_str());
+      }
+    }
+    // `IMRUN_GAIKA=1`: the node table the partition cut (docs/formats/gaika.md)
+    // -- every node's area, settlement, rect in slots, centre, coverage and
+    // neighbours -- then what a second cut of the world as it stands at the
+    // end costs and how many slots it gives to another node. The time is the
+    // one figure here that is not the same on every run. `IMRUN_GAIKA=2`
+    // prints the second cut's nodes as well.
+    if (const char* gaika = std::getenv("IMRUN_GAIKA"); gaika != nullptr) {
+      const auto print = [](const sim::GaikaTable& table, const char* label) {
+        std::printf("  %s %d nodes, %d x %d slots\n", label, static_cast<int>(table.count()),
+                    table.slot_columns(), table.slot_rows());
+        for (const sim::GaikaNode& node : table.nodes()) {
+          const auto id = static_cast<sim::GaikaId>(&node - table.nodes().data() + 1);
+          std::printf("            #%d lsa %d set %u rect %d,%d,%d,%d centre %d,%d cover %d links",
+                      static_cast<int>(id), static_cast<int>(node.lsa), node.settlement,
+                      node.rect.left, node.rect.top, node.rect.right, node.rect.bottom,
+                      node.center.x, node.center.y, node.coverage);
+          for (const sim::GaikaId n : table.neighbours(id)) std::printf(" %d", static_cast<int>(n));
+          std::printf("\n");
+        }
+      };
+      const sim::GaikaTable& table = run.world().gaika();
+      print(table, "gaika     ");
+      if (const sim::EconomySystem* economy = sim::economy_of(run.world())) {
+        sim::GaikaTable again;
+        const auto start = std::chrono::steady_clock::now();
+        again.build(run.world(), run.world().lsa(), economy->settlements());
+        const auto spent = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start);
+        std::size_t moved = again.slot_nodes().size() == table.slot_nodes().size() ? 0 : SIZE_MAX;
+        for (std::size_t i = 0; moved != SIZE_MAX && i < table.slot_nodes().size(); ++i) {
+          if (again.slot_nodes()[i] != table.slot_nodes()[i]) ++moved;
+        }
+        std::printf("  gaika cut  %lld us, %d nodes, %zu slots moved\n",
+                    static_cast<long long>(spent.count()), static_cast<int>(again.count()), moved);
+        if (std::strcmp(gaika, "2") == 0) print(again, "recut     ");
       }
     }
     // `IMRUN_SETTLEMENTS=1`: every settlement, with what the AI's economy

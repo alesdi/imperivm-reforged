@@ -591,8 +591,10 @@ struct NodeBench {
 
   NodeBench() {
     graph.add(bytes_of(
-                  R"(<class id="Townhall" cpp_class="CVXTownHall"><properties maxhealth="1000"/></class>)"),
+                  R"(<class id="Townhall" cpp_class="CVXTownHall" parent="BaseTownhall"><properties maxhealth="1000"/></class>)"),
               "townhall.sc.xml");
+    graph.add(bytes_of(R"(<class id="BaseTownhall" cpp_class="CVXTownHall" parent=""/>)"),
+              "basetownhall.sc.xml");
     graph.link();
     world.set_class_graph(&graph);
     const Result<Grid> layer = Grid::parse(terrain);
@@ -679,116 +681,201 @@ struct ArmyBench : NodeBench {
 
 }  // namespace
 
-/// One node per settlement, then one per region nothing was built in.
+/// The partition over the two islands with nothing built: one region node per
+/// island, in scan order, each its island's slots (docs/formats/gaika.md,
+/// "How the table is built", steps 3, 4, 6, 9 and 10).
 ///
-/// This is the approximation, and the test asserts the *rule* rather than any
-/// particular cut -- `sim/gaika.hpp` says why the cut itself is not a claim.
-/// What is claimed, and what breaks if it stops holding: node ids are stable
-/// (settlement order, then area order), every settlement has exactly one node,
-/// and `GetGaika` and `GAIKA::settlement` are inverses.
-TEST(gaika_gives_every_settlement_a_node_and_every_empty_region_one_too) {
+/// The picture is 8 by 8 slots. The western island is slots 0..2 by 0..2, the
+/// eastern 3..5 by 0..7. A region seed's rectangle (radius 15) covers the whole
+/// map, so the first open slot in scan order, (0, 0), seeds the west and the
+/// next, (3, 0), the east. Neither node is merged away although both cover
+/// fewer than 30 slots: the only node next to each is in another area.
+TEST(gaika_cuts_one_region_node_per_island_in_scan_order) {
   NodeBench b;
-  // Water is impassable here, so the areas are the two islands and nothing
-  // else -- the sea is not a place an army can be.
   REQUIRE(b.world.lsa().size() == 2);
-  const SettlementId west = b.plant(3, 3);   // on the western island
   b.rebuild();
   const GaikaTable& table = b.world.gaika();
-
-  // One settlement node, and the eastern island gets a region node because
-  // nothing was built on it.
   REQUIRE(table.count() == 2);
-  const Settlement* w = b.economy.settlements().find(west);
-  REQUIRE(w != nullptr);
+  REQUIRE(table.slot_columns() == 8);
+  REQUIRE(table.slot_rows() == 8);
+  const LsaId west = b.world.lsa().at(in_cell(3, 3));
+  const LsaId east = b.world.lsa().at(in_cell(9, 9));
 
-  CHECK(table.for_settlement(w->object) == 1);
-  REQUIRE(table.find(1) != nullptr);
-  CHECK(table.find(1)->settlement == w->object);
-  CHECK(table.find(1)->center == in_cell(3, 3));
-  CHECK(table.find(1)->lsa == b.world.lsa().at(in_cell(3, 3)));
+  const GaikaNode* one = table.find(1);
+  REQUIRE(one != nullptr);
+  CHECK(one->settlement == kNoObject);
+  CHECK(one->lsa == west);
+  CHECK(one->rect == (GaikaRect{0, 0, 2, 2}));
+  CHECK(one->coverage == 9);
+  // Step 10: the middle of (0, 0, 2, 2) is slot (1, 1), which is the node's
+  // and wholly free, so the centre is that slot's **corner**.
+  CHECK(one->center == (Point{128, 128}));
 
-  REQUIRE(table.find(2) != nullptr);
-  CHECK(table.find(2)->settlement == kNoObject);
-  CHECK(table.find(2)->lsa == b.world.lsa().at(in_cell(9, 9)));
-  CHECK(table.find(2)->lsa != table.find(1)->lsa);
+  const GaikaNode* two = table.find(2);
+  REQUIRE(two != nullptr);
+  CHECK(two->lsa == east);
+  CHECK(two->rect == (GaikaRect{3, 0, 5, 7}));
+  CHECK(two->coverage == 24);
+  // (3 + 5) / 2 and (0 + 7) / 2, truncated: slot (4, 3).
+  CHECK(two->center == (Point{512, 384}));
 
-  // A second settlement, on the island that had only a region node: it becomes
-  // node 2 and the region node is gone, because the region is no longer empty.
-  const SettlementId east = b.plant(9, 9);
-  b.rebuild();
-  REQUIRE(table.count() == 2);
-  const Settlement* e = b.economy.settlements().find(east);
-  REQUIRE(e != nullptr);
-  CHECK(table.for_settlement(e->object) == 2);
-  CHECK(table.find(2)->settlement == e->object);
+  // Touching along the channel's slots, and neighbours with no type test.
+  REQUIRE(table.neighbours(1).size() == 1);
+  CHECK(table.neighbours(1)[0] == 2);
+  REQUIRE(table.neighbours(2).size() == 1);
+  CHECK(table.neighbours(2)[0] == 1);
 
-  // Ids are 1-based and out of range is nothing, which is `kNoGaika`'s rule.
+  // Record 0, the placeholder, is there to read once the table is built.
+  REQUIRE(table.record(kNoGaika) != nullptr);
+  CHECK(table.record(kNoGaika)->center == (Point{-1, -1}));
   CHECK(table.find(0) == nullptr);
   CHECK(table.find(3) == nullptr);
+}
+
+/// `GetGAIKA(point)` is the slot-grid read 0x0044e3f0 makes, edges and all.
+TEST(gaika_at_reads_the_slot_grid_as_the_original_does) {
+  NodeBench b;
+  b.rebuild();
+  const GaikaTable& table = b.world.gaika();
+  REQUIRE(table.count() == 2);
+  CHECK(table.at(Point{100, 100}) == 1);
+  CHECK(table.at(Point{600, 900}) == 2);
+  // A slot no area claimed carries no node.
+  CHECK(table.at(Point{900, 100}) == kNoGaika);
+  // Negative, or `x` at -1: no node, before the grid is read.
+  CHECK(table.at(Point{-1, 100}) == kNoGaika);
+  CHECK(table.at(Point{100, -5}) == kNoGaika);
+  // **Past the right edge the read runs on into the next row**: x 1100 is slot
+  // column 8 of an 8-wide grid, so row 0 column 8 is row 1 column 0.
+  CHECK(table.at(Point{1100, 100}) == table.at(Point{0, 200}));
+  CHECK(table.at(Point{1100, 100}) == 1);
+  // Past the whole grid the original reads beyond its array; here, nothing.
+  CHECK(table.at(Point{6000, 6000}) == kNoGaika);
+  // The `areas` overload is the same read.
+  CHECK(table.at(b.world.lsa(), Point{1100, 100}) == 1);
+}
+
+/// A settlement's node: its central building's slot snapped to ground, the
+/// slots its seeds won in that slot's area, and the snapped slot's middle as
+/// its centre (steps 2 and 5).
+TEST(gaika_gives_a_settlement_the_slots_its_seed_wins_in_its_area) {
+  NodeBench b;
+  const SettlementId hall = b.plant(9, 10);  // (608, 672): slot (4, 5), the east
+  b.rebuild();
+  const GaikaTable& table = b.world.gaika();
+  REQUIRE(table.count() == 2);
+  const Settlement* s = b.economy.settlements().find(hall);
+  REQUIRE(s != nullptr);
+  CHECK(table.for_settlement(s->object) == 1);
+  const GaikaNode* one = table.find(1);
+  REQUIRE(one != nullptr);
+  CHECK(one->settlement == s->object);
+  CHECK(one->lsa == b.world.lsa().at(in_cell(9, 9)));
+  CHECK(one->rect == (GaikaRect{3, 0, 5, 7}));
+  CHECK(one->coverage == 24);
+  // The middle of the snapped slot, not the building's own point.
+  CHECK(one->center == (Point{4 * 128 + 64, 5 * 128 + 64}));
+  // The west is the ground no seed of the settlement reached.
+  CHECK(table.find(2)->settlement == kNoObject);
+  CHECK(table.find(2)->rect == (GaikaRect{0, 0, 2, 2}));
   CHECK(table.for_settlement(kNoObject) == kNoGaika);
   CHECK(table.for_settlement(static_cast<ObjectId>(9999)) == kNoGaika);
 }
 
-/// `GetGAIKA(point)` prefers a node in the point's own area, and the map is
-/// built so that a plain nearest-centre rule would answer across the water.
-///
-/// The eastern island is tall, so its region node sits far to the south. Its
-/// north-west corner is **nearer to the western island's settlement node** than
-/// to its own island's centroid -- and the answer is still its own island's.
-TEST(gaika_at_a_point_stays_in_the_points_own_region) {
+/// **The snap prefers the larger area within two slots, across water if it
+/// must** (0x0044ab60): a town hall on the western island's slot (1, 1) has
+/// the eastern island's slot (3, 1) two slots east, whose area covers more,
+/// and that is where its node is cut.
+TEST(gaika_snaps_a_settlement_to_the_largest_area_within_two_slots) {
   NodeBench b;
-  b.plant(5, 5);  // node 1, on the western island's south-east corner
+  const SettlementId hall = b.plant(3, 3);  // (224, 224): slot (1, 1), the west
   b.rebuild();
   const GaikaTable& table = b.world.gaika();
   REQUIRE(table.count() == 2);
-
-  const Point corner = in_cell(7, 1);  // the eastern island's north-west corner
-  const Point west_node = table.find(1)->center;
-  const Point east_node = table.find(2)->center;
-  const auto d2 = [](Point a, Point c) {
-    const std::int64_t dx = a.x - c.x;
-    const std::int64_t dy = a.y - c.y;
-    return dx * dx + dy * dy;
-  };
-  // The premise, asserted rather than assumed: without the region rule this
-  // point would answer node 1.
-  REQUIRE(d2(corner, west_node) < d2(corner, east_node));
-  CHECK(table.at(b.world.lsa(), corner) == 2);
-  CHECK(table.find(table.at(b.world.lsa(), corner))->settlement == kNoObject);
-
-  // And a point on the western island answers its own node.
-  CHECK(table.at(b.world.lsa(), in_cell(2, 2)) == 1);
-
-  // Out at sea there is no area to prefer -- water is impassable, so the sea is
-  // in no area at all -- and the nearest node overall wins rather than nothing.
-  // `GetGAIKA` has no "no answer" for the corpus to test.
-  REQUIRE(b.world.lsa().at(in_cell(6, 1)) == kNoLsa);
-  CHECK(table.at(b.world.lsa(), in_cell(6, 1)) != kNoGaika);
-
-  // **Two nodes in one area**, which is the case that pins "nearest" rather
-  // than merely "in the same region": with one node per area the region rule
-  // alone would answer everything.
-  NodeBench two;
-  two.plant(2, 2);
-  two.plant(4, 4);
-  two.rebuild();
-  const GaikaTable& pair = two.world.gaika();
-  REQUIRE(pair.count() == 3);  // two settlements, plus the empty eastern island
-  REQUIRE(pair.find(1)->lsa == pair.find(2)->lsa);
-  CHECK(pair.at(two.world.lsa(), in_cell(1, 1)) == 1);
-  CHECK(pair.at(two.world.lsa(), in_cell(5, 5)) == 2);
+  const Settlement* s = b.economy.settlements().find(hall);
+  REQUIRE(s != nullptr);
+  const GaikaNode* one = table.find(table.for_settlement(s->object));
+  REQUIRE(one != nullptr);
+  CHECK(table.for_settlement(s->object) == 1);
+  CHECK(one->lsa == b.world.lsa().at(in_cell(9, 9)));
+  CHECK(one->center == (Point{3 * 128 + 64, 1 * 128 + 64}));
+  // The building's own slot, west (1, 1), is given the node's id after the
+  // flood (step 5) -- and taken back by the west's region node, whose flood
+  // (step 6) writes every slot its seed won.
+  CHECK(table.at(in_cell(3, 3)) == 2);
+  CHECK(table.at(in_cell(1, 1)) == 2);
+  CHECK(table.find(2)->settlement == kNoObject);
 }
 
-/// A map with no settlements is all region nodes, and a map with no terrain is
-/// all settlement nodes. Neither is a degenerate case that answers nothing.
-TEST(gaika_covers_a_map_with_only_regions_and_one_with_only_settlements) {
+/// Two town halls on one island split it where their scores cross (step 4):
+/// `((15 - |dx|)^2 + (15 - |dy|)^2) * weight`, equal weights, so each slot
+/// goes to the nearer hall by rows.
+TEST(gaika_splits_an_island_between_two_settlements_by_score) {
   NodeBench b;
+  const SettlementId north = b.plant(9, 2);   // slot (4, 1)
+  const SettlementId south = b.plant(9, 13);  // slot (4, 6)
   b.rebuild();
-  // Two islands, no settlements: two region nodes.
-  CHECK(b.world.gaika().count() == 2);
-  CHECK(b.world.gaika().find(1)->settlement == kNoObject);
-  CHECK(b.world.gaika().find(2)->settlement == kNoObject);
+  const GaikaTable& table = b.world.gaika();
+  REQUIRE(table.count() == 3);
+  const GaikaId n = table.for_settlement(b.economy.settlements().find(north)->object);
+  const GaikaId s = table.for_settlement(b.economy.settlements().find(south)->object);
+  CHECK(n == 1);
+  CHECK(s == 2);
+  // Row 3 is two from the north hall and three from the south; row 4 the
+  // other way round.
+  CHECK(table.find(1)->rect == (GaikaRect{3, 0, 5, 3}));
+  CHECK(table.find(2)->rect == (GaikaRect{3, 4, 5, 7}));
+  CHECK(table.find(1)->coverage == 12);
+  CHECK(table.find(2)->coverage == 12);
+  CHECK(table.at(Point{600, 3 * 128 + 10}) == 1);
+  CHECK(table.at(Point{600, 4 * 128 + 10}) == 2);
+  // The west is node 3, touching the north half only.
+  CHECK(table.find(3)->settlement == kNoObject);
+  REQUIRE(table.neighbours(1).size() == 2);
+  CHECK(table.neighbours(1)[0] == 2);
+  CHECK(table.neighbours(1)[1] == 3);
+  REQUIRE(table.neighbours(2).size() == 1);
+  CHECK(table.neighbours(2)[0] == 1);
+  REQUIRE(table.neighbours(3).size() == 1);
+  CHECK(table.neighbours(3)[0] == 1);
+}
 
+/// **A region's centre keeps the middle row** when the middle slot is not
+/// wholly free (0x0044a8a0): the search out to five slots finds the nearest
+/// free slot of the node, column first, but the centre it records is that
+/// slot's column with the rectangle's middle row.
+TEST(gaika_region_centre_keeps_the_middle_row_when_the_middle_slot_is_blocked) {
+  // kNodeIslands with one water cell, (8, 6), inside the eastern island's
+  // middle slot (4, 3): the slot stays the island's but is no longer free.
+  static constexpr std::initializer_list<std::string_view> kHoled = {
+      "~~~~~~~~~~~~~~~~", "~.....~.....~~~~", "~.....~.....~~~~", "~.....~.....~~~~",
+      "~.....~.....~~~~", "~.....~.....~~~~", "~~~~~~~.~...~~~~", "~~~~~~~.....~~~~",
+      "~~~~~~~.....~~~~", "~~~~~~~.....~~~~", "~~~~~~~.....~~~~", "~~~~~~~.....~~~~",
+      "~~~~~~~.....~~~~", "~~~~~~~.....~~~~", "~~~~~~~.....~~~~", "~~~~~~~~~~~~~~~~",
+  };
+  NodeBench b;
+  b.terrain = terrain_from(kHoled);
+  b.pass = pass_blocking_water(kHoled);
+  const Result<Grid> layer = Grid::parse(b.terrain);
+  REQUIRE(layer.ok());
+  b.world.set_terrain(layer.value());
+  b.world.mutable_lsa().build(b.world.terrain(), obstruction(b.pass));
+  // The movement grid is what "wholly free" reads.
+  MovementSystem movement;
+  REQUIRE(b.world.add_system(&movement));
+  movement.set_grid(obstruction(b.pass));
+  b.rebuild();
+  const GaikaTable& table = b.world.gaika();
+  REQUIRE(table.count() == 2);
+  REQUIRE(table.find(2)->rect == (GaikaRect{3, 0, 5, 7}));
+  // Middle (4, 3) blocked; (3, 3) is half channel; the first at distance 1 in
+  // the search's order is (4, 2) -- column 4, and row 3 is kept.
+  CHECK(table.find(2)->center == (Point{4 * 128 + 64, 3 * 128 + 64}));
+}
+
+/// No terrain is no partition: no slot grid, no node -- and every reader
+/// answers "nothing" rather than reading past an end.
+TEST(gaika_over_no_terrain_cuts_nothing) {
   World bare;
   LsaPartition none;
   none.build(Grid{}, ObstructionGrid{});
@@ -801,15 +888,43 @@ TEST(gaika_covers_a_map_with_only_regions_and_one_with_only_settlements) {
   (void)economy.create(bare, init);
   GaikaTable table;
   table.build(bare, none, economy.settlements());
-  CHECK(table.count() == 1);
-  CHECK(table.find(1)->lsa == kNoLsa);
-  // And a table over nothing at all still answers rather than reading past its
-  // own end.
+  CHECK(table.count() == 0);
+  CHECK(table.built());
+  CHECK(table.record(kNoGaika) != nullptr);
+  CHECK(table.at(Point{0, 0}) == kNoGaika);
   GaikaTable empty;
+  CHECK(!empty.built());
+  CHECK(empty.record(kNoGaika) == nullptr);
   CHECK(empty.count() == 0);
   CHECK(empty.find(1) == nullptr);
   CHECK(empty.at(none, Point{0, 0}) == kNoGaika);
   CHECK(empty.for_settlement(static_cast<ObjectId>(1)) == kNoGaika);
+}
+
+/// A restore takes the records and the grid and counts coverage and
+/// neighbours again from the grid; a grid that names a node not there, or
+/// does not fit its size, is refused.
+TEST(gaika_restore_counts_coverage_and_neighbours_from_the_grid) {
+  NodeBench b;
+  b.rebuild();
+  const GaikaTable& built = b.world.gaika();
+  std::vector<GaikaNode> nodes(built.nodes().begin(), built.nodes().end());
+  for (GaikaNode& node : nodes) node.coverage = 0;
+  std::vector<std::uint16_t> slots(built.slot_nodes().begin(), built.slot_nodes().end());
+  GaikaTable copy;
+  REQUIRE(copy.restore(nodes, built.slot_columns(), built.slot_rows(), slots));
+  REQUIRE(copy.count() == 2);
+  CHECK(copy.find(1)->coverage == 9);
+  CHECK(copy.find(2)->coverage == 24);
+  REQUIRE(copy.neighbours(1).size() == 1);
+  CHECK(copy.neighbours(1)[0] == 2);
+  CHECK(copy.at(Point{100, 100}) == 1);
+
+  std::vector<std::uint16_t> bad = slots;
+  bad[0] = 3;
+  CHECK(!copy.restore(nodes, built.slot_columns(), built.slot_rows(), bad));
+  CHECK(copy.count() == 0);
+  CHECK(!copy.restore(nodes, built.slot_columns() + 1, built.slot_rows(), slots));
 }
 
 // --------------------------------------------------------------------------
@@ -821,7 +936,9 @@ TEST(gaika_covers_a_map_with_only_regions_and_one_with_only_settlements) {
 /// something to say.
 TEST(gaika_entry_points_read_the_table_the_way_the_scripts_do) {
   NodeBench b;
-  const SettlementId west = b.plant(3, 3);
+  // Cell (1, 3) is slot (0, 1): the eastern island is three slots off, out of
+  // the snap's reach, so the settlement's node stays on the west.
+  const SettlementId west = b.plant(1, 3);
   b.rebuild();
   REQUIRE(b.world.gaika().count() == 2);
   const Settlement* w = b.economy.settlements().find(west);
@@ -880,15 +997,17 @@ TEST(gaika_entry_points_read_the_table_the_way_the_scripts_do) {
   CHECK(building.value.is_object());
   CHECK(building.value.as_object().id == w->object);
 
-  // `g.Center` is the node's own centre: the settlement's central building for
-  // a settlement node, the area's centroid for a region node.
+  // `g.Center` is the node record's own point: for a settlement node the
+  // middle of its central building's snapped slot (0, 1), not the building.
   const script::HostOutcome centre = call(script::CallKind::member, "Center", {gaika(1)});
   CHECK(is_point(centre.value));
-  CHECK(unpack_point(centre.value) == in_cell(3, 3));
+  CHECK(unpack_point(centre.value) == (Point{64, 192}));
   CHECK(unpack_point(call(script::CallKind::member, "Center", {gaika(2)}).value) ==
         b.world.gaika().find(2)->center);
-  // A GAIKA that names no node answers (0,0) rather than a sentinel: every
-  // shipped site feeds the result into a distance or a `Goto`.
+  // Node 0 is the placeholder record, whose point is (-1, -1); an id past the
+  // vector reads beyond it in the original and answers (0, 0) here.
+  CHECK(unpack_point(call(script::CallKind::member, "Center", {gaika(0)}).value) ==
+        (Point{-1, -1}));
   CHECK(unpack_point(call(script::CallKind::member, "Center", {gaika(99)}).value) ==
         (Point{0, 0}));
 
@@ -945,19 +1064,19 @@ TEST(get_dist_to_players_measures_town_halls_by_side_and_doubles_a_crossing) {
   NodeBench b;
   // The receiver is a **village**, so it has a node like every settlement does
   // and is itself not measured: the walk keeps only strongholds. Planted first
-  // so that its node is id 1.
-  b.plant(3, 3, 0, SettlementKind::village);
+  // so that its node is id 1. Every western home stands in cell column 1 --
+  // slot column 0 -- where the snap cannot reach the larger eastern island,
+  // so each node keeps the west's area.
+  b.plant(1, 2, 0, SettlementKind::village);
   // **Planted in an order the answers can see.** Each side's nearest home is
-  // not the last one the walk meets -- player 0's is at 64 units and its second
-  // is at 181, planted afterwards -- so a walk that kept the newest rather than
+  // not the last one the walk meets -- player 0's is at 45 units and its second
+  // is at 163, planted afterwards -- so a walk that kept the newest rather than
   // the least would be visibly wrong. And the three answers are three different
-  // numbers, so a pair of them being swapped is visible too. Both were
-  // survivors of the fault sweep before this layout replaced one where own and
-  // ally were equidistant.
-  b.plant(2, 3, 0);  // own,   64
-  b.plant(1, 3, 1);  // ally, 128
-  b.plant(9, 9, 2);  // enemy, 543 on the other island
-  b.plant(1, 1, 0);  // own,  181 -- farther, and later
+  // numbers, so a pair of them being swapped is visible too.
+  b.plant(1, 3, 0);  // own,   45
+  b.plant(1, 1, 1);  // ally, 101
+  b.plant(9, 9, 2);  // enemy, 684 on the other island
+  b.plant(1, 5, 0);  // own,  163 -- farther, and later
   b.rebuild();
 
   PlayerTable& players = b.world.players();
@@ -997,22 +1116,24 @@ TEST(get_dist_to_players_measures_town_halls_by_side_and_doubles_a_crossing) {
     return Answer{args[2].as_integer(), args[3].as_integer(), args[4].as_integer()};
   };
 
-  // The receiver's centre is `in_cell(3, 3)`. `isqrt` floors: 64 straight along
-  // one axis, 128 along one axis, and 384 on each axis is 543 -- charged twice,
-  // because that home is on the other island.
+  // The receiver's centre is its snapped slot's middle, (64, 192), and the
+  // homes are measured at their buildings. `isqrt` floors: (32, 32) is 45,
+  // (32, -96) is 101, and (544, 416) is 684 -- charged twice, because that
+  // home's node is in the other island's area.
+  REQUIRE(b.world.gaika().find(1)->center == (Point{64, 192}));
   const Answer seen = ask(1, 1);
-  CHECK(seen.own == 64);
-  CHECK(seen.ally == 128);
-  CHECK(seen.enemy == 2 * 543);
+  CHECK(seen.own == 45);
+  CHECK(seen.ally == 101);
+  CHECK(seen.enemy == 2 * 684);
 
   // The penalty is per settlement rather than per answer: an enemy home on the
   // receiver's own island is measured straight and wins the minimum.
-  b.plant(4, 4, 2);
+  b.plant(1, 4, 2);  // (32, 96): 101
   b.rebuild();
   const Answer nearer = ask(1, 1);
-  CHECK(nearer.enemy == 90);
-  CHECK(nearer.own == 64);
-  CHECK(nearer.ally == 128);
+  CHECK(nearer.enemy == 101);
+  CHECK(nearer.own == 45);
+  CHECK(nearer.ally == 101);
 
   // A village is not a home. These two are nearer than either side's nearest
   // stronghold and change nothing.
@@ -1031,7 +1152,7 @@ TEST(get_dist_to_players_measures_town_halls_by_side_and_doubles_a_crossing) {
   const Answer stranger = ask(1, 4);
   CHECK(stranger.own == -1);
   CHECK(stranger.ally == -1);
-  CHECK(stranger.enemy == 64);
+  CHECK(stranger.enemy == 45);
 
   // A player number outside 1..16 classifies nothing, and neither does a
   // receiver that names no node. Neither traps.
@@ -1046,23 +1167,26 @@ TEST(get_dist_to_players_measures_town_halls_by_side_and_doubles_a_crossing) {
 /// the **same area**, and the area is the reason it lives here.
 ///
 /// `0x0042c800` compares `[node + 0x10]`, which is `GAIKA::LSA`, and not node
-/// identity. That distinction is load-bearing in this engine and nowhere else:
-/// the node partition here is an approximation with one node per settlement, so
-/// a comparison by node would answer nothing on every map, while the LSA
-/// partition is measured. The three exclusions below are each placed *nearer*
-/// than the answer, so dropping any one of them changes it.
+/// identity: two settlements never share a node, so a comparison by node would
+/// answer nothing. The area a settlement is in is its node's, which is the
+/// area of the slot its central building was snapped to. The three exclusions
+/// below are each placed *nearer* than the answer, so dropping any one of them
+/// changes it.
+///
+/// The scene is on the eastern island, which no snap ever leaves (the western
+/// island covers less). The town hall across the channel stands in cell column
+/// 1, slot column 0, three slots from the east and out of the snap's reach, so
+/// its node keeps the west's area.
 TEST(best_to_supply_takes_the_nearest_same_owner_town_hall_in_the_same_area) {
   NodeBench b;
-  // The receiver sits on the west island's east edge, where an east-island
-  // stronghold is nearer than a west-island one.
-  const SettlementId from = b.plant(5, 3, 0, SettlementKind::village);
-  const SettlementId answer = b.plant(1, 3, 0);                            // 256, west
-  const SettlementId across = b.plant(7, 3, 0);                            // 128, east
-  const SettlementId nearer_village = b.plant(4, 3, 0, SettlementKind::village);  // 64
-  const SettlementId nearer_foreign = b.plant(5, 2, 1);                    // 64, player 1
+  const SettlementId from = b.plant(7, 4, 0, SettlementKind::village);       // (480, 288)
+  const SettlementId answer = b.plant(7, 11, 0);                             // 448, east
+  const SettlementId across = b.plant(1, 4, 0);                              // 384, west
+  const SettlementId nearer_village = b.plant(7, 7, 0, SettlementKind::village);  // 192
+  const SettlementId nearer_foreign = b.plant(8, 4, 1);                      // 64, player 1
   // A second settlement that passes every test, farther away, so that the walk
   // is choosing rather than taking the only survivor.
-  const SettlementId farther = b.plant(1, 1, 0);                           // 286, west
+  const SettlementId farther = b.plant(9, 13, 0);                            // 590, east
   b.rebuild();
 
   script::HostRegistry registry;
@@ -1092,9 +1216,16 @@ TEST(best_to_supply_takes_the_nearest_same_owner_town_hall_in_the_same_area) {
     }
     return out.value.as_object().id;
   };
+  const auto area_of = [&](SettlementId id) {
+    const GaikaNode* node = b.world.gaika().find(b.world.gaika().for_settlement(object_of(id)));
+    return node == nullptr ? kNoLsa : node->lsa;
+  };
+  const LsaId west = b.world.lsa().at(in_cell(3, 3));
+  const LsaId east = b.world.lsa().at(in_cell(9, 9));
+  REQUIRE(area_of(from) == east);
+  REQUIRE(area_of(across) == west);
 
   CHECK(best(from) == object_of(answer));
-  (void)across;
   (void)nearer_village;
   (void)nearer_foreign;
   (void)farther;
@@ -1105,21 +1236,16 @@ TEST(best_to_supply_takes_the_nearest_same_owner_town_hall_in_the_same_area) {
   // an outpost.
   CHECK(best(answer) == object_of(answer));
 
-  // **A settlement whose centre stands on blocked ground takes the area of the
-  // nearest labelled cell** (`LsaPartition::at_or_near`, a labelled reading):
-  // every village's central building stands on its own footprint, and with
-  // `at` alone every village had no area and no supply target, so no tribute
-  // ever flowed. Cell (0, 1) is sea one cell off the west island, so the
-  // village there supplies the west island's nearest town hall, `farther` at
-  // (1, 1) -- and not `across`, on the other island.
+  // **A settlement whose centre stands off the ground still has an area**: its
+  // node's, the area of the slot the snap found. Cell (0, 1) is sea one cell
+  // off the western island, but its slot (0, 0) is the west's, so the village
+  // there supplies the west's town hall, `across` -- and none on the east,
+  // however near.
   const SettlementId shore = b.plant(0, 1, 0, SettlementKind::village);
   b.rebuild();
   REQUIRE(b.world.lsa().at(in_cell(0, 1)) == kNoLsa);
-  const GaikaNode* node = b.world.gaika().find(b.world.gaika().for_settlement(object_of(shore)));
-  REQUIRE(node != nullptr);
-  CHECK(node->lsa == b.world.lsa().at(in_cell(1, 1)));
-  CHECK(node->lsa != kNoLsa);
-  CHECK(best(shore) == object_of(farther));
+  CHECK(area_of(shore) == west);
+  CHECK(best(shore) == object_of(across));
 }
 
 /// `IsWaterLsa` answering **true**, which needs a map with navigable water --
@@ -1210,7 +1336,7 @@ std::vector<ObjectId> controlled(ArmyBench& b, GaikaId node, const char* class_n
 /// see the body in `sim/squad.cpp` for which instruction each one came from.
 TEST(get_ai_controlled_units_walks_the_nodes_squads_and_emits_their_members) {
   ArmyBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   REQUIRE(b.world.gaika().count() == 2);
 
@@ -1234,7 +1360,7 @@ TEST(get_ai_controlled_units_walks_the_nodes_squads_and_emits_their_members) {
 
 TEST(get_ai_controlled_units_takes_only_the_players_own_squads) {
   ArmyBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId mine = b.soldier("Legionary", 1);
   const ObjectId theirs = b.soldier("Legionary", 2);
@@ -1262,7 +1388,7 @@ TEST(get_ai_controlled_units_takes_only_the_players_own_squads) {
 /// `SF_PEACEFUL`, `true` takes it.
 TEST(get_ai_controlled_units_gates_peaceful_squads_on_its_boolean) {
   ArmyBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId calm = b.soldier("Legionary", 1);
   const SquadKey key = b.band(1, 1, {calm});
@@ -1276,7 +1402,7 @@ TEST(get_ai_controlled_units_gates_peaceful_squads_on_its_boolean) {
 
 TEST(get_ai_controlled_units_counts_a_squad_that_is_heading_to_the_node) {
   ArmyBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.plant(9, 9);
   b.rebuild();
   REQUIRE(b.world.gaika().count() == 2);
@@ -1303,7 +1429,7 @@ TEST(get_ai_controlled_units_counts_a_squad_that_is_heading_to_the_node) {
 /// 0x400000` test is the only thing left standing between it and the list.
 TEST(get_ai_controlled_units_emits_units_and_not_buildings) {
   ArmyBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId soldier = b.soldier("Legionary", 1);
   const ObjectId keep = b.fort(1);
@@ -1319,7 +1445,7 @@ TEST(get_ai_controlled_units_emits_units_and_not_buildings) {
 /// than reaching through to a squad that happens to carry the same number.
 TEST(get_ai_controlled_units_refuses_a_player_index_past_the_table) {
   ArmyBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId stray = b.soldier("Legionary", kNoPlayer);
   const SquadKey key = b.heroes.squads().create(kNoPlayer);
@@ -1338,7 +1464,7 @@ TEST(get_ai_controlled_units_refuses_a_player_index_past_the_table) {
 
 TEST(get_ai_controlled_units_skips_the_dead_the_pinned_and_the_strengthless) {
   ArmyBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId alive = b.soldier("Legionary", 1);
   const ObjectId dead = b.soldier("Legionary", 1);
@@ -1363,7 +1489,7 @@ TEST(get_ai_controlled_units_skips_the_dead_the_pinned_and_the_strengthless) {
 /// it is in the middle of -- not a per-squad quota and not a comparison.
 TEST(get_ai_controlled_units_stops_the_walk_when_the_quota_is_met) {
   ArmyBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId one = b.soldier("Legionary", 1);
   const ObjectId two = b.soldier("Legionary", 1);
@@ -1384,7 +1510,7 @@ TEST(get_ai_controlled_units_stops_the_walk_when_the_quota_is_met) {
 /// and the same units come back on the next call until a caller does.
 TEST(get_ai_controlled_units_changes_nothing_and_answers_the_same_twice) {
   ArmyBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId soldier = b.soldier("Legionary", 1);
   const SquadKey key = b.band(1, 1, {soldier});
@@ -1509,7 +1635,7 @@ ObjectId best_in_gaika(SiegeBench& b, ObjectId caster) {
 /// only thing separating the two readings.
 TEST(best_target_in_gaika_takes_the_nearest_enemy_out_of_the_squads_standing_here) {
   SiegeBench b;
-  b.plant(3, 3);  // node 1 on the western island; the eastern one is node 2
+  b.plant(1, 3);  // node 1 the western island; the eastern one is node 2
   b.rebuild();
   REQUIRE(b.world.gaika().count() == 2);
 
@@ -1527,7 +1653,7 @@ TEST(best_target_in_gaika_takes_the_nearest_enemy_out_of_the_squads_standing_her
   // order and then join order. The pair below is joined highest-id first, so
   // a rule of "lowest id" would answer the other one.
   SiegeBench t;
-  t.plant(3, 3);
+  t.plant(1, 3);
   t.rebuild();
   const ObjectId watcher = t.trooper("Legionary", 1, 3, 3);
   const ObjectId left = t.trooper("Archer", 2, 2, 3);
@@ -1543,7 +1669,7 @@ TEST(best_target_in_gaika_takes_the_nearest_enemy_out_of_the_squads_standing_her
 /// that the circle-sweeping form of the same search finds nothing at all.
 TEST(best_target_in_gaika_has_no_radius_where_the_rest_of_the_family_has_sight) {
   SiegeBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId caster = b.trooper("Legionary", 1, 1, 1);
   const ObjectId across = b.trooper("Archer", 2, 5, 5);
@@ -1559,7 +1685,7 @@ TEST(best_target_in_gaika_has_no_radius_where_the_rest_of_the_family_has_sight) 
 /// two candidates happen to arrive in.
 TEST(best_target_in_gaika_applies_the_squad_tests_one_at_a_time) {
   SiegeBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId caster = b.trooper("Legionary", 1, 2, 2);
   const ObjectId enemy = b.trooper("Archer", 2, 2, 3);
@@ -1636,7 +1762,7 @@ TEST(best_target_in_gaika_applies_the_squad_tests_one_at_a_time) {
 /// answer would be the member; it asks about the squad, so there is none.
 TEST(best_target_in_gaika_reads_the_squads_owner_and_not_its_members) {
   SiegeBench b;
-  b.plant(3, 3);
+  b.plant(1, 3);
   b.rebuild();
   const ObjectId caster = b.trooper("Legionary", 1, 2, 2);
   const ObjectId lent = b.trooper("Archer", 2, 2, 3);
@@ -1658,17 +1784,15 @@ TEST(best_target_in_gaika_reads_the_squads_owner_and_not_its_members) {
 
 /// The fallback: the first enemy catapult standing in the receiver's node.
 ///
-/// **The node test is narrower here than in the original**, and the layout says
-/// so out loud. Every settlement gets a node centred on its central building,
-/// so the catapult *is* a node centre and the receiver shares its node exactly
-/// when that catapult is the nearest node centre to it. The original's slot
-/// grid makes a node a region instead; the reading is the same and the reach is
-/// smaller, and `sim/ai.cpp` records that.
+/// The catapult's settlement seeds no node of its own -- its central building
+/// is none of the five settlement classes -- so it stands in whatever node the
+/// partition cut there: here the western island's region node, the town hall
+/// being on the eastern island.
 TEST(best_target_in_gaika_falls_back_to_an_enemy_catapult_standing_in_this_node) {
   SiegeBench b;
   // `BCatapult`, not `Catapult`: the match is by descent.
   const ObjectId siege = b.emplacement("BCatapult", 2, 2, 2);
-  b.plant(5, 5, 1);  // a town hall of the receiver's own, and a second node
+  b.plant(9, 9, 1);  // a town hall of the receiver's own, the eastern island's node
   b.rebuild();
   const ObjectId caster = b.trooper("Legionary", 1, 1, 1);
   b.arm();
@@ -1692,8 +1816,8 @@ TEST(best_target_in_gaika_falls_back_to_an_enemy_catapult_standing_in_this_node)
 
   // A different node, and it is gone: the receiver standing by its own town
   // hall is in that settlement's node and not the catapult's.
-  CHECK(b.world.set_position(caster, in_cell(5, 5)));
-  REQUIRE(table.at(b.world.lsa(), in_cell(5, 5)) != here);
+  CHECK(b.world.set_position(caster, in_cell(9, 9)));
+  REQUIRE(table.at(b.world.lsa(), in_cell(9, 9)) != here);
   CHECK(best_in_gaika(b, caster) == kNoObject);
   CHECK(b.world.set_position(caster, in_cell(1, 1)));
 
@@ -1983,8 +2107,10 @@ struct TeleportBench {
 
   TeleportBench() {
     graph.add(bytes_of(
-                  R"(<class id="Townhall" cpp_class="CVXTownHall"><properties maxhealth="1000"/></class>)"),
+                  R"(<class id="Townhall" cpp_class="CVXTownHall" parent="BaseTownhall"><properties maxhealth="1000"/></class>)"),
               "townhall.sc.xml");
+    graph.add(bytes_of(R"(<class id="BaseTownhall" cpp_class="CVXTownHall" parent=""/>)"),
+              "basetownhall.sc.xml");
     graph.add(bytes_of(R"(<class id="Teleport" cpp_class="CVXTeleport"/>)"), "teleport.sc.xml");
     graph.link();
     world.set_class_graph(&graph);
@@ -2015,6 +2141,17 @@ struct TeleportBench {
   void pair(ObjectId a, ObjectId b) {
     world.mutable_state(a)->teleport_destination = b;
     world.mutable_state(b)->teleport_destination = a;
+  }
+
+  /// A town hall, which seeds a settlement node where a teleport seeds none.
+  void town_hall(std::int32_t cx, std::int32_t cy) {
+    const ObjectId object = world.spawn(NativeClass::town_hall, nullptr, graph.find("Townhall"));
+    CHECK(world.set_position(object, in_cell(cx, cy)));
+    SettlementInit init;
+    init.kind = SettlementKind::stronghold;
+    init.anchor = object;
+    init.owner = 1;
+    CHECK(economy.create(world, init) != kNoSettlement);
   }
 
   void rebuild() { world.mutable_gaika().build(world, world.lsa(), economy.settlements()); }
@@ -2124,6 +2261,14 @@ TEST(find_teleport_skips_a_teleport_in_a_node_the_computer_player_has_not_explor
   const ObjectId b_out = b.teleport(36, 3);
   b.pair(a_in, a_out);
   b.pair(b_in, b_out);
+  // A teleport seeds no node, and the bare western island is one region node,
+  // so two town halls cut it: slot columns 0..1 go to the hall in slot column
+  // 1 (a tie at column 2 goes to the later seed), 2..13 to the hall in column
+  // 3, as far as its rectangle reaches, and 14..24 -- thirty-three slots, too
+  // many to be merged away -- to the region seed the scan finds at column 14.
+  // Neither hall has a teleport destination, so `FindTeleport` passes them by.
+  b.town_hall(2, 2);
+  b.town_hall(6, 2);
   b.rebuild();
   // Player 1 is a computer player with a fresh view: nothing explored.
   b.ai.seed_gaika_view(0, b.world.gaika().count());
@@ -2308,8 +2453,10 @@ struct ShoreBench {
   explicit ShoreBench(std::initializer_list<std::string_view> picture = kShores)
       : terrain(terrain_from(picture)), pass(pass_walling_shore_sized(picture)) {
     graph.add(bytes_of(
-                  R"(<class id="Townhall" cpp_class="CVXTownHall"><properties maxhealth="1000"/></class>)"),
+                  R"(<class id="Townhall" cpp_class="CVXTownHall" parent="BaseTownhall"><properties maxhealth="1000"/></class>)"),
               "townhall.sc.xml");
+    graph.add(bytes_of(R"(<class id="BaseTownhall" cpp_class="CVXTownHall" parent=""/>)"),
+              "basetownhall.sc.xml");
     graph.add(bytes_of(R"(<class id="BaseVillage" cpp_class="CVXBuilding" parent=""/>)"),
               "basevillage.sc.xml");
     graph.add(bytes_of(R"(<class id="Village" cpp_class="CVXBuilding" parent="BaseVillage"/>)"),
@@ -2657,6 +2804,70 @@ TEST(check_lsa_path_counts_the_areas_and_needs_a_ship_to_cross) {
   CHECK(b.path(west, east, 1) == 0);
   // ...and with a ship present but busy, the sea is not short of ships.
   CHECK(b.ai.ship_needs(0, sea) == 2);
+}
+
+/// **An advancing ship is a way across only when its squad's destination shows
+/// no enemy** (0x00441730's `advance` clause). The ship's squad (none --
+/// available), the squad's AI destination (the order's node, else
+/// `DestGAIKA`), and that node's squad deque: an enemy squad with strength and
+/// any presence there withholds the ship; an ally's does not, nor a peaceful
+/// one's. Without the AI manager the clause answers available.
+TEST(check_lsa_path_refuses_an_advancing_ship_bound_for_an_enemys_node) {
+  ShoreBench b;
+  const LsaPartition& areas = b.world.lsa();
+  const LsaId west = areas.at(in_cell(6, 6));
+  const LsaId east = areas.at(in_cell(20, 6));
+  REQUIRE(west != kNoLsa && east != kNoLsa);
+  b.rebuild();
+  const GaikaId there = b.world.gaika().at(areas, in_cell(20, 6));
+  REQUIRE(there != kNoGaika);
+
+  const ObjectId ship = b.ship(14, 6, 0, "advance");
+  SquadTable& table = b.heroes.squads();
+  // The ship has no squad: available, manager or not.
+  CHECK(b.path(west, east, 1) == 3);
+  b.ai.start_manager();
+  CHECK(b.path(west, east, 1) == 3);
+
+  // In a squad bound for the eastern node, with nobody there: available.
+  const SquadKey crew = table.create(0);
+  CHECK(table.join(crew, ship));
+  table.set_dest(crew, there);
+  CHECK(b.path(west, east, 1) == 3);
+
+  // An enemy squad with strength staying there: not a way across.
+  const ObjectId foe = b.ship(20, 6, 1, nullptr);
+  const SquadKey band = table.create(1);
+  CHECK(table.join(band, foe));
+  table.move_in(band, there);
+  table.set_dest(band, there);
+  Squad* enemy = table.find(band);
+  REQUIRE(enemy != nullptr);
+  enemy->eval = 10;
+  CHECK(b.path(west, east, 1) == 0);
+  // With no strength it is not counted...
+  enemy->eval = 0;
+  CHECK(b.path(west, east, 1) == 3);
+  enemy->eval = 10;
+  // ...nor when the owner of the ship is allied to it (the ship owner's row).
+  b.world.players().set(0, 1, Relation::allied, true);
+  CHECK(b.path(west, east, 1) == 3);
+  b.world.players().set(0, 1, Relation::allied, false);
+  CHECK(b.path(west, east, 1) == 0);
+  // A peaceful squad has no presence.
+  enemy->flags = static_cast<std::uint16_t>(enemy->flags | kSquadFlagPeaceful);
+  CHECK(b.path(west, east, 1) == 3);
+  enemy->flags = static_cast<std::uint16_t>(enemy->flags & ~kSquadFlagPeaceful);
+  // Bound elsewhere, the ship is free again: the clause reads the ship's
+  // destination, not where the ship stands.
+  table.set_dest(crew, kNoGaika);
+  CHECK(b.path(west, east, 1) == 3);
+  table.set_dest(crew, there);
+  CHECK(b.path(west, east, 1) == 0);
+  // An idle ship is not asked.
+  b.commands.clear_commands(b.world, ship);
+  b.commands.set_command(b.world, ship, "idle", Command{});
+  CHECK(b.path(west, east, 1) == 3);
 }
 
 /// **A boarding ship is a way across only while its transport order is the
@@ -3449,10 +3660,12 @@ TEST(get_gaika_of_a_negative_point_is_no_node) {
   b.rebuild();
   const GaikaTable& table = b.world.gaika();
   REQUIRE(table.count() >= 1);
-  // The control: the corner itself, and a point off the far edge, still have
-  // a node -- only the sign decides.
+  // The control: the corner itself, and a point in the far corner of the
+  // eastern island, still have a node -- only the sign decides. (A point past
+  // the slot grid's end has none either, but that is the grid's bound and not
+  // the sign: `gaika_at_reads_the_slot_grid_as_the_original_does`.)
   REQUIRE(table.at(b.world.lsa(), (Point{0, 0})) != kNoGaika);
-  REQUIRE(table.at(b.world.lsa(), (Point{100'000, 100'000})) != kNoGaika);
+  REQUIRE(table.at(b.world.lsa(), in_cell(10, 14)) != kNoGaika);
   CHECK(table.at(b.world.lsa(), kHeldPosition) == kNoGaika);
   CHECK(table.at(b.world.lsa(), (Point{-1, 500})) == kNoGaika);
   CHECK(table.at(b.world.lsa(), (Point{500, -1})) == kNoGaika);
@@ -4163,8 +4376,10 @@ struct LinkBench {
         pass(rect ? pass_blocking_water_for(picture)
                   : (shore ? pass_blocking_shore(picture) : pass_blocking_water(picture))) {
     graph.add(bytes_of(
-                  R"(<class id="Townhall" cpp_class="CVXTownHall"><properties maxhealth="1000"/></class>)"),
+                  R"(<class id="Townhall" cpp_class="CVXTownHall" parent="BaseTownhall"><properties maxhealth="1000"/></class>)"),
               "townhall.sc.xml");
+    graph.add(bytes_of(R"(<class id="BaseTownhall" cpp_class="CVXTownHall" parent=""/>)"),
+              "basetownhall.sc.xml");
     graph.link();
     world.set_class_graph(&graph);
     const Result<Grid> layer = Grid::parse(terrain);
@@ -4222,15 +4437,19 @@ struct LinkBench {
 /// same island, which is next door to the first.
 TEST(gaika_neighbours_pair_a_land_node_with_the_water_around_it) {
   LinkBench b(kIslandAndSea, /*shore=*/true);
-  // Both inside the walled shore, which leaves the five-cell block at 4..8.
-  b.plant(4, 4);
+  // Both inside the walled shore, which leaves the five-cell block at 4..8:
+  // slots 2..4 each way. Both on its southern row, which the sea's slots
+  // border: the first keeps slot column 2 and the second, taking the tie in
+  // column 3, keeps columns 3 and 4. Two on a diagonal would not do -- the
+  // smoothing hands the lesser one's slots to the greater until none is left.
+  b.plant(4, 8);
   b.plant(8, 8);
   b.rebuild();
   // Two settlements, and the open water nothing was built in.
   REQUIRE(b.world.gaika().count() == 3);
   b.check_shape();
 
-  const GaikaId first = b.world.gaika().at(b.world.lsa(), in_cell(4, 4));
+  const GaikaId first = b.world.gaika().at(b.world.lsa(), in_cell(4, 8));
   const GaikaId second = b.world.gaika().at(b.world.lsa(), in_cell(8, 8));
   const GaikaId sea = b.world.gaika().at(b.world.lsa(), Point{16, 16});
   REQUIRE(first != second);
@@ -4265,7 +4484,9 @@ TEST(gaika_neighbours_stop_at_water_wider_than_a_slot) {
 /// 128 units.
 TEST(gaika_neighbours_cannot_see_a_channel_narrower_than_a_slot) {
   LinkBench b(kNodeIslands, /*shore=*/false);
-  b.plant(3, 3);
+  // Cell column 1, slot column 0: out of the snap's reach of the eastern
+  // island, so the first node is the western island's.
+  b.plant(1, 3);
   b.plant(9, 9);
   b.rebuild();
   REQUIRE(b.world.gaika().count() == 2);
@@ -4311,11 +4532,12 @@ std::int32_t controlled_neighbors(LinkBench& b, GaikaId node, std::int32_t playe
 /// asking for 1 finds neither. That is the whole of the original's `dec`.
 TEST(controlled_neighbors_counts_the_settlements_next_door) {
   LinkBench b(kIslandAndSea, /*shore=*/true);
-  b.plant(4, 4, /*owner=*/1);
+  // On the island's southern row, as in the test above, so both border the sea.
+  b.plant(4, 8, /*owner=*/1);
   b.plant(8, 8, /*owner=*/2);
   b.rebuild();
   REQUIRE(b.world.gaika().count() == 3);
-  const GaikaId first = b.world.gaika().at(b.world.lsa(), in_cell(4, 4));
+  const GaikaId first = b.world.gaika().at(b.world.lsa(), in_cell(4, 8));
   const GaikaId second = b.world.gaika().at(b.world.lsa(), in_cell(8, 8));
   const GaikaId sea = b.world.gaika().at(b.world.lsa(), Point{16, 16});
   REQUIRE(b.touching(first, second));
@@ -4338,7 +4560,9 @@ TEST(controlled_neighbors_counts_the_settlements_next_door) {
   // trap, which is what the raw `dec` and compare do -- and an *unowned*
   // settlement is not the one it matches, which is the only way to tell the
   // refusal from a comparison against "no player".
-  const SettlementId nobodys = b.plant(6, 6, kNoPlayer);
+  // In the island's north-west corner: it takes the two northern rows, and
+  // the first keeps the south-west slot, which still borders the sea.
+  const SettlementId nobodys = b.plant(4, 4, kNoPlayer);
   b.rebuild();
   CHECK(nobodys != kNoSettlement);
   REQUIRE(b.world.gaika().count() == 4);
@@ -4357,11 +4581,11 @@ TEST(controlled_neighbors_counts_the_settlements_next_door) {
 /// both.
 TEST(controlled_neighbors_counts_every_neighbour_that_qualifies) {
   LinkBench b(kIslandAndSea, /*shore=*/true);
-  b.plant(4, 4, /*owner=*/1);
+  b.plant(4, 8, /*owner=*/1);
   b.plant(8, 8, /*owner=*/1);
   b.rebuild();
   REQUIRE(b.world.gaika().count() == 3);
-  const GaikaId first = b.world.gaika().at(b.world.lsa(), in_cell(4, 4));
+  const GaikaId first = b.world.gaika().at(b.world.lsa(), in_cell(4, 8));
   const GaikaId sea = b.world.gaika().at(b.world.lsa(), Point{16, 16});
 
   CHECK(controlled_neighbors(b, first, 2) == 1);
@@ -4494,12 +4718,14 @@ struct ExploreBench : LinkBench {
 /// nothing lights up a node whose neighbours are all still dark.
 TEST(can_explore_says_yes_when_a_neighbour_has_been_explored) {
   ExploreBench b(kIslandAndSea, /*shore=*/true);
-  b.plant(4, 4);
+  // On the island's southern row, so both border the sea (see
+  // `gaika_neighbours_pair_a_land_node_with_the_water_around_it`).
+  b.plant(4, 8);
   b.plant(8, 8);
   b.rebuild();
   REQUIRE(b.world.gaika().count() == 3);
   b.see(0);
-  const GaikaId first = b.world.gaika().at(b.world.lsa(), in_cell(4, 4));
+  const GaikaId first = b.world.gaika().at(b.world.lsa(), in_cell(4, 8));
   const GaikaId second = b.world.gaika().at(b.world.lsa(), in_cell(8, 8));
   const GaikaId sea = b.world.gaika().at(b.world.lsa(), Point{16, 16});
   REQUIRE(b.touching(first, second));
@@ -4550,10 +4776,8 @@ TEST(can_explore_says_yes_through_a_teleport_that_lands_somewhere_explored) {
   // The node the far end of the pair actually stands in, which is what the
   // routine asks about and which is not the settlement's node beside it.
   const GaikaId landing = b.world.gaika().at(b.world.lsa(), b.world.resolve_position(exit));
-  // A teleport is a settlement here, so it is a node centre and the node it
-  // stands in is its own. That is the partition showing through, and it is
-  // narrower than the original's region: there a teleport shares the node of
-  // whatever region it sits in.
+  // A teleport seeds no node: it is in whatever node the partition cut where
+  // it stands, here the western settlement's.
   const GaikaId doorway = b.world.gaika().at(b.world.lsa(), b.world.resolve_position(mouth));
   REQUIRE(west != east);
   // Nothing on the western island is next door to anything on the eastern one,
@@ -4613,11 +4837,9 @@ struct WallBench : ArmyBench {
         <properties maxhealth="1000"/>
       </class>)"),
               "gate.sc.xml");
-    // A town hall under the base the entry point actually tests. `NodeBench`'s
-    // `Townhall` descends from nothing, and `GAIKA::GetDestPoint` asks
-    // `IsHeirOf("BaseTownhall")` before it will look for a gate at all.
-    graph.add(bytes_of(R"(<class id="BaseTownhall" cpp_class="CVXTownHall" parent=""/>)"),
-              "basetownhall.sc.xml");
+    // A town hall under the base the entry point actually tests:
+    // `GAIKA::GetDestPoint` asks `IsHeirOf("BaseTownhall")` before it will look
+    // for a gate at all. `NodeBench` declares the base.
     graph.add(bytes_of(R"(<class id="RTownhall" cpp_class="CVXTownHall" parent="BaseTownhall">
         <properties maxhealth="5000"/>
       </class>)"),
@@ -4954,10 +5176,11 @@ TEST(gaika_dest_point_aims_a_squad_at_the_ground_outside_the_nearest_gate) {
   // answer every branch either improves on or leaves.
   CHECK(ask(node, scout) == centre);
 
-  // A `GAIKA` naming no node is `(0, 0)`: the accumulator is zeroed before the
-  // table is asked and nothing else writes it.
+  // Node 0 is the placeholder record, which has no settlement, so it answers
+  // its own point, `(-1, -1)`. An id past the table is `(0, 0)`: the
+  // accumulator is zeroed before the table is asked and nothing else writes it.
   const Point origin{0, 0};
-  CHECK(ask(kNoGaika, scout) == origin);
+  CHECK(ask(kNoGaika, scout) == (Point{-1, -1}));
   CHECK(ask(99, scout) == origin);
 
   // Two gates on opposite sides of the town. The nearest one **to the unit**
@@ -5043,12 +5266,24 @@ TEST(gaika_dest_point_aims_a_squad_at_the_ground_outside_the_nearest_gate) {
                            .value) == middle);
   }
 
-  // **The class test is `BaseTownhall` and it is not decoration.** A settlement
-  // whose central building descends from nothing has gates and is still
-  // answered with its centre: the search never runs.
+  // **The class test is `BaseTownhall` and it is not decoration.** A village --
+  // which has a node of its own, its central building descending from
+  // `BaseVillage` -- has gates and is still answered with its centre: the
+  // search never runs.
   {
     WallBench c;
-    const SettlementId plain = c.plant(3, 3);  // `NodeBench`'s `Townhall`, no base
+    c.graph.add(bytes_of(R"(<class id="BaseVillage" cpp_class="CVXTownHall" parent=""/>)"),
+                "basevillage.sc.xml");
+    c.graph.add(bytes_of(R"(<class id="Village" cpp_class="CVXTownHall" parent="BaseVillage"/>)"),
+                "village.sc.xml");
+    c.graph.link();
+    const ObjectId hall = c.world.spawn(NativeClass::building, nullptr, c.graph.find("Village"));
+    CHECK(c.world.set_position(hall, in_cell(3, 3)));
+    SettlementInit init;
+    init.kind = SettlementKind::village;
+    init.anchor = hall;
+    init.owner = 1;
+    const SettlementId plain = c.economy.create(c.world, init);
     const Settlement* s = c.economy.settlements().find(plain);
     REQUIRE(s != nullptr);
     const Point middle = c.world.resolve_position(s->anchor);
@@ -5096,7 +5331,8 @@ TEST(gaika_dest_point_aims_a_squad_at_the_ground_outside_the_nearest_gate) {
 /// above the whole gate search.
 TEST(gaika_dest_point_answers_a_region_nodes_own_centre) {
   WallBench b;
-  (void)b.plant(3, 3);
+  // Slot column 0, out of the snap's reach of the eastern island.
+  (void)b.plant(1, 3);
   b.rebuild();
   // The eastern island has no settlement on it, so its node is a region node.
   const GaikaId region = b.world.gaika().at(b.world.lsa(), in_cell(10, 10));
@@ -5343,12 +5579,14 @@ struct DetourBench : LinkBench {
     install_objlist_teardown(scheduler);
 
     // Planted in this order so the ids are known: the centre is 1 and its
-    // neighbour list runs east, north, south, west.
-    (void)plant(7, 7);
-    (void)plant(13, 7);
-    (void)plant(7, 1);
-    (void)plant(7, 13);
-    (void)plant(1, 7);
+    // neighbour list runs east, north, south, west. Each town hall stands on
+    // the middle of its slot -- slots (3, 3), (6, 3), (3, 0), (3, 6) and
+    // (0, 3) -- so that each node's centre is its central building.
+    (void)town(Point{448, 448});
+    (void)town(Point{832, 448});
+    (void)town(Point{448, 64});
+    (void)town(Point{448, 832});
+    (void)town(Point{64, 448});
     rebuild();
     REQUIRE(world.gaika().count() == 5);
     here = world.gaika().at(world.lsa(), in_cell(7, 7));
@@ -5364,6 +5602,18 @@ struct DetourBench : LinkBench {
     const std::span<const GaikaId> around = world.gaika().neighbours(here);
     REQUIRE(std::vector<GaikaId>(around.begin(), around.end()) ==
             std::vector<GaikaId>({east, north, south, west}));
+  }
+
+  /// A town hall of player 1's standing on a point rather than a cell.
+  SettlementId town(Point at) {
+    const ObjectId anchor = world.spawn(NativeClass::town_hall, nullptr, graph.find("Townhall"));
+    CHECK(world.set_position(anchor, at));
+    CHECK(world.set_owner(anchor, 1));
+    SettlementInit init;
+    init.kind = SettlementKind::stronghold;
+    init.anchor = anchor;
+    init.owner = 1;
+    return economy.create(world, init);
   }
 
   /// A stand-in `CheckMAIKA.vs` with the shipped signature. It refuses the
@@ -5474,7 +5724,7 @@ TEST(calc_go_around_measures_a_garrisoned_leader_from_its_town) {
 TEST(calc_go_around_picks_the_sideways_neighbour_on_the_centres_side_of_the_march) {
   DetourBench b;
   b.check_maika(kNoGaika);
-  const Point leader_at{600, 470};
+  const Point leader_at{568, 438};
   const ObjectId mule = b.unit("Mule", leader_at);
   const ObjectId first = b.unit("Walker", leader_at);
   const ObjectId champion = b.hero(leader_at);
@@ -5530,7 +5780,7 @@ TEST(calc_go_around_keeps_the_later_of_two_equal_scores_unless_the_script_refuse
   {
     DetourBench b;
     b.check_maika(kNoGaika);
-    const ObjectId only = b.unit("Walker", Point{608, 480});
+    const ObjectId only = b.unit("Walker", Point{576, 448});
     const SquadKey key = b.band(2, {only}, b.east, b.west);
     CHECK(b.go_around(key).value.truthy_scalar());
     CHECK(b.heroes.squads().find(key)->src_gaika == b.south);
@@ -5542,7 +5792,7 @@ TEST(calc_go_around_keeps_the_later_of_two_equal_scores_unless_the_script_refuse
   {
     DetourBench b;
     b.check_maika(b.south);
-    const ObjectId only = b.unit("Walker", Point{608, 480});
+    const ObjectId only = b.unit("Walker", Point{576, 448});
     const SquadKey key = b.band(2, {only}, b.east, b.west);
     CHECK(b.go_around(key).value.truthy_scalar());
     CHECK(b.heroes.squads().find(key)->src_gaika == b.north);
@@ -5566,14 +5816,14 @@ TEST(calc_go_around_keeps_the_later_of_two_equal_scores_unless_the_script_refuse
     b.check_maika(kNoGaika);
     b.check_maika(b.south, "DATA/AI/DEFENSIVE/CHECKMAIKA.VS");
 
-    const ObjectId theirs = b.unit("Walker", Point{608, 480}, 5);
+    const ObjectId theirs = b.unit("Walker", Point{576, 448}, 5);
     const SquadKey key = b.band(5, {theirs}, b.east, b.west);
     CHECK(b.go_around(key).value.truthy_scalar());
     CHECK(b.heroes.squads().find(key)->src_gaika == b.north);
     CHECK(b.shown(5) == (b.east * 10 + b.north) * 10 + b.south);
     CHECK(b.shown(2) == 0);
 
-    const ObjectId ours = b.unit("Walker", Point{608, 480}, 2);
+    const ObjectId ours = b.unit("Walker", Point{576, 448}, 2);
     const SquadKey root = b.band(2, {ours}, b.east, b.west);
     CHECK(b.go_around(root).value.truthy_scalar());
     CHECK(b.heroes.squads().find(root)->src_gaika == b.south);
@@ -5596,7 +5846,7 @@ TEST(calc_go_around_refuses_the_way_back_the_way_there_and_a_squad_going_nowhere
   {
     DetourBench b;
     b.check_maika(kNoGaika);
-    const ObjectId only = b.unit("Walker", Point{600, 470});
+    const ObjectId only = b.unit("Walker", Point{568, 438});
     untouched(b, b.band(2, {only}, b.east, b.south), only, b.south);
     CHECK(b.shown(2) == b.south);
   }
@@ -5606,7 +5856,7 @@ TEST(calc_go_around_refuses_the_way_back_the_way_there_and_a_squad_going_nowhere
   {
     DetourBench b;
     b.check_maika(kNoGaika);
-    const ObjectId only = b.unit("Walker", Point{800, 481});
+    const ObjectId only = b.unit("Walker", Point{768, 449});
     untouched(b, b.band(2, {only}, b.east, b.west), only, b.west);
     CHECK(b.shown(2) == b.east);
   }
@@ -5614,14 +5864,14 @@ TEST(calc_go_around_refuses_the_way_back_the_way_there_and_a_squad_going_nowhere
   {
     DetourBench b;
     b.check_maika(b.south);
-    const ObjectId only = b.unit("Walker", Point{600, 470});
+    const ObjectId only = b.unit("Walker", Point{568, 438});
     untouched(b, b.band(2, {only}, b.east, b.west), only, b.west);
   }
   // No destination, the destination is here, or here is nowhere.
   {
     DetourBench b;
     b.check_maika(kNoGaika);
-    const ObjectId only = b.unit("Walker", Point{600, 470});
+    const ObjectId only = b.unit("Walker", Point{568, 438});
     untouched(b, b.band(2, {only}, kNoGaika, b.west), only, b.west);
     untouched(b, b.band(2, {only}, b.here, b.west), only, b.west);
     const SquadKey lost = b.band(2, {only}, b.east, b.west);
@@ -5646,8 +5896,8 @@ TEST(calc_go_around_refuses_the_way_back_the_way_there_and_a_squad_going_nowhere
     DetourBench b;
     b.check_maika(kNoGaika);
     untouched(b, b.band(2, {}, b.east, b.west), kNoObject, b.west);
-    const ObjectId fallen = b.unit("Walker", Point{600, 470});
-    const ObjectId behind = b.unit("Walker", Point{600, 470});
+    const ObjectId fallen = b.unit("Walker", Point{568, 438});
+    const ObjectId behind = b.unit("Walker", Point{568, 438});
     // It came from the north, so that a body reading the dead slot's
     // `(-1, -1)` as a position would find a west that is not the way back.
     const SquadKey leaderless = b.band(2, {fallen, behind}, b.east, b.north);
@@ -5664,7 +5914,7 @@ TEST(calc_go_around_refuses_the_way_back_the_way_there_and_a_squad_going_nowhere
 TEST(calc_go_around_without_check_maika_accepts_and_with_a_broken_one_fails) {
   {
     DetourBench b;
-    const ObjectId only = b.unit("Walker", Point{600, 470});
+    const ObjectId only = b.unit("Walker", Point{568, 438});
     const SquadKey key = b.band(2, {only}, b.east, b.west);
     CHECK(b.go_around(key).value.truthy_scalar());
     CHECK(b.heroes.squads().find(key)->src_gaika == b.south);
@@ -5676,7 +5926,7 @@ TEST(calc_go_around_without_check_maika_accepts_and_with_a_broken_one_fails) {
                          "// bool, int idPlayer, GAIKA gSrc, GAIKA gDst, GAIKA gMAIKA\n"
                          "Sleep(10);\nreturn true;\n",
                          "DATA/AI/CHECKMAIKA.VS") != script::kNoChunk);
-    const ObjectId only = b.unit("Walker", Point{600, 470});
+    const ObjectId only = b.unit("Walker", Point{568, 438});
     const SquadKey key = b.band(2, {only}, b.east, b.west);
     CHECK(b.go_around(key).status == script::HostStatus::error);
     CHECK(b.heroes.squads().find(key)->src_gaika == b.west);
@@ -5911,8 +6161,10 @@ TEST(nearest_hospital_weighs_the_enemies_standing_in_the_node) {
 
 /// Across the water the distance is multiplied by the length of the area
 /// path, and no path is no hospital. The leader stands on the west island's
-/// east coast: the east island's town is 256 away as the crow flies and 768
-/// as the ship sails, against a town of its own island at 607.
+/// east coast: the east island's town is 320 away as the crow flies and 960
+/// as the ship sails, against a town of its own island at 546. (One cell
+/// further east, the leader would be on a slot the sea claimed first, in the
+/// sea's node.)
 TEST(nearest_hospital_multiplies_by_the_area_path_and_needs_a_ship_to_cross) {
   HospitalBench b;
   const SettlementId home = b.town(3, 3, 2);
@@ -5921,8 +6173,8 @@ TEST(nearest_hospital_multiplies_by_the_area_path_and_needs_a_ship_to_cross) {
   const GaikaId at_home = b.node_of(home);
   const GaikaId at_abroad = b.node_of(abroad);
   REQUIRE(at_home != kNoGaika && at_abroad != kNoGaika);
-  const ObjectId leader = b.walker(12, 6, 2);
-  const GaikaId standing = b.world.gaika().at(b.world.lsa(), in_cell(12, 6));
+  const ObjectId leader = b.walker(11, 6, 2);
+  const GaikaId standing = b.world.gaika().at(b.world.lsa(), in_cell(11, 6));
   REQUIRE(standing == at_home);
   const SquadKey key = b.band(2, {leader}, standing, 100);
 
@@ -5939,7 +6191,7 @@ TEST(nearest_hospital_multiplies_by_the_area_path_and_needs_a_ship_to_cross) {
   // The player's own idle ship makes the crossing a route of three.
   (void)b.ship(14, 7, 2, "idle");
   CHECK(b.hospital(key) == at_abroad);
-  // And three times 256 is more than 607, so with the home town fed again it
+  // And three times 320 is more than 546, so with the home town fed again it
   // wins although it is further as the crow flies.
   h->warehouse.food = 1000;
   CHECK(b.hospital(key) == at_home);
@@ -5954,48 +6206,61 @@ TEST(nearest_hospital_multiplies_by_the_area_path_and_needs_a_ship_to_cross) {
 }
 
 /// The two multipliers are three halves and two, not the other way round,
-/// and a tie in the score keeps the earlier node. The leader is at (6,6):
-/// the towns at (10,4) and (10,8) are 286 each, the town at (12,9) is 429,
-/// the village at (3,9) is 271 and so 406.
+/// and a tie in the score keeps the earlier node. The leader is at (4,4):
+/// the towns at (9,5) and (5,9) are 326 each, the town at (10,9) is 499, the
+/// village at (8,6) is 286 and so 429. All four stand in the west island's
+/// own slots: cell column 12 is on a slot the sea claimed first, and a town
+/// there would snap to the larger eastern island.
 TEST(nearest_hospital_ranks_by_the_multiplied_distance_and_breaks_ties_by_id) {
   HospitalBench b;
-  const SettlementId first = b.town(10, 4, 2);
-  const SettlementId second = b.town(10, 8, 2);
-  const SettlementId far = b.town(12, 9, 2);
-  const SettlementId village = b.town(3, 9, 2, "Village");
+  const SettlementId first = b.town(9, 5, 2);
+  const SettlementId second = b.town(5, 9, 2);
+  const SettlementId far = b.town(10, 9, 2);
+  const SettlementId village = b.town(8, 6, 2, "Village");
   b.rebuild();
-  const ObjectId leader = b.walker(6, 6, 2);
-  const SquadKey key = b.band(2, {leader}, b.world.gaika().at(b.world.lsa(), in_cell(6, 6)), 100);
+  const ObjectId leader = b.walker(4, 4, 2);
+  const GaikaId standing = b.world.gaika().at(b.world.lsa(), in_cell(4, 4));
+  REQUIRE(standing != kNoGaika);
+  // One area, so every route is one long and only the distance decides.
+  for (const SettlementId id : {first, second, far, village}) {
+    REQUIRE(b.node_of(id) != kNoGaika);
+    REQUIRE(b.world.gaika().find(b.node_of(id))->lsa == b.world.gaika().find(standing)->lsa);
+  }
+  REQUIRE(b.node_of(first) < b.node_of(second));
+  const SquadKey key = b.band(2, {leader}, standing, 100);
   Settlement* one = b.economy.settlements().find(first);
   Settlement* two = b.economy.settlements().find(second);
   Settlement* v = b.economy.settlements().find(village);
   REQUIRE(one != nullptr && two != nullptr && v != nullptr);
 
-  // Equal at 286: the first planted, which is the lower node id.
+  // Equal at 326: the first planted, which is the lower node id.
   CHECK(b.hospital(key) == b.node_of(first));
   one->warehouse.food = 0;
   CHECK(b.hospital(key) == b.node_of(second));
 
-  // The village's 271 is 406 at three halves and would be 542 at two: the
-  // 429 town sits between, so which multiplier it is decides.
+  // The village's 286 is 429 at three halves and would be 572 at two: the
+  // 499 town sits between, so which multiplier it is decides.
   two->warehouse.food = 0;
   CHECK(b.hospital(key) == b.node_of(village));
   v->warehouse.food = 0;
   CHECK(b.hospital(key) == b.node_of(far));
 
   // And the enemy doubling is two, not three halves: the first town under
-  // pressure is 572, and would be 429 -- a tie with the far town that the
-  // lower id would win.
+  // pressure is 652, and would be 489 -- less than the far town's 499.
   one->warehouse.food = 1000;
-  const SquadKey raiders = b.band(1, {b.walker(10, 4, 1)}, b.node_of(first), 60);
+  const SquadKey raiders = b.band(1, {b.walker(9, 5, 1)}, b.node_of(first), 60);
   (void)raiders;
   CHECK(b.hospital(key) == b.node_of(far));
 }
 
-/// The refusal behind the fallback: a node with **no** area -- nothing labelled
-/// within reach at all -- answers an invalid handle at 0x0042c82e, before the
-/// walk. A stronghold is its own nearest town hall, so without that guard one
-/// with an area of `kNoLsa` would match itself.
+/// The refusal behind the fallback: a settlement with no node, or a node with
+/// **no** area, answers an invalid handle at 0x0042c82e, before the walk. A
+/// stronghold is its own nearest town hall, so without that guard one with an
+/// area of `kNoLsa` would match itself.
+///
+/// The partition never makes such a node -- a settlement with no ground slot
+/// within reach places no seed and has no node at all -- so the area guard is
+/// reached through a restored table, which is what a save hands back.
 TEST(best_to_supply_refuses_a_node_with_no_area_within_reach) {
   LinkBench b({"~~~~~~~~~~~~~~~~", "~~~~~~~~~~~~~~~~", "~~~~~~~~~~~~~~~~", "~~~~~~~~~~~~~~~~",
                "~~~~~~~~~~~~~~~~", "~~~~~~~~~~~~~~~~", "~~~~~~~~~~~~~~~~", "~~~~~~~~~~~~~~~~",
@@ -6005,8 +6270,7 @@ TEST(best_to_supply_refuses_a_node_with_no_area_within_reach) {
   REQUIRE(b.world.lsa().size() == 0);
   const SettlementId adrift = b.plant(3, 3, 0);
   b.rebuild();
-  REQUIRE(b.world.gaika().count() == 1);
-  CHECK(b.world.gaika().find(1)->lsa == kNoLsa);
+  REQUIRE(b.world.gaika().count() == 0);
 
   script::HostRegistry registry;
   (void)register_all_hosts(registry);
@@ -6022,9 +6286,20 @@ TEST(best_to_supply_refuses_a_node_with_no_area_within_reach) {
   ctx.user = &context;
   ctx.name = "BestToSupply";
   ctx.kind = script::CallKind::member;
-  const script::HostOutcome out = registry.entry(index).fn(ctx);
-  CHECK(out.status == script::HostStatus::ok);
-  CHECK(!out.value.is_object() || out.value.as_object().type == script::kNoType);
+  const auto refused = [&] {
+    const script::HostOutcome out = registry.entry(index).fn(ctx);
+    CHECK(out.status == script::HostStatus::ok);
+    return !out.value.is_object() || out.value.as_object().type == script::kNoType;
+  };
+  CHECK(refused());
+
+  GaikaNode adrift_node;
+  adrift_node.center = in_cell(3, 3);
+  adrift_node.settlement = s->object;
+  REQUIRE(b.world.mutable_gaika().restore({adrift_node}, 0, 0, {}));
+  REQUIRE(b.world.gaika().for_settlement(s->object) == 1);
+  CHECK(b.world.gaika().find(1)->lsa == kNoLsa);
+  CHECK(refused());
 }
 
 namespace {

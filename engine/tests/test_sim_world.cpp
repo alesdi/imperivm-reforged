@@ -2875,6 +2875,82 @@ TEST(world_host_reads_a_player_argument_as_the_script_writes_it_one_based) {
   CHECK(found[1] == third);
 }
 
+TEST(ally_count_and_enemy_count_add_the_class_tally_by_the_viewers_row) {
+  // `AllyCount` (0x004223b0) and `EnemyCount` (0x004224c0): the class tally
+  // `Count` reads, summed over the sixteen players by how the viewer sees
+  // each (0x0044e250) -- not enemy for `AllyCount`, which includes the
+  // viewer itself, and enemy for `EnemyCount`. The relation is the viewer's
+  // row alone, so a one-sided alliance counts on the side that declared it.
+  World world;
+  ClassGraph graph;
+  REQUIRE(graph.add(bytes_of(R"(<class id="Unit" cpp_class="CVXUnit"/>)"), "unit.sc.xml").ok());
+  REQUIRE(graph.add(bytes_of(R"(<class id="Archer" parent="Unit" cpp_class="CVXUnit"/>)"),
+                    "archer.sc.xml")
+              .ok());
+  graph.link();
+  world.set_class_graph(&graph);
+  HeroSystem heroes;
+  AiSystem ai;
+  REQUIRE(world.add_system(&heroes));
+  REQUIRE(world.add_system(&ai));
+  ai.start_manager();
+  const auto born = [&](PlayerId owner, const char* cls) {
+    const ObjectId id = world.spawn(NativeClass::unit, nullptr, graph.find(cls));
+    (void)world.set_health(id, 100);
+    world.set_owner(id, owner);
+    heroes.ai_register(world, id);
+  };
+  born(0, "Unit");
+  born(0, "Archer");
+  born(1, "Archer");
+  born(1, "Archer");
+  born(2, "Unit");
+  born(2, "Unit");
+  born(2, "Archer");
+  // Player 0 is allied to 1 and not to 2; player 1 is allied to nobody.
+  world.players().set(0, 1, Relation::allied, true);
+  world.players().set(0, 2, Relation::allied, false);
+  world.players().set(1, 0, Relation::allied, false);
+  world.players().set(1, 2, Relation::allied, false);
+
+  script::HostRegistry registry;
+  script::declare_shipped_surface(registry);
+  (void)register_world_host(registry);
+  HostContext context;
+  context.world = &world;
+  context.object_type = kTypeObj;
+  const auto call = [&](const char* name, std::int32_t player, const char* cls) -> std::int64_t {
+    const std::uint32_t index = registry.find(script::CallKind::free_function, name, 2);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return -999;
+    const script::HostEntry& entry = registry.entry(index);
+    CHECK(entry.fn != nullptr);
+    if (entry.fn == nullptr) return -999;
+    std::vector<script::Value> args{script::Value::integer(player), script::Value::string(cls)};
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::free_function;
+    const script::HostOutcome out = entry.fn(ctx);
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.as_integer();
+  };
+
+  // Seen by script player 1 (PlayerId 0): itself and player 1 are friends.
+  CHECK(call("AllyCount", 1, "Unit") == 2 + 2);
+  CHECK(call("AllyCount", 1, "Archer") == 1 + 2);
+  CHECK(call("EnemyCount", 1, "Unit") == 3);
+  CHECK(call("EnemyCount", 1, "Archer") == 1);
+  // Seen by script player 2 (PlayerId 1): the alliance is not returned.
+  CHECK(call("AllyCount", 2, "Unit") == 2);
+  CHECK(call("EnemyCount", 2, "Unit") == 2 + 3);
+  // A name with no entry is 0, and so are a player past the table and 0.
+  CHECK(call("AllyCount", 1, "Catapult") == 0);
+  CHECK(call("EnemyCount", 17, "Unit") == 0);
+  CHECK(call("AllyCount", 0, "Unit") == 0);
+}
+
 // ==========================================================================
 // Erase
 // ==========================================================================

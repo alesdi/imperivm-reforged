@@ -3783,9 +3783,9 @@ TEST(get_counter_units_asks_the_ais_ranked_nodes_before_the_census) {
   REQUIRE(camp->is_outpost());
   const SettlementId camp_id = camp->id;
   // Node 1 the owner's town, node 2 the camp.
-  b.world.mutable_gaika().restore({GaikaNode{Point{1000, 1000}, kNoLsa, b.settlement_object},
+  REQUIRE(b.world.mutable_gaika().restore({GaikaNode{Point{1000, 1000}, kNoLsa, b.settlement_object},
                                    GaikaNode{Point{5000, 5000}, kNoLsa, camp->object}},
-                                  LsaPartition{});
+                                  0, 0, {}));
   const script::Value set = script::Value::object(kTypeSettlement, b.settlement_object);
 
   // No AI: the census, which finds nobody, and the weights stay undeclared.
@@ -3807,7 +3807,7 @@ TEST(get_counter_units_asks_the_ais_ranked_nodes_before_the_census) {
   // Ranked below the tenth node, the camp is not asked: the census answers,
   // onto weights the rows zeroed, and with nobody about that is nothing.
   ai.seed_gaika_view(2, 12);
-  b.world.mutable_gaika().restore(
+  REQUIRE(b.world.mutable_gaika().restore(
       {GaikaNode{Point{1000, 1000}, kNoLsa, b.settlement_object},
        GaikaNode{Point{1100, 1000}, kNoLsa, kNoObject}, GaikaNode{Point{1200, 1000}, kNoLsa, kNoObject},
        GaikaNode{Point{1300, 1000}, kNoLsa, kNoObject}, GaikaNode{Point{1400, 1000}, kNoLsa, kNoObject},
@@ -3815,7 +3815,7 @@ TEST(get_counter_units_asks_the_ais_ranked_nodes_before_the_census) {
        GaikaNode{Point{1700, 1000}, kNoLsa, kNoObject}, GaikaNode{Point{1800, 1000}, kNoLsa, kNoObject},
        GaikaNode{Point{1900, 1000}, kNoLsa, kNoObject}, GaikaNode{Point{2000, 1000}, kNoLsa, kNoObject},
        GaikaNode{Point{5000, 5000}, kNoLsa, b.economy.settlements().find(camp_id)->object}},
-      LsaPartition{});
+      0, 0, {}));
   CHECK(b.ask(set).status == script::HostStatus::ok);
   CHECK(b.weight(0) == 0);
   CHECK(b.weight(1) == 0);
@@ -3850,8 +3850,8 @@ TEST(get_counter_units_counts_all_of_the_independents_riders_for_a_tent) {
   const Settlement* tent = b.economy.settlements().for_object(pole);
   REQUIRE(tent != nullptr);
   REQUIRE(tent->is_teuton_tent());
-  b.world.mutable_gaika().restore({GaikaNode{Point{5000, 5000}, kNoLsa, tent->object}},
-                                  LsaPartition{});
+  REQUIRE(b.world.mutable_gaika().restore({GaikaNode{Point{5000, 5000}, kNoLsa, tent->object}},
+                                  0, 0, {}));
   ai.seed_gaika_view(2, 1);
   const script::Value set = script::Value::object(kTypeSettlement, b.settlement_object);
   // Twenty riders of player 14's, far from the tent: 125 a head, a threshold

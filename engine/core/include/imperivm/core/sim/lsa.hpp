@@ -176,6 +176,10 @@ struct LsaArea {
   /// reproduce.
   Point centroid{};
   std::int32_t cells = 0;
+  /// `cells - slots touched`, the figure the size threshold is measured
+  /// against and the one the node partition's slot snap prefers the largest
+  /// of (the area record's `+0xc`, `docs/formats/gaika.md`).
+  std::int32_t coverage = 0;
 };
 
 /// The whole partition.

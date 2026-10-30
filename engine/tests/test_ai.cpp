@@ -44,6 +44,7 @@
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "domains.hpp"
+#include "gaika_stand_in.hpp"
 #include "test.hpp"
 
 using namespace imperivm::core::sim;
@@ -2191,7 +2192,7 @@ TEST(starting_an_ai_gives_it_a_view_of_every_node_and_stopping_takes_it_back) {
   // records -- the reserved one and one per node.
   (void)f.make_settlement(1);
   (void)f.make_settlement(1);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.world.gaika().count() == 2);
 
   REQUIRE(f.ai.gaika_view(1) != nullptr);
@@ -2450,7 +2451,7 @@ TEST(area_ai_writes_reach_the_nodes_inside_the_named_shape_and_no_others) {
     CHECK(f.world.set_position(a->anchor, Point{1000, 1000}));
     CHECK(f.world.set_position(b->anchor, Point{9000, 9000}));
   }
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.world.gaika().count() == 2);
   const GaikaId inside = f.world.gaika().for_settlement(a_object);
   const GaikaId outside = f.world.gaika().for_settlement(b_object);
@@ -2510,7 +2511,7 @@ TEST(area_ai_writes_reach_the_nodes_inside_the_named_shape_and_no_others) {
     c_object = c->object;
     CHECK(f.world.set_position(c->anchor, Point{1000 + 540, 1000 + 721}));
   }
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   f.ai.seed_gaika_view(1, f.world.gaika().count());
   const GaikaId shell = f.world.gaika().for_settlement(c_object);
   REQUIRE(shell != kNoGaika);
@@ -3344,7 +3345,7 @@ struct SendToBench {
     const ObjectId theirs = b->object;
     CHECK(f.world.set_position(a->anchor, Point{1000, 1000}));
     CHECK(f.world.set_position(b->anchor, Point{6000, 4000}));
-    f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+    imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
     home = f.world.gaika().for_settlement(mine);
     dest = f.world.gaika().for_settlement(theirs);
     REQUIRE(home != kNoGaika);
@@ -3976,7 +3977,7 @@ TEST(recruit_scores_ranks_and_dispatches_squads_through_three_scripts) {
   (void)f.make_settlement(0);
   (void)f.make_settlement(0);
   (void)f.make_settlement(0);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.world.gaika().count() >= 3);
 
   // Engine player 0 is script player 1.
@@ -4124,7 +4125,7 @@ TEST(recruit_spends_each_donor_nodes_budget_best_first) {
   (void)f.make_settlement(0);
   (void)f.make_settlement(0);
   (void)f.make_settlement(0);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
   const script::ScriptId root = f.ai.player_ai(0)->root;
 
@@ -4212,7 +4213,7 @@ TEST(recruit_clears_a_dependency_the_donor_does_not_feel) {
   (void)f.make_settlement(0);
   (void)f.make_settlement(0);
   (void)f.make_settlement(0);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
   const script::ScriptId root = f.ai.player_ai(0)->root;
 
@@ -4286,7 +4287,7 @@ TEST(recruit_refuses_a_squad_heavier_than_its_donors_whole_budget) {
   (void)f.make_settlement(0);
   (void)f.make_settlement(0);
   (void)f.make_settlement(0);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
   const script::ScriptId root = f.ai.player_ai(0)->root;
 
@@ -4346,7 +4347,7 @@ TEST(recruit_passes_over_squads_no_script_should_ever_see) {
                 "DATA/AI/SENDSQUAD.VS") != script::kNoChunk);
   (void)f.make_settlement(0);
   (void)f.make_settlement(0);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
   const script::ScriptId root = f.ai.player_ai(0)->root;
 
@@ -4426,7 +4427,7 @@ TEST(set_maika_puts_the_triple_at_the_front_of_a_list_of_512) {
   (void)f.make_settlement(1);
   (void)f.make_settlement(1);
   (void)f.make_settlement(1);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.world.gaika().count() > 0);
   set(1, 2, 3);
   CHECK(routes() == std::vector<Route>({Route{1, 2, 3}}));
@@ -4466,7 +4467,7 @@ TEST(a_squad_hit_between_two_nodes_records_where_it_was_hit) {
   (void)f.make_settlement(1);
   (void)f.make_settlement(1);
   (void)f.make_settlement(1);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.world.gaika().count() >= 3);
   SquadTable& table = f.heroes.squads();
   const SquadKey key = table.create(0);
@@ -4534,7 +4535,7 @@ TEST(recruit_drops_a_squad_whose_route_crosses_a_refused_way_point) {
                 "DATA/AI/CHECKMAIKA.VS") != script::kNoChunk);
 
   for (int i = 0; i < 4; ++i) (void)f.make_settlement(0);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.world.gaika().count() >= 4);
   REQUIRE(f.ai.start(0, "", AiDifficulty::normal, f.scheduler) == AiStartStatus::ok);
   const script::ScriptId root = f.ai.player_ai(0)->root;
@@ -4798,7 +4799,7 @@ TEST(gaika_eval_adds_the_settlement_skips_messengers_and_sees_as_the_ai_sees) {
   init.owner = 2;
   init.kind = SettlementKind::stronghold;
   const SettlementId town = f.economy.settlements().create(init);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   constexpr GaikaId kHere = 1;
   constexpr GaikaId kElsewhere = 7;
   const GaikaNode* node = f.world.gaika().find(kHere);
@@ -4987,7 +4988,7 @@ TEST(military_presence_counts_the_viewers_own_manned_wall) {
   init.owner = 2;
   init.kind = SettlementKind::stronghold;
   const SettlementId town = f.economy.settlements().create(init);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   constexpr GaikaId kHere = 1;
   REQUIRE(f.world.gaika().find(kHere) != nullptr);
   REQUIRE(f.world.gaika().find(kHere)->settlement == hall);
@@ -5068,7 +5069,7 @@ TEST(the_sweep_marks_what_a_player_stands_in_and_remembers_it_when_it_leaves) {
   // Node 1 is player 1's town, node 2 player 3's.
   const SettlementId home = f.make_settlement(1);
   const SettlementId away = f.make_settlement(3);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   REQUIRE(f.world.gaika().count() == 2);
   const GaikaId mine = f.world.gaika().for_settlement(f.economy.settlements().find(home)->object);
   const GaikaId theirs =
@@ -5146,7 +5147,7 @@ TEST(the_sweep_marks_what_a_player_stands_in_and_remembers_it_when_it_leaves) {
 TEST(explored_and_revealed_answer_the_match_rules_before_the_bits) {
   Fixture f;
   (void)f.make_settlement(3);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   f.ai.seed_gaika_view(1, f.world.gaika().count());
   const auto ask = [&](const char* name) {
     return f.call(script::CallKind::member, name, {gaika_value(1), script::Value::integer(2)},
@@ -5181,7 +5182,7 @@ TEST(eval_remembers_the_enemy_in_a_node_out_of_sight) {
   Fixture f;
   (void)f.make_settlement(1);
   (void)f.make_settlement(3);
-  f.world.mutable_gaika().build(f.world, f.world.lsa(), f.economy.settlements());
+  imperivm::test::stand_in_nodes(f.world, f.economy.settlements());
   constexpr GaikaId kHome = 1;
   constexpr GaikaId kThere = 2;
   f.ai.seed_gaika_view(1, f.world.gaika().count());

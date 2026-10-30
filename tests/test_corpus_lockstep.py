@@ -491,7 +491,9 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     if not path.is_file():
         pytest.skip(f"{CROSSROADS} is not in this installation")
     # Who is where at the order's turn: p1's village by its map position, and
-    # the first p3 foot soldier standing on the map.
+    # the first p3 foot soldier standing on the map -- or, when p3's AI keeps
+    # them all in its garrison then, the first held one, which `IMRUN_PLACE`
+    # takes out of the garrison where it stands it.
     first = subprocess.run(
         [str(imrun), str(game_dir), str(path), str(CAPTURE_ORDER_TURN), str(LENGTH),
          "--seed", str(CAPTURE_SEED)],
@@ -502,9 +504,13 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     listed = [(int(i), cls, int(p), int(x), int(y)) for i, cls, p, x, y in
               re.findall(r"^\s+(\d+) (\S+) p(\d+) at \((-?\d+),(-?\d+)\) holder 0 health [1-9]",
                          first.stdout, re.MULTILINE)]
-    village = [i for i, cls, p, x, y in listed
+    held = [(int(i), cls, int(p)) for i, cls, p in
+            re.findall(r"^\s+(\d+) (\S+) p(\d+) at \(-1,-1\) holder [1-9]\d* health [1-9]",
+                       first.stdout, re.MULTILINE)]
+    village =[i for i, cls, p, x, y in listed
                if "Village" in cls and p == 1 and (x, y) == P1_VILLAGE_AT]
-    soldier = [i for i, cls, p, x, y in listed if "Village" not in cls and p == 3]
+    soldier = [i for i, cls, p, x, y in listed if "Village" not in cls and p == 3] or [
+        i for i, cls, p in held if p == 3]
     assert village and soldier, first.stdout[-3000:]
     staged = {**os.environ,
               "IMRUN_PLACE": f"{P3_STANDS_AT[0]},{P3_STANDS_AT[1]}",
