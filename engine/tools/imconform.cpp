@@ -58,6 +58,9 @@
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/infobar.hpp"
 #include "imperivm/core/sim/match.hpp"
+#include "imperivm/core/sim/movement.hpp"
+#include "imperivm/core/sim/orders.hpp"
+#include "imperivm/core/sim/squad.hpp"
 #include "imperivm/gamedata/installation.hpp"
 #include "imperivm/gamedata/map_source.hpp"
 
@@ -1061,12 +1064,87 @@ std::unique_ptr<imperivm::core::sim::OrderVerifier> click_verifier(conformance::
 
 /// A peer that drives no stream of its own but strikes (`Striker`): the
 /// orders it gives are kept, so that `netcmds` hashes them as a stream's.
+/// `imrun`'s staging, for a skirmish lockstep: `IMRUN_GOTO=<turn>:<id>:<x>,<y>`
+/// gives that object its owner's right click before that turn, landing on
+/// `IMRUN_CLICK=<id>` when given and on the bare point otherwise, and
+/// `IMRUN_PLACE=<x>,<y>` first stands it there, out of its AI's hands. Each
+/// peer applies it to its own world on the same turn, before the turn, as
+/// `imrun` does, so a test can stage a war's kill and capture rather than
+/// wait for the computers to bring one.
+struct Staging {
+  bool wanted = false;
+  std::size_t turn = 0;
+  ObjectId id = kNoObject;
+  imperivm::core::sim::Point to;
+  bool place = false;
+  imperivm::core::sim::Point at;
+  ObjectId click = kNoObject;
+
+  static Staging from_env() {
+    Staging s;
+    unsigned long long turn = 0;
+    unsigned id = 0;
+    int x = 0;
+    int y = 0;
+    if (const char* order = std::getenv("IMRUN_GOTO")) {
+      s.wanted = std::sscanf(order, "%llu:%u:%d,%d", &turn, &id, &x, &y) == 4 && turn > 0;
+      s.turn = static_cast<std::size_t>(turn);
+      s.id = static_cast<ObjectId>(id);
+      s.to = imperivm::core::sim::Point{x, y};
+    }
+    if (const char* place = std::getenv("IMRUN_PLACE")) {
+      s.place = std::sscanf(place, "%d,%d", &x, &y) == 2;
+      s.at = imperivm::core::sim::Point{x, y};
+    }
+    if (const char* click = std::getenv("IMRUN_CLICK")) {
+      s.click = static_cast<ObjectId>(std::strtoul(click, nullptr, 10));
+    }
+    return s;
+  }
+
+  void apply(conformance::Run& run, std::size_t now) const {
+    using namespace imperivm::core::sim;
+    if (!wanted || now != turn) return;
+    World& world = run.world();
+    if (place) {
+      if (MovementSystem* move = movement_system(world)) move->stop(world, id);
+      const bool placed = world.set_position(id, at);
+      if (ObjectState* state = world.mutable_state(id); placed && state != nullptr) {
+        state->flags.no_ai = true;
+        if (HeroSystem* heroes = hero_system_of(world)) {
+          const ObjectId alone[] = {id};
+          regroup_into_fresh_squads(world, *heroes, alone, /*SS_IDLE*/ 0, world.time());
+        }
+      }
+      std::printf("place     turn %zu: %u at (%d,%d)%s\n", now, static_cast<unsigned>(id), at.x,
+                  at.y, placed ? "" : " refused");
+    }
+    const WorldObject* actor = world.find(id);
+    const CommandTable* table = order_command_table(world);
+    auto* session_run = session_of(run);
+    OrderReport made;
+    if (actor != nullptr && table != nullptr && session_run != nullptr) {
+      OrderTarget target;
+      target.point = to;
+      target.object = click;
+      ScriptOrderVerifier verifier(session_run->scheduler(), session_run->host_context());
+      const ObjectId actors[] = {id};
+      made = issue_default_order(world, *table, actors, target, OrderMode::replace, false,
+                                 actor->state.owner, &verifier);
+    }
+    std::printf("goto      turn %zu: %u to (%d,%d), %zu issued\n", now, static_cast<unsigned>(id),
+                to.x, to.y, made.issued);
+    std::fflush(stdout);
+  }
+};
+
 class StrikeDriver final : public conformance::Driver {
  public:
   StrikeDriver(Striker striker, std::size_t turns) : striker_(std::move(striker)) {
     stream_.turns.resize(turns);
   }
   [[nodiscard]] std::uint64_t drive(conformance::Run& run, std::size_t turn) override {
+    staging_.apply(run, turn);
     bool struck = false;
     if (turn < stream_.turns.size()) {
       if (std::optional<imperivm::core::sim::NetOrder> order = striker_.take(run, turn)) {
@@ -1085,6 +1163,7 @@ class StrikeDriver final : public conformance::Driver {
 
  private:
   Striker striker_;
+  Staging staging_ = Staging::from_env();
   imperivm::core::sim::CommandStream stream_;
 };
 

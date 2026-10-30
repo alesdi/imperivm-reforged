@@ -468,18 +468,21 @@ def test_a_seat_left_and_taken_back_twice_through_the_war(imconform, game_dir):
     assert "netjoin   ok" in result.stdout, result.stdout
 
 
-# The long runs: minutes each, so `slow` -- `pytest --slow`, which
-# `tools/verify.py --slow` passes. What they add to the ones above is the rest of
-# the war: towns change hands, and on the map's own setup the match is decided
-# by a capture on the same turn and with the same final hash `imrun` reaches,
-# which is the proof that the peers played the game and not a lesser one.
-
-#: The capture run's game and ceiling: a seed whose computers take a
-#: settlement from one another inside it (see the test).
+#: The staged war: the game, the turn the order is given, and how long both
+#: runs go. A p3 foot soldier is stood beside p1's village at the map's north
+#: east and right-clicks it: an undefended village, it is captured within a
+#: few hundred turns, and p1's guards kill what p3 sends after it. Staged with
+#: `imrun`'s `IMRUN_PLACE`/`IMRUN_GOTO`/`IMRUN_CLICK`, which `imconform`'s
+#: skirmish lockstep applies to each peer on the same turn, so the war the
+#: peers are held to does not wait on which seed's computers start one.
 CAPTURE_SEED = 7
-CAPTURE_TURNS = 4_000
+CAPTURE_ORDER_TURN = 300
+CAPTURE_TURNS = 600
+#: p1's village there, where the map puts it, and where the soldier is stood.
+P1_VILLAGE_AT = (15362, 779)
+P3_STANDS_AT = (15100, 1100)
 
-@pytest.mark.slow
+
 def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     imrun, complaint = corpus.find_tool("imrun", "IMPERIVM_IMRUN")
     if imrun is None or complaint:
@@ -487,64 +490,68 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     path = game_dir / CROSSROADS
     if not path.is_file():
         pytest.skip(f"{CROSSROADS} is not in this installation")
-    # The seed's war, as far as the ceiling or the match's end. Which turn the AI
-    # takes a town is the seed's and has moved from under every cap this test
-    # held: seed 4 had one computer take a village from another at 2,698, then
-    # at 3,306 once a swordsman could not hit a building (playtest #24) and a
-    # hero's army marched at its pace (#22); seed 5's came at 3,078 until a
-    # tactic script handed its army back to the AI and a town's loyalty became
-    # gbr.exe's, after which seed 5 is a war p1 wins at 5,398, and seed 2 had
-    # p1 take village #12 from p3 at 1,785. Once rand became gbr.exe's LCG
-    # every seed plays another war: over seeds 1 to 12 at 6,000 turns a
-    # settlement changes hands between players on nine seeds. The first is on
-    # seed 12, at 1,498, but taken without a blow: no army of one player has
-    # struck another's by then, which `imconform` refuses as a war never
-    # started. Seed 9 had both: the first kill between players at 667, and p1
-    # took village #12 from p3 at turn 3,099. On the tenth round's tree the
-    # first blows between players come thousands of turns later on most seeds;
-    # the first capture between them is seed 11's, where p2 takes village #34
-    # from p3 at 3,908, after a kill at 3,855. On the eleventh round's, seed 11
-    # has none by 6,000 and the first is seed 2's: p3 takes village #25 from p1
-    # at 3,050. On the twelfth round's seed 2 is still the one: p3's hero
-    # kills a p2 archer at 3,822 and p2 takes village #27 from p3 at 3,908;
-    # seed 7's capture at 2,553 comes before any kill. On the thirteenth round's,
-    # where routes come from the smart pathfinder, seed 2's first capture is at
-    # 5,219 and the first under 4,000 is seed 8's: a p1 archer kills a p3
-    # maceman at 2,045 and p3 takes village #11 from p1 at 3,588. On the fourteenth round's,
-    # with Count reading the AI's class tally and the idle draw in the
-    # original's order, seed 8 has none before 5,331 and seed 7 is the first:
-    # a p3 swordsman kills a p1 swordsman at 829 and p2 takes village #26
-    # from p3 at 3,183. The peers are held to a war in
-    # which that happens; which seed shows it is the AI's, and the capture is
-    # asserted on the solo run rather than assumed.
+    # Who is where at the order's turn: p1's village by its map position, and
+    # the first p3 foot soldier standing on the map.
+    first = subprocess.run(
+        [str(imrun), str(game_dir), str(path), str(CAPTURE_ORDER_TURN), str(LENGTH),
+         "--seed", str(CAPTURE_SEED)],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_OBJECTS": "Village,Swordsman,Footman,Axe,Guardian"},
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    listed = [(int(i), cls, int(p), int(x), int(y)) for i, cls, p, x, y in
+              re.findall(r"^\s+(\d+) (\S+) p(\d+) at \((-?\d+),(-?\d+)\) holder 0 health [1-9]",
+                         first.stdout, re.MULTILINE)]
+    village = [i for i, cls, p, x, y in listed
+               if "Village" in cls and p == 1 and (x, y) == P1_VILLAGE_AT]
+    soldier = [i for i, cls, p, x, y in listed if "Village" not in cls and p == 3]
+    assert village and soldier, first.stdout[-3000:]
+    staged = {**os.environ,
+              "IMRUN_PLACE": f"{P3_STANDS_AT[0]},{P3_STANDS_AT[1]}",
+              "IMRUN_GOTO": f"{CAPTURE_ORDER_TURN}:{soldier[0]}:{P1_VILLAGE_AT[0]},{P1_VILLAGE_AT[1]}",
+              "IMRUN_CLICK": str(village[0])}
+
     solo = subprocess.run(
         [str(imrun), str(game_dir), str(path), str(CAPTURE_TURNS), str(LENGTH),
          "--seed", str(CAPTURE_SEED)],
-        capture_output=True, text=True, timeout=1800,
-        env={**os.environ, "IMRUN_UNTIL_OVER": "1", "IMRUN_CAPTURES": "1"},
+        capture_output=True, text=True, timeout=600,
+        env={**staged, "IMRUN_CAPTURES": "1", "IMRUN_DEATHS": "1"},
     )
     assert solo.returncode == 0, solo.stdout + solo.stderr
-    over = re.search(r"after (\d+) turns of", solo.stdout)
+    assert "no traps." in solo.stdout, solo.stdout[-3000:]
     digest = re.search(r"hash\s+([0-9a-f]{16})", solo.stdout)
-    assert over and digest, solo.stdout
-    between_players = [m for m in re.findall(r"capture turn \d+: #\d+ kind \d+ p(\d+) -> p(\d+)",
-                                             solo.stdout)
-                       if int(m[0]) < 14 and int(m[1]) < 14]
-    assert between_players, solo.stdout[-3000:]
-    turns = int(over[1])
-    result = run_skirmish(imconform, game_dir, "lockstep", str(turns), str(LENGTH),
-                          "--setup", "map", "--seed", str(CAPTURE_SEED), timeout=1800)
+    assert digest, solo.stdout
+    # A capture and a kill, each between players: the village to p3, and a
+    # death one player dealt another.
+    captures = [(int(a), int(b)) for a, b in
+                re.findall(r"capture turn \d+: #\d+ kind \d+ p(\d+) -> p(\d+)", solo.stdout)]
+    assert (1, 3) in captures, solo.stdout[-3000:]
+    kills = [(int(a), int(b)) for a, b in
+             re.findall(r"^\s+death turn \d+: \d+ \S+ p(\d+) at .* by \d+ \S+ p(\d+)$",
+                        solo.stdout, re.MULTILINE)]
+    assert any(a != b and a < 14 and b < 14 for a, b in kills), solo.stdout[-3000:]
+
+    # Two peers, each from its own seat, staged alike: they agree on every
+    # turn, end on the solo run's hash, and played the same war.
+    result = subprocess.run(
+        [str(imconform), "lockstep", str(game_dir), str(path), str(CAPTURE_TURNS), str(LENGTH),
+         "--setup", "map", "--seed", str(CAPTURE_SEED), "--skirmish"],
+        capture_output=True, text=True, timeout=900, env=staged,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"agree on all {turns} turns" in result.stdout, result.stdout
-    assert re.search(rf"session\s+hash {digest[1]} after turn {turns}", result.stdout), (
+    assert len(re.findall(rf"goto\s+turn {CAPTURE_ORDER_TURN}: {soldier[0]} .*, 1 issued",
+                          result.stdout)) == 2, result.stdout
+    assert f"agree on all {CAPTURE_TURNS} turns" in result.stdout, result.stdout
+    assert re.search(rf"session\s+hash {digest[1]} after turn {CAPTURE_TURNS}", result.stdout), (
         solo.stdout + result.stdout)
-    # The capture the solo run ended on, played by the peers too -- when it
-    # ended on one; a match undecided at the ceiling is still the same match.
-    if re.search(r"^match\s+over=yes", solo.stdout, re.MULTILINE):
-        assert re.search(r"p\d+ takes p0's stronghold", result.stdout), result.stdout
     war = war_fields(result.stdout)
     assert war["blows"] > 0 and war["deaths"] > 0, result.stdout
+    assert re.search(r"war\s+.*; [1-9]\d* captures", result.stdout), result.stdout
 
+
+# The long runs: minutes each, so `slow` -- `pytest --slow`, which
+# `tools/verify.py --slow` passes. What they add to the ones above is the rest of
+# the war, well into it.
 
 @pytest.mark.slow
 def test_netplay_agrees_well_into_the_war(imconform, game_dir):

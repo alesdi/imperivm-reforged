@@ -93,7 +93,9 @@ int main(int argc, char** argv) {
                  "player orders before the first), IMRUN_PLACE=<x>,<y>\n"
                  "first stands it there, out of its AI's hands, IMRUN_ATTACK=<id>\n"
                  "makes the order the command bar's attack row (A) aimed at that\n"
-                 "object instead of the right click, IMRUN_WATCH=<id>[:<n>]\n"
+                 "object instead of the right click, IMRUN_CLICK=<id> makes the\n"
+                 "right click land on that object rather than the bare point,\n"
+                 "IMRUN_WATCH=<id>[:<n>]\n"
                  "prints where it stands every n turns (ten by default) -- a hero,\n"
                  "each member of his army too, and what it runs -- and every gate\n"
                  "its route crosses, and IMRUN_GATES=1 prints each gate as it opens or closes\n"
@@ -726,6 +728,12 @@ int main(int argc, char** argv) {
   if (const char* attack = std::getenv("IMRUN_ATTACK")) {
     attack_target = static_cast<ObjectId>(std::strtoul(attack, nullptr, 10));
   }
+  // `IMRUN_CLICK=<id>`: the right click lands on that object, as a click on
+  // it does -- an enemy's village is captured, a bare point only walked to.
+  ObjectId click_target = kNoObject;
+  if (const char* click = std::getenv("IMRUN_CLICK")) {
+    click_target = static_cast<ObjectId>(std::strtoul(click, nullptr, 10));
+  }
   ObjectId watched = kNoObject;
   unsigned long long watch_every = 10;
   if (const char* watch = std::getenv("IMRUN_WATCH")) {
@@ -824,6 +832,7 @@ int main(int argc, char** argv) {
       } else if (actor != nullptr && table != nullptr) {
         sim::OrderTarget target;
         target.point = sim::Point{goto_x, goto_y};
+        target.object = click_target;
         // With the click's verifier over the run's own scripts, as the app
         // and `imconform` give one: without it a candidate with a `verify=`
         // -- a hero's `moveinfight` before his `move` -- blocks the order.
