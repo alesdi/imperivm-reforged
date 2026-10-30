@@ -31,9 +31,11 @@ using namespace imperivm::core::sim;
 
 namespace {
 
-/// Three animations: slot 13 (264 units), slot 19 (300, action moment 100) and
-/// slot 1, whose sheet is `pingpong` and which declares 150 over a 200 strip. Slot 5 is deliberately absent, because a
-/// missing slot is an ordinary case and not an error.
+/// Four animations: slot 13 (264 units, state 1 to 1), slot 19 (300, action
+/// moment 100, state 1 to 2), slot 18 (120, state 2 to 1: the transition back
+/// in front of anything that starts from state 1) and slot 1, whose sheet is
+/// `pingpong` and which declares 150 over a 200 strip. Slot 5 is deliberately
+/// absent, because a missing slot is an ordinary case and not an error.
 constexpr std::string_view kEntityXml = R"(<?xml version="1.0"?>
 <entity name="fixture" type="vx/unit" variations="8">
   <images>
@@ -68,6 +70,14 @@ constexpr std::string_view kEntityXml = R"(<?xml version="1.0"?>
       <frame idx="3" duration="100"/>
       <frame idx="4" duration="100"/>
       <frame idx="5" duration="0"/>
+    </anim>
+    <anim idx="18" name="ToIdle" startstate="2" endstate="1" frames="4" duration="120"
+          default_duration="0" action_time="0" step="0">
+      <replace layer="1" image="2"/>
+      <frame idx="1" duration="0"/>
+      <frame idx="2" duration="60"/>
+      <frame idx="3" duration="60"/>
+      <frame idx="4" duration="0"/>
     </anim>
     <anim idx="1" name="fire" startstate="1" endstate="1" frames="6" duration="150"
           default_duration="0" action_time="0" step="0">
@@ -111,6 +121,9 @@ struct AnimBench {
   ObjectId spawn() {
     const ObjectId id = world.spawn(NativeClass::unit, &entity.value());
     (void)world.set_position(id, Point{100, 100});
+    // Alive: an object at no health is dead to the animation-end handler,
+    // which puts it down (`anim_dispatch`).
+    (void)world.set_health(id, 100);
     return id;
   }
 
@@ -129,6 +142,23 @@ struct AnimBench {
     ctx.scheduler = scheduler;
     ctx.name = name;
     ctx.kind = script::CallKind::member;
+    return registry.entry(index).fn(ctx);
+  }
+
+  /// A suspending call's run: the first, or a re-entry with its word.
+  script::HostOutcome rerun(const char* name, std::uint16_t arity,
+                            std::vector<script::Value> args, bool first, std::int32_t& word) {
+    const std::uint32_t index = registry.find(script::CallKind::member, name, arity);
+    CHECK(index != script::kUnresolvedHost);
+    if (index == script::kUnresolvedHost) return script::HostOutcome::failed("not declared");
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.scheduler = scheduler;
+    ctx.name = name;
+    ctx.kind = script::CallKind::member;
+    ctx.first_call = first;
+    ctx.scratch = &word;
     return registry.entry(index).fn(ctx);
   }
 
@@ -208,40 +238,70 @@ TEST(anim_the_point_is_a_facing_and_the_objects_own_position_means_do_not_turn) 
   CHECK(b.movement.state(id).facing != before);
 }
 
-/// `PlayAnim` **suspends**, and for the animation's own length.
+/// `PlayAnim` **suspends**, starts nothing itself, and wakes when what it
+/// started has ended.
 ///
 /// `DATA\SUBAI\ANIM.VS` is `while (1) This.PlayAnim(1, This.pos);` with no
-/// `Sleep` in it, and 28 shipped classes bind it -- the blacksmith fires, the
-/// wells, the obelisks, the barrack horses. A `PlayAnim` that returned would
-/// spin the instruction budget every tick forever, which is the shape
-/// `Unit::Attack` was caught in. `gbr.exe` settles it: `Obj::PlayAnim` is one
-/// of only two members of this family registered through the *suspending*
-/// registrar.
+/// `Sleep` in it, and 28 shipped classes bind it. 0x005a9ba0 writes 6 into the
+/// action mode, arms the animation timer for 1 ms and sleeps with no timed
+/// wake; the timer's firing runs mode 6 (0x005a76c0), which starts the
+/// animation; its end runs mode 6 again, which wakes the script and sets the
+/// mode back to 0.
 TEST(anim_play_anim_suspends_for_the_length_of_what_it_started) {
   AnimBench b;
   const ObjectId id = b.spawn();
-  const script::HostOutcome out =
-      b.call("PlayAnim", 2, {AnimBench::obj(id), script::Value::integer(13),
-                             AnimBench::point(100, 100)});
-  CHECK(out.status == script::HostStatus::suspend);
-  // Slot 13's four held frames are 66 units each.
-  CHECK(out.suspend_for == 264);
+  std::int32_t word = 0;
+  const std::vector<script::Value> args{AnimBench::obj(id), script::Value::integer(13),
+                                        AnimBench::point(100, 100)};
+  const script::HostOutcome first = b.rerun("PlayAnim", 2, args, true, word);
+  CHECK(first.status == script::HostStatus::retry);
+  CHECK(first.suspend_for == 1);
+  CHECK(b.world.find(id)->clock.mode == 6);
+  CHECK(b.world.find(id)->clock.slot == kNoAnim);
+  CHECK(!b.call("IsInState", 0, {AnimBench::obj(id)}).value.as_integer() != 0);
+
+  // The timer fires: the animation starts, and the call waits its length.
+  b.world.advance_turns(1);
+  const script::HostOutcome start = b.rerun("PlayAnim", 2, args, false, word);
+  CHECK(start.status == script::HostStatus::retry);
+  CHECK(start.suspend_for == 264);
   CHECK(b.world.find(id)->object->anim.anim_slot == 13);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 13);
 
-  // A slot nothing declares plays nothing and suspends for zero -- which still
-  // yields, because the scheduler runs a zero wait again at the next pass's
-  // end. So `ANIM.VS` stays bounded even on an object whose entity is missing.
-  const script::HostOutcome miss =
-      b.call("PlayAnim", 2, {AnimBench::obj(id), script::Value::integer(5),
-                             AnimBench::point(100, 100)});
-  CHECK(miss.status == script::HostStatus::suspend);
-  CHECK(miss.suspend_for == 0);
+  // Its end wakes the script, and the mode is 0 again.
+  b.world.advance_turns(3);
+  const script::HostOutcome wake = b.rerun("PlayAnim", 2, args, false, word);
+  CHECK(wake.status == script::HostStatus::ok);
+  CHECK(b.world.find(id)->clock.mode == 0);
 
-  // And an unresolvable receiver does not suspend at all: there is nothing to
-  // wait for.
-  const script::HostOutcome dead =
-      b.call("PlayAnim", 2, {AnimBench::obj(9999), script::Value::integer(13),
-                             AnimBench::point(0, 0)});
+  // A mode something else rewrote runs no continuation: a `StartAnim` from
+  // another script while the first millisecond is pending leaves the call
+  // waiting for a wake that never comes.
+  std::int32_t other = 0;
+  (void)b.rerun("PlayAnim", 2, args, true, other);
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(1),
+                          AnimBench::point(100, 100)});
+  b.world.advance_turns(3);
+  const script::HostOutcome orphan = b.rerun("PlayAnim", 2, args, false, other);
+  CHECK(orphan.status == script::HostStatus::retry);
+  CHECK(orphan.suspend_for > 1000000);
+
+  // A slot nothing declares starts nothing, arms no timer, and nothing wakes
+  // the script: it sleeps rather than spins.
+  std::int32_t miss_word = 0;
+  const std::vector<script::Value> miss{AnimBench::obj(id), script::Value::integer(5),
+                                        AnimBench::point(100, 100)};
+  (void)b.rerun("PlayAnim", 2, miss, true, miss_word);
+  b.world.advance_turns(1);
+  const script::HostOutcome none = b.rerun("PlayAnim", 2, miss, false, miss_word);
+  CHECK(none.status == script::HostStatus::retry);
+  CHECK(none.suspend_for > 1000000);
+
+  // And an unresolvable receiver does not suspend at all.
+  std::int32_t dead_word = 0;
+  const script::HostOutcome dead = b.rerun(
+      "PlayAnim", 2, {AnimBench::obj(9999), script::Value::integer(13), AnimBench::point(0, 0)},
+      true, dead_word);
   CHECK(dead.status == script::HostStatus::ok);
 }
 
@@ -394,11 +454,14 @@ TEST(anim_a_script_mid_turn_starts_an_animation_on_its_own_millisecond) {
   CHECK(b.number("TimeToActionMoment", 0, {AnimBench::obj(id)}) == 100);
 
   // At the turn's end itself nothing is brought forward.
+  // The lead-in is stopped where it stands and leaves the unit in its end
+  // state, 2, so the fidget has the 2-to-1 edge (120) in front.
   clock.set_now(800);
   b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(13),
                           AnimBench::point(100, 100)});
+  CHECK(b.world.find(id)->object->anim.anim_slot == 18);
   CHECK(b.world.find(id)->object->anim.elapsed_ms == 0);
-  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 264);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 120 + 264);
 }
 
 /// `TimeToActionMoment` counts down to the entity's `action_time`, not to the
@@ -422,10 +485,16 @@ TEST(anim_time_to_action_moment_counts_down_to_the_declared_moment) {
   // The animation is not over, though: the two are different questions.
   CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 200);
 
-  // An animation whose moment is at zero answers zero from the start.
+  // An animation whose moment is at zero answers zero from the start, on a
+  // unit resting where it starts; after the lead-in, the moment is past the
+  // 2-to-1 edge in front of it (0x0053cf30 counts from the main start).
+  const ObjectId fresh = b.spawn();
+  b.call("StartAnim", 2, {AnimBench::obj(fresh), script::Value::integer(13),
+                          AnimBench::point(100, 100)});
+  CHECK(b.number("TimeToActionMoment", 0, {AnimBench::obj(fresh)}) == 0);
   b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(13),
                           AnimBench::point(100, 100)});
-  CHECK(b.number("TimeToActionMoment", 0, {AnimBench::obj(id)}) == 0);
+  CHECK(b.number("TimeToActionMoment", 0, {AnimBench::obj(id)}) == 120);
 }
 
 /// `GetAnim` is the slot, with **0** for nothing playing; `GetAnimTime` and
@@ -480,11 +549,16 @@ TEST(anim_scripts_see_the_declared_duration_not_the_frame_strip) {
   CHECK(b.number("GetAnimTime", 1, {AnimBench::obj(id), script::Value::integer(1)}) == 150);
   CHECK(b.number("GetAnimDuration", 1, {AnimBench::obj(id), script::Value::integer(0)}) == 150);
 
-  const script::HostOutcome play =
-      b.call("PlayAnim", 2, {AnimBench::obj(id), script::Value::integer(1),
-                             AnimBench::point(100, 100)});
-  CHECK(play.status == script::HostStatus::suspend);
+  std::int32_t word = 0;
+  const std::vector<script::Value> args{AnimBench::obj(id), script::Value::integer(1),
+                                        AnimBench::point(100, 100)};
+  (void)b.rerun("PlayAnim", 2, args, true, word);
+  b.world.advance_turns(1);
+  const script::HostOutcome play = b.rerun("PlayAnim", 2, args, false, word);
+  CHECK(play.status == script::HostStatus::retry);
   CHECK(play.suspend_for == 150);
+  b.world.advance_turns(2);
+  CHECK(b.rerun("PlayAnim", 2, args, false, word).status == script::HostStatus::ok);
 
   b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(1),
                           AnimBench::point(100, 100)});
@@ -613,12 +687,16 @@ TEST(anim_a_states_loop_and_a_finished_animation_are_not_playing) {
   CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 0);
 }
 
-/// `StartDelayedAnim(slot, point, delay)` -- one site, and its delay is `-1`.
+/// `StartDelayedAnim(slot, point, delay)` -- the delay is `StartAnimation`'s
+/// start offset.
 ///
-/// `CATAPULT_IDLE.VS:32` is `.StartDelayedAnim(1, .pos, -1);`, and `-1` is the
-/// original's own special case: apply the animation immediately and locally
-/// rather than arming the object's timer. So the one shipped call is
-/// `StartAnim` under a longer name, and that is what this is.
+/// `CATAPULT_IDLE.VS:32` is `.StartDelayedAnim(1, .pos, -1);`, and `-1` is
+/// the original's own special case (0x0053e7f7): the animation is applied at
+/// once, its start a millisecond in the past, and **no timer is armed**. So it
+/// never ends: `IsInState` is true at once, `GetAnim` keeps answering it, and
+/// `TimeToAnimFinish` counts down to its start less one plus its length and
+/// stays at 0. A positive delay arms the timer for the start: the object rests
+/// where it is until then, with the slot already written.
 TEST(anim_start_delayed_anim_is_start_anim_at_the_one_delay_that_ships) {
   AnimBench b;
   const ObjectId id = b.spawn();
@@ -627,7 +705,91 @@ TEST(anim_start_delayed_anim_is_start_anim_at_the_one_delay_that_ships) {
                 script::Value::integer(-1)})
             .status == script::HostStatus::ok);
   CHECK(b.world.find(id)->object->anim.anim_slot == 13);
-  CHECK(b.world.find(id)->object->anim.elapsed_ms == 0);
+  CHECK(b.world.find(id)->object->anim.elapsed_ms == 1);
+  CHECK(b.call("IsInState", 0, {AnimBench::obj(id)}).value.as_integer() != 0);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 263);
+  b.world.advance_turns(5);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 13);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 0);
+
+  // A positive delay: the slot at once, the timer pending, the pose kept.
+  const ObjectId later = b.spawn();
+  REQUIRE(b.world.enter_state(later, 3));
+  CHECK(b.call("StartDelayedAnim", 3,
+               {AnimBench::obj(later), script::Value::integer(13), AnimBench::point(100, 100),
+                script::Value::integer(150)})
+            .status == script::HostStatus::ok);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(later)}) == 13);
+  CHECK(!b.call("IsInState", 0, {AnimBench::obj(later)}).value.as_integer() != 0);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(later)}) == 150 + 264);
+  b.world.advance_turns(1);
+  CHECK(b.world.find(later)->object->anim.anim_slot == kNoAnim);
+  b.world.advance_turns(1);
+  CHECK(b.world.find(later)->object->anim.anim_slot == 13);
+}
+
+/// **A transition plays in front.** `StartAnimation` (0x0053e6c0) looks for
+/// the first animation leading from the state the object rests in to the
+/// state the new one starts from (0x005a8170) and plays it first; the end and
+/// the action moment the scripts wait on are counted after it (0x0053cf30).
+/// After the 1-to-2 lead-in the unit rests in state 2, so the 1-to-1 fidget
+/// is the 2-to-1 edge (120) and then itself (264).
+TEST(anim_a_transition_plays_in_front_and_the_scripts_wait_for_it) {
+  AnimBench b;
+  const ObjectId id = b.spawn();
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(19),
+                          AnimBench::point(100, 100)});
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 300);
+  CHECK(b.number("TimeToActionMoment", 0, {AnimBench::obj(id)}) == 100);
+  b.world.advance_turns(3);
+  CHECK(b.world.anim_rest_state_at(*b.world.find(id), b.world.time()) == 2);
+  CHECK(b.call("IsInState", 0, {AnimBench::obj(id)}).value.as_integer() != 0);
+
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(13),
+                          AnimBench::point(100, 100)});
+  CHECK(b.world.find(id)->clock.transition == 18);
+  CHECK(b.number("TimeToAnimFinish", 0, {AnimBench::obj(id)}) == 120 + 264);
+  CHECK(b.number("TimeToActionMoment", 0, {AnimBench::obj(id)}) == 120);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 13);
+  // The view plays the edge first, then the fidget.
+  CHECK(b.world.find(id)->object->anim.anim_slot == 18);
+  b.world.advance_turns(2);
+  CHECK(b.world.find(id)->object->anim.anim_slot == 13);
+  CHECK(b.world.find(id)->object->anim.elapsed_ms == 80);
+  b.world.advance_turns(2);
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 0);
+  CHECK(b.world.anim_rest_state_at(*b.world.find(id), b.world.time()) == 1);
+
+  // `SetState` to where it rests is nothing; elsewhere it rests there at once,
+  // the slot dropped.
+  b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(13),
+                          AnimBench::point(100, 100)});
+  b.call("SetState", 1, {AnimBench::obj(id), script::Value::integer(3)});
+  CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 0);
+  CHECK(b.world.find(id)->object->anim.state_idx == 3);
+}
+
+/// **`StartAnim` hands off to a dead object's handler first.** With no timer
+/// pending, 0x005a9ce0 sets the action mode to 0 and runs `vtbl+0x54`; for an
+/// object at no health that is the death sequence (0x005b0f70): with no death
+/// animation, straight to its destroy (`vtbl+0x94`). A living one is only
+/// given mode 0.
+TEST(anim_start_anim_on_a_dead_object_runs_its_end_first) {
+  AnimBench b;
+  CommandSystem commands;
+  REQUIRE(b.world.add_system(&commands));
+  const ObjectId living = b.spawn();
+  b.world.set_anim_mode(living, 4);
+  b.call("StartAnim", 2, {AnimBench::obj(living), script::Value::integer(13),
+                          AnimBench::point(100, 100)});
+  CHECK(b.world.find(living) != nullptr);
+  CHECK(b.world.find(living)->clock.mode == 0);
+
+  const ObjectId dead = b.spawn();
+  (void)b.world.set_health(dead, 0);
+  b.call("StartAnim", 2, {AnimBench::obj(dead), script::Value::integer(13),
+                          AnimBench::point(100, 100)});
+  CHECK(b.world.find(dead) == nullptr);
 }
 
 // --------------------------------------------------------------------------
@@ -698,6 +860,9 @@ struct EngineBench {
   ObjectId spawn(const char* cls) {
     const ObjectId id = world.spawn(NativeClass::catapult, &entity.value(), graph.find(cls));
     (void)world.set_position(id, Point{100, 100});
+    // Standing: a siege engine at no health is dead to the animation-end
+    // handler `StartDelayedAnim` runs first, which puts it down.
+    (void)world.set_health(id, 1);
     return id;
   }
 
@@ -857,22 +1022,25 @@ TEST(idle_draws_for_a_fidget_every_hundred_ms_and_spends_its_whole_budget) {
   CHECK(b.world.rng().state() == probe.state());
   if (first_t < 0) {
     CHECK(first.suspend_for == 1000);
-  } else if (first_t == 0) {
-    CHECK(first.suspend_for == 264);
   } else {
-    CHECK(first.suspend_for == first_t);
+    // The fidget starts `t` on: the wait is its start offset plus its length.
+    CHECK(first.suspend_for == first_t + 264);
   }
 
-  // Run the steps out: the waits add up to the budget, and the call ends.
+  // Run the steps out, the game's time moving as the waits do: they add up to
+  // the budget, and the call ends.
   std::int64_t waited = first.suspend_for;
+  std::int64_t last = first.suspend_for;
   ctx.first_call = false;
   for (int i = 0; i < 50; ++i) {
+    b.world.advance(static_cast<std::int32_t>(last));
     const script::HostOutcome next = idle(ctx);
     if (next.status != script::HostStatus::retry) {
       CHECK(next.status == script::HostStatus::ok);
       break;
     }
     waited += next.suspend_for;
+    last = next.suspend_for;
   }
   CHECK(waited == 1000);
 
@@ -986,7 +1154,7 @@ TEST(idle_waits_out_an_animation_already_in_flight_before_its_first_step) {
   CommandSystem commands;
   REQUIRE(b.world.add_system(&commands));
   const ObjectId unit = b.spawn();
-  REQUIRE(b.world.play_anim(unit, 19, AnimRepeat::hold));
+  REQUIRE(b.world.start_animation(unit, 19, b.world.time()) == 300);
   b.world.advance(100);
   REQUIRE(b.world.find(unit)->animating);
 
@@ -998,17 +1166,16 @@ TEST(idle_waits_out_an_animation_already_in_flight_before_its_first_step) {
   CHECK(first.suspend_for == 200);
   CHECK(b.world.rng().state() == before);
 
-  // The re-entry is the first step, over the whole 1,000.
+  // The re-entry is the first step, over the whole 1,000. The lead-in left
+  // the unit in state 2, so a fidget has the 2-to-1 edge (120) in front.
   b.world.advance(200);
   const std::int64_t t = first_fidget(777, 1000);
   const script::HostOutcome step = idle.run();
   CHECK(step.status == script::HostStatus::retry);
   if (t < 0) {
     CHECK(step.suspend_for == 1000);
-  } else if (t == 0) {
-    CHECK(step.suspend_for == 264);
   } else {
-    CHECK(step.suspend_for == t);
+    CHECK(step.suspend_for == t + 120 + 264);
   }
   CHECK(b.world.rng().state() != before);
 

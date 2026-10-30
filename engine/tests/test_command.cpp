@@ -1247,7 +1247,10 @@ TEST(idle_is_an_order_that_costs_game_time) {
   CHECK(slept.status == HostStatus::retry);  // the activity's steps are re-entries
   CHECK(slept.suspend_for == 1900);
 
-  HostCall bare(f.world, {obj(u)});
+  // Another unit: on `u` the first idle's hold is still pending, and a second
+  // idle set over it waits that out before its own first step (0x005a7680).
+  const ObjectId v = f.spawn(f.unit_class);
+  HostCall bare(f.world, {obj(v)});
   const HostOutcome fallback = invoke(registry, CallKind::member, "Idle", 0, bare);
   CHECK(fallback.status == HostStatus::retry);
   CHECK(fallback.suspend_for == kDefaultIdleSlice);
@@ -1294,7 +1297,10 @@ TEST(idle_on_the_map_drops_the_target_and_still_waits_its_argument) {
   CHECK(combat.find(u)->attacks == 0);
   CHECK(combat.find(u)->action == Action::idle);
 
-  // A non-positive argument still ends the slice, as every 3 does.
+  // A non-positive argument still ends the slice, as every 3 does -- once the
+  // first idle's hold has run out, since until then it is that hold the
+  // second idle waits on.
+  f.world.advance(1900);
   combat.find(u)->target = foe;
   HostCall zero(f.world, {obj(u), Value::integer(0)});
   const HostOutcome yielded = invoke(registry, CallKind::member, "Idle", 1, zero);

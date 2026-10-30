@@ -1174,7 +1174,11 @@ TEST(a_unit_whose_fight_is_over_settles_through_toidle) {
   CHECK(seen_toidle);
   CHECK(!cut_short);
   CHECK(settles == 1);
-  CHECK(slot->object->anim.anim_slot == kAnimToIdle);
+  // And `toidle` has run out into its end state: the unit rests in state 1
+  // with nothing playing (0x0053f6a0 at the end), shown in that state's pose.
+  CHECK(world.anim_slot_at(*slot, world.time()) == kNoAnim);
+  CHECK(world.anim_rest_state_at(*slot, world.time()) == 1);
+  CHECK(slot->object->anim.state_idx == 1);
 }
 
 /// **A death is seen, and lasts as long as the animation that shows it.** The

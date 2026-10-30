@@ -445,7 +445,12 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// map's explored-everywhere flag (`[map+0xf0]`, which `ExploreAll` raises
 /// and `GAIKA::Explored` reads, 0x0041cb80). A version-56 file has none, and
 /// a load would answer every node unexplored after a script's `ExploreAll`.
-inline constexpr std::uint32_t kStateVectorVersion = 57;
+/// 58: every object carries the original's animation clock (world section
+/// version 37, docs/formats/animation.md): the animation started, its
+/// transition, playback length, start, main start and action moment, the
+/// animation timer and the action mode `[obj+0x130]`. A version-57 file has
+/// none, and every animation a script waits on would read as over.
+inline constexpr std::uint32_t kStateVectorVersion = 58;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

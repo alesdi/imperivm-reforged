@@ -126,6 +126,8 @@
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/game/registry.hpp"
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/system.hpp"
+#include "imperivm/core/sim/tick.hpp"
 
 namespace imperivm::core::sim {
 
@@ -160,21 +162,27 @@ std::size_t register_anim_host(script::HostRegistry& registry);
 class World;
 struct WorldObject;
 
-/// What is left, at the running script's millisecond, of a one-shot animation
-/// the object is playing -- one started to run once and hand control back
-/// (`AnimRepeat::hold`), as an attack, a death or a fidget is -- or 0 for
-/// none. The original's animation timer (id 0x1b, armed by `StartAnimation`,
-/// 0x0053e6c0) is pending for exactly that long, and the idle activity's
-/// setter (0x005a7680) runs the activity at once only when it is not
-/// (0x0053cfc0); see `docs/formats/idle.md`.
-[[nodiscard]] std::int32_t one_shot_time_left(const script::CallContext& ctx, const World& world,
-                                              const WorldObject& slot);
+/// The running script's millisecond: the scheduler's `now`, or the world's
+/// time outside a pass. Every animation-clock read and write a script makes
+/// is at this time.
+[[nodiscard]] GameTime script_now(const script::CallContext& ctx, const World& world);
 
-/// Start animation `anim_slot` on `id`, held, **at the running script's
-/// millisecond**: the cursor is brought forward by the part of the turn the
-/// world has already lived through, as the animation entry points do. False
-/// when the entity declares no such animation.
-bool start_anim_at_script_time(const script::CallContext& ctx, World& world, core::ObjectId id,
-                               std::int32_t anim_slot);
+/// `StartAnimation` (0x0053e6c0) as a script's call makes it: at the script's
+/// millisecond, turning towards `face` first unless it is the invalid point
+/// or the object is off the map. Answers what is left of the animation,
+/// transition included, or 0 when nothing started (`World::start_animation`).
+std::int32_t start_animation_facing(const script::CallContext& ctx, World& world,
+                                    core::ObjectId id, std::int32_t anim_slot, Point face,
+                                    GameTime delay);
+
+/// The object's animation-end handler (`vtbl+0x54`: 0x005d5b60 for a unit,
+/// 0x005b0f70 for every object) up to the point where its action mode's own
+/// step would run, at `now`. A held unit runs nothing; a dead object runs the
+/// death sequence -- mode 1 starts a death animation variant and ends the
+/// running command, then mode 8 destroys it (`vtbl+0x94`) -- and runs no
+/// step. True when the mode's own step (a walk step, an idle's, a
+/// `PlayAnim`'s continuation) is what runs next. See
+/// `docs/formats/animation.md`.
+bool anim_dispatch(script::CallContext& ctx, World& world, core::ObjectId id, GameTime now);
 
 }  // namespace imperivm::core::sim

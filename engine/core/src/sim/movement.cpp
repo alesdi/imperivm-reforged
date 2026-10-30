@@ -1982,6 +1982,10 @@ void MovementSystem::play_locomotion(World& world, ObjectId id, MoveState& move)
   if (moving == move.walking) return;
   move.walking = moving;
   if (moving) {
+    // The first walk step's `StartAnimation` stops what the clock plays
+    // (0x005d3b50 -> 0x0053e6c0 -> 0x0053d730). The walk itself is this
+    // loop, not the original's one-shot steps (docs/formats/animation.md).
+    world.stop_animation(id, world.time());
     (void)world.play_anim(id, move.walk_anim, AnimRepeat::loop);
     return;
   }

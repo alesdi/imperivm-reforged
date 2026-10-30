@@ -6891,6 +6891,10 @@ struct X87Number {
 
 }  // namespace
 
+void erase_from_script(script::CallContext& ctx, World& world, ObjectId id) {
+  erase_one(ctx, world, id);
+}
+
 void erase_object(CallContext& ctx, World& world, ObjectId id) { erase_one(ctx, world, id); }
 
 std::int32_t object_max_health(World& world, const WorldObject& slot) {

@@ -304,6 +304,21 @@ envelope.
                            contents keep their order. Not hashed.
       u8    animating
       u8    repeat         AnimRepeat
+      -- the animation clock, version 37 (docs/formats/animation.md) --
+      i32   clock.slot       The animation started ([obj+0x50]), document idx,
+                             or -1. Kept after its end; whether it plays is
+                             read against the reader's time.
+      i32   clock.transition The transition in front of it ([obj+0x54]), or -1.
+      i32   clock.duration   Playback length ([obj+0x64]).
+      i32   clock.mode       The action mode [obj+0x130].
+      i32   clock.from_state The state rested in when it was started.
+      i64   clock.start      [obj+0x58]: the call's time plus the start offset.
+      i64   clock.main_start [obj+0x68]: after the transition.
+      i64   clock.action_at  [obj+0x6c]: the action moment.
+      i64   clock.timer_at   When the animation timer (message 27) fires
+                             next, or -1 for none.
+      u8    clock_drives     The cursor shows the clock's animation. All of
+                             this is hashed.
       -- only when native_class != 0xFF --
       i32   anim.state_idx
       i32   anim.anim_slot
