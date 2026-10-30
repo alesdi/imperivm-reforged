@@ -157,7 +157,7 @@ envelope.
 
 ```
     u32     magic          "IWLD"
-    u32     version        23
+    u32     version        37
 
     -- the clock (all of it is world state; sim/tick.hpp) --
     i32     turn_length    TickConfig::turn_length: the length the NEXT turn takes
