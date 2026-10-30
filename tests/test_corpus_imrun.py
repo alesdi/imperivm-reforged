@@ -537,6 +537,15 @@ P0_TOWNHALL = (2758, 2466)
 #: (found by sweeping seeds 1..1200 for exactly those three facts).
 LAYOUT_SEED = 1020
 
+#: When the walls fight's swordsman is sent in: early, while the ones p1's AI
+#: trains first are still on the map. At `ORDER_TURN` they were, until a
+#: march's member walked its own step and a unit was filed in a squad at
+#: every move (fourteenth round); since then p1's first swordsmen go out to
+#: the neutral villages and die to their guards before 300. Which of them
+#: lives that long is the AI's war; the fight at the wall is the placement's,
+#: whenever it is staged.
+WALLS_ORDER_TURN = 60
+
 
 def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     """The walls fight, by placement rather than by waiting for the AI to
@@ -553,7 +562,7 @@ def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     if not crossroads.is_file():
         pytest.skip("Crossroads.BFHP is not in this installation")
     first = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN), "800",
+        [str(imrun), str(game_dir), str(crossroads), str(WALLS_ORDER_TURN), "800",
          "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_OBJECTS": "ESwordsman"},
@@ -566,18 +575,18 @@ def test_a_walled_towns_sentries_kill_an_enemy_at_its_walls(imrun, game_dir):
     unit = enemies[0]
 
     second = subprocess.run(
-        [str(imrun), str(game_dir), str(crossroads), str(ORDER_TURN + 300), "800",
+        [str(imrun), str(game_dir), str(crossroads), str(WALLS_ORDER_TURN + 300), "800",
          "--seed", str(LAYOUT_SEED)],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_DEATHS": "1",
              "IMRUN_PLACE": f"{P0_OUTSIDE[0]},{P0_OUTSIDE[1]}",
-             "IMRUN_GOTO": f"{ORDER_TURN}:{unit}:{P0_TOWNHALL[0]},{P0_TOWNHALL[1]}"},
+             "IMRUN_GOTO": f"{WALLS_ORDER_TURN}:{unit}:{P0_TOWNHALL[0]},{P0_TOWNHALL[1]}"},
     )
     assert second.returncode == 0, second.stdout + second.stderr
     out = second.stdout
-    assert re.search(rf"^\s+place turn {ORDER_TURN}: {unit} at \(-?\d+,-?\d+\)$", out, re.MULTILINE), \
+    assert re.search(rf"^\s+place turn {WALLS_ORDER_TURN}: {unit} at \(-?\d+,-?\d+\)$", out, re.MULTILINE), \
         out[-3000:]
-    assert re.search(rf"^\s+goto turn {ORDER_TURN}: {unit} to .*, 1 issued$", out, re.MULTILINE), \
+    assert re.search(rf"^\s+goto turn {WALLS_ORDER_TURN}: {unit} to .*, 1 issued$", out, re.MULTILINE), \
         out[-3000:]
     death = re.search(rf"^\s+death turn (\d+): {unit} ESwordsman p1 at .* by \d+ (\S+) p(\d+)$",
                       out, re.MULTILINE)
@@ -812,13 +821,9 @@ P1_INSIDE = (13600, 2700)
 #: stood to be sent in. The west gate, because on the seed above nobody of
 #: p1's holds it open at the order turn, as somebody does the south one.
 P1_WEST_OUTSIDE = (12300, 2050)
-#: When the swordsman is sent in: early, while the ones p1's AI trains first
-#: are still on the map. At 300 they were, until a march's member walked its
-#: own step and a unit was filed in a squad at every move (fourteenth round);
-#: since then p1's first swordsmen go out to the neutral villages and die to
-#: their guards before 300. Which of them lives that long is the AI's war;
-#: the fight at the wall is the placement's, whenever it is staged.
-ORDER_TURN = 60
+#: When the swordsman is sent in. By then p1's AI has trained a few and marched
+#: them out through its gates.
+ORDER_TURN = 300
 #: When the gate test's swordsman is sent in: a turn at which every one of
 #: p1's gates stands closed with nobody near, so the gate it walks through is
 #: shut when it is sent. At 300 on the tenth round's tree p1's two swordsmen
