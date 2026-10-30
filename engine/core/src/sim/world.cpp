@@ -2404,6 +2404,8 @@ bool World::play_anim(ObjectId id, std::int32_t slot, AnimRepeat repeat) {
   found->timeline = std::move(timeline);
   found->repeat = repeat;
   found->animating = true;
+  // Whoever puts an animation on the cursor directly takes it from the clock.
+  found->clock_drives = false;
   // A leg belongs to the animation that flies it; `Flying::PlayAnim` writes
   // its own after this (`sim/anim.cpp`).
   found->flight = FlightLeg{};
@@ -2422,6 +2424,7 @@ bool World::enter_state(ObjectId id, std::int32_t state_idx) {
   if (state == nullptr) return false;
 
   found->object->anim.state_idx = state_idx;
+  found->clock_drives = false;
   if (!state->has_anim()) {
     // A still pose. 987 of the 1,168 states are one.
     found->animating = false;
@@ -2442,6 +2445,242 @@ bool World::stop_anim(ObjectId id) {
   if (found == nullptr) return false;
   found->animating = false;
   return true;
+}
+
+// --------------------------------------------------------------------------
+// the animation clock (docs/formats/animation.md)
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// The highest animation number an entity can declare: the original's array
+/// holds 28 (0x1c), and its loader refuses an `idx` past it (0x006004d0).
+constexpr std::int32_t kAnimArraySize = 28;
+
+[[nodiscard]] const EntityAnim* clock_anim(const WorldObject& slot, std::int32_t idx) noexcept {
+  if (idx == kNoAnim || slot.object == nullptr || slot.object->entity == nullptr) return nullptr;
+  return slot.object->entity->anim(idx);
+}
+
+/// 0x005a8170: the first animation, in array order, that runs from state
+/// `from` to state `to`, or `kNoAnim`.
+[[nodiscard]] std::int32_t find_transition(const Entity& entity, std::int32_t from,
+                                           std::int32_t to) noexcept {
+  for (std::int32_t idx = 1; idx <= kAnimArraySize; ++idx) {
+    const EntityAnim* anim = entity.anim(idx);
+    if (anim != nullptr && anim->startstate == from && anim->endstate == to) return idx;
+  }
+  return kNoAnim;
+}
+
+/// 0x0053cf30 with the slot at -1: the cached times read -1.
+void clear_clock(AnimClock& clock) noexcept {
+  clock.slot = kNoAnim;
+  clock.transition = kNoAnim;
+  clock.start = -1;
+  clock.main_start = -1;
+  clock.action_at = -1;
+}
+
+}  // namespace
+
+std::int32_t World::anim_slot_at(const WorldObject& slot, GameTime now) const noexcept {
+  const AnimClock& clock = slot.clock;
+  if (clock.slot == kNoAnim) return kNoAnim;
+  if (clock.chained() && now >= clock.end()) return kNoAnim;
+  return clock.slot;
+}
+
+std::int32_t World::anim_rest_state_at(const WorldObject& slot, GameTime now) const noexcept {
+  const AnimClock& clock = slot.clock;
+  const std::int32_t stored = slot.object != nullptr ? slot.object->anim.state_idx : 1;
+  if (clock.slot == kNoAnim) return stored;
+  if (clock.chained() && now >= clock.end()) {
+    const EntityAnim* anim = clock_anim(slot, clock.slot);
+    return anim != nullptr ? anim->endstate : stored;
+  }
+  // A delayed start that has not come: the object still rests where it was.
+  if (now < clock.start) return clock.from_state;
+  return kNoAnim;
+}
+
+GameTime World::anim_timer_left(const WorldObject& slot, GameTime now) const noexcept {
+  const GameTime at = slot.clock.timer_at;
+  return at != kNoAnimTimer && at > now ? at - now : 0;
+}
+
+void World::settle_anim(ObjectId id, GameTime now) {
+  WorldObject* found = find(id);
+  if (found == nullptr) return;
+  AnimClock& clock = found->clock;
+  if (clock.chained() && now >= clock.end()) {
+    // 0x0053f6a0 at the end: rest in the end state, the slot dropped, the
+    // timer not re-armed.
+    if (const EntityAnim* anim = clock_anim(*found, clock.slot);
+        anim != nullptr && found->object != nullptr) {
+      found->object->anim.state_idx = anim->endstate;
+    }
+    clear_clock(clock);
+    clock.timer_at = kNoAnimTimer;
+    return;
+  }
+  if (clock.timer_at != kNoAnimTimer && now >= clock.timer_at) clock.timer_at = kNoAnimTimer;
+}
+
+void World::rest_after(WorldObject& slot, GameTime now) {
+  // What plays at `now` ends: the transition while it runs, else the
+  // animation (0x0053d730 reads the word, which is the transition's index
+  // until the animation's own start).
+  const AnimClock& clock = slot.clock;
+  if (slot.object == nullptr || clock.slot == kNoAnim || now < clock.start) return;
+  std::int32_t playing = clock.slot;
+  if (clock.transition != kNoAnim && now < clock.main_start) playing = clock.transition;
+  if (const EntityAnim* anim = clock_anim(slot, playing); anim != nullptr) {
+    slot.object->anim.state_idx = anim->endstate;
+  }
+}
+
+void World::stop_animation(ObjectId id, GameTime now) {
+  settle_anim(id, now);
+  WorldObject* found = find(id);
+  if (found == nullptr) return;
+  AnimClock& clock = found->clock;
+  clock.timer_at = kNoAnimTimer;
+  const bool was_playing = clock.slot != kNoAnim && anim_rest_state_at(*found, now) == kNoAnim;
+  if (was_playing) rest_after(*found, now);
+  clear_clock(clock);
+  if (was_playing && found->clock_drives && found->object != nullptr) {
+    found->clock_drives = false;
+    (void)enter_state(id, found->object->anim.state_idx);
+  }
+}
+
+std::int32_t World::start_animation(ObjectId id, std::int32_t slot, GameTime now, GameTime delay,
+                                    std::int32_t duration_override) {
+  WorldObject* found = find(id);
+  if (found == nullptr || found->object == nullptr || found->object->entity == nullptr) return 0;
+  // Off the map -- inside a holder, or taken away -- the timer is cancelled
+  // and nothing starts (0x0053e6d6).
+  if (found->state.position == kHeldPosition) {
+    found->clock.timer_at = kNoAnimTimer;
+    return 0;
+  }
+  const Entity& entity = *found->object->entity;
+  const EntityAnim* anim = entity.anim(slot);
+  // The original indexes its array blind and faults on a hole; nothing starts
+  // here.
+  if (anim == nullptr) return 0;
+  settle_anim(id, now);
+
+  AnimClock& clock = found->clock;
+  // What plays is stopped first, into its end state (0x0053e6f0).
+  if (clock.slot != kNoAnim && anim_rest_state_at(*found, now) == kNoAnim) {
+    stop_animation(id, now);
+  }
+  const std::int32_t rest = anim_rest_state_at(*found, now);
+  clock.slot = slot;
+  clock.start = now + delay;
+  clock.duration = duration_override != 0 ? duration_override : anim->duration;
+  clock.from_state = rest;
+  clock.transition = anim->startstate == rest ? kNoAnim : find_transition(entity, rest, anim->startstate);
+  // 0x0053cf30: the transition's declared length in front; the action moment
+  // scaled by the playback length over the declared one.
+  const EntityAnim* transition = clock_anim(*found, clock.transition);
+  clock.main_start = clock.start + (transition != nullptr ? transition->duration : 0);
+  const std::int64_t scaled =
+      anim->duration > 0
+          ? static_cast<std::int64_t>(anim->action_time) * clock.duration / anim->duration
+          : 0;
+  clock.action_at = clock.main_start + scaled;
+  // A delay of -1 is "now, and no timer" (0x0053e7f7): the animation never
+  // ends. Any other arms the timer, which runs the phases to the end.
+  if (delay != -1) clock.timer_at = clock.end();
+
+  // The view: a new animation's leg is its own (`Flying::PlayAnim` writes
+  // one after this), and the cursor follows the clock from here.
+  found->flight = FlightLeg{};
+  found->clock_drives = true;
+  show_clock(*found, std::max(now, time()));
+  return static_cast<std::int32_t>(clock.main_start - now) + clock.duration;
+}
+
+std::int32_t World::set_anim_state(ObjectId id, std::int32_t state, bool transition,
+                                   GameTime now) {
+  settle_anim(id, now);
+  WorldObject* found = find(id);
+  if (found == nullptr || found->object == nullptr) return 0;
+  const std::int32_t rest = anim_rest_state_at(*found, now);
+  if (rest == state) return 0;
+  if (transition && rest != kNoAnim && found->object->entity != nullptr) {
+    // Only an animation past the array's first is taken (0x0053e8c4).
+    const std::int32_t via = find_transition(*found->object->entity, rest, state);
+    if (via != kNoAnim && via > 1) return start_animation(id, via, now);
+  }
+  // At once: the slot dropped and the state written; the timer is left as
+  // it is.
+  clear_clock(found->clock);
+  found->object->anim.state_idx = state;
+  found->clock_drives = false;
+  (void)enter_state(id, state);
+  return 0;
+}
+
+void World::arm_anim_timer(ObjectId id, GameTime now, GameTime ms) {
+  settle_anim(id, now);
+  if (WorldObject* found = find(id); found != nullptr) found->clock.timer_at = now + ms;
+}
+
+void World::set_anim_mode(ObjectId id, std::int32_t mode) noexcept {
+  if (WorldObject* found = find(id); found != nullptr) found->clock.mode = mode;
+}
+
+bool World::show_anim(WorldObject& slot, std::int32_t anim_slot, GameTime elapsed) {
+  if (slot.object == nullptr || slot.object->entity == nullptr) return false;
+  const EntityAnim* anim = slot.object->entity->anim(anim_slot);
+  if (anim == nullptr) return false;
+  AnimCursor& cursor = slot.object->anim;
+  if (cursor.anim_slot != anim_slot || slot.repeat != AnimRepeat::hold || !slot.timeline.valid()) {
+    AnimTimeline timeline = slot.object->entity->timeline(*anim);
+    if (!timeline.valid()) return false;
+    slot.timeline = std::move(timeline);
+    slot.repeat = AnimRepeat::hold;
+    cursor.anim_slot = anim_slot;
+  }
+  cursor.elapsed_ms = advance_elapsed(slot.timeline, 0, elapsed > 0 ? elapsed : 0, AnimRepeat::hold);
+  const AnimSample sample = slot.timeline.sample(cursor.elapsed_ms, AnimRepeat::hold);
+  cursor.step = sample.step;
+  slot.animating = !sample.finished;
+  return true;
+}
+
+void World::show_clock(WorldObject& slot, GameTime at) {
+  if (!slot.clock_drives || slot.object == nullptr) return;
+  const AnimClock& clock = slot.clock;
+  if (clock.slot == kNoAnim) {
+    // Nothing playing: the state's own pose (0x0053f430), once.
+    slot.clock_drives = false;
+    (void)enter_state(slot.id, slot.object->anim.state_idx);
+    return;
+  }
+  if (clock.chained() && at >= clock.end()) {
+    // Run out: the object rests in the end state. The view lets the strip
+    // play to its last frame and holds it there, as a held one-shot always
+    // has here; the original draws the end state's pose from that instant
+    // (a renderer-only difference, docs/formats/animation.md).
+    if (const EntityAnim* anim = clock_anim(slot, clock.slot); anim != nullptr) {
+      slot.object->anim.state_idx = anim->endstate;
+    }
+    if (!show_anim(slot, clock.slot, at - clock.main_start) || !slot.animating) {
+      slot.clock_drives = false;
+    }
+    return;
+  }
+  if (at < clock.start) return;  // a delayed start: the pose stays
+  if (clock.transition != kNoAnim && at < clock.main_start &&
+      show_anim(slot, clock.transition, at - clock.start)) {
+    return;
+  }
+  (void)show_anim(slot, clock.slot, at - clock.main_start);
 }
 
 // --------------------------------------------------------------------------
@@ -2469,6 +2708,12 @@ void World::run_turn(std::int32_t length) {
   for (WorldObject& slot : objects_) {
     if (slot.object == nullptr) continue;  // internal objects do not animate
     slot.object->on_tick(static_cast<std::uint32_t>(clock_.turns()));
+    // An animation the clock started is shown at the clock's phase, not
+    // advanced: its transition, then itself, then its end state's pose.
+    if (slot.clock_drives) {
+      show_clock(slot, clock_.time());
+      continue;
+    }
     if (!slot.animating || !slot.timeline.valid()) continue;
 
     AnimCursor& cursor = slot.object->anim;
@@ -2607,6 +2852,18 @@ std::uint64_t World::state_hash() const noexcept {
     hash_u64(state, cursor.variation);
     hash_u64(state, slot.animating ? 1u : 0u);
     hash_u64(state, static_cast<std::uint64_t>(slot.repeat));
+    // The animation clock: what the scripts wait on.
+    const AnimClock& clock = slot.clock;
+    hash_i32(state, clock.slot);
+    hash_i32(state, clock.transition);
+    hash_i32(state, clock.duration);
+    hash_i32(state, clock.mode);
+    hash_i32(state, clock.from_state);
+    hash_u64(state, static_cast<std::uint64_t>(clock.start));
+    hash_u64(state, static_cast<std::uint64_t>(clock.main_start));
+    hash_u64(state, static_cast<std::uint64_t>(clock.action_at));
+    hash_u64(state, static_cast<std::uint64_t>(clock.timer_at));
+    hash_u64(state, slot.clock_drives ? 1u : 0u);
   }
 
   // Named object groups. Hashed for the same reason the object table is: two
@@ -2681,7 +2938,7 @@ WorldHashes World::hashes() const noexcept {
 namespace {
 
 constexpr std::uint32_t kWorldMagic = 0x444C5749u;  // "IWLD"
-constexpr std::uint32_t kWorldVersion = 36;  // 36: each object's grid arrival stamp and the next stamp; 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
+constexpr std::uint32_t kWorldVersion = 37;  // 37: each object's animation clock; 36: each object's grid arrival stamp and the next stamp; 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
 
 /// `0xFF` for a slot with no native object -- every internal kind.
 /// `NativeClass` is a `std::uint8_t` enum with 26 values, so the sentinel
@@ -2919,6 +3176,17 @@ void World::serialize(std::vector<std::byte>& out) const {
     // data that could disagree with the game data.
     bytes::put_u8(out, slot.animating ? 1u : 0u);
     bytes::put_u8(out, static_cast<std::uint32_t>(slot.repeat));
+    // World version 37: the animation clock (docs/formats/animation.md).
+    bytes::put_i32(out, slot.clock.slot);
+    bytes::put_i32(out, slot.clock.transition);
+    bytes::put_i32(out, slot.clock.duration);
+    bytes::put_i32(out, slot.clock.mode);
+    bytes::put_i32(out, slot.clock.from_state);
+    bytes::put_i64(out, slot.clock.start);
+    bytes::put_i64(out, slot.clock.main_start);
+    bytes::put_i64(out, slot.clock.action_at);
+    bytes::put_i64(out, slot.clock.timer_at);
+    bytes::put_u8(out, slot.clock_drives ? 1u : 0u);
     // World version 32: the map's `display_name`.
     bytes::put_string(out, slot.display_name);
     if (slot.object != nullptr) {
@@ -3110,6 +3378,7 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
     std::uint32_t flags = 0;
     std::uint8_t animating = 0;
     std::uint8_t repeat = 0;
+    std::uint8_t clock_drives = 0;
     if (!reader.u32(slot.id) || !reader.u8(internal) || !reader.u8(native) ||
         !reader.u32(slot.class_index) || !reader.u32(slot.settlement) ||
         !bytes::get_i32(reader, slot.sight) || !reader.u32(slot.query) ||
@@ -3135,9 +3404,20 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
         !reader.u32(slot.state.traversed_by) ||
         !bytes::get_i64(reader, slot.state.curse_until) ||
         !bytes::get_u64(reader, slot.spatial.arrival) || !reader.u8(animating) ||
-        !reader.u8(repeat) || !bytes::get_string(reader, slot.display_name)) {
+        !reader.u8(repeat) || !bytes::get_i32(reader, slot.clock.slot) ||
+        !bytes::get_i32(reader, slot.clock.transition) ||
+        !bytes::get_i32(reader, slot.clock.duration) ||
+        !bytes::get_i32(reader, slot.clock.mode) ||
+        !bytes::get_i32(reader, slot.clock.from_state) ||
+        !bytes::get_i64(reader, slot.clock.start) ||
+        !bytes::get_i64(reader, slot.clock.main_start) ||
+        !bytes::get_i64(reader, slot.clock.action_at) ||
+        !bytes::get_i64(reader, slot.clock.timer_at) || !reader.u8(clock_drives) ||
+        !bytes::get_string(reader, slot.display_name)) {
       return FormatError::truncated;
     }
+    if (clock_drives > 1) return FormatError::malformed;
+    slot.clock_drives = clock_drives != 0;
     if (internal >= static_cast<std::uint8_t>(InternalKind::count)) return FormatError::malformed;
     if (repeat > static_cast<std::uint8_t>(AnimRepeat::hold)) return FormatError::malformed;
     if ((flags & ~kObjectFlagMask) != 0) return FormatError::unsupported;

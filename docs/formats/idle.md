@@ -1,7 +1,8 @@
 # The idle and taunt activity
 
 **Status:** read from `gbr.exe`; reproduced in `engine/core/src/sim/command.cpp`
-(`idle_activity`, `idle_step`) with the gaps listed at the end.
+(`idle_activity`, `idle_fire`, `idle_step`) on the animation clock, with the
+gaps listed at the end.
 
 `Unit::Idle(ms)` (0x005d6030), `Unit::Taunt(ms)` (0x005d60f0) and
 `Ship::Idle()` (0x005c6ea0) do not wait by themselves. They hand the unit an
@@ -90,38 +91,28 @@ when it was called.
 
 ## What this engine models
 
-* The steps are the call's re-entries. The first run drops the target and
-  takes the first step; each step that waits answers "again in so many ms"
-  and keeps the budget and a fidget still to start in the call's word; the
-  step that wakes the script answers done.
+* The activity runs on the animation clock (`docs/formats/animation.md`):
+  the action mode is `AnimClock::mode`, 4 or 5 while the activity is set; a
+  fidget is `World::start_animation` with its start offset `t`, transition
+  included; a hold arms the animation timer for the rest of the budget.
+* The steps are the call's re-entries, each one the timer's firing. The first
+  run drops the target, sets the mode and, when the timer is not pending,
+  takes the first step at once; otherwise it waits for the timer. Each later
+  run waits out a timer that was moved later, then runs the end handler's
+  gates (held: nothing; dead: the death sequence) and takes a step only while
+  the mode is still the activity's. Anything else leaves the script asleep,
+  as in the original. The budget is the call's word.
 * The force flag is `ObjectFlags::force_idle`, on the object, hashed and
   saved. `ForceIdle` and `Ship::Idle` raise it; the step that plays a fidget
   drops it.
-* An animation in flight is a one-shot animation the object is playing
-  (`AnimRepeat::hold`: an attack, a death, a fidget, anything a script
-  started). The first step waits out what is left of it, counted from the
-  script's millisecond. A state's own loop is a pose and is not in flight.
-* A fidget starts on the script's millisecond: the cursor is brought forward
-  by the part of the turn the world has already run, as the animation entry
-  points do.
+* Everything is counted from the script's millisecond.
 
 ## What differs, and why
 
-* **No transition animations.** The engine has none (see `sim/anim.hpp`), so
-  a fidget costs `t + L`; the original adds the length of the transition
-  from the unit's state into the fidget, when the entity declares one.
-* **A walk cycle is not "in flight".** The engine's walk is a looping cursor,
-  not a one-shot animation with an end, so an `Idle` called on a unit just
-  stopped mid-stride takes its first step at once; whether the original's
-  walk leaves timer 0x1b pending after a stop was not read.
-* **A unit put into a holder mid-idle.** The original's dispatch runs no
-  activity while the unit is held, so its script is never woken by it; here
-  the call's re-entries go on and the call ends when the budget is spent.
+* **A walk cycle is not "in flight".** The original walks by one-shot steps
+  on the animation timer (action mode 3, 0x005d3b50), and `Stop`
+  (0x005d6c90) leaves the step in flight to play out; so an `Idle` called on
+  a unit just stopped mid-stride waits for the end of that step. The
+  engine's walk is the movement system's loop, so the first step is at once.
 * **The launch gate.** This engine does not run the shipyard launch, so
   `[ship+0x1cc]` is never up and `Ship::Idle` always takes its activity.
-
-## What is still unknown
-
-* Whether the original's walk animation leaves the animation timer pending
-  after `Stop`, which decides whether the first step of an idle that follows
-  a stop waits out a walk cycle.

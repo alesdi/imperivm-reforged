@@ -21,10 +21,12 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
 #include <vector>
 
 #include "imperivm/core/formats/grid.hpp"
+#include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/game/localization.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
@@ -2014,6 +2016,160 @@ TEST(a_host_goto_into_a_wall_reports_no_path) {
   CHECK(outcome.suspend_for == 2000);
 }
 
+namespace {
+
+/// A unit's art for the `Goto` family's animation half: slot 20 is the
+/// "look around" (900), slot 19 the 1-to-2 lead-in (300), slot 18 the 2-to-1
+/// edge back (120), slot 13 a fidget.
+constexpr std::string_view kLookerEntity = R"(<?xml version="1.0"?>
+<entity name="looker" type="vx/unit" variations="8">
+  <images>
+    <image idx="1" file="idle.rle" drawmode="player_color" remaping="none" rows="4" columns="8"/>
+  </images>
+  <layers>
+    <layer idx="1" name="body" image="1" z="1000"/>
+  </layers>
+  <states>
+    <state idx="1" name="idle" image_idx="1" image_row="1" anim_idx="65536" anim_frame="65536"/>
+    <state idx="2" name="attack" image_idx="1" image_row="0" anim_idx="65536" anim_frame="65536"/>
+  </states>
+  <anims>
+    <anim idx="13" name="idle" startstate="1" endstate="1" frames="3" duration="200"
+          default_duration="0" action_time="0" step="0">
+      <frame idx="1" duration="100"/><frame idx="2" duration="100"/><frame idx="3" duration="0"/>
+    </anim>
+    <anim idx="18" name="ToIdle" startstate="2" endstate="1" frames="3" duration="120"
+          default_duration="0" action_time="0" step="0">
+      <frame idx="1" duration="60"/><frame idx="2" duration="60"/><frame idx="3" duration="0"/>
+    </anim>
+    <anim idx="19" name="ToAttack" startstate="1" endstate="2" frames="4" duration="300"
+          default_duration="0" action_time="100" step="0">
+      <frame idx="1" duration="100"/><frame idx="2" duration="100"/><frame idx="3" duration="100"/>
+      <frame idx="4" duration="0"/>
+    </anim>
+    <anim idx="20" name="look" startstate="1" endstate="1" frames="4" duration="900"
+          default_duration="0" action_time="0" step="0">
+      <frame idx="1" duration="300"/><frame idx="2" duration="300"/><frame idx="3" duration="300"/>
+      <frame idx="4" duration="0"/>
+    </anim>
+  </anims>
+</entity>)";
+
+[[nodiscard]] std::span<const std::byte> looker_bytes() {
+  return {reinterpret_cast<const std::byte*>(kLookerEntity.data()), kLookerEntity.size()};
+}
+
+}  // namespace
+
+/// **With no route laid, the family's flag plays the look-around** (0x005d65a0
+/// in `Goto`, the same in `GotoEnter` and the object worker 0x005d40c0): the
+/// action mode 0, the entity's animation index 0x13 (the script's slot 20)
+/// started towards the goal, and the wait the longer of the slice and its
+/// length. Without the flag, a unit resting anywhere but its first state is
+/// put back there with a transition (0x0053e860), and the wait is the slice.
+TEST(a_goto_that_lays_no_route_looks_around_or_settles) {
+  const auto entity = imperivm::core::Entity::parse(looker_bytes());
+  REQUIRE(entity.ok());
+  HostRegistry registry;
+  register_movement_host(registry);
+  World world;
+  MovementSystem movement;
+  movement.set_grid(sealed_cell(9, 10));
+  attach(world, movement);
+  const Point cell{9 * 16 + 8, 10 * 16 + 8};
+  const ObjectId unit = world.spawn(NativeClass::unit, &entity.value());
+  REQUIRE(world.set_position(unit, cell));
+  movement.state(unit).speed = 100;
+  world.set_anim_mode(unit, 4);
+
+  HostCall look(world, {Value::object(kTypeObj, unit), pack_point(Point{900, 160}),
+                        Value::integer(0), Value::integer(500), Value::boolean(true),
+                        Value::integer(-1)});
+  const HostOutcome looked = invoke(registry, CallKind::member, "Goto", 5, look);
+  CHECK(looked.status == HostStatus::retry);
+  CHECK(looked.suspend_for == 900);
+  CHECK(world.find(unit)->clock.slot == 20);
+  CHECK(world.find(unit)->clock.mode == 0);
+  // Turned towards the goal, east.
+  CHECK(movement.find(unit)->facing.x > 0);
+  // A slice longer than the animation is the wait.
+  movement.stop(world, unit);
+  HostCall longer(world, {Value::object(kTypeObj, unit), pack_point(Point{900, 160}),
+                          Value::integer(0), Value::integer(2000), Value::boolean(true),
+                          Value::integer(-1)});
+  CHECK(invoke(registry, CallKind::member, "Goto", 5, longer).suspend_for == 2000);
+
+  // Without the flag: the lead-in has left the unit in state 2, and the call
+  // starts the 2-to-1 edge back.
+  world.advance(1000);
+  REQUIRE(world.start_animation(unit, 19, world.time()) == 300);
+  world.advance(300);
+  REQUIRE(world.anim_rest_state_at(*world.find(unit), world.time()) == 2);
+  movement.stop(world, unit);
+  HostCall plain(world, {Value::object(kTypeObj, unit), pack_point(Point{900, 160}),
+                         Value::integer(0), Value::integer(500), Value::boolean(false),
+                         Value::integer(-1)});
+  const HostOutcome settled = invoke(registry, CallKind::member, "Goto", 5, plain);
+  CHECK(settled.suspend_for == 500);
+  CHECK(world.find(unit)->clock.slot == 18);
+
+  // Resting in the first state already, nothing starts.
+  world.advance(200);
+  movement.stop(world, unit);
+  HostCall rest(world, {Value::object(kTypeObj, unit), pack_point(Point{900, 160}),
+                        Value::integer(0), Value::integer(500), Value::boolean(false),
+                        Value::integer(-1)});
+  CHECK(invoke(registry, CallKind::member, "Goto", 5, rest).suspend_for == 500);
+  CHECK(world.anim_slot_at(*world.find(unit), world.time()) == kNoAnim);
+}
+
+/// **A route laid sets the walk's action mode** (3) and arms the animation
+/// timer for 1 ms when it is not pending (0x005d65c0); **an arrival at the
+/// first run with an animation still playing waits for its end** and answers
+/// true at the re-entry (0x005d6482 .. 0x005d64a8).
+TEST(a_goto_walks_in_mode_three_and_an_arrival_waits_out_the_animation) {
+  const auto entity = imperivm::core::Entity::parse(looker_bytes());
+  REQUIRE(entity.ok());
+  HostRegistry registry;
+  register_movement_host(registry);
+  World world;
+  MovementSystem movement;
+  movement.set_grid(open_field(64));
+  attach(world, movement);
+  const ObjectId unit = world.spawn(NativeClass::unit, &entity.value());
+  REQUIRE(world.set_position(unit, Point{100, 100}));
+  movement.state(unit).speed = 100;
+
+  HostCall walk(world, {Value::object(kTypeObj, unit), pack_point(Point{500, 100}),
+                        Value::integer(0), Value::integer(2000), Value::boolean(true),
+                        Value::integer(-1)});
+  CHECK(invoke(registry, CallKind::member, "Goto", 5, walk).suspend_for == 2000);
+  CHECK(world.find(unit)->clock.mode == 3);
+  CHECK(world.anim_timer_left(*world.find(unit), world.time()) == 1);
+  movement.stop(world, unit);
+
+  // Standing at the goal with the lead-in 100 ms in: wait the other 200.
+  REQUIRE(world.start_animation(unit, 19, world.time()) == 300);
+  world.advance(100);
+  const Point here = world.resolve_position(unit);
+  HostCall there(world, {Value::object(kTypeObj, unit), pack_point(here), Value::integer(50),
+                         Value::integer(2000), Value::boolean(true), Value::integer(-1)});
+  const HostOutcome waiting = invoke(registry, CallKind::member, "Goto", 5, there);
+  CHECK(waiting.status == HostStatus::retry);
+  CHECK(waiting.suspend_for == 200);
+  world.advance(200);
+  const HostOutcome arrived = invoke(registry, CallKind::member, "Goto", 5, there.reenter());
+  CHECK(arrived.status == HostStatus::ok);
+  CHECK(arrived.value.as_integer() == 1);
+
+  // With nothing playing, true at once.
+  HostCall still(world, {Value::object(kTypeObj, unit), pack_point(here), Value::integer(50),
+                         Value::integer(2000), Value::boolean(true), Value::integer(-1)});
+  const HostOutcome at_once = invoke(registry, CallKind::member, "Goto", 5, still);
+  CHECK(at_once.status == HostStatus::ok);
+  CHECK(at_once.value.as_integer() == 1);
+}
+
 TEST(a_host_goto_with_a_zero_give_up_ends_the_script_at_the_first_failed_search) {
   // `UNIT_ADVANCE.VS` and `UNIT_MOVE.VS` pass 0. In `gbr.exe` (0x005d61b0) a
   // call that lays no route and is not arrived stamps the failure, and once
@@ -2175,7 +2331,7 @@ TEST(a_failing_host_goto_draws_and_searches_less_often) {
 
 TEST(a_search_that_laid_nothing_searches_again_at_the_next_call_whatever_the_draw) {
   // `SetDest` tests the path follower's stop bits before it compares the goal
-  // (`test al, 6` at 0x0041a4da, 0x0041a5da) and takes its new-goal branch
+  // (the stop-bit test at 0x0041a4da, 0x0041a5da) and takes its new-goal branch
   // when one is set: the search runs whatever the draw before it said, and the
   // free-spot search's flag 8 is forgotten (0x0041a594). A search that laid
   // nothing leaves bit 2 (0x00419a1e, `MoveState::route_failed`).

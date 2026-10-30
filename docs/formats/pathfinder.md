@@ -378,7 +378,7 @@ on to the first free spot, as `Unit::Stop`'s bit 1 does.
 `SetDest` is the `Goto` family's, the march's and the formation's way in. It caps the range
 at 999 and then takes its **new-goal branch** -- forget flags 1, 2, 3 and 0x80 (flag 8 is the
 free-spot search's), keep 0x40, set 0x10, search -- **when either stop bit is set**, or the
-goal, band, inner bound or formation differ from the retry's (`test al, 6` at 0x0041a4da and
+goal, band, inner bound or formation differ from the retry's (the stop-bit test at 0x0041a4da and
 0x0041a5da, before any comparison). Otherwise it clears the stop bits and searches only when
 its first argument is 0 and the retry has no route left (`vtbl+0x14` of the media answers 0)
 and is not arrived (0x0041a513). The `Goto` family passes as that argument the failing unit's

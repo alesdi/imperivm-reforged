@@ -362,7 +362,7 @@ struct MoveState {
   /// walked, if there is one -- and, for a retry not aimed at a formation
   /// (`[retry+0xc]` clear, 0x00419a17), sets this bit (0x00419a1e) and answers
   /// with the path follower's own step (0x00419a48 .. 0x00419a5d). The
-  /// follower (0x00419ee0) tests bits 1 and 2 together (`test al, 6` at
+  /// follower (0x00419ee0) tests bits 1 and 2 together (the stop-bit test at
   /// 0x00419ee9), so a failed search walks the old route on exactly as
   /// `Unit::Stop` does -- to the first passable free spot, for an order that
   /// owns a lock, and not a step for one that does not -- instead of
@@ -1150,12 +1150,22 @@ struct GotoOrder {
   /// original's; set by `Goto` and `GotoEnter` (0x005d6810), not by
   /// `GotoAttack`, whose entry point sets the target instead (0x005d6b20).
   bool drop_target = false;
+  /// The call's fourth argument (a byte, 0x005d6655 in `Goto`; the same
+  /// slot in `GotoEnter` and the object forms): with no route laid, play the
+  /// "look around" animation towards the goal and wait at least its length
+  /// (`run_goto`).
+  bool look_around = false;
   /// The object forms' worker (0x005d40c0): `Goto(Obj)` and `GotoAttack`.
   /// A target that is the mover answers true at once; one the mover may not
   /// approach (`goto_may_approach`) lays no route and waits the slice, and so
   /// does a target naming nothing (`target` is then `kNoObject` with this set).
   bool object_form = false;
 };
+
+/// The look-around flag as the family reads it: the argument's low byte.
+[[nodiscard]] inline bool goto_flag(const script::Value& value) noexcept {
+  return value.is_integer() && (value.as_integer() & 0xFF) != 0;
+}
 
 /// The range `SetDest` keeps for a point goal (0x0041a4c0): at most 999.
 [[nodiscard]] constexpr std::int32_t point_route_range(std::int32_t range) noexcept {

@@ -354,6 +354,64 @@ struct FlightLeg {
   bool valid = false;
 };
 
+/// No animation timer pending.
+inline constexpr GameTime kNoAnimTimer = -1;
+
+/// The original's animation clock: what `StartAnimation` (0x0053e6c0)
+/// writes into the object at `[obj+0x50..0x6c]`, the animation timer (the
+/// pending message 27 on the object's list, `[obj+0xc]`) and the action mode
+/// `[obj+0x130]`. `docs/formats/animation.md` is the description.
+///
+/// **Absolute game times, read at the reader's millisecond.** The original's
+/// timer walks the animation through its phases -- the start, the end of the
+/// transition, the action moment, the end -- and at the end puts the object
+/// to rest in the animation's end state and drops the slot (0x0053f6a0).
+/// Here nothing walks: every reader asks what the clock says at its own
+/// time (`World::anim_slot_at`, `anim_timer_left`), so a script that runs
+/// at a millisecond the world's turn has already passed sees what the
+/// original would have shown it then. What is committed is committed by the
+/// next writer, at its own time (`World::settle_anim`).
+///
+/// Hashed and saved (world section version 37).
+struct AnimClock {
+  /// The animation started (`[obj+0x50]`), as the entity document's `idx`,
+  /// or `kNoAnim`. Kept after the end; whether it still plays is
+  /// `World::anim_slot_at`.
+  std::int32_t slot = kNoAnim;
+  /// The transition played in front of it (`[obj+0x54]`): the first
+  /// animation leading from the state the object rested in to the state the
+  /// animation starts from, or `kNoAnim`.
+  std::int32_t transition = kNoAnim;
+  /// The playback length (`[obj+0x64]`): the declared `duration`, or the
+  /// caller's override.
+  std::int32_t duration = 0;
+  /// The action mode `[obj+0x130]`: what the object's animation-end handler
+  /// (`vtbl+0x54`) runs when the timer lapses -- 0 nothing, 1 die, 3 a walk
+  /// step, 4 idle, 5 taunt, 6 a script's `PlayAnim`, 8 dead.
+  std::int32_t mode = 0;
+  /// The state the object rested in when the animation was started: what
+  /// it still rests in until a delayed start comes.
+  std::int32_t from_state = 1;
+  /// When it was started: the call's time plus the start offset
+  /// (`[obj+0x58]`).
+  GameTime start = 0;
+  /// When the animation itself begins, after the transition (`[obj+0x68]`).
+  GameTime main_start = 0;
+  /// The action moment (`[obj+0x6c]`): `main_start` plus the declared
+  /// `action_time` scaled by the playback length over the declared one.
+  GameTime action_at = 0;
+  /// When the timer fires next, or `kNoAnimTimer`. An animation's timer runs
+  /// to its end and lapses there; a hold (0x0053ced0) is a timer with no
+  /// animation.
+  GameTime timer_at = kNoAnimTimer;
+
+  [[nodiscard]] GameTime end() const noexcept { return main_start + duration; }
+  /// The timer is the animation's own: it will end the animation at `end`.
+  [[nodiscard]] bool chained() const noexcept {
+    return slot != kNoAnim && timer_at != kNoAnimTimer && timer_at == end();
+  }
+};
+
 /// One object in the world.
 ///
 /// The native object owns the art binding and the animation cursor; this adds
@@ -416,6 +474,12 @@ struct WorldObject {
   /// animation -- the common case, since 579 of the 889 entities declare no
   /// animation at all.
   bool animating = false;
+  /// The original's animation clock; see `AnimClock`.
+  AnimClock clock;
+  /// The cursor shows `clock`'s animation: the turn loop sets it from the
+  /// clock's phases rather than advancing it. Dropped when something else
+  /// takes the cursor (a walk, a state's loop). Hashed and saved with it.
+  bool clock_drives = false;
   /// The construction frame `Catapult::SetBuildFrame` last set -- a frame of
   /// the animation playing, counted as the entity declares its frames -- or
   /// -1 for none. What a half-built siege engine is drawn at: `gbr.exe` keeps
@@ -1799,6 +1863,50 @@ class World {
   /// Whether a slot would resolve. Same null-tolerant contract as `play_anim`.
   [[nodiscard]] bool has_anim(ObjectId id, std::int32_t slot) const noexcept;
 
+  // -- the animation clock (docs/formats/animation.md) -------------------
+  //
+  // `play_anim` and `enter_state` above move the cursor the view draws; these
+  // are the original's animation layer, which the scripts wait on. Every
+  // `now` is the caller's own millisecond.
+
+  /// `StartAnimation` (0x0053e6c0): start the animation `slot` (the
+  /// document's `idx`) `delay` ms from `now`, for `duration_override` ms
+  /// (0: the declared `duration`). Answers what is left of it from `now`,
+  /// transition included, or 0 when nothing started -- an object off the map
+  /// (its timer cancelled), no such animation. A `delay` of -1 starts it at
+  /// once, one millisecond in the past, and arms no timer, so it never ends.
+  std::int32_t start_animation(ObjectId id, std::int32_t slot, GameTime now,
+                               GameTime delay = 0, std::int32_t duration_override = 0);
+  /// `StopAnimation` (0x0053d730): the timer cancelled, the slot dropped,
+  /// and an object that was playing rests in the end state of what it was
+  /// playing.
+  void stop_animation(ObjectId id, GameTime now);
+  /// `CObj::SetState` (0x0053e860) with the document's state number: nothing
+  /// when the object already rests in it; otherwise, with `transition` and an
+  /// animation leading there from the state it rests in (array index 1 or
+  /// more), that animation is started; else it rests there at once. Answers
+  /// the started animation's time left, or 0.
+  std::int32_t set_anim_state(ObjectId id, std::int32_t state, bool transition, GameTime now);
+  /// Arm the animation timer for `ms` from `now` (0x0053ced0); one already
+  /// pending is moved.
+  void arm_anim_timer(ObjectId id, GameTime now, GameTime ms);
+  /// The animation playing at `now`, or `kNoAnim` (`[obj+0x50]` as the
+  /// original would read it then).
+  [[nodiscard]] std::int32_t anim_slot_at(const WorldObject& slot, GameTime now) const noexcept;
+  /// The state the object rests in at `now`, or `kNoAnim` while an
+  /// animation or its transition plays (`[obj+0x44]` below 0x1c).
+  [[nodiscard]] std::int32_t anim_rest_state_at(const WorldObject& slot,
+                                                GameTime now) const noexcept;
+  /// How long the animation timer is still pending at `now`, 0 for none
+  /// (0x0053cfc0 answers "not pending" exactly when this is 0).
+  [[nodiscard]] GameTime anim_timer_left(const WorldObject& slot, GameTime now) const noexcept;
+  /// Commit what the clock says has already happened at `now`: an animation
+  /// whose timer ran to its end rests the object in the end state and drops
+  /// the slot; a timer that has fired is no longer pending.
+  void settle_anim(ObjectId id, GameTime now);
+  /// Write the action mode `[obj+0x130]`.
+  void set_anim_mode(ObjectId id, std::int32_t mode) noexcept;
+
   // -- the loop ----------------------------------------------------------
 
   /// Run one turn at the current length.
@@ -1873,6 +1981,14 @@ class World {
 
  private:
   void run_turn(std::int32_t length);
+  /// Set the cursor from the clock's phase at `at` (`clock_drives` objects):
+  /// the transition, then the animation, then the end state's pose.
+  void show_clock(WorldObject& slot, GameTime at);
+  /// Put animation `anim_slot` on the cursor, held, `elapsed` ms in, without
+  /// touching the flight leg. False when the entity has no such animation.
+  bool show_anim(WorldObject& slot, std::int32_t anim_slot, GameTime elapsed);
+  /// The end state of whatever `slot`'s clock shows at `now`.
+  void rest_after(WorldObject& slot, GameTime now);
   /// Append `id` to `out` if it passes `filter` and is not an internal object.
   void collect(const WorldObject& slot, const ClassFilter& filter,
                std::vector<ObjectId>& out) const;

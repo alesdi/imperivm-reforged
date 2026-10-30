@@ -37,23 +37,17 @@
 /// (0x0051bb10) are the only two members of this family registered through the
 /// **suspending** registrar 0x00699eb0; the other eight go through 0x00699bb0.
 ///
-/// The two suspend differently, and only one of the two mechanisms survives the
-/// crossing to this engine. `Obj::PlayAnim` starts nothing: it writes 6 into the
-/// object's script-action mode, arms the object's animation timer and returns
-/// the "suspend until this object's order completes" code, and a continuation
-/// (0x005a76c0) starts the animation on the next action tick and wakes the
-/// script when it ends. `Flying::PlayAnim` starts the animation itself and
-/// suspends for exactly the animation's duration. This engine has no per-object
-/// order queue for a script to wait on, so **both are implemented as
-/// `Flying::PlayAnim`'s shape**: start now, suspend for what is left. The
-/// difference is a tick of latency at the front -- and, when the object is
-/// already playing an animation, the whole of what is left of it: the
-/// original's armed animation timer keeps 0x005a9ba0 from arming its own, so
-/// the continuation runs only when the current one ends (0x0053f6a0 calls the
-/// action handler 0x005b0f70, whose mode 6 is 0x005a76c0). Here the new one
-/// interrupts it. Every shipped `Obj::PlayAnim` loop calls it again only after
-/// its last one ended; the druids' summoning lines call it once on a druid that
-/// has just been ordered to cast.
+/// The two suspend differently. `Obj::PlayAnim` starts nothing: it writes 6
+/// into the object's action mode, arms the object's animation timer for 1 ms
+/// when it is not pending and sleeps with no timed wake. The timer's firing
+/// runs the object's end handler (0x0053f6a0 -> `vtbl+0x54`), whose mode 6 is
+/// the continuation 0x005a76c0: it starts the animation the call named and,
+/// at the next firing -- that animation's end -- wakes the script and sets the
+/// mode back to 0. So an object already playing an animation runs it out
+/// first, and a mode something else rewrote in the meantime leaves the script
+/// asleep. Here the call's re-entries are the firings (`m_play_anim`).
+/// `Flying::PlayAnim` starts the animation itself and suspends for exactly
+/// its declared duration.
 ///
 /// ## The index is the entity's `<anim idx>`, and two names are off by one
 ///
@@ -88,30 +82,37 @@
 /// dispatches on the handle type. A body that only did the object half would
 /// answer three quarters of the corpus by refusing.
 ///
+/// ## The animation clock
+///
+/// Every object carries the original's animation record (`AnimClock` on
+/// `WorldObject`; `docs/formats/animation.md` is the description): the
+/// playing slot, the transition played in front of it, the start, the main
+/// start after the transition, the action moment and the end, the animation
+/// timer, and the action mode `[obj+0x130]`. `StartAnimation` (0x0053e6c0,
+/// `World::start_animation`) stops what plays into its end state, looks for
+/// the transition from the state the object rests in, takes a start offset
+/// (`StartDelayedAnim`, the idle's fidgets) and the `-1` that applies the
+/// animation with no timer. The scripts' readers read the record at the
+/// script's own millisecond. The cursor the renderer draws follows it.
+///
 /// ## What is left out, and named
 ///
-/// **The state model is thinner here than in the original, in four places.**
-/// `gbr.exe` keeps, per object: a combined action/state word (`Anim`, where
-/// values below `0x1c` are "playing animation n" and above are "resting in
-/// state n - 0x1c"), a facing vector, the playing index, a *transition*
-/// animation index, an absolute start time, an animation origin point, and a
-/// per-playback duration override. This engine keeps a state index and a slot
-/// as two fields, an elapsed time rather than a start time, and neither a
-/// transition, nor an origin, nor an override.
-///
-///   * **No transition animations.** `StartAnimation` looks for an animation
-///     leading from the current state to the new one and plays it first;
-///     nothing here does, so an object snaps.
 ///   * **No animation origin.** The original's `AnimX`/`AnimY` let an animation
-///     play somewhere other than where the object stands. Every shipped site
-///     passes the object's own position or a facing target, so the field is
-///     never used for its own purpose in the corpus.
-///   * **No duration override**, `StartAnimation`'s (0x0053e6c0) last
-///     parameter; every entry point here passes 0, so the declared `duration`
-///     is the length.
-///   * **Elapsed, not absolute.** A reimplementation aiming at the original's
-///     *own* hash would have to store the start time; this engine hashes its
-///     own cursor and the two are equivalent under it.
+///     play somewhere other than where the object stands; only the walk step
+///     and `Flying::PlayAnim` pass one. `Flying::PlayAnim` puts the bird at its
+///     goal at the call instead of at the main start.
+///   * **No duration override** from a script: every entry point passes 0, so
+///     the declared `duration` is the length. The walk step, the one caller
+///     that passes one, is the movement system's loop here.
+///   * **The walk is not animation steps.** The original walks by one-shot
+///     steps on the animation timer (action mode 3, 0x005d3b50), so its timer
+///     is pending all the way and `IsInState` is false while a unit walks.
+///     Here the walk is the movement system's loop, which stops what the
+///     clock plays when it starts.
+///   * **A corpse is not put down by its own timer.** The end handler's death
+///     sequence (mode 1, then 8 and the destroy) runs here when a script's
+///     call reaches it (`anim_dispatch`); combat's death time removes the
+///     bodies it kills.
 ///   * **`Flying::PlayAnim`'s Z** is no longer discarded: `sim/flying.hpp`
 ///     carries the flight state it writes, and `sim/anim.cpp` the order.
 ///
@@ -126,6 +127,8 @@
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/game/registry.hpp"
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/system.hpp"
+#include "imperivm/core/sim/tick.hpp"
 
 namespace imperivm::core::sim {
 
@@ -160,21 +163,27 @@ std::size_t register_anim_host(script::HostRegistry& registry);
 class World;
 struct WorldObject;
 
-/// What is left, at the running script's millisecond, of a one-shot animation
-/// the object is playing -- one started to run once and hand control back
-/// (`AnimRepeat::hold`), as an attack, a death or a fidget is -- or 0 for
-/// none. The original's animation timer (id 0x1b, armed by `StartAnimation`,
-/// 0x0053e6c0) is pending for exactly that long, and the idle activity's
-/// setter (0x005a7680) runs the activity at once only when it is not
-/// (0x0053cfc0); see `docs/formats/idle.md`.
-[[nodiscard]] std::int32_t one_shot_time_left(const script::CallContext& ctx, const World& world,
-                                              const WorldObject& slot);
+/// The running script's millisecond: the scheduler's `now`, or the world's
+/// time outside a pass. Every animation-clock read and write a script makes
+/// is at this time.
+[[nodiscard]] GameTime script_now(const script::CallContext& ctx, const World& world);
 
-/// Start animation `anim_slot` on `id`, held, **at the running script's
-/// millisecond**: the cursor is brought forward by the part of the turn the
-/// world has already lived through, as the animation entry points do. False
-/// when the entity declares no such animation.
-bool start_anim_at_script_time(const script::CallContext& ctx, World& world, core::ObjectId id,
-                               std::int32_t anim_slot);
+/// `StartAnimation` (0x0053e6c0) as a script's call makes it: at the script's
+/// millisecond, turning towards `face` first unless it is the invalid point
+/// or the object is off the map. Answers what is left of the animation,
+/// transition included, or 0 when nothing started (`World::start_animation`).
+std::int32_t start_animation_facing(const script::CallContext& ctx, World& world,
+                                    core::ObjectId id, std::int32_t anim_slot, Point face,
+                                    GameTime delay);
+
+/// The object's animation-end handler (`vtbl+0x54`: 0x005d5b60 for a unit,
+/// 0x005b0f70 for every object) up to the point where its action mode's own
+/// step would run, at `now`. A held unit runs nothing; a dead object runs the
+/// death sequence -- mode 1 starts a death animation variant and ends the
+/// running command, then mode 8 destroys it (`vtbl+0x94`) -- and runs no
+/// step. True when the mode's own step (a walk step, an idle's, a
+/// `PlayAnim`'s continuation) is what runs next. See
+/// `docs/formats/animation.md`.
+bool anim_dispatch(script::CallContext& ctx, World& world, core::ObjectId id, GameTime now);
 
 }  // namespace imperivm::core::sim

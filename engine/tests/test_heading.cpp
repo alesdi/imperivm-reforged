@@ -451,7 +451,9 @@ TEST(heading_is_in_state_is_the_absence_of_an_animation) {
   // Freshly spawned and holding a pose.
   CHECK(in_state());
 
-  CHECK(b.world.play_anim(id, 1));
+  // Started on the animation clock (0x0053e6c0), whose timer is what
+  // `IsInState` reads (0x0053cfc0).
+  CHECK(b.world.start_animation(id, 1, b.world.time()) > 0);
   CHECK(!in_state());
 
   // The animation is 200 units long; run past it and the object settles.

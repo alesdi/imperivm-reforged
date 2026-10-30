@@ -254,6 +254,11 @@ class WorldHost : public script::Host {
 /// seconds after the hero can have died, and the rest of the sequence runs.
 [[nodiscard]] bool receiver_departed(World& world, const script::Value& receiver) noexcept;
 
+/// The object's destroy (`vtbl+0x94`) as a script's call reaches it: `Erase`'s
+/// body, deferred to the end of the slice when the object is the running
+/// script's own (the latch at `[0x009bdb14]`).
+void erase_from_script(script::CallContext& ctx, World& world, ObjectId id);
+
 /// Kill every coroutine owned by an object the world no longer holds, and
 /// forget its command queue. `Erase` does both itself (`perform_erase`); the
 /// death path cannot, because `CombatSystem::advance` despawns the corpse at

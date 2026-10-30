@@ -1372,17 +1372,14 @@ namespace {
 /// length]`, one unit past the clock, so a blow can land at `time() + 1`.
 /// The first version measured to `time()`, and a partition test caught it a
 /// millisecond out on exactly that blow.
+///
+/// **Through the animation clock** (`World::start_animation`, 0x0053e6c0):
+/// what plays is stopped into its end state, a transition from the state the
+/// unit rests in is played in front, and the timer runs to the end, so the
+/// scripts that wait on the unit's animation see the original's times. The
+/// blow itself keeps combat's own schedule.
 void start_anim_at(World& world, ObjectId id, std::int32_t slot, GameTime began) {
-  if (!world.play_anim(id, slot, AnimRepeat::hold)) return;
-  const GameTime late = world.turn().end - began;
-  if (late <= 0) return;
-  WorldObject* object = world.find(id);
-  if (object == nullptr || object->object == nullptr) return;
-  AnimCursor& cursor = object->object->anim;
-  cursor.elapsed_ms = advance_elapsed(object->timeline, cursor.elapsed_ms, late, object->repeat);
-  const AnimSample sample = object->timeline.sample(cursor.elapsed_ms, object->repeat);
-  cursor.step = sample.step;
-  if (sample.finished) object->animating = false;
+  (void)world.start_animation(id, slot, began);
 }
 
 /// A siege engine, the one heir of `CVXBuilding` that dies: see
@@ -1474,7 +1471,15 @@ void CombatSystem::settle_swing(World& world, const Combatant& unit, GameTime no
   if (!world_bound_) return;
   const WorldObject* slot = world.find(unit.id);
   if (slot == nullptr || slot->object == nullptr) return;
-  if (slot->animating || slot->object->anim.anim_slot != core::kAnimAttack) return;
+  // Nothing playing on the animation clock, and resting where a swing leaves
+  // a unit: the state `toidle` starts from, after a swing.
+  if (world.anim_slot_at(*slot, now) != kNoAnim) return;
+  const EntityAnim* to_idle =
+      slot->object->entity != nullptr ? slot->object->entity->anim(core::kAnimToIdle) : nullptr;
+  if (to_idle == nullptr || world.anim_rest_state_at(*slot, now) != to_idle->startstate) return;
+  if (slot->clock.slot != core::kAnimAttack && slot->object->anim.anim_slot != core::kAnimAttack) {
+    return;
+  }
   start_anim_at(world, unit.id, core::kAnimToIdle, now);
 }
 
