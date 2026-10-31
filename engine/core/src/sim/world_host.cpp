@@ -3447,10 +3447,8 @@ HostOutcome m_rotate_to(CallContext& ctx) {
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr || ctx.count() < 2 || !is_point(ctx.arg(1))) return HostOutcome::ok_void();
   const Point towards = unpack_point(ctx.arg(1));
-  // Belt and braces, kept knowingly: `MovementSystem::face` returns early on a
-  // zero delta of its own accord, so this test changes no behaviour and a
-  // fault that drops it survives the suite. The original writes the test
-  // here (0x004e2ca7), so this does too.
+  // The original's own test (0x004e2ca7): a point on top of the catapult
+  // turns nothing, where the facing setter would write `(0, 1)`.
   if (towards == world->resolve_position(slot->id)) return HostOutcome::ok_void();
   // And an engine with towers does not turn: the same `[cat+0x22c]` gate
   // `Catapult::Attack` has, read in the same place (0x004e2c50).
@@ -6896,6 +6894,10 @@ void erase_from_script(script::CallContext& ctx, World& world, ObjectId id) {
 }
 
 void erase_object(CallContext& ctx, World& world, ObjectId id) { erase_one(ctx, world, id); }
+
+void destroy_object(script::Scheduler* scheduler, World& world, ObjectId id) {
+  perform_erase(scheduler, world, id);
+}
 
 std::int32_t object_max_health(World& world, const WorldObject& slot) {
   return max_health_of_object(world, slot);

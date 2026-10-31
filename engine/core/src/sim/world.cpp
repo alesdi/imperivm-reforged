@@ -8,6 +8,7 @@
 // For the little-endian output helpers, which the save envelope and the world
 // share so that the two cannot drift apart. `sim/save.hpp` includes this
 // header, not the other way round, so there is no cycle.
+#include "imperivm/core/sim/anim.hpp"
 #include "imperivm/core/sim/save.hpp"
 // `isqrt`, for a stale sight query's one-object test.
 #include "imperivm/core/sim/path.hpp"
@@ -698,6 +699,10 @@ bool World::despawn(ObjectId id) {
     if (observer_ != nullptr) observer_->despawning(*this, *it);
     if (it->object != nullptr) it->object->on_destroy();
     index_.drop(*it);
+    // Its timer goes with it (the object's messages are dropped with it).
+    if (it->clock.timer_at != kNoAnimTimer) {
+      timers_.erase(std::make_tuple(it->clock.timer_at, it->clock.timer_seq, it->id));
+    }
     objects_.erase(it);  // stable: the survivors keep their relative order
     // Out of every group it was in. Ids are never reused, so a stale membership
     // could not alias a later object and leaving it would be *safe* -- but it
@@ -2484,10 +2489,16 @@ void clear_clock(AnimClock& clock) noexcept {
 
 }  // namespace
 
+// The clock's readers answer what the clock says at the reader's own
+// millisecond. A script reads inside the pass that fires the timers in the
+// wheel's order, so everything due before it has fired and the fields are
+// the answer; a system reads ahead of that pass (its turn runs first), and
+// an animation whose timer was to end it before `now` reads as ended.
+
 std::int32_t World::anim_slot_at(const WorldObject& slot, GameTime now) const noexcept {
   const AnimClock& clock = slot.clock;
   if (clock.slot == kNoAnim) return kNoAnim;
-  if (clock.chained() && now >= clock.end()) return kNoAnim;
+  if (clock.chained() && now > clock.end()) return kNoAnim;
   return clock.slot;
 }
 
@@ -2495,7 +2506,7 @@ std::int32_t World::anim_rest_state_at(const WorldObject& slot, GameTime now) co
   const AnimClock& clock = slot.clock;
   const std::int32_t stored = slot.object != nullptr ? slot.object->anim.state_idx : 1;
   if (clock.slot == kNoAnim) return stored;
-  if (clock.chained() && now >= clock.end()) {
+  if (clock.chained() && now > clock.end()) {
     const EntityAnim* anim = clock_anim(slot, clock.slot);
     return anim != nullptr ? anim->endstate : stored;
   }
@@ -2509,22 +2520,159 @@ GameTime World::anim_timer_left(const WorldObject& slot, GameTime now) const noe
   return at != kNoAnimTimer && at > now ? at - now : 0;
 }
 
-void World::settle_anim(ObjectId id, GameTime now) {
+Point World::current_position(const WorldObject& slot, GameTime now) const noexcept {
+  const Point at = slot.state.position;
+  const AnimClock& clock = slot.clock;
+  // Playing (the word below 0x1c) and inside the main window; a window of no
+  // length has no inside.
+  if (clock.slot == kNoAnim || slot.object == nullptr || slot.object->entity == nullptr ||
+      anim_rest_state_at(slot, now) != kNoAnim || clock.duration <= 0) {
+    return at;
+  }
+  if (now < clock.main_start || now > clock.main_start + clock.duration) return at;
+  const std::int64_t done = now - clock.main_start;
+  return Point{clock.origin.x + static_cast<std::int32_t>(
+                                    (static_cast<std::int64_t>(at.x) - clock.origin.x) * done /
+                                    clock.duration),
+               clock.origin.y + static_cast<std::int32_t>(
+                                    (static_cast<std::int64_t>(at.y) - clock.origin.y) * done /
+                                    clock.duration)};
+}
+
+std::uint64_t World::arm_sequence() {
+  if (arm_source_ != nullptr) return arm_source_(arm_user_);
+  return next_timer_arm_++;
+}
+
+void World::set_timer(WorldObject& slot, GameTime at) {
+  AnimClock& clock = slot.clock;
+  if (clock.timer_at != kNoAnimTimer) {
+    timers_.erase(std::make_tuple(clock.timer_at, clock.timer_seq, slot.id));
+  }
+  clock.timer_at = at;
+  if (at == kNoAnimTimer) return;
+  // A re-arm takes a new place at the tail of its millisecond (0x00688240
+  // removes the pending message and appends it again).
+  clock.timer_seq = arm_sequence();
+  timers_.emplace(at, clock.timer_seq, slot.id);
+}
+
+void World::rebuild_timers() {
+  timers_.clear();
+  std::uint64_t highest = 0;
+  for (const WorldObject& slot : objects_) {
+    if (slot.clock.timer_at == kNoAnimTimer) continue;
+    timers_.emplace(slot.clock.timer_at, slot.clock.timer_seq, slot.id);
+    highest = std::max(highest, slot.clock.timer_seq);
+  }
+  next_timer_arm_ = std::max(next_timer_arm_, highest + 1);
+}
+
+bool World::next_anim_timer(GameTime& at, std::uint64_t& seq, ObjectId& id) const noexcept {
+  if (timers_.empty()) return false;
+  const auto& [time, order, object] = *timers_.begin();
+  at = time;
+  seq = order;
+  id = object;
+  return true;
+}
+
+void World::fire_anim_timer() {
+  if (timers_.empty()) return;
+  fire_timer(std::get<2>(*timers_.begin()));
+}
+
+void World::fire_anim_timers(GameTime until) {
+  while (!timers_.empty() && std::get<0>(*timers_.begin()) <= until) fire_anim_timer();
+}
+
+void World::run_anim_end(ObjectId id, GameTime at) {
+  // With no handler installed -- a world no session runs -- the handler runs
+  // with no scheduler: nothing to wake, and a corpse destroyed all the same.
+  if (anim_end_ != nullptr) {
+    anim_end_->anim_end(*this, id, at);
+  } else {
+    sim::anim_end_handler(*this, nullptr, nullptr, id, at);
+  }
+}
+
+void World::fire_timer(ObjectId id) {
   WorldObject* found = find(id);
   if (found == nullptr) return;
+  const GameTime t = found->clock.timer_at;
+  if (t == kNoAnimTimer) return;
+  // The message is consumed as it is delivered.
+  set_timer(*found, kNoAnimTimer);
   AnimClock& clock = found->clock;
-  if (clock.chained() && now >= clock.end()) {
-    // 0x0053f6a0 at the end: rest in the end state, the slot dropped, the
-    // timer not re-armed.
-    if (const EntityAnim* anim = clock_anim(*found, clock.slot);
+
+  // 0x0053f6a0. Nothing playing -- a hold, or a timer that outlived its
+  // animation -- is the end handler at once.
+  if (clock.slot == kNoAnim) {
+    run_anim_end(id, t);
+    return;
+  }
+  bool main = false;
+  if (t == clock.start) {
+    // The transition begins; the main start is the next phase.
+    if (t != clock.main_start) {
+      set_timer(*found, clock.main_start);
+      return;
+    }
+    main = true;
+  } else if (t == clock.main_start) {
+    main = true;
+  }
+  if (main) {
+    // The object moves to the origin, and the origin keeps where it came
+    // from (0x0053f6d3): what the drawn point runs from over the window.
+    const Point from = found->state.position;
+    if (clock.origin_given && clock.origin != from) {
+      (void)set_position(id, clock.origin);
+      found = find(id);
+      if (found == nullptr) return;
+    }
+    found->clock.origin = from;
+    if (t != found->clock.action_at) {
+      set_timer(*found, found->clock.action_at);
+      return;
+    }
+  }
+  AnimClock& now_clock = found->clock;
+  if (t == now_clock.action_at && t != now_clock.end()) {
+    // The end is armed before the action handler runs (`vtbl+0x58`). That
+    // handler is a sound for every mode but the attack's, whose blow
+    // combat lands on its own schedule; neither is the simulation's here.
+    set_timer(*found, now_clock.end());
+    return;
+  }
+  if (t == now_clock.end()) {
+    // The end: the object rests in the end state, the slot dropped, and the
+    // end handler (`vtbl+0x54`).
+    if (const EntityAnim* anim = clock_anim(*found, now_clock.slot);
         anim != nullptr && found->object != nullptr) {
       found->object->anim.state_idx = anim->endstate;
     }
-    clear_clock(clock);
-    clock.timer_at = kNoAnimTimer;
-    return;
+    clear_clock(now_clock);
+    show_clock(*found, std::max(t, time()));
+    run_anim_end(id, t);
   }
-  if (clock.timer_at != kNoAnimTimer && now >= clock.timer_at) clock.timer_at = kNoAnimTimer;
+  // A time on none of the phases (a hold that moved the timer while the
+  // animation plays) runs nothing and arms nothing: the animation stays.
+}
+
+void World::settle_anim(ObjectId id, GameTime now) {
+  // Whatever this object's timer was to do before `now` and has not done --
+  // a system writes ahead of the pass that fires the timers -- is done
+  // first, at its own time. Four phases at most, and an end handler that
+  // arms again at once is the last.
+  for (int phase = 0; phase < 6; ++phase) {
+    const WorldObject* found = find(id);
+    if (found == nullptr || found->clock.timer_at == kNoAnimTimer ||
+        found->clock.timer_at >= now) {
+      return;
+    }
+    fire_timer(id);
+  }
 }
 
 void World::rest_after(WorldObject& slot, GameTime now) {
@@ -2544,8 +2692,15 @@ void World::stop_animation(ObjectId id, GameTime now) {
   settle_anim(id, now);
   WorldObject* found = find(id);
   if (found == nullptr) return;
+  set_timer(*found, kNoAnimTimer);
+  // The object is put where the animation draws it (0x0053d730: the
+  // current position, then `SetPos`).
+  if (const Point at = current_position(*found, now); at != found->state.position) {
+    (void)set_position(id, at);
+    found = find(id);
+    if (found == nullptr) return;
+  }
   AnimClock& clock = found->clock;
-  clock.timer_at = kNoAnimTimer;
   const bool was_playing = clock.slot != kNoAnim && anim_rest_state_at(*found, now) == kNoAnim;
   if (was_playing) rest_after(*found, now);
   clear_clock(clock);
@@ -2556,13 +2711,13 @@ void World::stop_animation(ObjectId id, GameTime now) {
 }
 
 std::int32_t World::start_animation(ObjectId id, std::int32_t slot, GameTime now, GameTime delay,
-                                    std::int32_t duration_override) {
+                                    std::int32_t duration_override, Point origin) {
   WorldObject* found = find(id);
   if (found == nullptr || found->object == nullptr || found->object->entity == nullptr) return 0;
   // Off the map -- inside a holder, or taken away -- the timer is cancelled
   // and nothing starts (0x0053e6d6).
   if (found->state.position == kHeldPosition) {
-    found->clock.timer_at = kNoAnimTimer;
+    set_timer(*found, kNoAnimTimer);
     return 0;
   }
   const Entity& entity = *found->object->entity;
@@ -2571,15 +2726,23 @@ std::int32_t World::start_animation(ObjectId id, std::int32_t slot, GameTime now
   // here.
   if (anim == nullptr) return 0;
   settle_anim(id, now);
+  found = find(id);
+  if (found == nullptr) return 0;
 
-  AnimClock& clock = found->clock;
   // What plays is stopped first, into its end state (0x0053e6f0).
-  if (clock.slot != kNoAnim && anim_rest_state_at(*found, now) == kNoAnim) {
+  if (found->clock.slot != kNoAnim && anim_rest_state_at(*found, now) == kNoAnim) {
     stop_animation(id, now);
+    found = find(id);
+    if (found == nullptr) return 0;
   }
+  AnimClock& clock = found->clock;
   const std::int32_t rest = anim_rest_state_at(*found, now);
   clock.slot = slot;
+  // A delay of -1 is "now, one millisecond ago": 0x0053e6c0 adds it.
   clock.start = now + delay;
+  // The origin: the point given, or where the object stands.
+  clock.origin_given = origin != kHeldPosition;
+  clock.origin = clock.origin_given ? origin : found->state.position;
   clock.duration = duration_override != 0 ? duration_override : anim->duration;
   clock.from_state = rest;
   clock.transition = anim->startstate == rest ? kNoAnim : find_transition(entity, rest, anim->startstate);
@@ -2592,16 +2755,27 @@ std::int32_t World::start_animation(ObjectId id, std::int32_t slot, GameTime now
           ? static_cast<std::int64_t>(anim->action_time) * clock.duration / anim->duration
           : 0;
   clock.action_at = clock.main_start + scaled;
-  // A delay of -1 is "now, and no timer" (0x0053e7f7): the animation never
-  // ends. Any other arms the timer, which runs the phases to the end.
-  if (delay != -1) clock.timer_at = clock.end();
+  if (delay == -1) {
+    // At once and with no timer, so it never ends: the object moves to the
+    // origin now and the origin keeps where it came from (0x0053e7f7).
+    const Point from = found->state.position;
+    if (clock.origin_given && clock.origin != from) {
+      (void)set_position(id, clock.origin);
+      found = find(id);
+      if (found == nullptr) return 0;
+    }
+    found->clock.origin = from;
+  } else {
+    // The timer, at the start; its firings walk the phases (0x00688240).
+    set_timer(*found, now + delay);
+  }
 
   // The view: a new animation's leg is its own (`Flying::PlayAnim` writes
   // one after this), and the cursor follows the clock from here.
   found->flight = FlightLeg{};
   found->clock_drives = true;
   show_clock(*found, std::max(now, time()));
-  return static_cast<std::int32_t>(clock.main_start - now) + clock.duration;
+  return static_cast<std::int32_t>(found->clock.main_start - now) + found->clock.duration;
 }
 
 std::int32_t World::set_anim_state(ObjectId id, std::int32_t state, bool transition,
@@ -2627,7 +2801,7 @@ std::int32_t World::set_anim_state(ObjectId id, std::int32_t state, bool transit
 
 void World::arm_anim_timer(ObjectId id, GameTime now, GameTime ms) {
   settle_anim(id, now);
-  if (WorldObject* found = find(id); found != nullptr) found->clock.timer_at = now + ms;
+  if (WorldObject* found = find(id); found != nullptr) set_timer(*found, now + ms);
 }
 
 void World::set_anim_mode(ObjectId id, std::int32_t mode) noexcept {
@@ -2731,6 +2905,10 @@ void World::run_turn(std::int32_t length) {
   // before it so that a system observes the animation state of the turn it is
   // running in; the order between the two is a choice, and this is it.
   for (System* system : systems_) system->advance(*this, clock_.turn());
+
+  // The animation timers due by the turn's end, when no scheduler sweeps
+  // them among the scripts' wakes (`set_timers_swept`).
+  if (!timers_swept_) fire_anim_timers(clock_.time());
 }
 
 std::uint64_t World::state_hash() const noexcept {
@@ -2864,6 +3042,17 @@ std::uint64_t World::state_hash() const noexcept {
     hash_u64(state, static_cast<std::uint64_t>(clock.action_at));
     hash_u64(state, static_cast<std::uint64_t>(clock.timer_at));
     hash_u64(state, slot.clock_drives ? 1u : 0u);
+    // World version 38: the origin and the activity's word. The timer's
+    // place in the arming order is saved and not hashed: it is the order
+    // the firings run in, which the state they leave already shows.
+    hash_i32(state, clock.origin.x);
+    hash_i32(state, clock.origin.y);
+    hash_u64(state, clock.origin_given ? 1u : 0u);
+    hash_u64(state, static_cast<std::uint64_t>(clock.budget));
+    hash_i32(state, clock.play_slot);
+    hash_i32(state, clock.play_face.x);
+    hash_i32(state, clock.play_face.y);
+    hash_u64(state, clock.play_started ? 1u : 0u);
   }
 
   // Named object groups. Hashed for the same reason the object table is: two
@@ -2938,7 +3127,7 @@ WorldHashes World::hashes() const noexcept {
 namespace {
 
 constexpr std::uint32_t kWorldMagic = 0x444C5749u;  // "IWLD"
-constexpr std::uint32_t kWorldVersion = 37;  // 37: each object's animation clock; 36: each object's grid arrival stamp and the next stamp; 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
+constexpr std::uint32_t kWorldVersion = 38;  // 38: the animation timer's arming order, origin and activity word; 37: each object's animation clock; 36: each object's grid arrival stamp and the next stamp; 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
 
 /// `0xFF` for a slot with no native object -- every internal kind.
 /// `NativeClass` is a `std::uint8_t` enum with 26 values, so the sentinel
@@ -3187,6 +3376,18 @@ void World::serialize(std::vector<std::byte>& out) const {
     bytes::put_i64(out, slot.clock.action_at);
     bytes::put_i64(out, slot.clock.timer_at);
     bytes::put_u8(out, slot.clock_drives ? 1u : 0u);
+    // World version 38: the timer's place in the arming order, the origin,
+    // and the activity's word.
+    bytes::put_u64(out, slot.clock.timer_seq);
+    bytes::put_i32(out, slot.clock.origin.x);
+    bytes::put_i32(out, slot.clock.origin.y);
+    bytes::put_u8(out, slot.clock.origin_given ? 1u : 0u);
+    bytes::put_i64(out, slot.clock.budget);
+    bytes::put_i32(out, slot.clock.play_slot);
+    bytes::put_i32(out, slot.clock.play_face.x);
+    bytes::put_i32(out, slot.clock.play_face.y);
+    bytes::put_u8(out, slot.clock.play_started ? 1u : 0u);
+    bytes::put_u32(out, slot.clock.waiter);
     // World version 32: the map's `display_name`.
     bytes::put_string(out, slot.display_name);
     if (slot.object != nullptr) {
@@ -3379,6 +3580,8 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
     std::uint8_t animating = 0;
     std::uint8_t repeat = 0;
     std::uint8_t clock_drives = 0;
+    std::uint8_t origin_given = 0;
+    std::uint8_t play_started = 0;
     if (!reader.u32(slot.id) || !reader.u8(internal) || !reader.u8(native) ||
         !reader.u32(slot.class_index) || !reader.u32(slot.settlement) ||
         !bytes::get_i32(reader, slot.sight) || !reader.u32(slot.query) ||
@@ -3413,10 +3616,20 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
         !bytes::get_i64(reader, slot.clock.main_start) ||
         !bytes::get_i64(reader, slot.clock.action_at) ||
         !bytes::get_i64(reader, slot.clock.timer_at) || !reader.u8(clock_drives) ||
+        !bytes::get_u64(reader, slot.clock.timer_seq) ||
+        !bytes::get_i32(reader, slot.clock.origin.x) ||
+        !bytes::get_i32(reader, slot.clock.origin.y) || !reader.u8(origin_given) ||
+        !bytes::get_i64(reader, slot.clock.budget) ||
+        !bytes::get_i32(reader, slot.clock.play_slot) ||
+        !bytes::get_i32(reader, slot.clock.play_face.x) ||
+        !bytes::get_i32(reader, slot.clock.play_face.y) || !reader.u8(play_started) ||
+        !reader.u32(slot.clock.waiter) ||
         !bytes::get_string(reader, slot.display_name)) {
       return FormatError::truncated;
     }
-    if (clock_drives > 1) return FormatError::malformed;
+    if (clock_drives > 1 || origin_given > 1 || play_started > 1) return FormatError::malformed;
+    slot.clock.origin_given = origin_given != 0;
+    slot.clock.play_started = play_started != 0;
     slot.clock_drives = clock_drives != 0;
     if (internal >= static_cast<std::uint8_t>(InternalKind::count)) return FormatError::malformed;
     if (repeat > static_cast<std::uint8_t>(AnimRepeat::hold)) return FormatError::malformed;
@@ -3681,6 +3894,7 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
   queries_ = std::move(queries);
   query_caches_ = std::move(caches);
   rebuild_query_pool();  // derived: which live query each definition names
+  rebuild_timers();  // derived: the pending timers in the wheel's order
   players_ = std::move(table);
   groups_ = std::move(groups);
   rects_ = std::move(rects);

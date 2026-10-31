@@ -12,6 +12,7 @@
 #include "imperivm/core/sim/player_host.hpp"
 #include "imperivm/core/sim/hooks.hpp"
 
+#include <limits>
 #include <algorithm>
 #include <utility>
 
@@ -29,6 +30,9 @@
 
 namespace imperivm::core::sim {
 namespace {
+
+/// A corpse in a world never acts again: its timer puts it down.
+constexpr GameTime kNeverActs = std::numeric_limits<GameTime>::max();
 
 // -- small integral helpers -------------------------------------------------
 
@@ -1512,12 +1516,11 @@ void CombatSystem::enter_dying(World& world, Combatant& unit, GameTime now) {
     if (MovementSystem* movement = movement_system(world); movement != nullptr) {
       movement->stop(world, unit.id);
     }
-    // `Anim=8` is slot 9. Held, so the last row -- what is left of the body --
-    // stays on screen until the object goes. Facing is left where it was: every
-    // dying block keeps a non-zero vector.
-    start_anim_at(world, unit.id, core::kAnimDie, now);
   }
-  unit.next_action_time = unit.death_time;
+  // A corpse in a world is put down by its own animation timer (the base
+  // death below, then the end handler's modes 1 and 8, `anim_end_handler`);
+  // the drain only removes the bodies of a synthetic fight.
+  unit.next_action_time = world_bound_ ? kNeverActs : unit.death_time;
   if (unit.health < 0) unit.health = 0;
   events_.push_back(CombatEvent{CombatEvent::Kind::death, now, kNoObject, unit.id, 0,
                                 unit.health});
@@ -1548,10 +1551,35 @@ void CombatSystem::enter_dying(World& world, Combatant& unit, GameTime now) {
   if (engine) die_as_engine(world, id, now);
   // Six to eight: out of the hero's army and out of the squad, after the hook
   // and not before it -- `CMERCENARY_ONDIE.VS` pays its gold to `.hero`.
-  // Five, the held unit's erase, is `on_death`'s exception. `SetPath(null)` is
+  // `SetPath(null)` is
   // the `movement->stop` above; the census counts and the GAIKA-node removal
   // of the AI unregister are not reproduced (this engine counts on demand).
+  //
+  // Five: a unit in a holder (`[unit+0x154]` not -1) is destroyed on the
+  // spot (`vtbl+0x94`), and its erase does the detaching; the rest is the
+  // death of a unit on the map (0x005db270).
+  if (world_bound_) {
+    if (const ObjectState* state = world.state(id); state != nullptr && state->is_held()) {
+      destroy_object(nullptr, world, id);
+      return;
+    }
+  }
   if (heroes != nullptr) heroes->on_death(world, id);
+  // The base death (0x005b16f0), last: what plays stopped, the object put
+  // back to its first state at once, the animation timer armed for 1 ms and
+  // the action mode 1. When it fires, the end handler starts a death
+  // variant (`Anim=8` is slot 9), ends the command, and at that animation's
+  // end destroys the object. Facing is left where it was: every dying block
+  // keeps a non-zero vector. **Not reproduced:** the command thread's
+  // pending wake is cancelled here (0x0069f890, 0x0069f8d0); this engine
+  // ends the command 1 ms later, at mode 1, and lets a wake due in between
+  // run.
+  if (world_bound_ && world.find(id) != nullptr) {
+    world.stop_animation(id, now);
+    (void)world.set_anim_state(id, 1, /*transition=*/false, now);
+    world.arm_anim_timer(id, now, 1);
+    world.set_anim_mode(id, 1);
+  }
 }
 
 /// What `CVXCatapult`'s death virtual (0x004e3fd0) does between the `ondie`

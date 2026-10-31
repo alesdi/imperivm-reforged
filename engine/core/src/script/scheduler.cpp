@@ -396,11 +396,43 @@ RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
     }
   }
 
-  while (!due.empty()) {
+  // The animation timers share the wheel (`TimerSource`): each pending one
+  // due by the end runs at its own time, in the same `(instant, armed)`
+  // order, and a script it wakes is queued at that instant.
+  in_pass_ = true;
+  woken_.clear();
+  const auto queue_woken = [&] {
+    for (const ScriptId woken : woken_) {
+      const ScriptRecord* record = find(woken);
+      if (record == nullptr || record->dead ||
+          record->execution.status != ExecStatus::suspended) {
+        continue;
+      }
+      due.emplace(record->execution.wake_time, record->armed, woken);
+    }
+    woken_.clear();
+  };
+
+  for (;;) {
+    queue_woken();
+    std::int64_t timer_at = 0;
+    std::uint64_t timer_armed = 0;
+    const bool timer_due =
+        timers_ != nullptr && timers_->next_timer(timer_at, timer_armed) && timer_at <= to;
+    if (!timer_due && due.empty()) break;
+    if (timer_due && (due.empty() || std::make_pair(timer_at, timer_armed) <
+                                         std::make_pair(std::get<0>(due.top()),
+                                                        std::get<1>(due.top())))) {
+      now_ = timer_at;
+      timers_->fire_timer();
+      continue;
+    }
     const auto [instant, armed, id] = due.top();
     due.pop();
     ScriptRecord* queued = find(id);
     if (queued == nullptr || queued->dead) continue;
+    // Re-armed since it was queued -- woken early -- and queued again then.
+    if (queued->armed != armed) continue;
     if (queued->chunk_index >= chunks_.size()) continue;
     now_ = instant;
 
@@ -470,6 +502,7 @@ RunReport Scheduler::run_window(std::int64_t from, std::int64_t to) {
     }
   }
 
+  in_pass_ = false;
   now_ = to;
   // The synchronous calls that trapped during the pass (`report_trap`).
   for (FailedScript& trap : call_traps_) {
@@ -518,6 +551,18 @@ CallReport Scheduler::call(std::uint32_t chunk_index, std::span<const Value> arg
   // here, once, for the one id this call ever had.
   if (teardown_hook_ != nullptr) teardown_hook_(user_, report.id);
   return report;
+}
+
+bool Scheduler::wake(ScriptId id, std::int64_t at) {
+  if (id == kNoScript || id == running_) return false;
+  ScriptRecord* record = find(id);
+  if (record == nullptr || record->dead || record->execution.status != ExecStatus::suspended) {
+    return false;
+  }
+  record->execution.wake_time = at;
+  record->armed = next_arm_++;
+  if (in_pass_) woken_.push_back(id);
+  return true;
 }
 
 RunReport Scheduler::advance(std::int64_t delta) {

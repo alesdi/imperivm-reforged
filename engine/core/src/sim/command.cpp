@@ -2430,14 +2430,13 @@ HostOutcome get_cmd_stamina_cost_impl(CallContext& ctx) {
 ///
 /// So an idle on the map costs its whole `ms` and spends a draw per 100 ms of
 /// it until a fidget plays, and one per variant choice at every step,
-/// including the last. **Here** the steps are the call's re-entries: the
-/// first run drops the target and takes the first step, and each step that
-/// waits answers `retry` for the time to the next one, keeping the budget
-/// and a fidget still to start in the call's word (`CallContext::scratch`);
-/// the step that wakes the script answers done. The first step waits out a
-/// one-shot animation the unit is already playing (the original's timer
-/// 0x1b is pending, so the setter does not run the activity, and the
-/// animation's end does), and a fidget starts on the script's millisecond.
+/// including the last. **Here as there** the call is done at once and the
+/// script sleeps with no timed wake; every step is the animation timer's
+/// firing through the end handler (`anim_end_handler`, on the scripts'
+/// wheel), the budget is kept on the record (`AnimClock::budget`) and the
+/// last step wakes the script (`wake_waiter`). The first step waits out a
+/// one-shot animation the unit is already playing (the timer is pending, so
+/// the setter does not run the activity, and the animation's end does).
 /// `docs/formats/idle.md` is the whole description, with what is left out.
 ///
 /// A handle that names no object is held for `ms` as before: the original
@@ -2449,19 +2448,9 @@ enum class IdleKind : std::uint8_t { idle, taunt };
 /// stack slot the call popped its argument from.
 constexpr std::uint32_t kIdleBudgetMask = 0x7FFFFFFFu;
 
-/// A wait for a wake that never comes: the activity that was to wake the
-/// script will not run (the unit held, dead, or set to another activity).
+/// A wait for a wake that never comes, or that the activity sends: the call
+/// is done and the slice ends with no timed wake.
 constexpr std::int64_t kIdleNoWake = std::numeric_limits<std::int32_t>::max();
-
-[[nodiscard]] HostOutcome idle_wait(CallContext& ctx, std::int64_t wait, std::int64_t budget) {
-  if (ctx.scratch != nullptr) {
-    *ctx.scratch = static_cast<std::int32_t>(std::clamp<std::int64_t>(budget, 0, kIdleBudgetMask));
-  }
-  HostOutcome out;
-  out.status = script::HostStatus::retry;
-  out.suspend_for = wait > 0 ? wait : 0;
-  return out;
-}
 
 /// The declared length of the entity's animation `idx`, or -1 without one.
 [[nodiscard]] std::int32_t entity_anim_length(const WorldObject& slot, std::int32_t idx) {
@@ -2470,14 +2459,21 @@ constexpr std::int64_t kIdleNoWake = std::numeric_limits<std::int32_t>::max();
   return anim == nullptr ? -1 : anim->duration;
 }
 
-/// One step of the activity (0x005d2ca0) with `budget` left; see above.
-HostOutcome idle_step(CallContext& ctx, const Self& self, IdleKind kind, std::int64_t budget) {
-  World& world = *self.world;
-  const WorldObject* slot = world.find(self.id);
-  const GameTime now = script_now(ctx, world);
+/// The activity's mode: 4 for an idle, 5 for a taunt.
+[[nodiscard]] constexpr std::int32_t idle_mode(IdleKind kind) noexcept {
+  return kind == IdleKind::idle ? 4 : 5;
+}
+
+}  // namespace
+
+bool idle_activity_step(World& world, script::Scheduler* scheduler, ObjectId id, GameTime now) {
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr) return false;
+  const IdleKind kind = slot->clock.mode == 5 ? IdleKind::taunt : IdleKind::idle;
+  const std::int64_t budget = slot->clock.budget;
   // Table index + 1 is the entity's `idx`.
   const std::int32_t base = kind == IdleKind::idle ? 13 : 20;
-  if (slot != nullptr && entity_anim_length(*slot, base) >= 0) {
+  if (entity_anim_length(*slot, base) >= 0) {
     std::int32_t chosen = base;
     if (kind == IdleKind::idle) {
       std::int32_t variants = 1;
@@ -2491,7 +2487,7 @@ HostOutcome idle_step(CallContext& ctx, const Self& self, IdleKind kind, std::in
     }
     const std::int32_t length = entity_anim_length(*slot, chosen);
     const MovementSystem* movement = movement_system(world);
-    const MoveState* move = movement == nullptr ? nullptr : movement->find(self.id);
+    const MoveState* move = movement == nullptr ? nullptr : movement->find(id);
     const bool walk_index_zero = move == nullptr || move->walk_anim == 1;
     if (length >= 0 && length <= budget) {
       for (std::int64_t t = 0; t <= budget - length; t += 100) {
@@ -2499,83 +2495,69 @@ HostOutcome idle_step(CallContext& ctx, const Self& self, IdleKind kind, std::in
         // The draw comes first and is spent whether or not the flag is up
         // (0x005d2d70); the flag only decides a draw that said no.
         const bool drawn = world.rng().between(1, kind == IdleKind::idle ? 15 : 3) == 1;
-        ObjectState* state = world.mutable_state(self.id);
+        ObjectState* state = world.mutable_state(id);
         const bool forced = state != nullptr && state->flags.force_idle;
         if (!drawn && !forced) continue;
         if (state != nullptr) state->flags.force_idle = false;
         // The fidget starts `t` ms on (`StartAnimation`'s start offset); its
         // answer -- `t`, the transition in front, the animation -- comes off
         // the budget, and the next step is the animation's end.
-        const std::int32_t spent = world.start_animation(self.id, chosen, now, t);
-        return idle_wait(ctx, spent, budget - spent);
+        const std::int32_t spent = world.start_animation(id, chosen, now, t);
+        if (WorldObject* again = world.find(id); again != nullptr) {
+          again->clock.budget = budget - spent;
+        }
+        return false;
       }
     }
   }
   if (budget > 0) {
     // Hold the pose for the rest (0x0053ced0): the next step is the timer.
-    world.arm_anim_timer(self.id, now, budget);
-    return idle_wait(ctx, budget, 0);
+    world.arm_anim_timer(id, now, budget);
+    if (WorldObject* again = world.find(id); again != nullptr) again->clock.budget = 0;
+    return false;
   }
-  // The wake, and the activity back to 0. On a re-entry the script goes on;
-  // on the first run the call still answered 3, which ends the slice
-  // (0x0069d5fb), and the wake at once runs the script again on the next
-  // pass here.
-  world.set_anim_mode(self.id, 0);
-  if (ctx.first_call) return HostOutcome::sleep_for(0);
-  return HostOutcome::ok_void();
+  // The wake (0x005d2de0 -> 0x0069f8f0), and the activity back to 0.
+  world.set_anim_mode(id, 0);
+  (void)wake_waiter(world, scheduler, id, now);
+  return true;
 }
 
-/// The activity's mode: 4 for an idle, 5 for a taunt.
-[[nodiscard]] constexpr std::int32_t idle_mode(IdleKind kind) noexcept {
-  return kind == IdleKind::idle ? 4 : 5;
-}
-
-/// The unit's animation-end handler reaching the activity: the timer has
-/// fired (one moved later is waited out), the handler's own gates passed
-/// (`anim_dispatch`: not held, not dead) and the mode is still this one.
-/// Anything else runs no step, and nothing wakes the script.
-HostOutcome idle_fire(CallContext& ctx, const Self& self, IdleKind kind, std::int64_t budget) {
-  World& world = *self.world;
-  const GameTime now = script_now(ctx, world);
-  const WorldObject* slot = world.find(self.id);
-  if (slot == nullptr) return idle_wait(ctx, kIdleNoWake, budget);
-  if (const GameTime left = world.anim_timer_left(*slot, now); left > 0) {
-    return idle_wait(ctx, left, budget);
-  }
-  world.settle_anim(self.id, now);
-  if (!anim_dispatch(ctx, world, self.id, now)) return idle_wait(ctx, kIdleNoWake, budget);
-  slot = world.find(self.id);
-  if (slot == nullptr || slot->clock.mode != idle_mode(kind)) {
-    return idle_wait(ctx, kIdleNoWake, budget);
-  }
-  return idle_step(ctx, self, kind, budget);
-}
+namespace {
 
 /// `Unit::Idle(ms)`, `Unit::Taunt(ms)` and `Ship::Idle()`; see above.
 HostOutcome idle_activity(CallContext& ctx, const Self& self, std::int64_t ms, IdleKind kind) {
-  // A re-entry is the activity's timer firing for a call made on the map:
-  // the unit's handler decides, held or not (a unit put into a holder
-  // mid-idle runs no step, and its script is not woken).
-  if (!ctx.first_call && ctx.scratch != nullptr) {
-    const std::int64_t budget = static_cast<std::uint32_t>(*ctx.scratch) & kIdleBudgetMask;
-    return idle_fire(ctx, self, kind, budget);
-  }
-  const WorldObject* slot = self.world->find(self.id);
+  World& world = *self.world;
+  const WorldObject* slot = world.find(self.id);
   if (slot == nullptr || slot->state.position == kHeldPosition) {
     // The held branch: `ms` in the wait cell and return 1; its re-entry pops
     // the arguments and is done, which is a timed wait.
     if (!ctx.first_call) return HostOutcome::ok_void();
     return HostOutcome::sleep_for(ms > 0 ? ms : 0);
   }
-  if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
+  if (CombatSystem* combat = combat_system_of(world); combat != nullptr) {
     (void)combat->stop(self.id);
   }
-  const std::int64_t budget = ms > 0 ? ms : 0;
-  // The setter (0x005a7680): the mode written, and the handler run at once
-  // only when the animation timer is not pending (0x0053cfc0); otherwise the
-  // timer's firing runs it -- an animation in flight runs out first.
-  self.world->set_anim_mode(self.id, idle_mode(kind));
-  return idle_fire(ctx, self, kind, budget);
+  const GameTime now = script_now(ctx, world);
+  // The setter (0x005a7680): the mode written, the budget left where the
+  // activity reads it, and the handler run at once only when the animation
+  // timer is not pending (0x0053cfc0); otherwise the timer's firing runs
+  // it -- an animation in flight runs out first.
+  world.set_anim_mode(self.id, idle_mode(kind));
+  if (WorldObject* own = world.find(self.id); own != nullptr) {
+    own->clock.budget = ms > 0 ? ms : 0;
+    own->clock.waiter = ctx.script;
+  }
+  if (const WorldObject* own = world.find(self.id); own != nullptr && !world.anim_timer_pending(*own)) {
+    // A last step taken here wakes a script that is still running, and the
+    // call's 3 then takes the thread off the wheel (0x0069d5fb, 0x0069f842
+    // -> 0x00687bf0), undoing that wake: the script sleeps on with nothing
+    // to wake it, as an `Idle(0)` on a unit at rest does in the original.
+    anim_end_handler(world, ctx.scheduler, &ctx, self.id, now);
+  }
+  HostOutcome out;
+  out.status = script::HostStatus::suspend;
+  out.suspend_for = kIdleNoWake;
+  return out;
 }
 
 HostOutcome idle_impl(CallContext& ctx) {
@@ -2603,8 +2585,7 @@ HostOutcome idle_impl(CallContext& ctx) {
     const std::int32_t own = entity_anim_length(*slot, 13);
     if (own >= 0) ms = own;
   }
-  // The flag goes up on the first run only: the re-entries are the
-  // activity's own steps, which the original takes without calling back.
+  // The flag goes up on the call's first run only.
   if (ctx.first_call) {
     if (ObjectState* state = self.world->mutable_state(self.id); state != nullptr) {
       state->flags.force_idle = true;

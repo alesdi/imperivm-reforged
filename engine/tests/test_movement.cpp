@@ -99,6 +99,9 @@ ObstructionGrid wall_with_gap(std::int32_t cells, std::int32_t wall_x, std::int3
 ObjectId spawn_unit(World& world, MovementSystem& movement, Point where, std::int32_t speed) {
   const ObjectId id = world.spawn(NativeClass::unit, nullptr);
   world.set_position(id, where);
+  // Alive: a unit at no health is dead to its animation-end handler, which
+  // puts it down when its timer fires (`anim_end_handler`).
+  (void)world.set_health(id, 100);
   MoveState& state = movement.state(id);
   state.speed = speed;
   return id;
@@ -558,9 +561,10 @@ TEST(a_walking_unit_shows_the_column_it_is_walking_along) {
   // `Face` names a heading without laying a path, and it shows too.
   movement.face(world, walker, Point{900, 100});
   CHECK(slot->object->anim.variation == 5u);
-  // A point on top of the unit names no direction and leaves the pose alone.
+  // A point on top of the unit faces `(0, 1)` (0x0053f5f0): column 0.
   movement.face(world, walker, movement.position(world, walker));
-  CHECK(slot->object->anim.variation == 5u);
+  CHECK(movement.state(walker).facing == (Point{0, 1}));
+  CHECK(slot->object->anim.variation == 0u);
 }
 
 TEST(a_moving_unit_plays_its_walk_animation_and_stops_it_on_arrival) {
@@ -1808,6 +1812,7 @@ struct EdgeField {
   ObjectId place(const char* class_name, Point where) {
     const ObjectId id = world.spawn(NativeClass::unit, nullptr, graph.find(class_name));
     CHECK(world.set_position(id, where));
+    (void)world.set_health(id, 100);
     movement.state(id).speed = class_name == std::string_view("Camp") ? 0 : 100;
     return id;
   }
@@ -2078,6 +2083,7 @@ TEST(a_goto_that_lays_no_route_looks_around_or_settles) {
   attach(world, movement);
   const Point cell{9 * 16 + 8, 10 * 16 + 8};
   const ObjectId unit = world.spawn(NativeClass::unit, &entity.value());
+  (void)world.set_health(unit, 100);
   REQUIRE(world.set_position(unit, cell));
   movement.state(unit).speed = 100;
   world.set_anim_mode(unit, 4);
@@ -2137,6 +2143,7 @@ TEST(a_goto_walks_in_mode_three_and_an_arrival_waits_out_the_animation) {
   movement.set_grid(open_field(64));
   attach(world, movement);
   const ObjectId unit = world.spawn(NativeClass::unit, &entity.value());
+  (void)world.set_health(unit, 100);
   REQUIRE(world.set_position(unit, Point{100, 100}));
   movement.state(unit).speed = 100;
 
@@ -2633,16 +2640,18 @@ TEST(the_deer_prelude_runs_through_the_host) {
 
   const MoveState* state = movement.find(deer);
   REQUIRE(state != nullptr);
-  CHECK(state->facing == (Point{0, kFacingLength}));
+  // The raw difference to the point (0x0053f5f0).
+  CHECK(state->facing == (Point{0, 400}));
   CHECK(state->speed_factor == 7);
   CHECK(state->walk_anim == 13);
 
-  // `.GetDir` hands that facing back, and it is long enough to survive
-  // `pt.SetLen(15 + rand(50))` -- which is the next thing the script does.
+  // `.GetDir` hands that facing back at its length, and
+  // `pt.SetLen(15 + rand(50))` -- the next thing the script does -- sets
+  // its own.
   HostCall dir(world, {Value::object(kTypeObj, deer)});
   const HostOutcome heading = invoke(registry, CallKind::member, "GetDir", 0, dir);
   CHECK(is_point(heading.value));
-  CHECK(unpack_point(heading.value) == (Point{0, kFacingLength}));
+  CHECK(unpack_point(heading.value) == (Point{0, 400}));
 
   // At factor 7 a speed-150 deer ambles: 10 units per second, so 4 in a
   // 400-unit turn. That is the arithmetic in the movement header, checked.

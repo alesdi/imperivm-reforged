@@ -450,7 +450,13 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// transition, playback length, start, main start and action moment, the
 /// animation timer and the action mode `[obj+0x130]`. A version-57 file has
 /// none, and every animation a script waits on would read as over.
-inline constexpr std::uint32_t kStateVectorVersion = 58;
+/// 59: the animation timer is an event on the scripts' wheel (world section
+/// version 38): each object's record adds the timer's place in the arming
+/// order, the animation's origin and whether one was given, the idle's
+/// budget, `PlayAnim`'s slot, facing and progress, and the script the
+/// activity wakes. A version-58 file has none, and a waiting idle or
+/// `PlayAnim` would never wake.
+inline constexpr std::uint32_t kStateVectorVersion = 59;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

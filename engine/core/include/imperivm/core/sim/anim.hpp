@@ -45,9 +45,11 @@
 /// at the next firing -- that animation's end -- wakes the script and sets the
 /// mode back to 0. So an object already playing an animation runs it out
 /// first, and a mode something else rewrote in the meantime leaves the script
-/// asleep. Here the call's re-entries are the firings (`m_play_anim`).
-/// `Flying::PlayAnim` starts the animation itself and suspends for exactly
-/// its declared duration.
+/// asleep. Here too the firings are the animation timer's, on the scripts'
+/// wheel (`AnimEvents`, `anim_end_handler`), and the wake is the scheduler's.
+/// `Flying::PlayAnim` starts the animation itself, with its point as the
+/// origin the bird is put at at the main start, and suspends for exactly its
+/// declared duration.
 ///
 /// ## The index is the entity's `<anim idx>`, and two names are off by one
 ///
@@ -97,24 +99,21 @@
 ///
 /// ## What is left out, and named
 ///
-///   * **No animation origin.** The original's `AnimX`/`AnimY` let an animation
-///     play somewhere other than where the object stands; only the walk step
-///     and `Flying::PlayAnim` pass one. `Flying::PlayAnim` puts the bird at its
-///     goal at the call instead of at the main start.
-///   * **No duration override** from a script: every entry point passes 0, so
-///     the declared `duration` is the length. The walk step, the one caller
-///     that passes one, is the movement system's loop here.
 ///   * **The walk is not animation steps.** The original walks by one-shot
-///     steps on the animation timer (action mode 3, 0x005d3b50), so its timer
-///     is pending all the way and `IsInState` is false while a unit walks.
-///     Here the walk is the movement system's loop, which stops what the
-///     clock plays when it starts.
-///   * **A corpse is not put down by its own timer.** The end handler's death
-///     sequence (mode 1, then 8 and the destroy) runs here when a script's
-///     call reaches it (`anim_dispatch`); combat's death time removes the
-///     bodies it kills.
-///   * **`Flying::PlayAnim`'s Z** is no longer discarded: `sim/flying.hpp`
-///     carries the flight state it writes, and `sim/anim.cpp` the order.
+///     steps on the animation timer (action mode 3, 0x005d3b50), each with
+///     its own duration override and the next point as its origin, so its
+///     timer is pending all the way and `IsInState` is false while a unit
+///     walks. Here the walk is the movement system's loop, which stops what
+///     the clock plays when it starts, and a mode-3 firing runs nothing.
+///   * **No origin, no move.** An animation started with no origin leaves
+///     the object where it is at the main start (the original puts it back
+///     where it stood at the call), because the movement system may have
+///     moved it since; with the walk on the timer the two agree.
+///   * **The waiter** is the script that called, kept on the record
+///     (`AnimClock::waiter`), where the original wakes the object's command
+///     thread; for every shipped caller the two are the same thread.
+///
+/// `docs/formats/animation.md` is the whole description.
 ///
 /// **A retail stack bug is deliberately not reproduced.** `Obj::SetState` is
 /// registered `void` and its error path pushes an int anyway, leaving four
@@ -129,6 +128,8 @@
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/system.hpp"
 #include "imperivm/core/sim/tick.hpp"
+#include "imperivm/core/script/scheduler.hpp"
+#include "imperivm/core/sim/world.hpp"
 
 namespace imperivm::core::sim {
 
@@ -176,14 +177,55 @@ std::int32_t start_animation_facing(const script::CallContext& ctx, World& world
                                     core::ObjectId id, std::int32_t anim_slot, Point face,
                                     GameTime delay);
 
+/// `StartAnimation` at `now`, turning towards `face` first unless it is the
+/// invalid point or the object is off the map, and moving the object to
+/// `origin` at the main start (the invalid point: it stays).
+std::int32_t start_animation_facing_at(World& world, core::ObjectId id, std::int32_t anim_slot,
+                                       Point face, GameTime now, GameTime delay,
+                                       Point origin = Point{-1, -1});
+
 /// The object's animation-end handler (`vtbl+0x54`: 0x005d5b60 for a unit,
-/// 0x005b0f70 for every object) up to the point where its action mode's own
-/// step would run, at `now`. A held unit runs nothing; a dead object runs the
-/// death sequence -- mode 1 starts a death animation variant and ends the
-/// running command, then mode 8 destroys it (`vtbl+0x94`) -- and runs no
-/// step. True when the mode's own step (a walk step, an idle's, a
-/// `PlayAnim`'s continuation) is what runs next. See
-/// `docs/formats/animation.md`.
-bool anim_dispatch(script::CallContext& ctx, World& world, core::ObjectId id, GameTime now);
+/// then 0x005b0f70 for every object), run at `now` by the animation timer's
+/// firing or by a setter that finds no timer pending. A held unit runs
+/// nothing. A dead object not yet put down takes mode 1 (a death animation
+/// declared) or 8. Then the mode: 1 starts a death animation variant, ends
+/// the running command and becomes 8; 8 destroys the object (`vtbl+0x94`);
+/// 4 and 5 are the idle's and the taunt's step (`idle_activity_step`); 6 is
+/// `PlayAnim`'s continuation; 3, the walk step, and 2, the attack, are not
+/// this engine's yet. `ctx` is the script whose call ran it, or null for a
+/// timer's firing; a script's own object is destroyed at the end of its
+/// slice. See `docs/formats/animation.md`.
+void anim_end_handler(World& world, script::Scheduler* scheduler, script::CallContext* ctx,
+                      core::ObjectId id, GameTime now);
+
+/// Wake the script the object's activity is for (0x0069f8f0), at `now`.
+/// False when there is none, or it is the one running.
+bool wake_waiter(World& world, script::Scheduler* scheduler, core::ObjectId id, GameTime now);
+
+/// One step of the idle or taunt activity (0x005d2ca0), with the budget the
+/// object's clock keeps: a fidget started, the pose held for the rest, or --
+/// the budget spent -- the mode back to 0 and the script woken. True for
+/// the last. Defined beside `Idle` (`sim/command.cpp`).
+bool idle_activity_step(World& world, script::Scheduler* scheduler, core::ObjectId id,
+                        GameTime now);
+
+/// What the session installs to put the animation timers on the scripts'
+/// wheel: the world's timers as the scheduler's `TimerSource`, the end
+/// handler as the world's `AnimEndHandler`, and the scheduler's arming
+/// counter as the world's. Configuration: holds two references.
+class AnimEvents final : public AnimEndHandler, public script::TimerSource {
+ public:
+  AnimEvents(World& world, script::Scheduler& scheduler) noexcept
+      : world_(&world), scheduler_(&scheduler) {}
+  /// Wire both ends.
+  void install();
+  void anim_end(World& world, core::ObjectId id, GameTime now) override;
+  [[nodiscard]] bool next_timer(std::int64_t& at, std::uint64_t& armed) const override;
+  void fire_timer() override;
+
+ private:
+  World* world_;
+  script::Scheduler* scheduler_;
+};
 
 }  // namespace imperivm::core::sim

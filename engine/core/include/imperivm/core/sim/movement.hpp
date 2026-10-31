@@ -701,8 +701,9 @@ class MovementSystem : public System {
   /// unit on to a free spot only when this names it; a march member stopped
   /// while its formation's path goes on stands where it is.
   [[nodiscard]] bool lock_owner(ObjectId id, const MoveState& move) const noexcept;
-  /// `Unit.Face(pt)`: look towards a world point. A point on top of the unit
-  /// leaves the facing alone, since it names no direction.
+  /// The facing setter 0x0053f5f0 as `Face` and `StartAnimation` reach it:
+  /// the raw difference to the point, `(0, 1)` for a point on top of the
+  /// object.
   void face(World& world, ObjectId id, Point towards);
 
   /// How far a tracked target may drift before the route is rebuilt. Four

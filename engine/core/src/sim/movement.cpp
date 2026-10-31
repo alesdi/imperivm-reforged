@@ -1193,8 +1193,14 @@ std::int32_t MovementSystem::formation_stride_or_walk(const World& world, Object
 void MovementSystem::face(World& world, ObjectId id, Point towards) {
   MoveState& move = state(id);
   const Point from = position(world, id);
-  const Point delta{towards.x - from.x, towards.y - from.y};
-  set_facing(world, id, move, delta);
+  // 0x0053f5f0: the raw difference, kept at its own length, and `(0, 1)`
+  // for a point on top of the object.
+  Point delta{towards.x - from.x, towards.y - from.y};
+  if (delta.x == 0 && delta.y == 0) delta = Point{0, 1};
+  move.facing = delta;
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr || slot->object == nullptr || slot->object->entity == nullptr) return;
+  slot->object->anim.variation = facing_column(move.facing, slot->object->entity->variations());
 }
 
 std::int64_t MovementSystem::remaining(ObjectId id) const noexcept {
@@ -2355,11 +2361,10 @@ void end_commands(World& world, ObjectId id) {
 /// own-script test at all. No shipped site calls either. A query handle that
 /// names nothing prints and does nothing; an empty list does nothing.
 ///
-/// **Not reproduced:** the animation reset, as `Disappear` leaves it out --
-/// the object model does not drive a unit's sprite from here; and the
-/// facing's length. The original keeps the raw difference, this engine a
-/// vector of `kFacingLength` in the same direction (`MoveState::facing`),
-/// which `GetDir` hands back.
+/// Each member first has its animation stopped where it is drawn
+/// (0x0053d730) and then faces the point (0x0053f660 -> 0x0053f5f0): the
+/// raw difference, `(0, 1)` for a point on top of it, which `GetDir` hands
+/// back at that length.
 HostOutcome face_impl(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed(kNoWorld);
@@ -2372,6 +2377,7 @@ HostOutcome face_impl(CallContext& ctx) {
   if (list_form) {
     if (!is_point(ctx.arg(1))) return HostOutcome::failed(kNoPoint);
     for (const ObjectId id : receiver_objects(ctx, *world, receiver)) {
+      world->stop_animation(id, now_of(ctx, *world));
       movement->face(*world, id, unpack_point(ctx.arg(1)));
       end_commands(*world, id);
     }
@@ -2384,6 +2390,7 @@ HostOutcome face_impl(CallContext& ctx) {
   if (!destination_of(*self.world, ctx.arg(1), towards, ignored)) {
     return HostOutcome::failed(kNoPoint);
   }
+  self.world->stop_animation(self.id, now_of(ctx, *self.world));
   self.movement->face(*self.world, self.id, towards);
   if (!runs_own_command(ctx, *self.world, self.id)) end_commands(*self.world, self.id);
   return HostOutcome::ok_void();
@@ -2882,8 +2889,9 @@ HostOutcome time_without_walking_impl(CallContext& ctx) {
 }
 
 /// `GetDir` (0x005ac5e0): the facing at `[obj+0x48]`, `(0, 1)` for a receiver
-/// that names nothing. The facing's length is this engine's
-/// (`kFacingLength`, see `Face`).
+/// that names nothing. `Face` and `StartAnimation` leave the raw difference
+/// there; the walk's own turns are this engine's movement system's, at
+/// `kFacingLength`, until the walk is on the animation timer.
 HostOutcome get_dir_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return unresolved(self, HostOutcome::ok_with(pack_point(Point{0, 1})));
@@ -2928,7 +2936,12 @@ HostOutcome set_pos_impl(CallContext& ctx) {
       (void)self.world->remove_from_holder(self.id, to);
       (void)garrison_forget(*self.world, self.id);
     }
+    // The animation reset (0x0053d730) runs on this path too.
+    self.world->stop_animation(self.id, now_of(ctx, *self.world));
   } else {
+    // 0x0053d730 before the move: what plays is stopped where it is drawn,
+    // then the object is put at the point.
+    self.world->stop_animation(self.id, now_of(ctx, *self.world));
     (void)self.world->set_position(self.id, to);
   }
   if (!runs_own_command(ctx, *self.world, self.id)) end_commands(*self.world, self.id);

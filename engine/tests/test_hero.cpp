@@ -4029,6 +4029,10 @@ TEST(egoism_never_drains_a_corpse_in_its_dying_window) {
   // drain before it could be counted. Unbound, it neither writes nor despawns,
   // and the corpse lies there for as long as the test needs it to.
   b.combat.set_world_bound(false);
+  // And its animation timer cancelled, which is what would put it down: the
+  // bench's warrior declares no death animation, so its end handler would
+  // destroy it 1 ms after the blow (mode 8).
+  b.f.world.stop_animation(corpse, b.f.world.time());
   // Eight drains, at 5,000 .. 40,000.
   b.f.world.advance(400);
   b.f.world.advance_turns(100);
@@ -4078,12 +4082,11 @@ TEST(wisdom_draws_once_and_credits_the_hero_one_point_on_success) {
 }
 
 TEST(a_held_unit_keeps_its_squad_through_death_and_leaves_it_at_the_erase) {
-  // The death virtual's fifth step: a unit in a holder is erased on the spot
-  // and the erase does the detaching, so the death path itself skips them.
-  // This engine does not erase it there -- it lies in the holder for its death
-  // strip like any corpse -- and the erase that ends the corpse is where it
-  // leaves. An AI squad, because `clear_dead` would prune a hero's army at the
-  // same moment and hide which of the two did it.
+  // The death virtual's fifth step: a unit in a holder is destroyed on the
+  // spot (0x005db270, `vtbl+0x94` when `[unit+0x154]` is not -1) and the
+  // erase does the detaching, so the death path itself skips them. An AI
+  // squad, because `clear_dead` would prune a hero's army at the same moment
+  // and hide which of the two did it.
   DeathBench b;
   b.combat.set_death_duration(1000);
   const ObjectId held = b.f.spawn_warrior();
@@ -4097,12 +4100,8 @@ TEST(a_held_unit_keeps_its_squad_through_death_and_leaves_it_at_the_erase) {
   REQUIRE(b.f.world.put_in_holder(held, holder));
   b.enlist();
 
-  b.kill(held);
-  REQUIRE(b.combat.is_dying(held));
-  CHECK(b.f.heroes.squad_of(held) == key);
   CHECK(b.f.heroes.squads().find(key)->size() == 2);
-
-  b.f.world.advance_turns(5);
+  b.kill(held);
   REQUIRE(b.f.world.find(held) == nullptr);
   CHECK(b.f.heroes.squad_of(held) == kNoSquad);
   CHECK(b.f.heroes.squads().find(key)->size() == 1);

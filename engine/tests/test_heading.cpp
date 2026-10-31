@@ -74,6 +74,8 @@ struct HeadingBench {
   ObjectId spawn() {
     const ObjectId id = world.spawn(NativeClass::unit, &entity.value());
     (void)world.set_position(id, Point{100, 100});
+    // Alive: at no health its animation-end handler would put it down.
+    (void)world.set_health(id, 100);
     return id;
   }
 

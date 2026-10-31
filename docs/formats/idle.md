@@ -95,13 +95,21 @@ when it was called.
   the action mode is `AnimClock::mode`, 4 or 5 while the activity is set; a
   fidget is `World::start_animation` with its start offset `t`, transition
   included; a hold arms the animation timer for the rest of the budget.
-* The steps are the call's re-entries, each one the timer's firing. The first
-  run drops the target, sets the mode and, when the timer is not pending,
-  takes the first step at once; otherwise it waits for the timer. Each later
-  run waits out a timer that was moved later, then runs the end handler's
-  gates (held: nothing; dead: the death sequence) and takes a step only while
-  the mode is still the activity's. Anything else leaves the script asleep,
-  as in the original. The budget is the call's word.
+* The call is done at once and the script sleeps with no timed wake, as a
+  3 leaves it. The call drops the target, sets the mode, keeps the budget
+  and the script to wake on the object's clock (`AnimClock::budget`,
+  `waiter`, in place of the script's stack and its command thread) and, when
+  the timer is not pending, runs the end handler at once, which takes the
+  first step; otherwise the timer's firing does. Every later step is the
+  timer's firing through the end handler (`anim_end_handler`): its gates
+  first (held: nothing; dead: the death sequence), then the step, only while
+  the mode is still the activity's. The last step sets the mode to 0 and
+  wakes the script at that millisecond (`Scheduler::wake`). Anything else
+  leaves the script asleep, as in the original. A last step taken inside
+  the call itself (no budget, no fidget, nothing in flight) wakes a script
+  that is still running, and the call's 3 then takes the thread off the
+  wheel (0x0069d5fb, 0x0069f842 -> 0x00687bf0): the wake is undone and the
+  script sleeps on for good, in the original as here.
 * The force flag is `ObjectFlags::force_idle`, on the object, hashed and
   saved. `ForceIdle` and `Ship::Idle` raise it; the step that plays a fidget
   drops it.

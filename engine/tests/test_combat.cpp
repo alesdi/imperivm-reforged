@@ -1204,25 +1204,40 @@ TEST(a_dying_unit_plays_its_death_and_leaves_when_the_animation_ends) {
   REQUIRE(combat.is_dying(b));
   const WorldObject* corpse = world.find(b);
   REQUIRE(corpse != nullptr && corpse->object != nullptr);
-  CHECK(corpse->object->anim.anim_slot == kAnimDie);
-  CHECK(corpse->repeat == AnimRepeat::hold);
+  // The base death (0x005b16f0): the action mode 1 and the timer 1 ms on.
+  CHECK(corpse->clock.mode == 1);
+  REQUIRE(corpse->clock.timer_at != kNoAnimTimer);
+  const GameTime died = corpse->clock.timer_at - 1;
   // The blow fell somewhere in the turn that just ended.
   const GameTime turn_end = world.time();
-  const Combatant* dying = combat.find(b);
-  REQUIRE(dying != nullptr);
+  CHECK(died > turn_end - 400);
+  CHECK(died <= turn_end + 1);
   CHECK(fighter.value().timeline_for_slot(kAnimDie).cycle() == 3000);
-  CHECK(dying->death_time > turn_end - 400 + 3000);
-  CHECK(dying->death_time <= turn_end + 3000);
+
+  // The timer fires: the death animation (one variant here, no draw), the
+  // mode 8, and the end 1 ms plus the declared length after the blow.
+  fight_turn(world, combat);
+  corpse = world.find(b);
+  REQUIRE(corpse != nullptr && corpse->object != nullptr);
+  CHECK(corpse->object->anim.anim_slot == kAnimDie);
+  CHECK(corpse->repeat == AnimRepeat::hold);
+  CHECK(corpse->clock.slot == kAnimDie);
+  CHECK(corpse->clock.mode == 8);
+  const EntityAnim* die = fighter.value().anim(kAnimDie);
+  REQUIRE(die != nullptr);
+  const GameTime gone = died + 1 + die->duration;
+  CHECK(corpse->clock.end() == gone);
 
   // Well past the fallback: still lying there, still animating.
-  while (world.time() < turn_end + 2400) fight_turn(world, combat);
+  while (world.time() + 400 < gone) fight_turn(world, combat);
   const WorldObject* still = world.find(b);
   CHECK(still != nullptr);
   CHECK(combat.is_dying(b));
   CHECK(still != nullptr && still->animating);
-  // And gone once the strip has run.
-  while (world.time() < turn_end + 3400) fight_turn(world, combat);
+  // And gone once its end has fired.
+  fight_turn(world, combat);
   CHECK(world.find(b) == nullptr);
+  fight_turn(world, combat);
   CHECK(combat.find(b) == nullptr);
 }
 

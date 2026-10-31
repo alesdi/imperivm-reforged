@@ -253,49 +253,52 @@ TEST(anim_play_anim_suspends_for_the_length_of_what_it_started) {
   std::int32_t word = 0;
   const std::vector<script::Value> args{AnimBench::obj(id), script::Value::integer(13),
                                         AnimBench::point(100, 100)};
+  // The call is done at once and the script sleeps with no timed wake.
   const script::HostOutcome first = b.rerun("PlayAnim", 2, args, true, word);
-  CHECK(first.status == script::HostStatus::retry);
-  CHECK(first.suspend_for == 1);
+  CHECK(first.status == script::HostStatus::suspend);
+  CHECK(first.suspend_for > 1000000);
   CHECK(b.world.find(id)->clock.mode == 6);
   CHECK(b.world.find(id)->clock.slot == kNoAnim);
+  CHECK(b.world.find(id)->clock.timer_at == b.world.time() + 1);
   CHECK(!b.call("IsInState", 0, {AnimBench::obj(id)}).value.as_integer() != 0);
 
-  // The timer fires: the animation starts, and the call waits its length.
+  // The timer fires 1 ms on: the animation starts from the call's arguments,
+  // which are marked used.
   b.world.advance_turns(1);
-  const script::HostOutcome start = b.rerun("PlayAnim", 2, args, false, word);
-  CHECK(start.status == script::HostStatus::retry);
-  CHECK(start.suspend_for == 264);
   CHECK(b.world.find(id)->object->anim.anim_slot == 13);
   CHECK(b.number("GetAnim", 0, {AnimBench::obj(id)}) == 13);
+  CHECK(b.world.find(id)->clock.mode == 6);
+  CHECK(b.world.find(id)->clock.play_started);
 
-  // Its end wakes the script, and the mode is 0 again.
+  // Its end runs mode 6 again: the wake (the waiter taken), and mode 0.
+  b.world.find(id)->clock.waiter = 7;
   b.world.advance_turns(3);
-  const script::HostOutcome wake = b.rerun("PlayAnim", 2, args, false, word);
-  CHECK(wake.status == script::HostStatus::ok);
   CHECK(b.world.find(id)->clock.mode == 0);
+  CHECK(b.world.find(id)->clock.waiter == script::kNoScript);
 
   // A mode something else rewrote runs no continuation: a `StartAnim` from
   // another script while the first millisecond is pending leaves the call
   // waiting for a wake that never comes.
   std::int32_t other = 0;
   (void)b.rerun("PlayAnim", 2, args, true, other);
+  b.world.find(id)->clock.waiter = 7;
   b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(1),
                           AnimBench::point(100, 100)});
   b.world.advance_turns(3);
-  const script::HostOutcome orphan = b.rerun("PlayAnim", 2, args, false, other);
-  CHECK(orphan.status == script::HostStatus::retry);
-  CHECK(orphan.suspend_for > 1000000);
+  CHECK(b.world.find(id)->clock.mode == 0);
+  CHECK(b.world.find(id)->clock.waiter == 7);
 
-  // A slot nothing declares starts nothing, arms no timer, and nothing wakes
-  // the script: it sleeps rather than spins.
+  // A slot nothing declares starts nothing and arms no timer after the first
+  // millisecond, and nothing wakes the script: it sleeps rather than spins.
   std::int32_t miss_word = 0;
   const std::vector<script::Value> miss{AnimBench::obj(id), script::Value::integer(5),
                                         AnimBench::point(100, 100)};
   (void)b.rerun("PlayAnim", 2, miss, true, miss_word);
-  b.world.advance_turns(1);
-  const script::HostOutcome none = b.rerun("PlayAnim", 2, miss, false, miss_word);
-  CHECK(none.status == script::HostStatus::retry);
-  CHECK(none.suspend_for > 1000000);
+  b.world.find(id)->clock.waiter = 8;
+  b.world.advance_turns(2);
+  CHECK(b.world.find(id)->clock.mode == 6);
+  CHECK(b.world.find(id)->clock.timer_at == kNoAnimTimer);
+  CHECK(b.world.find(id)->clock.waiter == 8);
 
   // And an unresolvable receiver does not suspend at all.
   std::int32_t dead_word = 0;
@@ -376,6 +379,10 @@ TEST(anim_flying_play_anim_refuses_a_bad_slot_before_it_moves_and_clamps_its_poi
       b.call("PlayAnim", 3, {AnimBench::obj(id), script::Value::integer(0),
                              AnimBench::point(-500, 300), script::Value::integer(-1)});
   CHECK(edge.status == script::HostStatus::suspend);
+  // The clamped point is the animation's origin: the bird is there from the
+  // animation's main start, when the timer fires.
+  CHECK(b.world.find(id)->clock.origin == (Point{0, 300}));
+  b.world.advance_turns(1);
   CHECK((b.world.resolve_position(id) == Point{0, 300}));
 }
 
@@ -553,12 +560,12 @@ TEST(anim_scripts_see_the_declared_duration_not_the_frame_strip) {
   const std::vector<script::Value> args{AnimBench::obj(id), script::Value::integer(1),
                                         AnimBench::point(100, 100)};
   (void)b.rerun("PlayAnim", 2, args, true, word);
+  const GameTime called = b.world.time();
   b.world.advance_turns(1);
-  const script::HostOutcome play = b.rerun("PlayAnim", 2, args, false, word);
-  CHECK(play.status == script::HostStatus::retry);
-  CHECK(play.suspend_for == 150);
+  // Started 1 ms after the call, it ends 150 later, and its end wakes.
+  CHECK(b.world.find(id)->clock.end() == called + 1 + 150);
   b.world.advance_turns(2);
-  CHECK(b.rerun("PlayAnim", 2, args, false, word).status == script::HostStatus::ok);
+  CHECK(b.world.find(id)->clock.mode == 0);
 
   b.call("StartAnim", 2, {AnimBench::obj(id), script::Value::integer(1),
                           AnimBench::point(100, 100)});
@@ -1015,89 +1022,12 @@ TEST(build_frame_row_skips_the_entry_marker_and_clamps_to_the_sheet) {
   CHECK(build_frame_row(*build, AnimTimeline(), 4) == 0);
 }
 
-/// **The idle activity spends draws and plays its fidget** (0x005d2ca0 behind
-/// `Unit::Idle`, 0x005d6030). This fixture declares the idle base (`idx` 13,
-/// 264 ms) and no variant after it, so there is no variant draw; then for
-/// `t` = 0, 100, ... up to the budget less 264 the activity draws
-/// `rand(1, 15)` from the world's generator until one is 1, starts the fidget
-/// `t` ms on and waits it out; with no 1 it holds its pose for the whole
-/// budget. Every step after is a re-entry, and the call is done when the
-/// budget is spent. A unit walking on another slot draws nothing.
-TEST(idle_draws_for_a_fidget_every_hundred_ms_and_spends_its_whole_budget) {
-  AnimBench b;
-  CommandSystem commands;
-  REQUIRE(b.world.add_system(&commands));
-  const ObjectId unit = b.spawn();
-  b.world.rng().seed(12345);
-  std::int32_t word = 0;
-  std::vector<script::Value> args{script::Value::object(kTypeObj, unit),
-                                  script::Value::integer(1000)};
-  script::CallContext ctx;
-  ctx.arguments = args;
-  ctx.user = &b.context;
-  ctx.name = "Idle";
-  ctx.kind = script::CallKind::member;
-  ctx.scratch = &word;
-  const std::uint32_t index = b.registry.find(script::CallKind::member, "Idle", 1);
-  REQUIRE(index != script::kUnresolvedHost);
-  const script::HostFn idle = b.registry.entry(index).fn;
-
-  // What the first step must do, computed beside it.
-  Rng probe(12345);
-  std::int64_t first_t = -1;
-  for (std::int64_t t = 0; t <= 1000 - 264; t += 100) {
-    if (probe.between(1, 15) == 1) {
-      first_t = t;
-      break;
-    }
-  }
-  const script::HostOutcome first = idle(ctx);
-  CHECK(first.status == script::HostStatus::retry);
-  CHECK(b.world.rng().state() == probe.state());
-  if (first_t < 0) {
-    CHECK(first.suspend_for == 1000);
-  } else {
-    // The fidget starts `t` on: the wait is its start offset plus its length.
-    CHECK(first.suspend_for == first_t + 264);
-  }
-
-  // Run the steps out, the game's time moving as the waits do: they add up to
-  // the budget, and the call ends.
-  std::int64_t waited = first.suspend_for;
-  std::int64_t last = first.suspend_for;
-  ctx.first_call = false;
-  for (int i = 0; i < 50; ++i) {
-    b.world.advance(static_cast<std::int32_t>(last));
-    const script::HostOutcome next = idle(ctx);
-    if (next.status != script::HostStatus::retry) {
-      CHECK(next.status == script::HostStatus::ok);
-      break;
-    }
-    waited += next.suspend_for;
-    last = next.suspend_for;
-  }
-  CHECK(waited == 1000);
-
-  // On another walk slot -- a villager with its bundle -- no draw at all.
-  const ObjectId carrier = b.spawn();
-  b.movement.state(carrier).walk_anim = 18;
-  const std::uint32_t before = b.world.rng().state();
-  std::vector<script::Value> other{script::Value::object(kTypeObj, carrier),
-                                   script::Value::integer(1000)};
-  script::CallContext cctx = ctx;
-  cctx.arguments = other;
-  cctx.first_call = true;
-  std::int32_t cword = 0;
-  cctx.scratch = &cword;
-  const script::HostOutcome held = idle(cctx);
-  CHECK(held.status == script::HostStatus::retry);
-  CHECK(held.suspend_for == 1000);
-  CHECK(b.world.rng().state() == before);
-}
-
 namespace {
 
-/// One `Idle(ms)` call on `unit` through the registry, first run or re-entry.
+/// The script an idle in these tests is for: what the activity wakes.
+constexpr script::ScriptId kIdleScript = 5;
+
+/// One `Idle(ms)` call on `unit` through the registry, from `kIdleScript`.
 struct IdleCall {
   AnimBench& b;
   std::vector<script::Value> args;
@@ -1112,6 +1042,7 @@ struct IdleCall {
     ctx.name = "Idle";
     ctx.kind = script::CallKind::member;
     ctx.scratch = &word;
+    ctx.script = kIdleScript;
     const std::uint32_t index = b.registry.find(script::CallKind::member, "Idle", 1);
     REQUIRE(index != script::kUnresolvedHost);
     fn = b.registry.entry(index).fn;
@@ -1134,7 +1065,80 @@ std::int64_t first_fidget(std::uint32_t seed, std::int64_t budget) {
   return -1;
 }
 
+/// The game time at which `unit`'s activity woke its script -- its waiter
+/// taken -- run a millisecond at a time, or -1 by `limit`.
+GameTime woken_at(AnimBench& b, ObjectId unit, GameTime limit) {
+  while (b.world.time() < limit) {
+    b.world.advance(1);
+    const WorldObject* slot = b.world.find(unit);
+    if (slot == nullptr) return -1;
+    if (slot->clock.waiter == script::kNoScript) return b.world.time();
+  }
+  return -1;
+}
+
 }  // namespace
+
+/// **The idle activity spends draws and plays its fidget** (0x005d2ca0 behind
+/// `Unit::Idle`, 0x005d6030). This fixture declares the idle base (`idx` 13,
+/// 264 ms) and no variant after it, so there is no variant draw; then for
+/// `t` = 0, 100, ... up to the budget less 264 the activity draws
+/// `rand(1, 15)` from the world's generator until one is 1, starts the fidget
+/// `t` ms on and waits it out; with no 1 it holds its pose for the whole
+/// budget. The call is done at once and the script sleeps with no timed
+/// wake; every step after is the animation timer's firing, and the last
+/// wakes the script when the budget is spent. A unit walking on another slot
+/// draws nothing.
+TEST(idle_draws_for_a_fidget_every_hundred_ms_and_spends_its_whole_budget) {
+  AnimBench b;
+  CommandSystem commands;
+  REQUIRE(b.world.add_system(&commands));
+  const ObjectId unit = b.spawn();
+  b.world.rng().seed(12345);
+  IdleCall idle(b, unit, 1000);
+
+  // What the first step must do, computed beside it.
+  Rng probe(12345);
+  std::int64_t first_t = -1;
+  for (std::int64_t t = 0; t <= 1000 - 264; t += 100) {
+    if (probe.between(1, 15) == 1) {
+      first_t = t;
+      break;
+    }
+  }
+  const GameTime called = b.world.time();
+  const script::HostOutcome first = idle.run();
+  CHECK(first.status == script::HostStatus::suspend);
+  CHECK(first.suspend_for > 1000000);
+  CHECK(b.world.rng().state() == probe.state());
+  const WorldObject* slot = b.world.find(unit);
+  CHECK(slot->clock.mode == 4);
+  CHECK(slot->clock.waiter == kIdleScript);
+  if (first_t < 0) {
+    CHECK(slot->clock.timer_at == called + 1000);
+    CHECK(slot->clock.budget == 0);
+  } else {
+    // The fidget starts `t` on, and its start offset and length come off
+    // the budget.
+    CHECK(slot->clock.start == called + first_t);
+    CHECK(slot->clock.end() == called + first_t + 264);
+    CHECK(slot->clock.budget == 1000 - first_t - 264);
+  }
+
+  // The steps run on the timer, and the last -- the budget spent -- wakes
+  // the script exactly the budget after the call.
+  CHECK(woken_at(b, unit, called + 2000) == called + 1000);
+
+  // On another walk slot -- a villager with its bundle -- no draw at all.
+  const ObjectId carrier = b.spawn();
+  b.movement.state(carrier).walk_anim = 18;
+  const std::uint32_t before = b.world.rng().state();
+  IdleCall other(b, carrier, 1000);
+  const GameTime asked = b.world.time();
+  CHECK(other.run().status == script::HostStatus::suspend);
+  CHECK(b.world.find(carrier)->clock.timer_at == asked + 1000);
+  CHECK(b.world.rng().state() == before);
+}
 
 /// **`ForceIdle`'s flag is kept on the unit and spent by the next draw**
 /// (0x005d88b0 writes `[unit+0x1b8]`; 0x005d2ca0 reads it). With it up, the
@@ -1157,10 +1161,12 @@ TEST(force_idle_keeps_its_flag_until_a_draw_spends_it) {
   Rng probe(seed);
   (void)probe.between(1, 15);
   IdleCall idle(b, unit, 1000);
+  const GameTime called = b.world.time();
   const script::HostOutcome first = idle.run();
-  CHECK(first.status == script::HostStatus::retry);
-  // The fidget at `t = 0`: wait its length; one draw spent; the flag down.
-  CHECK(first.suspend_for == 264);
+  CHECK(first.status == script::HostStatus::suspend);
+  // The fidget at `t = 0`; one draw spent; the flag down.
+  CHECK(b.world.find(unit)->clock.start == called);
+  CHECK(b.world.find(unit)->clock.end() == called + 264);
   CHECK(b.world.rng().state() == probe.state());
   CHECK(!b.world.find(unit)->state.flags.force_idle);
   CHECK(b.world.find(unit)->object->anim.anim_slot == 13);
@@ -1171,8 +1177,8 @@ TEST(force_idle_keeps_its_flag_until_a_draw_spends_it) {
   const std::uint32_t before = b.world.rng().state();
   IdleCall brief(b, other, 200);
   const script::HostOutcome held = brief.run();
-  CHECK(held.status == script::HostStatus::retry);
-  CHECK(held.suspend_for == 200);
+  CHECK(held.status == script::HostStatus::suspend);
+  CHECK(b.world.find(other)->clock.timer_at == b.world.time() + 200);
   CHECK(b.world.rng().state() == before);
   CHECK(b.world.find(other)->state.flags.force_idle);
 }
@@ -1181,14 +1187,16 @@ TEST(force_idle_keeps_its_flag_until_a_draw_spends_it) {
 /// activity setter (0x005a7680) runs the activity at once only when the
 /// unit's animation timer is not pending (0x0053cfc0); otherwise the
 /// animation's end runs it (0x0053f6a0). So an `Idle` called 100 ms into a
-/// 300 ms attack lead-in waits 200 ms with no draw, then takes its first step
-/// with the whole budget. The state's own loop is a pose, not in flight.
+/// 300 ms attack lead-in draws nothing, and the lead-in's end takes the
+/// first step with the whole budget. The state's own loop is a pose, not in
+/// flight.
 TEST(idle_waits_out_an_animation_already_in_flight_before_its_first_step) {
   AnimBench b;
   CommandSystem commands;
   REQUIRE(b.world.add_system(&commands));
   const ObjectId unit = b.spawn();
-  REQUIRE(b.world.start_animation(unit, 19, b.world.time()) == 300);
+  const GameTime began = b.world.time();
+  REQUIRE(b.world.start_animation(unit, 19, began) == 300);
   b.world.advance(100);
   REQUIRE(b.world.find(unit)->animating);
 
@@ -1196,22 +1204,21 @@ TEST(idle_waits_out_an_animation_already_in_flight_before_its_first_step) {
   const std::uint32_t before = b.world.rng().state();
   IdleCall idle(b, unit, 1000);
   const script::HostOutcome first = idle.run();
-  CHECK(first.status == script::HostStatus::retry);
-  CHECK(first.suspend_for == 200);
+  CHECK(first.status == script::HostStatus::suspend);
   CHECK(b.world.rng().state() == before);
+  CHECK(b.world.find(unit)->clock.slot == 19);
 
-  // The re-entry is the first step, over the whole 1,000. The lead-in left
-  // the unit in state 2, so a fidget has the 2-to-1 edge (120) in front.
+  // The lead-in's end is the first step, over the whole 1,000. It left the
+  // unit in state 2, so a fidget has the 2-to-1 edge (120) in front.
   b.world.advance(200);
   const std::int64_t t = first_fidget(777, 1000);
-  const script::HostOutcome step = idle.run();
-  CHECK(step.status == script::HostStatus::retry);
-  if (t < 0) {
-    CHECK(step.suspend_for == 1000);
-  } else {
-    CHECK(step.suspend_for == t + 120 + 264);
-  }
   CHECK(b.world.rng().state() != before);
+  if (t < 0) {
+    CHECK(b.world.find(unit)->clock.timer_at == began + 300 + 1000);
+  } else {
+    CHECK(b.world.find(unit)->clock.slot == 13);
+    CHECK(b.world.find(unit)->clock.end() == began + 300 + t + 120 + 264);
+  }
 
   // A unit resting in its state's loop is not in flight: the step is at once.
   const ObjectId resting = b.spawn();
@@ -1220,7 +1227,7 @@ TEST(idle_waits_out_an_animation_already_in_flight_before_its_first_step) {
   IdleCall now(b, resting, 1000);
   const script::HostOutcome at_once = now.run();
   CHECK(b.world.rng().state() != Rng(777).state());
-  CHECK(at_once.status == script::HostStatus::retry);
+  CHECK(at_once.status == script::HostStatus::suspend);
 }
 
 /// `Ship::Idle` raises the same flag (0x005c6ea0 writes `[ship+0x1b8] = 1`),
@@ -1242,10 +1249,12 @@ TEST(ship_idle_raises_the_force_flag_its_first_draw_spends) {
   ctx.name = "Idle";
   ctx.kind = script::CallKind::member;
   ctx.scratch = &word;
+  const GameTime called = b.world.time();
   const script::HostOutcome first = b.registry.entry(index).fn(ctx);
   // The budget is the idle animation's own 264 ms, and the fidget fills it.
-  CHECK(first.status == script::HostStatus::retry);
-  CHECK(first.suspend_for == 264);
+  CHECK(first.status == script::HostStatus::suspend);
+  CHECK(b.world.find(ship)->clock.end() == called + 264);
+  CHECK(b.world.find(ship)->clock.budget == 0);
   CHECK(!b.world.find(ship)->state.flags.force_idle);
 }
 
@@ -1261,13 +1270,84 @@ TEST(idle_whose_mode_was_rewritten_never_wakes) {
   b.world.rng().seed(1);
   IdleCall idle(b, unit, 1000);
   const script::HostOutcome first = idle.run();
-  REQUIRE(first.status == script::HostStatus::retry);
+  REQUIRE(first.status == script::HostStatus::suspend);
   CHECK(b.world.find(unit)->clock.mode == 4);
   b.call("StartAnim", 2, {AnimBench::obj(unit), script::Value::integer(1),
                           AnimBench::point(100, 100)});
   CHECK(b.world.find(unit)->clock.mode == 0);
   b.world.advance(1500);
-  const script::HostOutcome orphan = idle.run();
-  CHECK(orphan.status == script::HostStatus::retry);
-  CHECK(orphan.suspend_for > 1000000);
+  CHECK(b.world.find(unit)->clock.waiter == kIdleScript);
+}
+
+/// **The animation timer walks the phases, and the main start moves the
+/// object to the origin** (0x0053f6a0). `StartAnimation` arms the timer at
+/// the start; at the main start the object is put at the origin and the
+/// origin keeps where it came from, which `GetCurrentPosition` (0x0053d830)
+/// runs the drawn point from over the window; `StopAnimation` (0x0053d730)
+/// puts the object at that point. A delay of -1 moves it at once and arms
+/// nothing.
+TEST(anim_timer_walks_the_phases_and_moves_to_the_origin_at_the_main_start) {
+  AnimBench b;
+  const ObjectId id = b.spawn();
+  const GameTime now = b.world.time();
+  REQUIRE(b.world.start_animation(id, 13, now, 0, 0, Point{300, 100}) == 264);
+  // Armed at the start; nothing has moved yet.
+  CHECK(b.world.find(id)->clock.timer_at == now);
+  CHECK(b.world.resolve_position(id) == (Point{100, 100}));
+  // The start is the main start here (no transition) and the action moment
+  // too (an action time of 0): the object moves, and the end is armed.
+  b.world.fire_anim_timers(now);
+  CHECK(b.world.resolve_position(id) == (Point{300, 100}));
+  CHECK(b.world.find(id)->clock.origin == (Point{100, 100}));
+  CHECK(b.world.find(id)->clock.timer_at == now + 264);
+  // Half way through the window, the drawn point is half way along.
+  CHECK(b.world.current_position(*b.world.find(id), now + 132) == (Point{200, 100}));
+  CHECK(b.world.current_position(*b.world.find(id), now + 264) == (Point{300, 100}));
+  // Stopped there, the object is put at that point and the timer cancelled.
+  b.world.stop_animation(id, now + 132);
+  CHECK(b.world.resolve_position(id) == (Point{200, 100}));
+  CHECK(b.world.find(id)->clock.timer_at == kNoAnimTimer);
+  CHECK(b.world.find(id)->clock.slot == kNoAnim);
+
+  // `-1`: at once, no timer, and the animation never ends.
+  REQUIRE(b.world.start_animation(id, 13, now, -1, 0, Point{50, 60}) > 0);
+  CHECK(b.world.resolve_position(id) == (Point{50, 60}));
+  CHECK(b.world.find(id)->clock.origin == (Point{200, 100}));
+  CHECK(b.world.find(id)->clock.timer_at == kNoAnimTimer);
+  b.world.advance_turns(10);
+  CHECK(b.world.find(id)->clock.slot == 13);
+}
+
+/// **`Face` and `SetPos` stop what plays first** (0x0053d730): the object
+/// is put where the animation draws it and rests in the end state, the timer
+/// cancelled. `Face` then writes the raw difference to the point, `(0, 1)`
+/// for a point on top of the object (0x0053f5f0), which `GetDir` answers at
+/// that length.
+TEST(anim_face_and_set_pos_stop_the_animation_and_face_keeps_the_raw_difference) {
+  AnimBench b;
+  const ObjectId id = b.spawn();
+  const GameTime now = b.world.time();
+  REQUIRE(b.world.start_animation(id, 13, now, 0, 0, Point{300, 100}) == 264);
+  b.world.fire_anim_timers(now);
+  REQUIRE(b.world.find(id)->clock.timer_at == now + 264);
+
+  CHECK(b.call("Face", 1, {AnimBench::obj(id), AnimBench::point(200, 400)}).status ==
+        script::HostStatus::ok);
+  CHECK(b.world.find(id)->clock.slot == kNoAnim);
+  CHECK(b.world.find(id)->clock.timer_at == kNoAnimTimer);
+  // Stopped at the window's start: the drawn point is the origin's.
+  CHECK(b.world.resolve_position(id) == (Point{100, 100}));
+  CHECK(b.movement.state(id).facing == (Point{100, 300}));
+  CHECK(unpack_point(b.call("GetDir", 0, {AnimBench::obj(id)}).value) == (Point{100, 300}));
+  CHECK(b.call("Face", 1, {AnimBench::obj(id), AnimBench::point(100, 100)}).status ==
+        script::HostStatus::ok);
+  CHECK(b.movement.state(id).facing == (Point{0, 1}));
+
+  REQUIRE(b.world.start_animation(id, 13, now, 0) == 264);
+  CHECK(b.world.find(id)->clock.timer_at == now);
+  CHECK(b.call("SetPos", 1, {AnimBench::obj(id), AnimBench::point(500, 500)}).status ==
+        script::HostStatus::ok);
+  CHECK(b.world.find(id)->clock.timer_at == kNoAnimTimer);
+  CHECK(b.world.find(id)->clock.slot == kNoAnim);
+  CHECK(b.world.resolve_position(id) == (Point{500, 500}));
 }

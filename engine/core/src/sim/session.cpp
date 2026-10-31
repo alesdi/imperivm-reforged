@@ -3,6 +3,7 @@
 
 #include "imperivm/core/sim/session.hpp"
 
+#include "imperivm/core/sim/anim.hpp"
 #include "imperivm/core/sim/fog.hpp"
 
 #include <algorithm>
@@ -122,6 +123,8 @@ struct GameSession::Impl : ScriptLibrary, ClassHookRunner, ObjectStarter {
   WorldHost host{world};
   HostContext context;
   script::Scheduler scheduler;
+  /// The animation timers on the scripts' wheel, and the end handler they run.
+  AnimEvents anim_events{world, scheduler};
   SelectionTable selections;
 
   ScriptResolver* scripts = nullptr;
@@ -800,6 +803,8 @@ Result<std::unique_ptr<GameSession>> GameSession::create(const script::HostRegis
   // once. A world without it fires no class hook and takes the `ondie` latch
   // all the same, which is what every synthetic test gets. See `sim/hooks.hpp`.
   impl.world.set_hook_runner(&impl);
+  // And the animation timers onto the scripts' wheel (`AnimEvents`).
+  impl.anim_events.install();
 
   impl.world.start();
 

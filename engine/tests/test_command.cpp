@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <iterator>
 #include <span>
 #include <string>
@@ -1244,17 +1245,21 @@ TEST(idle_is_an_order_that_costs_game_time) {
 
   HostCall timed(f.world, {obj(u), Value::integer(1900)});
   const HostOutcome slept = invoke(registry, CallKind::member, "Idle", 1, timed);
-  CHECK(slept.status == HostStatus::retry);  // the activity's steps are re-entries
-  CHECK(slept.suspend_for == 1900);
+  // Done, with no timed wake: the activity holds the pose for the budget on
+  // the animation timer, and its last step wakes the script.
+  CHECK(slept.status == HostStatus::suspend);
+  CHECK(slept.suspend_for > 1000000);
+  CHECK(f.world.find(u)->clock.mode == 4);
+  CHECK(f.world.find(u)->clock.timer_at == f.world.time() + 1900);
 
   // Another unit: on `u` the first idle's hold is still pending, and a second
   // idle set over it waits that out before its own first step (0x005a7680).
   const ObjectId v = f.spawn(f.unit_class);
   HostCall bare(f.world, {obj(v)});
   const HostOutcome fallback = invoke(registry, CallKind::member, "Idle", 0, bare);
-  CHECK(fallback.status == HostStatus::retry);
-  CHECK(fallback.suspend_for == kDefaultIdleSlice);
-  CHECK(fallback.suspend_for > 0);  // or SHIP_IDLE.VS spins
+  CHECK(fallback.status == HostStatus::suspend);
+  // Held for the slice, or SHIP_IDLE.VS spins.
+  CHECK(f.world.find(v)->clock.timer_at == f.world.time() + kDefaultIdleSlice);
 
   // It does *not* touch the queue: idling is what a command does, not a
   // command in itself.
@@ -1290,8 +1295,8 @@ TEST(idle_on_the_map_drops_the_target_and_still_waits_its_argument) {
 
   HostCall standing(f.world, {obj(u), Value::integer(1900)});
   const HostOutcome idled = invoke(registry, CallKind::member, "Idle", 1, standing);
-  CHECK(idled.status == HostStatus::retry);
-  CHECK(idled.suspend_for == 1900);
+  CHECK(idled.status == HostStatus::suspend);
+  CHECK(f.world.find(u)->clock.timer_at == f.world.time() + 1900);
   REQUIRE(combat.find(u) != nullptr);
   CHECK(combat.find(u)->target == kNoObject);
   CHECK(combat.find(u)->attacks == 0);
@@ -1299,13 +1304,16 @@ TEST(idle_on_the_map_drops_the_target_and_still_waits_its_argument) {
 
   // A non-positive argument still ends the slice, as every 3 does -- once the
   // first idle's hold has run out, since until then it is that hold the
-  // second idle waits on.
+  // second idle waits on. With nothing to spend, the activity's wake comes
+  // inside the call, and the 3 takes the thread off the wheel after it
+  // (0x0069f842 -> 0x00687bf0): the script sleeps on with no timed wake.
   f.world.advance(1900);
   combat.find(u)->target = foe;
   HostCall zero(f.world, {obj(u), Value::integer(0)});
   const HostOutcome yielded = invoke(registry, CallKind::member, "Idle", 1, zero);
   CHECK(yielded.status == HostStatus::suspend);
-  CHECK(yielded.suspend_for == 0);
+  CHECK(yielded.suspend_for == std::numeric_limits<std::int32_t>::max());
+  CHECK(f.world.find(u)->clock.mode == 0);
   CHECK(combat.find(u)->target == kNoObject);
 
   // Inside a holder: the argument as a wait, and the target kept.
@@ -1359,8 +1367,9 @@ TEST(taunt_drops_the_target_on_the_map_and_waits_in_a_holder) {
   const HostOutcome yielded = invoke(registry, CallKind::member, "Taunt", 1, standing);
   // Two seconds of taunting, not one scheduler step: `UNIT_CAPTURE.VS` takes
   // a point of loyalty after each.
-  CHECK(yielded.status == HostStatus::retry);
-  CHECK(yielded.suspend_for == 2000);
+  CHECK(yielded.status == HostStatus::suspend);
+  CHECK(f.world.find(u)->clock.mode == 5);
+  CHECK(f.world.find(u)->clock.timer_at == f.world.time() + 2000);
   // "A new order supersedes combat" -- the prologue this shares with `Stop`,
   // both `Goto`s, `Attack` and `AttackEveryone`.
   REQUIRE(combat.find(u) != nullptr);
@@ -1407,7 +1416,7 @@ TEST(taunt_without_a_combat_system_still_yields) {
   const ObjectId u = f.spawn(f.unit_class);
 
   HostCall standing(f.world, {obj(u), Value::integer(2000)});
-  CHECK(invoke(registry, CallKind::member, "Taunt", 1, standing).status == HostStatus::retry);
+  CHECK(invoke(registry, CallKind::member, "Taunt", 1, standing).status == HostStatus::suspend);
 
   // No receiver at all refuses, which is `resolve`'s answer and `Idle`'s too.
   HostCall nobody(f.world, {obj(kNoObject), Value::integer(2000)});
