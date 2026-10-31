@@ -328,13 +328,18 @@ def test_a_seed_is_one_game_and_another_seed_is_another(imrun, game_dir):
     assert field(first, "  hash") != field(default, "  hash")
 
 
-#: How far a run may go for its first capture. It stops on the turn the first
-#: comes (`IMRUN_UNTIL_CAPTURE`): turn 1,110 on seed 1 once, 586 with exact
-#: wake-ups, 484 with the sentries fix as well. When the computer players
-#: first take something is their business, and moves with every change to
-#: what they do; the claim is about the lines a run prints, whatever turn
-#: they come on, so the ceiling is generous and costs nothing unless needed.
-CAPTURE_CEILING = 4_000
+#: The capture the reconciliation below replays, staged rather than waited
+#: for: a p3 soldier is stood beside p1's undefended village at the map's
+#: north east and right-clicks it at `CAPTURE_ORDER_TURN` (the war
+#: `test_corpus_lockstep.py` stages), and the run stops on the first capture
+#: (`IMRUN_UNTIL_CAPTURE`) or at `CAPTURE_CEILING`. It used to wait for seed
+#: 1's computer players to take something first, which is their business and
+#: moves with every change to what they do.
+CAPTURE_SEED = 7
+CAPTURE_ORDER_TURN = 300
+CAPTURE_CEILING = 1_500
+P1_VILLAGE_AT = (15362, 779)
+P3_STANDS_AT = (15100, 1100)
 
 
 def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to_its_last(
@@ -344,18 +349,44 @@ def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to
     turn 0 must give the owners at the end, every settlement, outposts
     included. A capture missed, or printed for a settlement that did not
     change hands, breaks the reconciliation; a run with no capture at all
-    would pass it vacuously, so one is required.
+    would pass it vacuously, so one is staged and required.
     """
     crossroads = game_dir / "Scenarios" / "Crossroads.BFHP"
     if not crossroads.is_file():
         pytest.skip("Crossroads.BFHP is not in this installation")
     owner_line = re.compile(r"^\s+#(\d+) p(-?\d+) kind (\d+) ", re.MULTILINE)
 
+    # Who is where at the order's turn: p1's village by its map position, and
+    # a p3 foot soldier or hero on the map, or else a held one, which
+    # `IMRUN_PLACE` takes out of its garrison.
+    first = subprocess.run(
+        [str(imrun), str(game_dir), str(crossroads), str(CAPTURE_ORDER_TURN), "800",
+         "--seed", str(CAPTURE_SEED)],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "IMRUN_OBJECTS": "Village,Swordsman,Footman,Axe,Guardian,Hero"},
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    listed = [(int(i), cls, int(p), int(x), int(y)) for i, cls, p, x, y in
+              re.findall(r"^\s+(\d+) (\S+) p(\d+) at \((-?\d+),(-?\d+)\) holder 0 health [1-9]",
+                         first.stdout, re.MULTILINE)]
+    held = [(int(i), cls, int(p)) for i, cls, p in
+            re.findall(r"^\s+(\d+) (\S+) p(\d+) at \(-1,-1\) holder [1-9]\d* health [1-9]",
+                       first.stdout, re.MULTILINE)]
+    village = [i for i, cls, p, x, y in listed
+               if "Village" in cls and p == 1 and (x, y) == P1_VILLAGE_AT]
+    soldier = [i for i, cls, p, x, y in listed if "Village" not in cls and p == 3] or [
+        i for i, cls, p in held if p == 3]
+    assert village and soldier, first.stdout[-3000:]
+    staged = {**os.environ, "IMRUN_SETTLEMENTS": "1", "IMRUN_UNTIL_CAPTURE": "1",
+              "IMRUN_PLACE": f"{P3_STANDS_AT[0]},{P3_STANDS_AT[1]}",
+              "IMRUN_GOTO": f"{CAPTURE_ORDER_TURN}:{soldier[0]}:{P1_VILLAGE_AT[0]},{P1_VILLAGE_AT[1]}",
+              "IMRUN_CLICK": str(village[0])}
+
     def owners(turns: int) -> tuple[dict[int, int], str]:
         result = subprocess.run(
-            [str(imrun), str(game_dir), str(crossroads), str(turns), "800", "--seed", "1"],
-            capture_output=True, text=True, timeout=1800,
-            env={**os.environ, "IMRUN_SETTLEMENTS": "1", "IMRUN_UNTIL_CAPTURE": "1"},
+            [str(imrun), str(game_dir), str(crossroads), str(turns), "800",
+             "--seed", str(CAPTURE_SEED)],
+            capture_output=True, text=True, timeout=1800, env=staged,
         )
         assert result.returncode == 0, result.stdout + result.stderr
         found = {int(m.group(1)): int(m.group(2)) for m in owner_line.finditer(result.stdout)}
@@ -366,9 +397,7 @@ def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to
     end, output = owners(CAPTURE_CEILING)
     captures = re.findall(r"^  capture turn (\d+): #(\d+) kind \d+ p(-?\d+) -> p(-?\d+)$",
                           output, re.MULTILINE)
-    assert start != end, (
-        f"no settlement changed hands in {CAPTURE_CEILING} turns on seed 1; "
-        "raise CAPTURE_CEILING so that this test has something to check")
+    assert start != end, f"the staged capture did not come in {CAPTURE_CEILING} turns"
     replayed = dict(start)
     last_turn = 0
     for turn, settlement, before, after in captures:
