@@ -210,6 +210,11 @@ Departures, each one for what the engine does not yet do:
 * **The waiter.** The original wakes the object's command thread; here the
   activity wakes the script that called `Idle`, `Taunt` or `PlayAnim`
   (`AnimClock::waiter`), which is that thread for every shipped caller.
+* **An animation declared 0 long.** The original divides by the declared
+  length when it places the action moment (0x0053cf30, at 0x0053cfa9), so
+  starting one is an integer-divide fault there. Here the action moment is
+  the main start and the animation ends on the millisecond it starts; the
+  idle's fidget does not start one (`docs/formats/idle.md`).
 * **The view after an end.** The original draws the end state's pose from
   the end. Here the strip plays to its last frame and holds it. This is a
   renderer-only difference.

@@ -2489,7 +2489,14 @@ bool idle_activity_step(World& world, script::Scheduler* scheduler, ObjectId id,
     const MovementSystem* movement = movement_system(world);
     const MoveState* move = movement == nullptr ? nullptr : movement->find(id);
     const bool walk_index_zero = move == nullptr || move->walk_anim == 1;
-    if (length >= 0 && length <= budget) {
+    // An animation declared 0 long is no fidget here. The original's
+    // `StartAnimation` scales the action moment by dividing by the declared
+    // length (0x0053cf30, the division at 0x0053cfa9), so starting one is an
+    // integer-divide fault there, not a behaviour; played here it would end
+    // on the millisecond it starts, and a script that idles in a loop (the
+    // ship's `SHIP_IDLE.VS`, whose idle animation is declared 0 long) would
+    // run again on that same millisecond for ever.
+    if (length > 0 && length <= budget) {
       for (std::int64_t t = 0; t <= budget - length; t += 100) {
         if (!walk_index_zero) continue;
         // The draw comes first and is spent whether or not the flag is up
@@ -2576,14 +2583,17 @@ HostOutcome idle_impl(CallContext& ctx) {
   // target drop, and the script waits for a wake nothing sends. This engine
   // does not run the launch (see `f_presentation_void` in world_host.cpp),
   // so the gate is never up here.
-  // A ship with no such animation is a null dereference in the original;
-  // here it idles `kDefaultIdleSlice`, which keeps `SHIP_IDLE.VS`'s loop from
-  // spinning.
+  // A ship with no such animation is a null dereference in the original,
+  // and one declared 0 long a divide fault at its fidget; here either idles
+  // `kDefaultIdleSlice`, which keeps `SHIP_IDLE.VS`'s loop from spinning.
   const WorldObject* slot = self.world->find(self.id);
   std::int64_t ms = kDefaultIdleSlice;
   if (slot != nullptr) {
     const std::int32_t own = entity_anim_length(*slot, 13);
-    if (own >= 0) ms = own;
+    // An animation declared 0 long is taken as absent too: the fidget it
+    // would force divides by its length in the original (see
+    // `idle_activity_step`).
+    if (own > 0) ms = own;
   }
   // The flag goes up on the call's first run only.
   if (ctx.first_call) {

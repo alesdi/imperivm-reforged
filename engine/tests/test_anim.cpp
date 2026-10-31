@@ -1351,3 +1351,41 @@ TEST(anim_face_and_set_pos_stop_the_animation_and_face_keeps_the_raw_difference)
   CHECK(b.world.find(id)->clock.slot == kNoAnim);
   CHECK(b.world.resolve_position(id) == (Point{500, 500}));
 }
+
+/// **An idle animation declared 0 long plays no fidget** (labelled
+/// departure). The original divides by the declared length when it starts
+/// an animation (0x0053cf30, at 0x0053cfa9), so its fidget would be an
+/// integer-divide fault; played here it ended on the millisecond it started,
+/// its end ran the activity's last step and woke the script on that same
+/// millisecond, and `SHIP_IDLE.VS`'s `while (1) { ... if (.Stop(200))
+/// .Idle(); }` -- the ship's idle animation is declared 0 long -- ran again
+/// there for ever: Zama hung in one scheduler pass. A forced `Idle(0)` here
+/// starts nothing and arms nothing, and the script sleeps on.
+TEST(anim_an_idle_animation_declared_zero_long_plays_no_fidget_and_arms_nothing) {
+  AnimBench b;
+  CommandSystem commands;
+  REQUIRE(b.world.add_system(&commands));
+  std::string xml(kEntityXml);
+  const std::string from = R"(name="idle" startstate="1" endstate="1" frames="6" duration="264")";
+  const std::size_t at = xml.find(from);
+  REQUIRE(at != std::string::npos);
+  xml.replace(at, from.size(), R"(name="idle" startstate="1" endstate="1" frames="6" duration="0")");
+  const Result<Entity> zero = Entity::parse(bytes_of(xml));
+  REQUIRE(zero.ok());
+  const ObjectId unit = b.world.spawn(NativeClass::unit, &zero.value());
+  (void)b.world.set_position(unit, Point{100, 100});
+  (void)b.world.set_health(unit, 100);
+
+  for (int round = 0; round < 50; ++round) {
+    CHECK(b.call("ForceIdle", 0, {AnimBench::obj(unit)}).status == script::HostStatus::ok);
+    IdleCall idle(b, unit, 0);
+    const script::HostOutcome out = idle.run();
+    CHECK(out.status == script::HostStatus::suspend);
+    // No fidget: nothing armed at this millisecond, so nothing to fire and
+    // wake the script on it.
+    CHECK(!b.world.anim_timer_pending(*b.world.find(unit)));
+    CHECK(b.world.find(unit)->clock.mode == 0);
+    // The flag was not spent: no draw was allowed to draw.
+    CHECK(b.world.state(unit)->flags.force_idle);
+  }
+}

@@ -122,5 +122,16 @@ when it was called.
   (0x005d6c90) leaves the step in flight to play out; so an `Idle` called on
   a unit just stopped mid-stride waits for the end of that step. The
   engine's walk is the movement system's loop, so the first step is at once.
+* **An idle animation declared 0 long plays no fidget.** The original's
+  `StartAnimation` scales the action moment by dividing by the declared
+  length (0x0053cf30, the division at 0x0053cfa9), so a fidget declared 0
+  long is an integer-divide fault there. Played here, it ended on the
+  millisecond it started; its end ran the last step and woke the script on
+  that same millisecond, and a script that idles in a loop ran again there
+  for ever. The ship's idle animation is declared 0 long, and
+  `SHIP_IDLE.VS` loops on `if (.Stop(200)) .Idle();`: Zama hung inside one
+  scheduler pass. Here such an animation is taken as absent, by the step's
+  fidget and by `Ship::Idle`'s budget, which then idles
+  `kDefaultIdleSlice` as it does for a ship with no idle animation at all.
 * **The launch gate.** This engine does not run the shipyard launch, so
   `[ship+0x1cc]` is never up and `Ship::Idle` always takes its activity.
