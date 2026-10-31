@@ -102,9 +102,8 @@ GameTime script_now(const CallContext& ctx, const World& world) {
   return ctx.scheduler != nullptr ? ctx.scheduler->now() : world.time();
 }
 
-std::int32_t start_animation_facing(const CallContext& ctx, World& world, ObjectId id,
-                                    std::int32_t anim_slot, Point face, GameTime delay) {
-  const GameTime now = script_now(ctx, world);
+std::int32_t start_animation_facing_at(World& world, ObjectId id, std::int32_t anim_slot,
+                                       Point face, GameTime now, GameTime delay, Point origin) {
   // Off the map the timer is cancelled and nothing starts -- and nothing
   // turns: that test opens 0x0053e6c0, and the facing is set inside it.
   if (const ObjectState* state = world.state(id);
@@ -113,14 +112,30 @@ std::int32_t start_animation_facing(const CallContext& ctx, World& world, Object
       movement->face(world, id, face);
     }
   }
-  return world.start_animation(id, anim_slot, now, delay, 0);
+  return world.start_animation(id, anim_slot, now, delay, 0, origin);
 }
 
-bool anim_dispatch(CallContext& ctx, World& world, ObjectId id, GameTime now) {
+std::int32_t start_animation_facing(const CallContext& ctx, World& world, ObjectId id,
+                                    std::int32_t anim_slot, Point face, GameTime delay) {
+  return start_animation_facing_at(world, id, anim_slot, face, script_now(ctx, world), delay);
+}
+
+bool wake_waiter(World& world, script::Scheduler* scheduler, ObjectId id, GameTime now) {
   WorldObject* slot = world.find(id);
-  if (slot == nullptr) return false;
+  if (slot == nullptr || slot->clock.waiter == script::kNoScript) return false;
+  const script::ScriptId waiter = slot->clock.waiter;
+  slot->clock.waiter = script::kNoScript;
+  return scheduler != nullptr && scheduler->wake(waiter, now);
+}
+
+void anim_end_handler(World& world, script::Scheduler* scheduler, CallContext* ctx, ObjectId id,
+                      GameTime now) {
+  // A flying unit's own step first (0x0051b450), then the unit's handler.
+  flying_anim_end(world, id);
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr) return;
   // A unit's handler (0x005d5b60) does nothing at all while it is held.
-  if (slot->state.flags.is_unit && slot->state.is_held()) return false;
+  if (slot->state.flags.is_unit && slot->state.is_held()) return;
   // Dead (`vtbl+0x50`, health gone) and not yet put down: the death
   // animation when the entity declares one (mode 1), else straight to the
   // end (mode 8) -- 0x005b0f70, and 0x005d5b75 before it for a unit.
@@ -129,34 +144,80 @@ bool anim_dispatch(CallContext& ctx, World& world, ObjectId id, GameTime now) {
                            slot->object->entity->has_anim(kAnimDie);
     slot->clock.mode = has_death ? 1 : 8;
   }
-  if (slot->clock.mode == 1) {
-    // One of the death animation's variants (0x005a81b0 over idx 9..12, one
-    // draw on the synchronised generator), the command the object runs ended
-    // (0x005b07d0, when its command thread lives: 0x0069f950), and the
-    // object marked put down.
-    const Entity& entity = *slot->object->entity;
-    std::int32_t variants = 1;
-    if (entity.has_anim(kAnimDie + 1)) {
-      variants = 2;
-      if (entity.has_anim(kAnimDie + 2)) variants = entity.has_anim(kAnimDie + 3) ? 4 : 3;
+  switch (slot->clock.mode) {
+    case 1: {
+      // One of the death animation's variants (0x005a81b0 over idx 9..12,
+      // one draw on the synchronised generator), the command the object
+      // runs ended (0x005b07d0, when its command thread lives: 0x0069f950),
+      // and the object marked put down.
+      const Entity& entity = *slot->object->entity;
+      std::int32_t variants = 1;
+      if (entity.has_anim(kAnimDie + 1)) {
+        variants = 2;
+        if (entity.has_anim(kAnimDie + 2)) variants = entity.has_anim(kAnimDie + 3) ? 4 : 3;
+      }
+      const std::int32_t chosen = kAnimDie + world.rng().between(0, variants - 1);
+      (void)world.start_animation(id, chosen, now);
+      if (CommandSystem* commands = command_system(world); commands != nullptr) {
+        const script::ScriptId previous =
+            commands->set_caller(ctx != nullptr ? ctx->script : script::kNoScript);
+        (void)commands->kill_command(world, id);
+        (void)commands->set_caller(previous);
+      }
+      world.set_anim_mode(id, 8);
+      return;
     }
-    const std::int32_t chosen = kAnimDie + world.rng().between(0, variants - 1);
-    (void)world.start_animation(id, chosen, now);
-    if (CommandSystem* commands = command_system(world); commands != nullptr) {
-      const script::ScriptId previous = commands->set_caller(ctx.script);
-      (void)commands->kill_command(world, id);
-      (void)commands->set_caller(previous);
+    case 8:
+      // The object's destroy (`vtbl+0x94`): from a script's call, deferred to
+      // the end of its slice when the object is the script's own.
+      if (ctx != nullptr) {
+        erase_from_script(*ctx, world, id);
+      } else {
+        destroy_object(scheduler, world, id);
+      }
+      return;
+    case 4:
+    case 5:
+      (void)idle_activity_step(world, scheduler, id, now);
+      return;
+    case 6: {
+      // `PlayAnim`'s continuation (0x005a76c0): the animation from the
+      // call's arguments, marked used; at its end, the wake and mode 0.
+      if (slot->clock.play_started) {
+        world.set_anim_mode(id, 0);
+        (void)wake_waiter(world, scheduler, id, now);
+        return;
+      }
+      slot->clock.play_started = true;
+      (void)start_animation_facing_at(world, id, slot->clock.play_slot, slot->clock.play_face, now,
+                                      0);
+      return;
     }
-    world.set_anim_mode(id, 8);
-    return false;
+    default:
+      // 0: nothing. 3, the walk step (0x005d3b50), is the movement system's
+      // loop here; 2, the attack's, is combat's own schedule.
+      return;
   }
-  if (slot->clock.mode == 8) {
-    // The object's destroy (`vtbl+0x94`).
-    erase_from_script(ctx, world, id);
-    return false;
-  }
-  return true;
 }
+
+void AnimEvents::install() {
+  world_->set_anim_end_handler(this);
+  world_->set_arm_source(
+      [](void* user) { return static_cast<script::Scheduler*>(user)->take_arm(); }, scheduler_);
+  world_->set_timers_swept(true);
+  scheduler_->set_timer_source(this);
+}
+
+void AnimEvents::anim_end(World& world, ObjectId id, GameTime now) {
+  anim_end_handler(world, scheduler_, nullptr, id, now);
+}
+
+bool AnimEvents::next_timer(std::int64_t& at, std::uint64_t& armed) const {
+  ObjectId id = kNoObject;
+  return world_->next_anim_timer(at, armed, id);
+}
+
+void AnimEvents::fire_timer() { world_->fire_anim_timer(); }
 
 namespace {
 
@@ -173,7 +234,7 @@ namespace {
 /// `[obj+0x130]` set to 0**, then, **when the animation timer is not
 /// pending** (0x0053cfc0), the object's animation-end handler (`vtbl+0x54`)
 /// with that mode: nothing for a living object, the death sequence for a
-/// dead one (`anim_dispatch`). Then `StartAnimation` with the document's
+/// dead one (`anim_end_handler`). Then `StartAnimation` with the document's
 /// number less one -- this engine keys on the document's number -- no
 /// origin, and the delay: 0 for `StartAnim`, the argument for
 /// `StartDelayedAnim`. A delay of -1 starts it at once and arms no timer, so
@@ -188,7 +249,7 @@ HostOutcome start_anim_common(CallContext& ctx, GameTime delay) {
   const Point face = facing_argument(ctx, *world, *slot, 2);
   const GameTime now = script_now(ctx, *world);
   world->set_anim_mode(id, 0);
-  if (world->anim_timer_left(*slot, now) == 0) (void)anim_dispatch(ctx, *world, id, now);
+  if (!world->anim_timer_pending(*slot)) anim_end_handler(*world, ctx.scheduler, &ctx, id, now);
   if (world->find(id) == nullptr) return HostOutcome::ok_void();
   (void)start_animation_facing(ctx, *world, id, int_arg(ctx, 1), face, delay);
   return HostOutcome::ok_void();
@@ -211,59 +272,36 @@ HostOutcome m_start_delayed_anim(CallContext& ctx) {
 /// ends, the handler runs mode 6 again, finds them used, wakes the script
 /// (0x0069f8f0) and sets the mode back to 0.
 ///
-/// Here the timer's firings are the call's re-entries (the call's word holds
-/// the phase and whether the facing was the object's own position). At each
-/// one the handler's own gates are asked first (`anim_dispatch`): a held
-/// unit, a dead object, or a mode something else has rewritten since --
-/// another script's `StartAnim`, an `Idle` -- runs no continuation, and the
-/// script is never woken by it. A timer moved later by another start is
-/// waited out. An object off the map at the start starts nothing and has no
+/// The firings are the timer's (`anim_end_handler`, mode 6), and the
+/// arguments are kept on the object's clock in place of the script's stack
+/// (`AnimClock::play_slot`, `play_face`, `play_started`), with the script
+/// to wake (`waiter`). The handler's own gates come first: a held unit, a
+/// dead object, or a mode something else has rewritten since -- another
+/// script's `StartAnim`, an `Idle` -- runs no continuation, and the script
+/// is never woken by it. A timer moved later by another start is waited
+/// out. An object off the map at the start starts nothing and has no
 /// timer, so nothing wakes the script either.
-constexpr std::int32_t kPlayStarted = 1;
-constexpr std::int32_t kPlayNoTurn = 2;
-
 HostOutcome m_play_anim(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("PlayAnim: no world");
-  if (ctx.first_call && slot == nullptr) return HostOutcome::ok_void();
-  if (slot == nullptr) return again_in(kNoWake);
+  if (slot == nullptr) return HostOutcome::ok_void();
   const ObjectId id = slot->id;
   const GameTime now = script_now(ctx, *world);
-
-  if (ctx.first_call) {
-    const bool no_turn = facing_argument(ctx, *world, *slot, 2) == kHeldPosition;
-    if (ctx.scratch != nullptr) *ctx.scratch = no_turn ? kPlayNoTurn : 0;
-    world->set_anim_mode(id, 6);
-    if (world->anim_timer_left(*slot, now) == 0) world->arm_anim_timer(id, now, 1);
-    const WorldObject* again = world->find(id);
-    return again_in(again == nullptr ? kNoWake : world->anim_timer_left(*again, now));
+  const Point face = facing_argument(ctx, *world, *slot, 2);
+  world->set_anim_mode(id, 6);
+  if (WorldObject* own = world->find(id); own != nullptr) {
+    own->clock.play_slot = int_arg(ctx, 1);
+    own->clock.play_face = face;
+    own->clock.play_started = false;
+    own->clock.waiter = ctx.script;
+    if (!world->anim_timer_pending(*own)) world->arm_anim_timer(id, now, 1);
   }
-
-  // The timer fired, unless something moved it later.
-  if (const GameTime left = world->anim_timer_left(*slot, now); left > 0) return again_in(left);
-  world->settle_anim(id, now);
-  if (!anim_dispatch(ctx, *world, id, now)) return again_in(kNoWake);
-  slot = world->find(id);
-  if (slot == nullptr || slot->clock.mode != 6) return again_in(kNoWake);
-
-  const std::int32_t word = ctx.scratch != nullptr ? *ctx.scratch : 0;
-  if ((word & kPlayStarted) != 0) {
-    // 0x005a76c0's second run: the wake, and the mode back to 0.
-    world->set_anim_mode(id, 0);
-    return HostOutcome::ok_void();
-  }
-  if (ctx.scratch != nullptr) *ctx.scratch = word | kPlayStarted;
-  const Point face = (word & kPlayNoTurn) != 0 ? kHeldPosition
-                     : ctx.count() > 2 && is_point(ctx.arg(2)) ? unpack_point(ctx.arg(2))
-                                                               : kHeldPosition;
-  (void)start_animation_facing(ctx, *world, id, int_arg(ctx, 1), face, 0);
-  const WorldObject* started = world->find(id);
-  if (started == nullptr) return again_in(kNoWake);
-  // No timer -- an object off the map, an animation the entity does not
-  // declare -- is no lapse, so no second run.
-  const GameTime left = world->anim_timer_left(*started, now);
-  return again_in(left > 0 ? left : kNoWake);
+  // 3: the call is done and the slice ends with no timed wake.
+  HostOutcome out;
+  out.status = script::HostStatus::suspend;
+  out.suspend_for = kNoWake;
+  return out;
 }
 
 /// `Flying::PlayAnim(int slot, point at, int z)` -- **suspending**. 13 sites,
@@ -329,25 +367,17 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
   }
   const ObjectId id = slot->id;
   const GameTime now = script_now(ctx, *world);
-  begin_flight_anim(*world, id, destination, z);
+  begin_flight_anim(*world, id, destination, z, now);
   world->set_anim_mode(id, 0);
   world->stop_animation(id, now);
   slot = world->find(id);
   if (slot == nullptr) return HostOutcome::ok_void();
 
   const Point face = destination == world->resolve_position(id) ? kHeldPosition : destination;
-  (void)start_animation_facing(ctx, *world, id, anim_slot, face, 0);
-  const WorldObject* started = world->find(id);
-  if (started == nullptr) return HostOutcome::ok_void();
-  const bool playing_now = world->anim_slot_at(*started, now) == anim_slot;
-
-  // **And the object arrives.** The original's `StartAnimation` takes the
-  // point as the animation's origin, and its timer puts the object there at
-  // the animation's own start, after any transition (0x0053f6d3: the origin
-  // and the position swapped). This engine has no animation origin, so the
-  // arrival happens here, at the call, *after* the facing has been taken
-  // from the old position -- the same instant whenever no transition plays
-  // in front, a transition's length early otherwise.
+  // **The point is the animation's origin**: the timer puts the bird there
+  // at the animation's main start, after any transition (0x0053f6d3, the
+  // origin and the position swapped), and the drawn point runs to it over
+  // the animation from where it was (`World::current_position`).
   //
   // `CROW_MOVE.VS`'s `while (.DistTo(pt) > 100)` is why a bird must arrive:
   // one that never does never leaves that loop. What it arrives *along* is
@@ -356,10 +386,12 @@ HostOutcome m_play_anim_flying(CallContext& ctx) {
   // `sim/flying.hpp`). Presentation, and written only once an animation is
   // playing to carry it.
   const Point from = world->resolve_position(id);
-  (void)world->set_position(id, destination);
-  if (playing_now) {
+  (void)start_animation_facing_at(*world, id, anim_slot, face, now, 0, destination);
+  const WorldObject* started = world->find(id);
+  if (started == nullptr) return HostOutcome::ok_void();
+  if (started->clock.slot == anim_slot) {
     if (WorldObject* moved = world->find(id); moved != nullptr) {
-      moved->flight = FlightLeg{from, world->resolve_position(id), true};
+      moved->flight = FlightLeg{from, destination, true};
     }
   }
 
@@ -528,7 +560,7 @@ HostOutcome m_is_in_state(CallContext& ctx) {
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("IsInState: no world");
   return HostOutcome::ok_with(Value::boolean(
-      slot != nullptr && world->anim_timer_left(*slot, script_now(ctx, *world)) == 0));
+      slot != nullptr && !world->anim_timer_pending(*slot)));
 }
 
 struct AnimHostDef {

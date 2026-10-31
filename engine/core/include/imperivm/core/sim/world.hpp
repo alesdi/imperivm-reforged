@@ -44,6 +44,8 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
+#include <tuple>
 #include <span>
 #include <string>
 #include <string_view>
@@ -362,17 +364,18 @@ inline constexpr GameTime kNoAnimTimer = -1;
 /// pending message 27 on the object's list, `[obj+0xc]`) and the action mode
 /// `[obj+0x130]`. `docs/formats/animation.md` is the description.
 ///
-/// **Absolute game times, read at the reader's millisecond.** The original's
-/// timer walks the animation through its phases -- the start, the end of the
-/// transition, the action moment, the end -- and at the end puts the object
-/// to rest in the animation's end state and drops the slot (0x0053f6a0).
-/// Here nothing walks: every reader asks what the clock says at its own
-/// time (`World::anim_slot_at`, `anim_timer_left`), so a script that runs
-/// at a millisecond the world's turn has already passed sees what the
-/// original would have shown it then. What is committed is committed by the
-/// next writer, at its own time (`World::settle_anim`).
+/// **Absolute game times, and a timer that fires.** The original's timer
+/// walks the animation through its phases -- the start, the end of the
+/// transition, the action moment, the end -- moves the object to the
+/// animation's origin at the main start, and at the end puts the object to
+/// rest in the animation's end state, drops the slot and runs the object's
+/// end handler (0x0053f6a0). Here the timer is an entry on the scripts'
+/// wheel (`World::next_anim_timer`, `fire_anim_timer`; the scheduler sweeps
+/// both in one order, `script::TimerSource`), and the readers still ask
+/// what the clock says at their own time (`World::anim_slot_at`), which
+/// agrees with the firings.
 ///
-/// Hashed and saved (world section version 37).
+/// Hashed and saved (world section version 38).
 struct AnimClock {
   /// The animation started (`[obj+0x50]`), as the entity document's `idx`,
   /// or `kNoAnim`. Kept after the end; whether it still plays is
@@ -401,14 +404,43 @@ struct AnimClock {
   /// `action_time` scaled by the playback length over the declared one.
   GameTime action_at = 0;
   /// When the timer fires next, or `kNoAnimTimer`. An animation's timer runs
-  /// to its end and lapses there; a hold (0x0053ced0) is a timer with no
-  /// animation.
+  /// through its phases to its end and lapses there; a hold (0x0053ced0) is
+  /// a timer with no animation.
   GameTime timer_at = kNoAnimTimer;
+  /// The timer's place in the wheel's arming order (`World::arm_sequence`):
+  /// two entries due on one millisecond fire in the order they were armed,
+  /// a script's wake among them (0x00688060, 0x006879a0).
+  std::uint64_t timer_seq = 0;
+  /// The animation's origin (`[obj+0x5c]`). `StartAnimation` writes the
+  /// point it is given, or the object's own position for none; at the main
+  /// start the object moves there and the field keeps where it came from
+  /// (0x0053f6d3), which is what `GetCurrentPosition` (0x0053d830) runs the
+  /// drawn point from.
+  Point origin{-1, -1};
+  /// The origin was given: the object moves there at the main start. False
+  /// for an animation started with none, which leaves the object where it
+  /// is then (see `World::start_animation`).
+  bool origin_given = false;
+  /// The activity's word, which the original keeps on the waiting script's
+  /// stack: an idle's budget left (0x005d2ca0 reads the slot above the stack
+  /// pointer), or `PlayAnim`'s slot (0x005a76c0 reads the call's arguments,
+  /// and marks them used). Saved.
+  std::int64_t budget = 0;
+  std::int32_t play_slot = kNoAnim;
+  Point play_face{-1, -1};
+  /// `PlayAnim`'s animation has been started: its next run wakes the script.
+  bool play_started = false;
+  /// The script the activity wakes (`0x0069f8f0` on the object's command
+  /// thread): the one that called `Idle`, `Taunt` or `PlayAnim`, or 0.
+  std::uint32_t waiter = 0;
 
   [[nodiscard]] GameTime end() const noexcept { return main_start + duration; }
-  /// The timer is the animation's own: it will end the animation at `end`.
+  /// The timer is the animation's own: armed on one of its phases, it walks
+  /// them to the end and ends the animation there.
   [[nodiscard]] bool chained() const noexcept {
-    return slot != kNoAnim && timer_at != kNoAnimTimer && timer_at == end();
+    return slot != kNoAnim && timer_at != kNoAnimTimer &&
+           (timer_at == start || timer_at == main_start || timer_at == action_at ||
+            timer_at == end());
   }
 };
 
@@ -992,6 +1024,21 @@ class WorldObserver {
   virtual void despawning(World& world, const WorldObject& object) = 0;
 };
 
+/// What an object's animation timer runs when it fires with nothing left to
+/// play: the object's end handler (`vtbl+0x54`; 0x005d5b60 for a unit, then
+/// 0x005b0f70). It reads the action mode and does what the mode asks -- a
+/// walk step, an idle step, a `PlayAnim` continuation, a death, a destroy --
+/// which needs the scheduler and the systems, so it arrives as an interface
+/// the core declares and the session implements (`sim/anim.hpp`,
+/// `AnimEvents`). Configuration, like the observer: not owned, not hashed,
+/// not serialised; null is silence.
+class AnimEndHandler {
+ public:
+  virtual ~AnimEndHandler() = default;
+  /// `id`'s timer fired at `now` with no animation to go on with.
+  virtual void anim_end(World& world, ObjectId id, GameTime now) = 0;
+};
+
 /// The simulation.
 ///
 /// Owns the clock, the objects, the query table, the RNG and the ordered list
@@ -1040,6 +1087,23 @@ class World {
   /// The move hook; see `UnitMoveHook`. Same terms as the observer.
   void set_move_hook(UnitMoveHook* hook) noexcept { move_hook_ = hook; }
   [[nodiscard]] UnitMoveHook* move_hook() const noexcept { return move_hook_; }
+  /// The end handler; see `AnimEndHandler`. Same terms as the observer.
+  void set_anim_end_handler(AnimEndHandler* handler) noexcept { anim_end_ = handler; }
+  [[nodiscard]] AnimEndHandler* anim_end_handler() const noexcept { return anim_end_; }
+  /// Where the arming sequence comes from: the scripts' wheel's own counter
+  /// (`script::Scheduler::take_arm`), so that a timer and a script due on one
+  /// millisecond run in the order they were armed. Null takes the world's
+  /// own counter, for a world no scheduler sweeps. Configuration.
+  using ArmSource = std::uint64_t (*)(void* user);
+  void set_arm_source(ArmSource source, void* user) noexcept {
+    arm_source_ = source;
+    arm_user_ = user;
+  }
+  /// Whether a scheduler sweeps the animation timers (`script::TimerSource`).
+  /// When none does, `advance` fires the ones due by the end of each turn
+  /// itself, after the systems. Configuration.
+  void set_timers_swept(bool swept) noexcept { timers_swept_ = swept; }
+  [[nodiscard]] bool timers_swept() const noexcept { return timers_swept_; }
 
   /// The building damage tiers. Configuration, like the class graph beside it:
   /// it comes from `CONST.INI`, is the same on both sides of a save, and is
@@ -1871,16 +1935,45 @@ class World {
 
   /// `StartAnimation` (0x0053e6c0): start the animation `slot` (the
   /// document's `idx`) `delay` ms from `now`, for `duration_override` ms
-  /// (0: the declared `duration`). Answers what is left of it from `now`,
-  /// transition included, or 0 when nothing started -- an object off the map
-  /// (its timer cancelled), no such animation. A `delay` of -1 starts it at
-  /// once, one millisecond in the past, and arms no timer, so it never ends.
+  /// (0: the declared `duration`), the object moving to `origin` at the
+  /// animation's main start (the invalid point: where it stands). Answers
+  /// what is left of it from `now`, transition included, or 0 when nothing
+  /// started -- an object off the map (its timer cancelled), no such
+  /// animation. A `delay` of -1 starts it at once, one millisecond in the
+  /// past, moves the object to the origin at once and arms no timer, so it
+  /// never ends; any other delay arms the timer at `now + delay`, and the
+  /// firings walk the phases (`fire_anim_timer`).
   std::int32_t start_animation(ObjectId id, std::int32_t slot, GameTime now,
-                               GameTime delay = 0, std::int32_t duration_override = 0);
-  /// `StopAnimation` (0x0053d730): the timer cancelled, the slot dropped,
-  /// and an object that was playing rests in the end state of what it was
+                               GameTime delay = 0, std::int32_t duration_override = 0,
+                               Point origin = Point{-1, -1});
+  /// `StopAnimation` (0x0053d730): the timer cancelled, the object put where
+  /// its animation draws it now (`current_position`), the slot dropped, and
+  /// an object that was playing rests in the end state of what it was
   /// playing.
   void stop_animation(ObjectId id, GameTime now);
+  /// `GetCurrentPosition` (0x0053d830): while an animation plays and `now`
+  /// is inside its main window, the point that far along from where the
+  /// object came from (the origin field after the main start's swap) to
+  /// where it stands; otherwise where it stands.
+  [[nodiscard]] Point current_position(const WorldObject& slot, GameTime now) const noexcept;
+  /// Whether the animation timer is pending -- armed and not yet fired
+  /// (0x0053cfc0 answers the opposite). What `IsInState` asks.
+  [[nodiscard]] bool anim_timer_pending(const WorldObject& slot) const noexcept {
+    return slot.clock.timer_at != kNoAnimTimer;
+  }
+  /// The earliest pending animation timer: its time, its arming sequence and
+  /// its object. False when none is pending.
+  [[nodiscard]] bool next_anim_timer(GameTime& at, std::uint64_t& seq,
+                                     ObjectId& id) const noexcept;
+  /// Fire the earliest pending timer, as of its own time (0x0053f6a0): the
+  /// phase that time has reached, the next phase armed, and the end handler
+  /// at the end or with nothing playing.
+  void fire_anim_timer();
+  /// Fire every timer due by `until`, in the wheel's order. What `advance`
+  /// does after the systems when no scheduler sweeps them.
+  void fire_anim_timers(GameTime until);
+  /// The next place in the wheel's arming order (`set_arm_source`).
+  [[nodiscard]] std::uint64_t arm_sequence();
   /// `CObj::SetState` (0x0053e860) with the document's state number: nothing
   /// when the object already rests in it; otherwise, with `transition` and an
   /// animation leading there from the state it rests in (array index 1 or
@@ -2048,6 +2141,25 @@ class World {
   ClassHookRunner* hooks_ = nullptr;
   WorldObserver* observer_ = nullptr;
   UnitMoveHook* move_hook_ = nullptr;
+  AnimEndHandler* anim_end_ = nullptr;
+  ArmSource arm_source_ = nullptr;
+  void* arm_user_ = nullptr;
+  bool timers_swept_ = false;
+  /// The world's own arming counter, for a world no scheduler sweeps.
+  /// Derived on load from the timers it holds.
+  std::uint64_t next_timer_arm_ = 1;
+  /// Every pending animation timer by `(time, arming sequence, object)`: the
+  /// wheel's order. Derived from the objects' clocks, never saved, rebuilt
+  /// on load; `set_timer` keeps it.
+  std::set<std::tuple<GameTime, std::uint64_t, ObjectId>> timers_;
+  /// Arm `slot`'s timer for `at` with a new place in the arming order, or
+  /// cancel it with `kNoAnimTimer`.
+  void set_timer(WorldObject& slot, GameTime at);
+  /// Fire `id`'s timer, due at its `timer_at` (0x0053f6a0).
+  void fire_timer(ObjectId id);
+  /// The end handler, installed or not (`AnimEndHandler`).
+  void run_anim_end(ObjectId id, GameTime at);
+  void rebuild_timers();
   BuildingStateRules building_states_;
   Grid terrain_;
   LsaPartition lsa_;

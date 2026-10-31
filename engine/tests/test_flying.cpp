@@ -237,7 +237,7 @@ struct FlightBench {
     return id;
   }
 
-  ObjectId crow(Point at) { return spawn(at, crow_class); }
+  ObjectId crow(Point at) { return spawn(at, crow_class, NativeClass::flying_unit); }
 
   void face(ObjectId id, Point towards) { movement.face(world, id, towards); }
 
@@ -585,12 +585,13 @@ TEST(flying_play_anim_is_the_only_writer_of_in_air) {
   CHECK(!slot->state.flags.landing);
   CHECK(slot->state.z_from == ground);
   CHECK(slot->state.z_to == 80 + ground);
-  // And the bird arrived, which is what makes `CROW_MOVE.VS` terminate.
-  CHECK(b.world.resolve_position(id) == pt(48, 16));
 
-  // Let the animation finish, so `z` is the altitude it climbed to.
+  // Let the animation finish, so `z` is the altitude it climbed to. And the
+  // bird arrived at the main start, which is what makes `CROW_MOVE.VS`
+  // terminate.
   b.world.advance_turns(4);
-  CHECK(flying_z(b.world, *b.world.find(id)) == 80 + ground);
+  CHECK(b.world.resolve_position(id) == pt(48, 16));
+  CHECK(flying_z(b.world, *b.world.find(id), b.world.time()) == 80 + ground);
 
   // Land: still up, and now descending.
   b.call(script::CallKind::member, "PlayAnim", 3,
@@ -638,7 +639,7 @@ TEST(flying_lift_raises_a_birds_body_by_its_altitude_above_the_ground) {
   const std::int32_t under = terrain_height(b.world, flying_position(b.world, *slot));
   CHECK(under != terrain_height(b.world, b.world.resolve_position(id)));
   const std::int32_t mid = flying_lift(b.world, *slot);
-  CHECK(mid == flying_z(b.world, *slot) - under);
+  CHECK(mid == flying_z(b.world, *slot, b.world.time()) - under);
   CHECK(mid > 0);
   CHECK(mid < 80 + ground - under);
   // At the top of the climb, which is the end of the leg.
@@ -657,7 +658,7 @@ TEST(flying_lift_raises_a_birds_body_by_its_altitude_above_the_ground) {
   const ObjectId walker = b.spawn(pt(16, 16), b.crow_class);
   b.world.find(walker)->state.flags.in_air = true;
   b.world.find(walker)->state.z_from = 200;
-  CHECK(flying_z(b.world, *b.world.find(walker)) == 200);
+  CHECK(flying_z(b.world, *b.world.find(walker), b.world.time()) == 200);
   CHECK(flying_lift(b.world, *b.world.find(walker)) == 0);
 
   // The layers it moves: the two body depths, and not the shadow's.
@@ -689,7 +690,11 @@ TEST(flight_progress_runs_a_bird_along_its_leg_and_is_presentation_only) {
   const std::uint64_t before = b.world.state_hash();
   b.call(script::CallKind::member, "PlayAnim", 3,
          {FlightBench::obj(id), script::Value::integer(16), b.point(end), script::Value::integer(80)});
-  // The simulation's position is the end already; the drawn one is the start.
+  // The timer is due at the call's own millisecond: the main start, which
+  // moves the bird to the origin. The simulation's position is then the end;
+  // the drawn one is the start.
+  CHECK(b.world.resolve_position(id) == start);
+  b.world.fire_anim_timers(b.world.time());
   CHECK(b.world.resolve_position(id) == end);
   FlightProgress leg = flight_progress(b.world, *b.world.find(id));
   REQUIRE(leg.moving());
@@ -727,6 +732,7 @@ TEST(flight_progress_runs_a_bird_along_its_leg_and_is_presentation_only) {
   // Anything else that moves the bird ends its leg where it stands...
   b.call(script::CallKind::member, "PlayAnim", 3,
          {FlightBench::obj(id), script::Value::integer(16), b.point(start), script::Value::integer(80)});
+  b.world.fire_anim_timers(b.world.time());
   CHECK(flight_progress(b.world, *b.world.find(id)).moving());
   (void)b.world.set_position(id, pt(100, 100));
   CHECK(!flight_progress(b.world, *b.world.find(id)).moving());
@@ -734,6 +740,7 @@ TEST(flight_progress_runs_a_bird_along_its_leg_and_is_presentation_only) {
   // ...and so does any other animation it starts.
   b.call(script::CallKind::member, "PlayAnim", 3,
          {FlightBench::obj(id), script::Value::integer(16), b.point(end), script::Value::integer(80)});
+  b.world.fire_anim_timers(b.world.time());
   CHECK(flight_progress(b.world, *b.world.find(id)).moving());
   CHECK(b.world.play_anim(id, 17, AnimRepeat::hold));
   CHECK(!flight_progress(b.world, *b.world.find(id)).moving());
@@ -810,7 +817,7 @@ TEST(flying_initial_z_puts_an_eagle_in_the_air_at_spawn) {
   CHECK(aloft->state.z_from == 200);
   // And `z` answers the stored altitude rather than the ground, because the
   // bird is in the air and has no animation to interpolate along yet.
-  CHECK(flying_z(b.world, *aloft) == 200);
+  CHECK(flying_z(b.world, *aloft, b.world.time()) == 200);
 }
 
 /// **The ground `in_air` is compared against is the ground under the *bird*,
@@ -861,33 +868,34 @@ TEST(flying_z_interpolates_over_the_animation) {
   // On the ground: the terrain under it, whatever the stored altitudes say.
   slot->state.z_from = 500;
   slot->state.z_to = 900;
-  CHECK(flying_z(b.world, *slot) == 8);
+  CHECK(flying_z(b.world, *slot, b.world.time()) == 8);
 
   // In the air and not animating: where the last animation left it.
   slot->state.flags.in_air = true;
-  CHECK(flying_z(b.world, *slot) == 500);
+  CHECK(flying_z(b.world, *slot, b.world.time()) == 500);
 
-  // Mid-animation: the cycle is 300 ms and one turn is 100, so a 300-unit
-  // climb rises by exactly 100 a turn.
+  // Mid-animation: the declared length is 200 ms (over a 300 ms strip) and
+  // one turn is 100, so a 300-unit climb is half done after one turn
+  // (0x0051b040 runs over the playback length, `[obj+0x64]`).
   slot->state.z_from = 100;
   slot->state.z_to = 400;
-  CHECK(b.world.play_anim(id, 1, AnimRepeat::hold));
+  REQUIRE(b.world.start_animation(id, 1, b.world.time()) == 200);
   b.world.advance_turns(1);
   slot = b.world.find(id);
   REQUIRE(slot != nullptr);
-  CHECK(slot->animating);
-  CHECK(flying_z(b.world, *slot) == 200);
-  b.world.advance_turns(1);
-  CHECK(flying_z(b.world, *b.world.find(id)) == 300);
+  CHECK(flying_z(b.world, *slot, b.world.time()) == 250);
+  // At the window's last millisecond, with the timer still to fire, it is
+  // `z_to` exactly: the instant a script that waited the length resumes.
+  CHECK(flying_z(b.world, *slot, slot->clock.end()) == 400);
 
-  // And at the end of the cycle it is `z_to` **and stays there**, which is the
-  // boundary the whole chain runs on: the suspended script resumes at exactly
-  // this instant and the altitude it reads becomes the next `z_from`.
+  // And once the end has fired it is `z_to` **and stays there**: the flying
+  // unit's end step moved `z_from` up to it (0x0051b450).
   b.world.advance_turns(1);
-  CHECK(!b.world.find(id)->animating);
-  CHECK(flying_z(b.world, *b.world.find(id)) == 400);
+  CHECK(b.world.find(id)->clock.slot == kNoAnim);
+  CHECK(b.world.find(id)->state.z_from == 400);
+  CHECK(flying_z(b.world, *b.world.find(id), b.world.time()) == 400);
   b.world.advance_turns(5);
-  CHECK(flying_z(b.world, *b.world.find(id)) == 400);
+  CHECK(flying_z(b.world, *b.world.find(id), b.world.time()) == 400);
 }
 
 /// `IsLanding` is both bits and `IsInAir` is one, which is why a bird on the
@@ -1412,7 +1420,8 @@ TEST(flying_get_average_direction_is_the_mean_heading) {
   // An `ObjList` handle that names nothing is an empty receiver.
   CHECK(mean == pt(0, 0));
 
-  // A query over both birds: the mean of (1024, 0) and (0, 1024).
+  // A query over both birds: the mean of (100, 0) and (0, 100), the raw
+  // differences `Face` leaves (0x0053f5f0).
   // A circle rather than `ObjsInRange`, which leaves its own anchor out.
   const QuerySpec spec = objs_in_circle(pt(100, 100), 900, ClassFilter::of(b.crow_class));
   const ObjectId query = b.world.create_query(spec);
@@ -1420,7 +1429,7 @@ TEST(flying_get_average_direction_is_the_mean_heading) {
       b.call(script::CallKind::member, "GetAverageDirection", 0,
              {script::Value::object(kTypeQuery, query)})
           .value);
-  CHECK(both == pt(kFacingLength / 2, kFacingLength / 2));
+  CHECK(both == pt(50, 50));
 }
 
 // --------------------------------------------------------------------------
@@ -1476,7 +1485,7 @@ TEST(flying_dir_is_the_heading) {
   const ObjectId id = b.crow(pt(100, 100));
   b.face(id, pt(200, 100));
   CHECK(unpack_point(b.call(script::CallKind::member, "dir", 0, {FlightBench::obj(id)}).value) ==
-        pt(kFacingLength, 0));
+        pt(100, 0));
   CHECK(b.world.despawn(id));
   CHECK(unpack_point(b.call(script::CallKind::member, "dir", 0, {FlightBench::obj(id)}).value) ==
         pt(0, 0));
@@ -1525,7 +1534,9 @@ TEST(flying_an_eagle_steps_its_class_speed_and_arrives) {
              {obj, script::Value::integer(0), b.point(new_pos), script::Value::integer(200)});
   CHECK(flew.status == script::HostStatus::suspend);
   CHECK(flew.suspend_for > 0);
-  CHECK(b.world.resolve_position(id) == new_pos);
+  // The point is the animation's origin: the eagle is there from the main
+  // start, when the timer fires.
+  CHECK(b.world.find(id)->clock.origin == new_pos);
   CHECK(number("IsInState", {obj}) == 0);
 
   // The animation plays once and ends, loop-shaped state or not.

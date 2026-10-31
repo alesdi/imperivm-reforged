@@ -847,6 +847,8 @@ TEST(an_engine_that_decays_to_nothing_dies_and_leaves_the_world) {
   CHECK(b.combat.apply_damage(b.world, engine, 5) == 0);
 
   CHECK(runs_until_gone(b, engine, 2 * CombatSystem::kDefaultDeathDuration));
+  // Put down by its own timer; combat lets the record go at its next turn.
+  b.world.advance(100);
   CHECK(b.combat.find(engine) == nullptr);
   // What a builder's script asks next: the handle no longer resolves, so it
   // walks off with a `move` rather than entering.
@@ -855,8 +857,9 @@ TEST(an_engine_that_decays_to_nothing_dies_and_leaves_the_world) {
 
 /// **The crew die with their engine**, killed in place by the engine's death
 /// virtual: 0x004e3fd0 copies its holder's roster and calls each member's own
-/// `vtbl+0xb0`, the unit death, `ondie` and all. Nobody is ejected and nobody
-/// is released to idle; a unit outside the engine is untouched.
+/// `vtbl+0xb0`, the unit death, `ondie` and all -- which destroys a unit in a
+/// holder on the spot (0x005db270). Nobody is ejected and nobody is released
+/// to idle; a unit outside the engine is untouched.
 TEST(a_crewed_engine_that_is_destroyed_takes_its_crew_with_it) {
   SiegeBench b;
   const ObjectId engine = place_catapult(b.world, b.graph.find("GCatapult"), Point{5000, 5000}, 2);
@@ -875,10 +878,7 @@ TEST(a_crewed_engine_that_is_destroyed_takes_its_crew_with_it) {
 
   (void)b.combat.apply_damage(b.world, engine, 1000);
   CHECK(b.combat.is_dying(engine));
-  for (const ObjectId id : crew) {
-    CHECK(b.combat.is_dying(id));
-    CHECK(b.world.find(id)->state.health == 0);
-  }
+  for (const ObjectId id : crew) CHECK(b.world.find(id) == nullptr);
   CHECK(!b.combat.is_dying(outsider));
   CHECK(b.world.find(outsider)->state.health == 100);
 

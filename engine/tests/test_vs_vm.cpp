@@ -7,6 +7,7 @@
 // `continue`s, a host call that writes through an argument -- because those
 // shapes are what the corpus is made of.
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -1052,6 +1053,104 @@ TEST(vs_scripts_due_together_run_in_the_order_they_were_armed) {
     REQUIRE(loaded.world.log.size() == 2);
     CHECK(loaded.world.log[0] == "2");
     CHECK(loaded.world.log[1] == "1");
+  }
+}
+
+namespace {
+
+/// Timers beside the scripts on one wheel (`TimerSource`): each logs `T`
+/// and its tag when it fires, and may wake a script.
+struct LogTimers final : TimerSource {
+  struct Entry {
+    std::int64_t at;
+    std::uint64_t armed;
+    std::string tag;
+    ScriptId wakes;
+  };
+  Stage* stage = nullptr;
+  std::vector<Entry> entries;
+
+  bool next_timer(std::int64_t& at, std::uint64_t& armed) const override {
+    if (entries.empty()) return false;
+    const Entry& first = *std::min_element(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+      return a.at != b.at ? a.at < b.at : a.armed < b.armed;
+    });
+    at = first.at;
+    armed = first.armed;
+    return true;
+  }
+  void fire_timer() override {
+    const auto first = std::min_element(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+      return a.at != b.at ? a.at < b.at : a.armed < b.armed;
+    });
+    const Entry fired = *first;
+    entries.erase(first);
+    stage->world.log.push_back("T" + fired.tag);
+    if (fired.wakes != kNoScript) (void)stage->scheduler.wake(fired.wakes, stage->scheduler.now());
+  }
+};
+
+}  // namespace
+
+/// **A timer and a script due on one millisecond run in the order they were
+/// armed.** The objects' animation timers are on the scripts' wheel
+/// (game+0x1294) and the sweep takes each millisecond's bucket front to back
+/// (0x006879a0), whichever kind an entry is. And a timer that wakes a
+/// sleeping script (0x0069f8f0) runs it at that millisecond, behind
+/// whatever was armed before the wake.
+TEST(vs_timers_and_scripts_share_the_wheel_and_a_timer_wakes_a_script) {
+  const char* sleeper = "// void\nSleep(30);\nNote(1);\n";
+  {
+    // The timer armed first: it fires first.
+    Stage stage;
+    LogTimers timers;
+    timers.stage = &stage;
+    stage.scheduler.set_timer_source(&timers);
+    REQUIRE(stage.add(sleeper, "one.vs"));
+    timers.entries.push_back({30, stage.scheduler.take_arm(), "a", kNoScript});
+    stage.scheduler.spawn(0);
+    stage.scheduler.run_ready();
+    stage.scheduler.advance(40);
+    REQUIRE(stage.world.log.size() == 2);
+    CHECK(stage.world.log[0] == "Ta");
+    CHECK(stage.world.log[1] == "1");
+  }
+  {
+    // The script went to sleep first: it runs first.
+    Stage stage;
+    LogTimers timers;
+    timers.stage = &stage;
+    stage.scheduler.set_timer_source(&timers);
+    REQUIRE(stage.add(sleeper, "one.vs"));
+    stage.scheduler.spawn(0);
+    stage.scheduler.run_ready();
+    timers.entries.push_back({30, stage.scheduler.take_arm(), "a", kNoScript});
+    stage.scheduler.advance(40);
+    REQUIRE(stage.world.log.size() == 2);
+    CHECK(stage.world.log[0] == "1");
+    CHECK(stage.world.log[1] == "Ta");
+  }
+  {
+    // A wake at 10 runs a script that slept for ever at 10, ahead of one
+    // due at 20, and its long wait is forgotten.
+    Stage stage;
+    LogTimers timers;
+    timers.stage = &stage;
+    stage.scheduler.set_timer_source(&timers);
+    REQUIRE(stage.add("// void\nSleep(1000000);\nNote(2);\n", "two.vs"));
+    REQUIRE(stage.add("// void\nSleep(20);\nNote(3);\n", "three.vs"));
+    const ScriptId two = stage.scheduler.spawn(0);
+    stage.scheduler.spawn(1);
+    stage.scheduler.run_ready();
+    timers.entries.push_back({10, stage.scheduler.take_arm(), "w", two});
+    stage.scheduler.advance(40);
+    REQUIRE(stage.world.log.size() == 3);
+    CHECK(stage.world.log[0] == "Tw");
+    CHECK(stage.world.log[1] == "2");
+    CHECK(stage.world.log[2] == "3");
+    CHECK(stage.scheduler.live_count() == 0);
+    // A script that is not sleeping is not woken.
+    CHECK(!stage.scheduler.wake(two, stage.scheduler.now()));
   }
 }
 

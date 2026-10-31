@@ -131,7 +131,13 @@ namespace imperivm::core::sim {
 [[nodiscard]] std::int32_t terrain_height(const World& world, Point at) noexcept;
 
 /// `Flying::z` -- the interpolated altitude of one object.
-[[nodiscard]] std::int32_t flying_z(const World& world, const WorldObject& slot) noexcept;
+[[nodiscard]] std::int32_t flying_z(const World& world, const WorldObject& slot,
+                                    GameTime now) noexcept;
+
+/// The flying unit's own animation-end step (0x0051b450, ahead of the
+/// unit's handler): a climb or a glide leaves `z_from` at `z_to`, a landing
+/// clears `in_air`. Nothing for any other object.
+void flying_anim_end(World& world, ObjectId id) noexcept;
 
 /// How far along its leg a bird is: the two ends and the animation clock.
 ///
@@ -260,7 +266,7 @@ struct FlightPose {
 /// rules at the head of this file. `at` is the animation's destination, already
 /// clamped into the map; `z` is the call's own argument, `-1` meaning *land*.
 /// Called by `sim/anim.cpp`, which owns the animation half.
-void begin_flight_anim(World& world, ObjectId id, Point at, std::int32_t z) noexcept;
+void begin_flight_anim(World& world, ObjectId id, Point at, std::int32_t z, GameTime now) noexcept;
 
 /// One of `PickFlyingPoint`'s twelve candidate offsets: `index` is 0..11 and
 /// stands for `30 * index` degrees.

@@ -259,6 +259,11 @@ class WorldHost : public script::Host {
 /// script's own (the latch at `[0x009bdb14]`).
 void erase_from_script(script::CallContext& ctx, World& world, ObjectId id);
 
+/// The object's destroy with no script running: the `ondie` hook (latched),
+/// the detaches, its coroutines killed, and out of the world. What an
+/// animation timer's end handler runs for a corpse (mode 8).
+void destroy_object(script::Scheduler* scheduler, World& world, ObjectId id);
+
 /// Kill every coroutine owned by an object the world no longer holds, and
 /// forget its command queue. `Erase` does both itself (`perform_erase`); the
 /// death path cannot, because `CombatSystem::advance` despawns the corpse at

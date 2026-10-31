@@ -176,6 +176,22 @@ struct RunReport {
   std::vector<FailedScript> traps;
 };
 
+/// What else is on the scripts' wheel: the objects' animation timers
+/// (message 27), which the original keeps on the same wheel as the script
+/// threads (game+0x1294) and fires in the same order -- times ascending,
+/// and within one millisecond the order they were armed in. The session
+/// hands the world's timers in through this; the scheduler merges them into
+/// every pass.
+class TimerSource {
+ public:
+  virtual ~TimerSource() = default;
+  /// The earliest pending timer: its time and its place in the arming order
+  /// (`Scheduler::take_arm`). False when none is pending.
+  [[nodiscard]] virtual bool next_timer(std::int64_t& at, std::uint64_t& armed) const = 0;
+  /// Fire that timer. `Scheduler::now` is its instant.
+  virtual void fire_timer() = 0;
+};
+
 class Scheduler {
  public:
   // -- code library ------------------------------------------------------
@@ -393,6 +409,18 @@ class Scheduler {
   [[nodiscard]] std::int64_t now() const { return now_; }
   void set_now(std::int64_t milliseconds) { now_ = milliseconds; }
 
+  /// The animation timers swept with the scripts; see `TimerSource`. Not
+  /// owned; configuration, not state. Null sweeps none.
+  void set_timer_source(TimerSource* source) noexcept { timers_ = source; }
+  /// The next place in the wheel's arming order, for a timer armed outside
+  /// the scheduler.
+  [[nodiscard]] std::uint64_t take_arm() noexcept { return next_arm_++; }
+  /// Wake a suspended script at `at` (0x0069f8f0: its timer armed at once,
+  /// at the tail of the millisecond): it runs again then -- in this pass
+  /// when one is running -- its wait over. False, and nothing done, for a
+  /// script that is not suspended or is the one running.
+  bool wake(ScriptId id, std::int64_t at);
+
   /// `StartPlayerScript(player, name)`: start `name` for `player` unless that
   /// player has already started a script of that name. `kNoScript` when it was
   /// refused or there is no such script.
@@ -475,6 +503,10 @@ class Scheduler {
   /// clear between slices, so neither is saved.
   ScriptId running_ = kNoScript;
   bool stop_ = false;
+  TimerSource* timers_ = nullptr;
+  /// Scripts woken while a pass runs, to be queued in it. Transient.
+  std::vector<ScriptId> woken_;
+  bool in_pass_ = false;
   CallTrace call_trace_ = nullptr;
   void* trace_user_ = nullptr;
   std::uint64_t instruction_budget_ = 1u << 20;

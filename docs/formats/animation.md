@@ -153,10 +153,40 @@ wait.
 ## What this engine keeps, and what it leaves out
 
 The record is `AnimClock` on each object, hashed and saved (world version
-37). It is kept with absolute times and lazily: a reader asks it at its own
-millisecond, and an animation that has run out is read as ended without any
-event having fired. The world settles it when a writer touches it. The cursor
-the renderer draws follows the record at each turn's end.
+38). **The timer fires.** Every pending timer is an entry on the scripts'
+wheel, ordered by its time and its place in the arming order, which the
+scripts' own re-arms share (`World::set_timer`, `script::TimerSource`); the
+scheduler's pass sweeps both kinds in that one order, so a timer and a
+script due on one millisecond run in the order they were armed, as the
+original's bucket does (0x00688060, 0x006879a0). Each firing runs the phase
+its time has reached (`World::fire_timer`): the start re-arms for the main
+start; the main start moves the object to the origin, keeps where it came
+from in the origin field and re-arms for the action moment; the action
+moment re-arms for the end; the end rests the object in the end state, drops
+the slot and runs the end handler (`anim_end_handler`). A wake the handler
+sends (0x0069f8f0) re-arms the waiting script at that millisecond, behind
+everything armed before it (`Scheduler::wake`).
+
+The end handler is the original's, mode by mode: a held unit runs nothing; a
+dead object takes mode 1 or 8; mode 1 draws a death variant, ends the
+command and becomes 8; mode 8 destroys the object; modes 4 and 5 are the
+idle's step and its wake (`docs/formats/idle.md`); mode 6 is `PlayAnim`'s
+continuation and its wake. A flying unit's own step runs first (0x0051b450):
+a climb or a glide leaves `z_from` at `z_to`, a landing clears the airborne
+bit; `Flying::z` (0x0051b040) reads the pending timer and the main window.
+A unit's death is the original's base death (0x005b16f0): the animation
+stopped, the first state at once, the timer armed for 1 ms and mode 1, and
+the corpse is destroyed when its death animation ends. A unit that dies in a
+holder is destroyed on the spot (0x005db270).
+
+The readers ask the record at their own millisecond. A script reads inside
+the pass, where everything due before it has fired. A system reads ahead of
+the pass (its turn runs first): an animation whose timer was to end it
+before then reads as ended, and a writer at that time first fires whatever
+of that object's timer was due before it, at its own time
+(`World::settle_anim`). A world that no scheduler sweeps fires its timers at
+the end of each turn, after the systems (`World::set_timers_swept`). The
+cursor the renderer draws follows the record at each turn's end.
 
 Departures, each one for what the engine does not yet do:
 
@@ -165,22 +195,26 @@ Departures, each one for what the engine does not yet do:
   override and the next point as its origin. So the timer is pending all the
   way, `IsInState` is false while a unit walks, and a `Goto` wakes its script
   at the step that arrives (bit 0x10000 of `[unit+0x194]`). Here the walk is
-  the movement system's loop. Its start stops what the record plays, and a
-  `Goto` waits its slice.
-* **A dead object's later firings.** A corpse's death animation ends with
-  the destroy (mode 8). Here the death sequence runs when a script's call
-  reaches the end handler, and combat's death time removes the bodies it
-  kills.
-* **`Flying::PlayAnim` arrives at the call**, not at the main start.
+  the movement system's loop: a mode-3 firing runs nothing, its start stops
+  what the record plays, and a `Goto` waits its slice.
+* **An animation started with no origin does not move the object at its
+  main start.** The original puts the object back where it stood at the
+  call; here the movement system may have moved it since, because the walk
+  is not on the timer, so the object is left where it is and the origin
+  field takes that point. With the walk on the timer the two agree.
+* **The attack's action moment** (mode 2's `vtbl+0x120`) is combat's own
+  schedule; the action handler's other work is sound.
+* **The command thread's wake at a death.** The base death cancels the
+  command thread's pending wake (0x0069f890, 0x0069f8d0); here the command
+  is ended 1 ms later, at mode 1, and a wake due in between runs.
+* **The waiter.** The original wakes the object's command thread; here the
+  activity wakes the script that called `Idle`, `Taunt` or `PlayAnim`
+  (`AnimClock::waiter`), which is that thread for every shipped caller.
+* **An animation declared 0 long.** The original divides by the declared
+  length when it places the action moment (0x0053cf30, at 0x0053cfa9), so
+  starting one is an integer-divide fault there. Here the action moment is
+  the main start and the animation ends on the millisecond it starts; the
+  idle's fidget does not start one (`docs/formats/idle.md`).
 * **The view after an end.** The original draws the end state's pose from
   the end. Here the strip plays to its last frame and holds it. This is a
   renderer-only difference.
-* **A timer re-armed in the middle of an animation.** Arming replaces the
-  pending message (0x00688240). The original's firing at the new time then
-  runs whichever phase that time has reached. Here the animation is not run
-  out by itself after such a re-arm: it plays until something stops it. No
-  ported writer re-arms over a playing animation. The `Goto` family and
-  `PlayAnim` arm only when the timer is not pending, and the idle holds only
-  after its fidget has ended.
-* **Order at one millisecond.** A firing due at a script's millisecond is
-  taken as delivered before the script runs.

@@ -157,7 +157,7 @@ envelope.
 
 ```
     u32     magic          "IWLD"
-    u32     version        37
+    u32     version        38
 
     -- the clock (all of it is world state; sim/tick.hpp) --
     i32     turn_length    TickConfig::turn_length: the length the NEXT turn takes
@@ -305,9 +305,8 @@ envelope.
       u8    animating
       u8    repeat         AnimRepeat
       -- the animation clock, version 37 (docs/formats/animation.md) --
-      i32   clock.slot       The animation started ([obj+0x50]), document idx,
-                             or -1. Kept after its end; whether it plays is
-                             read against the reader's time.
+      i32   clock.slot       The animation playing ([obj+0x50]), document idx,
+                             or -1. Dropped when its timer fires at its end.
       i32   clock.transition The transition in front of it ([obj+0x54]), or -1.
       i32   clock.duration   Playback length ([obj+0x64]).
       i32   clock.mode       The action mode [obj+0x130].
@@ -319,6 +318,24 @@ envelope.
                              next, or -1 for none.
       u8    clock_drives     The cursor shows the clock's animation. All of
                              this is hashed.
+      -- version 38: the timer on the wheel, the origin, the activity's word --
+      u64   clock.timer_seq  The timer's place in the scripts' wheel's arming
+                             order (shared with the scripts' `armed`): two
+                             entries due on one millisecond run in this
+                             order. Saved, not hashed.
+      i32   clock.origin.x   [obj+0x5c]: the point given to StartAnimation (or
+      i32   clock.origin.y   where the object stood); after the main start,
+                             where it came from.
+      u8    clock.origin_given  The object moves to the origin at the main
+                             start (0 or 1).
+      i64   clock.budget     An idle's or a taunt's budget left (the word the
+                             original keeps on the script's stack).
+      i32   clock.play_slot  PlayAnim's slot, and its facing point:
+      i32   clock.play_face.x
+      i32   clock.play_face.y
+      u8    clock.play_started  PlayAnim's animation has started (0 or 1).
+      u32   clock.waiter     The script the activity wakes, or 0. Saved, not
+                             hashed (a script id).
       -- only when native_class != 0xFF --
       i32   anim.state_idx
       i32   anim.anim_slot

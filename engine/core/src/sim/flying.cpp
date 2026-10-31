@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "imperivm/core/sim/anim.hpp"
 #include "imperivm/core/sim/heading.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/match.hpp"
@@ -378,28 +379,23 @@ HostOutcome m_dir(CallContext& ctx) {
 /// 0x0051bdf0 resolves the receiver by handle only (no dead test) and answers
 /// 0x0051b040: with `[obj+0x194] & 0x400000` (`in_air`) clear, the terrain
 /// height (0x0053eaa0) under the object's current position (`vtbl+0x40`);
-/// in the air and animating (component 27 present, 0x0053cfc0) with the clock
-/// inside the animation's window (0x0053cef0, both ends inclusive),
-/// `z_from + (z_to - z_from) * (now - start) / [obj+0x64]`; otherwise `z_from`
-/// (`[obj+0x1cc]`).
+/// in the air with the animation timer pending (0x0053cfc0) and the clock
+/// inside the main window (0x0053cef0, both ends inclusive),
+/// `z_from + (z_to - z_from) * (now - main start) / [obj+0x64]`; otherwise
+/// `z_from` (`[obj+0x1cc]`).
 ///
-/// **What keeps "otherwise" right is the flying unit's animation-finished
-/// virtual** (0x0051b450, `vtbl+0x54` of the vtable at 0x007be750): at an
-/// animation's end it copies `z_to` into `z_from` -- or, for a landing
-/// animation (`[obj+0x1d4]`), clears `in_air` instead. This engine has no
-/// such hook; it answers the same numbers by clamping the clock at the
-/// window's end (`flying_z_at`), so `z` agrees. What does not agree is
-/// `in_air` after a landing animation runs out: here it stays set until the
-/// next `PlayAnim` with `z == -1` at ground level clears it (see
-/// `begin_flight_anim` and the header). Recorded at `PickFlyingPoint`, whose
-/// crowding term counts `in_air` neighbours.
+/// **What keeps "otherwise" right is the flying unit's end handler**
+/// (0x0051b450, `vtbl+0x54` of the vtable at 0x007be750): at an animation's
+/// end it copies `z_to` into `z_from` -- or, for a landing animation
+/// (`[obj+0x1d4]`), clears `in_air` instead. It runs here at the same event
+/// (`flying_anim_end`, from `anim_end_handler`).
 HostOutcome m_z(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
   if (world == nullptr) return HostOutcome::failed("z: no world");
   // 0x0051be13 formats a complaint and pushes **0**, which is sea level.
   if (slot == nullptr) return HostOutcome::ok_with(Value::integer(0));
-  return HostOutcome::ok_with(Value::integer(flying_z(*world, *slot)));
+  return HostOutcome::ok_with(Value::integer(flying_z(*world, *slot, script_now(ctx, *world))));
 }
 
 /// `Flying::IsLanding` -- `in_air && landing`. 0x0051bd80, zero shipped sites.
@@ -425,11 +421,8 @@ HostOutcome m_is_landing(CallContext& ctx) {
 /// scored by 0x0051c2f0; then `SetLen(n)` (0x0067c3d0's root, zero vector to
 /// `(0, n)`) and the jitter, two draws of `[-n/5, n/5]`, Y first (0x0051c639).
 ///
-/// **Known gap, in the state it reads:** the scan's crowding term counts
-/// `in_air` neighbours, and a bird whose landing animation has run out is
-/// still `in_air` here (no animation-finished hook; see `m_z`), where the
-/// original has cleared it (0x0051b450). The scores can differ; the number of
-/// draws cannot.
+/// The scan's crowding term counts `in_air` neighbours; a landing clears the
+/// bit at its animation's end (0x0051b450, see `m_z`).
 HostOutcome m_pick_flying_point(CallContext& ctx) {
   World* world = nullptr;
   const WorldObject* slot = receiver_object(ctx, world);
@@ -656,9 +649,37 @@ std::int32_t flying_z_at(const World& world, const FlightPose& pose, std::int32_
 
 }  // namespace
 
-std::int32_t flying_z(const World& world, const WorldObject& slot) noexcept {
-  return flying_z_at(world, flight_pose(world, slot),
-                     slot.object != nullptr ? slot.object->anim.elapsed_ms : 0);
+std::int32_t flying_z(const World& world, const WorldObject& slot, GameTime now) noexcept {
+  // 0x0051b040. On the ground: the terrain under where the animation draws
+  // the object (`GetCurrentPosition`).
+  if (!slot.state.flags.in_air) return terrain_height(world, world.current_position(slot, now));
+  // In the air: while the animation timer is pending and `now` is inside the
+  // animation's main window, `z_from` that far towards `z_to` over the
+  // playback length; otherwise `z_from`, which the end handler has moved to
+  // `z_to` when the animation ran out (0x0051b450).
+  const AnimClock& clock = slot.clock;
+  if (world.anim_timer_pending(slot) && clock.slot != kNoAnim && clock.main_start <= now &&
+      now <= clock.end() && clock.duration > 0) {
+    const std::int64_t span = static_cast<std::int64_t>(slot.state.z_to) - slot.state.z_from;
+    return static_cast<std::int32_t>(slot.state.z_from + span * (now - clock.main_start) /
+                                                              clock.duration);
+  }
+  return slot.state.z_from;
+}
+
+void flying_anim_end(World& world, ObjectId id) noexcept {
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr || slot->object == nullptr ||
+      !slot->object->is_a(NativeClass::flying_unit)) {
+    return;
+  }
+  // 0x0051b450: a climb or a glide ends at its altitude; a landing ends on
+  // the ground.
+  if (!slot->state.flags.landing) {
+    slot->state.z_from = slot->state.z_to;
+  } else {
+    slot->state.flags.in_air = false;
+  }
 }
 
 std::int32_t FlightProgress::along(std::int32_t a, std::int32_t b) const noexcept {
@@ -673,7 +694,12 @@ FlightPose flight_pose(const World& world, const WorldObject& slot) noexcept {
   out.in_air = slot.state.flags.in_air;
   out.z_from = slot.state.z_from;
   out.z_to = slot.state.z_to;
-  out.cycle = slot.object != nullptr && slot.timeline.valid() ? slot.timeline.cycle() : 0;
+  // The playback length while the clock plays an animation -- what the
+  // original runs both the altitude and the drawn point over (0x0051b040,
+  // 0x0053d830) -- else the strip's own cycle.
+  out.cycle = slot.clock.slot != kNoAnim && slot.clock.duration > 0 ? slot.clock.duration
+              : slot.object != nullptr && slot.timeline.valid() ? slot.timeline.cycle()
+                                                                  : 0;
   out.at = world.resolve_position(slot.id);
   // Moved since by anything but its own animation: the leg is over.
   if (slot.flight.valid && out.flying && out.cycle > 0 && out.at == slot.flight.to) {
@@ -735,14 +761,14 @@ std::int32_t flying_lift(const World& world, const FlightPose& pose, std::int32_
   return lift > 0 ? lift : 0;
 }
 
-void begin_flight_anim(World& world, ObjectId id, Point at, std::int32_t z) noexcept {
+void begin_flight_anim(World& world, ObjectId id, Point at, std::int32_t z, GameTime now) noexcept {
   WorldObject* slot = world.find(id);
   if (slot == nullptr) return;
   const std::int32_t ground_here = terrain_height(world, world.resolve_position(id));
 
   // 0x0051bbed: `z_from` is `Flying::z` itself, so an animation starts where
   // the last one left off rather than where the object nominally is.
-  const std::int32_t from = flying_z(world, *slot);
+  const std::int32_t from = flying_z(world, *slot, now);
   slot->state.z_from = from;
   slot->state.z_to = z == -1 ? terrain_height(world, at) : z;
   slot->state.flags.landing = z == -1;

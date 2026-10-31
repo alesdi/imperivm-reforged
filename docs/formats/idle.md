@@ -95,13 +95,21 @@ when it was called.
   the action mode is `AnimClock::mode`, 4 or 5 while the activity is set; a
   fidget is `World::start_animation` with its start offset `t`, transition
   included; a hold arms the animation timer for the rest of the budget.
-* The steps are the call's re-entries, each one the timer's firing. The first
-  run drops the target, sets the mode and, when the timer is not pending,
-  takes the first step at once; otherwise it waits for the timer. Each later
-  run waits out a timer that was moved later, then runs the end handler's
-  gates (held: nothing; dead: the death sequence) and takes a step only while
-  the mode is still the activity's. Anything else leaves the script asleep,
-  as in the original. The budget is the call's word.
+* The call is done at once and the script sleeps with no timed wake, as a
+  3 leaves it. The call drops the target, sets the mode, keeps the budget
+  and the script to wake on the object's clock (`AnimClock::budget`,
+  `waiter`, in place of the script's stack and its command thread) and, when
+  the timer is not pending, runs the end handler at once, which takes the
+  first step; otherwise the timer's firing does. Every later step is the
+  timer's firing through the end handler (`anim_end_handler`): its gates
+  first (held: nothing; dead: the death sequence), then the step, only while
+  the mode is still the activity's. The last step sets the mode to 0 and
+  wakes the script at that millisecond (`Scheduler::wake`). Anything else
+  leaves the script asleep, as in the original. A last step taken inside
+  the call itself (no budget, no fidget, nothing in flight) wakes a script
+  that is still running, and the call's 3 then takes the thread off the
+  wheel (0x0069d5fb, 0x0069f842 -> 0x00687bf0): the wake is undone and the
+  script sleeps on for good, in the original as here.
 * The force flag is `ObjectFlags::force_idle`, on the object, hashed and
   saved. `ForceIdle` and `Ship::Idle` raise it; the step that plays a fidget
   drops it.
@@ -114,5 +122,16 @@ when it was called.
   (0x005d6c90) leaves the step in flight to play out; so an `Idle` called on
   a unit just stopped mid-stride waits for the end of that step. The
   engine's walk is the movement system's loop, so the first step is at once.
+* **An idle animation declared 0 long plays no fidget.** The original's
+  `StartAnimation` scales the action moment by dividing by the declared
+  length (0x0053cf30, the division at 0x0053cfa9), so a fidget declared 0
+  long is an integer-divide fault there. Played here, it ended on the
+  millisecond it started; its end ran the last step and woke the script on
+  that same millisecond, and a script that idles in a loop ran again there
+  for ever. The ship's idle animation is declared 0 long, and
+  `SHIP_IDLE.VS` loops on `if (.Stop(200)) .Idle();`: Zama hung inside one
+  scheduler pass. Here such an animation is taken as absent, by the step's
+  fidget and by `Ship::Idle`'s budget, which then idles
+  `kDefaultIdleSlice` as it does for a ship with no idle animation at all.
 * **The launch gate.** This engine does not run the shipyard launch, so
   `[ship+0x1cc]` is never up and `Ship::Idle` always takes its activity.
