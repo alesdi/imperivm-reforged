@@ -57,3 +57,12 @@ One heavy job at a time (a build, an `imrun`, a verify), never two; build
 with `-j4` at most; `verify.py --serial` for the quick pass. Keep the machine
 awake through a long run with `caffeinate -is`, or a sleep breaks the timing
 tests.
+
+Give every long `imrun` a wall-clock limit as well: a run whose memory stays
+flat while its time grows is a livelock, not a slow game.
+
+## Worktrees
+
+When a batch's branch is merged into main, remove its worktree and delete its
+branch at once (`git worktree remove`, `git branch -d`); don't leave finished
+worktrees on disk.
