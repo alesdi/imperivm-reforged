@@ -1044,23 +1044,27 @@ def test_an_enemy_sent_into_a_walled_town_is_not_routed_through_its_closed_gates
 
 
 NUMANTIA = Path("Adventures") / "GreatBattles" / "2_Great_Battles_Numantia.bfhp"
-#: North-west of the Roman camp, across open ground.
-NUMANTIA_MARCH = (13700, 14400)
+#: South-east of the Roman camp, across open ground, some 1,700 from the
+#: nearest Iberian building. Staged clear of enemies on purpose: until a strike
+#: runs on the animation timer (mode 2), combat's own schedule starts an attack
+#: animation over a walk step and cuts it mid-way, and the member it cuts is
+#: left on `form_move` -- which is combat's question, not the march's.
+NUMANTIA_MARCH = (15600, 13700)
 
 
 def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir):
     """Playtest #22: a hero's army keeps its formation on a march.
 
     Numantia's Roman hero starts with his army attached; his owner's
-    right-click sends him across open ground, which is `HERO_MOVE.VS`:
+    right-click sends him across open ground clear of the Iberians
+    (`NUMANTIA_MARCH` says why), which is `HERO_MOVE.VS`:
     `FormSetupAndMoveTo`, `FormKeepMoving` while he or a member of his column
     has a route, and then the army told to `stand_position`, whose first act
     is to `Stop` where it is.
     The hero's own `AddCommand(false, "stand_position")` finds nothing -- his
     `HERO_STAND_GROUND.VS` takes a point and the lookup is by name and
-    signature (0x005aef20) -- so he goes back to `HERO_IDLE.VS`, which on
-    Numantia engages the Iberians in sight. The formation is judged where the
-    march ends, before that.
+    signature (0x005aef20) -- so he goes back to `HERO_IDLE.VS`. The
+    formation is judged where the march ends.
     The hero rides at 120 and his footmen walk at 60 to 80. He used to walk
     at his own speed and the army chase stations laid where he had been, so he
     arrived alone and the army was stood 300 to 700 units behind him. As in
@@ -1096,7 +1100,7 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
     hero = int(heroes[0])
 
     second = subprocess.run(
-        [str(imrun), str(game_dir), str(numantia), "50", "800", "--human", "0"],
+        [str(imrun), str(game_dir), str(numantia), "80", "800", "--human", "0"],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "IMRUN_WATCH": f"{hero}:1",
              "IMRUN_GOTO": f"5:{hero}:{NUMANTIA_MARCH[0]},{NUMANTIA_MARCH[1]}"},
@@ -1127,18 +1131,25 @@ def test_a_heros_army_stands_formed_on_him_where_his_march_ends(imrun, game_dir)
     # hero arrives: his `HasPath` (0x0052fe40) stays true while any member's
     # route still follows the march, so `HERO_MOVE.VS` hands out
     # `stand_position` once the last of them has come in, and until then the
-    # ones already there are idle. The first report with nobody still
-    # marching is where that has happened.
+    # ones already there are idle. He asks at the end of each
+    # `FormKeepMoving(1500)`, so the hand-out comes within one 1,500 ms slice
+    # (two 800 ms turns) of the first report with nobody still marching, and
+    # nobody does anything but stand idle in between.
     reports = sorted({int(t) for t in re.findall(r"^\s+army turn (\d+): ", out, re.MULTILINE)
-                      if int(t) > arrived[0]})
+                      if int(t) >= arrived[0]})
+    orders_at = {turn: re.findall(rf"^\s+army turn {turn}: \d+ at .* order (\S+)$", out,
+                                  re.MULTILINE) for turn in reports}
+    marched = next((turn for turn in reports
+                    if orders_at[turn] and "form_move" not in orders_at[turn]), None)
+    assert marched is not None, out[-3000:]
     settled = None
-    for turn in reports:
-        orders = re.findall(rf"^\s+army turn {turn}: \d+ at .* order (\S+)$", out, re.MULTILINE)
-        if orders and "form_move" not in orders:
-            settled = orders
+    for turn in (t for t in reports if marched <= t <= marched + 2):
+        orders = orders_at[turn]
+        assert all(order in ("idle", "stand_position") for order in orders), (turn, orders)
+        if all(order == "stand_position" for order in orders):
+            settled = turn
             break
-    assert settled, out[-3000:]
-    assert all(order == "stand_position" for order in settled), settled
+    assert settled is not None, {t: orders_at[t] for t in reports if marched <= t <= marched + 2}
 
 
 # ---------------------------------------------------------------------------
