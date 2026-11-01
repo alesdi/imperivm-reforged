@@ -7,6 +7,7 @@
 // data, so they run in CI on a machine that has never seen the game.
 
 #include <cstdio>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -6702,25 +6703,33 @@ TEST(best_training_target_is_the_nearest_training_unit_unless_an_enemy_is_armed)
   CHECK(best(999999) == kNoObject);
 }
 
-/// **`TrainAttack` is one swing's wait and then true, after three refusals.**
+/// **`TrainAttack` is one swing on the animation timer, after its refusals.**
 /// 0x005d5d10: the held position, the partner that does not resolve, the
-/// receiver at one point of health; then action state 2 and the interpreter's
-/// suspend-until-clear.
-TEST(train_attack_waits_one_swing_and_answers_true) {
+/// receiver at one point of health answer false at once; otherwise action
+/// mode 2 and a wait with no timed wake, which the attack's end answers. The
+/// blow at the swing's action moment is the training blow (0x00511550): it
+/// leaves the partner at least a tenth of its health.
+TEST(train_attack_swings_once_on_the_animation_timer) {
   const Result<imperivm::core::Entity> entity = imperivm::core::Entity::parse(bytes_of(kCatapultEntityXml));
   REQUIRE(entity.ok());
   const ClassGraph graph = training_graph();
   PredicateBench b;
   b.world.set_class_graph(&graph);
+  CombatSystem combat;
+  combat.set_class_graph(&graph);
+  combat.set_world_bound(true);
+  REQUIRE(b.world.add_system(&combat));
   const ObjectId self = b.world.spawn(NativeClass::unit, &entity.value(), graph.find("Unit"));
   b.world.set_position(self, Point{0, 0});
   b.world.set_health(self, 100);
   const ObjectId partner = b.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
   b.world.set_position(partner, Point{20, 0});
   b.world.set_health(partner, 100);
-  const ObjectId bare = b.world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
-  b.world.set_position(bare, Point{40, 0});
-  b.world.set_health(bare, 100);
+  // A partner the `CanAttack` virtual lets through: one in training.
+  b.world.mutable_state(partner)->flags.training = true;
+  (void)combat.reconcile(b.world);
+  REQUIRE(combat.find(self) != nullptr);
+  REQUIRE(combat.find(partner) != nullptr);
 
   const auto call = [&](ObjectId who, script::Value other, bool first_call) -> script::HostOutcome {
     const std::uint32_t index = b.registry.find(script::CallKind::member, "TrainAttack", 1);
@@ -6735,34 +6744,33 @@ TEST(train_attack_waits_one_swing_and_answers_true) {
     ctx.first_call = first_call;
     return b.registry.entry(index).fn(ctx);
   };
-  const auto truth = [&](const script::HostOutcome& out) {
-    return out.status == script::HostStatus::ok && out.value.truthy_scalar();
+  const auto refused = [](const script::HostOutcome& out) {
+    return out.status == script::HostStatus::ok && !out.value.truthy_scalar();
   };
-  // The swing: the entity's one-second attack, then true.
+  // The swing: mode 2, the partner the attack's target, a wait for the end.
   script::HostOutcome out = call(self, PredicateBench::obj(partner), true);
-  CHECK(out.status == script::HostStatus::retry);
-  CHECK(out.suspend_for == 1000);
-  CHECK(truth(call(self, PredicateBench::obj(partner), false)));
-  // No attack animation to wait on: still a suspend, to the next pass, and
-  // then true. Answering true at once let `UNIT_TRAIN.VS`'s loop run its
-  // instruction budget out (236 times on Balcans in 4,000 turns).
-  out = call(bare, PredicateBench::obj(partner), true);
-  CHECK(out.status == script::HostStatus::retry);
-  CHECK(out.suspend_for == 0);
-  CHECK(truth(call(bare, PredicateBench::obj(partner), false)));
-  // The three refusals, none of them a trap.
-  out = call(self, PredicateBench::obj(999999), true);
-  CHECK(out.status == script::HostStatus::ok && !out.value.truthy_scalar());
+  CHECK(out.status == script::HostStatus::suspend);
+  CHECK(out.suspend_for == std::numeric_limits<std::int32_t>::max());
+  const WorldObject* slot = b.world.find(self);
+  REQUIRE(slot != nullptr);
+  CHECK(slot->clock.mode == 2);
+  CHECK(slot->clock.attack_target == partner);
+  // The one-second swing runs out: the blow landed, the mode back to 0.
+  for (int turn = 0; turn < 4; ++turn) b.world.advance(400);
+  CHECK(slot->clock.mode == 0);
+  CHECK(slot->clock.attack_word == 1);
+  CHECK(b.world.state(partner)->health < 100);
+  CHECK(b.world.state(partner)->health >= 10);
+
+  // The refusals, none of them a trap and none a suspension.
+  CHECK(refused(call(self, PredicateBench::obj(999999), true)));
   b.world.set_health(self, 1);
-  out = call(self, PredicateBench::obj(partner), true);
-  CHECK(out.status == script::HostStatus::ok && !out.value.truthy_scalar());
+  CHECK(refused(call(self, PredicateBench::obj(partner), true)));
   b.world.set_health(self, 2);
-  CHECK(call(self, PredicateBench::obj(partner), true).status == script::HostStatus::retry);
+  CHECK(call(self, PredicateBench::obj(partner), true).status == script::HostStatus::suspend);
   REQUIRE(b.world.set_position(self, kHeldPosition));
-  out = call(self, PredicateBench::obj(partner), true);
-  CHECK(out.status == script::HostStatus::ok && !out.value.truthy_scalar());
-  out = call(999999, PredicateBench::obj(partner), true);
-  CHECK(out.status == script::HostStatus::ok && !out.value.truthy_scalar());
+  CHECK(refused(call(self, PredicateBench::obj(partner), true)));
+  CHECK(refused(call(999999, PredicateBench::obj(partner), true)));
 }
 
 /// **`GetStaminaDecTime` is the class's `stamina_dec_time`, floored at 0, and

@@ -19,6 +19,7 @@
 #include "imperivm/core/sim/stats.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
+#include "fight.hpp"
 #include "test.hpp"
 
 using namespace imperivm::core;
@@ -136,11 +137,18 @@ struct Bench {
   [[nodiscard]] std::int32_t health(ObjectId id) { return combat.health(id); }
 
   /// `killer` fights `victim`, left one health from death, until the victim
-  /// falls. Answers whether it did.
+  /// falls: `Attack` called again at each turn's head (`fight.hpp`). Answers
+  /// whether it did.
   bool kill(ObjectId killer, ObjectId victim) {
     (void)combat.apply_damage(world, victim, combat.health(victim) - 1);
-    if (!combat.order_attack(killer, victim)) return false;
-    for (int turn = 0; turn < 10 && combat.is_alive(victim); ++turn) world.advance(400);
+    // Side by side, inside the killer's reach and outside its inner bound.
+    const Point at = world.state(killer)->position;
+    world.set_position(victim, Point{at.x + 40, at.y});
+    if (!combat.can_attack(killer, victim)) return false;
+    for (int turn = 0; turn < 10 && combat.is_alive(victim); ++turn) {
+      (void)imperivm::test::swing(world, combat, killer, victim);
+      world.advance(400);
+    }
     return !combat.is_alive(victim);
   }
 };

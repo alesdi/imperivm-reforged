@@ -191,12 +191,21 @@ std::int32_t start_animation_facing_at(World& world, core::ObjectId id, std::int
 /// declared) or 8. Then the mode: 1 starts a death animation variant, ends
 /// the running command and becomes 8; 8 destroys the object (`vtbl+0x94`);
 /// 4 and 5 are the idle's and the taunt's step (`idle_activity_step`); 6 is
-/// `PlayAnim`'s continuation; 3, the walk step, and 2, the attack, are not
-/// this engine's yet. `ctx` is the script whose call ran it, or null for a
+/// `PlayAnim`'s continuation; 3 is the walk step (0x005d3b50); 2 is the
+/// attack's swing or its answer (0x005d5ed0, `CombatSystem::attack_end`).
+/// `ctx` is the script whose call ran it, or null for a
 /// timer's firing; a script's own object is destroyed at the end of its
 /// slice. See `docs/formats/animation.md`.
 void anim_end_handler(World& world, script::Scheduler* scheduler, script::CallContext* ctx,
                       core::ObjectId id, GameTime now);
+
+/// The object's action handler (`vtbl+0x58`, 0x005d9550 for a unit), run
+/// by the animation timer at an animation's action moment. In the attack's
+/// mode (2) it is the unit's blow (`vtbl+0x120`, 0x005dc900,
+/// `CombatSystem::attack_action`); in every other mode it is a sound, which
+/// is the renderer's.
+void anim_action_handler(World& world, script::Scheduler* scheduler, core::ObjectId id,
+                         GameTime now);
 
 /// Wake the script the object's activity is for (0x0069f8f0), at `now`.
 /// False when there is none, or it is the one running.
@@ -220,6 +229,7 @@ class AnimEvents final : public AnimEndHandler, public script::TimerSource {
   /// Wire both ends.
   void install();
   void anim_end(World& world, core::ObjectId id, GameTime now) override;
+  void anim_action(World& world, core::ObjectId id, GameTime now) override;
   [[nodiscard]] bool next_timer(std::int64_t& at, std::uint64_t& armed) const override;
   void fire_timer() override;
 

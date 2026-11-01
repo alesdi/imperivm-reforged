@@ -2739,8 +2739,10 @@ struct Mover {
 /// a point goal at its centre with both radii added before the cap of 999.
 /// The answer comes at the re-entry (`run_goto`).
 ///
-/// **Approximated:** the inner bound is the class profile's and is carried
-/// and not acted on, as for every `Goto`. A point argument, which no
+/// The inner bound is acted on: a unit nearer than `min_range` (every
+/// shipped unit's is 2 or more) is not arrived, and searches its way out to
+/// the band (`within_band`), so that `GotoAttack` never answers true where
+/// `Attack`'s range test (0x005a7800) refuses. A point argument, which no
 /// shipped site passes, walks to the point as `Goto` would.
 HostOutcome goto_attack_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
@@ -2769,9 +2771,13 @@ HostOutcome goto_attack_impl(CallContext& ctx) {
       // The stored range, as `in_attack_range` measures it (0x005a7800).
       weapon = combat->range_of(*attacker);
       reach = profile.radius;
-      order.min_range = profile.min_range;
       const Combatant* defender = target == kNoObject ? nullptr : combat->find(target);
       if (defender != nullptr) reach += combat->profile(defender->class_index).radius;
+      // The inner bound, `[unit+0xd8]` (0x005d4353, 0x005d438d): measured
+      // between the edges for an object goal and with both radii added for
+      // a point goal -- the same thing here, where the band is centre to
+      // centre with the radii folded in.
+      order.min_range = profile.min_range + reach;
     }
   }
   if (object_argument) {

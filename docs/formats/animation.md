@@ -111,7 +111,7 @@ The timer's firing does one of five things, depending on the time:
 1. It does nothing while the unit is in a holder.
 2. It turns a dead unit's mode to 1.
 3. It runs the unit's own modes:
-   * 2: its attack;
+   * 2: its attack (`vtbl+0x11c`, see "The attack");
    * 3: its walk step (0x005d3b50);
    * 4 and 5: the idle activity (0x005d2ca0, `docs/formats/idle.md`).
 4. It hands over to 0x005b0f70.
@@ -153,7 +153,7 @@ wait.
 ## What this engine keeps, and what it leaves out
 
 The record is `AnimClock` on each object, hashed and saved (world version
-38). **The timer fires.** Every pending timer is an entry on the scripts'
+39). **The timer fires.** Every pending timer is an entry on the scripts'
 wheel, ordered by its time and its place in the arming order, which the
 scripts' own re-arms share (`World::set_timer`, `script::TimerSource`); the
 scheduler's pass sweeps both kinds in that one order, so a timer and a
@@ -187,6 +187,125 @@ of that object's timer was due before it, at its own time
 (`World::settle_anim`). A world that no scheduler sweeps fires its timers at
 the end of each turn, after the systems (`World::set_timers_swept`). The
 cursor the renderer draws follows the record at each turn's end.
+
+## The attack
+
+No unit strikes on its own. A unit attacks when a script calls `Attack`
+(`UNIT_ENGAGE.VS` and its kin hold a fight with `while (.Attack(u));`, after
+`UNIT_IDLE.VS` has picked a target with `BestTargetInSquadSight...`), or
+`TrainAttack`, and each call is one swing on the animation timer, in action
+mode 2.
+
+**`Unit::Attack(target)`** (0x005ddb50) is registered suspending. On its
+first run it zeroes the call's word. A receiver off the map answers false. It
+stores the target's handle as the unit's target (`[unit+0x1a8]`), zeroing the
+count of blows on it (`[unit+0x1ac]`) when the target changes, and then asks
+the gate (0x005a78a0): the receiver's `CanAttack` virtual and the range band
+(0x005a7800). A refusal answers false without a suspension. Otherwise the
+arguments stay on the stack as the attack's frame, the mode becomes 2
+through the setter, and the call suspends with no timed wake (return 3).
+Its re-entry with the word still 0 sets the mode to 0 and answers true; the
+answer the end handler pushes is the one a woken call returns.
+
+**A ship** (0x005ddc5a .. 0x005ddcf3) does not swing: each call fires one
+shot at once. Its shots are counted in ten-second windows. When ten seconds
+have passed since the window opened, or the window lies ahead, the shots it
+allows are recomputed (0x005c6930: the units aboard times 60 over the
+class's `max_units_to_board`, plus 3, at most 23), the window opens now and
+nothing is fired in it. A call past the allowance waits for the window's
+end. Otherwise the mode becomes 2 through the setter, the blow is dealt at
+once (0x005dc650), and the call waits: on every third shot until that
+shot's even place in the window, when that lies ahead, and otherwise a draw
+on the synchronised generator between a tenth of the spacing and the
+spacing, the spacing being ten seconds over the allowance. Its end handler
+in mode 2 (0x005c6670) starts another of its attack variants, no origin and
+no facing, at its declared length; its action (0x005c66b0) only counts.
+
+**`Unit::TrainAttack(partner)`** (0x005d5d10) zeroes the word, answers false
+for a receiver off the map, prints and answers false for a partner that does
+not resolve, answers false for a receiver at one point of health or less,
+and otherwise sets mode 2 through the setter and suspends as `Attack` does.
+It stores no target and asks no gate.
+
+**The setter** (0x005a7680) writes the mode and, when no timer is pending
+(0x0053cfc0), runs the end handler at once. A walk step in flight is
+therefore never cut: its end runs the end handler in the new mode.
+
+**The end handler in mode 2** (`vtbl+0x11c`, 0x005d5ed0) reads the frame of
+the unit's command thread: the target and the word. With the word 0 and the
+target resolving, it draws one of the attack's variants (0x005a81b0 from 4:
+the declared attack and the next one, two or three after it while the
+entity declares them, one draw on the synchronised generator), takes its
+declared length times 100 over the speed factor (`[unit+0x15c]`), and
+starts it with the unit's own position as the origin, turned towards the
+target, at once and for that long. It then tells the target it is attacked
+(`vtbl+0xa4`): the hero's and the squad's clocks. With the target gone the
+word becomes 2. With the word not 0 -- the swing is over -- it pushes the
+answer (the word is 1, the target resolves and is not dead), wakes the
+command thread (0x0069f8f0) and sets the mode to 0. Nothing else is played:
+the unit holds the swing's last frame until its next animation.
+
+**The action moment in mode 2** (`vtbl+0x58` 0x005d9550 into `vtbl+0x120`,
+0x005dc900) is the blow: the word becomes 1 when 0x005dc650 deals it and 2
+when it does not, and the blow count goes up by one. 0x005dc650 asks the
+`CanAttack` virtual again and the distance between the edges (0x005a77b0)
+against the range plus 150; a unit with a missile class throws it, a melee
+unit hits (0x00511550). It stamps the last attack's time (`[unit+0x1a4]`)
+and shows an attacker that was hidden.
+
+**Between two units that are not enemies** -- a training partner -- the hit
+is the training blow (0x00511550's first branch): what leaves the partner a
+tenth of its maximum health, never below 0, as the most; the larger of the
+attack times `MinPercentOfAttackersDamage` over 100 and `MinDamage` as the
+least; and between them the attack less the partner's slash armour scaled
+by the level difference (0x0050fe60). A blow of 0 does nothing. Otherwise a
+draw on the synchronised generator under `TrainingExpChance` (75 in the
+shipped `CONST.INI`) pays the attacker a point of experience, and the
+damage is dealt.
+
+**The range band** (0x005a7800) is the distance between the two edges --
+the integer square root of the squared centre distance, less both class
+radii -- between the attacker's `[unit+0xd8]` and `[unit+0xd4]`, both ends
+included, with no inner end when `[unit+0xd8]` is below 1. The stat rebuild
+(0x005d9df0) writes `[unit+0xd4]`: the class range and the formation's
+`BonusRange` percent, never below 0. It never writes `[unit+0xd8]`, which
+is the class's `min_range` from the constructor; every shipped unit's is 2
+or more, so two bodies drawn through each other cannot strike. `InRange`
+(0x005d72e0) is the band, false for a receiver in a holder; `CanAttack`
+(0x005ab060) is the dead checks, the virtual and the band, the very gate
+`Attack` passes through; `IsValidTarget` (0x005aafd0) is the virtual alone.
+`GotoAttack` lays its route with the band's two ends (0x005d4353,
+0x005d438d) and `IsArrived` (0x00417c10) tests both, so it never answers
+true where `Attack` refuses.
+
+This engine does all of the above (`CombatSystem::begin_attack`,
+`attack_end`, `attack_action`, `blow`, `training_blow`, `in_range`,
+`can_attack`; `unit_attack` and `ship_attack` in `sim/combat.cpp`;
+`m_train_attack` in `sim/world_host.cpp`). The frame is on the clock
+(`AnimClock::attack_target`, `attack_word`, and a ship's window in
+`ship_shots`, `ship_window`, `ship_fired`), and the answer is written into
+the suspended call's frame before its wake (`Scheduler::answer`). A combat
+system bound to no world -- the synthetic tests -- keeps its own schedule as
+a harness; in a world, nothing strikes but an attack.
+
+Departures, each one for what the engine does not yet do:
+
+* **No swing to play.** An attacker with no entity, an entity that
+  declares no attack, or a speed factor of 0 faults in the original (it
+  reads the animation's record through a null, or divides by the factor).
+  Here the timer is held 1 ms and the blow is owed (word 3), dealt when it
+  fires, just before the answer.
+* **Trample.** A melee unit with special 34 against an enemy sweeps
+  (0x005d4f30); here it hits its target alone.
+* **The training blow's level scale** is this engine's level table, where
+  the original builds its own of 101 steps (0x0050fd40).
+* **The attacker's flag `[unit+0x194] & 0x200000`**, which skips the
+  training branch and the `CanAttack` virtual's side test, is not modelled.
+* **A ship's shot at a ship** draws an angle and throws the shot along it
+  (0x005dc7a8); here the shot is the engine's.
+* **The attacked target of one class** answers `vtbl+0xa4` through
+  0x00511cd0 rather than 0x005dc1f0; here every target stamps the hero's
+  and the squad's clocks.
 
 ## The walk
 
@@ -231,8 +350,6 @@ Departures, each one for what the engine does not yet do:
   call; here a writer outside the clock (`SetPos`, a holder's exit) may
   have moved it since, so the object is left where it is and the origin
   field takes that point. The walk is on the timer, so for it the two agree.
-* **The attack's action moment** (mode 2's `vtbl+0x120`) is combat's own
-  schedule; the action handler's other work is sound.
 * **The command thread's wake at a death.** The base death cancels the
   command thread's pending wake (0x0069f890, 0x0069f8d0); here the command
   is ended 1 ms later, at mode 1, and a wake due in between runs.

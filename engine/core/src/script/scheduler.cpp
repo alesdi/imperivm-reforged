@@ -565,6 +565,17 @@ bool Scheduler::wake(ScriptId id, std::int64_t at) {
   return true;
 }
 
+bool Scheduler::answer(ScriptId id, const Value& answer) {
+  if (id == kNoScript || id == running_) return false;
+  ScriptRecord* record = find(id);
+  if (record == nullptr || record->dead || record->execution.status != ExecStatus::suspended ||
+      record->execution.frames.empty() || record->execution.frames.back().stack.empty()) {
+    return false;
+  }
+  record->execution.frames.back().stack.back() = answer;
+  return true;
+}
+
 RunReport Scheduler::advance(std::int64_t delta) {
   return run_window(now_, now_ + delta);
 }

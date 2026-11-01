@@ -201,9 +201,9 @@ struct MoveState {
   /// `PathType handle=<h>`: a moving target, re-read each turn. `kNoObject`
   /// when the destination is a fixed point.
   ObjectId target_object = kNoObject;
-  /// `Range` and `Min Range`: the arrival annulus. A unit stops once it is
-  /// within `range` of the target; `min_range` is carried because the dumps
-  /// print it and engagement will need it, and is not yet acted on.
+  /// `Range` and `Min Range`: the arrival annulus. A unit is arrived inside
+  /// `[min_range, range]` of the target (`within_band`, 0x00417c10), and the
+  /// search's rings stop at `min_range` (`ring_goal`).
   std::int32_t range = 0;
   std::int32_t min_range = 0;
 

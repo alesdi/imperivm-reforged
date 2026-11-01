@@ -1777,6 +1777,17 @@ Status GameSession::load(std::span<const std::byte> bytes, std::string_view map,
     }
   }
 
+  // The explored-everywhere flag (`[map+0xf0]`) as the original's load
+  // leaves it. Its persist (0x00517860) never wrote it, and the map a load
+  // builds starts with it down (0x005179d0); the game's start, which a load
+  // runs as a new game does (0x00526200), raises it again for a match with
+  // exploration off (0x00526813), filling every cell as `ExploreAll` does.
+  // A flag raised during play -- a script's `ExploreAll`, a match's end with
+  // no human left (0x00524090) -- is forgotten. **Not modelled:** the
+  // start's other raise (0x00526707), on a game-object field this engine
+  // does not hold, which its new game does not model either.
+  if (!impl.match.rules().exploration) impl.fog.map().explore_all();
+
   // The two tables `create` built over the map's own settlement list, which a
   // skirmish map's is not: `start_match` made every `Mutable` placeholder into
   // a race's town and rebuilt both over the new anchors, and a load that kept

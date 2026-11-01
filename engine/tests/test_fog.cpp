@@ -675,19 +675,19 @@ TEST(fog_the_map_survives_a_save_and_is_not_in_the_hash) {
   // not have produced: flip one cell's slot-5 bits and the load is refused.
   std::vector<std::byte> forged = rim_bytes;
   {
-    // The first cell word sits after the 8-byte section header, the
-    // explored-everywhere byte, the side and the count; find slot 5's first
-    // partial cell and set it to full.
+    // The first cell word sits after the 8-byte section header, the side
+    // and the count; find slot 5's first partial cell and set it to full.
     const std::size_t index = static_cast<std::size_t>(mine[0].index);
-    const std::size_t at = 8 + 1 + 4 + 4 + index * 2;
+    const std::size_t at = 8 + 4 + 4 + index * 2;
     auto word = static_cast<std::uint16_t>(static_cast<std::uint8_t>(forged[at]) |
                                            (static_cast<std::uint8_t>(forged[at + 1]) << 8));
     word = static_cast<std::uint16_t>(word | (3u << (2 * mine[0].slot)));
     forged[at] = static_cast<std::byte>(word & 0xFF);
     forged[at + 1] = static_cast<std::byte>(word >> 8);
   }
-  // The explored-everywhere flag `ExploreAll` raises comes back with it, and
-  // a fresh map has it down.
+  // The explored-everywhere flag `ExploreAll` raises does **not** come back
+  // with it: the original's persist (0x00517860) leaves it out and its load
+  // builds a fresh map (0x005179d0), flag down. The grid it filled does.
   CHECK(!again.fog.map().explored_everywhere());
   Bench all;
   all.fog.map().explore_all();
@@ -695,7 +695,11 @@ TEST(fog_the_map_survives_a_save_and_is_not_in_the_hash) {
   std::vector<std::byte> all_bytes;
   all.fog.serialize(all_bytes);
   REQUIRE(again.fog.deserialize(all_bytes).ok());
-  CHECK(again.fog.map().explored_everywhere());
+  CHECK(!again.fog.map().explored_everywhere());
+  CHECK(std::equal(again.fog.map().raw().begin(), again.fog.map().raw().end(),
+                   all.fog.map().raw().begin(), all.fog.map().raw().end()));
+  // And a map that had it up loses it to a load as well.
+  again.fog.map().explore_all();
   REQUIRE(again.fog.deserialize(rim_bytes).ok());
   CHECK(!again.fog.map().explored_everywhere());
 

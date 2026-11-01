@@ -3243,32 +3243,21 @@ HostOutcome m_best_training_target(CallContext& ctx) {
 /// after `GotoAttack(u, ...)` has brought the unit to its partner:
 /// `if (!.TrainAttack(u)) break;`.
 ///
-/// `0x005d5d10` is registered suspending. It answers **false** without a word
-/// for a receiver whose position is the held sentinel, prints and answers
-/// false for a partner that does not resolve, and answers false for a
-/// receiver with one point of health or less (`[unit+0xc0]`). Otherwise it
-/// puts the receiver into action state 2 -- the attack -- through 0x005a7680
-/// and answers the interpreter's 3, *suspend until this object's action
-/// state clears*, which is one swing of the attack animation; the partner is
-/// validated and not stored, because the swing goes to whatever
-/// `GotoAttack` made the target. So the call is one attack's worth of wait,
-/// and the strike itself is the combat system's, here as there.
-///
-/// Here: the same three refusals, then a `retry` for one cycle of the
-/// entity's `attack` state (`attack_animation_ms`, what `AttackWait` measures),
-/// and **true** on the re-entry.
-///
-/// **A unit with no attack animation to wait on still suspends**, until the
-/// next pass. Past the refusals 0x005d5d10 has no path that answers without
-/// the 3, so the call always gives up the slice. It used to answer true at
-/// once here, and `UNIT_TRAIN.VS`'s loop -- `GotoAttack` already in reach
-/// answers at once in both engines, then three `TrainAttack`s -- then never
-/// yielded: 236 runaways on Balcans in 4,000 turns. The partners there were
-/// Gaul sentries (`GSentry1`), sent to train by `TOWNHALL_AUTOTRAIN.VS`, whose
-/// entity (`Units/GArcher/GSentry1.ent.xml`) declares only `idle` and `fight`
-/// states and so has no `attack` cycle to measure. **Labelled:** how long
-/// action state 2 lasts with no animation behind it was not read; one pass is
-/// the shortest wait the 3 can mean, and it is what this answers.
+/// `0x005d5d10` is registered suspending. It zeroes the call's word, then
+/// answers **false** without a word for a receiver whose position is the
+/// held sentinel, prints and answers false for a partner that does not
+/// resolve, and answers false for a receiver with one point of health or
+/// less (`[unit+0xc0]`). Otherwise the arguments stay as the attack's frame,
+/// the partner its target, the action mode becomes 2 through the setter
+/// (0x005a7680) and the call answers 3: the script sleeps until the attack
+/// wakes it, exactly as `Unit::Attack`'s does (`CombatSystem::begin_attack`).
+/// Nothing is gated here and nothing is stored as the unit's target: the
+/// blow at the swing's action moment asks the `CanAttack` virtual, which
+/// lets a training partner through, and the range plus 150 (0x005dc650);
+/// between two units that are not enemies it is the training blow, which
+/// leaves the partner a tenth of its health and may pay a point of
+/// experience (`CombatSystem::training_blow`). The answer is the blow landed
+/// and the partner alive.
 HostOutcome m_train_attack(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("TrainAttack: no world");
@@ -3277,18 +3266,18 @@ HostOutcome m_train_attack(CallContext& ctx) {
   if (world->resolve_position(self->id) == kHeldPosition) {
     return HostOutcome::ok_with(Value::boolean(false));
   }
-  if (ctx.count() < 2 || object_of(*world, ctx.arg(1)) == nullptr) {
-    return HostOutcome::ok_with(Value::boolean(false));
-  }
+  const WorldObject* partner = ctx.count() < 2 ? nullptr : object_of(*world, ctx.arg(1));
+  if (partner == nullptr) return HostOutcome::ok_with(Value::boolean(false));
   if (self->state.health <= 1) return HostOutcome::ok_with(Value::boolean(false));
-  const std::int32_t swing = attack_animation_ms(*self);
-  if (ctx.first_call) {
-    HostOutcome outcome;
-    outcome.status = script::HostStatus::retry;
-    outcome.suspend_for = swing > 0 ? swing : 0;
-    return outcome;
-  }
-  return HostOutcome::ok_with(Value::boolean(true));
+  CombatSystem* combat = combat_system_of(*world);
+  if (combat == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  const GameTime now = ctx.scheduler != nullptr ? ctx.scheduler->now() : world->time();
+  combat->begin_attack(*world, ctx.scheduler, self->id, partner->id, ctx.script, now);
+  HostOutcome outcome;
+  outcome.status = script::HostStatus::suspend;
+  outcome.value = Value::boolean(false);
+  outcome.suspend_for = std::numeric_limits<std::int32_t>::max();
+  return outcome;
 }
 
 /// `Obj::GetStaminaDecTime()` / `Unit::GetStaminaDecTime()` -- 2 sites, both

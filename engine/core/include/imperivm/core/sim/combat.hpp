@@ -329,6 +329,10 @@ struct CombatConstants {
   /// root of its garrison, in percent (0x005c2fb0, the global 0x009bf7b0).
   std::int32_t base_fire_rate = 100;
 
+  /// `TrainingExpChance` (75): the training blow's chance in a hundred of a
+  /// point of experience (0x00511658, the global 0x00996e34).
+  std::int32_t training_exp_chance = 75;
+
   // -- pacing ---------------------------------------------------------
   /// How often a unit with nothing to hit looks for something. `SquadLookIvl`,
   /// the AI's own look interval, is 1000 and is the only cadence of this shape
@@ -1165,6 +1169,49 @@ class CombatSystem final : public System {
   /// sweeps and `Building::Attack` ask of a candidate.
   [[nodiscard]] bool valid_target(const Combatant& self, const Combatant& other) const;
 
+  // -- the attack on the animation timer (docs/formats/animation.md, "The
+  //    attack") --------------------------------------------------------
+
+  /// A unit's `CanAttack` virtual (`vtbl+0xb4`, 0x005b1da0), as far as this
+  /// engine has it: a target that resolves and is not dead, with health; for
+  /// a unit receiver, an enemy, or else a target that is training or a
+  /// building with health; neither side under a hero's ceasefire; a class
+  /// that may be attacked; then the class lines (`unit_can_attack`). What
+  /// `Attack`'s and `CanAttack`'s gates, `IsValidTarget` and the blow ask.
+  [[nodiscard]] bool can_attack(ObjectId self, ObjectId target) const;
+  /// 0x005a7800, measured where the two stand now: the floored root of the
+  /// squared centre distance less both class radii, at most the receiver's
+  /// stored range `[unit+0xd4]` and, when its minimum `[unit+0xd8]` is 1 or
+  /// more, at least that.
+  [[nodiscard]] bool in_range(ObjectId self, ObjectId target) const;
+  /// 0x005a77b0: centre to centre, floored root, less both class radii.
+  [[nodiscard]] std::int64_t edge_distance(ObjectId self, ObjectId target) const;
+  /// `[unit+0xd8]`: the class's `min_range`, which the constructor stores and
+  /// no rebuild touches.
+  [[nodiscard]] std::int32_t min_range_of(const Combatant& unit) const;
+  /// Start the attack: the frame (`target`, word 0) written on the unit's
+  /// clock with the script to wake, and the action mode set to 2 through the
+  /// setter (0x005a7680), which runs the end handler at once when no timer is
+  /// pending. `Attack`, `TrainAttack`.
+  void begin_attack(World& world, script::Scheduler* scheduler, ObjectId id, ObjectId target,
+                    std::uint32_t waiter, GameTime now);
+  /// The end handler's mode 2 (`vtbl+0x11c`, 0x005d5ed0): with the frame's
+  /// word still 0 and its target there, a swing -- one of the attack
+  /// variants, its length over the speed factor, turned to the target -- and
+  /// the target told it is attacked (`vtbl+0xa4`); otherwise the call's
+  /// answer (the blow landed and the target lives) pushed, its script woken
+  /// and the mode back to 0.
+  void attack_end(World& world, script::Scheduler* scheduler, ObjectId id, GameTime now);
+  /// The action handler's mode 2 (`vtbl+0x120`, 0x005dc900): the blow at the
+  /// frame's target, its word 1 when it landed and 2 when not, and the
+  /// unit's attack count `[unit+0x1ac]` raised.
+  void attack_action(World& world, ObjectId id, GameTime now);
+  /// One blow (0x005dc650): refused by the `CanAttack` virtual or beyond the
+  /// stored range plus 150; then the shot or the melee blow (0x00511550), the
+  /// last-attack time `[unit+0x1a4]` and a hidden attacker shown. True when
+  /// it was dealt.
+  bool blow(World& world, ObjectId id, ObjectId target, GameTime now);
+
   /// `Catapult::Attack(point)`'s shot (0x004e22a0): a ground shot of the
   /// engine's class leaving `from` at `release` -- the attack animation's
   /// action moment, which may lie ahead -- for `at`, carrying the class's
@@ -1537,6 +1584,13 @@ class CombatSystem final : public System {
   void land_on_ground(World& world, const Projectile& shot, GameTime now);
   void hit(World& world, Combatant& defender, const DamageInputs& inputs, ObjectId source,
            GameTime now);
+  /// The training blow (0x00511550's first branch, 0x00511621 .. 0x0051177c):
+  /// between two units that are not enemies, the attack less the target's
+  /// slash armour scaled by the level difference, at least the floors and
+  /// at most what leaves the target a tenth of its maximum; nothing more at
+  /// 0, else one point of experience on a draw under `TrainingExpChance`
+  /// and the damage dealt.
+  void training_blow(World& world, Combatant& attacker, Combatant& defender, GameTime now);
 
   /// Credit a landed blow to the two owners' score counters.
   ///

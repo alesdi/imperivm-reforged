@@ -108,6 +108,18 @@ inline constexpr std::int32_t kCollisionCellSize = 16;
   return dist_sq(a, b) <= r * r;
 }
 
+/// Whether `a` and `b` are inside a route's band: no more than `range` apart
+/// and, by the integer root, no less than `min_range` (`IsArrived`,
+/// 0x00417c10, both forms: below the inner bound is not arrived, and a bound
+/// of 0 or less excludes nothing).
+[[nodiscard]] constexpr bool within_band(Point a, Point b, std::int32_t min_range,
+                                         std::int32_t range) noexcept {
+  if (!within(a, b, range)) return false;
+  if (min_range <= 0) return true;
+  const std::int64_t m = min_range;
+  return dist_sq(a, b) >= m * m;
+}
+
 /// Sine and cosine of an integer number of degrees, in Q15 (32768 = 1).
 ///
 /// A 91-entry table and the three symmetries, so that `sin_q15(30)` is 16384

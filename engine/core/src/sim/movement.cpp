@@ -407,7 +407,9 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
 
   // `RecastPathfind` (`0x00419730`) asks `IsArrived` before it searches: inside
   // the band, and -- for an order that owns a lock -- on a free spot.
-  if (within(from, dest, range) && arrival_spot_free(world, id, move, from)) return arrived_here();
+  if (within_band(from, dest, move.min_range, range) && arrival_spot_free(world, id, move, from)) {
+    return arrived_here();
+  }
 
   // The search's goal is the band's rings (`ring_goal`), not the band's
   // centre, and the route runs to the one nearest the unit -- for an order
@@ -444,7 +446,9 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   if (path.status == PathStatus::arrived) {
     // Standing on the ring point already. Arrived when the band says so; a
     // unit on a taken spot stays put, not arrived (a one-point route).
-    if (within(from, dest, range) && arrival_spot_free(world, id, move, from)) return arrived_here();
+    if (within_band(from, dest, move.min_range, range) && arrival_spot_free(world, id, move, from)) {
+      return arrived_here();
+    }
     path.status = PathStatus::partial;
   }
 
@@ -1224,7 +1228,8 @@ bool MovementSystem::is_arrived(const World& world, ObjectId id) const {
   }
   const Point goal =
       move->target_object == kNoObject ? move->target : world.resolve_position(move->target_object);
-  return within(here, goal, move->range) && arrival_spot_free(world, id, *move, here);
+  return within_band(here, goal, move->min_range, move->range) &&
+         arrival_spot_free(world, id, *move, here);
 }
 
 // --------------------------------------------------------------------------
@@ -2913,7 +2918,7 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   // `IsArrived` (`0x005d422b`, `0x005d43b9`): in the band, and on a free spot
   // when the order owns a lock. An arrival clears the failure stamp
   // (0x005d6482).
-  if (within(here, dest, order.range) &&
+  if (within_band(here, dest, order.min_range, order.range) &&
       (!order.lock_destination || movement.ignores_passability(world, id) ||
        movement.spot_free(world, id, here, movement.radius_of(world, id)))) {
     return goto_arrived(ctx, world, movement, id, move);
