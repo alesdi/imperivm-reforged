@@ -34,7 +34,6 @@ namespace {
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 
 /// A decision that is not coming this turn, or at all.
-constexpr GameTime kNever = std::numeric_limits<GameTime>::max();
 
 /// The bucket the avoidance queries sort bodies into. The original's spatial
 /// buckets are 256 units (`0x00417090` shifts by 8); nothing depends on this
@@ -43,7 +42,6 @@ constexpr GameTime kNever = std::numeric_limits<GameTime>::max();
 constexpr std::int32_t kBucket = 256;
 
 /// How a route is walked this turn.
-enum : std::uint8_t { kStill = 0, kCooperative = 1, kWholeTurn = 2 };
 
 [[nodiscard]] bool property_flag(std::string_view value) noexcept {
   std::int32_t parsed = 0;
@@ -368,19 +366,19 @@ void MovementSystem::mark_path(World& world, ObjectId id, bool active) const noe
   if (state != nullptr) state->flags.has_active_path = active;
 }
 
-/// Forget the step being walked and the wait: what a new route, a `Stop` and
-/// an arrival all start from. `CVXPathRetry::SetMedia` deletes the old media
-/// before it installs the new, and a fresh `CVXPathCoop` is born with
-/// `retrytime` 0.
+/// Forget the cooperative wait: what a new route, a `Stop` and an arrival
+/// all start from. `CVXPathRetry::SetMedia` deletes the old media before it
+/// installs the new, and a fresh `CVXPathCoop` is born with `retrytime` 0.
 namespace {
-void reset_cooperation(MoveState& move, GameTime now) noexcept {
-  move.holding = true;
-  move.hold_until = now;
-  move.step_start = 0;
-  move.step_end = 0;
-  move.offset_from = Point{};
-  move.offset_to = Point{};
-  move.retry_time = 0;
+void reset_cooperation(MoveState& move) noexcept { move.retry_time = 0; }
+
+/// The media dropped: no sampled route left to step.
+void drop_media(MoveState& move) noexcept {
+  move.has_path = false;
+  move.route = FormationRoute{};
+  move.gate_crossings.clear();
+  move.path_length = 0;
+  reset_cooperation(move);
 }
 }  // namespace
 
@@ -396,24 +394,13 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   move.range = range;
   // The route being walked, if any is left of it: a search that lays nothing
   // keeps it (below), so it is not touched until the search has answered.
-  const bool walking_on = move.has_path && move.waypoints.size() >= 2 &&
-                          move.travelled() < move.path_length;
-  const auto fresh_media = [&]() {
-    move.progress = 0;
-    move.path_generation = grid_generation_;
-    // The first step of the new route is decided the moment it is laid.
-    reset_cooperation(move, now);
-  };
+  (void)now;
+  const bool walking_on = move.has_path && formation_route_left(move.route) != 0;
+  move.arrived_mark = false;
 
   const auto arrived_here = [&]() {
-    fresh_media();
-    move.has_path = false;
-    mark_path(world, id, false);
-    move.waypoints.clear();
-    move.gate_crossings.clear();
-    move.path_length = 0;
+    drop_media(move);
     move.path_complete = true;
-    move.holding = false;
     move.last_outcome = MoveOutcome::arrived;
     return MoveOutcome::arrived;
   };
@@ -510,35 +497,23 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
     // to the next free spot along the way.
     const bool formation = move.form_aimed;
     if (!formation) move.route_failed = true;
-    if (!formation && walking_on &&
-        !stop_branch_halts(world, id, move, from, move.travelled())) {
+    if (!formation && walking_on && !stop_branch_halts(world, id, move, from)) {
       move.last_outcome = MoveOutcome::moving;
       return move.last_outcome;
     }
     // A route aimed at a formation keeps what it had, and answers the failure
     // to the formation's step (0x00419b20), which takes no step on it.
     if (formation && walking_on) return MoveOutcome::blocked;
-    fresh_media();
-    move.has_path = false;
-    mark_path(world, id, false);
-    move.waypoints.clear();
-    move.gate_crossings.clear();
-    move.path_length = 0;
+    drop_media(move);
     move.path_complete = false;
-    move.holding = false;
     // Cut back to where it stands: the way is open and the end is taken. The
     // unit is not arrived, and not walled off either.
     move.last_outcome = cut ? MoveOutcome::exhausted : MoveOutcome::blocked;
     return move.last_outcome;
   }
 
-  fresh_media();
-  move.waypoints = path.waypoints;
-  move.path_length = path.length;
+  reset_cooperation(move);
   move.form_lock_laid = lays_lock;
-  // 0x00418fb0 over the route as it will be walked.
-  move.gate_crossings.clear();
-  if (!request.ignore_passability) world.gate_lines().crossings(move.waypoints, move.gate_crossings);
   // A route cut back from a taken end no longer reaches its goal, one
   // re-aimed at a free spot was never laid to the band, and one laid with no
   // goal point left -- status 0 from the straight line's walk to a free spot
@@ -546,13 +521,21 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   // band anyway (a mover that ignores passability, sent onto a wall).
   move.path_complete = path.status == PathStatus::found && !cut && !aimed &&
                        (goal.free || within(path.waypoints.back(), dest, range));
+  // The media: the route cut by the unit's walk stride (`CVXSPath`, built
+  // in 0x00419730 with 0x005d2920's step), its length the sum of its legs'
+  // roots.
+  formation_route_lay(move.route, std::move(path.waypoints), move.path_complete,
+                      walk_stride(world, id, move));
+  move.path_length = 0;
+  for (std::size_t i = 0; i + 1 < move.route.points.size(); ++i) {
+    move.path_length += isqrt(dist_sq(move.route.points[i], move.route.points[i + 1]));
+  }
+  // 0x00418fb0 over the route as it will be walked.
+  move.gate_crossings.clear();
+  if (!request.ignore_passability) {
+    world.gate_lines().crossings(move.route.points, move.gate_crossings);
+  }
   move.has_path = true;
-  mark_path(world, id, true);
-  move.stride = formation_stride_or_walk(world, id, move);
-  // Face along the first leg immediately, so a unit does not moonwalk out of
-  // its first turn.
-  const Point step{move.waypoints[1].x - from.x, move.waypoints[1].y - from.y};
-  set_facing(world, id, move, step);
   move.last_outcome = move.path_complete ? MoveOutcome::moving : MoveOutcome::exhausted;
   return move.last_outcome;
 }
@@ -676,11 +659,14 @@ MoveOutcome MovementSystem::order_goto(World& world, ObjectId id, Point dest, st
   // An order that is not aimed at a formation walks at the unit's own pace.
   move.form_aimed = false;
   move.form_seen = -1;
-  move.march_rate = 0;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
   // `SetDest` and `SetFormation` both clear the stop request (0x00417797).
   move.stop_requested = false;
-  return lay_path(world, id, move, dest, range, world.time());
+  // The retry exists: `SyncFlags` bit 17 (0x005d3830 with a record).
+  mark_path(world, id, true);
+  const MoveOutcome outcome = lay_path(world, id, move, dest, range, world.time());
+  if (move.has_path) start_walk(world, id);
+  return outcome;
 }
 
 MoveOutcome MovementSystem::order_goto_object(World& world, ObjectId id, ObjectId target,
@@ -700,74 +686,46 @@ MoveOutcome MovementSystem::order_goto_object(World& world, ObjectId id, ObjectI
   move.party = kNoObject;
   move.form_aimed = false;
   move.form_seen = -1;
-  move.march_rate = 0;
   move.dest_lock = lock_destination && !ignores_passability(world, id);
   move.stop_requested = false;
-  return lay_path(world, id, move, position(world, target), range, world.time());
+  mark_path(world, id, true);
+  const MoveOutcome outcome = lay_path(world, id, move, position(world, target), range, world.time());
+  if (move.has_path) start_walk(world, id);
+  return outcome;
 }
 
 void MovementSystem::stop(World& world, ObjectId id) {
+  // 0x005d3830 with 0: the retry deleted, its media and flags with it, and
+  // `SyncFlags` bit 17 cleared.
   mark_path(world, id, false);
   MoveState* move = find(id);
   if (move == nullptr) return;
-  move->has_path = false;
+  drop_media(*move);
   move->goto_active = false;
   move->target_object = kNoObject;
-  move->waypoints.clear();
-  move->gate_crossings.clear();
-  move->path_length = 0;
-  move->progress = 0;
-  // Every route after a stop is laid by `lay_path`, which resets this again,
-  // so leaving it is unobservable; cleared so a saved stopped unit says so.
-  reset_cooperation(*move, world.time());
-  move->holding = false;
-  // The retry goes with the order, and its flags with it.
   move->free_spot_tried = false;
   move->free_spot_aimed = false;
   move->stop_requested = false;
   move->route_failed = false;
-  move->march_rate = 0;
+  move->arrived_mark = false;
   move->form_aimed = false;
   move->form_seen = -1;
   move->last_outcome = MoveOutcome::idle;
 }
 
 bool MovementSystem::stop_branch_halts(const World& world, ObjectId id, const MoveState& move,
-                                       Point here, std::int64_t travelled) const {
+                                       Point here) const {
   // 0x00419ee0 with `[retry+0x20] & 6`. It never asks `IsArrived`. An order
-  // that names no owner (0x004178d0 at 0x00419ef1) takes no step at all; one
-  // that does stops on a spot the passability grid leaves open (the bit tested
-  // through 0x00623300) and the free-spot test passes (0x0040a990), and
-  // otherwise takes the route's next step -- none at its end, so a unit that
-  // runs out of route stops there, free spot or not. Nor does it step on
-  // before a gate that bars it (0x00419f8a .. 0x00419fa2): where the walk on
-  // would wait at the gate, the stop stops there.
-  return !lock_owner(id, move) || travelled >= move.path_length ||
+  // that names no owner (0x004178d0 at 0x00419ef1) takes no step at all, nor
+  // does one with no media or whose class ignores passability; one that does
+  // stops on a spot the passability grid leaves open (the bit tested through
+  // 0x00623300) and the free-spot test passes (0x0040a990), and before a gate
+  // that bars it (0x00419f8a .. 0x00419fa2); otherwise it takes the route's
+  // next step -- none at its end, so a unit that runs out of route stops
+  // there, free spot or not.
+  return !lock_owner(id, move) || !move.has_path || ignores_passability(world, id) ||
          (!grid_.blocked(here) && spot_free(world, id, here, radius_of(world, id))) ||
-         held_at_gate(world, id, move, travelled);
-}
-
-void MovementSystem::halt(World& world, ObjectId id, MoveState& move) {
-  // `Unit::Stop`'s: its re-entry (0x005d6df0) finds no next step and deletes
-  // the route, the order with it.
-  if (move.stop_requested) {
-    stop(world, id);
-    return;
-  }
-  // A failed search's: the follower answers no step and the retry stays,
-  // bit 2 and all, until the next `SetDest` searches again. The walk ends;
-  // the order does not, and is not arrived (`IsArrived` is false while the
-  // bit is set).
-  mark_path(world, id, false);
-  move.has_path = false;
-  move.waypoints.clear();
-  move.gate_crossings.clear();
-  move.path_length = 0;
-  move.progress = 0;
-  move.path_complete = false;
-  reset_cooperation(move, world.time());
-  move.holding = false;
-  move.last_outcome = MoveOutcome::exhausted;
+         gate_barring(world, id, move) != kNoObject;
 }
 
 bool MovementSystem::marching(ObjectId id, const MoveState& move) const noexcept {
@@ -791,18 +749,15 @@ bool MovementSystem::lock_owner(ObjectId id, const MoveState& move) const noexce
 }
 
 bool MovementSystem::request_stop(World& world, ObjectId id) {
+  // The retry's slot 6 (0x004178b0): bit 1 of its flags, whatever it names.
+  // The path follower's stop branch then decides at the unit's next step
+  // (`retry_step`): walk on to a free spot for an order that names an
+  // owner, no step at all for one that does not (0x00419ef8) -- a march
+  // member stopped while its formation goes on stands where it is.
   MoveState* move = find(id);
-  if (move == nullptr || !move->has_path || !lock_owner(id, *move)) {
-    // With no owner named, the path follower's stop branch takes no step at
-    // all (0x00419ef8 -> 0x0041a019): the unit stands where it is. A march
-    // member is named no owner while its formation's path goes on
-    // (0x004178d0), so one its hero's script stops mid-march stands where the
-    // stop found it -- inside a fellow, if that is where it was, since the
-    // members of one formation do not block one another (0x005d2f80).
-    stop(world, id);
-    return false;
-  }
+  if (move == nullptr || !move->goto_active) return false;
   move->stop_requested = true;
+  start_walk(world, id);
   return true;
 }
 
@@ -1050,7 +1005,7 @@ bool MovementSystem::owned_lock(const World& world, ObjectId id, StaticLock& loc
   // `SetMedia` puts it at the route's last point (`vtbl+0x10` of the media),
   // and `0x0040a580` leaves its own radius at 0, which `0x0040a880` reads as
   // the owner's class radius.
-  lock.at = move->waypoints.back();
+  lock.at = move->route.points.back();
   lock.radius = radius_of(world, id);
   return true;
 }
@@ -1110,19 +1065,6 @@ bool MovementSystem::arrival_spot_free(const World& world, ObjectId id, const Mo
   return spot_free(world, id, here, radius_of(world, id));
 }
 
-void MovementSystem::recast(World& world, std::size_t entry, Point here, GameTime now) {
-  const ObjectId id = states_[entry].id;
-  MoveState& move = states_[entry].state;
-  const Point goal =
-      move.target_object != kNoObject && world.find(move.target_object) != nullptr
-          ? position(world, move.target_object)
-          : move.target;
-  set_position(world, id, here);
-  lay_path(world, id, move, goal, move.range, now, &here);
-  // The path follower clears the re-aim after the search it runs at a
-  // route's end, whatever that search found (`0x0041a097`, `0x0041a0ae`).
-  move.free_spot_aimed = false;
-}
 
 MovementSystem::OverlapCensus MovementSystem::overlap_census(const World& world) const {
   struct Standing {
@@ -1164,313 +1106,6 @@ MovementSystem::OverlapCensus MovementSystem::overlap_census(const World& world)
   return census;
 }
 
-std::int32_t MovementSystem::walk_step(const World& world, ObjectId id,
-                                       const MoveState& move) const {
-  // `0x005d2920`: the walk slot's animation record, `+0x2dc`, which the
-  // entity loader fills from `step` (`0x00600ff6`).
-  const WorldObject* slot = world.find(id);
-  if (slot == nullptr || slot->object == nullptr || slot->object->entity == nullptr) return 0;
-  const EntityAnim* walk = slot->object->entity->anim(move.walk_anim);
-  return walk == nullptr || walk->step <= 0 ? 0 : walk->step;
-}
-
-std::int32_t MovementSystem::formation_stride_or_walk(const World& world, ObjectId id,
-                                                      const MoveState& move) const {
-  // A route is cut by its unit's own walk step: `RecastPathfind` (0x00419730)
-  // builds every route's media with 0x005d2920, a route aimed at a formation
-  // (mode 2) as any other, hero and follower alike. Only the formation's own
-  // record steps 200 (`kFormationRouteStride`).
-  const std::int32_t step = walk_step(world, id, move);
-  // **Engine limit, labelled.** A route aimed at a formation has to be
-  // stepped, since its samples are made at its steps (0x00419b20), and this
-  // engine walks a stepless route turn by turn with no step to make them at;
-  // a unit whose walk animation declares no `step` takes the formation's 200
-  // there. What the original's media does with a step of 0 was not read.
-  if (step == 0 && move.form_aimed) return kFormationStride;
-  return step;
-}
-
-void MovementSystem::face(World& world, ObjectId id, Point towards) {
-  MoveState& move = state(id);
-  const Point from = position(world, id);
-  // 0x0053f5f0: the raw difference, kept at its own length, and `(0, 1)`
-  // for a point on top of the object.
-  Point delta{towards.x - from.x, towards.y - from.y};
-  if (delta.x == 0 && delta.y == 0) delta = Point{0, 1};
-  move.facing = delta;
-  WorldObject* slot = world.find(id);
-  if (slot == nullptr || slot->object == nullptr || slot->object->entity == nullptr) return;
-  slot->object->anim.variation = facing_column(move.facing, slot->object->entity->variations());
-}
-
-std::int64_t MovementSystem::remaining(ObjectId id) const noexcept {
-  const MoveState* move = find(id);
-  if (move == nullptr || !move->has_path) return 0;
-  const std::int64_t done = move->travelled();
-  return done >= move->path_length ? 0 : move->path_length - done;
-}
-
-bool MovementSystem::is_arrived(const World& world, ObjectId id) const {
-  const MoveState* move = find(id);
-  if (move == nullptr || !move->goto_active) return false;
-  // `IsArrived` answers 0 while either stop bit is set (0x00417c19): a unit
-  // walking on to stop, or stopped after a failed search, is not arrived.
-  if (move->stopping()) return false;
-  const Point here = world.resolve_position(id);
-  // A route aimed at a formation (mode 2) is arrived once the formation's
-  // path is spent and the unit stands on its station exactly (0x00417c4a ..
-  // 0x00417c73: 0x005f22f0, then the position against the slot's sample).
-  if (move->form_aimed) {
-    const Formation* form = formation(move->party);
-    if (form == nullptr || formation_going_on(move->party)) return false;
-    return here == station_of(*form, id);
-  }
-  const Point goal =
-      move->target_object == kNoObject ? move->target : world.resolve_position(move->target_object);
-  return within(here, goal, move->range) && arrival_spot_free(world, id, *move, here);
-}
-
-std::int64_t MovementSystem::eta(ObjectId id) const noexcept {
-  const MoveState* move = find(id);
-  if (move == nullptr || !move->has_path) return -1;
-  const std::int64_t rate = move->rate();
-  if (rate <= 0) return -1;
-  const std::int64_t left = remaining(id);
-  // Round up: a turn short of arrival is a turn the caller would have to
-  // discover by polling.
-  return (left * kSpeedScale + rate - 1) / rate;
-}
-
-void MovementSystem::prepare(World& world, Entry& entry, GameTime now) {
-  MoveState& move = entry.state;
-  if (!move.has_path) return;
-
-  if (world.find(entry.id) == nullptr) {
-    // The object died mid-move. Drop the path rather than keep integrating for
-    // a handle that will never be reused.
-    move.has_path = false;
-    move.waypoints.clear();
-    move.gate_crossings.clear();
-    return;
-  }
-  // Nor does a corpse walk. `CombatSystem::enter_dying` stops it, but an order
-  // can still reach it afterwards -- a hero's army keeps the member until the
-  // object is gone, and `SetCommand` on the army routes all of it -- and the
-  // dying state lasts the whole death animation. All 15 dying objects in the
-  // nine dumps are without the active-path bit.
-  if (const CombatSystem* combat = combat_system_of(world);
-      combat != nullptr && combat->is_dying(entry.id)) {
-    stop(world, entry.id);
-    return;
-  }
-
-  // A route being walked on to a place to stop is the stop branch's alone:
-  // the path follower takes it (0x00419ee9) before anything that would lay a
-  // route again (0x0041a022 on), so neither a drifting target nor a changed
-  // grid re-lays it.
-  if (move.stopping()) return;
-
-  // A moving target that has drifted gets a fresh route. Done before the step
-  // so that the unit spends this turn on the new route, not the stale one.
-  if (move.target_object != kNoObject) {
-    const Point target_now = position(world, move.target_object);
-    if (!within(target_now, move.target, repath_threshold())) {
-      lay_path(world, entry.id, move, target_now, move.range, now);
-      if (!move.has_path) return;
-    }
-  }
-
-  // Re-validate only when the grid has changed under the route. A building
-  // finished across a unit's path is the case this catches.
-  // A mover that ignores passability is re-laid too, and its new route is the
-  // same straight line from where it stands.
-  if (move.path_generation != grid_generation_) {
-    move.path_generation = grid_generation_;
-    const Point here = position(world, entry.id);
-    bool clear = true;
-    std::size_t segment = 0;
-    (void)point_along(move.waypoints, move.travelled(), &segment);
-    for (std::size_t i = segment + 1; i < move.waypoints.size() && clear; ++i) {
-      const Point from = i == segment + 1 ? here : move.waypoints[i - 1];
-      clear = grid_.line_is_clear(from, move.waypoints[i]);
-    }
-    if (!clear) {
-      // Try once to route around the new obstruction from where we stand.
-      const Point dest = move.target;
-      const std::int32_t range = move.range;
-      if (lay_path(world, entry.id, move, dest, range, now) == MoveOutcome::blocked) {
-        move.last_outcome = MoveOutcome::blocked;
-        return;
-      }
-    }
-  }
-}
-
-void MovementSystem::walk_turn(World& world, const Turn& turn, Entry& entry) {
-  MoveState& move = entry.state;
-  if (!move.has_path) return;
-
-  // The stop branch, as `decide` reads it, tested once a turn here.
-  if (move.stopping() &&
-      stop_branch_halts(world, entry.id, move, position(world, entry.id), move.travelled())) {
-    halt(world, entry.id, move);
-    return;
-  }
-
-  const std::int64_t rate = move.rate();
-  if (rate <= 0) {
-    move.last_outcome = MoveOutcome::moving;
-    return;
-  }
-  // A gate ahead that bars this mover: it stands the turn out before it.
-  if (held_at_gate(world, entry.id, move, move.travelled())) {
-    ++counters_.gate_waits;
-    move.last_outcome = MoveOutcome::moving;
-    return;
-  }
-
-  // The one line the whole design is about: an exact integer sum, never a
-  // per-turn position increment. See the header.
-  move.progress += rate * static_cast<std::int64_t>(turn.length);
-
-  const std::int64_t travelled = move.travelled();
-  std::size_t segment = 0;
-  const Point next = point_along(move.waypoints, travelled, &segment);
-  const Point previous = position(world, entry.id);
-  set_position(world, entry.id, next);
-
-  if (next.x != previous.x || next.y != previous.y) move.last_moved = turn.time;
-
-  // Face along the *leg being walked*, which is a pure function of the distance
-  // travelled -- never along the step just taken, which is a function of how the
-  // interval was cut into turns. Facing is hashed state, so a step-derived
-  // heading would leave one turn of 800 and two of 400 on the same coordinate
-  // pointing different ways: a hash divergence with nothing visible behind it,
-  // which is the worst kind to chase.
-  //
-  // Past the end of the route the leg clamps to the *last* one rather than
-  // vanishing, for the same reason: otherwise the final heading would depend on
-  // whether a turn boundary happened to fall inside the last leg.
-  if (move.waypoints.size() >= 2) {
-    const std::size_t leg_start =
-        travelled >= move.path_length ? move.waypoints.size() - 2 : segment;
-    const Point leg{move.waypoints[leg_start + 1].x - move.waypoints[leg_start].x,
-                    move.waypoints[leg_start + 1].y - move.waypoints[leg_start].y};
-    set_facing(world, entry.id, move, leg);
-  }
-
-  const bool at_end = travelled >= move.path_length;
-  const bool in_range = move.range > 0 && within(next, move.target, move.range);
-  if (move.stopping() && at_end) {
-    halt(world, entry.id, move);
-    return;
-  }
-  // `IsArrived`'s free spot, as `decide` asks it.
-  if ((at_end || in_range) && !arrival_spot_free(world, entry.id, move, next)) {
-    if (at_end) {
-      const Point goal =
-          move.target_object != kNoObject && world.find(move.target_object) != nullptr
-              ? position(world, move.target_object)
-              : move.target;
-      lay_path(world, entry.id, move, goal, move.range, turn.time);
-      move.free_spot_aimed = false;
-      return;
-    }
-    move.last_outcome = MoveOutcome::moving;
-    return;
-  }
-  if (at_end || in_range) {
-    move.has_path = false;
-    mark_path(world, entry.id, false);
-    move.waypoints.clear();
-    move.gate_crossings.clear();
-    move.path_length = 0;
-    move.progress = 0;
-    move.holding = false;
-    // A route that never reached the goal has run out, not arrived. The
-    // distinction is what a caller's retry loop needs.
-    move.last_outcome = (in_range || move.path_complete) ? MoveOutcome::arrived
-                                                         : MoveOutcome::exhausted;
-    return;
-  }
-  move.last_outcome = MoveOutcome::moving;
-}
-
-// --------------------------------------------------------------------------
-// the cooperative step
-// --------------------------------------------------------------------------
-
-bool MovementSystem::cooperates(const World& world, const MoveState& move, ObjectId id) const {
-  if (!move.has_path || move.stride <= 0) return false;
-  const WorldObject* slot = world.find(id);
-  return slot != nullptr && !slot->state.is_held() && !slot->state.flags.in_air;
-}
-
-Point MovementSystem::offset_at(const MoveState& move, std::int64_t travelled) const noexcept {
-  const std::int64_t span = move.step_end - move.step_start;
-  // Only a freshly laid route has no span, and both its offsets are zero; the
-  // clamps below bite only on an accumulator a fraction of a unit past its
-  // step. Equivalences, and the arithmetic's guards.
-  if (span <= 0) return move.offset_to;
-  std::int64_t done = travelled - move.step_start;
-  if (done < 0) done = 0;
-  if (done > span) done = span;
-  return Point{
-      static_cast<std::int32_t>(move.offset_from.x +
-                                (static_cast<std::int64_t>(move.offset_to.x) - move.offset_from.x) *
-                                    done / span),
-      static_cast<std::int32_t>(move.offset_from.y +
-                                (static_cast<std::int64_t>(move.offset_to.y) - move.offset_from.y) *
-                                    done / span)};
-}
-
-Point MovementSystem::cooperative_position(const MoveState& move, std::int64_t progress) const {
-  std::int64_t travelled = progress / kSpeedScale;
-  if (travelled > move.path_length) travelled = move.path_length;
-  const Point on_route = point_along(move.waypoints, travelled);
-  const Point off = offset_at(move, travelled);
-  return Point{on_route.x + off.x, on_route.y + off.y};
-}
-
-std::int64_t MovementSystem::progress_at(std::size_t entry, GameTime t) const {
-  const MoveState& move = states_[entry].state;
-  if (mode_[entry] == kCooperative) {
-    if (move.holding) return move.progress;
-    return move.progress + move.rate() * (t - since_[entry]);
-  }
-  // A route walked a whole turn at once is still where its accumulator says
-  // at `t`: its account has not been touched since the turn began.
-  const std::int64_t whole = move.path_length * kSpeedScale;
-  const std::int64_t p = move.progress + move.rate() * (t - turn_t0_);
-  return p > whole ? whole : p;
-}
-
-Point MovementSystem::body_position(const World& world, const Body& body, GameTime t) const {
-  if (body.entry == kUntracked) return body.start;
-  const MoveState& move = states_[body.entry].state;
-  if (!move.has_path || mode_[body.entry] == kStill) {
-    // Standing, or arrived earlier in this turn, which wrote the position.
-    const WorldObject* slot = world.find(body.id);
-    return slot == nullptr ? body.start : slot->state.position;
-  }
-  const std::int64_t p = progress_at(body.entry, t);
-  if (mode_[body.entry] == kCooperative) return cooperative_position(move, p);
-  return point_along(move.waypoints, p / kSpeedScale);
-}
-
-GameTime MovementSystem::next_decision(const MoveState& move, GameTime now) const noexcept {
-  if (!move.has_path) return kNever;
-  if (move.holding) return move.hold_until > now ? move.hold_until : now;
-  const std::int64_t rate = move.rate();
-  if (rate <= 0) return kNever;
-  const std::int64_t need = move.step_end * kSpeedScale - move.progress;
-  if (need <= 0) return now;
-  // Exact: the first whole millisecond at which the accumulator has reached
-  // the end of the step. However a turn boundary cuts the interval, the
-  // ceiling lands on the same instant.
-  return now + (need + rate - 1) / rate;
-}
-
 namespace {
 
 /// The inclusive bucket range `[lo, hi]` a coordinate interval covers, clamped
@@ -1487,58 +1122,395 @@ void bucket_span(std::int64_t from, std::int64_t to, std::int32_t count, std::in
 
 }  // namespace
 
-void MovementSystem::index_bodies(const World& world) {
-  bodies_.clear();
-  movers_.clear();
-  std::int32_t max_x = grid_.extent_x();
-  std::int32_t max_y = grid_.extent_y();
-  for (const WorldObject& slot : world.objects()) {
-    const ObjectState& s = slot.state;
-    // `0x00416f60`: a unit, and not a dead one. Held units are not on the
-    // ground at all -- their position is `kHeldPosition`, off every map, so
-    // leaving them in would change nothing -- a spawn template is not in play,
-    // and an airborne bird is inference 4.
+namespace {
+void end_commands(World& world, ObjectId id);
+}  // namespace
+
+bool MovementSystem::gate_cuts_off(World& world, ObjectId gate, ObjectId hero,
+                                   ObjectId unit) const {
+  const WorldObject* slot = world.find(gate);
+  EconomySystem* economy = economy_of(world);
+  if (slot == nullptr || economy == nullptr) return false;
+  const Settlement* set = economy->settlements().for_object(slot->settlement);
+  if (set == nullptr || set->anchor == kNoObject) return false;
+  return inside_walls(world, hero, set->anchor) != inside_walls(world, unit, set->anchor);
+}
+
+std::int32_t MovementSystem::walk_stride(const World& world, ObjectId id,
+                                         const MoveState& move) const {
+  // `0x005d2920`: the walk slot's animation record, `+0x2dc`, which the
+  // entity loader fills from `step` (`0x00600ff6`). Every route is cut by
+  // it (`RecastPathfind`, 0x00419730), a route aimed at a formation as any
+  // other. **Departure 1** (file header): with none, the formation's 200.
+  const WorldObject* slot = world.find(id);
+  if (slot != nullptr && slot->object != nullptr && slot->object->entity != nullptr) {
+    const EntityAnim* walk = slot->object->entity->anim(move.walk_anim);
+    if (walk != nullptr && walk->step > 0) return walk->step;
+  }
+  return kFormationStride;
+}
+
+GameTime MovementSystem::default_step_time(const World& world, ObjectId id,
+                                           const MoveState& move) const {
+  // 0x005d38e0. A class with no speed divides by zero in the original; no
+  // step is taken here (an engine guard).
+  if (move.speed <= 0) return 0;
+  GameTime time = static_cast<GameTime>(walk_stride(world, id, move)) * 1000 / move.speed;
+  // A hero (bit 0x1000000, its own record), or a unit with one
+  // (`[unit+0x170]`): with the quick-march byte (`[rec+0x1ff]`) not
+  // withdrawn, the step shortened by its level times
+  // `SpeedPercentPerQuickMarchLevel` percent.
+  if (const HeroSystem* heroes = hero_system_of(const_cast<World&>(world)); heroes != nullptr) {
+    const HeroRecord* hero = heroes->hero(id);
+    if (hero == nullptr) {
+      if (const UnitRecord* unit = heroes->unit(id); unit != nullptr) hero = heroes->hero(unit->hero);
+    }
+    if (hero != nullptr) {
+      const std::int32_t level =
+          hero->skills[static_cast<std::size_t>(HeroSkill::quick_march)];
+      if (level >= 0) {
+        time = time * 100 /
+               (static_cast<GameTime>(level) *
+                    heroes->constants().speed_percent_per_quick_march_level +
+                100);
+      }
+    }
+  }
+  return time;
+}
+
+void MovementSystem::face(World& world, ObjectId id, Point towards) {
+  MoveState& move = state(id);
+  const Point from = position(world, id);
+  // 0x0053f5f0: the raw difference, kept at its own length, and `(0, 1)`
+  // for a point on top of the object.
+  Point delta{towards.x - from.x, towards.y - from.y};
+  if (delta.x == 0 && delta.y == 0) delta = Point{0, 1};
+  set_facing(world, id, move, delta);
+}
+
+void MovementSystem::set_facing(World& world, ObjectId id, MoveState& move,
+                                Point heading) const {
+  if (heading.x == 0 && heading.y == 0) return;  // names no direction
+  move.facing = heading;
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr || slot->object == nullptr || slot->object->entity == nullptr) return;
+  slot->object->anim.variation = facing_column(move.facing, slot->object->entity->variations());
+}
+
+std::int64_t MovementSystem::remaining(ObjectId id) const noexcept {
+  const MoveState* move = find(id);
+  if (move == nullptr || !move->has_path) return 0;
+  const std::int32_t left = formation_route_left(move->route);
+  return left < 0 ? 0 : left;
+}
+
+bool MovementSystem::is_arrived(const World& world, ObjectId id) const {
+  const MoveState* move = find(id);
+  if (move == nullptr || !move->goto_active) return false;
+  // `IsArrived` answers 0 while either stop bit is set (0x00417c19): a unit
+  // walking on to stop, or stopped after a failed search, is not arrived;
+  // and 1 for a route its member step marked arrived (bit 7, 0x00417c26).
+  if (move->stopping()) return false;
+  if (move->arrived_mark) return true;
+  const Point here = world.resolve_position(id);
+  // A route aimed at a formation (mode 2) is arrived once the formation's
+  // path is spent and the unit stands on its station exactly (0x00417c4a ..
+  // 0x00417c73: 0x005f22f0, then the position against the slot's sample).
+  if (move->form_aimed) {
+    const Formation* form = formation(move->party);
+    if (form == nullptr || formation_going_on(move->party)) return false;
+    return here == station_of(*form, id);
+  }
+  const Point goal =
+      move->target_object == kNoObject ? move->target : world.resolve_position(move->target_object);
+  return within(here, goal, move->range) && arrival_spot_free(world, id, *move, here);
+}
+
+// --------------------------------------------------------------------------
+// the walk
+// --------------------------------------------------------------------------
+
+void MovementSystem::start_walk(World& world, ObjectId id) {
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr) return;
+  // **Engine guard:** a dead unit's mode is its death's (1, then 8), and an
+  // order the engine's own callers send it -- a hero's army order -- must
+  // not put it back to walking, which would play the death again at its end.
+  if (slot->state.flags.is_unit && object_is_dead(*slot)) return;
+  world.set_anim_mode(id, 3);
+  const GameTime now = world.time();
+  if (!world.anim_timer_pending(*slot)) world.arm_anim_timer(id, now, 1);
+}
+
+void MovementSystem::walk_step(World& world, script::Scheduler* scheduler, ObjectId id,
+                               GameTime now) {
+  const WorldObject* slot = world.find(id);
+  MoveState* found = find(id);
+  if (slot == nullptr || found == nullptr) return;
+  const Point here = slot->state.position;
+  // The step's default length and the speed factor (0x005d3b68 ..
+  // 0x005d3b8b). **Engine guard:** a factor of 0, which the original
+  // divides by, takes no step.
+  const GameTime full = default_step_time(world, id, *found);
+  const std::int32_t factor = found->speed_factor;
+  GameTime d = factor > 0 ? full * 100 / factor : 0;
+  Point p = here;
+  bool answered = false;
+  if (found->goto_active && full > 0 && factor > 0) {
+    answered = retry_step(world, id, *found, p, d, now);
+  }
+  // The step may have laid routes and moved others; look again.
+  found = find(id);
+  if (found == nullptr || world.find(id) == nullptr) return;
+  MoveState& move = *found;
+  if (answered) {
+    if (p == here) {
+      // A hold: the timer armed for its length (0x0053ced0).
+      world.arm_anim_timer(id, now, d);
+    } else {
+      // `StartAnimation` (0x0053e6c0) of the walk index, turned towards the
+      // point and with it as the origin, for exactly the step's length.
+      face(world, id, p);
+      const std::int32_t played = world.start_animation(
+          id, move.walk_anim, now, 0, static_cast<std::int32_t>(d), p);
+      const WorldObject* again = world.find(id);
+      if (played == 0 && again != nullptr && again->state.position != kHeldPosition) {
+        // Departure 1 (file header): no walk animation to start.
+        set_position(world, id, p);
+        world.arm_anim_timer(id, now, d > 0 ? d : 1);
+      }
+    }
+    // The retry told the step was taken (`vtbl+0xc`).
+    if (MoveState* after = find(id); after != nullptr) retry_notify(*after);
+    return;
+  }
+  // No step. With no call waiting on the walk the route is deleted
+  // (0x005d3830 with 0); a waiting call is woken now when the unit is
+  // arrived (0x00417c10, then 0x0069f890 .. 0x0069f8f0), and otherwise
+  // waits its slice out.
+  if (!move.wake_on_arrival) {
+    if (move.goto_active) {
+      // What the walk came to, for the engine's own reporting: stopped on
+      // request, there, or short of it with nothing left to step.
+      const bool asked = move.stop_requested;
+      const bool there = !asked && is_arrived(world, id);
+      stop(world, id);
+      if (MoveState* after = find(id); after != nullptr && !asked) {
+        after->last_outcome = there ? MoveOutcome::arrived : MoveOutcome::exhausted;
+      }
+    }
+    return;
+  }
+  if (is_arrived(world, id)) (void)wake_waiter(world, scheduler, id, now);
+}
+
+bool MovementSystem::peek_step(World& world, ObjectId id, GameTime now) {
+  MoveState* move = find(id);
+  if (move == nullptr || !move->goto_active) return false;
+  const MoveState& cmove = *move;
+  const GameTime full = default_step_time(world, id, cmove);
+  const std::int32_t factor = cmove.speed_factor;
+  GameTime d = factor > 0 ? full * 100 / factor : 0;
+  Point p = position(world, id);
+  if (full <= 0 || factor <= 0) return false;
+  return retry_step(world, id, *move, p, d, now);
+}
+
+bool MovementSystem::retry_step(World& world, ObjectId id, MoveState& move, Point& p,
+                                GameTime& d, GameTime now) {
+  const Point here = position(world, id);
+  if (move.stopping()) {
+    // The stop branch (flags & 6, 0x00419ee6): no owner named, no media, a
+    // mover that ignores passability, a passable free spot or a gate that
+    // bars it ahead is no step; otherwise the media's.
+    if (stop_branch_halts(world, id, move, here)) return false;
+    return media_step(world, id, move, p, d);
+  }
+  if (is_arrived(world, id)) return false;
+  // A route aimed at a formation is the member's step (0x00419b20).
+  if (move.form_aimed) return member_step(world, id, move, p, d, now);
+  // No media: laid now, or no step.
+  if (!move.has_path && !recast(world, id, move)) return false;
+  // An object goal drawn away from the route's end is laid again.
+  if (move.target_object != kNoObject && object_goal_drifted(world, id, move)) {
+    (void)recast(world, id, move);
+    if (!move.has_path) return false;
+  }
+  if (!media_step(world, id, move, p, d)) {
+    // The route is spent short of arrival -- its end taken, or a partial
+    // route -- and is laid again from here (0x0041a056); the re-aim at a
+    // free spot is forgotten either way (0x0041a097, 0x0041a0ae).
+    if (is_arrived(world, id) || !recast(world, id, move)) {
+      move.free_spot_aimed = false;
+      return false;
+    }
+    if (gate_barring(world, id, move) != kNoObject) return false;
+    move.free_spot_aimed = false;
+    return media_step(world, id, move, p, d);
+  }
+  // A gate ahead that bars the mover (0x00418210, 0x00418260): searched
+  // again, and stepped along the new route only when that one is not barred
+  // within reach as well.
+  if (gate_barring(world, id, move) == kNoObject) return true;
+  ++counters_.gate_waits;
+  if (!recast(world, id, move)) return false;
+  if (gate_barring(world, id, move) != kNoObject) return false;
+  return media_step(world, id, move, p, d);
+}
+
+void MovementSystem::retry_notify(MoveState& move) noexcept {
+  // 0x00416800: a step the cooperative media let through or turned aside
+  // (its wait back at 0) is taken from the sampled route; a hold leaves it,
+  // so the same step is tested again.
+  if (move.has_path && move.retry_time == 0) formation_route_commit(move.route);
+}
+
+ObjectId MovementSystem::gate_barring(const World& world, ObjectId id,
+                                      const MoveState& move) const {
+  if (!move.has_path) return kNoObject;
+  // Where the unit has got to along its route: the laid length less what
+  // the sampled route has left (`vtbl+0x14`).
+  const std::int64_t travelled = move.path_length - formation_route_left(move.route);
+  ObjectId barring = kNoObject;
+  return held_at_gate(world, id, move, travelled, &barring) ? barring : kNoObject;
+}
+
+bool MovementSystem::object_goal_drifted(const World& world, ObjectId id,
+                                         const MoveState& move) const {
+  // 0x00417ab0 for an object goal (mode 1). A target gone or dead is laid
+  // again. **Not reproduced:** a unit whose squad's `[squad+0x7c]` is 25 or
+  // more and that has a combat target is never laid again here.
+  const WorldObject* target = world.find(move.target_object);
+  if (target == nullptr || target->state.health == 0) return true;
+  if (move.route.points.empty()) return true;
+  const Point last = move.route.points.back();
+  const std::int64_t away = isqrt(dist_sq(world.resolve_position(move.target_object), last));
+  const std::int64_t mine = isqrt(dist_sq(world.resolve_position(id), last));
+  // The band here holds both radii already (`object_goto_reach`), which the
+  // original subtracts one by one with its range.
+  return mine < away - move.range;
+}
+
+bool MovementSystem::recast(World& world, ObjectId id, MoveState& move) {
+  const Point goal =
+      move.target_object != kNoObject && world.find(move.target_object) != nullptr
+          ? position(world, move.target_object)
+          : move.target;
+  (void)lay_path(world, id, move, goal, move.range, world.time());
+  return move.has_path && formation_route_left(move.route) != 0;
+}
+
+bool MovementSystem::media_step(World& world, ObjectId id, MoveState& move, Point& p,
+                                GameTime& d) {
+  // `CVXPathCoop` 0x004172b0 over the sampled route (`CVXSPath` 0x0041a740).
+  if (!move.has_path) return false;
+  Point at;
+  if (!formation_route_step(move.route, at)) return false;
+  const Point here = position(world, id);
+
+  // 0x00417090 with 0x00416f60: every unit on the ground within the unit's
+  // radius plus 40 of the step's end -- alive, not this one, not of its
+  // march (0x005d2f80) -- measured by its own radius. One standing with no
+  // order (bit 17 clear) is a hard block.
+  const std::int32_t radius = radius_of(world, id);
+  const std::int64_t reach = static_cast<std::int64_t>(radius) + kCoopQueryMargin;
+  bool blocked = false;
+  bool hard = false;
+  neighbours_.clear();
+  near_.clear();
+  // Departure 3 (file header): a unit in the air tests nobody.
+  const WorldObject* self = world.find(id);
+  const bool airborne = self != nullptr && self->state.flags.in_air;
+  if (!airborne) {
+    world.objects_in_radius(at, static_cast<std::int32_t>(reach), ClassFilter{}, near_);
+  }
+  for (const ObjectId other : near_) {
+    if (other == id) continue;
+    const WorldObject* slot = world.find(other);
+    if (slot == nullptr) continue;
+    const ObjectState& s = slot->state;
     if (!s.flags.is_unit || s.is_held() || s.flags.unspawned || s.flags.in_air) continue;
     if (s.health == 0) continue;
-    Body body;
-    body.id = slot.id;
-    body.start = s.position;
-    body.radius = radius_of(world, slot.id);
-    const std::size_t at = lower_bound(slot.id);
-    body.entry = at < states_.size() && states_[at].id == slot.id ? at : kUntracked;
-    // A body with a route is somewhere else by the time anybody asks, so it is
-    // not bucketed by where it began: `decide` reads every one of them where
-    // it is at that instant. Nothing starts moving in the middle of a turn --
-    // orders arrive between turns -- so a body without a route stays where the
-    // bucket says for the whole of it.
-    if (body.entry != kUntracked && states_[body.entry].state.has_path) {
-      movers_.push_back(body);
-      continue;
+    if (move.party != kNoObject) {
+      const MoveState* theirs = find(other);
+      if (theirs != nullptr && theirs->party == move.party) continue;
     }
-    bodies_.push_back(body);
-    if (s.position.x > max_x) max_x = s.position.x;
-    if (s.position.y > max_y) max_y = s.position.y;
+    const std::int64_t gap = dist_sq(s.position, at);
+    if (gap > reach * reach) continue;
+    const std::int32_t r = radius_of(world, other);
+    neighbours_.push_back(Neighbour{s.position, r});
+    const std::int64_t sum = static_cast<std::int64_t>(radius) + r;
+    if (gap < sum * sum) {
+      blocked = true;
+      if (!s.flags.has_active_path) hard = true;
+    }
+  }
+  if (!airborne && !static_locks_.empty()) {
+    if (!lock_buckets_valid_) index_static_locks();
+    const Buckets& b = lock_buckets_;
+    std::int32_t x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+    bucket_span(at.x - reach, at.x + reach, b.columns, x0, x1);
+    bucket_span(at.y - reach, at.y + reach, b.rows, y0, y1);
+    for (std::int32_t cy = y0; cy <= y1; ++cy) {
+      for (std::int32_t cx = x0; cx <= x1; ++cx) {
+        const std::size_t cell = static_cast<std::size_t>(cy) * static_cast<std::size_t>(b.columns) +
+                                 static_cast<std::size_t>(cx);
+        for (std::uint32_t k = b.first[cell]; k < b.first[cell + 1]; ++k) {
+          const StaticLock& lock = static_locks_[b.items[k]];
+          const std::int64_t gap = dist_sq(lock.at, at);
+          if (gap > reach * reach) continue;
+          // The sidestep measures a lock by its class's radius, which is 0.
+          neighbours_.push_back(Neighbour{lock.at, 0});
+          const std::int64_t sum = static_cast<std::int64_t>(radius) + lock.radius;
+          if (gap < sum * sum) {
+            blocked = true;
+            hard = true;
+          }
+        }
+      }
+    }
   }
 
-  Buckets& b = body_buckets_;
-  b.columns = max_x / kBucket + 1;
-  b.rows = max_y / kBucket + 1;
-  const std::size_t cells = static_cast<std::size_t>(b.columns) * static_cast<std::size_t>(b.rows);
-  b.first.assign(cells + 1, 0);
-  const auto cell_of_body = [&b](Point p) {
-    std::int32_t cx = 0, cy = 0, unused = 0;
-    bucket_span(p.x, p.x, b.columns, cx, unused);
-    bucket_span(p.y, p.y, b.rows, cy, unused);
-    return static_cast<std::size_t>(cy) * static_cast<std::size_t>(b.columns) +
-           static_cast<std::size_t>(cx);
-  };
-  for (const Body& body : bodies_) ++b.first[cell_of_body(body.start) + 1];
-  for (std::size_t i = 1; i <= cells; ++i) b.first[i] += b.first[i - 1];
-  b.items.assign(bodies_.size(), 0);
-  std::vector<std::uint32_t> cursor(b.first.begin(), b.first.end() - 1);
-  for (std::uint32_t i = 0; i < bodies_.size(); ++i) {
-    b.items[cursor[cell_of_body(bodies_[i].start)]++] = i;
+  if (!airborne) ++counters_.decisions;
+  if (!blocked) {
+    // Free: the wait back to 0, and the step's length its distance's share
+    // of the default (an unsigned division by the walk stride, 0x004173a7).
+    move.retry_time = 0;
+    const auto distance = static_cast<std::uint64_t>(isqrt(dist_sq(here, at)));
+    d = static_cast<GameTime>(distance * static_cast<std::uint64_t>(d < 0 ? 0 : d) /
+                              static_cast<std::uint64_t>(move.route.stride));
+    p = at;
+    return true;
   }
+  ++counters_.blocked;
+  move.retry_time = next_retry_time(move.retry_time);
+  if (hard) {
+    move.retry_time = kGiveWay;
+  } else if (world.rng().between(1, kEarlyGiveWayOdds) == 1) {
+    if (move.retry_time != kGiveWay) ++counters_.early;
+    move.retry_time = kGiveWay;
+  }
+  if (move.retry_time != kGiveWay) {
+    // A hold where the unit stands, for the wait.
+    ++counters_.holds;
+    p = here;
+    d = move.retry_time;
+    return true;
+  }
+  // Give way: across the direction of travel, unless this is the route's
+  // last point (0x00416a00), for the default step's whole length
+  // (0x005d39c0: the default over the factor).
+  move.retry_time = 0;
+  p = at;
+  if (at != move.route.points.back()) {
+    p = pick_sidestep(at, here, radius, neighbours_, grid_, world.terrain(),
+                      traits_of(world, id).water_unit);
+  }
+  if (p != at) ++counters_.sidesteps;
+  const std::int32_t factor = move.speed_factor > 0 ? move.speed_factor : 1;
+  d = default_step_time(world, id, move) * 100 / factor;
+  return true;
 }
 
 void MovementSystem::index_static_locks() {
@@ -1570,448 +1542,10 @@ void MovementSystem::index_static_locks() {
   lock_buckets_valid_ = true;
 }
 
-void MovementSystem::arrive(World& world, std::size_t entry, bool in_range) {
-  Entry& e = states_[entry];
-  MoveState& move = e.state;
-  const std::int64_t travelled =
-      std::min<std::int64_t>(move.progress / kSpeedScale, move.path_length);
-  const Point where = cooperative_position(move, move.progress);
-  // The facing `walk_turn` would have left: the leg being walked, or the last
-  // one at the end of the route.
-  if (move.waypoints.size() >= 2) {
-    std::size_t segment = 0;
-    (void)point_along(move.waypoints, travelled, &segment);
-    const std::size_t leg_start =
-        travelled >= move.path_length ? move.waypoints.size() - 2 : segment;
-    const Point leg{move.waypoints[leg_start + 1].x - move.waypoints[leg_start].x,
-                    move.waypoints[leg_start + 1].y - move.waypoints[leg_start].y};
-    set_facing(world, e.id, move, leg);
-  }
-  set_position(world, e.id, where);
-  move.has_path = false;
-  mark_path(world, e.id, false);
-  move.waypoints.clear();
-  move.gate_crossings.clear();
-  move.path_length = 0;
-  move.progress = 0;
-  move.holding = false;
-  move.step_start = 0;
-  move.step_end = 0;
-  move.offset_from = Point{};
-  move.offset_to = Point{};
-  move.retry_time = 0;
-  move.last_outcome =
-      (in_range || move.path_complete) ? MoveOutcome::arrived : MoveOutcome::exhausted;
-  // A route walked to its end, or arrived on, is no longer re-aimed
-  // (`0x0041a0ae`); and the `Goto` family's arrival deletes the whole retry
-  // (`0x005d3830(0)`), the free-spot search's own flag with it.
-  move.free_spot_aimed = false;
-  if (move.last_outcome == MoveOutcome::arrived) move.free_spot_tried = false;
-}
-
-void MovementSystem::decide(World& world, std::size_t entry, GameTime now) {
-  const ObjectId id = states_[entry].id;
-  MoveState& move = states_[entry].state;
-  // A route aimed at a formation steps through 0x00419b20 first: laid again
-  // to a new sample, more samples made as the unit nears its station, the
-  // pace set. Laid again, the step is decided afresh at this same instant.
-  if (move.form_aimed && !move.stopping()) {
-    const std::vector<Point>::size_type before = move.waypoints.size();
-    const std::int64_t length_before = move.path_length;
-    const std::int32_t seen_before = move.form_seen;
-    if (formation_step(world, entry, now) == FormStep::done) return;
-    if (move.form_seen != seen_before || move.waypoints.size() != before ||
-        move.path_length != length_before) {
-      if (!move.has_path || move.holding) return;
-    }
-  }
-  const std::int64_t travelled = move.progress / kSpeedScale;
-  const Point here = cooperative_position(move, move.progress);
-
-  // `CVXPathRetry` asks whether it has arrived before it steps: at the end of
-  // the route, or inside the arrival annulus. A route that ever enters the
-  // annulus is one the search `found`, so `arrive`'s two answers only differ
-  // for a search that ran out of budget first.
-  //
-  // For an order that owns a lock, `IsArrived` (`0x00417c10`) also wants the
-  // spot free (`0x0040a990`). Inside the band on a taken spot the route walks
-  // on; at its end on one, it is laid again from here (`0x0041a056` ->
-  // `RecastPathfind`), which cuts it back to a free spot or leaves the unit
-  // where it stands, not arrived.
-  const bool at_end = travelled >= move.path_length;
-  const bool in_range = move.range > 0 && within(here, move.target, move.range);
-  if (move.stopping()) {
-    // `Unit::Stop` asked (`[retry+0x20] & 2`), or the last search laid
-    // nothing (`& 4`, `MoveState::route_failed`): the path follower's other
-    // branch (0x00419ee6), which never asks `IsArrived`
-    // (`stop_branch_halts`). `request_stop` set bit 1 only for an owner, and
-    // an order that has stopped owning a lock since takes no step at all
-    // (0x00419ef8).
-    if (stop_branch_halts(world, id, move, here, travelled)) {
-      set_position(world, id, here);
-      halt(world, id, move);
-      return;
-    }
-  } else if (at_end || in_range) {
-    if (arrival_spot_free(world, id, move, here)) {
-      const bool aimed = move.form_aimed;
-      arrive(world, entry, in_range);
-      // At the end of a formation's spent path the unit faces the way the
-      // formation does (0x0053f5f0 on `[form+0x38]`).
-      if (aimed) {
-        if (const Formation* form = formation(move.party); form != nullptr) {
-          set_facing(world, id, move, form->dir);
-        }
-      }
-      return;
-    }
-    if (at_end) {
-      recast(world, entry, here, now);
-      return;
-    }
-  }
-
-  // A gate on the route ahead that bars this mover (0x00418260): it stands
-  // where it is, the route kept, and asks again on the next turn, when the
-  // gate is read again. The cooperative wait is not involved.
-  ObjectId barring = kNoObject;
-  const bool barred = held_at_gate(world, id, move, travelled, &barring);
-  // On a route aimed at a formation (0x00419ca0): the gate that bars it is
-  // the formation's blocking gate, and once there is one, a member whose
-  // route has not yet compared sides at it does so (0x00417dc0). Cut off
-  // from its hero by it, its commands are ended and it leaves his army --
-  // at the end of this turn's movement here -- and it takes no step.
-  bool cut_off = false;
-  if (move.form_aimed) {
-    if (Formation* form = formation(move.party); form != nullptr) {
-      if (barred) form->blocking_gate = barring;
-      if (form->blocking_gate != kNoObject && move.gate_seen != form->blocking_gate) {
-        move.gate_seen = form->blocking_gate;
-        if (gate_cuts_off(world, form->blocking_gate, form->hero, id)) {
-          cut_off_.push_back(CutOff{id, form->hero});
-          cut_off = true;
-        }
-      }
-    }
-  }
-  if (barred || cut_off) {
-    ++counters_.gate_waits;
-    const Point standing = offset_at(move, travelled);
-    move.holding = true;
-    move.hold_until = turn_end_ + 1;
-    move.step_start = travelled;
-    move.step_end = travelled;
-    move.offset_from = standing;
-    move.offset_to = standing;
-    return;
-  }
-
-  // The step to test: the one after the last one tested, which after a hold is
-  // ahead of the unit (the sampled route advanced on every ask). With none
-  // left, the last is tested again -- inference 1.
-  const std::int64_t base = std::max(move.step_end, travelled);
-  const std::int64_t boundary = base >= move.path_length
-                                    ? move.path_length
-                                    : next_step_boundary(move.waypoints, move.stride, base);
-  const Point step_end = point_along(move.waypoints, boundary);
-  const Point drift = offset_at(move, travelled);
-
-  // `0x00416f60` over everything within the unit's radius plus 40.
-  const std::int32_t radius = radius_of(world, id);
-  const std::int64_t reach = static_cast<std::int64_t>(radius) + kCoopQueryMargin;
-  bool blocked = false;
-  bool hard = false;
-  neighbours_.clear();
-
-  const auto consider = [&](const Body& body) {
-    if (body.id == id) return;
-    // `0x005d2f80`: one march does not block itself.
-    if (move.party != kNoObject && body.entry != kUntracked &&
-        states_[body.entry].state.party == move.party) {
-      return;
-    }
-    const Point at = body_position(world, body, now);
-    const std::int64_t gap = dist_sq(at, step_end);
-    if (gap > reach * reach) return;
-    neighbours_.push_back(Neighbour{at, body.radius});
-    const std::int64_t sum = static_cast<std::int64_t>(radius) + body.radius;
-    if (gap < sum * sum) {
-      blocked = true;
-      // Bit 17 as it stands now: a mover that arrived earlier this turn is
-      // standing, and a hard block.
-      const bool moving = body.entry != kUntracked && states_[body.entry].state.has_path;
-      if (!moving) hard = true;
-    }
-  };
-  // Everybody with a route, wherever they have got to.
-  for (const Body& body : movers_) consider(body);
-  // Everybody standing, from the buckets they stand in.
-  {
-    const Buckets& b = body_buckets_;
-    std::int32_t x0 = 0, x1 = 0, y0 = 0, y1 = 0;
-    bucket_span(step_end.x - reach, step_end.x + reach, b.columns, x0, x1);
-    bucket_span(step_end.y - reach, step_end.y + reach, b.rows, y0, y1);
-    for (std::int32_t cy = y0; cy <= y1; ++cy) {
-      for (std::int32_t cx = x0; cx <= x1; ++cx) {
-        const std::size_t cell =
-            static_cast<std::size_t>(cy) * static_cast<std::size_t>(b.columns) +
-            static_cast<std::size_t>(cx);
-        for (std::uint32_t k = b.first[cell]; k < b.first[cell + 1]; ++k) {
-          consider(bodies_[b.items[k]]);
-        }
-      }
-    }
-  }
-  if (!static_locks_.empty()) {
-    const Buckets& b = lock_buckets_;
-    std::int32_t x0 = 0, x1 = 0, y0 = 0, y1 = 0;
-    bucket_span(step_end.x - reach, step_end.x + reach, b.columns, x0, x1);
-    bucket_span(step_end.y - reach, step_end.y + reach, b.rows, y0, y1);
-    for (std::int32_t cy = y0; cy <= y1; ++cy) {
-      for (std::int32_t cx = x0; cx <= x1; ++cx) {
-        const std::size_t cell =
-            static_cast<std::size_t>(cy) * static_cast<std::size_t>(b.columns) +
-            static_cast<std::size_t>(cx);
-        for (std::uint32_t k = b.first[cell]; k < b.first[cell + 1]; ++k) {
-          const StaticLock& lock = static_locks_[b.items[k]];
-          const std::int64_t gap = dist_sq(lock.at, step_end);
-          if (gap > reach * reach) continue;
-          // The sidestep measures a lock by its class's radius, which is 0.
-          neighbours_.push_back(Neighbour{lock.at, 0});
-          const std::int64_t sum = static_cast<std::int64_t>(radius) + lock.radius;
-          if (gap < sum * sum) {
-            blocked = true;
-            hard = true;
-          }
-        }
-      }
-    }
-  }
-
-  const auto take_step = [&](Point offset) {
-    move.holding = false;
-    move.step_start = travelled;
-    move.step_end = boundary;
-    move.offset_from = drift;
-    move.offset_to = offset;
-  };
-
-  ++counters_.decisions;
-  if (!blocked) {
-    move.retry_time = 0;
-    take_step(Point{});
-    return;
-  }
-  ++counters_.blocked;
-
-  move.retry_time = next_retry_time(move.retry_time);
-  if (hard) {
-    move.retry_time = kGiveWay;
-  } else if (world.rng().between(1, kEarlyGiveWayOdds) == 1) {
-    if (move.retry_time != kGiveWay) ++counters_.early;
-    move.retry_time = kGiveWay;
-  }
-
-  if (move.retry_time != kGiveWay) {
-    // A hold. The tested step is spent; the unit stands where it is.
-    ++counters_.holds;
-    move.holding = true;
-    move.hold_until = now + move.retry_time;
-    move.step_start = travelled;
-    move.step_end = boundary;
-    // The unit stays at `step_start`, where the interpolation reads
-    // `offset_from` whatever `offset_to` holds; both are the drift so the
-    // record says what the unit is doing.
-    move.offset_from = drift;
-    move.offset_to = drift;
-    return;
-  }
-
-  // Give way: across the direction of travel, unless this is the route's
-  // last point, which is stepped onto regardless.
-  move.retry_time = 0;
-  Point aim = step_end;
-  if (boundary < move.path_length) {
-    aim = pick_sidestep(step_end, here, radius, neighbours_, grid_, world.terrain(),
-                        traits_of(world, id).water_unit);
-  }
-  if (aim != step_end) ++counters_.sidesteps;
-  take_step(Point{aim.x - step_end.x, aim.y - step_end.y});
-}
-
-void MovementSystem::settle(World& world, const Turn& turn, std::size_t entry) {
-  Entry& e = states_[entry];
-  MoveState& move = e.state;
-  if (!move.holding) move.progress += move.rate() * (turn.time - since_[entry]);
-  since_[entry] = turn.time;
-  const std::int64_t travelled =
-      std::min<std::int64_t>(move.progress / kSpeedScale, move.path_length);
-  set_position(world, e.id, cooperative_position(move, move.progress));
-  if (move.waypoints.size() >= 2) {
-    std::size_t segment = 0;
-    (void)point_along(move.waypoints, travelled, &segment);
-    const std::size_t leg_start =
-        travelled >= move.path_length ? move.waypoints.size() - 2 : segment;
-    const Point leg{move.waypoints[leg_start + 1].x - move.waypoints[leg_start].x,
-                    move.waypoints[leg_start + 1].y - move.waypoints[leg_start].y};
-    set_facing(world, e.id, move, leg);
-  }
-  move.last_outcome = MoveOutcome::moving;
-}
-
-namespace {
-void end_commands(World& world, ObjectId id);
-}  // namespace
-
-bool MovementSystem::gate_cuts_off(World& world, ObjectId gate, ObjectId hero,
-                                   ObjectId unit) const {
-  const WorldObject* slot = world.find(gate);
-  EconomySystem* economy = economy_of(world);
-  if (slot == nullptr || economy == nullptr) return false;
-  const Settlement* set = economy->settlements().for_object(slot->settlement);
-  if (set == nullptr || set->anchor == kNoObject) return false;
-  return inside_walls(world, hero, set->anchor) != inside_walls(world, unit, set->anchor);
-}
-
 void MovementSystem::advance(World& world, const Turn& turn) {
-  if (turn.length <= 0) return;
-  const GameTime t0 = turn.time - turn.length;
-  turn_t0_ = t0;
-  turn_end_ = turn.time;
-
-  // Ascending id, which is spawn order. Iteration order is world state.
-  for (Entry& entry : states_) prepare(world, entry, t0);
-
-  const std::size_t count = states_.size();
-  mode_.assign(count, kStill);
-  since_.assign(count, t0);
-  scheduled_.assign(count, kNever);
-  turn_start_.resize(count);
-  bool any = false;
-  for (std::size_t i = 0; i < count; ++i) {
-    const Entry& entry = states_[i];
-    turn_start_[i] = position(world, entry.id);
-    if (!entry.state.has_path) continue;
-    if (cooperates(world, entry.state, entry.id)) {
-      mode_[i] = kCooperative;
-      any = true;
-    } else {
-      mode_[i] = kWholeTurn;
-    }
-  }
-
-  // The decisions, in `(game time, id)` order. Only a route with a stride
-  // makes them; everybody else is read where their accumulator puts them.
-  if (any) {
-    index_bodies(world);
-    if (!lock_buckets_valid_) index_static_locks();
-    using Due = std::tuple<GameTime, ObjectId, std::size_t>;
-    std::priority_queue<Due, std::vector<Due>, std::greater<Due>> queue;
-    for (std::size_t i = 0; i < count; ++i) {
-      if (mode_[i] != kCooperative) continue;
-      const GameTime at = next_decision(states_[i].state, t0);
-      scheduled_[i] = at;
-      if (at <= turn.time) queue.emplace(at, states_[i].id, i);
-    }
-    deciding_ = true;
-    while (!queue.empty()) {
-      const auto [at, id, i] = queue.top();
-      queue.pop();
-      (void)id;
-      if (scheduled_[i] != at) continue;
-      MoveState& move = states_[i].state;
-      if (!move.has_path) continue;
-      if (!move.holding) move.progress += move.rate() * (at - since_[i]);
-      since_[i] = at;
-      decide(world, i, at);
-      const GameTime next = next_decision(move, at);
-      scheduled_[i] = next;
-      if (next <= turn.time) queue.emplace(next, states_[i].id, i);
-    }
-    deciding_ = false;
-  }
-
-  for (std::size_t i = 0; i < count; ++i) {
-    Entry& entry = states_[i];
-    if (mode_[i] == kCooperative) {
-      if (entry.state.has_path) settle(world, turn, i);
-      if (position(world, entry.id) != turn_start_[i]) entry.state.last_moved = turn.time;
-    } else {
-      walk_turn(world, turn, entry);
-    }
-    play_locomotion(world, entry.id, entry.state);
-  }
-
-  // The members a shut gate cut off from their hero (0x00417dc0): their
-  // commands ended (`vtbl+0xc0` with 1), then out of his army (`DetachHero`,
-  // 0x005db190). The original does both inside the member's step; here they
-  // wait for the turn's steps to end, since neither may run inside them.
-  const std::vector<CutOff> cut = std::exchange(cut_off_, {});
-  for (const CutOff& c : cut) {
-    if (world.find(c.unit) == nullptr) continue;
-    end_commands(world, c.unit);
-    if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
-      if (const UnitRecord* record = heroes->unit(c.unit);
-          record != nullptr && record->hero == c.hero) {
-        (void)heroes->detach(world, c.unit);
-      }
-    }
-  }
-}
-
-/// Start the walk cycle when an object begins moving and stop it when it
-/// arrives.
-///
-/// **`MoveState::walk_anim` was written by `SetWalkAnim` and read by nobody**,
-/// so a unit under orders slid to its destination on a still frame. The slot is
-/// the entity's locomotion animation -- 1 in every entity that declares one,
-/// and the deer switches between 13 and 1 as it grazes and bolts.
-///
-/// **Only on the transition.** `World::play_anim` restarts the timeline at step
-/// zero, so calling it every turn would pin the sprite on its first frame
-/// forever -- which looks exactly like the bug this fixes. `walking` is the
-/// memory that makes it a transition rather than a poll.
-///
-/// Stopping holds the last frame rather than entering an idle pose. What a
-/// stationary object plays is its `<state>` machine's business and the scripts'
-/// -- `StartAnim` and `enter_state` are how the corpus drives it -- and
-/// choosing one here would be inventing a behaviour rather than restoring one.
-///
-/// **And only the walk.** Arrival stops the cursor only while it is still on
-/// the walk slot. Something else may have taken it over in the meantime --
-/// combat's swing, a death, a script's `PlayAnim` -- and freezing *that* on
-/// the frame it had reached would be stopping an animation movement never
-/// started. The case that showed it: a unit killed mid-walk is stopped by
-/// `CombatSystem::enter_dying` and starts its death in the same turn, and the
-/// next turn's transition here would have pinned the corpse on its first row.
-void MovementSystem::play_locomotion(World& world, ObjectId id, MoveState& move) {
-  const bool moving = move.has_path;
-  if (moving == move.walking) return;
-  move.walking = moving;
-  if (moving) {
-    // The first walk step's `StartAnimation` stops what the clock plays
-    // (0x005d3b50 -> 0x0053e6c0 -> 0x0053d730). The walk itself is this
-    // loop, not the original's one-shot steps (docs/formats/animation.md).
-    world.stop_animation(id, world.time());
-    (void)world.play_anim(id, move.walk_anim, AnimRepeat::loop);
-    return;
-  }
-  const WorldObject* slot = world.find(id);
-  if (slot != nullptr && slot->object != nullptr && slot->object->anim.anim_slot == move.walk_anim) {
-    (void)world.stop_anim(id);
-  }
-}
-
-void MovementSystem::set_facing(World& world, ObjectId id, MoveState& move,
-                                Point heading) const {
-  if (heading.x == 0 && heading.y == 0) return;  // names no direction
-  move.facing = set_length(heading, kFacingLength);
-
-  WorldObject* slot = world.find(id);
-  if (slot == nullptr || slot->object == nullptr) return;
-  const Entity* entity = slot->object->entity;
-  if (entity == nullptr) return;  // an object with no art has no column to pick
-  slot->object->anim.variation = facing_column(move.facing, entity->variations());
+  // Nothing moves on a turn: every step is a timer's (the file header).
+  (void)world;
+  (void)turn;
 }
 
 void MovementSystem::hash(std::uint64_t& accumulator) const {
@@ -2032,19 +1566,16 @@ void MovementSystem::hash(std::uint64_t& accumulator) const {
     hash_i32(accumulator, move.facing.y);
     hash_i32(accumulator, move.speed);
     hash_i32(accumulator, move.speed_factor);
-    // `walking` decides whether next turn restarts the walk cycle, which is
-    // in the object hash a turn later; see `play_locomotion`.
-    hash_u64(accumulator, move.walking ? 1u : 0u);
-    // The accumulator decides where the unit will be next turn, so a
-    // divergence in it is caught a turn before it becomes a divergence in a
-    // coordinate. That is the whole value of hashing it.
-    hash_u64(accumulator, static_cast<std::uint64_t>(move.progress));
+    // What the sampled route has left decides where the next step lands,
+    // and the waiting call's bit whether the walk's end wakes it.
+    hash_i32(accumulator, move.route.remaining);
+    hash_u64(accumulator, move.wake_on_arrival ? 1u : 0u);
     // How far a march's route looks ahead of a gate (`sim/gate.hpp`): the
     // radius of the formation this object leads, where it was hashed when it
     // lived on the movement record.
     const Formation* form = formation(entry.id);
     hash_i32(accumulator, form == nullptr ? 0 : form->radius);
-    // Deliberately absent: `waypoints`, `path_length`, `path_generation`,
+    // Deliberately absent: the route's points, `path_length`,
     // `last_outcome`. The route is the pathfinder's output, and the pathfinder
     // is not in the determinism contract -- `pathfinder` is zero in all nine
     // dumps and `WorldHashes` keeps it that way.
@@ -2103,6 +1634,25 @@ constexpr const char* kNoWorld = "movement: no World behind CallContext::user";
 constexpr const char* kNoSystem = "movement: no movement system registered with the world";
 constexpr const char* kNoReceiver = "movement: receiver is not an object";
 constexpr const char* kNoPoint = "movement: argument is not a point or an object";
+
+/// A call that waits on the walk (`Goto` and its siblings, `Stop`): bit
+/// 0x10000 of `[unit+0x194]` raised and the thread noted for the walk step
+/// to wake.
+void wait_on_walk(CallContext& ctx, World& world, ObjectId id) {
+  if (MovementSystem* movement = movement_system(world); movement != nullptr) {
+    movement->state(id).wake_on_arrival = true;
+  }
+  if (WorldObject* slot = world.find(id); slot != nullptr) slot->clock.waiter = ctx.script;
+}
+
+/// The re-entry's first act in every call that waits on the walk: the bit
+/// dropped (0x005d63a4 and its siblings).
+void stop_waiting_on_walk(World& world, ObjectId id) {
+  if (MovementSystem* movement = movement_system(world); movement != nullptr) {
+    if (MoveState* move = movement->find(id); move != nullptr) move->wake_on_arrival = false;
+  }
+}
+
 
 /// What every entry point below needs: the world, the system, and the receiver.
 ///
@@ -2547,31 +2097,54 @@ HostOutcome stop_impl(CallContext& ctx) {
   const std::int64_t hold = ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer()
                                                                       : 0;
   if (!ctx.first_call) {
-    // The re-entry (0x005d6df0) asks the route for its next step: one still
-    // there is a unit still walking to where it may stop, and the answer is
-    // false with the route kept; none, and the route is deleted and the
-    // answer is true.
-    const MoveState* move = self.movement->find(self.id);
-    if (move != nullptr && move->has_path) return HostOutcome::ok_with(Value::boolean(false));
+    // The re-entry (0x005d6df0): the bit dropped, and the route asked for
+    // its next step (`vtbl+8`) without being told it was taken -- a peek,
+    // which runs the follower whole, draws and all. One still there is a
+    // unit still walking to where it may stop, and the answer is false with
+    // the route kept; none, and the route is deleted and the answer is true.
+    MoveState* move = self.movement->find(self.id);
+    if (move != nullptr) move->wake_on_arrival = false;
+    if (move != nullptr && move->goto_active &&
+        self.movement->peek_step(*self.world, self.id, now_of(ctx, *self.world))) {
+      return HostOutcome::ok_with(Value::boolean(false));
+    }
     self.movement->stop(*self.world, self.id);
     return HostOutcome::ok_with(Value::boolean(true));
   }
   if (CombatSystem* combat = combat_system_of(*self.world); combat != nullptr) {
     (void)combat->drop_target(self.id);
   }
-  // A unit with a route, on the map (0x005d6d16 .. 0x005d6d48), is asked to
-  // stop and the call suspends for `ms` with the route in hand; the answer
-  // comes at the re-entry.
+  // A unit with a route record, on the map (0x005d6d16 .. 0x005d6d48), is
+  // asked to stop, its walk set going (mode 3, the timer armed for 1 ms
+  // when nothing is pending), and the call suspends for `ms` with the bit
+  // raised; the answer comes at the re-entry.
   if (const ObjectState* state = self.world->state(self.id);
       state != nullptr && !state->is_held() && state->position != kHeldPosition &&
       self.movement->request_stop(*self.world, self.id)) {
+    wait_on_walk(ctx, *self.world, self.id);
     HostOutcome out;
     out.status = script::HostStatus::retry;
     out.suspend_for = hold > 0 ? hold : 0;
     return out;
   }
-  // Anything else stops where it is and is answered at once (0x005d6d9b).
+  // Anything else (0x005d6d9b): the route record deleted, and with no timer
+  // pending the action mode back to 0 and -- for a unit whose walk index is
+  // 0 and that neither plays nor rests in its first state -- that state set
+  // at once (0x0053e860 with no transition). True at once.
   self.movement->stop(*self.world, self.id);
+  const GameTime now = now_of(ctx, *self.world);
+  if (const WorldObject* slot = self.world->find(self.id);
+      slot != nullptr && !self.world->anim_timer_pending(*slot)) {
+    self.world->set_anim_mode(self.id, 0);
+    const MoveState* move = self.movement->find(self.id);
+    const bool walk_index_zero = move == nullptr || move->walk_anim == 1;
+    const std::int32_t playing = self.world->anim_slot_at(*slot, now);
+    const std::int32_t index =
+        playing != kNoAnim ? playing - 1 : self.world->anim_rest_state_at(*slot, now) - 1;
+    if (walk_index_zero && index != 0) {
+      (void)self.world->set_anim_state(self.id, 1, /*transition=*/false, now);
+    }
+  }
   return HostOutcome::ok_with(Value::boolean(true));
 }
 
@@ -2594,15 +2167,16 @@ HostOutcome has_path_impl(CallContext& ctx) {
   const auto answer = [](bool has) { return HostOutcome::ok_with(Value::boolean(has)); };
   const ObjectState* state = self.world->state(self.id);
   if (state != nullptr && state->is_held()) return answer(false);
+  // The route record (`[unit+0x148]`), not whether it has media now.
   const MoveState* move = self.movement->find(self.id);
-  if (move != nullptr && move->has_path) return answer(true);
+  if (move != nullptr && move->goto_active) return answer(true);
   if (state == nullptr || !state->flags.is_hero) return answer(false);
   const HeroSystem* heroes = hero_system_of(*self.world);
   const HeroRecord* record = heroes == nullptr ? nullptr : heroes->hero(self.id);
   if (record == nullptr) return answer(false);
   for (const ObjectId member : record->army) {
     const MoveState* marching = self.movement->find(member);
-    if (marching != nullptr && marching->has_path && marching->form_aimed &&
+    if (marching != nullptr && marching->goto_active && marching->form_aimed &&
         marching->party == self.id) {
       return answer(true);
     }
@@ -2767,10 +2341,10 @@ HostOutcome path_dest_found_impl(CallContext& ctx) {
                                 "see sim/movement.cpp"));
   }
   const MoveState* move = self.movement->find(self.id);
-  if (move == nullptr || !move->has_path || move->waypoints.empty()) {
+  if (move == nullptr || !move->has_path || move->route.points.empty()) {
     return HostOutcome::ok_with(pack_point(kHeldPosition));
   }
-  return HostOutcome::ok_with(pack_point(move->waypoints.back()));
+  return HostOutcome::ok_with(pack_point(move->route.points.back()));
 }
 
 /// `dest` (0x005d6f50): `(-1, -1)` for a receiver that names nothing. A unit
@@ -2789,8 +2363,8 @@ HostOutcome dest_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return unresolved(self, HostOutcome::ok_with(pack_point(kHeldPosition)));
   const MoveState* move = self.movement->find(self.id);
-  if (move != nullptr && move->has_path && !move->waypoints.empty()) {
-    return HostOutcome::ok_with(pack_point(move->waypoints.back()));
+  if (move != nullptr && move->has_path && !move->route.points.empty()) {
+    return HostOutcome::ok_with(pack_point(move->route.points.back()));
   }
   const WorldObject* slot = self.world->find(self.id);
   const Point here = slot != nullptr && slot->state.flags.is_unit
@@ -3146,9 +2720,10 @@ constexpr std::int32_t kAnimLookAround = 20;
 ///     the unit put back to that state with a transition (0x0053e860).
 ///
 /// The wait is then the slice (or the look-around's length), and the unit is
-/// marked to wake the script at its arrival (bit 0x10000), which the walk
-/// step reads; here the walk is the movement system's and the call waits its
-/// slice (docs/formats/animation.md).
+/// marked to wake the script at its arrival (bit 0x10000,
+/// `MoveState::wake_on_arrival`, the thread in `AnimClock::waiter`), which
+/// the walk step reads: a walk that ends arrived wakes the call before its
+/// slice is out (docs/formats/animation.md, "The walk").
 [[nodiscard]] HostOutcome goto_tail(CallContext& ctx, World& world, ObjectId id,
                                     const GotoOrder& order, Point face, bool laid) {
   const GameTime now = now_of(ctx, world);
@@ -3158,6 +2733,7 @@ constexpr std::int32_t kAnimLookAround = 20;
   if (laid) {
     world.set_anim_mode(id, 3);
     if (world.anim_timer_left(*slot, now) == 0) world.arm_anim_timer(id, now, 1);
+    wait_on_walk(ctx, world, id);
     return goto_wait(ctx, wait, kGotoLaid);
   }
   const EntityAnim* look = order.look_around && slot->object != nullptr &&
@@ -3179,6 +2755,7 @@ constexpr std::int32_t kAnimLookAround = 20;
       (void)world.set_anim_state(id, 1, /*transition=*/true, now);
     }
   }
+  wait_on_walk(ctx, world, id);
   return goto_wait(ctx, wait, kGotoNoRoute);
 }
 
@@ -3294,6 +2871,7 @@ HostOutcome run_goto(CallContext& ctx, World& world, MovementSystem& movement, O
   // waited out an animation kept its route record and answers on it; here
   // the record is the word, the arrival band rechecked when an order is live.
   const std::int32_t word = ctx.scratch != nullptr ? *ctx.scratch : kGotoNoRoute;
+  if (!ctx.first_call && !stepped_out) move.wake_on_arrival = false;
   if (!ctx.first_call && !stepped_out && (move.goto_active || word == kGotoArrivedPlaying)) {
     const bool arrived = word == kGotoArrivedPlaying
                              ? !move.goto_active || movement.is_arrived(world, id)
@@ -3587,71 +3165,119 @@ bool MovementSystem::formation_retry_step(World& world, Formation& form, Point& 
   return formation_route_step(form.route, out);
 }
 
-Point MovementSystem::position_now(const World& world, ObjectId id, GameTime now) const {
-  if (deciding_) {
-    const std::size_t i = lower_bound(id);
-    if (i < states_.size() && states_[i].id == id && i < mode_.size() &&
-        mode_[i] == kCooperative && states_[i].state.has_path) {
-      return cooperative_position(states_[i].state, progress_at(i, now));
+void MovementSystem::step_pair(const World& world, ObjectId id, std::int64_t& stride,
+                               std::int64_t& time) const {
+  // 0x005d4630: the walk stride, and the default step time times the speed
+  // factor over 100.
+  // Every unit has its class's speed; one never ordered has no state here
+  // yet, so its class is read for it.
+  const MoveState* found = find(id);
+  if (found == nullptr || !found->class_resolved) {
+    MoveState fresh;
+    if (found != nullptr) {
+      fresh.speed = found->speed;
+      fresh.speed_factor = found->speed_factor;
+      fresh.walk_anim = found->walk_anim;
     }
-  }
-  return world.resolve_position(id);
-}
-
-void MovementSystem::formation_time_sample(const World& world, Formation& form,
-                                           GameTime now) const {
-  // Who is timed: the hero and every member with a slot, on the map.
-  struct Timed {
-    std::int64_t rate;
-    std::int64_t straight;
-  };
-  std::vector<Timed> timed;
-  const bool going = !form.path || form.going_on;
-  const std::int64_t short_of = going ? kSampleShort : 0;
-  const auto add = [&](ObjectId id, Point station) {
-    const WorldObject* slot = world.find(id);
-    if (slot == nullptr || slot->state.is_held() || station == kNoSample) return;
-    const MoveState* move = find(id);
-    if (move == nullptr || move->own_rate() <= 0) return;
-    const std::int64_t d = isqrt(dist_sq(position_now(world, id, now), station));
-    timed.push_back({move->own_rate(), d > short_of ? d - short_of : 0});
-  };
-  add(form.hero, form.centre);
-  for (const FormationSlot& slot : form.slots) add(slot.unit, slot.sample);
-  if (timed.empty()) {
-    form.speed = 0;
-    form.deadline = now;
+    if (classes_ != nullptr) {
+      const WorldObject* slot = world.find(id);
+      std::int32_t value = 0;
+      if (slot != nullptr && slot->class_index != kNoClass &&
+          parse_int(classes_->property(slot->class_index, "speed"), value)) {
+        fresh.speed = value;
+      }
+    }
+    stride = walk_stride(world, id, fresh);
+    time = default_step_time(world, id, fresh) * fresh.speed_factor / 100;
     return;
   }
-  // `UpdateMinSpeed`: the mean speed, held to one and a half times the
-  // slowest's.
-  std::int64_t sum = 0;
-  std::int64_t slowest = timed.front().rate;
-  for (const Timed& t : timed) {
-    sum += t.rate;
-    slowest = std::min(slowest, t.rate);
-  }
-  const auto n = static_cast<std::int64_t>(timed.size());
-  std::int64_t speed = sum / n;
-  if (2 * speed > 3 * slowest) speed = 3 * slowest / 2;
-  if (speed <= 0) speed = 1;
-  form.speed = speed;
-  // The deadline: now plus the mean time each needs at that speed.
-  std::int64_t total = 0;
-  for (const Timed& t : timed) total += t.straight * kSpeedScale / speed;
-  form.deadline = now + (total + n / 2) / n;
+  stride = walk_stride(world, id, *found);
+  time = default_step_time(world, id, *found) * found->speed_factor / 100;
 }
 
-std::int64_t MovementSystem::formation_rate(const Formation& form, const MoveState& move,
-                                            std::int64_t left, GameTime now) const {
-  const std::int64_t speed = form.speed > 0 ? form.speed : std::max<std::int64_t>(move.own_rate(), 1);
-  const std::int64_t slow = std::max<std::int64_t>(speed / 2, 1);
-  const std::int64_t fast = std::max<std::int64_t>(speed * 5 / 2, slow);
+void MovementSystem::update_min_speed(const World& world, Formation& form, bool force) const {
+  // 0x005f5640: only when asked (a quick-march skill written, 0x0052def0
+  // case 3) or with the slowest and fastest not yet recorded.
+  if (!force && form.min_unit != kNoObject && form.max_unit != kNoObject) return;
+  // 0x005f5260. The hero first, as both the slowest and the fastest.
+  std::int64_t min_stride = 0;
+  std::int64_t min_time = 0;
+  step_pair(world, form.hero, min_stride, min_time);
+  std::int64_t max_stride = min_stride;
+  std::int64_t max_time = min_time;
+  form.min_unit = form.hero;
+  form.max_unit = form.hero;
+  // The mean of stride over time, each share rounded to the nearest in
+  // fixed point with 32 fractional bits, where the original sums floats
+  // (departure 4 in the file header).
+  constexpr int kFraction = 32;
+  const auto share = [](std::int64_t s, std::int64_t time) -> std::int64_t {
+    if (time == 0) return 0;
+    const __int128 scaled = static_cast<__int128>(s) << kFraction;
+    return static_cast<std::int64_t>((scaled + time / 2) / time);
+  };
+  std::int64_t sum = share(min_stride, min_time);
+  std::int64_t count = 1;
+  const auto take = [&](ObjectId unit) {
+    std::int64_t s = 0;
+    std::int64_t time = 0;
+    step_pair(world, unit, s, time);
+    // Slower than the slowest: its stride taken, and **not its time** --
+    // the original updates only the stride there.
+    if (min_stride == 0 || (time * min_stride - s * min_time != 0 && s * min_time <= time * min_stride)) {
+      min_stride = s;
+      form.min_unit = unit;
+    }
+    if (max_stride == 0 || time * max_stride < s * max_time) {
+      max_stride = s;
+      max_time = time;
+      form.max_unit = unit;
+    }
+    sum += share(s, time);
+    ++count;
+  };
+  for (const FormationSlot& slot : form.slots) take(slot.unit);
+  for (const ObjectId unit : form.pending) take(unit);
+  std::int64_t pace = (max_time + min_time) / 2;
+  std::int64_t speed = static_cast<std::int64_t>(
+      (static_cast<__int128>(pace) * sum / count) >> kFraction);
+  // Never more than one and a half times the slowest's stride a step.
+  if (speed * min_time > pace * min_stride * 3 / 2) {
+    speed = min_stride * 3 / 2;
+    pace = min_time;
+  }
+  form.speed = speed;
+  form.pace = pace;
+}
+
+void MovementSystem::formation_deadline(const World& world, Formation& form, GameTime now) const {
+  // 0x005f5850: each one's distance to its station, short of 133 while the
+  // march goes on -- below nothing when nearer, with no floor -- at the
+  // march's pace, plus what is left of its step in flight (0x0053cef0); the
+  // mean over the hero and the slotted members, rounded half up.
+  // `UpdateMinSpeed` first (0x005f5640 with 0).
+  update_min_speed(world, form, false);
   const bool going = !form.path || form.going_on;
-  const std::int64_t walk = left - (going ? kSampleShort : 0);
-  const std::int64_t time = form.deadline - now;
-  if (time < 1 || walk <= 0) return fast;
-  return std::clamp(walk * kSpeedScale / time, slow, fast);
+  const std::int64_t short_of = going ? kSampleShort : 0;
+  const auto term = [&](ObjectId id, Point station) -> std::int64_t {
+    const WorldObject* slot = world.find(id);
+    if (slot == nullptr) return 0;
+    std::int64_t t = 0;
+    // **Engine guard:** a pace of no stride, which the original divides by.
+    if (form.speed != 0) {
+      t = (isqrt(dist_sq(slot->state.position, station)) - short_of) * form.pace / form.speed;
+    }
+    if (slot->clock.slot != kNoAnim) t += slot->clock.end() - now;
+    return t;
+  };
+  std::int64_t sum = 0;
+  std::int64_t count = 0;
+  for (const FormationSlot& slot : form.slots) {
+    sum += term(slot.unit, slot.sample);
+    ++count;
+  }
+  const std::int64_t hero = term(form.hero, form.centre);
+  form.deadline = now + ((count + 1) / 2 + hero + sum) / (count + 1);
 }
 
 bool MovementSystem::formation_next_sample(World& world, ObjectId hero) {
@@ -3691,23 +3317,8 @@ bool MovementSystem::formation_next_sample(World& world, ObjectId hero, GameTime
   }
   formation_place_sample(world, *form, formations_, next, dir, form->joined);
   ++form->samples;
-  formation_time_sample(world, *form, now);
+  formation_deadline(world, *form, now);
   return true;
-}
-
-void MovementSystem::stand_on_station(World& world, ObjectId id, MoveState& move, Point here,
-                                      GameTime until) {
-  move.waypoints.assign({here, here});
-  move.form_lock_laid = false;
-  move.stride = formation_stride_or_walk(world, id, move);
-  move.path_length = 0;
-  move.progress = 0;
-  move.gate_crossings.clear();
-  move.path_generation = grid_generation_;
-  move.has_path = true;
-  mark_path(world, id, true);
-  reset_cooperation(move, until);
-  move.last_outcome = MoveOutcome::moving;
 }
 
 void MovementSystem::aim_at_formation(World& world, ObjectId id, ObjectId hero, bool lock) {
@@ -3724,141 +3335,150 @@ void MovementSystem::aim_at_formation(World& world, ObjectId id, ObjectId hero, 
   move.dest_lock = lock && !ignores_passability(world, id);
   move.stop_requested = false;
   move.route_failed = false;
+  move.arrived_mark = false;
   // Only the mode is set: the route to the station is laid at the unit's
   // next step (0x00419b20, its sample count not yet seen). A route being
-  // walked is kept until then, as the retry keeps its media; with none the
-  // unit stands, its order taken. No blocking gate compared at yet
-  // (`[retry+0x18]` to none).
+  // walked is kept until then, as the retry keeps its media. No blocking
+  // gate compared at yet (`[retry+0x18]` to none).
   move.form_seen = -1;
   move.gate_seen = kNoObject;
-  const bool walking_on = move.has_path && move.waypoints.size() >= 2 &&
-                          move.travelled() < move.path_length;
-  if (!walking_on) stand_on_station(world, id, move, position(world, id), world.time());
+  mark_path(world, id, true);
+  start_walk(world, id);
 }
 
 void MovementSystem::reroute_to_station(World& world, ObjectId id) {
   MoveState* move = find(id);
   if (move == nullptr || !move->form_aimed) return;
-  const Formation* form = formation(move->party);
-  const Point here = position(world, id);
-  const GameTime now = world.time();
-  const Point station = form == nullptr ? kNoSample : station_of(*form, id);
-  if (form == nullptr || station == kNoSample || here == station) {
-    // Standing on its station, or with none yet: no route, the order kept.
-    stand_on_station(world, id, *move, here, now);
-    move->form_seen = form == nullptr ? -1 : form->samples;
-    return;
-  }
-  move->form_seen = form->samples;
-  if (lay_path(world, id, *move, station, 0, now) == MoveOutcome::blocked) move->form_seen = -1;
-  if (!move->has_path) stand_on_station(world, id, *move, here, now);
+  relay_to_station(world, id, *move);
 }
 
-MovementSystem::FormStep MovementSystem::formation_step(World& world, std::size_t entry,
-                                                        GameTime now) {
-  const ObjectId id = states_[entry].id;
-  MoveState& move = states_[entry].state;
+bool MovementSystem::relay_to_station(World& world, ObjectId id, MoveState& move) {
+  // 0x00419b20's relay: on the station, the media deleted (0x004177f0);
+  // otherwise `RecastPathfind` (0x00419730), which copies the sample count
+  // and the deadline (0x004197e1 .. 0x004197ea) and lays the route to the
+  // station afresh, answering 0 when it laid nothing.
+  const Formation* form = formation(move.party);
+  if (form == nullptr) return false;
+  const Point here = position(world, id);
+  const Point station = station_of(*form, id);
+  // **Engine guard:** a member with no slot has no station to walk to.
+  if (station == kNoSample || here == station) {
+    drop_media(move);
+    return true;
+  }
+  move.form_seen = form->samples;
+  move.form_deadline = form->deadline;
+  const MoveOutcome outcome = lay_path(world, id, move, station, 0, world.time());
+  return (outcome == MoveOutcome::moving || outcome == MoveOutcome::exhausted) && move.has_path;
+}
+
+bool MovementSystem::member_step(World& world, ObjectId id, MoveState& move, Point& p,
+                                 GameTime& d, GameTime now) {
   const ObjectId hero = move.party;
-  const Point here = cooperative_position(move, move.progress);
-  // No step this time (the step answers 0): the route, if any, is kept, and
-  // the unit asks again at its next step -- the next turn here.
-  const auto pause = [&]() {
-    const std::int64_t travelled = std::min(move.progress / kSpeedScale, move.path_length);
-    const Point standing = offset_at(move, travelled);
-    move.holding = true;
-    move.hold_until = turn_end_ + 1;
-    move.step_start = travelled;
-    move.step_end = travelled;
-    move.offset_from = standing;
-    move.offset_to = standing;
-  };
-  // 0x00419b20 lays a route to the station afresh (`RecastPathfind`, its
-  // sample count noted) or, standing on it, deletes the route. A search that
-  // lays nothing keeps the route the unit had (0x00419a0f) and takes no step;
-  // with the formation's path spent it marks the route arrived (`[retry+0x20]
-  // |= 0x80`, which `IsArrived` answers 1 for, 0x00417c26), and the unit's
-  // order ends where it stands.
-  const auto relay = [&](Point station) {
-    const Formation* form = formation(hero);
-    move.form_seen = form == nullptr ? -1 : form->samples;
-    set_position(world, id, here);
-    if (here == station) {
-      stand_on_station(world, id, move, here, now);
-      return true;
-    }
-    if (lay_path(world, id, move, station, 0, now, &here) != MoveOutcome::blocked &&
-        move.has_path) {
-      return true;
-    }
-    move.form_seen = -1;
-    if (!formation_going_on(hero)) {
-      if (move.has_path) {
-        arrive(world, entry, true);
-      } else {
-        stop(world, id);
-      }
-    } else if (move.has_path) {
-      pause();
-    } else {
-      stand_on_station(world, id, move, here, turn_end_ + 1);
-    }
+  Formation* form = formation(hero);
+  // **Engine guard:** the formation gone takes no step.
+  if (form == nullptr) return false;
+  update_min_speed(world, *form, false);
+  const Point here = position(world, id);
+  // A search to the station that lays nothing takes no step; with the
+  // march's path spent the route is marked arrived (0x00419c40).
+  const auto unlaid = [&]() {
+    if (!formation_going_on(hero)) move.arrived_mark = true;
     return false;
   };
-
-  const Formation* form = formation(hero);
-  if (form == nullptr) {
-    move.form_aimed = false;
-    return FormStep::walk;
-  }
-  if (move.form_seen != form->samples) {
-    const Point station = station_of(*form, id);
-    if (station == kNoSample) {
-      // No place in the formation: none to walk to while it goes on, and
-      // nothing to wait for once its path is spent.
-      if (formation_going_on(hero)) {
-        stand_on_station(world, id, move, here, turn_end_ + 1);
-      } else {
-        set_position(world, id, here);
-        stop(world, id);
-      }
-      return FormStep::done;
+  if (!move.has_path) {
+    // No media: the first sample made if there is none yet (0x005f5bd0),
+    // and the route laid unless the unit stands on its station.
+    if (form->samples == 0) {
+      if (!form->path || !formation_next_sample(world, hero, now)) return false;
+      form = formation(hero);
+      if (form == nullptr) return false;
     }
-    if (!relay(station)) return FormStep::done;
+    if (here != station_of(*form, id)) {
+      if (!relay_to_station(world, id, move)) return unlaid();
+      form = formation(hero);
+      if (form == nullptr) return false;
+    }
   }
-  for (int pass = 0; pass < kFormationStepPasses; ++pass) {
-    form = formation(hero);
-    const std::int64_t travelled = std::min(move.progress / kSpeedScale, move.path_length);
-    const std::int64_t left = move.has_path ? move.path_length - travelled : 0;
-    if (!formation_going_on(hero)) {
-      // The path is spent: walk what is left, then arrive (`decide`), facing
-      // the formation's way.
+  if (move.form_seen != form->samples && !relay_to_station(world, id, move)) return unlaid();
+  bool stepped = false;
+  int pass = 0;
+  for (; pass < kFormationStepPasses; ++pass) {
+    const std::int32_t stride = walk_stride(world, id, move);
+    stepped = media_step(world, id, move, p, d);
+    // A hold where the unit stands is answered as it is.
+    if (stepped && p == here) return true;
+    // Within half a stride and 133 of the station while the march goes on:
+    // the next sample (0x005f5bd0), and the route laid to it.
+    if (!formation_going_on(hero) ||
+        formation_route_left(move.route) > stride / 2 + kSampleShort) {
       break;
     }
-    // The unit's own walk step, whatever its avoidance strides (0x005d4630:
-    // the walk animation's step), or the formation's 200 with none.
-    std::int32_t step = walk_step(world, id, move);
-    if (step == 0) step = kFormationStride;
-    if (left > step / 2 + kSampleShort) break;
-    if (!formation_next_sample(world, hero, now)) {
-      // No sample to be had: this step is not taken, and the path is spent.
-      pause();
-      return FormStep::done;
-    }
+    if (!formation_next_sample(world, hero, now)) return false;
     form = formation(hero);
-    if (form == nullptr) return FormStep::done;
-    const Point station = station_of(*form, id);
-    if (station == kNoSample) {
-      stand_on_station(world, id, move, here, turn_end_ + 1);
-      return FormStep::done;
-    }
-    if (!relay(station)) return FormStep::done;
+    if (form == nullptr) return false;
+    if (move.form_seen != form->samples && !relay_to_station(world, id, move)) return unlaid();
   }
+  // The pass cap prints its message and takes no step.
+  if (pass == kFormationStepPasses) return false;
   form = formation(hero);
-  if (form != nullptr && move.has_path) {
-    const std::int64_t travelled = std::min(move.progress / kSpeedScale, move.path_length);
-    move.march_rate = formation_rate(*form, move, move.path_length - travelled, now);
+  if (form == nullptr) return false;
+  if (!stepped) {
+    // The path spent and no step: the unit faces the formation's way and
+    // its route is marked arrived (0x00419c4e .. 0x00419c6a).
+    if (!formation_going_on(hero)) {
+      set_facing(world, id, move, form->dir);
+      move.arrived_mark = true;
+    }
+    return false;
   }
-  return FormStep::walk;
+  // The gate block (0x00419ca0): a gate barring the route becomes the
+  // formation's blocking gate, and a member that has not compared sides at
+  // it does (0x00417dc0). Cut off from its hero, its commands are ended and
+  // it leaves his army (`DetachHero`, 0x005db190); barred, its waiting call
+  // is no longer woken (bit 0x10000 cleared).
+  const ObjectId barring = gate_barring(world, id, move);
+  if (barring != kNoObject) form->blocking_gate = barring;
+  if (form->blocking_gate != kNoObject && move.gate_seen != form->blocking_gate) {
+    move.gate_seen = form->blocking_gate;
+    if (gate_cuts_off(world, form->blocking_gate, form->hero, id)) {
+      ++counters_.gate_waits;
+      end_commands(world, id);
+      if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+        if (const UnitRecord* record = heroes->unit(id);
+            record != nullptr && record->hero == hero) {
+          (void)heroes->detach(world, id);
+        }
+      }
+      return false;
+    }
+  }
+  if (barring != kNoObject) {
+    ++counters_.gate_waits;
+    move.wake_on_arrival = false;
+    return false;
+  }
+  // The step timed to reach the station at the deadline (0x00419e52): the
+  // time left over the route left, one stride's share of it; held between
+  // two fifths and twice the march's own time for the step (0x005f2130),
+  // and the deadline itself when within 100 ms of it.
+  const GameTime left_time = move.form_deadline - now;
+  const std::int64_t left = formation_route_left(move.route) -
+                            (formation_going_on(hero) ? kSampleShort : 0);
+  GameTime t = 1;
+  if (left_time > 0) {
+    // **Engine guard:** no route left to share the time over.
+    t = left > 0 ? left_time * move.route.stride / left : left_time;
+  }
+  if (form->speed > 0) {
+    const std::int64_t m = static_cast<std::uint32_t>(move.route.step_length) >> 16;
+    const std::int64_t slowest = m * form->pace * 100 / (form->speed * 50);
+    const std::int64_t fastest = m * form->pace * 100 / (form->speed * 250);
+    t = std::max(std::min(t, slowest), fastest);
+  }
+  if (left_time > 0 && (t - left_time < 100 && left_time - t < 100)) t = left_time;
+  d = t;
+  return true;
 }
 
 }  // namespace imperivm::core::sim

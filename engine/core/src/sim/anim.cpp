@@ -193,9 +193,14 @@ void anim_end_handler(World& world, script::Scheduler* scheduler, CallContext* c
                                       0);
       return;
     }
+    case 3:
+      // The walk step (0x005d3b50).
+      if (MovementSystem* movement = movement_system(world); movement != nullptr) {
+        movement->walk_step(world, scheduler, id, now);
+      }
+      return;
     default:
-      // 0: nothing. 3, the walk step (0x005d3b50), is the movement system's
-      // loop here; 2, the attack's, is combat's own schedule.
+      // 0: nothing. 2, the attack's, is combat's own schedule.
       return;
   }
 }

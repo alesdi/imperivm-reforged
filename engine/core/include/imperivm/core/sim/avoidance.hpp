@@ -3,13 +3,13 @@
 // Unit-versus-unit avoidance: the arithmetic of `gbr.exe`'s cooperative step
 // and destination locks, as pure functions.
 //
-// `sim/movement.hpp` owns the state and the turn loop; this header owns the
+// `sim/movement.hpp` owns the state and the walk step; this header owns the
 // rules, so that each of them can be tested without a world. Everything below
 // is read out of the executable, and every figure names the address it comes
-// from; the four places the executable underdetermines what to build are
-// labelled inference where they are decided, in `sim/movement.hpp`, and what
-// was read and deliberately not built is set out below with its reason; the
-// destination locks carry their own two inferences, below.
+// from; what the engine does otherwise is labelled a departure in
+// `sim/movement.hpp`, and what was read and deliberately not built is set out
+// below with its reason; the destination locks carry their own two
+// inferences, below.
 //
 // ## Units contribute nothing to the obstruction grid
 //
@@ -30,7 +30,9 @@
 // unit takes:
 //
 //   1. It asks the wrapped path for its next point (`CVXSPath`'s step,
-//      `0x0041a740`, which **advances on every call**) and a duration.
+//      `0x0041a740`) and a duration. The step is taken from the route only
+//      when the walk tells the retry it was taken (`vtbl+0xc`, 0x00416800),
+//      which passes it on only with the wait at 0.
 //   2. It looks for everything within **its own radius + 40** of that point
 //      (`0x0041733b`) and keeps, through the callback `0x00416f60`:
 //        * a unit (`SyncFlags` bit 22) whose health is not zero (the unit's
@@ -50,8 +52,8 @@
 //      A hard block goes straight to 666. A soft one goes there early on a
 //      draw of `rand(1, 7) == 1` from the synchronised generator (slot `0x14`
 //      of `[0x996ff4] + 0x12a0`). Anything short of 666 is a **hold**: the
-//      unit stands where it is for that many milliseconds, and because the
-//      wrapped path has already advanced, the next test is at the step after.
+//      unit stands where it is for that many milliseconds, and since the
+//      step was not taken, the next test is of the same step.
 //   5. 666 means *give way*: unless the blocked point is the route's last,
 //      `0x00416a00` tries five points across the direction of travel and the
 //      unit steps to the cheapest -- or to the blocked point itself -- and the
@@ -102,14 +104,14 @@
 //
 //   * `CVXPathRetry::IsArrived` (`0x00417c10`), which will not call a unit
 //     arrived on a spot that is not free when its retry owns a lock
-//     (`0x004178d0`). Built: `decide`, `walk_turn` and `run_goto` ask it. Inside
+//     (`0x004178d0`). Built: `retry_step`, `walk_step` and `run_goto` ask it. Inside
 //     the band on a taken spot a route walks on; at the route's end the path
 //     follower (`0x00419ee0`, `0x0041a056`) re-lays it (`RecastPathfind`,
 //     `0x00419730`) from where the unit stands.
 //   * the path follower's stop branch (0x00419ee0, taken while `Unit::Stop`'s
 //     bit 1 is set at `[retry+0x20]`), which stops the owner on the first
 //     point that is passable and free and walks on otherwise; with no owner
-//     it takes no step. Built: `MovementSystem::request_stop` and `decide`.
+//     it takes no step. Built: `MovementSystem::request_stop` and `retry_step`.
 //   * the grid search, handed the owner (`0x0041ba00`), which cuts a route
 //     that reached no goal cell back along its cells, from the one it gave
 //     up at, to the first whose centre is free -- the start itself when none

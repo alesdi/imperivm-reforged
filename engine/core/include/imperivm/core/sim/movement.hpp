@@ -1,39 +1,45 @@
 #pragma once
 
-// Units that move: the turn-driven movement system, the formation table, and
+// Units that move: the movement system, whose walk is the animation clock, the formation table, and
 // the movement slice of the `.vs` host API.
 //
 // Contract: sim/system.hpp. Grid and search: sim/path.hpp.
 // Evidence: docs/engine/state-vector.md (`PathType`, `Min Range`/`Range`,
 //           `method`, `action`), docs/formats/vs-host-api.md (the entry points).
 //
-// ## Movement is exact, and exactness is the whole design
+// ## The walk is the animation clock's
 //
-// The turn length is renegotiated every turn -- 200, 400, 799 and 800 all occur
-// in the retail dumps -- so a movement system must scale with `turn.length` and
-// must land in the same place however an interval is cut up. `sim/tick.hpp`
-// states the property for animation; the same one is required here, and for a
-// stronger reason: where units are **is** hashed, and the original's dumps
-// prove it.
+// A unit walks as the original's does: one step at a time, each a one-shot
+// walk animation on the object's animation timer (docs/formats/animation.md).
+// An order lays a route and sets the action mode to the walk (3), arming the
+// timer for 1 ms when nothing is pending. When the timer ends an animation in
+// mode 3, the unit's end handler (0x005d5b60) runs the walk step
+// (`MovementSystem::walk_step`, 0x005d3b50):
 //
-// The way to get it is the way the tick loop gets it: **do not integrate.**
-// A moving unit accumulates
+//   1. the step's default length, the walk animation's `step` times 1,000
+//      over the class `speed` (0x005d38e0, a hero's quick march shortening
+//      it), times 100 over the speed factor `[unit+0x15c]`;
+//   2. the route's own step (`CVXPathRetry` 0x00419ee0, `retry_step`), which
+//      answers the next point and how long the step takes: the sampled
+//      route's next point (`CVXSPath` 0x0041a740) let through, held or
+//      turned aside by the cooperative step (`CVXPathCoop` 0x004172b0,
+//      `media_step`), or a march member's timed step (0x00419b20);
+//   3. a point where the unit stands is a hold, the timer armed for the
+//      step's length (0x0053ced0); any other is the walk animation started
+//      for exactly that long, turned towards the point (the raw difference,
+//      0x0053f5f0) and with the point as its origin, so the object moves
+//      there at the animation's main start through `SetPos` and the move
+//      hook; then the route is told the step was taken (`vtbl+0xc`), which
+//      commits it unless the cooperative step is holding;
+//   4. no step answered ends the walk: the route is deleted when no
+//      `Goto`-family call waits on it (bit 0x10000 of `[unit+0x194]`,
+//      `MoveState::wake_on_arrival`), and a call that waits is woken at
+//      once when the unit is arrived (0x0069f890 .. 0x0069f8f0).
 //
-//     progress += speed * speed_factor * turn.length          (exact integers)
-//
-// and its position is a pure function of that one running total against the
-// path polyline. Integer addition does not care how an interval was split, so
-// one turn of 800 and two of 400 leave the unit on precisely the same
-// coordinate -- not within a unit of it, on it. A system that instead computed
-// a per-turn step and added it to the position would round once per turn and
-// drift apart under repartitioning, which is a desync that only shows up in a
-// long game.
-//
-// `kSpeedScale` is 100 * 1000: a hundred because `SetSpeedFactor` is a
-// percentage (the shipped calls are 7, 150 and 170), and a thousand because a
-// game-time unit is a millisecond and a class's `speed` property is world units
-// per second. A `speed="150"` deer at factor 7 covers 4 world units in a
-// 400-unit turn; at factor 170 it covers 102.
+// Every position a walk writes is a step's end, written whole: there is no
+// accumulator and no turn loop. The drawn position between two step ends is
+// the clock's interpolation (`World::current_position`), which a `Stop` or a
+// new animation commits.
 //
 // ## What is hashed and what is not
 //
@@ -42,9 +48,8 @@
 // route a unit is following is not folded into the hash -- only the state the
 // dumps actually print for a mover, which is its position, whether it has an
 // active path (`SyncFlags` bit 17), and the path's target point and arrival
-// tolerances. `progress` and `speed_factor` are added because they decide where
-// the unit will be next turn, and a hash that cannot catch a divergence one
-// turn before it becomes visible is worth less than one that can.
+// tolerances. The sampled route's remainder is added because it decides where
+// the next step lands.
 //
 // ## Where a position lives
 //
@@ -55,82 +60,35 @@
 // predicts the dumps' `PathType` line perfectly -- is likewise written on the
 // object, so the world hash covers it and this system does not hash it twice.
 //
-// ## Units keep out of each other's way, and that subdivides the turn
+// ## Units keep out of each other's way
 //
-// `sim/avoidance.hpp` sets out what `gbr.exe` does; this is how it is run. A
-// route whose walk animation declares a `step` is walked in steps of that
-// length, and before each one the unit asks whether the step's end is taken.
-// The answer depends on where everybody else is **at that instant**, and the
-// instant is a game time inside the turn, not the turn's end.
+// `sim/avoidance.hpp` sets out the cooperative step. It is asked at each of
+// the unit's steps, against where everybody stands at that instant -- which
+// is the world's positions, since every walker's position is its last step's
+// end. **Labelled departures:**
 //
-// So a turn is played out as a queue of decisions ordered by `(game time,
-// id)`: each unit's next one is due when its progress reaches the end of its
-// step, or when its hold runs out, and both are exact -- the arrival time is a
-// ceiling division of the same integer accumulator, and a hold is a whole
-// number of milliseconds. Everybody else is evaluated at the decision's time
-// from the same accumulator. None of this depends on where a turn boundary
-// falls, so partition invariance survives: `[800]` and `[400, 400]` take the
-// same decisions at the same instants, draw the same numbers in the same
-// order, and leave every unit on the same coordinate. A turn boundary only
-// settles accounts -- positions written, facings drawn.
-//
-// A route with no stride -- no entity, or a walk animation with no `step` --
-// has no cooperative step and is walked turn by turn exactly as before. The
-// original has no such route: its sampled path divides by the stride.
-//
-// **Four things are labelled inference.**
-//
-//   1. **Running out of steps during a hold.** Each test consumes a step of the
-//      sampled route, so a unit held long enough runs its route out; the
-//      original then hands back to `CVXPathRetry`, which re-lays the route and
-//      so restarts the escalation. Here the last step is simply tested again,
-//      and the escalation carries on to 666. The alternative is a re-lay per
-//      exhausted hold, which would cost a search and reset the wait.
-//   2. **How long a step takes.** The original's step comes with a duration:
-//      the sampled path's, rescaled by distance when the coop lets it through
-//      (`0x004173a7`), and a fixed one from `0x005d39c0` when it gives way.
-//      Here every step takes its length at the unit's rate, which is what the
-//      accumulator already means. A give-way step therefore takes as long as
-//      its distance says rather than the original's constant; `0x005d39c0`
-//      was not read.
-//   3. **Who is in a party.** `[unit+0x1c0]` is the member's slot in its
-//      hero's formation object (`sim/formation.hpp`: written by the slot
-//      assignment, 0x005f3115, cleared by a removal, 0x005f4686), which this
-//      engine keeps as `Formation::slots`. What the avoidance step reads is
-//      still the order: a march's members and its hero carry the hero's id in
+//   1. **A unit with no walk step.** The original divides by the walk
+//      animation's `step` (0x005d38e0, 0x004173a7) and indexes the animation
+//      table blind; a unit whose entity declares no walk animation or no
+//      `step` faults there. None that walks ships so; this engine's own test
+//      units do, and they take the formation's stride of 200 as their step,
+//      and with no animation to start they are put on each step's end at
+//      once and the timer armed for its length.
+//   2. **Who is in a party.** `[unit+0x1c0]` is the member's slot in its
+//      hero's formation object, which this engine keeps as
+//      `Formation::slots`. What the avoidance step reads is still the order:
+//      a march's members and its hero carry the hero's id in
 //      `MoveState::party` from the route aimed at the formation
 //      (`aim_at_formation`, `SetFormation` 0x00417790) until an order that
-//      is not a march. The original's slot outlasts an order, so a member
-//      sent elsewhere is still of the party there; that was not followed.
-//      **The march is the formation's own route.** As in the original, the
-//      formation lays a route of its own from the hero (`SetDest`,
-//      0x005f2cc0), steps its centre 200 at a time along it
-//      (`CreateNextSample`, 0x005f5bd0), and every member's route and the
-//      hero's are aimed at it: at each step a unit lays its route to its
-//      station afresh when a sample has been made since, and makes the next
-//      sample when it is within half its step and 133 of the station
-//      (`formation_step`, 0x00419b20). Each step is timed to reach the
-//      station at the sample's deadline (0x00419e52), so the army and the
-//      hero walk the formation's pace. Such a route arrives once the
-//      formation's path is spent and the unit stands on its station, on a
-//      free spot when the march's flag was set, which is when `0x004178d0`
-//      names the member an owner (`lock_owner`). Hero and followers stride
-//      their own walk step (`formation_stride_or_walk`), and a member stopped
-//      while the march goes on is no owner and stands where it is. See
-//      `docs/formats/formation.md`, "The formation's route" and "What this
-//      engine models".
-//      **The claim on the stations is the original's.**
-//      `CVXFormObj::PlaceSample` (0x005f5a20) ends by moving every station
-//      its member cannot have (0x005f3fe0), with the gates near the hero
-//      laid shut for it (0x005f41b0): `formation_claim_stations` and
-//      `formation_claim_gates` in `sim/formation.hpp`, run from
-//      `formation_place_sample`. See `docs/formats/formation.md`, "The
-//      claim on the stations".
-//   4. **Birds in the air.** A unit with `in_air` set neither tests nor
+//      is not a march.
+//   3. **Birds in the air.** A unit with `in_air` set neither tests nor
 //      blocks. The callback asks only for bit 22 and a health; whether an
 //      airborne flyer is linked into the ground buckets at all was not
-//      followed, and a crow overhead that stopped a column would be the
-//      stranger of the two readings.
+//      followed.
+//   4. **The march's mean pace** (`UpdateMinSpeed` 0x005f5260) is a float
+//      mean of the members' stride over step time; here it is the same sum
+//      in fixed point, each share rounded to the nearest at 32 fractional
+//      bits, which can differ from the original's float in its last unit.
 
 #include <cstddef>
 #include <cstdint>
@@ -149,12 +107,6 @@
 #include "imperivm/core/sim/world.hpp"
 
 namespace imperivm::core::sim {
-
-/// Denominator of the progress accumulator: percent times milliseconds.
-///
-/// `speed` is world units per second (`CONST.INI` puts game time on a
-/// millisecond scale) and `SetSpeedFactor` is a percentage of it.
-inline constexpr std::int64_t kSpeedScale = 100 * 1000;
 
 /// The canonical length a facing vector is kept at.
 ///
@@ -243,10 +195,6 @@ struct MoveState {
   /// `SetWalkAnim`'s argument: which animation slot locomotion plays. The deer
   /// switches between 13 (idle amble) and 1 (walk) as it grazes and bolts.
   std::int32_t walk_anim = 1;
-  /// Whether the walk cycle is playing, so that starting it is a transition and
-  /// not a poll. `World::play_anim` restarts the timeline, so a system that
-  /// called it every turn would freeze the sprite on frame zero.
-  bool walking = false;
 
   /// `PathType point=(x,y)`: where the unit is going.
   Point target;
@@ -272,13 +220,6 @@ struct MoveState {
   /// Cleared by `stop`, by arrival, and by a new order to somewhere else.
   bool goto_active = false;
 
-  /// The exact accumulator described in the file header: the sum over turns of
-  /// `speed * speed_factor * turn.length`. Divided by `kSpeedScale` it is the
-  /// distance travelled along `waypoints`.
-  std::int64_t progress = 0;
-
-  /// Game time the unit last moved, for `Unit.TimeWithoutWalking`.
-  GameTime last_moved = 0;
   /// When the `Goto` family last began failing to lay a route, or
   /// `kNoGotoFailure` while it has not -- `[unit+0x150]` in `gbr.exe`, which
   /// keeps `-1` for the same. Stamped by the first call that lays no route and
@@ -288,13 +229,15 @@ struct MoveState {
   /// `GotoOrder::give_up`.
   GameTime goto_failed_at = kNoGotoFailure;
 
-  /// The route. **Not hashed** -- see the file header.
-  std::vector<Point> waypoints;
+  /// The route, as `CVXSPath` (`[retry+0x30]`'s media) walks it: the points
+  /// the search laid, cut into steps of the unit's walk stride and stepped one
+  /// at a time (`formation_route_step`, 0x0041a740). **Not hashed** -- see
+  /// the file header -- but saved, counters and all.
+  FormationRoute route;
+  /// The route's length as laid: the sum of its legs' integer roots, which
+  /// is what the sampled route's remainder starts from. The gate crossings
+  /// are measured along the same legs.
   std::int64_t path_length = 0;
-  /// The grid generation the route was built against. A route is re-validated
-  /// only when the grid has changed under it, which is what makes the check
-  /// cheap enough to run every turn.
-  std::uint32_t path_generation = 0;
   /// Whether the route reaches the goal or merely gets as close as it could.
   bool path_complete = false;
 
@@ -311,26 +254,6 @@ struct MoveState {
   // it *decides* is hashed: the position it leaves the unit at, and every
   // draw it takes from the world's generator.
 
-  /// The sampled route's step length: the walk animation's `step`, or
-  /// `kFormationStride` on a route aimed at a formation whose unit's walk
-  /// declares none (`formation_stride_or_walk`). **Zero means the route has no
-  /// cooperative step** and the unit walks it the way every unit walked before
-  /// avoidance existed.
-  std::int32_t stride = 0;
-  /// Standing still until `hold_until`, when the next step is decided; the
-  /// alternative is walking to `step_end`, where it is decided.
-  bool holding = false;
-  GameTime hold_until = 0;
-  /// The step being walked, as arc lengths along `waypoints`. After a hold
-  /// `step_end` is the step that was *tested* and consumed, which is ahead of
-  /// the unit: the next test is at the step after it.
-  std::int64_t step_start = 0;
-  std::int64_t step_end = 0;
-  /// Lateral displacement from the route at `step_start` and at `step_end`,
-  /// interpolated in between. Non-zero only across a sidestep and the step
-  /// that walks back from it.
-  Point offset_from;
-  Point offset_to;
   /// `CVXPathCoop::retrytime`: 0, 50, 75 or 100.
   std::int32_t retry_time = 0;
   /// The hero whose formation march this order belongs to -- the original's
@@ -351,7 +274,7 @@ struct MoveState {
   /// `Unit::Stop` has asked a moving unit to stop: `CVXPathRetry`'s flag bit 1
   /// (`[retry+0x20] |= 2`, slot 6 at 0x004178b0). The path follower
   /// (0x00419ee0) then walks on, step by step, until the unit stands on a
-  /// passable free spot or its route runs out (`MovementSystem::decide`).
+  /// passable free spot or its route runs out (`MovementSystem::retry_step`).
   /// Cleared by every new order and by `stop`. **Saved, and not hashed**:
   /// path media, and what it decides -- where the unit comes to rest -- is.
   bool stop_requested = false;
@@ -399,18 +322,20 @@ struct MoveState {
   /// mover (`gate_waves_through`). **Saved, and not hashed**: path media,
   /// like the route it describes. See `sim/gate.hpp`, "The step".
   std::vector<GateCrossing> gate_crossings;
-  /// On a formation march, the hero's and every marching member's: the pace
-  /// the march gives it, in `rate()`'s units, or 0 for none -- the unit then
-  /// walks at its own `speed` and factor. The original times each step of a
-  /// route aimed at a formation to reach the unit's station at the sample's
-  /// deadline (0x00419e52 .. 0x00419ecd), so a member walks the formation's
-  /// pace and not its own, and so does the hero, whose route is aimed at the
-  /// formation too (0x0052e830). The formation's step sets it at each of the
-  /// unit's steps (`formation_rate`); any order that is not a march clears
-  /// it.
-  /// **Saved, and not hashed**: path media like the rest of this block, and
-  /// what it decides -- where the unit is -- is hashed.
-  std::int64_t march_rate = 0;
+  /// `[retry+0x14]`: the formation's deadline (`[form+0x50]`) when this
+  /// route was laid to its station (0x004197ea), which the member's step
+  /// times itself to (0x00419e52). **Saved, and not hashed**.
+  GameTime form_deadline = 0;
+  /// `CVXPathRetry`'s flag bit 7 (`[retry+0x20] & 0x80`): a march member's
+  /// step found the formation's path spent and itself on its station
+  /// (0x00419c6a), which `IsArrived` answers true for (0x00417c26).
+  bool arrived_mark = false;
+  /// Bit 0x10000 of `[unit+0x194]`: a `Goto`-family call, `Stop` or
+  /// `FormKeepMoving` waits on this walk, and the walk step wakes it when
+  /// the unit is arrived instead of deleting the route (0x005d3cbf). Raised
+  /// as the call suspends and dropped at its re-entry. The thread woken is
+  /// `AnimClock::waiter`. **Saved and hashed**: it lives on the unit.
+  bool wake_on_arrival = false;
   /// The route is aimed at the formation of the hero in `party` (`SetFormation`,
   /// 0x00417790: the retry's mode 2), and follows its samples.
   bool form_aimed = false;
@@ -429,16 +354,6 @@ struct MoveState {
   /// route's lock is `dest_lock`.
   bool form_lock_laid = false;
 
-  /// The unit's own speed in world units per second, after the factor.
-  [[nodiscard]] std::int64_t own_rate() const noexcept {
-    return static_cast<std::int64_t>(speed) * speed_factor;
-  }
-  /// Effective speed: the march's pace while it sets one, else `own_rate()`.
-  [[nodiscard]] std::int64_t rate() const noexcept {
-    return march_rate > 0 ? march_rate : own_rate();
-  }
-  /// Distance covered along the route so far.
-  [[nodiscard]] std::int64_t travelled() const noexcept { return progress / kSpeedScale; }
 };
 
 // --------------------------------------------------------------------------
@@ -563,16 +478,31 @@ class MovementSystem : public System {
   [[nodiscard]] const ClassGraph* class_graph() const noexcept { return classes_; }
 
   void resolve_class_fields(const World& world, ObjectId id, MoveState& move);
-  void play_locomotion(World& world, ObjectId id, MoveState& move);
 
-  /// Point `move` at `heading` and show it: the sheet column `facing_column`
-  /// resolves the heading to goes onto the object's animation cursor, which is
-  /// what the renderer draws.
-  ///
-  /// **Every write to `MoveState::facing` goes through here**, so the pose on
-  /// screen cannot fall behind the heading the simulation is walking along --
-  /// which it did for as long as nothing wrote the cursor at all. A `heading`
-  /// of `(0, 0)` names no direction and leaves both alone.
+  // -- the walk (docs/formats/animation.md, "The walk") ---------------------
+
+  /// The walk step, 0x005d3b50: what the unit's end handler (0x005d5b60)
+  /// runs when an animation of `id` ends in action mode 3. The route's next
+  /// point and the step's length, then a hold on the timer or one walk
+  /// animation to the point; with no step, the route deleted or the waiting
+  /// call woken (see the file header). `scheduler` wakes that call; `now`
+  /// is the timer's instant.
+  void walk_step(World& world, script::Scheduler* scheduler, ObjectId id, GameTime now);
+  /// The retry's step asked without telling it the step was taken: what
+  /// `Unit::Stop`'s re-entry asks (0x005d6e14). True while a step is left.
+  bool peek_step(World& world, ObjectId id, GameTime now);
+  /// The mode-3 setters' tail (0x005d65a0 and its siblings): the action mode
+  /// to the walk and the timer armed for 1 ms when nothing is pending, so
+  /// the first step runs at once. Every order this system takes ends in it.
+  void start_walk(World& world, ObjectId id);
+  /// 0x005d38e0: the walk step's default length in milliseconds -- the walk
+  /// animation's `step` times 1,000 over the class `speed`, then for a hero,
+  /// or a unit of one, times 100 over 100 plus five per quick-march level.
+  /// The speed factor is not in it. 0 for a unit with no speed.
+  [[nodiscard]] GameTime default_step_time(const World& world, ObjectId id,
+                                           const MoveState& move) const;
+  /// Write `heading` to the facing as it is, with no length imposed (the
+  /// setter 0x0053f5f0), and show it on the cursor. `(0, 0)` names nothing.
   void set_facing(World& world, ObjectId id, MoveState& move, Point heading) const;
 
   void set_grid(ObstructionGrid grid);
@@ -647,8 +577,8 @@ class MovementSystem : public System {
   MoveOutcome order_goto(World& world, ObjectId id, Point dest, std::int32_t range,
                          std::int32_t min_range = 0, ObjectId party = kNoObject,
                          bool lock_destination = false);
-  /// The same, for a moving target. The route is re-laid when the target has
-  /// moved more than `repath_threshold()` from where it was.
+  /// The same, for a moving target. The route is laid again at a step when
+  /// the target has drawn away from its end (0x00417ab0, `retry_step`).
   MoveOutcome order_goto_object(World& world, ObjectId id, ObjectId target, std::int32_t range,
                                 std::int32_t min_range = 0, bool lock_destination = false);
   /// Keeps the position, drops the route: what `Unit.Stop` does to a unit
@@ -689,6 +619,12 @@ class MovementSystem : public System {
   /// its station as it stands now (what `UpdateMove` does for every member
   /// with a retry once it has laid the current sample again, 0x005f5e30).
   void reroute_to_station(World& world, ObjectId id);
+  /// `UpdateMinSpeed` (0x005f5640 -> 0x005f5260): the march's slowest and
+  /// fastest pace over the hero, the slotted members and the pending ones,
+  /// and the mean stride (`Formation::speed`) and step time
+  /// (`Formation::pace`) -- only when `force`d (a quick-march skill written)
+  /// or with the two not yet recorded.
+  void update_min_speed(const World& world, Formation& form, bool force) const;
   /// 0x005f22f0: false only when the formation has a route and it is spent.
   [[nodiscard]] bool formation_going_on(ObjectId hero) const noexcept;
   /// Where `id` stands in `form`: the hero at the centre (0x005f5a84), a
@@ -706,18 +642,9 @@ class MovementSystem : public System {
   /// object.
   void face(World& world, ObjectId id, Point towards);
 
-  /// How far a tracked target may drift before the route is rebuilt. Four
-  /// collision cells: shorter thrashes the pathfinder, longer lets a unit walk
-  /// visibly past its quarry.
-  [[nodiscard]] static constexpr std::int32_t repath_threshold() noexcept {
-    return 4 * kCollisionCellSize;
-  }
-
-  /// Remaining distance along the route, in world units.
+  /// What is left of the route in whole units (the sampled route's
+  /// remainder, `vtbl+0x14`); 0 with none.
   [[nodiscard]] std::int64_t remaining(ObjectId id) const noexcept;
-  /// Game time until arrival at the current rate, rounded up. `-1` when the
-  /// unit is not moving or its rate is zero.
-  [[nodiscard]] std::int64_t eta(ObjectId id) const noexcept;
   /// `CVXPathRetry::IsArrived` (0x00417c10) on the order the unit holds: in
   /// its band round its goal -- the target's position for an object goal --
   /// and, for an order that owns a lock, on a free spot. False with no order
@@ -895,15 +822,6 @@ class MovementSystem : public System {
     bool water_unit = false;
     bool ignore_passability = false;
   };
-  /// Something that can block a step: a unit on the ground, as it stood when
-  /// the turn began. See `index_bodies`.
-  struct Body {
-    ObjectId id = kNoObject;
-    std::size_t entry = 0;  ///< into `states_`, or `kUntracked`
-    Point start;
-    std::int32_t radius = 0;
-  };
-  static constexpr std::size_t kUntracked = static_cast<std::size_t>(-1);
 
   [[nodiscard]] std::size_t lower_bound(ObjectId id) const noexcept;
   /// `from` is where the unit stands, when that is not yet written to the
@@ -929,17 +847,13 @@ class MovementSystem : public System {
                                    ObjectId unit) const;
   /// A member a shut gate cut off from its hero during the turn's steps, to
   /// have its commands ended and leave his army once the steps are done.
-  struct CutOff {
-    ObjectId unit = kNoObject;
-    ObjectId hero = kNoObject;
-  };
   /// `IsArrived`'s free-spot half, for a route that owns a lock.
   [[nodiscard]] bool arrival_spot_free(const World& world, ObjectId id, const MoveState& move,
                                        Point here) const;
-  /// A route that ended on a taken spot is laid again from where the unit
-  /// stands (`RecastPathfind`, `0x00419730`). A route that cannot move it
-  /// stops it there, not arrived.
-  void recast(World& world, std::size_t entry, Point here, GameTime now);
+  /// `RecastPathfind` (0x00419730) for a unit's order: the route laid again
+  /// from where the unit stands, to the target's position for an object goal.
+  /// Answers whether there is route left to step along.
+  bool recast(World& world, ObjectId id, MoveState& move);
 
   /// `RecastPathfind` for the formation's route (0x00419730 with no unit):
   /// nothing when the formation stands in its band already; otherwise a
@@ -958,57 +872,53 @@ class MovementSystem : public System {
   [[nodiscard]] bool formation_gate_bars(const World& world, const Formation& form) const;
   /// The retry's step (0x00419ee0) for the formation's route, into `out`.
   bool formation_retry_step(World& world, Formation& form, Point& out);
-  /// `UpdateMinSpeed` (0x005f5640) and the sample's deadline (0x005f5850).
-  void formation_time_sample(const World& world, Formation& form, GameTime now) const;
-  /// Where `id` is at `now`: inside the movement step, along its route as
-  /// its account stands then; otherwise where the world has it.
-  [[nodiscard]] Point position_now(const World& world, ObjectId id, GameTime now) const;
-  /// The pace a unit aimed at `form` walks with `left` of its route to go.
-  [[nodiscard]] std::int64_t formation_rate(const Formation& form, const MoveState& move,
-                                            std::int64_t left, GameTime now) const;
-  /// What a step on a route aimed at a formation (0x00419b20) leaves to do:
-  /// walk the route as it now stands, or nothing more at this decision.
-  enum class FormStep { walk, done };
-  FormStep formation_step(World& world, std::size_t entry, GameTime now);
-  /// A unit aimed at a formation standing on its station with no route left
-  /// to walk: its order stays (`HasPath` reads the retry, 0x005d6ebf), and it
-  /// asks again at `until`.
-  void stand_on_station(World& world, ObjectId id, MoveState& move, Point here, GameTime until);
+  /// The sample's deadline (0x005f5850): now plus the mean over the hero
+  /// and the slotted members of the time each needs to its station at the
+  /// march's pace, its step in flight included.
+  void formation_deadline(const World& world, Formation& form, GameTime now) const;
+  /// 0x005d4630: a unit's stride and its step time times its speed factor
+  /// over 100.
+  void step_pair(const World& world, ObjectId id, std::int64_t& stride,
+                 std::int64_t& time) const;
+  /// The step of a route aimed at a formation (0x00419b20): `p` and `d` as
+  /// `retry_step` answers them.
+  bool member_step(World& world, ObjectId id, MoveState& move, Point& p, GameTime& d,
+                   GameTime now);
+  /// The member step's relay: a sample made since the route was laid, and
+  /// the route laid to the station afresh, or deleted on it.
+  /// False when the search to the station laid nothing.
+  bool relay_to_station(World& world, ObjectId id, MoveState& move);
   /// The path follower's stop branch (0x00419ee0 with `[retry+0x20] & 6`):
   /// whether the unit stops at `here` rather than take its route's next step
   /// -- an order that owns no lock, a route with nothing left, a passable free
   /// spot, or a gate ahead that bars it.
   [[nodiscard]] bool stop_branch_halts(const World& world, ObjectId id, const MoveState& move,
-                                       Point here, std::int64_t travelled) const;
-  /// And the stop: `Unit::Stop`'s (bit 1) ends the order with the route, as
-  /// its re-entry deletes the retry; a failed search's (bit 2 alone) ends the
-  /// walk and keeps the order.
-  void halt(World& world, ObjectId id, MoveState& move);
-  /// The turn-start housekeeping every route gets: a dead owner, a drifting
-  /// target, a grid that changed under the route.
-  void prepare(World& world, Entry& entry, GameTime now);
-  /// A route with no cooperative step, walked one whole turn at once.
-  void walk_turn(World& world, const Turn& turn, Entry& entry);
-
-  // The cooperative step. See the header and `advance`.
-  [[nodiscard]] bool cooperates(const World& world, const MoveState& move, ObjectId id) const;
-  [[nodiscard]] Point offset_at(const MoveState& move, std::int64_t travelled) const noexcept;
-  [[nodiscard]] Point cooperative_position(const MoveState& move, std::int64_t progress) const;
-  [[nodiscard]] std::int64_t progress_at(std::size_t entry, GameTime t) const;
-  [[nodiscard]] Point body_position(const World& world, const Body& body, GameTime t) const;
-  [[nodiscard]] GameTime next_decision(const MoveState& move, GameTime now) const noexcept;
-  void decide(World& world, std::size_t entry, GameTime now);
-  void arrive(World& world, std::size_t entry, bool in_range);
-  void settle(World& world, const Turn& turn, std::size_t entry);
-  void index_bodies(const World& world);
+                                       Point here) const;
+  /// The retry's step, 0x00419ee0: the route's next point `p` and the
+  /// step's length `d` (handed in as the default), or false for none.
+  bool retry_step(World& world, ObjectId id, MoveState& move, Point& p, GameTime& d,
+                  GameTime now);
+  /// The cooperative media's step, 0x004172b0, over the sampled route.
+  bool media_step(World& world, ObjectId id, MoveState& move, Point& p, GameTime& d);
+  /// The retry's notify (`vtbl+0xc`, 0x00417890 -> 0x00416800): the step
+  /// committed unless the cooperative step is holding.
+  void retry_notify(MoveState& move) noexcept;
+  /// 0x00418210 and 0x00418260 on a unit's route: the gate ahead that bars
+  /// it within its reach, or `kNoObject`.
+  [[nodiscard]] ObjectId gate_barring(const World& world, ObjectId id,
+                                      const MoveState& move) const;
+  /// 0x00417ab0: an object goal whose target has drawn away from the
+  /// route's end, or gone, is laid again.
+  [[nodiscard]] bool object_goal_drifted(const World& world, ObjectId id,
+                                         const MoveState& move) const;
   void index_static_locks();
 
   [[nodiscard]] ClassTraits traits_of(const World& world, ObjectId id) const;
-  /// The unit's walk animation's step (0x005d2920), or 0 with none.
-  [[nodiscard]] std::int32_t walk_step(const World& world, ObjectId id,
-                                       const MoveState& move) const;
-  [[nodiscard]] std::int32_t formation_stride_or_walk(const World& world, ObjectId id,
-                                                      const MoveState& move) const;
+  /// The unit's walk stride: its walk animation's `step` (0x005d2920), or
+  /// the formation's 200 for a unit whose walk declares none (departure 1 in
+  /// the file header).
+  [[nodiscard]] std::int32_t walk_stride(const World& world, ObjectId id,
+                                         const MoveState& move) const;
 
   std::vector<Entry> states_;  ///< sorted by id; iteration order is world state
   ObstructionGrid grid_;
@@ -1035,32 +945,14 @@ class MovementSystem : public System {
   mutable std::vector<Point> ring_points_;
   mutable std::vector<GoalPoint> ring_goal_points_;
   mutable std::vector<StaticLock> ring_takers_;
-  /// Per entry, how its route is walked this turn: still, step by step, or
-  /// the whole turn at once.
-  std::vector<std::uint8_t> mode_;
-  /// The boundary the running turn began at, and the one it ends at.
-  GameTime turn_t0_ = 0;
-  GameTime turn_end_ = 0;
-  /// Inside `advance`'s decisions, where `mode_` and `since_` describe the
-  /// turn being stepped.
-  bool deciding_ = false;
   /// A route search's gate lines, and the crossings it is tested against.
   CellOverlay barrier_;
   std::vector<GateCrossing> crossings_;
-  /// The members cut off this turn (`CutOff`); empty between turns.
-  std::vector<CutOff> cut_off_;
   /// The gates handed to the smart pathfinder for one search.
   std::vector<const GateLines::Line*> gates_;
   std::vector<Neighbour> neighbours_;
-  /// Per entry, the game time its accumulator has been brought up to.
-  std::vector<GameTime> since_;
-  std::vector<GameTime> scheduled_;
-  std::vector<Point> turn_start_;
-  /// The units standing at the turn's start, bucketed; and the ones with a
-  /// route, which are read where they are at each instant instead.
-  std::vector<Body> bodies_;
-  std::vector<Body> movers_;
-  /// A bucket grid over `bodies_` by position, and over the static locks:
+  mutable std::vector<ObjectId> near_;
+  /// A bucket grid over the static locks:
   /// `kBucket`-unit cells, compressed rows.
   struct Buckets {
     std::int32_t columns = 0;
@@ -1068,7 +960,6 @@ class MovementSystem : public System {
     std::vector<std::uint32_t> first;  ///< columns * rows + 1 offsets
     std::vector<std::uint32_t> items;
   };
-  Buckets body_buckets_;
   Buckets lock_buckets_;
   bool lock_buckets_valid_ = false;
 };

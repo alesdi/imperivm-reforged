@@ -188,20 +188,49 @@ of that object's timer was due before it, at its own time
 the end of each turn, after the systems (`World::set_timers_swept`). The
 cursor the renderer draws follows the record at each turn's end.
 
+## The walk
+
+A unit walks by one-shot steps on the timer, as the original does
+(`MovementSystem::walk_step`, 0x005d3b50, run by the end handler in action
+mode 3). An order lays its route and sets mode 3, arming the timer for 1 ms
+when nothing is pending (`MovementSystem::start_walk`; the `Goto` family's
+tail, `Stop`, `FormKeepMoving`). At each firing in mode 3 the step:
+
+1. takes the default step length: the walk animation's `step` times 1,000
+   over the class `speed` (0x005d38e0), shortened for a hero or a unit of
+   one by its quick-march level (100 over 100 plus
+   `SpeedPercentPerQuickMarchLevel` per level), then times 100 over the
+   speed factor `[unit+0x15c]`;
+2. asks the route for its next point and the step's length
+   (`CVXPathRetry` 0x00419ee0): the sampled route's next point
+   (`CVXSPath` 0x0041a740), let through by the cooperative step with its
+   distance's share of the default length, held where the unit stands for
+   50, 75 or 100 ms, or turned aside for the default length
+   (`CVXPathCoop` 0x004172b0, 0x005d39c0); a march member's step timed to
+   its station's deadline (0x00419b20);
+3. on a point where the unit stands, arms the timer for the length (a hold,
+   0x0053ced0); on any other, starts the walk animation (`[unit+0x1bc]`)
+   for exactly that long, turned towards the point (the raw difference) and
+   with the point as its origin, so the object is put there at the main
+   start through `SetPos` and the move hook; then tells the route the step
+   was taken, which commits it unless the cooperative step is holding;
+4. with no step, deletes the route when no call waits on the walk, and
+   otherwise wakes the waiting call now when the unit is arrived (bit
+   0x10000 of `[unit+0x194]`, `MoveState::wake_on_arrival`, raised by the
+   `Goto` family, `Stop` and `FormKeepMoving` as they suspend and dropped at
+   their re-entry).
+
+So the timer is pending all the way, `IsInState` is false while a unit
+walks, a `Goto` wakes its script at the step that arrives, a `Stop` leaves
+the step in flight to finish, and an `Idle` called right after waits it out.
+
 Departures, each one for what the engine does not yet do:
 
-* **The walk is not animation steps.** The original walks by one-shot steps
-  on the timer (mode 3, 0x005d3b50). Each step carries its own duration
-  override and the next point as its origin. So the timer is pending all the
-  way, `IsInState` is false while a unit walks, and a `Goto` wakes its script
-  at the step that arrives (bit 0x10000 of `[unit+0x194]`). Here the walk is
-  the movement system's loop: a mode-3 firing runs nothing, its start stops
-  what the record plays, and a `Goto` waits its slice.
 * **An animation started with no origin does not move the object at its
   main start.** The original puts the object back where it stood at the
-  call; here the movement system may have moved it since, because the walk
-  is not on the timer, so the object is left where it is and the origin
-  field takes that point. With the walk on the timer the two agree.
+  call; here a writer outside the clock (`SetPos`, a holder's exit) may
+  have moved it since, so the object is left where it is and the origin
+  field takes that point. The walk is on the timer, so for it the two agree.
 * **The attack's action moment** (mode 2's `vtbl+0x120`) is combat's own
   schedule; the action handler's other work is sound.
 * **The command thread's wake at a death.** The base death cancels the

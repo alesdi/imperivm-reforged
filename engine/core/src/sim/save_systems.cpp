@@ -82,7 +82,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 49;  // 49: the exploration map's explored-everywhere flag in the fog section (`ExplorationMap::explored_everywhere`, which `GAIKA::Explored` reads); 48: a formation's blocking gate and the gate each route aimed at it has compared sides at, in the movement section (`Formation::blocking_gate`, `MoveState::gate_seen`); 47: Place's deferred-filing list gone from the hero section (the move hook files a unit at every move, docs/formats/squad.md); 46: the hero section's squad watermark replaced by Place's deferred-filing list (every other birth registers and files its unit at once, docs/formats/class-tally.md); 45: the sixteen class tallies `Count` reads in the hero section (`HeroSystem::class_tally_`); 44: the formation's own route and its timing in the movement section (`Formation::route`, `going_on`, `goal`, `range`, `min_range`, `deadline`, `speed`, `joined`), and a route aimed at a formation (`MoveState::form_aimed`, `form_seen`, `form_lock_laid`); 43: the smart pathfinder's build in the movement section, as the calls that made it (`PathFinder::smart_calls`); 42: no finishing commands in the command section (an `onfinish` runs inside the end that calls it), and a command's list (`Command::list`, a ship's `unboard`); 41: every combatant's danger counter and its stamp (`Combatant::danger`, `danger_time`), and a hero's experience pool (`HeroRecord::experience_pool`); 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 50;  // 50: the walk on the animation clock in the movement section -- each route its sampled media (`MoveState::route`, stride and stepper), the march step's deadline and arrival mark and the waiting call's bit (`form_deadline`, `arrived_mark`, `wake_on_arrival`), the formation's pace and its slowest and fastest units, and the accumulator, the hold, the step offsets and the march rate gone; 49: the exploration map's explored-everywhere flag in the fog section (`ExplorationMap::explored_everywhere`, which `GAIKA::Explored` reads); 48: a formation's blocking gate and the gate each route aimed at it has compared sides at, in the movement section (`Formation::blocking_gate`, `MoveState::gate_seen`); 47: Place's deferred-filing list gone from the hero section (the move hook files a unit at every move, docs/formats/squad.md); 46: the hero section's squad watermark replaced by Place's deferred-filing list (every other birth registers and files its unit at once, docs/formats/class-tally.md); 45: the sixteen class tallies `Count` reads in the hero section (`HeroSystem::class_tally_`); 44: the formation's own route and its timing in the movement section (`Formation::route`, `going_on`, `goal`, `range`, `min_range`, `deadline`, `speed`, `joined`), and a route aimed at a formation (`MoveState::form_aimed`, `form_seen`, `form_lock_laid`); 43: the smart pathfinder's build in the movement section, as the calls that made it (`PathFinder::smart_calls`); 42: no finishing commands in the command section (an `onfinish` runs inside the end that calls it), and a command's list (`Command::list`, a ship's `unboard`); 41: every combatant's danger counter and its stamp (`Combatant::danger`, `danger_time`), and a hero's experience pool (`HeroRecord::experience_pool`); 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -650,6 +650,49 @@ Status AiVarStore::deserialize(std::span<const std::byte> data) {
 
 // -- movement ---------------------------------------------------------------
 
+namespace {
+
+/// A sampled route (`FormationRoute`): the points, then the stepper.
+void put_route(std::vector<std::byte>& out, const FormationRoute& r) {
+  bytes::put_u32(out, static_cast<std::uint32_t>(r.points.size()));
+  for (const Point p : r.points) put_point(out, p);
+  bytes::put_i32(out, r.stride);
+  bytes::put_i32(out, r.leg);
+  bytes::put_i32(out, r.steps);
+  bytes::put_i32(out, r.step);
+  bytes::put_i32(out, r.delta_x);
+  bytes::put_i32(out, r.delta_y);
+  bytes::put_i32(out, r.step_length);
+  bytes::put_i32(out, r.remaining);
+  put_bool(out, r.complete);
+}
+
+[[nodiscard]] Status get_route(ByteReader& reader, FormationRoute& r) {
+  std::uint32_t count = 0;
+  if (!reader.u32(count)) return FormatError::truncated;
+  if (count > reader.remaining()) return FormatError::truncated;
+  r.points.clear();
+  for (std::uint32_t k = 0; k < count; ++k) {
+    Point p;
+    if (!get_point(reader, p)) return FormatError::truncated;
+    r.points.push_back(p);
+  }
+  if (!bytes::get_i32(reader, r.stride) || !bytes::get_i32(reader, r.leg) ||
+      !bytes::get_i32(reader, r.steps) || !bytes::get_i32(reader, r.step) ||
+      !bytes::get_i32(reader, r.delta_x) || !bytes::get_i32(reader, r.delta_y) ||
+      !bytes::get_i32(reader, r.step_length) || !bytes::get_i32(reader, r.remaining) ||
+      !get_bool(reader, r.complete)) {
+    return FormatError::truncated;
+  }
+  // The stepper indexes the points by its leg, and divides by the stride.
+  if (r.leg < 0 || static_cast<std::uint32_t>(r.leg) > count || r.stride <= 0) {
+    return FormatError::malformed;
+  }
+  return Status();
+}
+
+}  // namespace
+
 void MovementSystem::serialize(std::vector<std::byte>& out) const {
   put_header(out, kMovementMagic);
   bytes::put_u32(out, grid_generation_);
@@ -667,72 +710,41 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, m.min_range);
     put_bool(out, m.has_path);
     put_bool(out, m.goto_active);
-    // `walking` is the memory that makes the walk cycle a transition rather
-    // than a poll (`play_locomotion`). Left out, a loaded session replayed
-    // every moving unit's walk from step zero on its first turn, and the
-    // round-trip diverged in the object hash the moment entities were loaded
-    // headless -- which is how it stayed invisible for as long as they were not.
-    put_bool(out, m.walking);
-    bytes::put_i64(out, m.progress);
-    bytes::put_i64(out, m.last_moved);
     // `Goto`'s failure stamp, `[unit+0x150]`: the give-up and the re-search
     // draw read it, so a unit loaded mid-failure would otherwise give up late
     // and draw where the original does not.
     bytes::put_i64(out, m.goto_failed_at);
-    // The route. Not hashed -- `pathfinder` is zero in all nine dumps -- and
-    // written all the same, because a route is not recomputable: the grid it
-    // was laid against can have moved under it, and a unit that came back with
-    // an empty path would silently stop where it stood.
-    bytes::put_u32(out, static_cast<std::uint32_t>(m.waypoints.size()));
-    for (const Point& p : m.waypoints) put_point(out, p);
+    // The route as its sampled media holds it (`CVXSPath`, a type in the
+    // executable's persistent factory): the points, the stride and the
+    // stepper's counters. Not hashed -- `pathfinder` is zero in all nine
+    // dumps -- and not recomputable: the grid it was laid against can have
+    // moved under it, and the counters say which step comes next.
+    put_route(out, m.route);
     bytes::put_i64(out, m.path_length);
-    bytes::put_u32(out, m.path_generation);
     put_bool(out, m.path_complete);
     bytes::put_u8(out, static_cast<std::uint32_t>(m.last_outcome));
-    // Avoidance: the step being walked, the wait and the march. Not hashed --
-    // path media, the channel the original leaves at zero -- and written all
-    // the same, for the route's reason: a unit that came back mid-hold without
-    // its hold would step early, and one that came back without its sidestep
-    // would jump sideways by the offset it was walking out of.
-    bytes::put_i32(out, m.stride);
-    put_bool(out, m.holding);
-    bytes::put_i64(out, m.hold_until);
-    bytes::put_i64(out, m.step_start);
-    bytes::put_i64(out, m.step_end);
-    put_point(out, m.offset_from);
-    put_point(out, m.offset_to);
+    // The cooperative media's wait, and the march the order belongs to.
     bytes::put_i32(out, m.retry_time);
     bytes::put_u32(out, m.party);
-    // The order's lock flag: the route's last point is this unit's owned
-    // destination lock, which other units' free-spot tests read.
+    // The retry's flags: the owned destination lock, the free-spot search's
+    // two, `Unit::Stop`'s request and the failed search's bit.
     put_bool(out, m.dest_lock);
-    // The free-spot search's two flags: whether it has run for this
-    // destination, and whether the route was re-aimed by it. Either keeps it
-    // from running again, and it draws from the world's generator when it runs.
     put_bool(out, m.free_spot_tried);
     put_bool(out, m.free_spot_aimed);
-    // `Unit::Stop`'s request: a unit that came back without it would stop
-    // where it stood rather than walk on to a free spot.
     put_bool(out, m.stop_requested);
-    // And the failed search's bit: a unit that came back without it would
-    // stop where it stood on a column-mate rather than walk on, and would
-    // count as arrived where the original does not.
     put_bool(out, m.route_failed);
-    // The pace a march gives the unit: a unit that came back without it
-    // would walk at its own speed until its hero next lays the stations.
-    bytes::put_i64(out, m.march_rate);
-    // Whether the route is aimed at the formation of `party`, and the sample
-    // it was laid to: a unit that came back without them would walk on to a
-    // station of a sample long gone, or never ask for the next.
+    // A route aimed at a formation: the sample and deadline it was laid to,
+    // its lock, the blocking gate it has compared sides at, and the member
+    // step's arrival mark.
     put_bool(out, m.form_aimed);
     bytes::put_i32(out, m.form_seen);
     put_bool(out, m.form_lock_laid);
-    // The blocking gate the route has compared sides at: one that came back
-    // without it would compare again and could cut a member off twice.
     bytes::put_u32(out, m.gate_seen);
-    // The gates the route crosses, listed when it was laid: path media like
-    // the route, and not recomputable from it -- a gate spawned since would
-    // join a list the original never rebuilds.
+    bytes::put_i64(out, m.form_deadline);
+    put_bool(out, m.arrived_mark);
+    // Bit 0x10000 of `[unit+0x194]`: a call waits on the walk.
+    put_bool(out, m.wake_on_arrival);
+    // The gates the route crosses, listed when it was laid.
     bytes::put_u32(out, static_cast<std::uint32_t>(m.gate_crossings.size()));
     for (const GateCrossing& crossing : m.gate_crossings) {
       bytes::put_u32(out, crossing.gate);
@@ -778,19 +790,9 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     // The formation's own route, stepped a sample at a time: the points, the
     // stepper's counters and what is left, as the record holds them -- a load
     // that searched it again would step from a different start.
-    const FormationRoute& r = f.route;
-    bytes::put_u32(out, static_cast<std::uint32_t>(r.points.size()));
-    for (const Point p : r.points) put_point(out, p);
-    bytes::put_i32(out, r.leg);
-    bytes::put_i32(out, r.steps);
-    bytes::put_i32(out, r.step);
-    bytes::put_i32(out, r.delta_x);
-    bytes::put_i32(out, r.delta_y);
-    bytes::put_i32(out, r.step_length);
-    bytes::put_i32(out, r.remaining);
-    put_bool(out, r.complete);
-    bytes::put_u32(out, static_cast<std::uint32_t>(r.gate_crossings.size()));
-    for (const GateCrossing& crossing : r.gate_crossings) {
+    put_route(out, f.route);
+    bytes::put_u32(out, static_cast<std::uint32_t>(f.route.gate_crossings.size()));
+    for (const GateCrossing& crossing : f.route.gate_crossings) {
       bytes::put_u32(out, crossing.gate);
       bytes::put_i64(out, crossing.at);
     }
@@ -801,6 +803,9 @@ void MovementSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, f.min_range);
     bytes::put_i64(out, f.deadline);
     bytes::put_i64(out, f.speed);
+    bytes::put_i64(out, f.pace);
+    bytes::put_u32(out, f.min_unit);
+    bytes::put_u32(out, f.max_unit);
     bytes::put_u32(out, static_cast<std::uint32_t>(f.joined.size()));
     for (const ObjectId id : f.joined) bytes::put_u32(out, id);
   }
@@ -825,40 +830,25 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
   for (std::uint32_t i = 0; i < count; ++i) {
     Entry entry;
     MoveState& m = entry.state;
-    std::uint32_t waypoints = 0;
     if (!reader.u32(entry.id) || !get_point(reader, m.facing) ||
         !bytes::get_i32(reader, m.speed) || !bytes::get_i32(reader, m.speed_factor) ||
         !bytes::get_i32(reader, m.walk_anim) || !get_point(reader, m.target) ||
         !reader.u32(m.target_object) || !bytes::get_i32(reader, m.range) ||
         !bytes::get_i32(reader, m.min_range) || !get_bool(reader, m.has_path) ||
-        !get_bool(reader, m.goto_active) || !get_bool(reader, m.walking) ||
-        !bytes::get_i64(reader, m.progress) ||
-        !bytes::get_i64(reader, m.last_moved) || !bytes::get_i64(reader, m.goto_failed_at) ||
-        !reader.u32(waypoints)) {
+        !get_bool(reader, m.goto_active) || !bytes::get_i64(reader, m.goto_failed_at)) {
       return FormatError::truncated;
     }
-    for (std::uint32_t w = 0; w < waypoints; ++w) {
-      Point p;
-      if (!get_point(reader, p)) return FormatError::truncated;
-      m.waypoints.push_back(p);
-    }
-    if (!bytes::get_i64(reader, m.path_length) || !reader.u32(m.path_generation) ||
-        !get_bool(reader, m.path_complete) ||
+    if (const Status status = get_route(reader, m.route); !status.ok()) return status;
+    if (!bytes::get_i64(reader, m.path_length) || !get_bool(reader, m.path_complete) ||
         !get_enum(reader, m.last_outcome,
-                  static_cast<std::uint8_t>(MoveOutcome::exhausted) + 1)) {
-      return FormatError::truncated;
-    }
-    if (!bytes::get_i32(reader, m.stride) ||
-        !get_bool(reader, m.holding) || !bytes::get_i64(reader, m.hold_until) ||
-        !bytes::get_i64(reader, m.step_start) || !bytes::get_i64(reader, m.step_end) ||
-        !get_point(reader, m.offset_from) || !get_point(reader, m.offset_to) ||
+                  static_cast<std::uint8_t>(MoveOutcome::exhausted) + 1) ||
         !bytes::get_i32(reader, m.retry_time) || !reader.u32(m.party) ||
         !get_bool(reader, m.dest_lock) || !get_bool(reader, m.free_spot_tried) ||
-        !get_bool(reader, m.free_spot_aimed) ||
-        !get_bool(reader, m.stop_requested) || !get_bool(reader, m.route_failed) ||
-        !bytes::get_i64(reader, m.march_rate) || !get_bool(reader, m.form_aimed) ||
+        !get_bool(reader, m.free_spot_aimed) || !get_bool(reader, m.stop_requested) ||
+        !get_bool(reader, m.route_failed) || !get_bool(reader, m.form_aimed) ||
         !bytes::get_i32(reader, m.form_seen) || !get_bool(reader, m.form_lock_laid) ||
-        !reader.u32(m.gate_seen)) {
+        !reader.u32(m.gate_seen) || !bytes::get_i64(reader, m.form_deadline) ||
+        !get_bool(reader, m.arrived_mark) || !get_bool(reader, m.wake_on_arrival)) {
       return FormatError::truncated;
     }
     std::uint32_t crossings = 0;
@@ -919,25 +909,10 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
         !get_bool(reader, f.path) || !get_bool(reader, f.should_lock)) {
       return FormatError::truncated;
     }
+    if (const Status status = get_route(reader, f.route); !status.ok()) return status;
     FormationRoute& r = f.route;
-    std::uint32_t point_count = 0;
-    if (!reader.u32(point_count)) return FormatError::truncated;
-    if (point_count > reader.remaining()) return FormatError::truncated;
-    for (std::uint32_t k = 0; k < point_count; ++k) {
-      Point p;
-      if (!get_point(reader, p)) return FormatError::truncated;
-      r.points.push_back(p);
-    }
     std::uint32_t crossing_count = 0;
-    if (!bytes::get_i32(reader, r.leg) || !bytes::get_i32(reader, r.steps) ||
-        !bytes::get_i32(reader, r.step) || !bytes::get_i32(reader, r.delta_x) ||
-        !bytes::get_i32(reader, r.delta_y) || !bytes::get_i32(reader, r.step_length) ||
-        !bytes::get_i32(reader, r.remaining) || !get_bool(reader, r.complete) ||
-        !reader.u32(crossing_count)) {
-      return FormatError::truncated;
-    }
-    // The stepper indexes the points by its leg.
-    if (r.leg < 0 || static_cast<std::uint32_t>(r.leg) > point_count) return FormatError::malformed;
+    if (!reader.u32(crossing_count)) return FormatError::truncated;
     for (std::uint32_t c = 0; c < crossing_count; ++c) {
       GateCrossing crossing;
       if (!reader.u32(crossing.gate) || !bytes::get_i64(reader, crossing.at)) {
@@ -951,6 +926,7 @@ Status MovementSystem::deserialize(std::span<const std::byte> data) {
         !get_point(reader, f.goal) ||
         !bytes::get_i32(reader, f.range) || !bytes::get_i32(reader, f.min_range) ||
         !bytes::get_i64(reader, f.deadline) || !bytes::get_i64(reader, f.speed) ||
+        !bytes::get_i64(reader, f.pace) || !reader.u32(f.min_unit) || !reader.u32(f.max_unit) ||
         !reader.u32(joined_count)) {
       return FormatError::truncated;
     }

@@ -117,11 +117,12 @@ when it was called.
 
 ## What differs, and why
 
-* **A walk cycle is not "in flight".** The original walks by one-shot steps
-  on the animation timer (action mode 3, 0x005d3b50), and `Stop`
-  (0x005d6c90) leaves the step in flight to play out; so an `Idle` called on
-  a unit just stopped mid-stride waits for the end of that step. The
-  engine's walk is the movement system's loop, so the first step is at once.
+* **The walk step in flight is waited out**, as in the original: the walk
+  is one-shot steps on the animation timer (action mode 3, 0x005d3b50,
+  docs/formats/animation.md, "The walk"), `Stop` (0x005d6c90) leaves the
+  step in flight to play out, and an `Idle` called on a unit just stopped
+  mid-stride finds the timer pending and takes its first step at that
+  step's end.
 * **An idle animation declared 0 long plays no fidget.** The original's
   `StartAnimation` scales the action moment by dividing by the declared
   length (0x0053cf30, the division at 0x0053cfa9), so a fidget declared 0

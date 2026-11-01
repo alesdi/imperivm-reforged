@@ -155,16 +155,44 @@ struct GateField {
   WorldObject& gate_slot() { return *world.find(gate); }
   /// `OpenNow` / `CloseNow`, as the script calls them.
   void swing(bool open) { gate_retarget(gate_slot(), open, world.time()); }
+  /// `while (!.Goto(dest)) ;` in the unit's script: the order with a call
+  /// waiting on the walk (bit 0x10000), so a step that finds nothing to take
+  /// keeps the route, and the order given again each time the call's slice
+  /// runs out with the unit not there (`walk`).
+  void go(ObjectId id, Point dest, bool lock = false) {
+    movement.order_goto(world, id, dest, 0, 0, kNoObject, lock);
+    movement.state(id).wake_on_arrival = true;
+    scripts.push_back(Script{id, dest, lock, world.time()});
+  }
+  /// The script stops calling `Goto` (it went on to something else).
+  void quit(ObjectId id) {
+    std::erase_if(scripts, [id](const Script& s) { return s.id == id; });
+  }
   /// Walk for `ms` in 100 ms turns, and say whether `id` was ever north of
   /// the gate's axis.
   bool walk(ObjectId id, int ms) {
     bool through = at(id).y < kGatePoint.y;
     for (int t = 0; t < ms; t += 100) {
       world.advance(100);
+      for (Script& s : scripts) {
+        if (world.time() - s.since < kSlice) continue;
+        s.since = world.time();
+        if (movement.is_arrived(world, s.id)) continue;
+        movement.order_goto(world, s.id, s.dest, 0, 0, kNoObject, s.lock);
+        movement.state(s.id).wake_on_arrival = true;
+      }
       through = through || at(id).y < kGatePoint.y;
     }
     return through;
   }
+  struct Script {
+    ObjectId id;
+    Point dest;
+    bool lock;
+    GameTime since;
+  };
+  static constexpr GameTime kSlice = 1000;
+  std::vector<Script> scripts;
   MoveState none;
 };
 
@@ -493,7 +521,7 @@ TEST(a_hidden_enemy_is_barred_by_a_closed_gate_as_any_enemy_is) {
   GateField f;
   const ObjectId foe = f.unit(1, kSouth);
   f.world.mutable_state(foe)->flags.hidden = true;
-  f.movement.order_goto(f.world, foe, kNorth, 0);
+  f.go(foe, kNorth);
   REQUIRE(f.move(foe).gate_crossings.size() == 1);
   CHECK(!f.walk(foe, 5000));
   CHECK((f.at(foe) == Point{1000, kStandY}));
@@ -505,14 +533,14 @@ TEST(a_hidden_enemy_is_barred_by_a_closed_gate_as_any_enemy_is) {
 }
 
 /// No way round, and a short route: the first route is kept (0x00419490), the
-/// soldier walks up to the gate and stands within reach of it -- both kinds of
-/// route, stepped and walked a turn at a time -- until the gate is opening,
-/// when it walks on.
+/// soldier walks up to the gate and stands within reach of it -- with its walk
+/// animation's steps of 40 and with none, the formation's 200 -- until the
+/// gate is opening, when its script's next `Goto` walks it on.
 TEST(an_enemy_stands_before_a_closed_gate_it_cannot_go_round_until_it_opens) {
   for (const bool strides : {true, false}) {
     GateField f;
     const ObjectId foe = f.unit(1, kSouth, strides);
-    f.movement.order_goto(f.world, foe, kNorth, 0);
+    f.go(foe, kNorth);
     REQUIRE(f.move(foe).has_path);
     CHECK(f.move(foe).path_length == 600);
     REQUIRE(f.move(foe).gate_crossings.size() == 1);
@@ -520,9 +548,10 @@ TEST(an_enemy_stands_before_a_closed_gate_it_cannot_go_round_until_it_opens) {
     CHECK(f.move(foe).gate_crossings[0].at == 300);
     CHECK(!f.walk(foe, 10000));
     CHECK(f.move(foe).has_path);  // waiting, not given up
-    // Stepped, the step decided at 80 along; a turn at a time, 10 units a
-    // turn, the first turn that starts at 80 or more. Either way, 80.
-    CHECK((f.at(foe) == Point{1000, kStandY}));
+    // The step that finds the crossing within reach is not taken: with the
+    // walk's steps of 40, the one decided at 80 along; with no walk
+    // animation, the formation's stride of 200, the one decided at 200.
+    CHECK((f.at(foe) == Point{1000, strides ? kStandY : kSouth.y - 200}));
     CHECK(f.movement.avoidance().gate_waits > 0);
     // Opening is enough, before the portcullis passes 20 (0x00418360).
     f.swing(true);
@@ -541,18 +570,21 @@ TEST(an_enemy_stands_before_a_closed_gate_it_cannot_go_round_until_it_opens) {
 TEST(a_unit_told_to_stop_before_a_gate_that_bars_it_stops_there) {
   GateField f;
   const ObjectId foe = f.unit(1, kSouth);
-  f.movement.order_goto(f.world, foe, kNorth, 0, 0, kNoObject, /*lock_destination=*/true);
+  f.go(foe, kNorth, /*lock=*/true);
   REQUIRE(f.move(foe).has_path);
   CHECK(!f.walk(foe, 10000));
   REQUIRE(f.move(foe).has_path);
   REQUIRE((f.at(foe) == Point{1000, kStandY}));
   // Somebody stands on the spot, so it is not free.
   (void)f.unit(1, Point{1000, kStandY});
+  f.quit(foe);
   REQUIRE(f.movement.request_stop(f.world, foe));
   f.world.advance(100);
   f.world.advance(100);
-  CHECK(!f.move(foe).has_path);
   CHECK((f.at(foe) == Point{1000, kStandY}));
+  // `Stop`'s re-entry asks the step (0x005d6e14) and finds none: it deletes
+  // the route and answers true.
+  CHECK(!f.movement.peek_step(f.world, foe, f.world.time()));
 }
 
 /// No way round and a long route (more than 1,300): the second search's
@@ -618,7 +650,7 @@ TEST(a_friend_stands_before_its_closed_gate_while_enemies_are_near) {
     GateField f;
     f.gate_slot().state.flags.enemies_near = true;
     const ObjectId friend_ = f.unit(0, kSouth);
-    f.movement.order_goto(f.world, friend_, kNorth, 0);
+    f.go(friend_, kNorth);
     CHECK(f.movement.avoidance().gate_searches == 0);
     CHECK(!f.walk(friend_, 5000));
     CHECK((f.at(friend_) == Point{1000, kStandY}));
@@ -652,7 +684,7 @@ TEST(a_friend_stands_before_its_gate_while_the_gate_runs_close_gate) {
   REQUIRE(commands.set_command(f.world, f.gate, "closegate", Command{}) != 0);
   REQUIRE(commands.command_name(f.gate) == "closegate");
   const ObjectId friend_ = f.unit(0, kSouth);
-  f.movement.order_goto(f.world, friend_, kNorth, 0);
+  f.go(friend_, kNorth);
   CHECK(f.movement.avoidance().gate_searches == 0);
   CHECK(!f.walk(friend_, 5000));
   CHECK((f.at(friend_) == Point{1000, kStandY}));
@@ -762,7 +794,7 @@ TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_27
 
     // The lone soldier: its own radius.
     const ObjectId alone = f.unit(0, Point{1600, 1900});
-    f.movement.order_goto(f.world, alone, Point{1000, 700}, 0);
+    f.go(alone, Point{1000, 700});
 
     const ObjectId hero = f.world.spawn(NativeClass::hero, &f.soldier.value(),
                                         f.graph.find("Soldier"));
@@ -785,11 +817,16 @@ TEST(a_march_stands_its_formations_radius_short_of_a_gate_and_never_less_than_27
     CHECK(f.movement.formation(hero)->route.gate_crossings[0].at == 900);
 
     CHECK(!f.walk(hero, 15000));
-    // The path spent short of the gate, the hero on its last centre.
+    // The path spent short of the gate, the last centre there. The hero's
+    // route to it runs within half his step and 133 of it 120 short, where
+    // he asks for the next sample (0x00419b20) and there is none
+    // (`CreateNextSample`, 0x005f5bd0, answers 0 with the path finished): no
+    // step, and with no call waiting on the walk his route is deleted
+    // (0x005d3830 with 0). He stands three steps of 40 short of it.
     CHECK(!f.movement.formation(hero)->going_on);
     CHECK(!f.move(hero).has_path);
     CHECK((f.movement.formation(hero)->centre == Point{1000, c.stand_y}));
-    CHECK((f.at(hero) == Point{1000, c.stand_y}));
+    CHECK((f.at(hero) == Point{1000, c.stand_y + 120}));
     // The lone soldier, on the far side of the gate's gap, crosses the axis
     // obliquely; it still stands its own reach short of the line.
     CHECK(f.move(alone).has_path);
@@ -871,7 +908,7 @@ TEST(a_save_mid_swing_stops_a_route_before_the_same_gate_on_the_same_turn) {
       f.swing(true);
       f.world.advance(2000);
       const ObjectId foe = f.unit(1, Point{1000, 1700}, strides);
-      f.movement.order_goto(f.world, foe, kNorth, 0);
+      f.go(foe, kNorth);
       CHECK(f.move(foe).gate_crossings.size() == 1);  // laid through the open gate
       f.swing(false);
       // 70 down to 21 takes 1,428 ms; saved at 800, the portcullis at 42.
@@ -901,15 +938,17 @@ TEST(a_save_mid_swing_stops_a_route_before_the_same_gate_on_the_same_turn) {
       a.world.advance(100);
       b.world.advance(100);
       CHECK(a.at(foe) == b.at(foe));
-      CHECK(a.move(foe).holding == b.move(foe).holding);
+      CHECK(a.move(foe).retry_time == b.move(foe).retry_time);
+      CHECK(a.world.find(foe)->clock.timer_at == b.world.find(foe)->clock.timer_at);
       if (!strides) CHECK(a.world.state_hash() == b.world.state_hash());
     }
     // Closed long before it got there -- the portcullis passes 20 some 140
     // units into the walk -- so it stands where any soldier the gate bars
     // stands: the crossing is 700 along, and the step at 480 finds it 220
-    // ahead (stepped), or the turn that starts at 480 does (a turn at a time).
+    // ahead (steps of 40), or the step at 600 finds it 100 ahead (the
+    // formation's stride of 200, with no walk animation).
     CHECK(a.move(foe).has_path);
-    CHECK((a.at(foe) == Point{1000, kStandY}));
+    CHECK((a.at(foe) == Point{1000, strides ? kStandY : 1100}));
     CHECK(b.at(foe) == a.at(foe));
   }
 }

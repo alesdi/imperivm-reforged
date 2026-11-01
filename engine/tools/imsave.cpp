@@ -484,7 +484,7 @@ struct Outcome {
               std::fprintf(stderr, "  move: has_path %d/%d goto %d/%d target (%d,%d)/(%d,%d) waypoints %zu/%zu\n",
                 xa ? (int)xa->has_path : -1, xb ? (int)xb->has_path : -1, xa ? (int)xa->goto_active : -1, xb ? (int)xb->goto_active : -1,
                 xa ? xa->target.x : -9, xa ? xa->target.y : -9, xb ? xb->target.x : -9, xb ? xb->target.y : -9,
-                xa ? xa->waypoints.size() : 0u, xb ? xb->waypoints.size() : 0u);
+                xa ? xa->route.points.size() : 0u, xb ? xb->route.points.size() : 0u);
               const sim::CommandSystem* ca = sim::command_system(const_cast<sim::World&>(original.world()));
               const sim::CommandSystem* cb = sim::command_system(const_cast<sim::World&>(restored->world()));
               std::fprintf(stderr, "  cmd: %s/%s (%zu/%zu queued)\n",

@@ -456,7 +456,15 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// budget, `PlayAnim`'s slot, facing and progress, and the script the
 /// activity wakes. A version-58 file has none, and a waiting idle or
 /// `PlayAnim` would never wake.
-inline constexpr std::uint32_t kStateVectorVersion = 59;
+/// 60: the walk is a walk animation a step on the animation timer
+/// (0x005d3b50; system section version 50, docs/formats/animation.md): each
+/// movement row carries its route as the sampled media -- points, stride
+/// and the stepper's counters -- with the march step's deadline, the
+/// arrival mark and whether a call waits on the walk (bit 0x10000), and each
+/// formation its pace and its slowest and fastest units; the turn
+/// accumulator, the hold, the sidestep offsets and the march rate are gone.
+/// A version-59 file walks by the turn, which nothing in this build does.
+inline constexpr std::uint32_t kStateVectorVersion = 60;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

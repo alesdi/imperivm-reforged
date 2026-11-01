@@ -2927,7 +2927,7 @@ void aim_marchers(World& world, MovementSystem& movement, ObjectId hero) {
 /// marked (0x005f56d0).
 ///
 /// **Samples are not made here.** They are made in the movement step, as
-/// units near their stations (`MovementSystem::formation_step`), and a sample
+/// units near their stations (`MovementSystem::member_step`), and a sample
 /// made there can run the layout too: the units it gave a place are handed
 /// `form_move` here, at the hero's next call, where the original hands it out
 /// at once. A script cannot be started from inside the movement step.
@@ -3200,8 +3200,10 @@ HostOutcome form_keep_moving_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
   if (!self.ok()) return HostOutcome::failed(self.error);
   if (!ctx.first_call) {
+    // The re-entry: the bit dropped, and an arrived route record deleted.
     if (self.world->find(self.id) != nullptr) {
-      const MoveState* move = self.movement->find(self.id);
+      MoveState* move = self.movement->find(self.id);
+      if (move != nullptr) move->wake_on_arrival = false;
       if (move != nullptr && move->goto_active && !self.movement->marching(self.id, *move) &&
           self.movement->is_arrived(*self.world, self.id)) {
         self.movement->stop(*self.world, self.id);
@@ -3245,6 +3247,17 @@ HostOutcome form_keep_moving_impl(CallContext& ctx) {
   // object already occupies leaves `has_path` false, `eta` returns **-1** for
   // that, and `eta >= 0` was never true. The clamp is wrong on the
   // disassembly's evidence alone. What spins in `hero_idle.vs` is still open.
+  //
+  // The walk: mode 3 and the timer armed for 1 ms when nothing is pending
+  // (0x005d7a40, 0x0052eaf0), and bit 0x10000 raised so a walk that ends
+  // arrived wakes the call (`MoveState::wake_on_arrival`).
+  if (self.world->find(self.id) != nullptr) {
+    self.movement->start_walk(*self.world, self.id);
+    self.movement->state(self.id).wake_on_arrival = true;
+    if (WorldObject* slot = self.world->find(self.id); slot != nullptr) {
+      slot->clock.waiter = ctx.script;
+    }
+  }
   const std::int64_t wait =
       ctx.count() > 1 && ctx.arg(1).is_integer() ? ctx.arg(1).as_integer() : 0;
   HostOutcome out;

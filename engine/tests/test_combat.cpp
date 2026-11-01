@@ -1355,7 +1355,8 @@ TEST(a_unit_killed_mid_walk_stops_and_its_death_keeps_playing) {
   CHECK(combat.order_attack(a, b));
   bool walked = false;
   for (int turn = 0; turn < 12 && !combat.is_dying(b); ++turn) {
-    walked = walked || movement.find(b)->walking;
+    // A walk step under way: the walk slot on the clock.
+    walked = walked || world.find(b)->clock.slot == kAnimAttack;
     world.advance(400);
   }
   REQUIRE(combat.is_dying(b));
@@ -1363,12 +1364,14 @@ TEST(a_unit_killed_mid_walk_stops_and_its_death_keeps_playing) {
   CHECK(!movement.find(b)->has_path);
   const Point fell = world.state(b)->position;
 
-  // An order after death, as a hero's army order would send one.
+  // An order after death, as a hero's army order would send one: the death's
+  // mode is kept, and nothing walks the corpse.
+  const std::int32_t mode = world.find(b)->clock.mode;
   (void)movement.order_goto(world, b, Point{500, 100}, 0, 0);
+  CHECK(world.find(b)->clock.mode == mode);
   world.advance(400);
   world.advance(400);
   CHECK(world.state(b)->position == fell);
-  CHECK(!movement.find(b)->has_path);
   const WorldObject* corpse = world.find(b);
   REQUIRE(corpse != nullptr && corpse->object != nullptr);
   CHECK(corpse->object->anim.anim_slot == kAnimDie);

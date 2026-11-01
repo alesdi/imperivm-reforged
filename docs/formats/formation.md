@@ -249,8 +249,7 @@ goal (0x004185a0), and 0 with no route object.
 ### The sample
 
 `CreateNextSample` (0x005f5bd0) first sizes the formation's speed
-(`UpdateMinSpeed`, 0x005f5640: the mean of the hero's and every placed
-member's speed, held to one and a half times the slowest), then asks the
+(`UpdateMinSpeed`, 0x005f5640, below), then asks the
 route for its next point through the same retry step a unit's route takes
 (below), so a gate within the formation's reach stops the centre. A point
 answered is taken (the route committed), and then:
@@ -268,8 +267,11 @@ answered is taken (the route committed), and then:
 
 No point answered, and no sample yet laid, ends the members' `form_move`
 (0x005f2c10); either way `+0x88` is cleared and the call answers 0. So a
-march whose next centre a gate bars is spent there: the hero walks to the
-last centre and arrives, and only a new `FormSetupAndMoveTo` goes on.
+march whose next centre a gate bars is spent there. The unit that asked for
+the sample -- one within half its step and 133 of its station -- takes no
+step, and with no call waiting on its walk its route is deleted where it
+stands (0x005d3b50, 0x005d3830 with 0); only a new `FormSetupAndMoveTo`
+goes on.
 
 **The gate.** The step finds the first gate crossing not yet passed: the
 first one the list holds whose remaining-at-crossing is no more than what is
@@ -294,11 +296,15 @@ again to the station, or deleted when the unit stands on it. Then, for up to
 100 passes: while the formation's path goes on and what is left of the
 unit's route is within half the unit's step and 133, the next sample is made
 and the route laid again to the new station. A sample that cannot be made
-takes no step. The step is then timed: its pace is what is left of the
-route, less 133 while the formation goes on, over the time to the sample's
-deadline, held to between half and two and a half times the formation's
-speed, and the fast end past the deadline (0x00419e52 .. 0x00419ecd,
-0x005f2130). Such a route is arrived when the formation's path is spent and
+takes no step. With no route at all, the first sample is made if there is
+none, and the route laid unless the unit stands on its station. The step is
+then timed (0x00419e52 .. 0x00419ecd): the time left to the sample's
+deadline over what is left of the route, less 133 while the formation goes
+on, one stride's share of it -- 1 ms with the deadline passed -- held
+between two fifths and twice the step's length at the march's pace
+(0x005f2130: the step times the pace over the speed, times 100 over 250
+and over 50), and the deadline itself when within 100 ms of it. That length
+is the walk step's (docs/formats/animation.md, "The walk"). Such a route is arrived when the formation's path is spent and
 the unit stands on its station (0x00417c4a .. 0x00417c73), and faces the
 formation's direction there. A search that lays nothing keeps the route the
 unit had and takes no step; with the formation's path spent it marks the
@@ -349,10 +355,21 @@ centre and direction) and searches every member's route to the formation
 again (`[unit+0x148]`, `RecastPathfind`); otherwise it runs
 `UpdateReassign`.
 
-**The pace** (0x005f5640, 0x005f5850): the deadline is the time the
-formation, at its speed, takes to cover the mean over the hero and its
-placed members of the straight distance from each to its station, less 133
-while the path goes on.
+**The pace** (0x005f5640 -> 0x005f5260, 0x005f5850). `UpdateMinSpeed`
+runs only when asked (a quick-march skill written) or with no slowest and
+fastest unit recorded. It takes each one's walk stride and its default step
+time (the stride over the class speed, the quick march, the speed factor;
+0x005d4630), the hero first as both the slowest and the fastest. A member
+slower than the slowest gives it its stride and **not its time**; one
+faster than the fastest gives both. The pace is the mean of the slowest's
+and fastest's step times, and the speed the mean of every stride over its
+time, times the pace; a speed over one and a half times the slowest's
+stride is held there, with the slowest's time as the pace. The deadline
+is the time the formation, at that speed a pace, takes to cover the mean
+over the hero and its placed members of the straight distance from each to
+its station, less 133 while the path goes on -- below nothing for one
+nearer, with no floor -- plus what is left of the step each has in flight,
+rounded half up.
 
 ### The claim on the stations
 
@@ -444,7 +461,8 @@ stepping and the sample are the original's rules above, in integers
 (`formation_route_step`, `MovementSystem::formation_next_sample`). The
 setup, `UpdateMove` and the hand-out are `FormSetupAndMoveTo` and
 `FormKeepMoving` in `sim/command.cpp`; the step of a route aimed at the
-formation is `MovementSystem::formation_step`. The claim on the stations
+formation is `MovementSystem::member_step`, which the walk step on the
+animation timer asks for each step. The claim on the stations
 and its gate bracket are `formation_claim_stations` and
 `formation_claim_gates`, which `formation_place_sample` runs with the
 movement system's grid (fourteenth round).
@@ -468,11 +486,11 @@ Still approximated:
   step takes the formation's 200 there, and the half-step test that makes
   the next sample takes 200 for it too. What the original does with a
   step of 0 was not read.
-* **The deadline has no animation time** and is not snapped to 100 ms, and
-  the mean speed is an integer mean.
+* **The mean speed is in fixed point.** The original sums each stride
+  over its time in floats; here each share is rounded to the nearest at 32
+  fractional bits (`MovementSystem::update_min_speed`).
 * **A member standing on its station has a route of no length**, so
-  `HasPath` still answers while the formation goes on; and a member whose
-  search lays nothing while the path goes on stands until the next turn.
+  `HasPath` still answers while the formation goes on.
 * **The rotation is exact.** The original multiplies by single-precision
   factors in the FPU and truncates; the engine takes the exact quotient and
   truncates (`formation_turn`), which can differ by one unit where a product
@@ -484,11 +502,10 @@ Still approximated:
   rather than writing the grid and putting it back. A gate whose entity
   gives it no axis is not laid.
 * **The blocking gate is wired** (`Formation::blocking_gate`,
-  `MoveState::gate_seen`, in `MovementSystem::decide` where a route aimed
-  at the formation is held at a gate). A member cut off from its hero has
-  its commands ended and leaves the army once the turn's movement steps are
-  done, rather than inside its own step, since neither may run inside them;
-  it takes no step meanwhile, as in the original. The side test's gate is
+  `MoveState::gate_seen`, in `MovementSystem::member_step` where a route
+  aimed at the formation is held at a gate). A member cut off from its hero
+  has its commands ended and leaves the army inside its own step, and takes
+  no step, as in the original. The side test's gate is
   the one `[form+0x90]` names, which is inferred: the call that reads it
   was not followed to its receiver. A gate that belongs to no settlement
   cuts nobody off, where the original reads its settlement handle

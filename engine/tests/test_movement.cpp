@@ -268,26 +268,26 @@ TEST(line_of_sight_sees_a_wall) {
 // point-to-point movement
 // --------------------------------------------------------------------------
 
-TEST(movement_scales_with_the_turn_length) {
-  World world;
-  MovementSystem movement;
-  movement.set_grid(open_field(64));
-  attach(world, movement);
-
-  // 100 world units per second, at the neutral factor. A 400-unit turn is
-  // therefore 40 units and an 800-unit turn is 80.
-  const ObjectId unit = spawn_unit(world, movement, Point{100, 100}, 100);
-  CHECK(movement.order_goto(world, unit, Point{900, 100}, 0) == MoveOutcome::moving);
-
-  run(world, movement, {400});
-  CHECK(position_of(world, unit) == (Point{140, 100}));
-  run(world, movement, {800});
-  CHECK(position_of(world, unit) == (Point{220, 100}));
-  run(world, movement, {200});
-  CHECK(position_of(world, unit) == (Point{240, 100}));
-  // 799, the off-speed turn one retail dump records.
-  run(world, movement, {799});
-  CHECK(position_of(world, unit) == (Point{319, 100}));
+TEST(a_walk_does_not_depend_on_the_turn_length) {
+  // Each step is the timer's, fired at its own instant whatever the turn
+  // (`World::run_turn`): the same walk run in turns of any length is at the
+  // same point at the same time.
+  const auto walk = [](std::initializer_list<std::int32_t> turns) -> Point {
+    World world;
+    MovementSystem movement;
+    movement.set_grid(open_field(64));
+    attach(world, movement);
+    const ObjectId unit = spawn_unit(world, movement, Point{100, 100}, 100);
+    CHECK(movement.order_goto(world, unit, Point{900, 100}, 0) == MoveOutcome::moving);
+    run(world, movement, turns);
+    return world.resolve_position(unit);
+  };
+  // Steps of the formation's 200 for a unit with no walk animation, 2,000 ms
+  // each from 1 ms: by 2,199 the second has begun.
+  CHECK(walk({400, 800, 200, 799}) == (Point{500, 100}));
+  CHECK(walk({2199}) == (Point{500, 100}));
+  CHECK(walk({1, 1999, 199}) == (Point{500, 100}));
+  CHECK(walk({1, 1999}) == (Point{300, 100}));
 }
 
 /// **`MoveState::speed` is resolved from the class, and nothing did it before.**
@@ -317,6 +317,7 @@ TEST(a_fresh_move_state_takes_its_speed_from_the_class) {
 
   const ObjectId walker = world.spawn(NativeClass::unit, nullptr, graph.find("Unit"));
   CHECK(world.set_position(walker, Point{100, 100}));
+  (void)world.set_health(walker, 100);
 
   // Nothing is resolved until an order is laid: the state does not exist yet.
   CHECK(movement.find(walker) == nullptr);
@@ -535,6 +536,7 @@ TEST(a_walking_unit_shows_the_column_it_is_walking_along) {
 
   const ObjectId walker = world.spawn(NativeClass::unit, &entity.value());
   CHECK(world.set_position(walker, Point{500, 500}));
+  (void)world.set_health(walker, 100);
   movement.state(walker).speed = 100;
 
   const WorldObject* slot = world.find(walker);
@@ -545,17 +547,20 @@ TEST(a_walking_unit_shows_the_column_it_is_walking_along) {
 
   // **The bug this covers:** the walk was simulated and the sprite never
   // turned, because nothing wrote the column the renderer reads. Walking west
-  // has to show the west column from the first turn, not eventually.
+  // has to show the west column from the first step, not eventually. The
+  // order turns nothing; each step faces its end (0x005d3b50).
   CHECK(movement.order_goto(world, walker, Point{100, 500}, 0, 0) != MoveOutcome::blocked);
-  CHECK(slot->object->anim.variation == 2u);
+  CHECK(slot->object->anim.variation == 0u);
   world.advance(200);
   CHECK(slot->object->anim.variation == 2u);
 
-  // Turning around turns the sprite around with it.
+  // Turning around turns the sprite around with it -- at the next step, once
+  // the one in flight (the formation's 200 for this walk with no step: 2,000
+  // ms from 1) has run out.
   movement.stop(world, walker);
   CHECK(movement.order_goto(world, walker, Point{900, 500}, 0, 0) != MoveOutcome::blocked);
-  CHECK(slot->object->anim.variation == 6u);
-  world.advance(200);
+  CHECK(slot->object->anim.variation == 2u);
+  world.advance(1801);
   CHECK(slot->object->anim.variation == 6u);
 
   // `Face` names a heading without laying a path, and it shows too.
@@ -567,12 +572,18 @@ TEST(a_walking_unit_shows_the_column_it_is_walking_along) {
   CHECK(slot->object->anim.variation == 0u);
 }
 
-TEST(a_moving_unit_plays_its_walk_animation_and_stops_it_on_arrival) {
+/// **The walk is one-shot walk animations on the timer** (0x005d3b50). An
+/// order sets action mode 3 and arms the timer for 1 ms; each firing in that
+/// mode starts the walk animation once, for exactly the step's length, with
+/// the step's end as its origin -- so the object stands on the step's end
+/// from the step's start, and the clock draws it coming from where it was.
+TEST(a_walk_is_one_walk_animation_a_step_on_the_timer) {
   const auto bytes = [](std::string_view text) {
     return std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()),
                                       text.size()};
   };
-  // `test_anim.cpp`'s entity, whose slot 13 is a looping six-frame cycle.
+  // `test_anim.cpp`'s entity: slot 13 declares no `step`, so the route is cut
+  // by the formation's 200 (departure 1 in `sim/movement.hpp`).
   const auto entity = imperivm::core::Entity::parse(bytes(kWalkerEntity));
   REQUIRE(entity.ok());
 
@@ -583,70 +594,48 @@ TEST(a_moving_unit_plays_its_walk_animation_and_stops_it_on_arrival) {
 
   const ObjectId walker = world.spawn(NativeClass::unit, &entity.value());
   CHECK(world.set_position(walker, Point{100, 100}));
+  (void)world.set_health(walker, 100);
   movement.state(walker).speed = 100;
-  // The locomotion slot this entity actually declares.
   movement.state(walker).walk_anim = 13;
-
-  const WorldObject* slot = world.find(walker);
-  REQUIRE(slot != nullptr);
-  CHECK(!slot->animating);
 
   CHECK(movement.order_goto(world, walker, Point{600, 100}, 0, 0) != MoveOutcome::blocked);
-  world.advance(100);
-  // Walking: the cycle is running and the state says so.
-  CHECK(movement.find(walker)->walking);
-  const bool started = slot->animating;
-  CHECK(started);
-
-  // **It is not restarted every turn.** Two more turns and the cursor has
-  // advanced rather than sitting at zero.
-  world.advance(100);
-  world.advance(100);
-  if (slot->object != nullptr) CHECK(slot->object->anim.elapsed_ms > 0);
-
-  // Run to arrival; the cycle stops.
-  for (int i = 0; i < 40 && movement.find(walker)->has_path; ++i) world.advance(200);
-  CHECK(!movement.find(walker)->has_path);
-  CHECK(!movement.find(walker)->walking);
-  CHECK(!slot->animating);
-}
-
-/// **Arrival stops the walk, and only the walk.** Something else can take the
-/// cursor over while a unit is still on its route -- combat's swing, a death,
-/// a script's `PlayAnim` -- and arrival used to freeze whatever was playing.
-/// The case that found it: a unit killed mid-walk had its death pinned on the
-/// first row the turn after, by the walk's own arrival.
-TEST(arrival_leaves_an_animation_that_is_not_the_walk_alone) {
-  const auto bytes = [](std::string_view text) {
-    return std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()),
-                                      text.size()};
-  };
-  const auto entity = imperivm::core::Entity::parse(bytes(kWalkerEntity));
-  REQUIRE(entity.ok());
-
-  World world;
-  MovementSystem movement;
-  REQUIRE(world.add_system(&movement));
-  movement.set_grid(ObstructionGrid(64, 64));
-
-  const ObjectId walker = world.spawn(NativeClass::unit, &entity.value());
-  CHECK(world.set_position(walker, Point{100, 100}));
-  movement.state(walker).speed = 100;
-  movement.state(walker).walk_anim = 13;
-  CHECK(movement.order_goto(world, walker, Point{300, 100}, 0, 0) != MoveOutcome::blocked);
-  world.advance(100);
-  REQUIRE(movement.find(walker)->walking);
-
-  // Mid-route, the fixture's looping slot 1 takes the cursor over.
-  REQUIRE(world.play_anim(walker, 1, AnimRepeat::loop));
-  for (int i = 0; i < 40 && movement.find(walker)->has_path; ++i) world.advance(200);
-  REQUIRE(!movement.find(walker)->has_path);
-  world.advance(200);
   const WorldObject* slot = world.find(walker);
-  REQUIRE(slot != nullptr && slot->object != nullptr);
-  CHECK(!movement.find(walker)->walking);
-  CHECK(slot->object->anim.anim_slot == 1);
-  CHECK(slot->animating);
+  REQUIRE(slot != nullptr);
+  // The order's tail: mode 3 and the timer 1 ms out; nothing has moved yet.
+  CHECK(slot->clock.mode == 3);
+  CHECK(slot->clock.timer_at == 1);
+  CHECK(world.resolve_position(walker) == (Point{100, 100}));
+  CHECK(slot->state.flags.has_active_path);
+
+  world.advance(100);
+  // 500 units cut into the step count nearest 200: three of 166. The first
+  // step's length is its distance's share of the default 200 * 1000 / 100:
+  // 166 * 2000 / 200 = 1660 ms, the walk animation started for exactly that.
+  CHECK(world.resolve_position(walker) == (Point{266, 100}));
+  CHECK(slot->clock.slot == 13);
+  CHECK(slot->clock.duration == 1660);
+  CHECK(slot->clock.start == 1);
+  CHECK(slot->clock.timer_at == 1661);
+  // Turned by the raw difference, not a unit vector.
+  CHECK(movement.find(walker)->facing == (Point{166, 0}));
+  // Drawn half way at the step's middle.
+  CHECK(world.current_position(*slot, 831) == (Point{183, 100}));
+
+  // The next step starts at the first one's end. The route's fixed point
+  // carries the third the first step dropped: 333 along, 167 long, 1,670 ms.
+  world.advance(1600);
+  CHECK(world.resolve_position(walker) == (Point{433, 100}));
+  CHECK(slot->clock.start == 1661);
+  CHECK(slot->clock.duration == 1670);
+
+  // At the route's end no step is left; with no call waiting the route
+  // record is deleted (0x005d3830 with 0), bit 17 with it.
+  for (int i = 0; i < 20 && movement.find(walker)->goto_active; ++i) world.advance(400);
+  CHECK(world.resolve_position(walker) == (Point{600, 100}));
+  CHECK(!movement.find(walker)->goto_active);
+  CHECK(!movement.find(walker)->has_path);
+  CHECK(!slot->state.flags.has_active_path);
+  CHECK(slot->clock.timer_at == kNoAnimTimer);
 }
 
 TEST(a_unit_stops_on_arrival) {
@@ -755,7 +744,7 @@ TEST(a_unit_walks_around_an_obstacle) {
   CHECK(state->path_length > distance(start, goal));
   // And it goes through the gap: some waypoint is north of the start.
   bool went_north = false;
-  for (const Point& waypoint : state->waypoints) {
+  for (const Point& waypoint : state->route.points) {
     if (waypoint.y < 10 * 16) went_north = true;
     // No waypoint may sit inside the wall.
     CHECK(!grid.blocked(waypoint));
@@ -766,31 +755,6 @@ TEST(a_unit_walks_around_an_obstacle) {
   // about 1,300 units is four seconds; twenty turns of 800 is sixteen.
   for (int i = 0; i < 20; ++i) run(world, movement, {800});
   CHECK(position_of(world, unit) == goal);
-}
-
-TEST(a_route_cut_by_a_new_building_is_re_laid) {
-  World world;
-  MovementSystem movement;
-  movement.set_grid(open_field(64));
-  attach(world, movement);
-
-  const ObjectId unit = spawn_unit(world, movement, Point{100, 500}, 200);
-  REQUIRE(movement.order_goto(world, unit, Point{900, 500}, 0) == MoveOutcome::moving);
-  run(world, movement, {800});
-
-  // A wall goes up across the route, with a gap to the south.
-  ObstructionGrid& grid = movement.mutable_grid();
-  for (std::int32_t y = 0; y < 40; ++y) grid.set_cell(40, y, true);
-
-  run(world, movement, {800});
-  const MoveState* state = movement.find(unit);
-  REQUIRE(state != nullptr);
-  CHECK(state->has_path);
-  for (const Point& waypoint : state->waypoints) {
-    CHECK(!movement.grid().blocked(waypoint));
-  }
-  // The detour is real: the route is no longer a straight line.
-  CHECK(state->waypoints.size() > 2);
 }
 
 /// **A class with `ignore_passability` walks straight, whatever the grid says.**
@@ -842,6 +806,7 @@ TEST(a_class_that_ignores_passability_walks_straight_along_a_wall) {
   CHECK(world.set_position(sentry, from));
   CHECK(world.set_position(soldier, from));
   CHECK(world.set_position(unset, from));
+  for (const ObjectId id : {sentry, soldier, unset}) (void)world.set_health(id, 100);
   CHECK(movement.ignores_passability(world, sentry));
   CHECK(!movement.ignores_passability(world, soldier));
   CHECK(!movement.ignores_passability(world, unset));
@@ -850,9 +815,9 @@ TEST(a_class_that_ignores_passability_walks_straight_along_a_wall) {
   REQUIRE(movement.order_goto(world, sentry, to, 0, 0) == MoveOutcome::moving);
   const MoveState* state = movement.find(sentry);
   REQUIRE(state != nullptr);
-  REQUIRE(state->waypoints.size() == 2);
-  CHECK(state->waypoints.front() == from);
-  CHECK(state->waypoints.back() == to);
+  REQUIRE(state->route.points.size() == 2);
+  CHECK(state->route.points.front() == from);
+  CHECK(state->route.points.back() == to);
   CHECK(state->path_length == distance(from, to));
   // Anyone else standing there has nowhere to go, the flag set to 0 included.
   CHECK(movement.order_goto(world, soldier, to, 0, 0) == MoveOutcome::blocked);
@@ -871,8 +836,8 @@ TEST(a_class_that_ignores_passability_walks_straight_along_a_wall) {
   state = movement.find(sentry);
   REQUIRE(state != nullptr);
   CHECK(state->has_path);
-  CHECK(state->waypoints.size() == 2);
-  CHECK(state->waypoints.back() == from);
+  CHECK(state->route.points.size() == 2);
+  CHECK(state->route.points.back() == from);
   for (int i = 0; i < 6; ++i) run(world, movement, {800});
   CHECK(position_of(world, sentry) == from);
 }
@@ -956,7 +921,7 @@ TEST(a_turn_partition_does_not_move_a_unit) {
   }
 
   // The world hash agrees too, which is the stronger statement: it covers the
-  // progress accumulator, the target and the facing, not just the coordinate.
+  // route's remainder, the target and the facing, not just the coordinate.
   // The clock is in it as well, and all four partitions have run the same total
   // game time -- but not the same number of turns, so `turns()` is excluded by
   // comparing the movement contribution on its own.
@@ -972,20 +937,20 @@ TEST(a_turn_partition_does_not_move_a_unit) {
   CHECK(whole_hash == quarters_hash);
   CHECK(whole_hash == ragged_hash);
 
-  // And `walking` is in it: the walk-cycle memory decides whether the next
-  // turn restarts an animation, which lands in the object hash a turn later.
+  // And the sampled route's remainder is in it: it decides where the next
+  // step lands.
   MoveState* first = whole.movement.find(whole.units.front());
   REQUIRE(first != nullptr);
-  first->walking = !first->walking;
+  first->route.remaining += 65536;
   std::uint64_t flipped = 0;
   whole.movement.hash(flipped);
   CHECK(flipped != whole_hash);
 }
 
 TEST(a_speed_change_keeps_partition_invariance) {
-  // The accumulator is exact across a rate change too, as long as the change
-  // falls on a boundary both partitions share -- which it does, because a host
-  // call happens between turns.
+  // A factor written between turns takes effect at each unit's next step
+  // (0x005d3b50 reads `[unit+0x15c]` there), which is a timer event at its
+  // own instant: the turn partition moves nothing.
   Scenario whole;
   Scenario halves;
   build(whole);
@@ -1746,7 +1711,7 @@ TEST(a_host_goto_lays_a_path_and_suspends) {
   REQUIRE(state != nullptr);
   CHECK(state->has_path);
   CHECK(state->target == (Point{500, 100}));
-  CHECK(movement.eta(unit) == 4000);
+  CHECK(movement.remaining(unit) == 400);
 
   // A slice longer than the journey is waited whole all the same
   // (0x005d65e8): the script goes on when the slice runs out, not when the
@@ -1822,6 +1787,14 @@ struct EdgeField {
     const HostOutcome out = invoke(registry, CallKind::member, "DistTo", 1, call);
     CHECK(out.status == HostStatus::ok);
     return out.value.is_integer() ? out.value.as_integer() : -999999;
+  }
+
+  /// A camp that is not a standing unit to the ring's strike-off or the
+  /// cooperative step: a route of its own (bit 17) that its speed of 0 never
+  /// walks, kept by a waiting call.
+  void keep_moving(ObjectId camp) {
+    (void)movement.order_goto(world, camp, Point{100, 100}, 0);
+    movement.state(camp).wake_on_arrival = true;
   }
 
   HostOutcome go(ObjectId self, const Value& where, std::int32_t range) {
@@ -1935,10 +1908,15 @@ TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   EdgeField f;
   const ObjectId walker = f.place("Walker", Point{1000, 1000});
   const ObjectId camp = f.place("Camp", Point{1600, 1000});
+  // Standing with no order, the camp would strike off every point of the
+  // band's rings -- each is within its radius and the walker's -- and the
+  // route would run on into it; with a route of its own it strikes nothing.
+  f.keep_moving(camp);
 
   const HostOutcome first = f.go(walker, Value::object(kTypeObj, camp), 0);
   CHECK(first.status == HostStatus::retry);
-  // Short turns, because arrival is tested where a turn ends.
+  // The route runs to the band's outer ring, 114 short of the anchor, and its
+  // last step ends there: arrival is asked at each step.
   for (int i = 0; i < 100; ++i) run(f.world, f.movement, {100});
   const Point stood = position_of(f.world, walker);
   // Stopped with the edges touching, 115 short of the anchor, not on it.
@@ -1957,6 +1935,7 @@ TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   // A range adds to the gap, it does not replace it: 50 more out.
   const ObjectId other = f.place("Walker", Point{1000, 1800});
   const ObjectId target = f.place("Camp", Point{1600, 1800});
+  f.keep_moving(target);
   (void)f.go(other, Value::object(kTypeObj, target), 50);
   for (int i = 0; i < 100; ++i) run(f.world, f.movement, {100});
   const Point there = position_of(f.world, other);
@@ -1966,6 +1945,7 @@ TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   // camp's 100, not 60 from its anchor.
   const ObjectId sunk = f.place("Sunk", Point{1000, 200});
   const ObjectId far_camp = f.place("Camp", Point{1600, 200});
+  f.keep_moving(far_camp);
   (void)f.go(sunk, Value::object(kTypeObj, far_camp), 0);
   for (int i = 0; i < 100; ++i) run(f.world, f.movement, {100});
   const Point sank = position_of(f.world, sunk);
@@ -2008,10 +1988,13 @@ TEST(a_host_goto_into_a_wall_reports_no_path) {
 
   // With a negative give-up the call never ends the script.
   const HostOutcome outcome = goto_once(registry, world, unit, Point{2000, 2000}, 2000, -1);
-  // False *and* no path, so `while (!.Goto(...) && .HasPath)` leaves.
   CHECK(outcome.value.as_integer() == 0);
+  // The route record was made before the search (0x005d6352) and is kept
+  // when the search lays nothing: `HasPath` answers it. The re-entry answers
+  // 0 for a call that laid nothing and keeps the record too, so a script
+  // goes round its loop again a slice later -- it never spins.
   HostCall has_path(world, {Value::object(kTypeObj, unit)});
-  CHECK(invoke(registry, CallKind::member, "HasPath", 0, has_path).value.as_integer() == 0);
+  CHECK(invoke(registry, CallKind::member, "HasPath", 0, has_path).value.as_integer() == 1);
 
   // And it **waits** rather than answering instantly, which the loops that have
   // no `.HasPath` guard need: an immediate `ok` in `while (!.Goto(pt, 0, 2000,
@@ -2175,6 +2158,53 @@ TEST(a_goto_walks_in_mode_three_and_an_arrival_waits_out_the_animation) {
   const HostOutcome at_once = invoke(registry, CallKind::member, "Goto", 5, still);
   CHECK(at_once.status == HostStatus::ok);
   CHECK(at_once.value.as_integer() == 1);
+}
+
+/// **A `Goto` is woken at the step that arrives** (bit 0x10000 of
+/// `[unit+0x194]`): the first run raises it and notes its thread as it
+/// suspends for the slice (0x005d65c0), and the walk step that finds no step
+/// left with the unit arrived wakes the thread then (0x005d3b50 -> 0x00417c10,
+/// 0x0069f890 .. 0x0069f8f0), however long the slice. Its re-entry drops the
+/// bit, answers true and deletes the route (0x005d6340). A unit with no walk
+/// animation steps 200 in 2,000 ms at 100 (departure 1): 400 is two steps,
+/// begun at 1 and 2,001, and the step at 4,001 finds it there.
+TEST(a_goto_is_woken_at_the_step_that_arrives_and_not_at_its_slice) {
+  HostRegistry registry;
+  register_movement_host(registry);
+  World world;
+  MovementSystem movement;
+  movement.set_grid(open_field(64));
+  attach(world, movement);
+  const ObjectId unit = spawn_unit(world, movement, Point{100, 100}, 100);
+
+  HostCall go(world, {Value::object(kTypeObj, unit), pack_point(Point{500, 100}),
+                      Value::integer(0), Value::integer(60000), Value::boolean(false),
+                      Value::integer(-1)});
+  go.context.script = 5;
+  const HostOutcome first = invoke(registry, CallKind::member, "Goto", 5, go);
+  CHECK(first.status == HostStatus::retry);
+  CHECK(first.suspend_for == 60000);
+  CHECK(movement.find(unit)->wake_on_arrival);
+  CHECK(world.find(unit)->clock.waiter == 5);
+
+  GameTime woken = -1;
+  while (world.time() < 10000) {
+    world.advance(1);
+    if (world.find(unit)->clock.waiter == kNoScript) {
+      woken = world.time();
+      break;
+    }
+  }
+  CHECK(woken == 4001);
+  CHECK(position_of(world, unit) == (Point{500, 100}));
+  // The record kept for the re-entry to answer on.
+  CHECK(movement.find(unit)->goto_active);
+
+  const HostOutcome again = invoke(registry, CallKind::member, "Goto", 5, go.reenter());
+  CHECK(again.status == HostStatus::ok);
+  CHECK(again.value.as_integer() == 1);
+  CHECK(!movement.find(unit)->goto_active);
+  CHECK(!movement.find(unit)->wake_on_arrival);
 }
 
 TEST(a_host_goto_with_a_zero_give_up_ends_the_script_at_the_first_failed_search) {
@@ -2579,10 +2609,12 @@ TEST(a_host_stop_on_a_standing_unit_answers_true_at_once_and_drops_its_target) {
 
 TEST(a_host_stop_on_a_walking_unit_answers_at_its_re_entry) {
   // 0x005d6c90 on a unit with a route: the first entry asks the route to stop
-  // and suspends with it in hand; the re-entry answers false while the unit
-  // still has a step to take and true once it has stood still. A `Goto` route
-  // owns a lock, so it stops on the first free spot -- here the next step,
-  // with nobody about.
+  // (`vtbl+0x18`), sets mode 3 with the timer, and suspends with the wake
+  // bit set. The re-entry asks the route for a step (`vtbl+8`): false while
+  // there is one to take; otherwise the record is deleted and it answers
+  // true. A stopping route steps only off a spot that is not free
+  // (0x00419ee0), so a unit standing clear stops at once -- the step in
+  // flight running out where it ends.
   HostRegistry registry;
   register_movement_host(registry);
 
@@ -2597,6 +2629,11 @@ TEST(a_host_stop_on_a_walking_unit_answers_at_its_re_entry) {
                         Value::integer(0)});
   (void)invoke(registry, CallKind::member, "Goto", 5, walk);
   CHECK(world.state(unit)->flags.has_active_path);
+  // The first step, the formation's 200 for a unit with no walk step, taken
+  // at 1 ms and ending at 2,001.
+  world.advance(100);
+  REQUIRE(position_of(world, unit) == (Point{700, 500}));
+  REQUIRE(world.find(unit)->clock.timer_at == 2001);
 
   HostCall stop(world, {Value::object(kTypeObj, unit), Value::integer(1000)});
   const HostOutcome first = invoke(registry, CallKind::member, "Stop", 1, stop);
@@ -2604,18 +2641,20 @@ TEST(a_host_stop_on_a_walking_unit_answers_at_its_re_entry) {
   CHECK(first.suspend_for == 1000);
   CHECK(world.state(unit)->flags.has_active_path);
   CHECK(movement.find(unit)->stop_requested);
+  CHECK(movement.find(unit)->wake_on_arrival);
+  // The step in flight is not cut short.
+  CHECK(world.find(unit)->clock.timer_at == 2001);
 
   stop.context.first_call = false;
-  const HostOutcome early = invoke(registry, CallKind::member, "Stop", 1, stop);
-  CHECK(early.status == HostStatus::ok);
-  CHECK(early.value.as_integer() == 0);
-
-  world.advance(200);
-  CHECK(!world.state(unit)->flags.has_active_path);
   const HostOutcome done = invoke(registry, CallKind::member, "Stop", 1, stop);
   CHECK(done.status == HostStatus::ok);
   CHECK(done.value.as_integer() == 1);
-  CHECK(position_of(world, unit).x < 600);
+  CHECK(!world.state(unit)->flags.has_active_path);
+  CHECK(!movement.find(unit)->goto_active);
+  CHECK(!movement.find(unit)->wake_on_arrival);
+  CHECK(world.find(unit)->clock.timer_at == 2001);
+  world.advance(2000);
+  CHECK(position_of(world, unit) == (Point{700, 500}));
 }
 
 TEST(the_deer_prelude_runs_through_the_host) {
@@ -2653,14 +2692,17 @@ TEST(the_deer_prelude_runs_through_the_host) {
   CHECK(is_point(heading.value));
   CHECK(unpack_point(heading.value) == (Point{0, 400}));
 
-  // At factor 7 a speed-150 deer ambles: 10 units per second, so 4 in a
-  // 400-unit turn. That is the arithmetic in the movement header, checked.
+  // At factor 7 a speed-150 deer ambles: its default step, the formation's
+  // 200 (it has no walk step here) at 150 a second, is 1,333 ms, over the
+  // factor 1333 * 100 / 7 = 19,042 ms (0x005d3b50). The 400 to the point is
+  // two steps of 200.
   HostCall go(world, {Value::object(kTypeObj, deer), pack_point(Point{500, 900}),
                       Value::integer(0), Value::integer(2000), Value::boolean(true),
                       Value::integer(0)});
   CHECK(invoke(registry, CallKind::member, "Goto", 5, go).status == HostStatus::retry);
   run(world, movement, {400});
-  CHECK(position_of(world, deer) == (Point{500, 504}));
+  CHECK(position_of(world, deer) == (Point{500, 700}));
+  CHECK(world.find(deer)->clock.timer_at == 1 + 19042);
 }
 
 TEST(host_geometry_reads_the_grid) {
@@ -3157,10 +3199,10 @@ TEST(dest_and_path_dest_found_answer_the_end_of_the_route) {
   const MoveState* move = f.movement.find(unit);
   REQUIRE(move != nullptr);
   REQUIRE(move->has_path);
-  REQUIRE(!move->waypoints.empty());
-  CHECK(move->waypoints.back() != walled);
-  CHECK(point_of("dest") == move->waypoints.back());
-  CHECK(point_of("PathDestFound") == move->waypoints.back());
+  REQUIRE(!move->route.points.empty());
+  CHECK(move->route.points.back() != walled);
+  CHECK(point_of("dest") == move->route.points.back());
+  CHECK(point_of("PathDestFound") == move->route.points.back());
 }
 
 /// `PathTo`'s object form (0x005de390) goes to the target's `posRH` with both

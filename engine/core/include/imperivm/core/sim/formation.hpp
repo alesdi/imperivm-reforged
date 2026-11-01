@@ -63,11 +63,15 @@ struct FormationSlot {
 /// (0x005f3a80) leaves it.
 inline constexpr Point kNoSample{-1, -1};
 
-/// The formation's own route (`[form+0x84]`'s path record, `CVXPath` built
-/// with a stride of 200): the points the route search laid, walked a fixed
-/// step at a time by `formation_route_step` and `formation_route_commit`.
-/// docs/formats/formation.md, "The formation's route".
+/// A sampled route (`CVXSPath`, vtable 0x7abfa4): the points the route search
+/// laid, walked a fixed stride at a time by `formation_route_step` and
+/// `formation_route_commit`. The formation's own route (`[form+0x84]`'s path
+/// record) is built with a stride of 200; every unit's route with its walk
+/// stride (`RecastPathfind`, 0x00419730). docs/formats/formation.md, "The
+/// formation's route".
 struct FormationRoute {
+  /// `+0x08`: the stride the legs are cut by.
+  std::int32_t stride = 200;
   /// The route as laid, its first point where the search started.
   std::vector<Point> points;
   /// `+0x0c`: the index of the point the leg being stepped ends at; 0 before
@@ -97,7 +101,8 @@ inline constexpr std::int32_t kFormationRouteStride = 200;
 
 /// Lay `points` as the route (0x0041a8f0's sum, and the record's fresh
 /// counters).
-void formation_route_lay(FormationRoute& route, std::vector<Point> points, bool complete);
+void formation_route_lay(FormationRoute& route, std::vector<Point> points, bool complete,
+                         std::int32_t stride = 200);
 
 /// The route's next point (`vtbl+8`, 0x0041a740), written to `out`; false
 /// at the route's end. Moving on to the next leg is done here, as the
@@ -162,10 +167,17 @@ struct Formation {
   std::int32_t range = 0;
   std::int32_t min_range = 0;
   /// `+0x50`: the time the current sample's stations are to be reached by
-  /// (0x005f5850), and the formation's speed it was timed at (`UpdateMinSpeed`,
-  /// 0x005f5640), in the movement system's rate units.
+  /// (0x005f5850).
   GameTime deadline = 0;
+  /// `+0x64` and `+0x68`: the march's mean stride and mean step time
+  /// (`UpdateMinSpeed`, 0x005f5260), what the deadline and each member's
+  /// step are timed at: a stride's walk takes `pace` ms.
   std::int64_t speed = 0;
+  std::int64_t pace = 0;
+  /// `+0x6c` and `+0x70`: the slowest and the fastest unit `UpdateMinSpeed`
+  /// found, none until it has run.
+  ObjectId min_unit = kNoObject;
+  ObjectId max_unit = kNoObject;
   /// Units the layout gave a place while a sample was laid in the middle of
   /// the movement step, still to be handed `form_move` at the hero's next
   /// `FormKeepMoving` (`update_march`, `sim/command.cpp`).
