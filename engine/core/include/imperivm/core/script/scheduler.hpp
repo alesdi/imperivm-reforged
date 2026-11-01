@@ -420,6 +420,14 @@ class Scheduler {
   /// when one is running -- its wait over. False, and nothing done, for a
   /// script that is not suspended or is the one running.
   bool wake(ScriptId id, std::int64_t at);
+  /// The answer a call that ended its slice with no timed wake leaves for
+  /// its waker to push: the value on top of the suspended script's stack is
+  /// replaced by `answer`. `Unit::Attack`'s waker (0x005d5ed0) writes the
+  /// byte at the thread's cursor and moves it on before it wakes it; here
+  /// the call pushed a placeholder when it suspended, and this is the write.
+  /// False, and nothing done, for a script that is not suspended or has
+  /// nothing pushed.
+  bool answer(ScriptId id, const Value& answer);
 
   /// `StartPlayerScript(player, name)`: start `name` for `player` unless that
   /// player has already started a script of that name. `kNoScript` when it was

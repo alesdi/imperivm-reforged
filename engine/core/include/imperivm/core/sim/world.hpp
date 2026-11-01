@@ -431,8 +431,22 @@ struct AnimClock {
   /// `PlayAnim`'s animation has been started: its next run wakes the script.
   bool play_started = false;
   /// The script the activity wakes (`0x0069f8f0` on the object's command
-  /// thread): the one that called `Idle`, `Taunt` or `PlayAnim`, or 0.
+  /// thread): the one that called `Idle`, `Taunt`, `PlayAnim`, `Attack` or
+  /// `TrainAttack`, or 0.
   std::uint32_t waiter = 0;
+  /// The attack's frame, which the original reads off the waiting script's
+  /// stack (0x005d5ed0 and 0x005dc900 at the thread's cursor): the target
+  /// the call named, and the call's own word -- 0 while the swing goes on,
+  /// 1 when its blow landed, 2 when it did not or the target is gone.
+  /// Written by `Attack` and `TrainAttack`; saved.
+  std::uint32_t attack_target = 0;
+  std::int32_t attack_word = 0;
+  /// A ship's shots: how many its ten-second window allows (`[ship+0x234]`),
+  /// when the window opened (`[ship+0x238]`) and how many it has fired in it
+  /// (`[ship+0x23c]`). `Unit::Attack`'s ship arm (0x005ddc5a). Saved.
+  std::int32_t ship_shots = 0;
+  GameTime ship_window = 0;
+  std::int32_t ship_fired = 0;
 
   [[nodiscard]] GameTime end() const noexcept { return main_start + duration; }
   /// The timer is the animation's own: armed on one of its phases, it walks
@@ -1037,6 +1051,8 @@ class AnimEndHandler {
   virtual ~AnimEndHandler() = default;
   /// `id`'s timer fired at `now` with no animation to go on with.
   virtual void anim_end(World& world, ObjectId id, GameTime now) = 0;
+  /// `id`'s animation reached its action moment at `now` (`vtbl+0x58`).
+  virtual void anim_action(World& world, ObjectId id, GameTime now) = 0;
 };
 
 /// The simulation.
@@ -2159,6 +2175,8 @@ class World {
   void fire_timer(ObjectId id);
   /// The end handler, installed or not (`AnimEndHandler`).
   void run_anim_end(ObjectId id, GameTime at);
+  /// The action handler (`vtbl+0x58`), installed or not.
+  void run_anim_action(ObjectId id, GameTime at);
   void rebuild_timers();
   BuildingStateRules building_states_;
   Grid terrain_;

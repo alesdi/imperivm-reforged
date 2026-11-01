@@ -2596,6 +2596,14 @@ void World::run_anim_end(ObjectId id, GameTime at) {
   }
 }
 
+void World::run_anim_action(ObjectId id, GameTime at) {
+  if (anim_end_ != nullptr) {
+    anim_end_->anim_action(*this, id, at);
+  } else {
+    sim::anim_action_handler(*this, nullptr, id, at);
+  }
+}
+
 void World::fire_timer(ObjectId id) {
   WorldObject* found = find(id);
   if (found == nullptr) return;
@@ -2637,14 +2645,17 @@ void World::fire_timer(ObjectId id) {
       return;
     }
   }
-  AnimClock& now_clock = found->clock;
-  if (t == now_clock.action_at && t != now_clock.end()) {
-    // The end is armed before the action handler runs (`vtbl+0x58`). That
-    // handler is a sound for every mode but the attack's, whose blow
-    // combat lands on its own schedule; neither is the simulation's here.
-    set_timer(*found, now_clock.end());
-    return;
+  if (t == found->clock.action_at) {
+    // The end is armed before the action handler runs (`vtbl+0x58`): a
+    // sound in every mode but the attack's, whose blow lands here. A
+    // handler that stopped the animation ends the firing; an action moment
+    // on the end itself goes on to the end (0x0053f76b).
+    if (t != found->clock.end()) set_timer(*found, found->clock.end());
+    run_anim_action(id, t);
+    found = find(id);
+    if (found == nullptr || found->clock.slot == kNoAnim) return;
   }
+  AnimClock& now_clock = found->clock;
   if (t == now_clock.end()) {
     // The end: the object rests in the end state, the slot dropped, and the
     // end handler (`vtbl+0x54`).
@@ -3053,6 +3064,12 @@ std::uint64_t World::state_hash() const noexcept {
     hash_i32(state, clock.play_face.x);
     hash_i32(state, clock.play_face.y);
     hash_u64(state, clock.play_started ? 1u : 0u);
+    // World version 39: the attack's frame.
+    hash_u64(state, clock.attack_target);
+    hash_i32(state, clock.attack_word);
+    hash_i32(state, clock.ship_shots);
+    hash_u64(state, static_cast<std::uint64_t>(clock.ship_window));
+    hash_i32(state, clock.ship_fired);
   }
 
   // Named object groups. Hashed for the same reason the object table is: two
@@ -3127,7 +3144,7 @@ WorldHashes World::hashes() const noexcept {
 namespace {
 
 constexpr std::uint32_t kWorldMagic = 0x444C5749u;  // "IWLD"
-constexpr std::uint32_t kWorldVersion = 38;  // 38: the animation timer's arming order, origin and activity word; 37: each object's animation clock; 36: each object's grid arrival stamp and the next stamp; 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
+constexpr std::uint32_t kWorldVersion = 39;  // 39: the attack's frame and a ship's shot window on the animation clock; 38: the animation timer's arming order, origin and activity word; 37: each object's animation clock; 36: each object's grid arrival stamp and the next stamp; 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
 
 /// `0xFF` for a slot with no native object -- every internal kind.
 /// `NativeClass` is a `std::uint8_t` enum with 26 values, so the sentinel
@@ -3388,6 +3405,12 @@ void World::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, slot.clock.play_face.y);
     bytes::put_u8(out, slot.clock.play_started ? 1u : 0u);
     bytes::put_u32(out, slot.clock.waiter);
+    // World version 39: the attack's frame.
+    bytes::put_u32(out, slot.clock.attack_target);
+    bytes::put_i32(out, slot.clock.attack_word);
+    bytes::put_i32(out, slot.clock.ship_shots);
+    bytes::put_i64(out, slot.clock.ship_window);
+    bytes::put_i32(out, slot.clock.ship_fired);
     // World version 32: the map's `display_name`.
     bytes::put_string(out, slot.display_name);
     if (slot.object != nullptr) {
@@ -3623,7 +3646,11 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
         !bytes::get_i32(reader, slot.clock.play_slot) ||
         !bytes::get_i32(reader, slot.clock.play_face.x) ||
         !bytes::get_i32(reader, slot.clock.play_face.y) || !reader.u8(play_started) ||
-        !reader.u32(slot.clock.waiter) ||
+        !reader.u32(slot.clock.waiter) || !reader.u32(slot.clock.attack_target) ||
+        !bytes::get_i32(reader, slot.clock.attack_word) ||
+        !bytes::get_i32(reader, slot.clock.ship_shots) ||
+        !bytes::get_i64(reader, slot.clock.ship_window) ||
+        !bytes::get_i32(reader, slot.clock.ship_fired) ||
         !bytes::get_string(reader, slot.display_name)) {
       return FormatError::truncated;
     }

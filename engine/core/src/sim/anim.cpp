@@ -8,6 +8,7 @@
 
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/script/scheduler.hpp"
+#include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/flying.hpp"
 #include "imperivm/core/sim/hero.hpp"
@@ -199,9 +200,28 @@ void anim_end_handler(World& world, script::Scheduler* scheduler, CallContext* c
         movement->walk_step(world, scheduler, id, now);
       }
       return;
-    default:
-      // 0: nothing. 2, the attack's, is combat's own schedule.
+    case 2:
+      // The attack's swing, or its answer (`vtbl+0x11c`, 0x005d5ed0).
+      if (slot->state.flags.is_unit) {
+        if (CombatSystem* combat = combat_system_of(world); combat != nullptr) {
+          combat->attack_end(world, scheduler, id, now);
+        }
+      }
       return;
+    default:
+      // 0: nothing.
+      return;
+  }
+}
+
+void anim_action_handler(World& world, script::Scheduler* scheduler, ObjectId id, GameTime now) {
+  (void)scheduler;
+  const WorldObject* slot = world.find(id);
+  // A unit's action handler (0x005d9550): the blow in the attack's mode
+  // (`vtbl+0x120`); its sounds are the renderer's.
+  if (slot == nullptr || !slot->state.flags.is_unit || slot->clock.mode != 2) return;
+  if (CombatSystem* combat = combat_system_of(world); combat != nullptr) {
+    combat->attack_action(world, id, now);
   }
 }
 
@@ -215,6 +235,10 @@ void AnimEvents::install() {
 
 void AnimEvents::anim_end(World& world, ObjectId id, GameTime now) {
   anim_end_handler(world, scheduler_, nullptr, id, now);
+}
+
+void AnimEvents::anim_action(World& world, ObjectId id, GameTime now) {
+  anim_action_handler(world, scheduler_, id, now);
 }
 
 bool AnimEvents::next_timer(std::int64_t& at, std::uint64_t& armed) const {

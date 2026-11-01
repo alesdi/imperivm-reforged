@@ -26,6 +26,7 @@
 #include "imperivm/core/sim/session.hpp"
 #include "imperivm/core/world/map.hpp"
 #include "builder.hpp"
+#include "fight.hpp"
 #include "test.hpp"
 
 namespace {
@@ -937,6 +938,7 @@ TEST(a_sheltered_world_object_takes_half_of_every_landed_blow) {
   World world;
   CombatSystem combat = make_system();
   combat.set_world_bound(true);
+  REQUIRE(world.add_system(&combat));
   const ObjectId a = world.spawn(NativeClass::unit, nullptr, kHastatus);
   const ObjectId b = world.spawn(NativeClass::unit, nullptr, kSwordsman);
   world.mutable_state(a)->owner = 0;
@@ -948,13 +950,13 @@ TEST(a_sheltered_world_object_takes_half_of_every_landed_blow) {
   combat.add(unit(a, kHastatus, 0, 200, Point{0, 0}));
   combat.add(unit(b, kSwordsman, 1, 200, Point{40, 0}));
   world.mutable_state(b)->flags.half_damage = true;
-  CHECK(combat.order_attack(a, b));
+  CHECK(combat.can_attack(a, b));
   CHECK(combat.preview(a, b).final_damage == 10);
 
   const auto strike_on = [&](ObjectId victim) {
     for (int turn = 0; turn < 20; ++turn) {
+      (void)imperivm::test::swing(world, combat, a, b);
       world.advance(400);
-      combat.advance(world, world.turn());
       for (const CombatEvent& event : combat.events()) {
         if (event.kind == CombatEvent::Kind::strike && event.defender == victim) {
           return event.damage;
@@ -1034,6 +1036,14 @@ void fight_turn(World& world, CombatSystem& combat) {
   combat.advance(world, world.turn());
 }
 
+/// A turn of 400 ms in a world combat is registered with, `a` offered a
+/// swing at `b` at its head (`fight.hpp`): `while (.Attack(b));`.
+bool fight_turn(World& world, CombatSystem& combat, ObjectId a, ObjectId b) {
+  const bool swung = imperivm::test::swing(world, combat, a, b);
+  world.advance(400);
+  return swung;
+}
+
 /// Place a world object and its combatant at the same spot.
 ObjectId place(World& world, CombatSystem& combat, const Entity* entity, ClassIndex cls,
                PlayerId owner, std::int32_t health, Point at) {
@@ -1061,6 +1071,7 @@ TEST(a_blow_turns_the_attacker_to_its_target_and_plays_one_swing) {
   World world;
   CombatSystem combat = make_system();
   combat.set_world_bound(true);
+  REQUIRE(world.add_system(&combat));
   // The target stands due west; the attacker was placed facing column 0.
   const ObjectId a = place(world, combat, &fighter.value(), kHastatus, 0, 200, Point{540, 500});
   const ObjectId b = place(world, combat, &fighter.value(), kSwordsman, 1, 200, Point{500, 500});
@@ -1070,28 +1081,35 @@ TEST(a_blow_turns_the_attacker_to_its_target_and_plays_one_swing) {
   REQUIRE(slot != nullptr && slot->object != nullptr);
   CHECK(slot->object->anim.variation == 0u);
 
-  CHECK(combat.order_attack(a, b));
-  fight_turn(world, combat);
-  REQUIRE(combat.health(b) < 200);  // the blow landed this turn
+  CHECK(combat.can_attack(a, b));
+  // The swing starts at once and its action moment, 500 ms in, lands the
+  // blow in the second turn.
+  CHECK(fight_turn(world, combat, a, b));
+  CHECK(combat.health(b) == 200);
+  CHECK(!fight_turn(world, combat, a, b));
+  REQUIRE(combat.health(b) < 200);
   CHECK(slot->object->anim.variation == west);
   CHECK(slot->object->anim.anim_slot == kAnimAttack);
   CHECK(slot->animating);
   CHECK(slot->repeat == AnimRepeat::hold);
 
   // **One swing per blow.** Held, not looped: once the cycle is over the
-  // unit stands in its last frame until the next blow restarts it, and the
-  // restart is what keeps swing and blow together.
+  // unit stands in its last frame until the next `Attack` restarts it, and
+  // each swing lands one blow.
   std::int32_t blows = 1;
+  std::int32_t swings = 1;
   bool restarted = false;
-  for (int turn = 0; turn < 6; ++turn) {
+  for (int turn = 0; turn < 9; ++turn) {
     const std::int32_t before = combat.health(b);
-    fight_turn(world, combat);
-    if (combat.health(b) < before) {
-      ++blows;
-      restarted = restarted || slot->object->anim.elapsed_ms < 400;
+    const bool swung = fight_turn(world, combat, a, b);
+    if (swung) {
+      ++swings;
+      restarted = restarted || slot->object->anim.elapsed_ms <= 400;
     }
+    if (combat.health(b) < before) ++blows;
   }
   CHECK(blows >= 3);
+  CHECK(blows == swings || blows + 1 == swings);
   CHECK(restarted);
   CHECK(slot->object->anim.anim_slot == kAnimAttack);
 }
@@ -1108,6 +1126,7 @@ TEST(a_tracked_attacker_turns_through_movement) {
   movement.set_grid(ObstructionGrid(64, 64));
   CombatSystem combat = make_system();
   combat.set_world_bound(true);
+  REQUIRE(world.add_system(&combat));
   const ObjectId a = place(world, combat, &fighter.value(), kHastatus, 0, 200, Point{500, 540});
   const ObjectId b = place(world, combat, &fighter.value(), kSwordsman, 1, 200, Point{500, 500});
   movement.state(a).speed = 100;
@@ -1115,8 +1134,9 @@ TEST(a_tracked_attacker_turns_through_movement) {
   movement.face(world, a, Point{900, 540});
   const Point east = movement.find(a)->facing;
 
-  CHECK(combat.order_attack(a, b));
-  fight_turn(world, combat);
+  CHECK(combat.can_attack(a, b));
+  (void)fight_turn(world, combat, a, b);
+  (void)fight_turn(world, combat, a, b);
   REQUIRE(combat.health(b) < 200);
   const Point faced = movement.find(a)->facing;
   CHECK(!(faced == east));
@@ -1128,116 +1148,76 @@ TEST(a_tracked_attacker_turns_through_movement) {
   CHECK(movement.find(b) == nullptr);
 }
 
-/// **A unit that stops fighting goes back to idle through `toidle`**, and
-/// only once its swing has run out: slot 18 is the 2-to-1 edge of the
-/// entity's own state machine. Here the target dies, so the next look finds
-/// nobody.
-TEST(a_unit_whose_fight_is_over_settles_through_toidle) {
+/// **An attack that is over leaves the unit where its swing ended.** The end
+/// handler answers the call and sets the mode to 0 (0x005d5ed0); nothing is
+/// started, so the swing holds its last frame until the next animation.
+TEST(an_attack_that_is_over_leaves_its_swing_held) {
   const auto fighter = Entity::parse(bytes_of(kFighterEntity));
   REQUIRE(fighter.ok());
   World world;
   CombatSystem combat = make_system();
   combat.set_world_bound(true);
-  // Blows every 600 against a 1,000 ms swing, so the look that finds the
-  // target dead comes while the killing swing is still in the air -- which is
-  // when settling too early would show.
-  CombatProfile quick = melee(16, 12, 200);
-  quick.attack_interval = 600;
-  combat.set_profile(kHastatus, quick);
+  REQUIRE(world.add_system(&combat));
   const ObjectId a = place(world, combat, &fighter.value(), kHastatus, 0, 200, Point{540, 500});
-  const ObjectId b = place(world, combat, &fighter.value(), kSwordsman, 1, 20, Point{500, 500});
-  CHECK(combat.order_attack(a, b));
+  const ObjectId b = place(world, combat, &fighter.value(), kSwordsman, 1, 2000, Point{500, 500});
+  REQUIRE(imperivm::test::swing(world, combat, a, b));
   const WorldObject* slot = world.find(a);
   REQUIRE(slot != nullptr && slot->object != nullptr);
-
-  bool seen_toidle = false;
-  bool cut_short = false;
-  std::int32_t settles = 0;
-  for (int turn = 0; turn < 20; ++turn) {
-    world.advance(400);
-    // What the swing is doing once this turn's animation pass is done, which
-    // is what combat sees when it decides.
-    const std::int32_t was = slot->object->anim.anim_slot;
-    const bool was_running = slot->animating;
-    const std::int32_t was_elapsed = slot->object->anim.elapsed_ms;
-    combat.advance(world, world.turn());
-    if (slot->object->anim.anim_slot == kAnimToIdle) {
-      seen_toidle = true;
-      // Never over a swing still in progress.
-      if (was == kAnimAttack && was_running) cut_short = true;
-      // Started once: a settled unit is not settled again every time it
-      // looks for a target and finds none.
-      if (was != kAnimToIdle || slot->object->anim.elapsed_ms < was_elapsed) ++settles;
-    }
-  }
-  CHECK(combat.is_dying(b) || combat.find(b) == nullptr);
-  CHECK(seen_toidle);
-  CHECK(!cut_short);
-  CHECK(settles == 1);
-  // And `toidle` has run out into its end state: the unit rests in state 1
-  // with nothing playing (0x0053f6a0 at the end), shown in that state's pose.
-  CHECK(world.anim_slot_at(*slot, world.time()) == kNoAnim);
-  CHECK(world.anim_rest_state_at(*slot, world.time()) == 1);
-  CHECK(slot->object->anim.state_idx == 1);
+  CHECK(slot->clock.mode == 2);
+  CHECK(slot->clock.slot == kAnimAttack);
+  for (int turn = 0; turn < 4; ++turn) world.advance(400);
+  CHECK(slot->clock.mode == 0);
+  CHECK(slot->clock.attack_word == 1);
+  CHECK(slot->object->anim.anim_slot == kAnimAttack);
+  CHECK(combat.health(b) < 2000);
 }
 
-/// **A death is seen, and lasts as long as the animation that shows it.** The
-/// dying state used to hold the victim's last pose for an invented second and
-/// then pop it out of the world.
-///
-/// The shipped death strips end on the corpse -- long holds over the rows
-/// where the body lies, rots and goes -- and the one battle dump has 14
-/// objects in `action=8` up to 14 s after their own last blow. So the object
-/// stays for one cycle of its entity's slot 9 and leaves when it ends; the
-/// system-wide duration is only for an entity with no death to measure.
 TEST(a_dying_unit_plays_its_death_and_leaves_when_the_animation_ends) {
   const auto fighter = Entity::parse(bytes_of(kFighterEntity));
   REQUIRE(fighter.ok());
   World world;
   CombatSystem combat = make_system();
   combat.set_world_bound(true);
+  REQUIRE(world.add_system(&combat));
   combat.set_death_duration(1000);  // the fallback, which must not be what decides
   const ObjectId a = place(world, combat, &fighter.value(), kHastatus, 0, 200, Point{540, 500});
   const ObjectId b = place(world, combat, &fighter.value(), kSwordsman, 1, 5, Point{500, 500});
-  CHECK(combat.order_attack(a, b));
-  fight_turn(world, combat);
+  CHECK(combat.can_attack(a, b));
+  // One swing from time 0: its blow, at the action moment 500 ms in, kills.
+  REQUIRE(imperivm::test::swing(world, combat, a, b));
+  world.advance(400);
+  CHECK(!combat.is_dying(b));
+  world.advance(400);
   REQUIRE(combat.is_dying(b));
-  const WorldObject* corpse = world.find(b);
-  REQUIRE(corpse != nullptr && corpse->object != nullptr);
-  // The base death (0x005b16f0): the action mode 1 and the timer 1 ms on.
-  CHECK(corpse->clock.mode == 1);
-  REQUIRE(corpse->clock.timer_at != kNoAnimTimer);
-  const GameTime died = corpse->clock.timer_at - 1;
-  // The blow fell somewhere in the turn that just ended.
-  const GameTime turn_end = world.time();
-  CHECK(died > turn_end - 400);
-  CHECK(died <= turn_end + 1);
+  const GameTime died = 500;
   CHECK(fighter.value().timeline_for_slot(kAnimDie).cycle() == 3000);
 
-  // The timer fires: the death animation (one variant here, no draw), the
-  // mode 8, and the end 1 ms plus the declared length after the blow.
-  fight_turn(world, combat);
-  corpse = world.find(b);
+  // The base death (0x005b16f0) is the action mode 1 and the timer 1 ms on;
+  // that timer fired inside the same turn: the death animation (one variant
+  // here, no draw), the mode 8, and the end 1 ms plus the declared length
+  // after the blow.
+  const WorldObject* corpse = world.find(b);
   REQUIRE(corpse != nullptr && corpse->object != nullptr);
   CHECK(corpse->object->anim.anim_slot == kAnimDie);
   CHECK(corpse->repeat == AnimRepeat::hold);
   CHECK(corpse->clock.slot == kAnimDie);
   CHECK(corpse->clock.mode == 8);
+  CHECK(corpse->clock.start == died + 1);
   const EntityAnim* die = fighter.value().anim(kAnimDie);
   REQUIRE(die != nullptr);
   const GameTime gone = died + 1 + die->duration;
   CHECK(corpse->clock.end() == gone);
 
   // Well past the fallback: still lying there, still animating.
-  while (world.time() + 400 < gone) fight_turn(world, combat);
+  while (world.time() + 400 < gone) world.advance(400);
   const WorldObject* still = world.find(b);
   CHECK(still != nullptr);
   CHECK(combat.is_dying(b));
   CHECK(still != nullptr && still->animating);
   // And gone once its end has fired.
-  fight_turn(world, combat);
+  world.advance(400);
   CHECK(world.find(b) == nullptr);
-  fight_turn(world, combat);
+  world.advance(400);
   CHECK(combat.find(b) == nullptr);
 }
 
@@ -1259,9 +1239,11 @@ TEST(a_fight_shows_the_same_frames_however_time_is_cut_into_turns) {
   };
   const auto start = [&](Run& run) {
     run.combat.set_world_bound(true);
+    REQUIRE(run.world.add_system(&run.combat));
     run.a = place(run.world, run.combat, &fighter.value(), kHastatus, 0, 200, Point{540, 500});
-    run.b = place(run.world, run.combat, &fighter.value(), kSwordsman, 1, 30, Point{500, 500});
-    CHECK(run.combat.order_attack(run.a, run.b));
+    run.b = place(run.world, run.combat, &fighter.value(), kSwordsman, 1, 5, Point{500, 500});
+    // One `Attack`, at time 0: its blow, 500 ms in, kills.
+    CHECK(imperivm::test::swing(run.world, run.combat, run.a, run.b));
   };
   Run even;
   Run uneven;
@@ -1278,13 +1260,11 @@ TEST(a_fight_shows_the_same_frames_however_time_is_cut_into_turns) {
   for (int check = 0; check < 4; ++check) {
     for (int i = 0; i < 4; ++i) {
       even.world.advance(400);
-      even.combat.advance(even.world, even.world.turn());
     }
     // Boundaries at 300, 800, 1100, 1600: the blow near 1000 falls in a turn
     // that ends at 1200 in one run and at 1100 in the other.
     for (const GameTime length : {300, 500, 300, 500}) {
       uneven.world.advance(length);
-      uneven.combat.advance(uneven.world, uneven.world.turn());
     }
     REQUIRE(even.world.time() == uneven.world.time());
     for (const ObjectId id : {even.a, even.b}) {
@@ -1331,6 +1311,83 @@ TEST(a_corpse_cannot_be_ordered_to_attack_or_be_attacked) {
   CHECK(combat.find(2) == nullptr);
 }
 
+/// **A blow does not touch the walk of the unit it lands on.** The attack's
+/// end handler tells its target (`vtbl+0xa4`, 0x005d5faa) and nothing else;
+/// the blow (0x00511550) changes health. The target's own clock -- a walk
+/// step in flight, action mode 3 -- is left alone, and it steps on.
+TEST(a_walking_unit_struck_mid_step_walks_on) {
+  const auto fighter = Entity::parse(bytes_of(kFighterEntity));
+  REQUIRE(fighter.ok());
+  World world;
+  MovementSystem movement;
+  CombatSystem combat = make_system();
+  REQUIRE(world.add_system(&movement));
+  REQUIRE(world.add_system(&combat));
+  movement.set_grid(ObstructionGrid(64, 64));
+  combat.set_world_bound(true);
+  const ObjectId a = place(world, combat, &fighter.value(), kHastatus, 0, 200, Point{540, 500});
+  const ObjectId b = place(world, combat, &fighter.value(), kSwordsman, 1, 200, Point{500, 500});
+  movement.state(b).speed = 5;
+  movement.state(b).walk_anim = kAnimAttack;  // any slot the fixture has
+  REQUIRE(movement.order_goto(world, b, Point{500, 400}, 0, 0) != MoveOutcome::blocked);
+  REQUIRE(imperivm::test::swing(world, combat, a, b));
+  world.advance(400);
+  const WorldObject* walker = world.find(b);
+  REQUIRE(walker->clock.mode == 3);
+  REQUIRE(walker->clock.slot == kAnimAttack);
+  const GameTime step_end = walker->clock.end();
+  REQUIRE(step_end > 800);
+  world.advance(400);
+  // The blow landed at 500, mid-step, and the step plays on to its own end.
+  REQUIRE(combat.health(b) < 200);
+  CHECK(walker->clock.mode == 3);
+  CHECK(walker->clock.slot == kAnimAttack);
+  CHECK(walker->clock.end() == step_end);
+  CHECK(world.anim_timer_pending(*walker));
+  // And the walk ends where it was going.
+  for (int turn = 0; turn < 30 && movement.find(b)->has_path; ++turn) world.advance(400);
+  CHECK((world.state(b)->position == Point{500, 400}));
+}
+
+/// **An attack ordered mid-step waits for the step.** The setter (0x005a7680)
+/// runs the end handler at once only when no timer is pending; a walk step
+/// in flight is not cut, and its end, in mode 2, starts the swing.
+TEST(an_attack_ordered_mid_step_starts_when_the_step_ends) {
+  const auto fighter = Entity::parse(bytes_of(kFighterEntity));
+  REQUIRE(fighter.ok());
+  World world;
+  MovementSystem movement;
+  CombatSystem combat = make_system();
+  REQUIRE(world.add_system(&movement));
+  REQUIRE(world.add_system(&combat));
+  movement.set_grid(ObstructionGrid(64, 64));
+  combat.set_world_bound(true);
+  const ObjectId a = place(world, combat, &fighter.value(), kHastatus, 0, 200, Point{540, 500});
+  const ObjectId b = place(world, combat, &fighter.value(), kSwordsman, 1, 2000, Point{500, 500});
+  movement.state(a).speed = 1;
+  movement.state(a).walk_anim = kAnimToIdle;  // any slot the fixture has
+  REQUIRE(movement.order_goto(world, a, Point{540, 520}, 0, 0) != MoveOutcome::blocked);
+  world.advance(400);
+  const WorldObject* slot = world.find(a);
+  REQUIRE(slot != nullptr);
+  REQUIRE(slot->clock.mode == 3);
+  REQUIRE(world.anim_timer_pending(*slot));
+  const std::int32_t walking = slot->clock.slot;
+  REQUIRE(walking == kAnimToIdle);
+  const GameTime step_end = slot->clock.end();
+  REQUIRE(step_end > world.time());
+
+  combat.begin_attack(world, nullptr, a, b, 0, world.time());
+  // The mode is the attack's at once; the step plays on.
+  CHECK(slot->clock.mode == 2);
+  CHECK(slot->clock.slot == walking);
+  CHECK(slot->clock.end() == step_end);
+  while (world.time() < step_end) world.advance(400);
+  // The step's end ran the attack's end handler: the swing.
+  CHECK(slot->clock.slot == kAnimAttack);
+  CHECK(slot->clock.mode == 2);
+}
+
 /// **A corpse does not walk.** All 15 dying objects across the nine dumps are
 /// without `SyncFlags` bit 17. A unit killed mid-walk stops where it fell,
 /// its death is not frozen on the first row by movement's arrival handling,
@@ -1348,15 +1405,19 @@ TEST(a_unit_killed_mid_walk_stops_and_its_death_keeps_playing) {
   movement.set_grid(ObstructionGrid(64, 64));
   combat.set_world_bound(true);
   const ObjectId a = place(world, combat, &fighter.value(), kHastatus, 0, 200, Point{540, 500});
-  const ObjectId b = place(world, combat, &fighter.value(), kSwordsman, 1, 30, Point{500, 500});
-  movement.state(b).speed = 5;  // slow enough to stay in reach for three blows
+  // One blow kills: the swing at time 0 lands it 500 ms in, mid-walk. The
+  // blow reaches the range plus 150 (0x005dc650), and the walk's steps stay
+  // inside that.
+  const ObjectId b = place(world, combat, &fighter.value(), kSwordsman, 1, 10, Point{500, 500});
+  movement.state(b).speed = 5;
   movement.state(b).walk_anim = kAnimAttack;  // any slot the fixture has
-  CHECK(movement.order_goto(world, b, Point{500, 100}, 0, 0) != MoveOutcome::blocked);
-  CHECK(combat.order_attack(a, b));
+  CHECK(movement.order_goto(world, b, Point{500, 400}, 0, 0) != MoveOutcome::blocked);
+  CHECK(combat.can_attack(a, b));
   bool walked = false;
-  for (int turn = 0; turn < 12 && !combat.is_dying(b); ++turn) {
+  for (int turn = 0; turn < 6 && !combat.is_dying(b); ++turn) {
     // A walk step under way: the walk slot on the clock.
     walked = walked || world.find(b)->clock.slot == kAnimAttack;
+    (void)imperivm::test::swing(world, combat, a, b);
     world.advance(400);
   }
   REQUIRE(combat.is_dying(b));
@@ -2159,6 +2220,7 @@ TEST(binding_to_the_world_shares_position_owner_and_health) {
   World world;
   CombatSystem combat = make_system();
   combat.set_world_bound(true);
+  REQUIRE(world.add_system(&combat));
 
   const ObjectId a = world.spawn(NativeClass::unit, nullptr, kHastatus);
   const ObjectId b = world.spawn(NativeClass::unit, nullptr, kSwordsman);
@@ -2174,16 +2236,13 @@ TEST(binding_to_the_world_shares_position_owner_and_health) {
   combat.add(one);
   combat.add(two);
 
-  world.advance(400);
-  combat.advance(world, world.turn());
+  CHECK(!fight_turn(world, combat, a, b));
   CHECK(combat.health(b) == 200);  // nothing in reach
 
-  // Movement walks it in; combat reads the new position off the world. It
-  // takes a scan interval to notice, which is the point of the acquire cadence.
+  // Movement walks it in; combat reads the new position off the world.
   world.set_position(b, Point{40, 0});
   for (int turn = 0; turn < 5 && combat.health(b) == 200; ++turn) {
-    world.advance(400);
-    combat.advance(world, world.turn());
+    (void)fight_turn(world, combat, a, b);
   }
   // `REQUIRE`, not `CHECK`: a fault that stops `a` being enrolled at all makes
   // this a null dereference, and a SIGSEGV here kills the run before the
@@ -2322,9 +2381,10 @@ TEST(combat_enrols_units_and_buildings_and_nothing_else) {
 
 TEST(combat_enrolled_from_a_map_actually_kills) {
   // The failure this whole exercise exists to prevent: two hostile armies
-  // standing next to each other while nothing happens. 40 units apart, both
+  // standing next to each other and unable to fight. 40 units apart, both
   // classes armed, both sides mutual enemies by default (a zero relations row
-  // means bit 0 clear, which is "enemy").
+  // means bit 0 clear, which is "enemy"). The fight is ordered, as a script
+  // orders it: no unit strikes on its own in `gbr.exe`.
   ClassGraph graph = enrolment_graph();
   const Result<MapObjectList> map = MapObjectList::parse(bytes_of(kEnrolmentMap));
   REQUIRE(map.ok());
@@ -2338,11 +2398,13 @@ TEST(combat_enrolled_from_a_map_actually_kills) {
   world.start();
 
   REQUIRE(combat.combatants().size() == 3);
+  const ObjectId legion = combat.combatants()[0].id;
   const ObjectId gaul = combat.combatants()[1].id;
   const std::int32_t before = combat.health(gaul);
   std::size_t strikes = 0;
   std::size_t deaths = 0;
   for (int turn = 0; turn < 40; ++turn) {
+    (void)imperivm::test::swing(world, combat, legion, gaul);
     world.advance(400);
     for (const CombatEvent& event : combat.events()) {
       if (event.kind == CombatEvent::Kind::strike) ++strikes;
@@ -2559,10 +2621,9 @@ TEST(a_building_at_no_health_stands_broken_and_is_no_longer_a_target) {
   const ObjectId man = combat.combatants()[0].id;
   const ObjectId hut = combat.combatants()[1].id;
   REQUIRE(world.find(hut)->state.flags.is_building);
-  // `act`'s own acquisition, which takes a building where the unit family
-  // never does.
-  REQUIRE(combat.auto_target(man) == hut);
+  // An `Attack` on it, which the unit family's sweep never offers.
   CHECK(combat.best_target(man) == kNoObject);
+  REQUIRE(combat.can_attack(man, hut));
 
   std::size_t blows_at_zero = 0;
   std::size_t hut_deaths = 0;
@@ -2570,6 +2631,7 @@ TEST(a_building_at_no_health_stands_broken_and_is_no_longer_a_target) {
   // Forty turns of 400 ms: long past `death_duration_`, so a hut that had
   // entered the dying state would be gone from both the roll and the world.
   for (int turn = 0; turn < 40; ++turn) {
+    (void)imperivm::test::swing(world, combat, man, hut);
     world.advance(400);
     for (const CombatEvent& event : combat.events()) {
       if (event.defender != hut) continue;
@@ -2592,7 +2654,7 @@ TEST(a_building_at_no_health_stands_broken_and_is_no_longer_a_target) {
   CHECK(world.state(hut)->health == 0);
   CHECK(world.state(hut)->damage_state == 3);  // `IsBroken`
   // Not a target any more, by any of the three doors.
-  CHECK(combat.find(man)->target != hut);
+  CHECK(!combat.can_attack(man, hut));
   CHECK(combat.best_target(man) == kNoObject);
   CHECK(!combat.order_attack(man, hut));
 
@@ -2714,7 +2776,7 @@ TEST(a_session_enrols_combatants_and_feeds_movement_its_grid) {
   // Combat. Without `set_world_bound(true)` in `GameSession::create` this is
   // zero on every shipped map, and `CombatSystem::advance` returns on its first
   // line for the whole match.
-  const CombatSystem* fight = combat_system_of(run.world());
+  CombatSystem* fight = combat_system_of(run.world());
   REQUIRE(fight != nullptr);
   REQUIRE(fight->combatants().size() == 3);
   CHECK(fight->world_bound());
@@ -2729,8 +2791,14 @@ TEST(a_session_enrols_combatants_and_feeds_movement_its_grid) {
   CHECK(move->grid().blocked(Point{0, 0}));
   CHECK(!move->grid().blocked(Point{1000, 0}));
 
-  // And it fights, through the session rather than through a hand-built world.
-  run.advance(40, 400);
+  // And it fights, through the session rather than through a hand-built world:
+  // the legion ordered at the Gaul each turn, as `UNIT_ENGAGE.VS` would.
+  const ObjectId legion = fight->combatants()[0].id;
+  const ObjectId gaul = fight->combatants()[1].id;
+  for (int turn = 0; turn < 40; ++turn) {
+    (void)imperivm::test::swing(run.world(), *fight, legion, gaul);
+    run.advance(1, 400);
+  }
   CHECK(fight->combatants().size() < 3);
 }
 
@@ -2841,7 +2909,12 @@ TEST(enrolment_keeps_what_a_combatant_has_earned) {
   world.mutable_state(gaul)->health = 4000;
   world.set_position(gaul, Point{1040, 1000});
 
-  for (int turn = 0; turn < 60; ++turn) world.advance(400);
+  // The two fight each other, `Attack` called again at each turn's head.
+  for (int turn = 0; turn < 60; ++turn) {
+    (void)imperivm::test::swing(world, combat, roman, gaul);
+    (void)imperivm::test::swing(world, combat, gaul, roman);
+    world.advance(400);
+  }
 
   REQUIRE(combat.combatants().size() == 3);
   const Combatant* before = combat.find(roman);
@@ -2849,7 +2922,7 @@ TEST(enrolment_keeps_what_a_combatant_has_earned) {
   const std::int32_t attacks = before->attacks;
   const GameTime last = before->last_attack_time;
   // The preconditions, and the one that carries the test: a single turn can
-  // rebuild at most two strikes' worth, so anything above ten is unambiguous.
+  // rebuild at most one strike's worth, so anything above ten is unambiguous.
   REQUIRE(attacks > 10);
   REQUIRE(before->target == gaul);
   REQUIRE(last > 0);
@@ -3011,11 +3084,12 @@ TEST(a_map_enrolled_combatant_starts_at_level_one_with_no_experience) {
   // And a blow that does not kill pays nothing (0x00511550 pays a kill), so
   // a total seeded at zero is still zero after the first strikes.
   combat.set_player_level_addend(0, 0);
-  REQUIRE(combat.order_attack(roman, gaul));
+  REQUIRE(combat.can_attack(roman, gaul));
   // Counted rather than assumed: a turn is long enough for more than one
   // strike, so the assertion is `strikes * gain` and not `gain`.
   std::int32_t strikes = 0;
   for (int turn = 0; turn < 8 && strikes == 0; ++turn) {
+    (void)imperivm::test::swing(world, combat, roman, gaul);
     world.advance(400);
     for (const CombatEvent& event : combat.events()) {
       if (event.kind == CombatEvent::Kind::strike && event.attacker == roman &&
@@ -3411,7 +3485,8 @@ TEST(combat_target_accessors_check_what_the_binary_checks) {
   animal.target_factor = -1;  // Crow, Deer, Eagle, Hen2
   b.combat.set_profile(b.villager_class, animal);
   const ObjectId sword = b.soldier(0, Point{0, 0});
-  const ObjectId deer = b.soldier(1, Point{30, 0}, b.villager_class);
+  // 40 apart: 10 between the edges, inside the band of 2 to 17.
+  const ObjectId deer = b.soldier(1, Point{0, 40}, b.villager_class);
   const ObjectId foe = b.soldier(1, Point{40, 0});
 
   CHECK(b.call("IsValidTarget", 1, {Value::object(1, sword), Value::object(1, deer)})
@@ -3821,7 +3896,9 @@ TEST(combat_a_strike_stamps_the_defenders_hero_and_a_script_damage_does_not) {
   combat.set_profile(kUnarmed, melee(0, 12, 200));
   combat.add(unit(leader, kUnarmed, 0, 200, Point{0, 0}));
   combat.add(unit(victim, kUnarmed, 0, 200, Point{100, 0}));
-  combat.add(unit(enemy, kSwordsman, 1, 200, Point{110, 0}));
+  combat.add(unit(enemy, kSwordsman, 1, 200, Point{140, 0}));
+  world.set_position(victim, Point{100, 0});
+  world.set_position(enemy, Point{140, 0});
 
   REQUIRE(heroes.hero(leader) != nullptr);
   CHECK(heroes.hero(leader)->army_attacked_at == 0);
@@ -3831,10 +3908,12 @@ TEST(combat_a_strike_stamps_the_defenders_hero_and_a_script_damage_does_not) {
   combat.apply_damage(world, victim, 10);
   CHECK(heroes.hero(leader)->army_attacked_at == 0);
 
-  // A real fight. The two are 10 apart, well inside `melee`'s range of 17.
-  REQUIRE(combat.order_attack(enemy, victim));
+  // A real fight. The two are 10 apart between the edges, inside `melee`'s
+  // band of 2 to 17; the enemy is ordered as `while (.Attack(victim));`.
+  REQUIRE(combat.can_attack(enemy, victim));
   std::size_t turns = 0;
   while (heroes.hero(leader)->army_attacked_at == 0 && turns < 40) {
+    (void)imperivm::test::swing(world, combat, enemy, victim);
     world.advance(400);
     ++turns;
   }
@@ -3854,7 +3933,10 @@ TEST(combat_a_strike_stamps_the_defenders_hero_and_a_script_damage_does_not) {
   heroes.register_unit(world, enemy);
   REQUIRE(heroes.attach(world, enemy, enemy_leader));
   const GameTime mine = heroes.hero(leader)->army_attacked_at;
-  for (int turn = 0; turn < 10; ++turn) world.advance(400);
+  for (int turn = 0; turn < 10; ++turn) {
+    (void)imperivm::test::swing(world, combat, enemy, victim);
+    world.advance(400);
+  }
   REQUIRE(heroes.hero(enemy_leader) != nullptr);
   CHECK(heroes.hero(enemy_leader)->army_attacked_at == 0);
   // While the defender's kept moving, so the fight really was still running.

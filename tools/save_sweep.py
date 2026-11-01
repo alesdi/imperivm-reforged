@@ -68,6 +68,23 @@ MID_WAR = (
     ("Scenarios/Crossroads.BFHP", 5500, 10),
 )
 
+#: Maps whose round trip gbr.exe itself does not keep, by (container, map
+#: number), with the reason. Each must still build, save and load; it is
+#: required to diverge, so that a later change that makes it round-trip is
+#: seen and the entry removed rather than left to hide a real break.
+#:
+#: The explored-everywhere flag is not in the original's fog persist
+#: (0x00517860), its load puts it down (0x005179d0), and only ExploreAll's
+#: own store (0x005157d4) and the game's start with exploration off raise it
+#: again. A map whose script calls `ExploreAll` with exploration on therefore
+#: loses the flag across a save in gbr.exe as here, and `GAIKA::Explored`
+#: answers differently afterwards (round 16's third batch).
+ORIGINALS_OWN_DIVERGENCE = {
+    ("Adventures/GreatChallenges/5_Great_Loses_German.BFHP", "2"):
+        "ExploreAll at the start with exploration on; the flag is not saved, "
+        "as in gbr.exe",
+}
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
@@ -135,16 +152,27 @@ def main() -> int:
     ok: list[str] = []
     refused: list[tuple[str, str]] = []
     failed: list[tuple[str, str]] = []
+    original: list[tuple[str, str]] = []
     for ref, command in zip(refs, commands):
         result = outputs[id(command)]
         if result is None:
             failed.append((ref.label, "timed out"))
             continue
         text, returncode = result
-        if "ROUND TRIP OK" in text:
+        known = ORIGINALS_OWN_DIVERGENCE.get(
+            (ref.container.relative_to(args.game).as_posix(), ref.number))
+        if known is not None and "ROUND TRIP OK" in text:
+            failed.append((ref.label, "round-trips now; remove it from "
+                           "ORIGINALS_OWN_DIVERGENCE"))
+        elif "ROUND TRIP OK" in text:
             ok.append(ref.label)
         elif "session failed to build" in text:
             refused.append((ref.label, "no session could be built"))
+        elif (known is not None and "ROUND TRIP FAILED (hash trace diverges)" in text
+              and "1 failure(s)" in text):
+            # Only the play after the load may differ: the re-save must
+            # still be byte for byte, or it is a real break.
+            original.append((ref.label, known))
         else:
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             failed.append((ref.label, lines[-1] if lines else f"exit {returncode}"))
@@ -153,6 +181,10 @@ def main() -> int:
     if refused:
         print(f"refused   {len(refused)} -- expected, and counted here rather than dropped:")
         for label, why in refused:
+            print(f"            {label}  --  {why}")
+    if original:
+        print(f"original  {len(original)} diverge after the load as gbr.exe's own does:")
+        for label, why in original:
             print(f"            {label}  --  {why}")
     if failed:
         print(f"FAILED    {len(failed)} map(s) did not survive the round trip:")
@@ -186,8 +218,9 @@ def main() -> int:
         print(f"FAILED    mid-war {label}  --  {why}")
 
     war = "" if args.no_mid_war else f"; mid-war {len(war_ok)} of {len(MID_WAR)}"
-    print(f"\nsaves     {len(ok)} of {len(refs) - len(refused)} runnable maps round-trip; "
-          f"{len(failed)} failed{war}")
+    as_original = f", {len(original)} as gbr.exe's own" if original else ""
+    print(f"\nsaves     {len(ok)} of {len(refs) - len(refused)} runnable maps round-trip"
+          f"{as_original}; {len(failed)} failed{war}")
     return 1 if failed or war_failed else 0
 
 

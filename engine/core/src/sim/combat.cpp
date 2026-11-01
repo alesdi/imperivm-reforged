@@ -6,6 +6,10 @@
 
 #include "imperivm/core/sim/combat.hpp"
 
+#include "imperivm/core/script/scheduler.hpp"
+#include "imperivm/core/sim/anim.hpp"
+
+#include "imperivm/core/sim/boarding.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/hero.hpp"
@@ -279,6 +283,8 @@ CombatConstants CombatConstants::from_const_ini(std::span<const std::byte> bytes
       out.base_fire_rate = to_int(value, out.base_fire_rate);
     } else if (equal_ignoring_case(key, "CatapultMaxUnits")) {
       out.catapult_max_units = to_int(value, out.catapult_max_units);
+    } else if (equal_ignoring_case(key, "TrainingExpChance")) {
+      out.training_exp_chance = to_int(value, out.training_exp_chance);
     } else if (equal_ignoring_case(key, "SquadLookIvl")) {
       out.acquire_interval = to_int(value, out.acquire_interval);
     }
@@ -849,22 +855,18 @@ bool CombatSystem::is_enemy(const Combatant& a, const Combatant& b) const noexce
 // ---------------------------------------------------------------------------
 
 bool CombatSystem::in_attack_range(const Combatant& attacker, const Combatant& defender) const {
-  const CombatProfile mine = profile(attacker.class_index);
-  const CombatProfile theirs = profile(defender.class_index);
-  const std::int64_t d2 = distance_squared(attacker.position, defender.position);
-  // Reach is measured surface to surface: the stored range plus both radii.
-  // The far edge is the attacker's `[obj+0xd4]` (0x005a7800), so a formation's
-  // `BonusRange` lengthens it; the minimum below is the class's `[obj+0xd8]`,
-  // which no rebuild touches.
-  const std::int64_t reach =
-      static_cast<std::int64_t>(range_of(attacker)) + mine.radius + theirs.radius;
-  if (d2 > squared(reach)) return false;
-  if (mine.min_range > 0) {
-    // A catapult's `min_range` of 301 really is a dead zone. Measured centre to
-    // centre, because the far edge is what the class number describes.
-    if (d2 < squared(static_cast<std::int64_t>(mine.min_range))) return false;
-  }
-  return true;
+  // 0x005a7800: the distance between the two edges -- the integer square
+  // root of the squared centre distance, less both class radii -- lies in
+  // the band from the attacker's `[obj+0xd8]` to its `[obj+0xd4]`, both
+  // ends included, and a band whose inner end is below 1 has none. The
+  // outer end is the stored range (`range_of`), which a formation's
+  // `BonusRange` moves; the inner is the class's `min_range`, which no
+  // rebuild touches (0x005d9df0 never writes `[obj+0xd8]`).
+  const std::int64_t d = isqrt(distance_squared(attacker.position, defender.position)) -
+                         profile(attacker.class_index).radius -
+                         profile(defender.class_index).radius;
+  const std::int32_t least = profile(attacker.class_index).min_range;
+  return (least < 1 || least <= d) && d <= range_of(attacker);
 }
 
 // ---------------------------------------------------------------------------
@@ -2304,6 +2306,292 @@ void CombatSystem::act(World& world, Combatant& unit, GameTime now) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// the attack on the animation timer (docs/formats/animation.md, "The attack")
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// One of the attack's variants (0x005a81b0 from 4): the declared attack, and
+/// the next one, two or three after it while the entity declares them, drawn
+/// once on the synchronised generator.
+[[nodiscard]] std::int32_t attack_variant(World& world, const Entity& entity) {
+  std::int32_t variants = 1;
+  if (entity.has_anim(kAnimAttack + 1)) {
+    variants = 2;
+    if (entity.has_anim(kAnimAttack + 2)) variants = entity.has_anim(kAnimAttack + 3) ? 4 : 3;
+  }
+  return kAnimAttack + world.rng().between(0, variants - 1);
+}
+
+/// `[unit+0x15c]`, the speed factor, from the movement row; 100 for a unit
+/// movement does not track.
+[[nodiscard]] std::int32_t speed_factor_of(World& world, ObjectId id) {
+  const MovementSystem* movement = movement_system(world);
+  const MoveState* move = movement == nullptr ? nullptr : movement->find(id);
+  return move == nullptr ? kDefaultSpeedFactor : move->speed_factor;
+}
+
+/// A suspension with no timed wake: the original's return 3.
+constexpr std::int64_t kAttackNoWake = std::numeric_limits<std::int32_t>::max();
+
+/// The attack's word while a blow is owed (`attack_end`'s departure for an
+/// attacker with no swing to play). Not one of the original's values, which
+/// are 0, 1 and 2.
+constexpr std::int32_t kAttackOwed = 3;
+
+}  // namespace
+
+std::int32_t CombatSystem::min_range_of(const Combatant& unit) const {
+  return profile(unit.class_index).min_range;
+}
+
+std::int64_t CombatSystem::edge_distance(ObjectId self, ObjectId target) const {
+  const Combatant* a = find(self);
+  const Combatant* d = find(target);
+  if (a == nullptr || d == nullptr) return std::numeric_limits<std::int32_t>::max();
+  Point from = a->position;
+  Point to = d->position;
+  if (world_bound_ && world_ != nullptr) {
+    if (world_->state(self) != nullptr) from = world_->resolve_position(self);
+    if (world_->state(target) != nullptr) to = world_->resolve_position(target);
+  }
+  return isqrt(distance_squared(from, to)) - profile(a->class_index).radius -
+         profile(d->class_index).radius;
+}
+
+bool CombatSystem::in_range(ObjectId self, ObjectId target) const {
+  const Combatant* a = find(self);
+  if (a == nullptr || find(target) == nullptr) return false;
+  const std::int64_t d = edge_distance(self, target);
+  const std::int32_t least = min_range_of(*a);
+  return (least < 1 || least <= d) && d <= range_of(*a);
+}
+
+bool CombatSystem::can_attack(ObjectId self, ObjectId target) const {
+  const Combatant* a = find(self);
+  const Combatant* d = find(target);
+  if (a == nullptr || d == nullptr) return false;
+  // Dead (`vtbl+0x50`), or at no health: a unit at none is dead, a building
+  // at none is refused by the building test further in (0x005b1f69).
+  if (!d->alive || d->action == Action::dying || d->health <= 0) return false;
+  const WorldObject* me = world_ != nullptr ? world_->find(self) : nullptr;
+  const WorldObject* them = world_ != nullptr ? world_->find(target) : nullptr;
+  if (me != nullptr && me->state.flags.is_unit && them != nullptr) {
+    // Not an enemy: only a training partner or a building (0x005b1e27).
+    if (!is_enemy(*a, *d) && !them->state.flags.training && !them->state.flags.is_building) {
+      return false;
+    }
+    // A hero's ceasefire, on the receiver and on a unit target (0x005d37f0
+    // with skill 10).
+    if (const HeroSystem* heroes = world_ != nullptr ? hero_system_of(*world_) : nullptr;
+        heroes != nullptr) {
+      const GameTime now = world_->time();
+      if (heroes->modifiers_for(self, now).ceasefire) return false;
+      if (them->state.flags.is_unit && heroes->modifiers_for(target, now).ceasefire) return false;
+    }
+  } else if (!is_enemy(*a, *d)) {
+    return false;
+  }
+  if (!profile(d->class_index).can_be_attacked) return false;
+  return unit_can_attack(*a, *d);
+}
+
+void CombatSystem::begin_attack(World& world, script::Scheduler* scheduler, ObjectId id,
+                                ObjectId target, std::uint32_t waiter, GameTime now) {
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr) return;
+  slot->clock.attack_target = target;
+  slot->clock.attack_word = 0;
+  slot->clock.waiter = waiter;
+  if (Combatant* unit = mutable_find(id); unit != nullptr) {
+    unit->action = Action::engaging;
+    unit->anim = kAnimEngage;
+  }
+  // The setter (0x005a7680): the mode, then the end handler at once when no
+  // timer is pending.
+  world.set_anim_mode(id, 2);
+  world.settle_anim(id, now);
+  if (const WorldObject* again = world.find(id);
+      again != nullptr && !world.anim_timer_pending(*again)) {
+    anim_end_handler(world, scheduler, nullptr, id, now);
+  }
+}
+
+void CombatSystem::attack_end(World& world, script::Scheduler* scheduler, ObjectId id,
+                              GameTime now) {
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr) return;
+  if (slot->object != nullptr && slot->object->is_a(NativeClass::ship)) {
+    // A ship's own (`vtbl+0x11c`, 0x005c6670): another of its attack
+    // variants, no origin, no facing, its declared length, for as long as
+    // the mode stays 2. **Departure:** a variant declared 0 long is not
+    // started; the original divides by its length (0x0053cf30) and faults.
+    if (slot->object->entity != nullptr) {
+      const std::int32_t chosen = attack_variant(world, *slot->object->entity);
+      const EntityAnim* anim = slot->object->entity->anim(chosen);
+      if (anim != nullptr && anim->duration > 0) (void)world.start_animation(id, chosen, now);
+    }
+    return;
+  }
+  const ObjectId target = slot->clock.attack_target;
+  const WorldObject* other = target == kNoObject ? nullptr : world.find(target);
+  if (slot->clock.attack_word == 0) {
+    if (other != nullptr) {
+      // The swing: a variant, as long as its declared duration times 100
+      // over the speed factor, from where the unit stands, turned to the
+      // target (0x005d5f0e .. 0x005d5f8c).
+      const Entity* entity = slot->object != nullptr ? slot->object->entity : nullptr;
+      const std::int32_t chosen = entity != nullptr ? attack_variant(world, *entity) : kNoAnim;
+      const EntityAnim* anim = entity != nullptr ? entity->anim(chosen) : nullptr;
+      const std::int32_t factor = speed_factor_of(world, id);
+      const Point here = world.resolve_position(id);
+      const Point at = world.resolve_position(target);
+      if (anim != nullptr && factor > 0) {
+        const std::int32_t length = static_cast<std::int32_t>(
+            static_cast<std::int64_t>(anim->duration) * 100 / factor);
+        if (here != kHeldPosition && at != kHeldPosition && at != here) {
+          // The facing goes where movement keeps it when movement tracks
+          // the unit, and onto the drawn column otherwise.
+          MovementSystem* movement = movement_system(world);
+          if (movement != nullptr && movement->find(id) != nullptr) {
+            movement->face(world, id, at);
+          } else if (slot->object != nullptr) {
+            slot->object->anim.variation =
+                facing_column(Point{at.x - here.x, at.y - here.y}, entity->variations());
+          }
+        }
+        (void)world.start_animation(id, chosen, now, 0, length, here);
+      } else {
+        // **Departure:** no attack animation to play -- an object with no
+        // entity, or an entity that declares none -- or a speed factor of
+        // 0. The original reads the animation's record through a null and
+        // divides by the factor; here the timer is held 1 ms and the blow
+        // is owed (`kAttackOwed`), dealt when it fires, just before the
+        // answer.
+        world.arm_anim_timer(id, now, 1);
+        if (WorldObject* again = world.find(id); again != nullptr) {
+          again->clock.attack_word = kAttackOwed;
+        }
+      }
+      // The target is told (`vtbl+0xa4`): its hero's and its squad's clocks.
+      record_army_attacked(world, target, now);
+      record_squad_attacked(world, target, id, now);
+      return;
+    }
+    slot->clock.attack_word = 2;
+  }
+  if (slot->clock.attack_word == kAttackOwed) {
+    attack_action(world, id, now);
+    slot = world.find(id);
+    if (slot == nullptr) return;
+    other = target == kNoObject ? nullptr : world.find(target);
+  }
+  // The answer: the blow landed and the target is there and not dead.
+  const bool landed = slot->clock.attack_word == 1 && other != nullptr && !object_is_dead(*other);
+  const std::uint32_t waiter = slot->clock.waiter;
+  slot->clock.waiter = 0;
+  if (scheduler != nullptr && waiter != 0) {
+    (void)scheduler->answer(waiter, script::Value::boolean(landed));
+    (void)scheduler->wake(waiter, now);
+  }
+  world.set_anim_mode(id, 0);
+  if (Combatant* unit = mutable_find(id); unit != nullptr && unit->action == Action::engaging) {
+    unit->action = Action::idle;
+    unit->anim = kAnimIdle;
+  }
+}
+
+void CombatSystem::attack_action(World& world, ObjectId id, GameTime now) {
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr) return;
+  if (slot->object != nullptr && slot->object->is_a(NativeClass::ship)) {
+    // A ship's (`vtbl+0x120`, 0x005c66b0): the count alone; its shot is the
+    // call's (`ship_attack`).
+    if (Combatant* unit = mutable_find(id); unit != nullptr) ++unit->attacks;
+    return;
+  }
+  const ObjectId target = slot->clock.attack_target;
+  const bool dealt = target != kNoObject && blow(world, id, target, now);
+  if (WorldObject* again = world.find(id); again != nullptr) {
+    again->clock.attack_word = dealt ? 1 : 2;
+  }
+  if (Combatant* unit = mutable_find(id); unit != nullptr) ++unit->attacks;
+}
+
+bool CombatSystem::blow(World& world, ObjectId id, ObjectId target, GameTime now) {
+  if (!can_attack(id, target)) return false;
+  Combatant* attacker = mutable_find(id);
+  Combatant* defender = mutable_find(target);
+  if (attacker == nullptr || defender == nullptr) return false;
+  if (edge_distance(id, target) > static_cast<std::int64_t>(range_of(*attacker)) + 150) {
+    return false;
+  }
+  // Where the two stand now, for the shot's track.
+  if (world_bound_) {
+    attacker->position = world.resolve_position(id);
+    defender->position = world.resolve_position(target);
+  }
+  now_ = now;
+  const CombatProfile mine = profile(attacker->class_index);
+  const WorldObject* me = world.find(id);
+  const WorldObject* them = world.find(target);
+  const bool training = me != nullptr && them != nullptr && me->state.flags.is_unit &&
+                        them->state.flags.is_unit && !is_enemy(*attacker, *defender);
+  if (mine.is_ranged()) {
+    launch(world, *attacker, *defender, now);
+  } else if (training) {
+    training_blow(world, *attacker, *defender, now);
+  } else {
+    hit(world, *defender, inputs_for(*attacker, *defender), id, now);
+  }
+  // The original has one health field: a blow that lands on the timer,
+  // outside this system's turn, is published at once rather than at the
+  // turn's end.
+  if (world_bound_) {
+    if (const Combatant* struck = find(target);
+        struck != nullptr && struck->alive && struck->action != Action::dying) {
+      (void)world.set_health(target, struck->health);
+    }
+  }
+  // The last-attack time, and a hidden attacker shown (0x005dc8a0).
+  if (Combatant* again = mutable_find(id); again != nullptr) again->last_attack_time = now;
+  if (ObjectState* state = world.mutable_state(id); state != nullptr && state->flags.hidden) {
+    state->flags.hidden = false;
+  }
+  return true;
+}
+
+void CombatSystem::training_blow(World& world, Combatant& attacker, Combatant& defender,
+                                 GameTime now) {
+  const ObjectId by = attacker.id;
+  const ObjectId victim = defender.id;
+  // What leaves the target a tenth of its maximum, never below 0.
+  std::int32_t cap = defender.health - max_health_of(defender) / 10;
+  if (cap < 0) cap = 0;
+  const std::int32_t attack = attack_of(attacker);
+  std::int32_t least = scale_percent(attack, constants_.min_percent_of_attackers_damage);
+  if (least < constants_.min_damage) least = constants_.min_damage;
+  // The attack less the slash armour, scaled by the level difference
+  // (0x0050fe60). **Labelled:** the scale is this engine's level table,
+  // where the original builds its own of 101 steps (0x0050fd40).
+  const std::int32_t difference = effective_level(attacker) - effective_level(defender);
+  const std::int32_t percent =
+      constants_.level_difference.percent(difference < 0 ? -difference : difference);
+  const std::int64_t raw = static_cast<std::int64_t>(attack) - armour_of(defender, DamageType::slash);
+  std::int64_t value = raw * (difference < 0 ? 100 - percent : 100 + percent) / 100;
+  if (value < least) value = least;
+  if (value > cap) value = cap;
+  if (value == 0) return;
+  if (world.rng().between(0, 99) < constants_.training_exp_chance) {
+    if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+      (void)heroes->set_experience(world, by, heroes->experience(by) + 1);
+    }
+  }
+  now_ = now;
+  (void)apply_damage(world, victim, static_cast<std::int32_t>(value), by);
+}
+
 void CombatSystem::advance(World& world, const Turn& turn) {
   events_.clear();
   // The fake towers owed to an outpost or an engine created since the last
@@ -2368,10 +2656,15 @@ void CombatSystem::advance(World& world, const Turn& turn) {
       }
     }
 
+    // **In a world no unit acts here.** A unit fights when a script makes it
+    // (`Attack`, `TrainAttack`), on its animation timer (`begin_attack`), and
+    // a corpse is put down by its own timer; nothing in `gbr.exe` acquires a
+    // target or strikes on a clock of its own. A synthetic roll, with no
+    // world and no scripts, keeps this engine's schedule as its harness.
     bool have_unit = false;
     GameTime unit_when = 0;
     std::size_t unit_index = 0;
-    for (std::size_t i = 0; i < units_.size(); ++i) {
+    for (std::size_t i = 0; i < (world_bound_ ? 0 : units_.size()); ++i) {
       const GameTime t = units_[i].next_action_time;
       if (!units_[i].alive || t <= begin || t > end) continue;
       if (!have_unit || t < unit_when) {
@@ -2959,6 +3252,107 @@ HostOutcome building_attack(CallContext& ctx, CombatSystem& combat, World& world
   return HostOutcome::ok_with(Value::boolean(true));
 }
 
+/// `Unit::Attack`'s ship arm (0x005ddc5a .. 0x005ddcf3): a ship fires as
+/// many shots in ten seconds as its crew allows, one at each call, and the
+/// call suspends between them and answers true at its re-entry.
+///
+/// The window: when ten seconds have passed since it opened, or it lies
+/// ahead, the shots it allows are recomputed (0x005c6930: the units aboard
+/// times 60 over the class's `max_units_to_board`, plus 3, at most 23), it
+/// opens now and nothing is fired in it. A call past the allowance waits
+/// for the window's end. Otherwise the mode becomes 2 through the setter,
+/// the blow is dealt at once (0x005dc650), and the call waits: on every
+/// third shot until that shot's even place in the window, when that lies
+/// ahead, and otherwise a draw on the synchronised generator between a
+/// tenth of the spacing and the spacing, the spacing being ten seconds over
+/// the allowance.
+///
+/// **Labelled:** the original draws an angle for a shot at a ship, and
+/// throws the shot along it (0x005dc7a8); here the shot is the engine's.
+HostOutcome ship_attack(CallContext& ctx, CombatSystem& combat, World& world, ObjectId id,
+                        ObjectId target, GameTime now) {
+  WorldObject* slot = world.find(id);
+  if (slot == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  AnimClock& clock = slot->clock;
+  if (now - clock.ship_window > 9999 || now < clock.ship_window) {
+    const std::int32_t carry = class_int(world, *slot, "max_units_to_board");
+    const std::int64_t aboard = static_cast<std::int64_t>(units_on_board(world, id));
+    std::int64_t shots = (carry > 0 ? aboard * 60 / carry : 0) + 3;
+    if (shots > 23) shots = 23;
+    clock.ship_shots = static_cast<std::int32_t>(shots);
+    clock.ship_window = now;
+    clock.ship_fired = 0;
+  }
+  const auto wait = [](GameTime ms) {
+    HostOutcome out;
+    out.status = script::HostStatus::retry;
+    out.suspend_for = ms > 0 ? ms : 0;
+    return out;
+  };
+  const std::int32_t fired = clock.ship_fired++;
+  if (clock.ship_shots <= fired) return wait(clock.ship_window - now + 10000);
+  const std::int32_t spacing = 10000 / (clock.ship_shots > 0 ? clock.ship_shots : 1);
+  const GameTime window = clock.ship_window;
+  const std::int32_t count = clock.ship_fired;
+  world.set_anim_mode(id, 2);
+  world.settle_anim(id, now);
+  if (const WorldObject* again = world.find(id);
+      again != nullptr && !world.anim_timer_pending(*again)) {
+    anim_end_handler(world, ctx.scheduler, nullptr, id, now);
+  }
+  (void)combat.blow(world, id, target, now);
+  if (count % 3 == 0) {
+    const GameTime next = static_cast<GameTime>(count) * spacing + window;
+    if (now < next) return wait(next - now);
+  }
+  return wait(world.rng().between(spacing / 10, spacing));
+}
+
+/// `Unit::Attack(target)` (0x005ddb50), suspending: one swing. In the
+/// original's order: a receiver that does not resolve answers false (with a
+/// log line there); one off the map answers false. The target's handle is
+/// stored as the unit's target `[unit+0x1a8]`, the attack count `[unit+0x1ac]`
+/// zeroed when it changes, before anything is asked of it. Then the gate
+/// (0x005a78a0): the `CanAttack` virtual and the range (0x005a7800); refused,
+/// the answer is false at once and nothing waits. Accepted, the arguments
+/// stay on the stack as the attack's frame -- the target and the call's word
+/// at 0 -- the action mode is set to 2 through the setter (0x005a7680), and
+/// the call answers 3: the script sleeps until the attack wakes it. The end
+/// handler then swings (`CombatSystem::attack_end`), the action moment deals
+/// the blow (`attack_action`), and the next end pushes the answer -- the blow
+/// landed and the target is alive -- and wakes the script. So one call is
+/// one swing, and `while (.Attack(u));` swings until the target dies or
+/// leaves the range.
+///
+/// A ship has an arm of its own (`ship_attack`).
+HostOutcome unit_attack(CallContext& ctx, CombatSystem& combat, World& world) {
+  const WorldObject* self = world.find(id_of(ctx.arg(0)));
+  if (self == nullptr) return HostOutcome::ok_with(Value::boolean(false));
+  const ObjectId id = self->id;
+  const bool ship = self->object != nullptr && self->object->is_a(NativeClass::ship);
+  if (ship && !ctx.first_call) {
+    // The re-entry, its word still 0: the mode back to 0 and true.
+    world.set_anim_mode(id, 0);
+    return HostOutcome::ok_with(Value::boolean(true));
+  }
+  if (world.resolve_position(id) == kHeldPosition) return HostOutcome::ok_with(Value::boolean(false));
+  const ObjectId named = ctx.count() > 1 ? id_of(ctx.arg(1)) : kNoObject;
+  (void)combat.hand_target(id, named);
+  const ObjectId target = world.find(named) != nullptr ? named : kNoObject;
+  if (target == kNoObject || !combat.can_attack(id, target) || !combat.in_range(id, target)) {
+    return HostOutcome::ok_with(Value::boolean(false));
+  }
+  const GameTime now = ctx.scheduler != nullptr ? ctx.scheduler->now() : world.time();
+  if (ship) return ship_attack(ctx, combat, world, id, target, now);
+  combat.begin_attack(world, ctx.scheduler, id, target, ctx.script, now);
+  HostOutcome out;
+  out.status = script::HostStatus::suspend;
+  // The answer is pushed by the attack when it wakes the script.
+  out.value = Value::boolean(false);
+  out.suspend_for = kAttackNoWake;
+  return out;
+}
+
 HostOutcome host_attack(CallContext& ctx) {
   CombatSystem* combat = system_of(ctx);
   if (combat == nullptr) return HostOutcome::failed(no_system_error(ctx));
@@ -2974,6 +3368,11 @@ HostOutcome host_attack(CallContext& ctx) {
     }
   }
   const ObjectId attacker = id_of(ctx.arg(0));
+  if (World* world = world_of(ctx); world != nullptr && combat->world_bound()) {
+    return unit_attack(ctx, *combat, *world);
+  }
+  // A synthetic roll, with no world and no animation timer: the order, and
+  // the roll's own schedule strikes.
   const bool ok = combat->order_attack(attacker, id_of(ctx.arg(1)));
   if (!ok) return HostOutcome::ok_with(Value::boolean(false));
 
@@ -2995,22 +3394,17 @@ HostOutcome host_can_attack(CallContext& ctx) {
   const Combatant* a = combat->find(id_of(ctx.arg(0)));
   const Combatant* d = combat->find(id_of(ctx.arg(1)));
   if (a == nullptr || d == nullptr) return HostOutcome::ok_with(Value::boolean(false));
-  // `Obj::CanAttack` (0x005ab060) is the receiver's `CanAttack` virtual and
-  // the range test; the virtual is `unit_can_attack`, and the range half is
-  // left out for the reason given there -- it must refuse exactly what
-  // `Attack` refuses, or `RAM_ATTACK.VS`'s `if (!.CanAttack(t)) break;
-  // .Attack(t);` loop spins on a refusal that never suspends.
-  //
-  // Before either, it refuses a dead target and then a dead receiver, each
-  // through the dead virtual (`vtbl+0x50`), with a log line and `false`.
-  // A dying combatant is dead to it: its health is already at zero.
+  // `Obj::CanAttack` (0x005ab060) refuses a dead target and then a dead
+  // receiver, each through the dead virtual (`vtbl+0x50`) with a log line,
+  // and is then the receiver's `CanAttack` virtual and the range band
+  // (0x005a7800) -- the very gate `Attack` passes through (0x005a78a0), so
+  // `RAM_ATTACK.VS`'s `if (!.CanAttack(t)) break; .Attack(t);` never meets
+  // a refusal that does not suspend. A dying combatant is dead to it.
   const auto dead = [&](const Combatant& c) {
     return !combat->is_alive(c.id) || c.action == Action::dying;
   };
   if (dead(*d) || dead(*a)) return HostOutcome::ok_with(Value::boolean(false));
-  const bool ok = combat->profile(a->class_index).can_attack() &&
-                  combat->profile(d->class_index).can_be_attacked && combat->is_enemy(*a, *d) &&
-                  combat->unit_can_attack(*a, *d);
+  const bool ok = combat->can_attack(a->id, d->id) && combat->in_range(a->id, d->id);
   return HostOutcome::ok_with(Value::boolean(ok));
 }
 
@@ -3020,18 +3414,15 @@ HostOutcome host_is_valid_target(CallContext& ctx) {
   const Combatant* a = combat->find(id_of(ctx.arg(0)));
   const Combatant* d = combat->find(id_of(ctx.arg(1)));
   if (a == nullptr || d == nullptr) return HostOutcome::ok_with(Value::boolean(false));
-  const CombatProfile theirs = combat->profile(d->class_index);
   // `Obj::IsValidTarget` (0x005aafd0) is nothing but the receiver's
-  // `CanAttack` virtual, so a swordsman's `MELEE_ATTACK.VS` and
-  // `UNIT_AI_ATTACK_GATE.VS` leave at their first test of a building. An
-  // invalid target answers `false` without a log line, an invalid receiver
-  // with one. It does **not** read the class's `target_factor`: a factor of
-  // -1 keeps an animal out of every target sweep (0x005db650) and out of
-  // `EnemyInRange` (0x004dbea0), but a script that names one gets the
-  // virtual's answer.
-  const bool ok = combat->is_enemy(*a, *d) && combat->is_alive(d->id) && d->health > 0 &&
-                  theirs.can_be_attacked && combat->unit_can_attack(*a, *d);
-  return HostOutcome::ok_with(Value::boolean(ok));
+  // `CanAttack` virtual (`CombatSystem::can_attack`), so a swordsman's
+  // `MELEE_ATTACK.VS` and `UNIT_AI_ATTACK_GATE.VS` leave at their first test
+  // of a building. An invalid target answers `false` without a log line, an
+  // invalid receiver with one. It does **not** read the class's
+  // `target_factor`: a factor of -1 keeps an animal out of every target
+  // sweep (0x005db650) and out of `EnemyInRange` (0x004dbea0), but a script
+  // that names one gets the virtual's answer.
+  return HostOutcome::ok_with(Value::boolean(combat->can_attack(a->id, d->id)));
 }
 
 HostOutcome host_is_enemy(CallContext& ctx) {
@@ -3092,13 +3483,8 @@ HostOutcome host_in_range(CallContext& ctx) {
       return HostOutcome::ok_with(Value::boolean(false));
     }
   }
-  Combatant attacker = *a;
-  Combatant defender = *d;
-  if (World* world = world_of(ctx); world != nullptr && combat->world_bound()) {
-    if (world->state(attacker.id) != nullptr) attacker.position = world->resolve_position(attacker.id);
-    if (world->state(defender.id) != nullptr) defender.position = world->resolve_position(defender.id);
-  }
-  return HostOutcome::ok_with(Value::boolean(combat->in_attack_range(attacker, defender)));
+  // Then 0x005a7800, measured where the two stand now (`in_range`).
+  return HostOutcome::ok_with(Value::boolean(combat->in_range(a->id, d->id)));
 }
 
 /// `SetExperienceModifier(player, percent)` -- 1 site, and one third of what

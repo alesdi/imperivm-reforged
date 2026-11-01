@@ -2066,7 +2066,7 @@ TEST(goto_attack_arrives_exactly_when_the_attack_would_connect) {
   const MoveState* move = movement.find(archer);
   REQUIRE(move != nullptr);
   CHECK(move->range == profile.range + 2 * profile.radius);
-  CHECK(move->min_range == profile.min_range);
+  CHECK(move->min_range == profile.min_range + 2 * profile.radius);
 
   // Walk until it reports true, then check the distance really is inside reach.
   bool arrived = false;

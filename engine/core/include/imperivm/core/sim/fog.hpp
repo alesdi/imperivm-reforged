@@ -215,7 +215,9 @@ class ExplorationMap {
   /// The explored-everywhere flag: 0 from the map's constructor (0x005179d0)
   /// and 1 from `ExploreAll` on; nothing else writes it. `GAIKA::Explored`
   /// reads it (0x0041cb80). The original's `Exploration` persist (0x00517860)
-  /// does not write it; this engine saves it (the fog section).
+  /// does not write it and its load puts it down; neither does this engine's
+  /// save, and the load raises it again only by the game's start
+  /// (`GameSession::load`).
   [[nodiscard]] bool explored_everywhere() const noexcept { return everywhere_; }
   void set_explored_everywhere(bool everywhere) noexcept { everywhere_ = everywhere; }
 

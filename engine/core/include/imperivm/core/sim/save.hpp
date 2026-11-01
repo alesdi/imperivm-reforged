@@ -464,7 +464,14 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// formation its pace and its slowest and fastest units; the turn
 /// accumulator, the hold, the sidestep offsets and the march rate are gone.
 /// A version-59 file walks by the turn, which nothing in this build does.
-inline constexpr std::uint32_t kStateVectorVersion = 60;
+/// 61: an attack is a swing on the animation timer (world version 39,
+/// docs/formats/animation.md, "The attack"): every clock carries the
+/// attack's target and word and a ship's shot window; and the fog section
+/// (system section version 51) no longer carries the explored-everywhere
+/// flag, which the original's save leaves out and its load raises again
+/// only by the game's start. A version-60 file strikes on combat's own
+/// schedule, which nothing in this build does.
+inline constexpr std::uint32_t kStateVectorVersion = 61;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

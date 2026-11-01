@@ -1045,10 +1045,12 @@ def test_an_enemy_sent_into_a_walled_town_is_not_routed_through_its_closed_gates
 
 NUMANTIA = Path("Adventures") / "GreatBattles" / "2_Great_Battles_Numantia.bfhp"
 #: South-east of the Roman camp, across open ground, some 1,700 from the
-#: nearest Iberian building. Staged clear of enemies on purpose: until a strike
-#: runs on the animation timer (mode 2), combat's own schedule starts an attack
-#: animation over a walk step and cuts it mid-way, and the member it cuts is
-#: left on `form_move` -- which is combat's question, not the march's.
+#: nearest Iberian building. Staged clear of enemies on purpose: the test is
+#: the march, and a fight on the way would make it the AI's. (The strike is on
+#: the animation timer now, mode 2, and an attack ordered mid-step waits for
+#: the step's end rather than cutting it -- `engine/tests/test_combat.cpp`,
+#: `an_attack_ordered_mid_step_starts_when_the_step_ends` and
+#: `a_walking_unit_struck_mid_step_walks_on`.)
 NUMANTIA_MARCH = (15600, 13700)
 
 

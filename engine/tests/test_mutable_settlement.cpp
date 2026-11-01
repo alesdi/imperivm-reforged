@@ -534,6 +534,59 @@ TEST(the_setups_rules_scale_the_population_set_the_gold_and_reveal_the_map) {
   CHECK(restored.rules().param == "2000");
 }
 
+/// **The explored-everywhere flag after a load is the original's.** Its save
+/// leaves the flag out (0x00517860) and its load builds a fresh map, flag
+/// down (0x005179d0); the game's start, which the load runs as a new game
+/// does (0x00526200), raises it again for a match with exploration off
+/// (0x00526813). So a flag a script raised during play is gone after a
+/// load, and one the rules raised is back.
+TEST(a_load_raises_the_explored_everywhere_flag_only_by_the_games_start) {
+  const auto options_with = [](bool exploration) {
+    MatchOptions options;
+    options.human = kNoPlayer;
+    options.control_set[0] = true;
+    options.controls[0] = PlayerControl::computer;
+    options.races[0] = static_cast<std::int32_t>(Race::carthage);
+    for (std::size_t i = 1; i < kPlayerCount; ++i) options.races[i] = kNoRace;
+    options.exploration = exploration;
+    return options;
+  };
+  {
+    // Exploration on; a script's `ExploreAll` raised it during play.
+    Bench b;
+    (void)b.session->start_match(options_with(true));
+    FogSystem* fog = fog_system_of(b.session->world());
+    REQUIRE(fog != nullptr);
+    CHECK(!fog->map().explored_everywhere());
+    fog->map().explore_all();
+    REQUIRE(fog->map().explored_everywhere());
+    const auto saved = b.session->save();
+    REQUIRE(saved.ok());
+    Bench again;
+    REQUIRE(again.session->load(saved.value()).ok());
+    const FogSystem* loaded = fog_system_of(again.session->world());
+    REQUIRE(loaded != nullptr);
+    CHECK(!loaded->map().explored_everywhere());
+    // The cells it filled are saved, and come back.
+    CHECK(loaded->map().explored(Point{8000, 8000}, 3));
+  }
+  {
+    // Exploration off: the start raised it, and the load's start does again.
+    Bench b;
+    (void)b.session->start_match(options_with(false));
+    const FogSystem* fog = fog_system_of(b.session->world());
+    REQUIRE(fog != nullptr);
+    REQUIRE(fog->map().explored_everywhere());
+    const auto saved = b.session->save();
+    REQUIRE(saved.ok());
+    Bench again;
+    REQUIRE(again.session->load(saved.value()).ok());
+    const FogSystem* loaded = fog_system_of(again.session->world());
+    REQUIRE(loaded != nullptr);
+    CHECK(loaded->map().explored_everywhere());
+  }
+}
+
 TEST(the_setups_defaults_leave_the_map_as_authored) {
   Bench b;
   b.start();

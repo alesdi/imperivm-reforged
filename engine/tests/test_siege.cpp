@@ -30,6 +30,7 @@
 #include "imperivm/core/sim/squad.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
+#include "fight.hpp"
 #include "test.hpp"
 
 using namespace imperivm::core;
@@ -905,11 +906,12 @@ TEST(a_built_engine_killed_in_combat_dies_and_takes_its_crew) {
   // 30 slash and the engine's 50 radius.
   b.combat.set_class_graph(&b.graph);
   b.combat.start(b.world);
-  REQUIRE(b.combat.order_attack(enemy, engine));
+  REQUIRE(b.combat.can_attack(enemy, engine));
 
   bool struck = false;
   bool died = false;
   for (GameTime spent = 0; spent < 10000 && b.world.find(engine) != nullptr; spent += 100) {
+    (void)imperivm::test::swing(b.world, b.combat, enemy, engine);
     b.world.advance(100);
     for (const CombatEvent& event : b.combat.events()) {
       if (event.kind == CombatEvent::Kind::strike && event.attacker == enemy) struck = true;

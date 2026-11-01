@@ -22,6 +22,7 @@
 #include "imperivm/core/sim/settlement.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
+#include "fight.hpp"
 #include "test.hpp"
 
 using namespace imperivm::core;
@@ -161,8 +162,9 @@ struct Bench {
 TEST(a_swordsman_may_not_attack_a_building_and_leaves_one_whole) {
   Bench b(false);
   const ObjectId sword = b.unit("Swordsman", Point{1000, 1000});
-  // 160 from the centre: inside 17 + 15 + 150, so reach is not what stops him.
-  const ObjectId hall = b.spawn(NativeClass::building, "House", Point{1160, 1000}, kThem, 3000);
+  // 180 from the centre: 15 between the edges, inside his band of 2 to 17,
+  // so reach is not what stops him.
+  const ObjectId hall = b.spawn(NativeClass::building, "House", Point{1180, 1000}, kThem, 3000);
   b.world.start();
   REQUIRE(b.combat.find(hall) != nullptr);
   REQUIRE(b.combat.in_attack_range(*b.combat.find(sword), *b.combat.find(hall)));
@@ -224,13 +226,12 @@ TEST(a_catapult_and_a_ram_damage_a_building) {
   // A ram at a building outside any settlement: the ram's own clause asks for
   // the settlement's centre, and with none `siege` decides.
   const ObjectId ram = b.unit("BRam", Point{2000, 2000});
-  const ObjectId shed = b.spawn(NativeClass::building, "House", Point{2160, 2000}, kThem, 3000);
+  const ObjectId shed = b.spawn(NativeClass::building, "House", Point{2180, 2000}, kThem, 3000);
   b.world.start();
 
   CHECK(b.attack_point(engine, Point{1500, 1000}, 0).status == script::HostStatus::suspend);
   CHECK(b.may(ram, shed));
-  CHECK(b.combat.order_attack(ram, shed));
-  b.run(30);
+  CHECK(imperivm::test::fight(b.world, b.combat, ram, shed, 30) > 0);
   CHECK(b.combat.health(target) < 3000);
   CHECK(b.combat.health(shed) < 3000);
 }

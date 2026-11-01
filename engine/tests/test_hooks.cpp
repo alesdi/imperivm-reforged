@@ -37,6 +37,7 @@
 #include "imperivm/core/sim/settlement.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
+#include "fight.hpp"
 #include "test.hpp"
 
 using namespace imperivm::core::sim;
@@ -646,10 +647,13 @@ TEST(a_killing_blow_runs_the_killers_onkill_with_the_victim) {
   Fixture f;
   REQUIRE(f.session != nullptr);
 
-  REQUIRE(f.combat().order_attack(kWarrior, kHastatus));
-  // Long enough for the swings to land: 200 health against 80 damage a blow.
-  // Both fight back, and the harder hitter is the one still standing.
-  f.session->advance(40, 400);
+  REQUIRE(f.combat().can_attack(kWarrior, kHastatus));
+  // Long enough for the swings to land: 200 health against 80 damage a blow,
+  // `Attack` called again at each turn's head (`fight.hpp`).
+  for (int i = 0; i < 40; ++i) {
+    (void)imperivm::test::swing(f.world(), f.combat(), kWarrior, kHastatus);
+    f.session->advance(1, 400);
+  }
 
   CHECK(!f.combat().is_alive(kHastatus));
   CHECK(f.combat().is_alive(kWarrior));
@@ -980,12 +984,16 @@ TEST(onenter_runs_inside_the_call_that_garrisons_the_unit) {
 }
 
 TEST(onkill_runs_inside_the_turn_that_lands_the_blow) {
-  // And `0x0059b1c0` likewise: the killer's hook has run when the systems
-  // hand back, with no scheduler pass at all -- only the world is advanced.
+  // And `0x0059b1c0` likewise: the killer's hook has run by the end of the
+  // turn whose swing landed the blow -- the swing's action moment, on the
+  // animation timer the scheduler's pass fires.
   Fixture f;
   REQUIRE(f.session != nullptr);
-  REQUIRE(f.combat().order_attack(kWarrior, kHastatus));
-  for (int i = 0; i < 40 && f.combat().is_alive(kHastatus); ++i) f.world().advance(400);
+  REQUIRE(f.combat().can_attack(kWarrior, kHastatus));
+  for (int i = 0; i < 40 && f.combat().is_alive(kHastatus); ++i) {
+    (void)imperivm::test::swing(f.world(), f.combat(), kWarrior, kHastatus);
+    f.session->advance(1, 400);
+  }
   REQUIRE(!f.combat().is_alive(kHastatus));
   CHECK(env_int(f.world(), "killed") == 1);
   CHECK(env_int(f.world(), "killerplayer") == kWarriorPlayer);

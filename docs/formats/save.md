@@ -336,6 +336,17 @@ envelope.
       u8    clock.play_started  PlayAnim's animation has started (0 or 1).
       u32   clock.waiter     The script the activity wakes, or 0. Saved, not
                              hashed (a script id).
+      -- version 39: the attack (docs/formats/animation.md, "The attack") --
+      u32   clock.attack_target  The attack's target, the handle the original
+                             keeps in the command thread's frame, or 0.
+      i32   clock.attack_word  The attack's word: 0 before the blow, 1 for a
+                             blow dealt, 2 for none, 3 for a blow owed where
+                             no swing could be played (the labelled departure).
+      i32   clock.ship_shots  A ship's shots for its ten-second window
+                             ([ship+0x234]).
+      i64   clock.ship_window When that window opened ([ship+0x238]).
+      i32   clock.ship_fired  The shots fired in it ([ship+0x23c]). All five
+                             are hashed.
       -- only when native_class != 0xFF --
       i32   anim.state_idx
       i32   anim.anim_slot
@@ -618,7 +629,7 @@ the map identity, the system run order.
 | `ai` | the sixteen per-player rows, each with its node view, its `AIRun` ids 3..51 and its own per-settlement economy/tactic bindings, then the AI-helper name→script table (whose AI a thread is, is the thread's context, in the `scripts` section) | the profile table, whose entries hold borrowed `const AiProfile*` |
 | `campaign` | `CampaignProgress`, applied through `CampaignSystem::restore` so a save from a different conquest is refused; the note board (nested `NOTS`); the conversation results (nested `CRES`) | the territory id and bonus tables, from `configure(ConquestMap)`; the note catalogue and the conversation catalogue, both rebuilt from the container |
 | `areas` | the area table | nothing — but see below |
-| `fog` | the explored-everywhere flag `ExploreAll` raises (`u8`, 0 or 1; section version 49, state vector 57: the original's `Exploration` persist, 0x00517860, leaves it out, so a game the original loads forgets it; kept here so a loaded game goes on as the saved one would), then the explored map as the original packs it: one `u16` per 1024-unit cell, two bits per player for eight players, then the partially explored cells' fine records — slot, cell index, and 32 × 32 nibbles packed two to a byte — in slot order and cell order | the grid's size, which `start` takes from the match's map extent, and the "already stamped" table the sweep keeps — but the *contents* are saved, see below |
+| `fog` | the explored map as the original packs it: one `u16` per 1024-unit cell, two bits per player for eight players, then the partially explored cells' fine records — slot, cell index, and 32 × 32 nibbles packed two to a byte — in slot order and cell order | the grid's size, which `start` takes from the match's map extent, the "already stamped" table the sweep keeps — but the *contents* are saved, see below — and the explored-everywhere flag `ExploreAll` raises (`[map+0xf0]`). The original's `Exploration` persist (0x00517860) writes the side and the grid and not the flag, and its load builds a fresh map, flag down (0x005179d0); the game's start, which its load runs as a new game does (0x00526200), raises it again, with every cell, for a match with exploration off (0x00526813). This load does the same (`GameSession::load`), so a flag raised during play — a script's `ExploreAll`, a match's end with no human left — is forgotten, as the original forgets it. Section version 51, state vector 61, which dropped the byte section version 49 had added |
 
 Two of those rows need their reasons stated rather than tabulated.
 
