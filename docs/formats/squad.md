@@ -302,11 +302,6 @@ copy, and `CreateShip` while it places its ship.
 
 What still differs, each for what this engine cannot yet do:
 
-* **When a walk crosses a slot.** The original moves the unit to the end of
-  a step as the step begins; this engine walks a unit continuously and
-  writes its position at each step's decision and at the turn's end
-  (`MovementSystem::set_position`, which writes only a position that
-  changed), so a crossing is seen at those writes, up to a step later.
 * **The visibility sweep** runs on every node once a turn
   (`AiSystem::advance`), not on the two nodes of a crossing.
 * **A unit counted and in no squad** is filed towards the node under it at

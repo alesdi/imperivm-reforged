@@ -1020,20 +1020,21 @@ TEST(save_movement_section_round_trips) {
   first.target_object = b;
   first.has_path = true;
   first.goto_active = true;
-  // The walk-cycle memory: left out of the section once, and a loaded session
-  // replayed every moving unit's walk from step zero on its first turn.
-  first.walking = true;
-  first.progress = 123456789;
   // `Goto`'s failure stamp: the give-up and the re-search draw read it.
   first.goto_failed_at = 31337;
-  first.waypoints = {Point{10, 20}, Point{30, 40}, Point{900, 400}};
+  // The sampled route part stepped: a load that laid it again would step
+  // from its start.
+  formation_route_lay(first.route, {Point{10, 20}, Point{30, 40}, Point{900, 400}}, true, 40);
+  Point next;
+  REQUIRE(formation_route_step(first.route, next));
+  formation_route_commit(first.route);
   first.path_length = 4242;
-  first.path_generation = 7;
   first.path_complete = true;
   first.last_outcome = MoveOutcome::moving;
-  // The pace a march gives the unit: without it a loaded army walks at its
-  // own speeds, the hero out ahead of it, until he next lays the stations.
-  first.march_rate = 6900;
+  // The march step's deadline and mark, and the waiting call's bit.
+  first.form_deadline = 6900;
+  first.arrived_mark = true;
+  first.wake_on_arrival = true;
   movement.state(b).facing = Point{-1, 0};
 
   MovementSystem fresh;
@@ -1045,20 +1046,22 @@ TEST(save_movement_section_round_trips) {
   REQUIRE(restored != nullptr);
   CHECK(restored->speed == 220);
   CHECK(restored->target_object == b);
-  CHECK(restored->progress == 123456789);
-  CHECK(restored->walking);
-  CHECK(!fresh.find(b)->walking);
   CHECK(restored->goto_failed_at == 31337);
   CHECK(fresh.find(b)->goto_failed_at == kNoGotoFailure);
-  CHECK(restored->march_rate == 6900);
-  CHECK(restored->rate() == 6900);
-  CHECK(fresh.find(b)->march_rate == 0);
+  CHECK(restored->form_deadline == 6900);
+  CHECK(restored->arrived_mark);
+  CHECK(restored->wake_on_arrival);
+  CHECK(!fresh.find(b)->wake_on_arrival);
+  CHECK(restored->route.stride == 40);
+  CHECK(restored->route.step == movement.find(a)->route.step);
+  CHECK(restored->route.remaining == movement.find(a)->route.remaining);
+  CHECK(restored->route.step == 1);
   // The route is not hashed -- `pathfinder` is zero in all nine dumps -- and is
   // written anyway, because a route is not recomputable from the state around
   // it. A unit that came back with an empty path would silently stop.
-  REQUIRE(restored->waypoints.size() == 3);
-  CHECK((restored->waypoints[2] == Point{900, 400}));
-  CHECK(restored->path_generation == 7);
+  REQUIRE(restored->route.points.size() == 3);
+  CHECK((restored->route.points[2] == Point{900, 400}));
+  CHECK(restored->path_length == 4242);
   CHECK(fresh.tracked() == 2);
 }
 

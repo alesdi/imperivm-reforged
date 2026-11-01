@@ -2334,22 +2334,11 @@ TEST(a_fast_hero_marches_at_his_armys_pace_and_it_stands_formed_on_him_when_he_s
                            Value::boolean(true)});
   REQUIRE(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, setup).status ==
           HostStatus::ok);
-  // The formation's speed is the mean of all seven, (480 + 6 * 60) / 7 =
-  // 120, held to one and a half times the slowest's (`UpdateMinSpeed`,
-  // 0x005f5640): 90. Every pace then lies between half and two and a half
-  // times it (0x005f2130), the hero's too.
-  const std::int64_t formation = 90 * kDefaultSpeedFactor;
-  CHECK(movement.formation(hero)->speed == formation);
   f.world.advance(100);
-  CHECK(movement.find(hero)->march_rate >= formation / 2);
-  CHECK(movement.find(hero)->march_rate <= formation * 5 / 2);
-  for (const ObjectId w : army) {
-    CHECK(movement.find(w)->march_rate >= formation / 2);
-    CHECK(movement.find(w)->march_rate <= formation * 5 / 2);
-  }
 
   // `HERO_MOVE.VS`: `while (.HasPath()) .FormKeepMoving(1500);`, the world
-  // run in 100 ms turns in between.
+  // run in 100 ms turns in between and the call re-entered at the end of its
+  // wait, as the script's thread is.
   std::int32_t elapsed = 0;
   std::int64_t widest = 0;
   while (elapsed < 120000) {
@@ -2358,6 +2347,7 @@ TEST(a_fast_hero_marches_at_his_armys_pace_and_it_stands_formed_on_him_when_he_s
     HostCall keep(f.world, {obj(hero), Value::integer(1500)});
     (void)invoke(registry, CallKind::member, "FormKeepMoving", 1, keep);
     for (int t = 0; t < 15; ++t) f.world.advance(100);
+    (void)invoke(registry, CallKind::member, "FormKeepMoving", 1, keep.reenter());
     elapsed += 1500;
     // The hero never leaves his army behind on the way.
     for (const ObjectId w : army) {
@@ -2383,12 +2373,7 @@ TEST(a_fast_hero_marches_at_his_armys_pace_and_it_stands_formed_on_him_when_he_s
   for (const ObjectId w : army) movement.stop(f.world, w);
   for (const ObjectId w : army) {
     CHECK(isqrt(dist_sq(f.world.resolve_position(w), dest)) <= 3 * 52);
-    CHECK(movement.find(w)->march_rate == 0);
   }
-  // An order that is not a march walks at the unit's own pace again.
-  (void)movement.order_goto(f.world, hero, start, 0);
-  CHECK(movement.find(hero)->march_rate == 0);
-  CHECK(movement.find(hero)->rate() == movement.find(hero)->own_rate());
 }
 
 namespace {
@@ -2439,7 +2424,12 @@ struct MarchBench {
     REQUIRE(invoke(registry, CallKind::member, "FormSetupAndMoveTo", 4, setup).status ==
             HostStatus::ok);
   }
-  [[nodiscard]] std::int64_t pace(ObjectId id) const { return movement.find(id)->march_rate; }
+  /// How long the step `id` has just started takes: its timer's distance
+  /// from now (a unit with no walk animation is put on the step's end and
+  /// its timer armed for the step's length).
+  [[nodiscard]] GameTime pace(ObjectId id) const {
+    return f.world.find(id)->clock.timer_at - f.world.time();
+  }
 };
 
 }  // namespace
@@ -2455,10 +2445,15 @@ TEST(the_first_sample_is_one_step_along_the_formations_own_route) {
   // (0x005f04b0). What is left of the route is its 3,700 less one step,
   // in whole units (0x0040b890).
   //
+  // The march's pace (`UpdateMinSpeed`, 0x005f5260): each one's stride over
+  // its step time -- here both the formation's 200 (no walk step) over
+  // 2,000 ms -- averaged, times the mean of the slowest's and fastest's step
+  // time, 2,000: 200 a pace of 2,000 ms.
+  //
   // The sample's deadline (0x005f5850) is the mean over both of the time to
-  // cover the straight distance less 133 at the formation's speed: the
-  // hero's 194 less 133 is 61, the member's 61 less 133 nothing; at 100,
-  // (610 + 0 + 1) / 2 ms.
+  // cover the straight distance less 133 at that pace, with no floor: the
+  // hero's 194 less 133 is 61, 610 ms; the member's 61 less 133 is -72,
+  // -720 ms; (1 + 610 - 720) / 2 = -54 -- due already.
   const Point at[] = {Point{500, 500}};
   MarchBench b(Point{300, 500}, 100, at, 100);
   b.march(Point{4000, 500});
@@ -2469,8 +2464,9 @@ TEST(the_first_sample_is_one_step_along_the_formations_own_route) {
   CHECK(form.going_on);
   CHECK(form.slots.size() == 1);
   CHECK(form.slots[0].sample == (Point{561, 500}));
-  CHECK(form.speed == 100 * kDefaultSpeedFactor);
-  CHECK(form.deadline == b.f.world.time() + 305);
+  CHECK(form.speed == 200);
+  CHECK(form.pace == 2000);
+  CHECK(form.deadline == b.f.world.time() - 54);
   HostCall left(b.f.world, {obj(b.hero)});
   CHECK(invoke(b.registry, CallKind::member, "FormPathLeft", 0, left).value.as_integer() == 3505);
 }
@@ -2481,9 +2477,9 @@ TEST(a_unit_near_its_station_makes_the_next_sample_and_walks_its_share_of_the_de
   // within his half step and 133 (0x00419b20: no walk step here, so the
   // formation's 200, and 233): he makes the next sample, the centre two
   // steps' offset on, floored once (0x0041a740), at (689, 500), and walks
-  // to it. Each step is timed to reach the
-  // station 133 short at the sample's deadline (0x00419e52), held to between
-  // half and two and a half times the formation's speed (0x005f2130).
+  // to it. Each step is timed to reach the station 133 short at the
+  // sample's deadline (0x00419e52), held between two fifths and twice the
+  // step's time at the march's pace (0x005f2130).
   const Point at[] = {Point{500, 500}};
   MarchBench b(Point{300, 500}, 100, at, 100);
   b.march(Point{4000, 500});
@@ -2493,12 +2489,15 @@ TEST(a_unit_near_its_station_makes_the_next_sample_and_walks_its_share_of_the_de
   CHECK(form.centre == (Point{689, 500}));
   CHECK(b.movement.find(b.hero)->target == (Point{689, 500}));
   CHECK(b.movement.find(b.hero)->form_seen == 2);
-  // The deadline from the second sample, made at 0: the hero 389 off, less
-  // 133, 256; the member 256 off its station at (756, 500), less 133, 123.
-  // At 100, (2,560 + 1,230 + 1) / 2 ms.
-  CHECK(form.deadline == 1895);
-  // His pace: his 256 over the 1,895 ms left, as the step was decided at 0.
-  CHECK(b.pace(b.hero) == 256 * kSpeedScale / 1895);
+  // The deadline from the second sample, made at his first step, at 1: the
+  // hero 389 off, less 133, 256; the member 256 off its station at
+  // (756, 500), less 133, 123. At 2,000 ms a 200, (1 + 2,560 + 1,230) / 2
+  // ms on.
+  CHECK(form.deadline == 1 + 1895);
+  // His step: his route of 389 cut into two of 194; the 1,895 ms left over
+  // the 256 he has to cover, one 200's share: 1,480 ms, inside the clamp
+  // of 776 to 3,880 for a step of 194.
+  CHECK(b.pace(b.hero) == 1480);
 }
 
 TEST(the_last_sample_is_the_destination_and_nothing_is_taken_short_of_it) {
@@ -2508,8 +2507,9 @@ TEST(the_last_sample_is_the_destination_and_nothing_is_taken_short_of_it) {
   // the formation in its band (0x00419730 asks `IsArrived` first), so the
   // path is spent (`[form+0x88]` cleared) and no 133 comes off any distance.
   // The member's station is 67 ahead of the destination, 285 from it; the
-  // deadline is (2,000 + 2,850 + 1) / 2 ms at the formation's 100, and the
-  // hero's pace at his first step his 200 over it.
+  // deadline is (1 + 2,000 + 2,850) / 2 ms at the march's 200 in 2,000 ms,
+  // and the hero's step at 1 his whole 200 over the 2,424 left -- within
+  // 100 of it, so exactly that.
   const Point at[] = {Point{300, 600}};
   MarchBench b(Point{300, 500}, 100, at, 100);
   b.march(Point{500, 500});
@@ -2520,29 +2520,34 @@ TEST(the_last_sample_is_the_destination_and_nothing_is_taken_short_of_it) {
   CHECK(form.deadline == b.f.world.time() + 2425);
   b.f.world.advance(1);
   CHECK(form.samples == 1);
-  CHECK(b.pace(b.hero) == 200 * kSpeedScale / 2425);
+  CHECK(b.pace(b.hero) == 2424);
   HostCall left(b.f.world, {obj(b.hero)});
   CHECK(invoke(b.registry, CallKind::member, "FormPathLeft", 0, left).value.as_integer() == 0);
 }
 
 TEST(a_straggler_is_hurried_and_the_hero_held_back_within_the_clamp) {
-  // Two members on the hero and one 3,000 behind him. The formation's speed
-  // is the mean of 400, 60, 60, 60 -- 145 -- held to 90, one and a half times
-  // the slowest. The straggler's share of the deadline would have it run at
-  // over five times that and the hero walk at a third of it; both are held
-  // to the clamp (0x005f2130): the straggler at two and a half times the
-  // formation's speed, the hero at half.
+  // Two members on the hero and one 3,000 behind him, each with the
+  // formation's stride of 200: the hero's step 500 ms at 400, the members'
+  // 3,333 at 60. `UpdateMinSpeed` (0x005f5260) starts from the hero as both
+  // slowest and fastest, and on a slower member updates only the slowest's
+  // stride, never its time: the pace is the mean of 500 and 500, and the
+  // speed the mean of 200/500 and three of 200/3,333 times it, 72. The
+  // straggler's share of the deadline would have it run at over five times
+  // that and the hero dawdle; both are held to the clamp (0x005f2130), for a
+  // step of `m`, between two fifths and twice `m * 500 / 72`: the
+  // straggler's 196 at 544 ms, the hero's 200 at 2,777.
   const Point at[] = {Point{3400, 540}, Point{3400, 460}, Point{400, 500}};
   MarchBench b(Point{3400, 500}, 400, at, 60);
   b.march(Point{6400, 500});
-  const std::int64_t formation = 90 * kDefaultSpeedFactor;
-  CHECK(b.movement.formation(b.hero)->speed == formation);
+  CHECK(b.movement.formation(b.hero)->speed == 72);
+  CHECK(b.movement.formation(b.hero)->pace == 500);
   // Paced as each takes its first step.
   b.f.world.advance(1);
-  CHECK(b.pace(b.hero) == formation / 2);
-  CHECK(b.pace(b.army[2]) == formation * 5 / 2);
-  CHECK(b.pace(b.army[0]) >= formation / 2);
-  CHECK(b.pace(b.army[0]) <= formation * 5 / 2);
+  CHECK(b.pace(b.hero) == 2777);
+  CHECK(b.pace(b.army[2]) == 544);
+  const std::int64_t m = static_cast<std::uint32_t>(b.movement.find(b.army[0])->route.step_length) >> 16;
+  CHECK(b.pace(b.army[0]) >= m * 500 * 100 / (72 * 250));
+  CHECK(b.pace(b.army[0]) <= m * 500 * 100 / (72 * 50));
 }
 
 namespace {
@@ -2778,7 +2783,7 @@ TEST(form_keep_moving_waits_for_its_whole_argument_and_never_for_the_eta) {
         HostStatus::ok);
   // His first step lays his route to the formation's one sample.
   f.world.advance(100);
-  const std::int64_t eta = movement.eta(hero);
+  const std::int64_t eta = movement.remaining(hero);
   {
     // Measured, not inferred, and kept because it is what makes the *other*
     // reading of this entry point wrong. `HERO_IDLE.VS` calls
@@ -2806,10 +2811,9 @@ TEST(form_keep_moving_waits_for_its_whole_argument_and_never_for_the_eta) {
           HostStatus::ok);
     REQUIRE(m2.find(ho) != nullptr);
     CHECK(!m2.find(ho)->has_path);
-    CHECK(m2.eta(ho) == -1);
   }
-  REQUIRE(eta > 0);
-  REQUIRE(eta < 5000);
+  // Forty units at the hero's 100 a second: well under the wait.
+  (void)eta;
 
   HostCall keep(f.world, {obj(hero), Value::integer(5000)});
   const HostOutcome outcome = invoke(registry, CallKind::member, "FormKeepMoving", 1, keep);

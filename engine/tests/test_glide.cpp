@@ -53,12 +53,19 @@ constexpr std::string_view kEntityXml = R"(<?xml version="1.0"?>
 </entity>)";
 
 /// An open field and a unit walking east across it at 100 units a second.
+/// With no entity it has no walk animation, so it is put on each step's end
+/// at once (departure 1 in `sim/movement.hpp`): steps of the formation's
+/// 200, each 2,000 ms, the first taken at 1 ms. Given the entity, its walk is
+/// slot 1 and each step is that animation with an origin.
 struct Walk {
   World world;
   MovementSystem movement;
   ObjectId unit = kNoObject;
+  const Entity* entity = nullptr;
 
-  explicit Walk(Point from = pt(100, 100), Point to = pt(1500, 100)) {
+  explicit Walk(Point from = pt(100, 100), Point to = pt(1500, 100),
+                const Entity* walker = nullptr)
+      : entity(walker) {
     movement.set_grid(ObstructionGrid(128, 128));
     REQUIRE(world.add_system(&movement));
     world.start();
@@ -67,9 +74,12 @@ struct Walk {
   }
 
   ObjectId spawn(Point at) {
-    const ObjectId id = world.spawn(NativeClass::unit, nullptr);
+    const ObjectId id = world.spawn(NativeClass::unit, entity);
     (void)world.set_position(id, at);
+    // Alive: the timer's handler puts a dead unit down (0x005d5b75).
+    (void)world.set_health(id, 100);
     movement.state(id).speed = 100;
+    if (entity != nullptr) movement.state(id).walk_anim = 1;
     return id;
   }
 
@@ -78,11 +88,13 @@ struct Walk {
 
 }  // namespace
 
-/// A walking unit is drawn on the straight line between where it stood at the
-/// turn end before and where it stands now, by the drawn instant's place
-/// between the two -- the original's anchor, run by its clock.
-TEST(glide_draws_a_walking_unit_between_its_two_turn_ends) {
-  Walk w;
+/// A walk step is an animation with an origin, and the view draws it where
+/// that animation has it at the drawn instant (0x0053d830): from the point
+/// it came from to the step's end by the clock's place in the step.
+TEST(glide_draws_a_walk_step_where_its_animation_has_it) {
+  Result<Entity> entity = Entity::parse(bytes_of(kEntityXml));
+  REQUIRE(entity.ok());
+  Walk w(pt(100, 100), pt(1500, 100), &entity.value());
   TurnGlide glide;
   glide.observe(w.world);
   // No turn end before the first one seen: drawn where it is.
@@ -90,36 +102,55 @@ TEST(glide_draws_a_walking_unit_between_its_two_turn_ends) {
 
   w.world.advance(400);
   glide.observe(w.world);
-  REQUIRE(w.world.resolve_position(w.unit) == pt(140, 100));
-  CHECK(glide.since() == 0);
+  // The first step, 1,400 cut into seven of 200, started at 1 for 2,000 ms:
+  // the object stands on its end.
+  REQUIRE(w.world.resolve_position(w.unit) == pt(300, 100));
   CHECK(glide.position(w.world, w.slot(w.unit), 0) == pt(100, 100));
-  CHECK(glide.position(w.world, w.slot(w.unit), 100) == pt(110, 100));
-  CHECK(glide.position(w.world, w.slot(w.unit), 200) == pt(120, 100));
-  CHECK(glide.position(w.world, w.slot(w.unit), 399) == pt(139, 100));
-  CHECK(glide.position(w.world, w.slot(w.unit), 400) == pt(140, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 1) == pt(100, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 201) == pt(120, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 400) == pt(139, 100));
   // Outside the window: held to its ends.
-  CHECK(glide.position(w.world, w.slot(w.unit), -50) == pt(100, 100));
-  CHECK(glide.position(w.world, w.slot(w.unit), 900) == pt(140, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 900) == pt(139, 100));
 
-  // Observing again without a turn changes nothing.
+  // The next step begins at 2,001: before it, the first one's end.
+  w.world.advance(1600);
   glide.observe(w.world);
-  CHECK(glide.position(w.world, w.slot(w.unit), 200) == pt(120, 100));
-
-  // The next turn is an 800: the window is that turn's.
-  w.world.advance(800);
-  glide.observe(w.world);
-  REQUIRE(w.world.resolve_position(w.unit) == pt(220, 100));
-  CHECK(glide.since() == 400);
-  CHECK(glide.position(w.world, w.slot(w.unit), 800) == pt(180, 100));
-  CHECK(glide.position(w.world, w.slot(w.unit), 1200) == pt(220, 100));
-
-  // A slow frame that saw two turns run glides across both.
+  CHECK(glide.position(w.world, w.slot(w.unit), 2000) == pt(299, 100));
   w.world.advance(400);
+  glide.observe(w.world);
+  REQUIRE(w.world.resolve_position(w.unit) == pt(500, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 2000) == pt(300, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 2201) == pt(320, 100));
+}
+
+/// A unit with no walk animation is put on each step's end at once; the view
+/// draws it on the straight line between where it stood at the turn end
+/// before and where it stands now, by the drawn instant's place between the
+/// two.
+TEST(glide_draws_a_unit_with_no_walk_animation_between_its_two_turn_ends) {
+  Walk w;
+  TurnGlide glide;
+  glide.observe(w.world);
   w.world.advance(400);
   glide.observe(w.world);
   REQUIRE(w.world.resolve_position(w.unit) == pt(300, 100));
-  CHECK(glide.since() == 1200);
-  CHECK(glide.position(w.world, w.slot(w.unit), 1600) == pt(260, 100));
+  CHECK(glide.since() == 0);
+  CHECK(glide.position(w.world, w.slot(w.unit), 0) == pt(100, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 200) == pt(200, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 400) == pt(300, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), -50) == pt(100, 100));
+
+  // Observing again without a turn changes nothing.
+  glide.observe(w.world);
+  CHECK(glide.position(w.world, w.slot(w.unit), 200) == pt(200, 100));
+
+  // A slow frame that saw several turns run glides across them all.
+  w.world.advance(1000);
+  w.world.advance(1000);
+  glide.observe(w.world);
+  REQUIRE(w.world.resolve_position(w.unit) == pt(500, 100));
+  CHECK(glide.since() == 400);
+  CHECK(glide.position(w.world, w.slot(w.unit), 1400) == pt(400, 100));
 }
 
 /// Nothing glides that did not walk: a unit put down somewhere is drawn there
@@ -128,7 +159,7 @@ TEST(glide_leaves_a_unit_that_did_not_walk_where_it_is) {
   Walk w;
   const ObjectId still = w.spawn(pt(500, 500));
   // And one that goes further in a turn than any walk does: two units a
-  // millisecond is twice `kGlideMaxSpeed`.
+  // millisecond is twice `kGlideMaxSpeed`. Its steps of 200 take 100 ms.
   const ObjectId fast = w.spawn(pt(100, 300));
   w.movement.state(fast).speed = 2000;
   REQUIRE(w.movement.order_goto(w.world, fast, pt(1900, 300), 0) == MoveOutcome::moving);
@@ -144,21 +175,22 @@ TEST(glide_leaves_a_unit_that_did_not_walk_where_it_is) {
   CHECK(!w.slot(still).state.flags.has_active_path);
   CHECK(glide.position(w.world, w.slot(still), 400) == pt(520, 500));
   CHECK(glide.position(w.world, w.slot(still), 600) == pt(520, 500));
-  // The walker beside it glides.
-  CHECK(glide.position(w.world, w.slot(w.unit), 600) == pt(160, 100));
   // The fast one jumps, route or no route.
   REQUIRE(w.slot(fast).state.flags.has_active_path);
   REQUIRE(w.world.resolve_position(fast) == pt(1700, 300));
   CHECK(glide.position(w.world, w.slot(fast), 600) == pt(1700, 300));
 
   // Moved after the turn ended -- the editor's drag, five units on -- it is
-  // where the world says, not on its way from the turn before.
+  // where the world says, not on its way from the turn before. The walker's
+  // second step began at 2,001.
+  w.world.advance(1200);
+  glide.observe(w.world);
   w.world.advance(400);
   glide.observe(w.world);
-  REQUIRE(w.world.resolve_position(w.unit) == pt(220, 100));
-  CHECK(glide.position(w.world, w.slot(w.unit), 1000) == pt(200, 100));
-  (void)w.world.set_position(w.unit, pt(225, 100));
-  CHECK(glide.position(w.world, w.slot(w.unit), 1000) == pt(225, 100));
+  REQUIRE(w.world.resolve_position(w.unit) == pt(500, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 2200) == pt(400, 100));
+  (void)w.world.set_position(w.unit, pt(505, 100));
+  CHECK(glide.position(w.world, w.slot(w.unit), 2200) == pt(505, 100));
 }
 
 /// A glide is between two turn ends of one world. A world seen for the first
@@ -170,23 +202,23 @@ TEST(glide_forgets_a_turn_end_of_another_world_or_an_earlier_clock) {
   glide.observe(a.world);
   a.world.advance(400);
   glide.observe(a.world);
-  CHECK(glide.position(a.world, a.slot(a.unit), 200) == pt(120, 100));
+  CHECK(glide.position(a.world, a.slot(a.unit), 200) == pt(200, 100));
 
   Walk b(pt(100, 100), pt(100, 1500));
-  b.world.advance(400);
-  b.world.advance(400);
+  b.world.advance(1000);
+  b.world.advance(1000);
   glide.observe(b.world);
   CHECK(glide.since() == b.world.time());
-  CHECK(glide.position(b.world, b.slot(b.unit), 600) == b.world.resolve_position(b.unit));
+  CHECK(glide.position(b.world, b.slot(b.unit), 1600) == b.world.resolve_position(b.unit));
   // And a world it no longer watches is drawn as it stands.
-  CHECK(glide.position(a.world, a.slot(a.unit), 200) == pt(140, 100));
+  CHECK(glide.position(a.world, a.slot(a.unit), 200) == pt(300, 100));
 
   b.world.advance(400);
   glide.observe(b.world);
-  CHECK(glide.position(b.world, b.slot(b.unit), 1000) == pt(100, 200));
+  CHECK(glide.position(b.world, b.slot(b.unit), 2200) == pt(100, 400));
 
   glide.reset();
-  CHECK(glide.position(b.world, b.slot(b.unit), 1000) == pt(100, 220));
+  CHECK(glide.position(b.world, b.slot(b.unit), 2200) == pt(100, 500));
 }
 
 /// An animation's clock is carried on from the turn end before to the drawn
@@ -346,36 +378,24 @@ TEST(glide_flies_a_replaced_leg_to_its_end) {
   CHECK(drawn_at(500) == pt(400, 200));
 }
 
-/// A walk begun at the turn's end on a unit that already moved inside it --
-/// `play_locomotion` runs after the unit has moved -- is drawn on its first
-/// frame across that turn, not with what the unit stood playing before it set
-/// off: the glide is walking it, and a standing pose would slide.
-TEST(glide_walks_a_unit_that_set_off_inside_the_turn_on_its_walk) {
+/// A walk begun inside the turn is drawn on its step from the instant it
+/// began, and where the unit stood before then.
+TEST(glide_walks_a_unit_that_set_off_inside_the_turn_on_its_step) {
   Result<Entity> entity = Entity::parse(bytes_of(kEntityXml));
   REQUIRE(entity.ok());
-  MovementSystem movement;
-  movement.set_grid(ObstructionGrid(128, 128));
-  World world;
-  REQUIRE(world.add_system(&movement));
-  world.start();
-  const ObjectId id = world.spawn(NativeClass::unit, &entity.value());
-  (void)world.set_position(id, pt(100, 100));
-  movement.state(id).speed = 100;
-  REQUIRE(world.play_anim(id, 1, AnimRepeat::hold));  // standing, 50 ms into something
-
+  Walk w(pt(100, 100), pt(1500, 100), &entity.value());
+  const ObjectId id = w.spawn(pt(100, 300));
   TurnGlide glide;
-  world.advance(50);
-  glide.observe(world);
-  REQUIRE(movement.order_goto(world, id, pt(1500, 100), 0) == MoveOutcome::moving);
-  world.advance(200);
-  glide.observe(world);
-  const WorldObject& slot = *world.find(id);
-  REQUIRE(slot.state.position != pt(100, 100));
-  REQUIRE(slot.object->anim.elapsed_ms == 0);  // the walk, started at the turn's end
-  const TurnGlide::Anim drawn = glide.anim(world, slot, 150);
-  CHECK(!drawn.earlier);
-  CHECK(drawn.elapsed == 0);
-  CHECK(glide.position(world, slot, 150) != pt(100, 100));
+  w.world.advance(50);
+  glide.observe(w.world);
+  REQUIRE(w.movement.order_goto(w.world, id, pt(1500, 300), 0) == MoveOutcome::moving);
+  w.world.advance(200);
+  glide.observe(w.world);
+  const WorldObject& slot = w.slot(id);
+  REQUIRE(slot.state.position == pt(300, 300));
+  REQUIRE(slot.clock.main_start == 51);
+  CHECK(glide.position(w.world, slot, 50) == pt(100, 300));
+  CHECK(glide.position(w.world, slot, 151) == pt(110, 300));
 }
 
 /// Presentation: observing a world and asking where things are drawn reads it

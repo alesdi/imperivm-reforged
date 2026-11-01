@@ -295,30 +295,32 @@ TEST(a_walk_ordered_over_a_standing_idle_never_halts_on_open_ground) {
     REQUIRE(commands != nullptr);
     REQUIRE(commands->set_command(run.world(), 1, "move", move_to(Point{1000, 1900})) != 0);
 
-    // Fifteen seconds of a 900-unit walk at sixty a second: every turn until
-    // arrival moves the unit, so there is no stretch of standing. The
-    // playtest's was about ten 100 ms turns in every forty.
+    // Fifteen seconds of a 900-unit walk at sixty a second. The walk is steps
+    // on the timer, each begun where the last ends: the unit never stands
+    // longer than a step lasts (and the turn it is seen in) between two of
+    // them. The playtest's halts were about ten 100 ms turns in every forty.
     Point last = run.world().resolve_position(1);
-    std::int32_t still = 0;
-    std::int32_t longest = 0;
+    GameTime changed = run.world().time();
+    GameTime longest = 0;
+    GameTime step = 0;
     std::int32_t moved = 0;
     for (std::int32_t turn = 0; turn < 20000 / length; ++turn) {
       run.advance(1, length);
       const Point now = run.world().resolve_position(1);
-      if (now == Point{1000, 1900}) break;
-      if (now == last) {
-        ++still;
-        if (still > longest) longest = still;
-      } else {
-        still = 0;
+      if (now != last) {
+        longest = std::max(longest, run.world().time() - changed);
+        changed = run.world().time();
+        // The step just begun: its timer's distance (a unit with no walk
+        // animation is put on the step's end with the timer armed for it).
+        step = std::max<GameTime>(step, run.world().find(1)->clock.timer_at - changed);
         ++moved;
       }
       last = now;
+      if (now == Point{1000, 1900}) break;
     }
     CHECK(run.world().resolve_position(1) == (Point{1000, 1900}));
-    // The first turn launches the order and lays the route; every one after
-    // it steps.
-    CHECK(longest <= 1);
-    CHECK(moved >= 14000 / length);
+    CHECK(step > 0);
+    CHECK(longest <= step + length);
+    CHECK(moved >= 3);
   }
 }

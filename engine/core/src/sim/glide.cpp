@@ -77,6 +77,18 @@ const TurnGlide::Mark* TurnGlide::walked(const World& world, const WorldObject& 
 
 Point TurnGlide::position(const World& world, const WorldObject& slot, GameTime at) const noexcept {
   const Point here = slot.state.position;
+  // A step handed to an animation with an origin -- the walk's -- is drawn
+  // where the animation has it (0x0053d830), from the point it came from to
+  // its end by the clock's place in the step. Before the step began the
+  // object stood where it came from.
+  const AnimClock& clock = slot.clock;
+  if (clock.slot != kNoAnim && clock.origin_given && clock.duration > 0 &&
+      clock.timer_at != kNoAnimTimer && world_ == &world && world.time() == now_time_ &&
+      clock.main_start <= now_time_) {
+    const GameTime when = std::clamp(at, before_time_, now_time_);
+    if (when >= clock.main_start) return world.current_position(slot, when);
+    return clock.origin;
+  }
   const Mark* before = walked(world, slot);
   if (before == nullptr) return here;
   const GameTime span = now_time_ - before_time_;
@@ -136,10 +148,8 @@ TurnGlide::Anim TurnGlide::anim(const World& world, const WorldObject& slot,
   }
   // And before then, what the turn end before saw it playing, carried on to
   // `at` -- a bird the rest of the leg its script has since replaced. Not for
-  // an object walked across the turn, though: a walk is started at the turn's
-  // end only because `MovementSystem::play_locomotion` runs after the unit
-  // has moved, and what it stood in before it set off would slide. It walks
-  // on its walk's first frame, as it did.
+  // an object glided across the turn, though: what it stood in before it set
+  // off would slide. It moves on its animation's first frame.
   out.elapsed = 0;
   if (before == nullptr || before->anim_slot == kNoAnim || before->cycle <= 0) return out;
   if (walked(world, slot) != nullptr && slot.state.position != before->position) return out;

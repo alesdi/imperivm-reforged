@@ -811,14 +811,16 @@ namespace {
 
 }  // namespace
 
-void formation_route_lay(FormationRoute& route, std::vector<Point> points, bool complete) {
+void formation_route_lay(FormationRoute& route, std::vector<Point> points, bool complete,
+                         std::int32_t stride) {
   route.points = std::move(points);
+  route.stride = stride;
   route.leg = 0;
   route.steps = 0;
   route.step = 0;
   route.delta_x = 0;
   route.delta_y = 0;
-  route.step_length = wrap32(static_cast<std::int64_t>(kFormationRouteStride) * 65536);
+  route.step_length = wrap32(static_cast<std::int64_t>(route.stride) * 65536);
   std::uint32_t total = 0;
   for (std::size_t i = 0; i + 1 < route.points.size(); ++i) {
     total += leg_root(route.points[i], route.points[i + 1]) * 65536u;
@@ -839,7 +841,7 @@ bool formation_route_step(FormationRoute& route, Point& out) noexcept {
     const Point from = route.points[static_cast<std::size_t>(route.leg - 1)];
     const Point to = route.points[static_cast<std::size_t>(route.leg)];
     const std::uint32_t length = leg_root(from, to);
-    const std::uint32_t stride = kFormationRouteStride;
+    const auto stride = static_cast<std::uint32_t>(route.stride);
     const std::uint32_t n = length / stride;
     const std::uint32_t scaled = length * 65536u;
     const std::int64_t target = static_cast<std::int64_t>(stride) * 65536;

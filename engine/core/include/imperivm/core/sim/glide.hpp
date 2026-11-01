@@ -31,9 +31,8 @@
 // This engine runs a turn whole: `World::advance` takes the clock from one
 // window's start to its end in one call, and the world then stands at the
 // end for as long as the turn's real length lasts. Every position it holds is
-// exact at the turn's end -- `MovementSystem` integrates nothing, see
-// `sim/movement.hpp` -- and the view used to draw that, so a unit stood still
-// for a turn and then jumped a turn's walk.
+// exact at the turn's end, and the view used to draw that, so a unit stood
+// still for a turn and then jumped a turn's walk.
 //
 // The view now draws the world at the instant the original's clock would
 // show: `at`, between the end of the turn before and the end of this one, by
@@ -41,11 +40,14 @@
 // say). It does not run the simulation there -- it cannot, and it must not --
 // it reads the two turn ends it has seen:
 //
-//   * **a position** runs in a straight line from where the object stood at
-//     the end of the turn before to where it stands now, by `at`'s place
-//     between the two ends. A route is a polyline walked at a constant rate,
-//     so this is the original's answer exactly along a straight stretch, and
-//     cuts a corner the route turned inside the turn by a chord's width;
+//   * **a walk step** is an animation with an origin (`sim/movement.hpp`):
+//     drawn where that animation has it at `at` (`World::current_position`,
+//     the original's 0x0053d830), and where it came from before the step
+//     began;
+//   * **any other position** -- a unit with no walk animation, put on each
+//     step's end at once (departure 1 in `sim/movement.hpp`) -- runs in a
+//     straight line from where the object stood at the end of the turn
+//     before to where it stands now, by `at`'s place between the two ends;
 //   * **an animation** runs its own clock: the elapsed time it had at the turn
 //     before, carried on to `at` exactly as `World::run_turn` carries it
 //     (`advance_elapsed`), so a walk cycle steps frame by frame instead of a

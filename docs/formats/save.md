@@ -607,7 +607,7 @@ the map identity, the system run order.
 
 | section | carries | left to `GameSession::create` to rebuild |
 |---|---|---|
-| `movement` | the per-object `MoveState` table in id order, waypoints included — and with each row, the avoidance state: the route's stride, the hold and when it ends, the step being walked with its two sidestep offsets, `CVXPathCoop`'s wait, and the march it belongs to, whether the route is aimed at that march's formation, the sample it was laid to, whether its search made a destination lock and the blocking gate it has compared sides at (section version 48, state vector 55) — then `grid_generation_`, then the ownerless destination locks with the flag that says they were made, the heroes' formations with each one's own route (its points, the stepper's counters, what is left, its goal and band, whether it goes on, its blocking gate (`[form+0x90]`, section version 48), the sample's deadline and speed, the units still to be handed `form_move`), and last the smart pathfinder's build as whether it was started and the `SPF*` calls made on it (a load makes them again over the saved map's grid; docs/formats/pathfinder.md) | the obstruction grid, the formation table, the node budget, `PathFinder`'s scratch and the structure itself, and the per-turn decision queue and bucket grids, which live only inside `advance` |
+| `movement` | the per-object `MoveState` table in id order — with each row its route as the sampled media holds it (`CVXSPath`: the points, the stride, and the stepper's leg, step count, step, offsets, step length and what is left, and whether the route is complete), `CVXPathCoop`'s wait, the retry's flags, and the march it belongs to, whether the route is aimed at that march's formation, the sample it was laid to, whether its search made a destination lock, the blocking gate it has compared sides at, the member step's deadline and arrival mark, and whether a call waits on the walk (bit 0x10000 of `[unit+0x194]`); section version 50, state vector 60, which dropped the turn walk's accumulator, hold, sidestep offsets and march rate — then `grid_generation_`, then the ownerless destination locks with the flag that says they were made, the heroes' formations with each one's own route (its points, the stepper's counters, what is left, its goal and band, whether it goes on, its blocking gate (`[form+0x90]`, section version 48), the sample's deadline, speed and pace and its slowest and fastest units (section version 50), the units still to be handed `form_move`), and last the smart pathfinder's build as whether it was started and the `SPF*` calls made on it (a load makes them again over the saved map's grid; docs/formats/pathfinder.md) | the obstruction grid, the formation table, the node budget, `PathFinder`'s scratch and the structure itself, and the per-turn decision queue and bucket grids, which live only inside `advance` |
 | `combat` | combatants — including `Unit::AddBonus`'s five per-object addends, which nothing but the entry point produces and so nothing could rebuild — projectiles in flight, the undrained event list, per-player level addends, alliance overrides, `now_`, `death_duration_`, `world_bound_` | `CombatConstants`, the class graph, the counter table and mode, the `PlayerTable` pointer, the lazily built `profiles_` cache |
 | `economy` | the settlement store (nested `ISET`), wagons in transit, the wagon id counter, per-settlement statistics, the `start`ed flag | `EconomyRules`, `auto_deliver_` |
 | `feeder` | the chain, the hungry list, `next_tick_`, both accumulators, both cursors | `FeederRules`, `world_bound_`, `draws_from_warehouse_` |
@@ -629,16 +629,17 @@ game. The five score counters beside them *are* hashed, because `GetTeamMilitary
 match on them. State vector **18**.
 
 **`movement` carries avoidance state that nothing hashes.** A unit blocked by another holds
-for 50, 75 or 100 ms, gives way sideways, and walks back to its route; a building's doorway
-and a tree's footprint are circles no unit may give way into. That is `CVXPathCoop` and the
-ownerless `CVXDestLock`s in the original — path media and objects that clear their own
-sync-set bit — and `pathfinder` is zero in all nine dumps, so none of it is folded into
+for 50, 75 or 100 ms where it stands, or is turned aside; a building's doorway and a tree's
+footprint are circles no unit may step into. That is `CVXPathCoop` and the ownerless
+`CVXDestLock`s in the original — path media and objects that clear their own sync-set bit —
+and `pathfinder` is zero in all nine dumps, so none of it is folded into
 `MovementSystem::hash`. It is saved because it is not recomputable: a unit reloaded without
-its hold steps at once, one reloaded without its sidestep jumps back onto its route, and
-locks rebuilt at load would forget that the original makes them once, when the map loads,
-and carries them in the save thereafter. `test_avoidance.cpp`'s
-`a_save_taken_mid_step_resumes_exactly` knocks every one of these fields off before a load
-and requires the reloaded crowd to end where the uninterrupted one does. State vector **19**.
+its wait would take the step it is holding at once, and locks rebuilt at load would forget
+that the original makes them once, when the map loads, and carries them in the save
+thereafter. The hold itself is the animation timer, saved with the object (world section).
+`test_avoidance.cpp`'s `a_save_taken_mid_step_resumes_exactly` knocks these fields off
+before a load and requires the reloaded crowd to end where the uninterrupted one does. State
+vector **19**; the walk on the timer, **60**.
 
 **`match` carries `end_message_`, which is display text and is deliberately not hashed.**
 `EndGame`'s three-argument form assigns the string only when the acting player is the local

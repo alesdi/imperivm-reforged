@@ -1512,7 +1512,7 @@ void CombatSystem::enter_dying(World& world, Combatant& unit, GameTime now) {
     // A corpse does not walk: all 15 dying objects across the nine dumps carry
     // `SyncFlags` without bit 17, the active-path bit, and none is `action=3`.
     // Stopped before the animation starts so that movement's own arrival
-    // handling has nothing left to stop; see `MovementSystem::play_locomotion`.
+    // handling has nothing left to stop; see `MovementSystem::walk_step`.
     if (MovementSystem* movement = movement_system(world); movement != nullptr) {
       movement->stop(world, unit.id);
     }
