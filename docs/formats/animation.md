@@ -254,7 +254,9 @@ unit hits (0x00511550). It stamps the last attack's time (`[unit+0x1a4]`)
 and shows an attacker that was hidden.
 
 **Between two units that are not enemies** -- a training partner -- the hit
-is the training blow (0x00511550's first branch): what leaves the partner a
+is the training blow (0x00511550's first branch), unless the attacker
+carries bit 21 of `[unit+0x194]`, the wild beast's bit (0x0051163f), which
+strikes in full. The training blow is what leaves the partner a
 tenth of its maximum health, never below 0, as the most; the larger of the
 attack times `MinPercentOfAttackersDamage` over 100 and `MinDamage` as the
 least; and between them the attack less the partner's slash armour scaled
@@ -274,6 +276,12 @@ or more, so two bodies drawn through each other cannot strike. `InRange`
 (0x005d72e0) is the band, false for a receiver in a holder; `CanAttack`
 (0x005ab060) is the dead checks, the virtual and the band, the very gate
 `Attack` passes through; `IsValidTarget` (0x005aafd0) is the virtual alone.
+The virtual (0x005b1da0) is one body in every object family's table, and
+its whole rule is set out at `CombatSystem::attack_virtual` in
+`sim/combat.hpp`: the hidden test through the side mask, the side test a
+beast skips, the ceasefires, the air, the sentries and the rams, `Fish`,
+the water units, the messengers, a building through its settlement, the
+catapults and the damage type.
 `GotoAttack` lays its route with the band's two ends (0x005d4353,
 0x005d438d) and `IsArrived` (0x00417c10) tests both, so it never answers
 true where `Attack` refuses.
@@ -299,8 +307,6 @@ Departures, each one for what the engine does not yet do:
   (0x005d4f30); here it hits its target alone.
 * **The training blow's level scale** is this engine's level table, where
   the original builds its own of 101 steps (0x0050fd40).
-* **The attacker's flag `[unit+0x194] & 0x200000`**, which skips the
-  training branch and the `CanAttack` virtual's side test, is not modelled.
 * **A ship's shot at a ship** draws an angle and throws the shot along it
   (0x005dc7a8); here the shot is the engine's.
 * **The attacked target of one class** answers `vtbl+0xa4` through

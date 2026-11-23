@@ -145,6 +145,11 @@ bool PlayerTable::is_enemy(PlayerId a, PlayerId b) const noexcept {
   return !has(a, b, Relation::ceasefire);
 }
 
+bool PlayerTable::in_side_mask(PlayerId viewer, PlayerId owner) const noexcept {
+  if (!is_valid(viewer) || !is_valid(owner)) return false;
+  return owner == viewer || has(owner, viewer, Relation::share_view);
+}
+
 bool PlayerTable::are_allied(PlayerId a, PlayerId b) const noexcept {
   // `DiplAreAllied` (0x00564c10) tests bit 0 of each player's row for the other
   // and requires both, so this stays as written -- but only because

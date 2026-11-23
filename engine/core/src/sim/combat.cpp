@@ -549,6 +549,7 @@ CombatProfile CombatProfile::from_class(const ClassGraph& graph, ClassIndex inde
   out.splash_radius = number("splash_radius", 0);
   out.shot_height = number("shot_height", 0);
   out.can_be_attacked = number("can_be_attacked", 1) != 0;
+  out.water_unit = number("water_unit", 0) != 0;
 
   const std::string_view projectile = graph.property(index, "projectile_class");
   if (!projectile.empty()) out.projectile = graph.lookup(projectile);
@@ -1181,17 +1182,12 @@ ObjectId CombatSystem::best_target_in_list(ObjectId id, std::span<const ObjectId
 }
 
 bool CombatSystem::targetable(const Combatant& self, const Combatant& other) const {
+  // 0x005db650, the sweep's own clauses around the virtual: not dead
+  // (`vtbl+0x50`), not inside a holder, a `target_factor` that is not
+  // negative, and the search's enemy mask. Health and the class are the
+  // virtual's to judge: a building at none is refused there unless its
+  // settlement is a garrisoned outpost or shipyard (0x005b1f69).
   if (!other.alive || other.action == Action::dying) return false;
-  // Nothing at no health is a target. For a unit that is death itself (its
-  // `vtbl + 0x50` is `health == 0`, 0x004e1f50); for a building, which never
-  // dies (`dies_at_no_health`), it is the separate test `0x005b1f69` makes on
-  // the candidate's health once it has found it a building -- so a town hall
-  // brought to nothing stands broken and nobody goes on hitting it. That test
-  // spares a building whose settlement's centre is an `Outpost` or a
-  // `BaseShipyard` (0x00440060, 0x004400b0) with something in its holder
-  // (inferred from the `+0x40` it reads); that exception needs the settlement
-  // and is not reproduced.
-  if (other.health <= 0) return false;
   // **Nothing inside a holder is a target.** A garrisoned unit, or a ship's
   // passenger, is off the original's grid altogether (0x005d3e10 drops it to
   // (-1, -1) and out of its cell), so no sweep can find it; here every held
@@ -1200,55 +1196,127 @@ bool CombatSystem::targetable(const Combatant& self, const Combatant& other) con
   // fought every other.
   if (other.position == kHeldPosition) return false;
   if (!is_enemy(self, other)) return false;
-  const CombatProfile theirs = profile(other.class_index);
-  if (!theirs.can_be_attacked || theirs.never_targeted()) return false;
+  if (profile(other.class_index).never_targeted()) return false;
   // 0x005db650 asks the attacker's `CanAttack` virtual of every candidate
   // before anything else, so a swordsman's sweep never finds a building.
   return unit_can_attack(self, other);
 }
 
 bool CombatSystem::unit_can_attack(const Combatant& self, const Combatant& target) const {
-  if (world_ == nullptr) return true;
-  const WorldObject* me = world_->find(self.id);
-  const WorldObject* them = world_->find(target.id);
-  if (me == nullptr || them == nullptr) return true;
-  // A tower's or an engine's own virtual is not this one.
-  if (!me->state.flags.is_unit) return true;
-
-  const CombatProfile mine = profile(self.class_index);
-  const CombatProfile theirs = profile(target.class_index);
-  const bool target_is_unit = them->state.flags.is_unit;
-  const bool target_is_building = them->state.flags.is_building;
-
-  if (target_is_unit) {
-    if (theirs.is(CombatProfile::kLineSentry) && !mine.shoots) return false;
-    if (mine.is(CombatProfile::kLineRamUnit)) return false;
+  if (world_ != nullptr) {
+    const WorldObject* me = world_->find(self.id);
+    const WorldObject* them = world_->find(target.id);
+    if (me != nullptr && them != nullptr) return attack_virtual(*me, *them);
   }
-  if (theirs.is(CombatProfile::kLineFish)) return false;
+  // A combat system bound to no world -- the synthetic fixtures -- has no
+  // flags, settlements or classes' kinds to ask, and every pair passes.
+  return true;
+}
 
-  // The settlement is looked up only for the two clauses that read it: it is
-  // a scan of the store, and every unit's sweep asks this of every building.
-  if (target_is_building && them->settlement != kNoObject &&
-      (theirs.is(CombatProfile::kLineFakeTower) || mine.is(CombatProfile::kLineRamUnit))) {
-    if (EconomySystem* economy = economy_of(*world_); economy != nullptr) {
-      if (const Settlement* set = economy->settlements().for_object(them->settlement);
-          set != nullptr) {
-        if (theirs.is(CombatProfile::kLineFakeTower)) return false;
-        if (mine.is(CombatProfile::kLineRamUnit)) {
-          const WorldObject* anchor = world_->find(set->anchor);
-          const CombatProfile hub = profile(anchor != nullptr ? anchor->class_index : kNoClass);
-          const bool soft =
-              hub.is(CombatProfile::kLineOutpost) || hub.is(CombatProfile::kLineBaseShipyard);
-          return soft || theirs.is(CombatProfile::kLineGate);
-        }
-      }
+bool CombatSystem::attack_virtual(const WorldObject& self, const WorldObject& target) const {
+  if (world_ == nullptr) return false;
+  const World& world = *world_;
+  // 1. A target that is dead: `vtbl+0x50`, a unit's (and a catapult's) health
+  //    gone; a building is never dead (0x005b1dd1).
+  if (object_is_dead(target)) return false;
+  if (const Combatant* corpse = find(target.id);
+      corpse != nullptr && (!corpse->alive || corpse->action == Action::dying)) {
+    return false;
+  }
+  const PlayerTable& players = world.players();
+  const PlayerId mine_owner = self.state.owner;
+  const PlayerId their_owner = target.state.owner;
+  const bool i_am_unit = self.state.flags.is_unit;
+  const bool target_is_unit = target.state.flags.is_unit;
+  const bool target_is_building = target.state.flags.is_building;
+
+  // 2. A hidden target, unless its owner's bit is in the receiver's side mask
+  //    (`[record+0x18]`, `seeflags`: its own player and every player that
+  //    shares its view with it) (0x005b1ddc). An unowned target has no bit.
+  if (target.state.flags.hidden && !players.in_side_mask(mine_owner, their_owner)) return false;
+
+  // 3. The side test, skipped by a unit carrying the beast's bit (0x005b1e19):
+  //    an enemy (bit 0 of the receiver's row for the target's owner clear),
+  //    or else a target that is training, or a building with health
+  //    (0x005b1e27 .. 0x005b1e56). A building receiver takes it too: the
+  //    virtual is the one every object family's table carries.
+  if (!(i_am_unit && self.state.flags.strikes_anyone)) {
+    const bool enemy = players.is_enemy(mine_owner, their_owner);
+    if (!enemy && !target.state.flags.training &&
+        !(target_is_building && target.state.health != 0)) {
+      return false;
     }
   }
 
+  // 4. A unit receiver under its hero's ceasefire (0x005d37f0 with skill 10,
+  //    which resolves an attached unit to its hero).
+  const HeroSystem* heroes = hero_system_of(*world_);
+  const GameTime now = world.time();
+  const auto ceasefire = [&](ObjectId id) {
+    return heroes != nullptr && heroes->modifiers_for(id, now).ceasefire;
+  };
+  if (i_am_unit && ceasefire(self.id)) return false;
+
+  const CombatProfile mine = profile(self.class_index);
+  const CombatProfile theirs = profile(target.class_index);
+
+  // 5. A unit target: one in the air, or a `Sentry`, only to a receiver that
+  //    shoots (0x0053f5b0); not under a ceasefire of its own; never to a
+  //    `RamUnit` (0x005b1e6f .. 0x005b1ebf).
+  if (target_is_unit) {
+    if (target.state.flags.in_air && !mine.shoots) return false;
+    if (ceasefire(target.id)) return false;
+    if (theirs.is(CombatProfile::kLineSentry) && !mine.shoots) return false;
+    if (mine.is(CombatProfile::kLineRamUnit)) return false;
+  }
+  // 6. A class that *is* `Fish`, by name (0x005b1ef5).
+  if (theirs.is(CombatProfile::kLineFish)) return false;
+  // 7. A water unit's class, to a receiver whose class is not one and that
+  //    does not shoot (`[class+0xb30]`, 0x005b1f0b).
+  if (!mine.water_unit && theirs.water_unit && !mine.shoots) return false;
+  // 8. A messenger on either side (bit 26 of `[obj+0x2c]`, 0x005b1f38).
+  if (self.state.flags.messenger || target.state.flags.messenger) return false;
+
+  // 9. A building, through its settlement (`[building+0x148]`, 0x005b1f51).
+  if (target_is_building) {
+    const EconomySystem* economy = economy_of(*world_);
+    const Settlement* set = economy == nullptr || target.settlement == kNoObject
+                                ? nullptr
+                                : economy->settlements().for_object(target.settlement);
+    if (set != nullptr) {
+      const WorldObject* anchor = world.find(set->anchor);
+      const CombatProfile hub = profile(anchor != nullptr ? anchor->class_index : kNoClass);
+      const bool soft =
+          hub.is(CombatProfile::kLineOutpost) || hub.is(CombatProfile::kLineBaseShipyard);
+      // At no health, only in an outpost's or a shipyard's settlement whose
+      // holder holds someone (0x005b1f69 .. 0x005b1fa4).
+      if (target.state.health == 0 && !(soft && set->holder.count() > 0)) return false;
+      if (theirs.is(CombatProfile::kLineFakeTower)) return false;
+      // The settlement's `canbeattacked` (`[settlement+0x40]`, its central
+      // class's `can_be_attacked`).
+      if (!set->can_be_attacked) return false;
+      if (mine.is(CombatProfile::kLineRamUnit)) {
+        return soft || theirs.is(CombatProfile::kLineGate);
+      }
+    } else {
+      // **Labelled:** a building in no settlement, which the original never
+      // has (it reads the settlement unguarded). Its own class decides what
+      // the settlement would have, and the ram's clause, which asks for the
+      // settlement's centre, is passed over to the damage type.
+      if (target.state.health == 0) return false;
+      if (theirs.is(CombatProfile::kLineFakeTower) || !theirs.can_be_attacked) return false;
+    }
+  }
+
+  // 10. Neither a unit nor a building (0x005b2011).
+  if (!target_is_unit && !target_is_building) return false;
+  // 11. A catapult: anyone but the five wild beasts (0x005b201a ..).
   if (target_is_building && theirs.is(CombatProfile::kLineCatapult)) {
     return !mine.is(CombatProfile::kLineBeast);
   }
-
+  // 12. The receiver's `damage_type` (`[class+0x2a4]`): slash and pierce take
+  //     a unit always and a building only when they shoot; siege anything;
+  //     none nothing.
   switch (mine.damage_type) {
     case DamageType::slash:
     case DamageType::pierce:
@@ -2162,10 +2230,10 @@ void CombatSystem::land_on_ground(World& world, const Projectile& shot, GameTime
 }
 
 bool CombatSystem::valid_target(const Combatant& self, const Combatant& other) const {
-  if (!other.alive || other.action == Action::dying || other.health <= 0) return false;
+  if (!other.alive || other.action == Action::dying) return false;
   if (other.position == kHeldPosition) return false;
   if (!is_enemy(self, other)) return false;
-  if (!profile(other.class_index).can_be_attacked) return false;
+  // Health and the settlement's `canbeattacked` are the virtual's.
   return unit_can_attack(self, other);
 }
 
@@ -2372,29 +2440,15 @@ bool CombatSystem::can_attack(ObjectId self, ObjectId target) const {
   const Combatant* a = find(self);
   const Combatant* d = find(target);
   if (a == nullptr || d == nullptr) return false;
-  // Dead (`vtbl+0x50`), or at no health: a unit at none is dead, a building
-  // at none is refused by the building test further in (0x005b1f69).
-  if (!d->alive || d->action == Action::dying || d->health <= 0) return false;
-  const WorldObject* me = world_ != nullptr ? world_->find(self) : nullptr;
-  const WorldObject* them = world_ != nullptr ? world_->find(target) : nullptr;
-  if (me != nullptr && me->state.flags.is_unit && them != nullptr) {
-    // Not an enemy: only a training partner or a building (0x005b1e27).
-    if (!is_enemy(*a, *d) && !them->state.flags.training && !them->state.flags.is_building) {
-      return false;
-    }
-    // A hero's ceasefire, on the receiver and on a unit target (0x005d37f0
-    // with skill 10).
-    if (const HeroSystem* heroes = world_ != nullptr ? hero_system_of(*world_) : nullptr;
-        heroes != nullptr) {
-      const GameTime now = world_->time();
-      if (heroes->modifiers_for(self, now).ceasefire) return false;
-      if (them->state.flags.is_unit && heroes->modifiers_for(target, now).ceasefire) return false;
-    }
-  } else if (!is_enemy(*a, *d)) {
-    return false;
+  if (world_ != nullptr) {
+    const WorldObject* me = world_->find(self);
+    const WorldObject* them = world_->find(target);
+    if (me != nullptr && them != nullptr) return attack_virtual(*me, *them);
   }
-  if (!profile(d->class_index).can_be_attacked) return false;
-  return unit_can_attack(*a, *d);
+  // No world: the roster's own record of death and diplomacy.
+  if (!d->alive || d->action == Action::dying || d->health <= 0) return false;
+  if (!is_enemy(*a, *d)) return false;
+  return profile(d->class_index).can_be_attacked;
 }
 
 void CombatSystem::begin_attack(World& world, script::Scheduler* scheduler, ObjectId id,
@@ -2536,8 +2590,11 @@ bool CombatSystem::blow(World& world, ObjectId id, ObjectId target, GameTime now
   const CombatProfile mine = profile(attacker->class_index);
   const WorldObject* me = world.find(id);
   const WorldObject* them = world.find(target);
+  // Between two units that are not enemies, a training blow -- unless the
+  // attacker carries the beast's bit (0x0051163f), which strikes in full.
   const bool training = me != nullptr && them != nullptr && me->state.flags.is_unit &&
-                        them->state.flags.is_unit && !is_enemy(*attacker, *defender);
+                        them->state.flags.is_unit && !is_enemy(*attacker, *defender) &&
+                        !me->state.flags.strikes_anyone;
   if (mine.is_ranged()) {
     launch(world, *attacker, *defender, now);
   } else if (training) {
@@ -3868,9 +3925,9 @@ HostOutcome host_time_without_attack(CallContext& ctx) {
 ///   * the flag word is non-zero and carries `kSyncUnit`, so buildings, decor
 ///     and item holders are not "enemies in sight" however hostile they are;
 ///   * `kSyncHidden` set means the candidate must additionally pass an owner
-///     mask test against the looker's side -- reproduced here as "a hidden
-///     object is not seen", which is what that test comes to for the one side
-///     doing the looking;
+///     mask test against the looker's side: its owner's bit in the looker's
+///     `seeflags` (`[record+0x18]`), the same test the `CanAttack` virtual
+///     makes again;
 ///   * not dead;
 ///   * **`[obj + 0xdc] > 1`** -- `Obj::attack`, and note the bound. The target
 ///     sweep's `require_armed` clause tests the same field `> 0`
@@ -3917,8 +3974,15 @@ HostOutcome host_enemies_in_sight(CallContext& ctx) {
     if (other.id == self->id) continue;
     if (!other.alive || other.action == Action::dying) continue;
     if (distance_squared(self->position, other.position) > reach2) continue;
+    // Units only; a hidden one only through the looker's side mask
+    // (0x005d537e), the test the virtual below makes again.
     const WorldObject* seen = world->find(other.id);
-    if (seen != nullptr && (!seen->state.flags.is_unit || seen->state.flags.hidden)) continue;
+    if (seen != nullptr && !seen->state.flags.is_unit) continue;
+    if (seen != nullptr && seen->state.flags.hidden &&
+        !world->players().in_side_mask(slot != nullptr ? slot->state.owner : self->owner,
+                                       seen->state.owner)) {
+      continue;
+    }
     if (combat->attack_of(other) <= 1) continue;
     if (!combat->is_enemy(*self, other)) continue;
     // And the looker's `CanAttack` virtual must accept it (0x005d5180): a

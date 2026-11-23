@@ -3132,6 +3132,17 @@ TEST(an_object_goto_routes_only_to_a_target_it_may_approach) {
   f.world.set_owner(lurker, 2);
   f.world.mutable_state(lurker)->flags.hidden = true;
   CHECK(refused(go(lurker)));
+  // Unless its owner shares its view with the walker's: its bit is then in
+  // the walker's side mask (`[record+0x18]`, 0x005d42c3). The walker's own
+  // grant gives it nothing.
+  const PlayerId mine = f.world.find(walker)->state.owner;
+  f.world.players().set(mine, 2, Relation::share_view, true);
+  CHECK(refused(go(lurker)));
+  f.world.players().set(2, mine, Relation::share_view, true);
+  CHECK(go(lurker).status == HostStatus::retry);
+  CHECK(f.movement.find(walker)->has_path);
+  CHECK(f.movement.find(walker)->target_object == lurker);
+  f.world.players().set(2, mine, Relation::share_view, false);
   const ObjectId scout = f.unit(Point{400, 600});
   f.world.mutable_state(scout)->flags.hidden = true;
   CHECK(go(scout).status == HostStatus::retry);

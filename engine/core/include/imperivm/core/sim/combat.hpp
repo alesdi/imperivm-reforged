@@ -169,12 +169,11 @@ struct WorldObject;
 /// whose class did not resolve are excluded: the first have no class and no
 /// position of their own, the second have no profile to fight with.
 ///
-/// **Not excluded here:** `SyncFlags` bit 26. `IsValidTarget` rejects a
-/// candidate *or* an attacker carrying `0x04000000` outright (`0x005b1f38` and
-/// `0x005b1f4b`), which settles `docs/engine/state-vector.md`'s inference that
-/// bit 26 marks an ambient civilian -- 140 objects, `*VillagerAmbient` and
-/// `OldManE`. `ObjectState` does not carry that bit today (`pack_sync_flags`
-/// deliberately does not produce it), so it is recorded here and not acted on.
+/// **Not excluded here:** `SyncFlags` bit 26, `Obj::SetMessengerStatus`'s
+/// (`ObjectFlags::messenger`). The `CanAttack` virtual rejects a candidate
+/// *or* an attacker carrying `0x04000000` outright (`0x005b1f38` and
+/// `0x005b1f4b`), so a messenger is in the fight's roster and neither strikes
+/// nor is struck (`CombatSystem::attack_virtual`).
 [[nodiscard]] bool is_combat_object(const WorldObject& slot) noexcept;
 
 // ---------------------------------------------------------------------------
@@ -611,6 +610,10 @@ struct CombatProfile {
   /// unit hit a building at all. Not `is_ranged()`, which asks whether the
   /// name *resolved*; the original asks only whether it was given.
   bool shoots = false;
+  /// `water_unit`, `[class+0xb30]` (the field `IsWaterUnit` reads): the
+  /// `CanAttack` virtual lets a receiver whose class is not one reach one
+  /// only if it shoots (0x005b1f0b).
+  bool water_unit = false;
 
   /// The classes `Unit::CanAttack` (0x005b1da0) asks about by name, answered
   /// once per class off its ancestry rather than once per candidate. Bits of
@@ -1163,21 +1166,19 @@ class CombatSystem final : public System {
   /// would swing from the grave.
   bool order_attack(ObjectId attacker, ObjectId target);
 
-  /// `IsValidTarget`'s virtual (`vtbl+0xb4`, 0x005b1da0) as `host_is_valid_target`
-  /// answers it: an enemy, alive, with health, not inside a holder, a class
-  /// that may be attacked, and `unit_can_attack`. What the two siege target
-  /// sweeps and `Building::Attack` ask of a candidate.
+  /// What the two siege target sweeps and `Building::Attack` ask of a
+  /// candidate: alive, not inside a holder, an enemy, and the `CanAttack`
+  /// virtual (`attack_virtual`).
   [[nodiscard]] bool valid_target(const Combatant& self, const Combatant& other) const;
 
   // -- the attack on the animation timer (docs/formats/animation.md, "The
   //    attack") --------------------------------------------------------
 
-  /// A unit's `CanAttack` virtual (`vtbl+0xb4`, 0x005b1da0), as far as this
-  /// engine has it: a target that resolves and is not dead, with health; for
-  /// a unit receiver, an enemy, or else a target that is training or a
-  /// building with health; neither side under a hero's ceasefire; a class
-  /// that may be attacked; then the class lines (`unit_can_attack`). What
-  /// `Attack`'s and `CanAttack`'s gates, `IsValidTarget` and the blow ask.
+  /// The `CanAttack` virtual (`vtbl+0xb4`, 0x005b1da0) between two
+  /// combatants, by id: `attack_virtual` on their world objects, or, for a
+  /// combat system bound to no world, a living enemy whose class may be
+  /// attacked. What `Attack`'s and `CanAttack`'s gates, `IsValidTarget` and
+  /// the blow ask.
   [[nodiscard]] bool can_attack(ObjectId self, ObjectId target) const;
   /// 0x005a7800, measured where the two stand now: the floored root of the
   /// squared centre distance less both class radii, at most the receiver's
@@ -1228,66 +1229,68 @@ class CombatSystem final : public System {
   /// is no combatant.
   bool fire_arrow(World& world, ObjectId tower, ObjectId target, GameTime now);
 
-  /// `Unit::CanAttack(target)`, the virtual at `vtbl+0xb4` (body 0x005b1da0,
-  /// shared by the unit vtables): **whether this kind of unit may strike that
-  /// kind of thing at all.** Playtest #24 was its absence -- a swordsman
-  /// ordered onto a fort hit it and its health fell.
+  /// The `CanAttack` virtual (`vtbl+0xb4`, body 0x005b1da0): **whether this
+  /// object may strike that one at all.** Playtest #24 was its absence -- a
+  /// swordsman ordered onto a fort hit it and its health fell.
+  ///
+  /// **One body for every object family.** The same function sits at
+  /// `+0xb4` in all 22 of the executable's object tables -- `CVXUnit`
+  /// (0x007d0af8), `CVXBuilding` (0x007ba488), the catapult's, the flying
+  /// unit's, the ship's, the hero's and the rest -- so a tower or an engine
+  /// asks exactly what a soldier asks, from the receiver's side: only the
+  /// unit-receiver clauses below are skipped for it.
   ///
   /// It is the first half of every gate the original puts in front of a
   /// strike. `Unit::Attack` (0x005ddb50) passes its target through 0x005a78a0,
-  /// which is this and then a range test (0x005a7800), and takes the refused
-  /// path at 0x005ddbd2 if either fails. `Obj::IsValidTarget` (0x005aafd0) is
-  /// this virtual and nothing else, `Obj::CanAttack` (0x005ab060) is this and
-  /// the range test, and the target-search predicate (0x005db650) asks it of
-  /// every candidate before it scores one. So here it gates `order_attack`,
-  /// the acquisition (`targetable`), the strike loop's hold on a target, and
-  /// the `IsValidTarget` and `CanAttack` entry points, together: an `Attack`
-  /// refused while `CanAttack` accepted would spin `RAM_ATTACK.VS`'s loop.
+  /// which is this and then the range band (0x005a7800); `Obj::IsValidTarget`
+  /// (0x005aafd0) is this alone; `Obj::CanAttack` (0x005ab060) is this and the
+  /// band; the blow (0x005dc650) is this and the range plus 150; and the
+  /// target sweep's predicate (0x005db650), `EnemiesInSight` (0x005d5180),
+  /// `EnemyInRange` (0x004dcb20), the siege planner's split and the towers'
+  /// sweeps ask it of every candidate.
   ///
-  /// The rule, in the original's order, for a unit attacker:
+  /// The rule, in the original's order (receiver R, target T):
   ///
-  ///   * a unit target: a `Sentry` only to a unit that `shoots`; nothing to
-  ///     a `RamUnit`;
-  ///   * a class that *is* `Fish`: never;
-  ///   * a building in a settlement: never a `FakeTower`. A `RamUnit` stops
-  ///     here: it may attack any building of a settlement whose centre is an
-  ///     `Outpost` or a `BaseShipyard`, and any `Gate`, and nothing else;
-  ///   * a `Catapult`: anyone but the five wild beasts;
-  ///   * everything else by the attacker's `damage_type` (`[class+0x2a4]`,
-  ///     loaded at 0x005a2200 as slash 0, pierce 1, siege 2, none 3): `slash`
-  ///     and `pierce` take a unit always and a building only when the
-  ///     attacker `shoots` (0x0053f5b0); `siege` takes anything; `none`
-  ///     nothing. **So a swordsman is refused every building, an archer,
-  ///     slinger or javelin thrower is not, and neither is `BritonHero`, whose
-  ///     class has a `projectile_class`.**
+  ///   1. T dead (`vtbl+0x50`: a unit's or a catapult's health gone; a
+  ///      building never is): no.
+  ///   2. T hidden (bit 21 of `[obj+0x2c]`) and its owner's bit not in R's
+  ///      side mask (`[record+0x18]`, `seeflags`: R's own player and every
+  ///      player sharing its view with R): no.
+  ///   3. Unless R is a unit carrying `strikes_anyone`: T an enemy of R's
+  ///      owner (bit 0 of R's row clear), or training, or a building with
+  ///      health -- else no. A non-enemy building passes this, so the
+  ///      virtual alone lets an archer aim at its own wall; the sweeps add
+  ///      their own enemy masks.
+  ///   4. R a unit under its hero's ceasefire (0x005d37f0, skill 10): no.
+  ///   5. T a unit: in the air (bit 22 of `[unit+0x194]`) or a `Sentry` heir,
+  ///      only to an R that shoots (0x0053f5b0); under a ceasefire of its
+  ///      own, no; and never to a `RamUnit`.
+  ///   6. T's class *is* `Fish`, by name: no.
+  ///   7. T's class a `water_unit` and R's not: only if R shoots.
+  ///   8. R or T a messenger (bit 26 of `[obj+0x2c]`): no.
+  ///   9. T a building, through its settlement S: at no health only when S's
+  ///      central building is an `Outpost` or `BaseShipyard` heir and S's
+  ///      holder holds someone; never a `FakeTower`; never when S's
+  ///      `canbeattacked` (`[settlement+0x40]`) is clear; and a `RamUnit` R
+  ///      stops here -- yes for an outpost's or shipyard's S or a `Gate`, no
+  ///      otherwise.
+  ///  10. T neither unit nor building: no.
+  ///  11. T a catapult: anyone but the five wild beasts.
+  ///  12. R's `damage_type` (`[class+0x2a4]`): `slash` and `pierce` take a
+  ///      unit always and a building only when R shoots; `siege` anything;
+  ///      `none` nothing. **So a swordsman is refused every building, an
+  ///      archer, slinger or javelin thrower is not, and neither is
+  ///      `BritonHero`, whose class has a `projectile_class`.**
   ///
-  /// True for anything that is not a unit: a tower's and a catapult's own
-  /// `CanAttack` are other virtuals (`Building::Attack` 0x004df650 and
-  /// `Catapult::Attack` 0x004e2d10 are their own entry points), not this
-  /// one, and are not reproduced. True, too, before `start` has seen a world:
-  /// whether a combatant is a unit or a building is the object model's to say.
-  ///
-  /// What it does not do, and why:
-  ///
-  ///   * **the range half is not here.** `Attack` and `CanAttack` both refuse
-  ///     a target out of reach in the original; this engine's `Attack` has
-  ///     always accepted one and let `act` hold the swing until it closes, and
-  ///     `GotoAttack`'s arrival is not measured the way 0x005a7800 measures
-  ///     (surface distance through an integer square root). Adding the half
-  ///     without the other would turn `while (.Attack(u))` after a short
-  ///     `GotoAttack` into a refusal that never suspends.
-  ///   * **the widening for non-enemies is not here.** The original lets a
-  ///     unit pass a target it is not hostile to if that target is training
-  ///     or is a building with health (0x005b1e3a-0x005b1e56), which would
-  ///     let an archer shoot its own walls. Every caller here keeps its own
-  ///     `is_enemy` test in front of this, so this only ever narrows.
-  ///   * the hero `Ceasefire` (0x005d37f0), the per-player visibility mask
-  ///     behind bit 21 of `[obj+0x2c]`, the class flag at `[class+0xb30]`,
-  ///     the object bit `0x4000000` and `[settlement+0x40]` are not modelled
-  ///     and pass; `sim/siege.cpp` adds the ceasefire for its own split.
-  ///   * a building at no health is refused before this is asked (see
-  ///     `targetable`), including the outpost-with-a-garrison exception the
-  ///     original makes at 0x005b1f69.
+  /// The catapult of clause 11 is the native class's in the original (the
+  /// type at 0x0081b24c) and the `Catapult` line here; they are the same
+  /// classes in the retail install. **Labelled:** a building with no
+  /// settlement, which the original never has (it reads S unguarded), is
+  /// judged by its own class's `can_be_attacked`.
+  [[nodiscard]] bool attack_virtual(const WorldObject& self, const WorldObject& target) const;
+  /// `attack_virtual` between two combatants' world objects; true for a
+  /// combat system bound to no world, whose fixtures have no flags or
+  /// settlements to ask.
   [[nodiscard]] bool unit_can_attack(const Combatant& self, const Combatant& target) const;
   /// Drop the current target and go idle.
   bool stop(ObjectId id);

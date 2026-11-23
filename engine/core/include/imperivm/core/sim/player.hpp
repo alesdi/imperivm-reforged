@@ -191,6 +191,16 @@ class PlayerTable {
   /// A player is never its own enemy.
   [[nodiscard]] bool is_enemy(PlayerId viewer, PlayerId other) const noexcept;
 
+  /// Whether `owner`'s bit is in `viewer`'s side mask, `seeflags`
+  /// (`[record+0x18]`): `viewer` itself, and every player whose own row
+  /// grants `viewer` share-view (`SetRelation`, 0x005652f0). The test a
+  /// hidden object (bit 21 of `[obj+0x2c]`) must pass to be seen by
+  /// `viewer`'s side -- the `CanAttack` virtual (0x005b1ddc), the
+  /// `EnemiesInSight` sweep (0x005d537e), the `Goto` worker's approach
+  /// (0x005d42c3), `VisibleObjsInSight`. An unowned object has no bit; an
+  /// invalid viewer has no mask.
+  [[nodiscard]] bool in_side_mask(PlayerId viewer, PlayerId owner) const noexcept;
+
   /// Mutual `allied`, or the same player.
   [[nodiscard]] bool are_allied(PlayerId a, PlayerId b) const noexcept;
 

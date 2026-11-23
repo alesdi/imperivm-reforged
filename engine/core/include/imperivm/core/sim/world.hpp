@@ -237,12 +237,17 @@ inline constexpr std::uint32_t kUnitFlagInAir = 0x00400000u;
 /// sentry together with `kUnitFlagNoAI`, and a map-placed unit's `UnitFlags`
 /// replaces the whole word (0x005dd6a9), this bit included.
 inline constexpr std::uint32_t kUnitFlagOnMinimap = 0x04000000u;
+/// Bit 21 of the same word: the wild beast's, `ObjectFlags::strikes_anyone`.
+/// 169 retail units author it, every one a `Wolf`, `Boar`, `Bear`, `LionM`
+/// or `LionF`, the five classes the constructor raises it for.
+inline constexpr std::uint32_t kUnitFlagStrikesAnyone = 0x00200000u;
 
 /// Pack an object's owner and category bits into the original's word.
 ///
-/// Bits 21 and 26 -- observed on `THuntress` and on ambient villagers
-/// respectively, and on nothing else -- are deliberately not produced. Naming a
-/// bit from one class's worth of evidence is how a guess gets built on.
+/// Bit 21 is `kSyncHidden` (`ObjectFlags::hidden`). Bit 26, observed on the
+/// ambient villagers and now known as `Obj::SetMessengerStatus`'s
+/// (`ObjectFlags::messenger`, 0x005ab8d0), is not produced: the word is
+/// hashed and dumped, and adding it is a change of its own.
 [[nodiscard]] std::uint32_t pack_sync_flags(const ObjectState& state) noexcept;
 
 /// The owner encoded in the low half, or `kNoPlayer` when no bit is set.

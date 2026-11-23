@@ -255,6 +255,10 @@ inline constexpr std::int32_t kFreeSpotProbes = 40;
 /// More than this many entries on a targeting unit's squad's `Enemies` and
 /// the free-spot search refuses (0x004180c5: `cmp 10, [squad+0x7c]`).
 inline constexpr std::size_t kFreeSpotCrowd = 10;
+/// At least this many entries on a targeting unit's squad's `Enemies` and an
+/// object goal's drift never recasts its route (0x00417b1f: `[squad+0x7c]`
+/// below 25 recasts).
+inline constexpr std::size_t kDriftCrowd = 25;
 inline constexpr std::int32_t kFreeSpotGain = 200;
 
 /// The `<point>` types that make ownerless locks, and their radii

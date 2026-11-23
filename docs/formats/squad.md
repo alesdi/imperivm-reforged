@@ -107,7 +107,7 @@ writes at `+0x6c`..`+0x7c` finds only the constructors.
 | `GetBestCurseTarget` | 0x005d9cb0 -> 0x005d94f0 | the same gate; each entry to the curse predicate |
 | `GetBestCrippleTarget` | 0x00513e10 -> 0x005138c0 | the same gate; non-units handed on as nothing |
 | the free-spot search | 0x004180b0 | refuses (answers (-1, -1), no draw) a unit with a target (`[unit+0x1a8]`) whose squad's `Enemies` holds more than 10 |
-| a route test | 0x00417ab0 | a unit with a target whose squad's `Enemies` holds 25 or more skips a distance test; reached through a table from 0x0041a024, not identified in the engine |
+| an object goal's drift test | 0x00417ab0 | a unit with a target whose squad's `Enemies` holds 25 or more skips the distance test, so its route to a moving target is never laid again; reached through a table from 0x0041a024 at each walk step (`MovementSystem::object_goal_drifted`, `kDriftCrowd`) |
 
 The third list (`+0x90`) has no reader found among the functions that
 resolve a squad.
@@ -320,7 +320,6 @@ What still differs, each for what this engine cannot yet do:
   other timers; the engine fires due looks once a turn.
 * The grid's chain order within a cell, which orders `Enemies`; the engine
   lists in ascending object id.
-* The reader at 0x00417ab0 and the route step that calls it.
 * Whether anything reads the third list.
 * That every step of a walk reaches the unit's `SetPos` through the motion
   handler 0x0053f6a0 was read from the handler and its dispatch, not traced

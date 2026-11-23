@@ -96,10 +96,9 @@
 ///     plan with an unstable introsort keyed on (catapult handle, distance),
 ///     so two crews at the same distance from an engine can swap; here the
 ///     sort is stable and the swap cannot happen.
-///   * **`Unit::CanAttack` is read from what the object model carries.** The
-///     visibility mask, the two unit flag bits at 21 and 22 of `[unit+0x194]`,
-///     the class flag at `[class+0xb30]`, and the settlement field at
-///     `[settlement+0x40]` are not modelled and are treated as passing.
+///   * **`Unit::CanAttack` is the fight's own** (`CombatSystem::attack_virtual`,
+///     the whole of 0x005b1da0), so a unit the planner counts as able to hurt
+///     the target is one `Attack` would accept.
 ///   * **The catapult's target is the engine's own slot.** 0x004389d5
 ///     writes the target handle into `[cat+0x228]`, the slot
 ///     `Catapult::GetCurrentTarget` reads back -- `ObjectState::catapult_target`

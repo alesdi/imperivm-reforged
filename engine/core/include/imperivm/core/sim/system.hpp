@@ -449,6 +449,18 @@ struct ObjectFlags {
   /// list". `Sacrifice::IsEmpty` (0x00594eb0) answers it.
   /// `docs/formats/sacrifice.md`. **Hashed and saved.**
   bool sacrifice_stopped = false;
+  /// Bit 21 (`0x00200000`) of the second flag word `[unit+0x194]`: **a wild
+  /// beast, which strikes whoever it likes.** The `CVXUnit` constructor
+  /// raises it on every unit whose class is an heir of `Wolf`, `Bear`,
+  /// `Boar`, `LionM` or `LionF` (0x005d3363 .. 0x005d33c2), and a map-placed
+  /// unit's `UnitFlags` replaces the word (0x005dd6a9): the 169 retail units
+  /// that author the bit are exactly the 101 wolves, 25 boars, 23 bears and
+  /// 20 lions the install places. Two readers, both in the fight: the
+  /// `CanAttack` virtual skips its side test for a unit that carries it
+  /// (0x005b1e19), and the blow deals it in full where it would otherwise
+  /// be a training blow between non-enemies (0x0051163f). No setter is
+  /// registered and no other store of the bit exists. **Hashed and saved.**
+  bool strikes_anyone = false;
 };
 
 /// The common header every simulated object carries.
