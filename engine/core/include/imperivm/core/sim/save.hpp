@@ -471,7 +471,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// flag, which the original's save leaves out and its load raises again
 /// only by the game's start. A version-60 file strikes on combat's own
 /// schedule, which nothing in this build does.
-inline constexpr std::uint32_t kStateVectorVersion = 61;
+/// 62: every object carries the wild beast's bit, `strikes_anyone` (bit 21
+/// of `[unit+0x194]`), and the object flag word is saved at 64 bits (world
+/// version 40). A version-61 file has no beast that strikes regardless of
+/// diplomacy.
+inline constexpr std::uint32_t kStateVectorVersion = 62;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

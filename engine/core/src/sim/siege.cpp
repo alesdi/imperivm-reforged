@@ -113,11 +113,6 @@ constexpr std::int32_t kEnoughCrews = 10;
   return !projectile.empty() && projectile != "**Invalid**";
 }
 
-[[nodiscard]] DamageType damage_type_of(const World& world, const WorldObject& slot) {
-  const ClassGraph* graph = world.class_graph();
-  if (graph == nullptr || slot.class_index == kNoClass) return DamageType::none;
-  return damage_type_from_name(graph->property(slot.class_index, "damage_type"));
-}
 
 [[nodiscard]] std::int32_t race_of(const World& world, const WorldObject& slot) {
   const ClassGraph* graph = world.class_graph();
@@ -132,82 +127,6 @@ constexpr std::int32_t kEnoughCrews = 10;
   const WorldObject* slot = world.find(id);
   if (slot == nullptr || slot->settlement == kNoObject) return nullptr;
   return economy->settlements().for_object(slot->settlement);
-}
-
-// -- Unit::CanAttack (vtbl+0xb4, 0x005b1da0) ----------------------------------
-
-/// A hero's ceasefire covers the hero and everyone attached to it
-/// (0x005d37f0 resolves a unit to its hero before asking), which is what
-/// `HeroSystem::modifiers_for` already resolves for the damage formula.
-[[nodiscard]] bool under_ceasefire(const HeroSystem* heroes, ObjectId id, GameTime now) {
-  return heroes != nullptr && heroes->modifiers_for(id, now).ceasefire;
-}
-
-/// `Unit::CanAttack(target)`, the virtual at `vtbl+0xb4` that
-/// `Obj::CanAttack` (0x005ab060) wraps and the planner's split turns on.
-///
-/// The order is the original's. What it does not model is listed in the
-/// header: the per-player visibility mask behind bit 21, the two unit flag
-/// bits, the class flag at `+0xb30`, and `[settlement+0x40]`.
-///
-/// **`CombatSystem::unit_can_attack` is the same rule** for the fight itself
-/// (`Attack`, `IsValidTarget`, `CanAttack` and the target sweep), read off
-/// cached class bits instead of class names. It leaves out what this keeps --
-/// the hero ceasefire and the widening for non-enemies -- because its callers
-/// test those their own way; change one table and the other must follow.
-[[nodiscard]] bool can_attack(World& world, const HeroSystem* heroes, EconomySystem* economy,
-                              const WorldObject& self, const WorldObject& target, GameTime now) {
-  if (target.state.health <= 0) return false;
-  if (self.state.flags.is_unit) {
-    if (!world.players().is_enemy(self.state.owner, target.state.owner)) {
-      // Not an enemy: only a training partner or a standing building.
-      if (!target.state.flags.training &&
-          !(target.state.flags.is_building && target.state.health > 0)) {
-        return false;
-      }
-    }
-  }
-  if (under_ceasefire(heroes, self.id, now)) return false;
-  if (target.state.flags.is_unit) {
-    if (under_ceasefire(heroes, target.id, now)) return false;
-    if (is_heir_of(world, target, "Sentry") && !is_ranged(world, self)) return false;
-    if (is_heir_of(world, self, "RamUnit")) return false;
-  }
-  {
-    const ClassGraph* graph = world.class_graph();
-    if (graph != nullptr && target.class_index != kNoClass &&
-        graph->at(target.class_index).id == "Fish") {
-      return false;
-    }
-  }
-  if (target.state.flags.is_building) {
-    const Settlement* set = settlement_of(world, economy, target.id);
-    if (set != nullptr) {
-      if (is_heir_of(world, target, "FakeTower")) return false;
-      if (is_heir_of(world, self, "RamUnit")) {
-        const WorldObject* anchor = world.find(set->anchor);
-        const bool soft = anchor != nullptr && (is_heir_of(world, *anchor, "Outpost") ||
-                                                is_heir_of(world, *anchor, "BaseShipyard"));
-        return soft || is_heir_of(world, target, "Gate");
-      }
-    }
-  }
-  if (target.state.flags.is_building && is_heir_of(world, target, "Catapult")) {
-    for (const char* beast : {"Wolf", "Bear", "Boar", "LionM", "LionF"}) {
-      if (is_heir_of(world, self, beast)) return false;
-    }
-    return true;
-  }
-  switch (damage_type_of(world, self)) {
-    case DamageType::slash:
-    case DamageType::pierce:
-      return target.state.flags.is_unit || is_ranged(world, self);
-    case DamageType::siege:
-      return true;
-    case DamageType::none:
-    default:
-      return false;
-  }
 }
 
 // -- the map and the sites ---------------------------------------------------
@@ -437,6 +356,7 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
   CommandSystem* commands = command_system(world);
   HeroSystem* heroes = hero_system_of(world);
   EconomySystem* economy = economy_of(world);
+  CombatSystem* combat = combat_system_of(world);
   if (graph == nullptr || commands == nullptr || heroes == nullptr) return report;
 
   const PlayerId player = first->state.owner;
@@ -466,7 +386,9 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
   for (std::size_t i = 0; i < units.size(); ++i) {
     const WorldObject* slot = world.find(units[i]);
     if (slot == nullptr) continue;
-    const bool hurts = can_attack(world, heroes, economy, *slot, *target_slot, now);
+    // `Unit::CanAttack` (vtbl+0xb4, 0x005b1da0): the one virtual the fight
+    // asks too (`CombatSystem::attack_virtual`).
+    const bool hurts = combat != nullptr && combat->attack_virtual(*slot, *target_slot);
     const bool crew = wanted && !heroes->is_hero(slot->id) && !hurts &&
                       is_heir_of(world, *slot, "Military") && !has_freedom(world, *slot);
     if (crew) {
@@ -530,7 +452,6 @@ SiegeReport run_siege_plan(World& world, std::span<const ObjectId> members, Obje
   bool have_rally = false;
   std::int32_t placed = 0;
   std::int32_t inside = 0;
-  CombatSystem* combat = combat_system_of(world);
   // The engine's own target slot, `[cat+0x228]` (`ObjectState::catapult_target`).
   const auto aimed_at = [&](ObjectId catapult) {
     const ObjectState* state = world.state(catapult);

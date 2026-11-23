@@ -3810,12 +3810,13 @@ TEST(combat_enemies_in_sight_needs_the_lookers_can_attack) {
   CHECK(b.enemies_in_sight(looker));
 }
 
-/// A hidden enemy is not an enemy in sight.
+/// A hidden enemy is not an enemy in sight -- unless its owner shares its
+/// view with the looker's.
 ///
 /// Bit 21 of `[obj + 0x2c]` means *not visible* -- `Obj::IsVisible` negates it
 /// -- and the sweep's hidden arm (0x005d537e) makes a candidate carrying it
-/// pass an owner-mask test before it counts. Reproduced as "a hidden object is
-/// not seen", which is what that test comes to for the side doing the looking.
+/// pass an owner-mask test before it counts: its owner's bit in the looker's
+/// `seeflags` (`[record+0x18]`), which the `CanAttack` virtual asks again.
 TEST(combat_enemies_in_sight_does_not_see_a_hidden_enemy) {
   SightBench b;
   const ObjectId looker = b.soldier(0, Point{0, 0});
@@ -3825,6 +3826,13 @@ TEST(combat_enemies_in_sight_does_not_see_a_hidden_enemy) {
   REQUIRE(b.world.find(sneak) != nullptr);
   b.world.find(sneak)->state.flags.hidden = true;
   CHECK(!b.enemies_in_sight(looker));
+  // The looker sharing its own view gives nothing; the sneak's owner sharing
+  // its view with the looker's puts its bit in the looker's mask.
+  b.world.players().set(0, 1, Relation::share_view, true);
+  CHECK(!b.enemies_in_sight(looker));
+  b.world.players().set(1, 0, Relation::share_view, true);
+  CHECK(b.enemies_in_sight(looker));
+  b.world.players().set(1, 0, Relation::share_view, false);
 
   b.world.find(sneak)->state.flags.hidden = false;
   CHECK(b.enemies_in_sight(looker));

@@ -123,6 +123,7 @@ struct SiegeBench {
     REQUIRE(world.add_system(&heroes));
     REQUIRE(world.add_system(&combat));
     combat.set_world_bound(true);  // what the session does: `reconcile` is a no-op otherwise
+    combat.set_class_graph(&graph);  // and the session hands it the classes
     REQUIRE(world.add_system(&match));
     REQUIRE(world.add_system(&movement));
     economy.start(world);

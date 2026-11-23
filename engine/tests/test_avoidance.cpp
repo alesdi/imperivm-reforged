@@ -2141,3 +2141,44 @@ TEST(the_failed_search_bit_survives_a_save_and_is_not_hashed) {
   REQUIRE(c.field.movement.deserialize(bytes).ok());
   CHECK(c.field.move(walking).route_failed);
 }
+
+TEST(an_object_goal_that_draws_away_is_laid_again_except_in_a_big_fight) {
+  // 0x00417ab0: an object goal whose target has drawn away from the route's
+  // end lays its route again at the next step -- except for a unit with a
+  // combat target (`[unit+0x1a8]`) whose squad's look saw 25 enemies or more
+  // (`[squad+0x7c]`), whose route stands. 24 is not a big fight.
+  const auto end_after_drift = [](std::size_t crowd, bool targeting) -> std::pair<Point, Point> {
+    Field field(128, false);
+    HeroSystem heroes;
+    CombatSystem combat;
+    CHECK(field.world.add_system(&combat));
+    CHECK(field.world.add_system(&heroes));
+    field.world.start();
+    const ObjectId walker = field.unit("Soldier", Point{200, 200});
+    const ObjectId quarry = field.unit("Soldier", Point{1200, 200});
+    const SquadKey key = heroes.squads().create(0);
+    CHECK(heroes.squads().join(key, walker));
+    Combatant fighter;
+    fighter.id = walker;
+    fighter.target = targeting ? quarry : kNoObject;
+    combat.add(fighter);
+    std::vector<ObjectId> seen;
+    for (ObjectId id = 5000; id < 5000 + crowd; ++id) seen.push_back(id);
+    heroes.squads().find(key)->enemies = seen;
+
+    field.movement.order_goto_object(field.world, walker, quarry, kBand, 0, true);
+    if (!field.move(walker).has_path) return {Point{0, 0}, Point{0, 0}};
+    const Point laid = field.move(walker).route.points.back();
+    CHECK(field.world.set_position(quarry, Point{1200, 1500}));
+    field.world.advance(400);
+    if (!field.move(walker).has_path) return {laid, Point{0, 0}};
+    return {laid, field.move(walker).route.points.back()};
+  };
+  const auto [laid24, now24] = end_after_drift(24, true);
+  CHECK(!(laid24 == (Point{0, 0})));
+  CHECK(!(now24 == laid24));
+  const auto [laid25, now25] = end_after_drift(25, true);
+  CHECK(now25 == laid25);
+  const auto [laid_free, now_free] = end_after_drift(25, false);
+  CHECK(!(now_free == laid_free));
+}

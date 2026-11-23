@@ -140,8 +140,8 @@ std::int32_t advance_elapsed(std::int32_t cycle_ms, std::int32_t elapsed, GameTi
 /// spare, because there was no spare: `no_ai` took `0x80` and the eight below
 /// it were full. The save version moves with the width; a version-7 world
 /// cannot be read as a version-8 one and is refused rather than mis-decoded.
-[[nodiscard]] std::uint32_t pack_object_flags(const ObjectFlags& flags) noexcept {
-  return static_cast<std::uint32_t>(
+[[nodiscard]] std::uint64_t pack_object_flags(const ObjectFlags& flags) noexcept {
+  return static_cast<std::uint64_t>(
       (flags.is_unit ? 0x001u : 0u) | (flags.is_building ? 0x002u : 0u) |
       (flags.is_hero ? 0x004u : 0u) | (flags.has_active_path ? 0x008u : 0u) |
       (flags.hidden ? 0x010u : 0u) | (flags.in_party ? 0x020u : 0u) |
@@ -158,10 +158,11 @@ std::int32_t advance_elapsed(std::int32_t cycle_ms, std::int32_t elapsed, GameTi
       (flags.half_damage ? 0x2000000u : 0u) | (flags.training ? 0x4000000u : 0u) |
       (flags.towers_posted ? 0x8000000u : 0u) | (flags.has_towers ? 0x10000000u : 0u) |
       (flags.force_idle ? 0x20000000u : 0u) | (flags.ai_registered ? 0x40000000u : 0u) |
-      (flags.sacrifice_stopped ? 0x80000000u : 0u));
+      (flags.sacrifice_stopped ? 0x80000000u : 0u)) |
+         (flags.strikes_anyone ? 0x100000000ull : 0ull);
 }
 
-[[nodiscard]] ObjectFlags unpack_object_flags(std::uint32_t bits) noexcept {
+[[nodiscard]] ObjectFlags unpack_object_flags(std::uint64_t bits) noexcept {
   ObjectFlags flags;
   flags.is_unit = (bits & 0x001u) != 0;
   flags.is_building = (bits & 0x002u) != 0;
@@ -195,6 +196,7 @@ std::int32_t advance_elapsed(std::int32_t cycle_ms, std::int32_t elapsed, GameTi
   flags.force_idle = (bits & 0x20000000u) != 0;
   flags.ai_registered = (bits & 0x40000000u) != 0;
   flags.sacrifice_stopped = (bits & 0x80000000u) != 0;
+  flags.strikes_anyone = (bits & 0x100000000ull) != 0;
   return flags;
 }
 
@@ -527,6 +529,15 @@ ObjectId World::allocate(InternalKind kind, std::unique_ptr<NativeObject> object
     if (sentry != kNoClass && class_is_a(assigned, sentry)) {
       made.state.flags.no_ai = true;
       made.state.flags.on_minimap = true;
+    }
+    // Then, past the feeding bit, the five wild beasts (0x005d3363 ..
+    // 0x005d33c2): an heir of any of them carries `strikes_anyone`.
+    for (const char* beast : {"Wolf", "Bear", "Boar", "LionM", "LionF"}) {
+      const ClassIndex line = classes_->find(beast);
+      if (line != kNoClass && class_is_a(assigned, line)) {
+        made.state.flags.strikes_anyone = true;
+        break;
+      }
     }
   }
   if (objects_.back().object != nullptr) objects_.back().object->on_spawn();
@@ -2132,6 +2143,9 @@ ObjectId World::spawn_map_object(const MapObject& placed, Point at, ObjectId set
   // The word is replaced, not merged (0x005dd6a9): a sentry the map places
   // keeps the bits its map gives it rather than the ones `allocate` set.
   slot->state.flags.on_minimap = (placed.unit_flags & kUnitFlagOnMinimap) != 0;
+  // And the wild beast's bit, which the constructor raised for the class and
+  // the map's word now says again: all 169 units that author it are beasts.
+  slot->state.flags.strikes_anyone = (placed.unit_flags & kUnitFlagStrikesAnyone) != 0;
   // Health as the map authors it, not as the class declares it.
   //
   // The nine dumps agree with the class maximum because the corpus is
@@ -3144,7 +3158,7 @@ WorldHashes World::hashes() const noexcept {
 namespace {
 
 constexpr std::uint32_t kWorldMagic = 0x444C5749u;  // "IWLD"
-constexpr std::uint32_t kWorldVersion = 39;  // 39: the attack's frame and a ship's shot window on the animation clock; 38: the animation timer's arming order, origin and activity word; 37: each object's animation clock; 36: each object's grid arrival stamp and the next stamp; 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
+constexpr std::uint32_t kWorldVersion = 40;  // 40: the object flag word at 64 bits, for `strikes_anyone`; 39: the attack's frame and a ship's shot window on the animation clock; 38: the animation timer's arming order, origin and activity word; 37: each object's animation clock; 36: each object's grid arrival stamp and the next stamp; 35: `curse_until`; 34: no `gate_passable`; 33: a gate's motion, `gate_passable`; 32: `display_name`; 31: `training`
 
 /// `0xFF` for a slot with no native object -- every internal kind.
 /// `NativeClass` is a `std::uint8_t` enum with 26 values, so the sentinel
@@ -3160,7 +3174,7 @@ constexpr std::uint8_t kNoNativeClass = 0xFFu;
 /// spots that only bite together: the mask is only reachable through a saved
 /// world that actually carries the bit. See
 /// `save_the_fixture_sets_and_clears_every_writable_flag`.
-constexpr std::uint32_t kObjectFlagMask = 0xFFFFFFFFu;  // all 32 bits since `sacrifice_stopped`
+constexpr std::uint64_t kObjectFlagMask = 0x1FFFFFFFFull;  // 33 bits since `strikes_anyone`
 
 void put_query_spec(std::vector<std::byte>& out, const QuerySpec& spec) {
   bytes::put_u8(out, static_cast<std::uint32_t>(spec.kind));
@@ -3351,7 +3365,7 @@ void World::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, slot.state.position.x);
     bytes::put_i32(out, slot.state.position.y);
     bytes::put_u8(out, slot.state.owner);
-    bytes::put_u32(out, pack_object_flags(slot.state.flags));
+    bytes::put_u64(out, pack_object_flags(slot.state.flags));
     bytes::put_u32(out, slot.state.holder);
     bytes::put_i32(out, slot.state.health);
     bytes::put_i32(out, slot.state.stamina);
@@ -3599,7 +3613,7 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
     std::uint8_t internal = 0;
     std::uint8_t native = 0;
     std::uint8_t owner = 0;
-    std::uint32_t flags = 0;
+    std::uint64_t flags = 0;
     std::uint8_t animating = 0;
     std::uint8_t repeat = 0;
     std::uint8_t clock_drives = 0;
@@ -3610,7 +3624,7 @@ Status World::deserialize(std::span<const std::byte> data, EntityResolver* entit
         !bytes::get_i32(reader, slot.sight) || !reader.u32(slot.query) ||
         !bytes::get_i32(reader, slot.state.position.x) ||
         !bytes::get_i32(reader, slot.state.position.y) || !reader.u8(owner) ||
-        !reader.u32(flags) || !reader.u32(slot.state.holder) ||
+        !bytes::get_u64(reader, flags) || !reader.u32(slot.state.holder) ||
         !bytes::get_i32(reader, slot.state.health) ||
         !bytes::get_i32(reader, slot.state.stamina) ||
         !bytes::get_i32(reader, slot.state.user) ||

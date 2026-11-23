@@ -1383,11 +1383,23 @@ ObjectId MovementSystem::gate_barring(const World& world, ObjectId id,
 
 bool MovementSystem::object_goal_drifted(const World& world, ObjectId id,
                                          const MoveState& move) const {
-  // 0x00417ab0 for an object goal (mode 1). A target gone or dead is laid
-  // again. **Not reproduced:** a unit whose squad's `[squad+0x7c]` is 25 or
-  // more and that has a combat target is never laid again here.
+  // 0x00417ab0 for an object goal (mode 1). A target gone or dead
+  // (`vtbl+0x50`: a building is never dead) is laid again. A unit whose
+  // squad's look saw 25 enemies or more (`[squad+0x7c]`, `Squad::enemies`)
+  // and that has a combat target (`[unit+0x1a8]`) is not: in a big fight the
+  // route stands (0x00417ae9 .. 0x00417b27).
   const WorldObject* target = world.find(move.target_object);
-  if (target == nullptr || target->state.health == 0) return true;
+  if (target == nullptr || object_is_dead(*target)) return true;
+  World& systems = const_cast<World&>(world);  // the lookups, not the state
+  if (const HeroSystem* heroes = hero_system_of(systems); heroes != nullptr) {
+    const Squad* squad = squad_containing(*heroes, id);
+    const CombatSystem* combat = combat_system_of(systems);
+    const Combatant* self = combat != nullptr ? combat->find(id) : nullptr;
+    if (squad != nullptr && squad->enemies.size() >= kDriftCrowd && self != nullptr &&
+        self->target != kNoObject) {
+      return false;
+    }
+  }
   if (move.route.points.empty()) return true;
   const Point last = move.route.points.back();
   const std::int64_t away = isqrt(dist_sq(world.resolve_position(move.target_object), last));
@@ -1807,12 +1819,11 @@ struct Self {
 ///     `[obj+0x2c]`) is routed to only when it is in no holder and either not
 ///     hidden (bit 21) or hidden from nobody on the mover's side (its one-hot
 ///     owner bits against the side mask `[record+0x18]` of the mover's
-///     owner). Anything else -- a handle naming nothing, a garrisoned or a
-///     concealed enemy unit -- lays no route and does not stamp a failure:
-///     the call clears its walking state (`[state] = 0`), waits the slice and
-///     answers false at its re-entry. Here that is the slice's suspension with
-///     `false`. **Approximated:** the side mask is not modelled, so a hidden
-///     unit is approached only by its own player's units;
+///     owner, `PlayerTable::in_side_mask`). Anything else -- a handle naming
+///     nothing, a garrisoned or a concealed unit -- lays no route and does
+///     not stamp a failure: the call clears its walking state (`[state] =
+///     0`), waits the slice and answers false at its re-entry. Here that is
+///     the slice's suspension with `false`;
 ///   * for a target that is not a unit, the route is the point form's to the
 ///     target's position with both class radii added to the band
 ///     (0x005d42a6, `SetDest` 0x0041a4c0); for a unit, the object mode
@@ -2681,8 +2692,10 @@ bool goto_may_approach(const World& world, ObjectId mover, ObjectId target) {
   if (!other->state.flags.is_unit) return true;
   if (other->state.is_held()) return false;
   if (!other->state.flags.hidden) return true;
+  // Hidden: only when its owner's bit is in the mover's side mask
+  // (`[record+0x18]`, 0x005d42c3).
   const WorldObject* self = world.find(mover);
-  return self != nullptr && other->state.owner == self->state.owner;
+  return self != nullptr && world.players().in_side_mask(self->state.owner, other->state.owner);
 }
 
 namespace {

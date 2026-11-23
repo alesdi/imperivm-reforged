@@ -548,8 +548,8 @@ the result **dropped** (0x005af576) — the class's `inventory_size` bounds the 
 - `UnitFlags` is a bit set with five bits in use, and it is the **second** flag word --
   `[obj+0x194]` in `gbr.exe`, not the `flags` attribute. `0x00040000` on 14,586 (the
   ordinary case), `0x00020000` on 2,028, `0x02000000` on 253 of the 254 `CVXFlyingUnit`
-  instances, `0x00400000` on 46 flying units, `0x00200000` on 169. **Two of the five are
-  named now**; the other three are still unresolved.
+  instances, `0x00400000` on 46 flying units, `0x00200000` on 169. **Four of the five are
+  named now** (`0x00020000` under *What is still unknown*); `0x02000000` is still open.
 
   - `0x00040000` is bit 18, **`UNITFLAG_NOAI`** — the constant the script language exposes
     and the only mask any shipped `Unit::GetFlags` call site passes. The correlation
@@ -559,6 +559,13 @@ the result **dropped** (0x005af576) — the class's `inventory_size` bounds the 
     the AI with `SetNoAIFlag(list, false)`; wildlife is the AI's from the first tick.
   - `0x00400000` is bit 22, **`Flying::IsInAir`** (`0x0051bd20`). It appears only on flying
     units, so 46 birds begin their map airborne.
+  - `0x00200000` is bit 21, **the wild beast's**: the 169 units that carry it are exactly
+    the install's 101 wolves, 25 boars, 23 bears and 20 lions (`LionM`, `LionF`), and the
+    `CVXUnit` constructor raises it on every heir of those five classes (0x005d3363 ..
+    0x005d33c2) before the map's word replaces it. A unit carrying it passes the
+    `CanAttack` virtual's side test whatever the diplomacy (0x005b1e19) and strikes a
+    non-enemy with a full blow rather than a training one (0x0051163f); nothing else
+    reads it. Checked over every placed unit in the 29 shipped containers.
 
   `0x02000000` is still only *correlated* with flying rather than explained — 253 of 254 is
   not 254 of 254, and no reader of bit 25 at `[obj+0x194]` has been found.
@@ -1432,11 +1439,11 @@ Cross-checks against the class graph, run separately because they need the packs
   **Light** above.
 - **The height layer's world-unit scale.** 0 is sea level, the range is 0..255, and the step
   size is a projection question.
-- **`UnitFlags`.** Five bits in use, **two still open**. `0x02000000` is flying (253 of
+- **`UnitFlags`.** Five bits in use, **one still open**. `0x02000000` is flying (253 of
   the 254 `CVXFlyingUnit` instances) but no reader of that bit has been found, so the
-  correlation is not an explanation. `0x00200000` (169) has no visible correlate. Three are
-  settled: `0x00040000` is `UNITFLAG_NOAI` and `0x00400000` is `Flying::IsInAir`, described
-  under **Unit** above, and **`0x00020000` is the *inverse* of "Unit doesn't eat"** — the
+  correlation is not an explanation. Four are settled: `0x00040000` is `UNITFLAG_NOAI`,
+  `0x00400000` is `Flying::IsInAir` and `0x00200000` is the wild beast's, described under
+  **Unit** above, and **`0x00020000` is the *inverse* of "Unit doesn't eat"** — the
   editor's `STA_NoFeeding` check box (`0x4000021`) shows `!bit17` (0x004aa2f4 reads the
   bit and negates it) and ticking it *clears* the bit (0x004ab130), so the 2,028 units that
   carry it are the ones that **do** eat, and the 14,143 without it are excused from the

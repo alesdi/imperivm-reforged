@@ -1074,9 +1074,8 @@ struct GotoOrder {
 
 /// Whether `mover` may route to `target` (0x005d40c0 at 0x005d4291 ..
 /// 0x005d42d7): anything that is not a unit, and a unit in no holder that is
-/// either not hidden or hidden from nobody on the mover's side. **Approximated:**
-/// the side mask `[record+0x18]` is not modelled, so a hidden unit is
-/// approached only by its own player's units.
+/// either not hidden or of an owner whose bit is in the mover's side mask
+/// (`[record+0x18]`, `PlayerTable::in_side_mask`).
 [[nodiscard]] bool goto_may_approach(const World& world, ObjectId mover, ObjectId target);
 
 /// The shared body of the `Goto` family. Returns the host outcome the entry

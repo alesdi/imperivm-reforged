@@ -63,6 +63,13 @@ struct Bench {
         R"(<class id="Sentry" parent="Unit" cpp_class="CVXUnit"/>)",
         R"(<class id="Wolf" parent="Unit" cpp_class="CVXUnit"><properties damage="15" damage_type="slash"/></class>)",
         R"(<class id="Fish" parent="Unit" cpp_class="CVXUnit"/>)",
+        // A water unit's class (`water_unit`, `[class+0xb30]`), melee.
+        R"(<class id="Boat" parent="Unit" cpp_class="CVXUnit"><properties water_unit="1"/></class>)",
+        // A wolf's heir: the constructor's beast test walks the ancestry.
+        R"(<class id="GreyWolf" parent="Wolf" cpp_class="CVXUnit"/>)",
+        // A settlement whose central class may not be attacked.
+        R"(<class id="Shrine" parent="Building" cpp_class="CVXTownHall"><properties is_central_building="1" can_be_attacked="0"/></class>)",
+        R"(<class id="Pierce" parent="FakeTower" cpp_class="CVXBuilding"><properties damage="40" damage_type="pierce" range="600" projectile_class="Arrow"/></class>)",
         R"(<class id="Arrow" parent="Object" cpp_class="CVXCatapultShot"/>)",
         R"(<class id="Building" parent="Object" cpp_class="CVXBuilding"><properties maxhealth="3000" radius="150" can_be_attacked="1"/></class>)",
         R"(<class id="House" parent="Building" cpp_class="CVXBuilding"/>)",
@@ -97,13 +104,14 @@ struct Bench {
   }
 
   /// A settlement of player 2 centred on `anchor`, with `others` in it.
-  void settle(ObjectId anchor, SettlementKind kind, std::vector<ObjectId> others = {}) {
+  void settle(ObjectId anchor, SettlementKind kind, std::vector<ObjectId> others = {},
+              bool can_be_attacked = true) {
     SettlementInit init;
     init.kind = kind;
     init.anchor = anchor;
     init.owner = kThem;
     init.max_units = 10;
-    init.can_be_attacked = true;
+    init.can_be_attacked = can_be_attacked;
     init.anchor_max_health = 3000;
     const SettlementId id = economy.create(world, init);
     REQUIRE(id != kNoSettlement);
@@ -336,4 +344,169 @@ TEST(in_range_measures_where_the_two_stand_now) {
   b.world.set_position(foe, Point{1300, 1000});
   REQUIRE(b.combat.find(foe)->position.x == 2000);
   CHECK(b.call("InRange", archer, foe).value.as_integer() == 1);
+}
+
+/// **The virtual reads what the object carries, in the original's order**
+/// (0x005b1da0): a hidden target only through the side mask, one in the air
+/// or of a water unit's class only to a receiver that shoots, a messenger on
+/// either side never.
+TEST(the_can_attack_virtual_reads_the_objects_flags) {
+  Bench b(false);
+  const ObjectId sword = b.unit("Swordsman", Point{100, 100});
+  const ObjectId archer = b.unit("Archer", Point{120, 100});
+  const ObjectId foe = b.unit("Swordsman", Point{200, 200}, kThem);
+  const ObjectId boat = b.unit("Boat", Point{240, 200}, kThem);
+  const ObjectId oar = b.unit("Boat", Point{260, 200});
+  b.world.start();
+  CHECK(b.may(sword, foe));
+
+  // Hidden (bit 21 of `[obj+0x2c]`): refused unless the target's owner shares
+  // its view with the receiver's -- the receiver's `seeflags`, not its own
+  // view of the target's player.
+  b.world.mutable_state(foe)->flags.hidden = true;
+  CHECK(!b.may(sword, foe));
+  CHECK(!b.may(archer, foe));
+  CHECK(b.call("IsValidTarget", sword, foe).value.as_integer() == 0);
+  b.world.players().set(kUs, kThem, Relation::share_view, true);
+  CHECK(!b.may(sword, foe));
+  b.world.players().set(kThem, kUs, Relation::share_view, true);
+  CHECK(b.may(sword, foe));
+  b.world.mutable_state(foe)->flags.hidden = false;
+
+  // In the air (bit 22 of `[unit+0x194]`): only a receiver that shoots.
+  b.world.mutable_state(foe)->flags.in_air = true;
+  CHECK(!b.may(sword, foe));
+  CHECK(b.may(archer, foe));
+  b.world.mutable_state(foe)->flags.in_air = false;
+
+  // A water unit's class: only to one that shoots, or is a water unit too.
+  CHECK(!b.may(sword, boat));
+  CHECK(b.may(archer, boat));
+  CHECK(b.may(oar, boat));
+
+  // A messenger (bit 26 of `[obj+0x2c]`), as target or as receiver.
+  b.world.mutable_state(foe)->flags.messenger = true;
+  CHECK(!b.may(sword, foe));
+  CHECK(!b.may(archer, foe));
+  b.world.mutable_state(foe)->flags.messenger = false;
+  b.world.mutable_state(sword)->flags.messenger = true;
+  CHECK(!b.may(sword, foe));
+  b.world.mutable_state(sword)->flags.messenger = false;
+  CHECK(b.may(sword, foe));
+}
+
+/// **The side test, and the beast that skips it** (0x005b1e19 .. 0x005b1e56).
+/// A non-enemy passes only training or as a building with health -- so the
+/// virtual alone lets an archer aim at its own house -- and a unit carrying
+/// the beast's bit passes whatever the diplomacy. The constructor raises the
+/// bit on every heir of the five beasts and on nothing else.
+TEST(the_side_test_passes_a_beast_a_trainee_and_a_standing_building) {
+  Bench b(false);
+  const ObjectId sword = b.unit("Swordsman", Point{100, 100});
+  const ObjectId archer = b.unit("Archer", Point{120, 100});
+  const ObjectId friend_ = b.unit("Swordsman", Point{140, 100});
+  const ObjectId wolf = b.unit("GreyWolf", Point{160, 100});
+  const ObjectId house = b.spawn(NativeClass::building, "House", Point{3000, 3000}, kUs, 1000);
+  b.world.start();
+  CHECK(b.world.find(wolf)->state.flags.strikes_anyone);
+  CHECK(!b.world.find(sword)->state.flags.strikes_anyone);
+
+  CHECK(!b.may(sword, friend_));
+  CHECK(b.may(wolf, friend_));
+  CHECK(b.may(wolf, sword));
+  b.world.mutable_state(friend_)->flags.training = true;
+  CHECK(b.may(sword, friend_));
+  b.world.mutable_state(friend_)->flags.training = false;
+
+  CHECK(b.may(archer, house));
+  CHECK(!b.may(sword, house));  // the side test passes; the sword's damage type does not
+  b.world.set_health(house, 0);
+  CHECK(!b.may(archer, house));
+}
+
+/// **A building through its settlement** (0x005b1f51 .. 0x005b1fbc): at no
+/// health only in a garrisoned outpost's or shipyard's settlement, and never
+/// in a settlement whose `canbeattacked` (`[settlement+0x40]`) is clear.
+TEST(a_building_is_judged_by_its_settlement) {
+  Bench b(true);
+  const ObjectId archer = b.unit("Archer", Point{100, 100});
+  const ObjectId shrine = b.spawn(NativeClass::town_hall, "Shrine", Point{3000, 3000}, kThem, 3000);
+  const ObjectId porch = b.spawn(NativeClass::building, "House", Point{3000, 3400}, kThem, 1000);
+  b.settle(shrine, SettlementKind::other, {porch}, false);
+  const ObjectId outpost = b.spawn(NativeClass::outpost, "Outpost", Point{6000, 6000}, kThem, 3000);
+  const ObjectId hall = b.spawn(NativeClass::town_hall, "TownHall", Point{9000, 9000}, kThem, 3000);
+  b.settle(outpost, SettlementKind::outpost);
+  b.settle(hall, SettlementKind::stronghold);
+  const ObjectId guard = b.unit("Swordsman", Point{6100, 6100}, kThem);
+  b.world.start();
+
+  CHECK(!b.may(archer, shrine));
+  CHECK(!b.may(archer, porch));
+
+  CHECK(b.may(archer, outpost));
+  b.world.set_health(outpost, 0);
+  b.world.set_health(hall, 0);
+  CHECK(!b.may(archer, outpost));  // nobody in its holder
+  CHECK(!b.may(archer, hall));
+  Settlement* camp = b.economy.settlements().for_object(b.world.find(outpost)->settlement);
+  Settlement* town = b.economy.settlements().for_object(b.world.find(hall)->settlement);
+  REQUIRE(camp != nullptr && town != nullptr);
+  REQUIRE(camp->holder.force_add(guard));
+  REQUIRE(town->holder.force_add(guard));
+  CHECK(b.may(archer, outpost));
+  CHECK(!b.may(archer, hall));  // a town hall's is no outpost
+
+  // One's own garrisoned outpost at no health fails the side test, which
+  // passes a non-enemy building only with health (0x005b1e4e).
+  const ObjectId ours = b.spawn(NativeClass::outpost, "Outpost", Point{12000, 6000}, kUs, 3000);
+  b.settle(ours, SettlementKind::outpost);
+  b.run(1);  // into combat's roster
+  Settlement* own = b.economy.settlements().for_object(b.world.find(ours)->settlement);
+  REQUIRE(own != nullptr);
+  REQUIRE(own->holder.force_add(guard));
+  CHECK(b.may(archer, ours));
+  b.world.set_health(ours, 0);
+  CHECK(!b.may(archer, ours));
+}
+
+/// **A tower asks the same virtual** -- every object family's table carries
+/// 0x005b1da0 at `+0xb4` -- from the receiver's side: the side test, and its
+/// class's damage type, with none of the unit-receiver clauses.
+TEST(a_tower_asks_the_same_virtual_as_a_soldier) {
+  Bench b(false);
+  const ObjectId tower = b.spawn(NativeClass::building, "Pierce", Point{100, 100}, kUs, 1000);
+  const ObjectId foe = b.unit("Swordsman", Point{300, 100}, kThem);
+  const ObjectId friend_ = b.unit("Swordsman", Point{320, 100});
+  const ObjectId sentry = b.unit("Sentry", Point{340, 100}, kThem);
+  b.world.start();
+  CHECK(b.may(tower, foe));
+  CHECK(!b.may(tower, friend_));
+  CHECK(b.may(tower, sentry));  // it shoots
+  b.world.mutable_state(foe)->flags.in_air = true;
+  CHECK(b.may(tower, foe));
+}
+
+/// **A beast's blow on a non-enemy is a full blow** (0x0051163f): the
+/// training blow between two units that are not enemies is skipped for an
+/// attacker carrying `strikes_anyone`, so a wolf takes a neighbour's soldier
+/// below the tenth of his health a training blow would leave him.
+TEST(a_beasts_blow_on_a_non_enemy_is_not_a_training_blow) {
+  Bench b(false);
+  const ObjectId wolf = b.unit("Wolf", Point{1000, 1000});
+  const ObjectId sword = b.unit("Swordsman", Point{1000, 1000});
+  const ObjectId mate = b.unit("Swordsman", Point{1040, 1000});
+  b.world.set_health(mate, 21);
+  b.world.start();
+  REQUIRE(b.world.find(wolf)->state.flags.strikes_anyone);
+  CHECK(imperivm::test::fight(b.world, b.combat, wolf, mate, 10) > 0);
+  CHECK(b.combat.health(mate) < 20);  // a training blow stops at 20 (a tenth of 200)
+
+  // And a swordsman training on the same mate stops at the tenth.
+  const ObjectId other = b.unit("Swordsman", Point{2040, 1000});
+  b.world.set_health(other, 60);
+  b.world.mutable_state(other)->flags.training = true;
+  b.world.set_position(sword, Point{2000, 1000});
+  b.run(1);
+  CHECK(imperivm::test::fight(b.world, b.combat, sword, other, 20) > 0);
+  CHECK(b.combat.health(other) == 20);
 }
