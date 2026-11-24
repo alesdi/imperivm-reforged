@@ -772,9 +772,11 @@ class HeroSystem final : public System, public UnitMoveHook {
   /// `SightPerScoutLevel` per point of difference, clamped to `[100, 2048]`,
   /// exploring the new circle round the hero for its owner when that widens
   /// it and the hero is not held -- `m_set_sight`'s reveal -- and storing it
-  /// either way. Administration, the team skills, Discipline, Quick March and
-  /// the Epic skills only refresh what this engine computes when asked
-  /// (`max_army`, `modifiers_for`, `hero_modifiers`).
+  /// either way. Quick March (3), with a formation at `[hero+0x2b0]`, measures
+  /// its slowest and fastest again, forced (0x005f5640 with 1,
+  /// `MovementSystem::update_min_speed`). Administration, the team skills,
+  /// Discipline and the Epic skills only refresh what this engine computes
+  /// when asked (`max_army`, `modifiers_for`, `hero_modifiers`).
   bool write_skill(World* world, ObjectId hero, HeroSkill which, std::int32_t points);
   /// Whether the hero is offered the skill: its byte is not -1. The class's
   /// `HeroSkills` list seeds it at registration; `SetSkill` and the map's
