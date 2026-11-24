@@ -513,8 +513,12 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     held = [(int(i), cls, int(p)) for i, cls, p in
             re.findall(r"^\s+(\d+) (\S+) p(\d+) at \(-1,-1\) holder [1-9]\d* health [1-9]",
                        first.stdout, re.MULTILINE)]
+    # The village's central building by its class (`TVillage`), not anything
+    # whose class merely contains the word: an ambient villager
+    # (`TVillagerAmbient`) walking past the site was picked whenever it stood
+    # nearer than the building, which is where the AI's draws put it.
     village = sorted(((x - P1_VILLAGE_AT[0]) ** 2 + (y - P1_VILLAGE_AT[1]) ** 2, i, x, y)
-                     for i, cls, p, x, y in listed if "Village" in cls and p == 1)[:1]
+                     for i, cls, p, x, y in listed if cls.endswith("Village") and p == 1)[:1]
     village = [(i, x, y) for d, i, x, y in village if d <= 1000 ** 2]
     soldier = [i for i, cls, p, x, y in listed if "Village" not in cls and p == 3] or [
         i for i, cls, p in held if p == 3]
