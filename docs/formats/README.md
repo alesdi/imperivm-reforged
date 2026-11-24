@@ -34,6 +34,7 @@ standard of evidence they are held to.
 | sacrifice (runtime) | [sacrifice.md](sacrifice.md) | a sacrifice's stop flag: who writes it and what `IsEmpty` answers |
 | settlement holder (runtime) | [settlement.md](settlement.md) | the garrison holder's `health` and `stamina`, and why both are always 0 |
 | object animation (runtime) | [animation.md](animation.md) | the original's per-object animation record: StartAnimation, transitions, the timer and its firings, the action mode, and what the script readers answer |
+| the blow (runtime) | [blow.md](blow.md) | what one object striking another does: the dealer, the training blow, the calculator's gates, its arithmetic and every special, the stamina it costs and the draws it takes, in the binary's order |
 | `ISAV` | [save.md](save.md) | **ours, not the original's** — the saved session we write, and the checklist `gbr.exe` gives for it |
 
 The resolved object model — class tree, native class responsibilities, faction inventory —

@@ -20,69 +20,36 @@
 ///     radius = 15          selection_radius = 15      sight = 500
 ///     target_factor = 100  unit_specials = Deflection
 ///
-/// So there are **two armour channels, not one**, and three damage types plus a
+/// So the data declares two armour channels and three damage types plus a
 /// null one: `damage_type` takes `slash` (the `Unit` default), `pierce` (the
 /// `Ranged` default), `siege` (catapults and rams) and `none` (peasants,
-/// wagons, wildlife) across the 30 classes that declare it. There is no
-/// `armor_siege` anywhere in the corpus, so **siege damage meets no armour at
-/// all** — that is a property of the shipped data, not a simplification here.
+/// wagons, wildlife). `armor_slash` and `armor_pierce` are declared on 102
+/// classes each and are equal in every one of them.
 ///
-/// `armor_slash` and `armor_pierce` are declared on 102 classes each and are
-/// *equal in every one of them*. The channels are therefore real in the engine
-/// (the executable carries `armor_pierce_percent` and `armor_slash_percent`
-/// too, which no shipped class uses) and unexercised in the retail balance.
+/// **The blow reads neither the damage type nor the pierce channel.** The
+/// calculator (0x0050ff30) takes the slash armour `[obj+0xe4]` off every
+/// blow, a sword's and an arrow's alike; the damage type decides only what a
+/// unit may attack (`attack_virtual`, clause 12), and a type-`none` class is
+/// refused every target there rather than dealt a blow of 0.
 ///
-/// ## The damage pipeline, and what fixes its order
+/// ## The blow
 ///
 /// `DATA\CONST.INI` `[GamePlay]` supplies the arithmetic constants:
 ///
 ///     MinPercentOfAttackersDamage = 20
 ///     MinDamage = 3
 ///     LevelDifferenceDamageTable = 1,5 5,20 10,40 20,60 40,80 100,90
-///     DamageAmplify = 200                     ; "Damage in settlements"
 ///     ChargeDamageFactor = 8
-///     FullArmor = 8                           ; see below — dead
 ///
-/// `DATA\UNIT_SPECIALS.INI` then describes the pipeline in prose, and two of
-/// its entries pin the order down:
-///
-///   * **Expertise** — "Instantly kills an enemy when the warrior damage is
-///     increased *after adjustments with enemy armor and level modifier*".
-///     Armour and the level modifier are two separate, ordered adjustments,
-///     armour first.
-///   * **Charge** — "The warrior deals 8 times his normal damage *(after enemy
-///     armor is applied)*". Flat multipliers sit downstream of armour.
-///
-/// and the additive terms are named by their own descriptions: *Offensive
-/// tactics* "adds the warrior's level to his damage", *Defensive tactics*
-/// "adds the warrior's level to his armor", *Attack skill* "increases the
-/// warrior's damage by twice his current stamina", *Penetration* "ignores the
-/// enemy armor". Damage and armour are plain integers that things add to.
-/// `DATA\SKILLS.INI` says the same for heroes: Team Attack "increases the
-/// damage of every attached warrior by 1 per skill point"
-/// (`AttackPerTeamAttackLevel = 1`), Team Defense the armour
-/// (`DefensePerTeamDefenseLevel = 1`).
-///
-/// So `resolve_damage` runs, in order:
-///
-///     1. attack        = damage + additive bonuses            (caller-supplied)
-///     2. after armour  = attack - armour                       [Expertise]
-///     3. floor         = max(after armour, attack * 20 / 100)  [MinPercentOfAttackersDamage]
-///     4. counter unit  = * (100 + strength) / 100               INFERRED, see below
-///     5. level         = * (100 +/- table(|dL|)) / 100          [Expertise]
-///     6. multiplier    = * multiplier_percent / 100            [Charge]
-///     7. settlement    = * DamageAmplify / 100                 [DamageAmplify]
-///     8. final         = max(result, MinDamage)                [MinDamage]
-///
-/// Steps 1-3, 5-8 are the shipped constants applied where the shipped text puts
-/// them. **Step 4 is the inference in this file** and is switchable; see
-/// `CounterMode`. The *placement* of step 4 (a multiplier, therefore after
-/// armour, alongside Charge) is inference even if the multiplier itself is
-/// granted.
-///
-/// Division is integer and truncating throughout, on non-negative values, so it
-/// is floor division and identical on every target. No floating point appears
-/// anywhere in this header or its implementation.
+/// The dealer 0x00511550 takes a training blow between units that are not
+/// enemies (`CombatSystem::training_blow`), and otherwise calls the
+/// calculator 0x0050ff30, whose arithmetic `resolve_damage` reproduces for a
+/// unit on a unit, and whose two other branches -- a defender that is not a
+/// unit, and a `RamUnit` -- `CombatSystem::blow_damage` takes. The counter
+/// table (`DATA\COUNTERUNITS.XML`) is not in the blow: its readers are the
+/// AI's and a catapult's ground shot (0x004da370). Nor is `DamageAmplify`,
+/// whose one reader is a building's damage virtual sharing a blow with its
+/// garrison (0x004db950 -> 0x005c2d00).
 ///
 /// ### `FullArmor = 8` is dead
 ///
@@ -91,10 +58,8 @@
 /// `MinDamage`, `MinPercentOfAttackersDamage`, `LevelDifferenceDamageTable`,
 /// `DamageAmplify` and `ChargeDamageFactor` each occur exactly once. A model
 /// built on it would be building on a constant the shipped engine never reads.
-/// Armour here is subtractive, floored by `MinPercentOfAttackersDamage`, which
-/// is what a constant literally named "minimum percent of the attacker's
-/// damage" is for. That reading is not proven, but it is the only one that
-/// gives every surviving constant a job.
+/// Armour is subtractive and floored by `MinPercentOfAttackersDamage`
+/// (0x00510d86, 0x00510df9).
 ///
 /// ## Morale: there is none
 ///
@@ -232,38 +197,38 @@ inline constexpr std::int32_t kAnimIdle = 28;
 // constants
 // ---------------------------------------------------------------------------
 
-/// `LevelDifferenceDamageTable = 1,5 5,20 10,40 20,60 40,80 100,90`.
+/// `LevelDifferenceDamageTable = 1,5 5,20 10,40 20,60 40,80 100,90`, as the
+/// original builds it (0x0050fd40) and applies it (0x0050fe60).
 ///
-/// Space-separated `difference,percent` pairs, ascending in both columns and
-/// saturating: a level advantage of 100 is worth 90%. Between breakpoints the
-/// value is linearly interpolated with integer arithmetic — **INFERRED**; the
-/// data supplies six points and no interpolation rule, and a step function
-/// would fit them equally well. Below the first breakpoint the modifier is
-/// zero, which the table's own first entry (a difference of 1 is worth 5%)
-/// makes the only consistent reading.
+/// The string is read as `difference,percent` pairs (a C `%i`, so a leading
+/// `0` is octal and `0x` hex). From the point `(0, 0)`, each pair `(x1, p1)`
+/// fills the entries `x0 .. x1 - 1` with
+/// `256 + ((p1 - p0) * k + span * p0) * 256 / (span * 100)`, `k` the step from
+/// `x0` and `span = x1 - x0`, one signed division toward zero: the percent
+/// interpolated in 256ths in one step. A pair that does not read is `(100,
+/// p0)`. The walk stops at the first `x1` of 100 or more, and entry 100 is
+/// `256 + p * 256 / 100` of the last percent read. So the shipped table gives
+/// 256 at 0, 268 at 1, 288 at 3 and 486 at 100.
+///
+/// **Labelled:** a breakpoint past 100 writes past the original's 101 entries
+/// (into the flag that says the table is built); here the walk stops at 100.
 struct LevelDifferenceTable {
-  struct Breakpoint {
-    std::int32_t difference = 0;
-    std::int32_t percent = 0;
+  static constexpr std::int32_t kSteps = 101;
 
-    friend bool operator==(const Breakpoint&, const Breakpoint&) = default;
-  };
+  /// The factor in 256ths, by magnitude of the difference, 0 to 100.
+  std::array<std::int32_t, kSteps> factors{};
 
-  static constexpr std::size_t kMaxBreakpoints = 8;
+  /// 0x0050fe60: the factor for a signed difference -- its magnitude kept to
+  /// 100, and `512 - factor` when the difference is negative.
+  [[nodiscard]] std::int32_t factor(std::int32_t difference) const noexcept;
 
-  std::array<Breakpoint, kMaxBreakpoints> points{};
-  std::uint8_t count = 0;
-
-  /// The percentage for a *magnitude* of level difference. Sign is the caller's
-  /// business: the attacker gains it and the defender's excess costs it.
-  [[nodiscard]] std::int32_t percent(std::int32_t difference) const noexcept;
+  /// `factor(difference) * value / 256`, signed, toward zero, in 32 bits.
+  [[nodiscard]] std::int32_t scale(std::int32_t value, std::int32_t difference) const noexcept;
 
   /// The retail table, compiled in.
   [[nodiscard]] static LevelDifferenceTable shipped() noexcept;
 
-  /// Parse the `CONST.INI` spelling. Returns the shipped table on garbage
-  /// rather than an empty one, because an empty table silently disables the
-  /// level modifier and that is a worse failure than a stale one.
+  /// Build from the `CONST.INI` spelling, as 0x0050fd40 does.
   [[nodiscard]] static LevelDifferenceTable parse(std::string_view text) noexcept;
 
   friend bool operator==(const LevelDifferenceTable&, const LevelDifferenceTable&) = default;
@@ -371,7 +336,10 @@ struct CombatConstants {
 
 /// How `DATA\COUNTERUNITS.XML` is applied to a damage calculation.
 ///
-/// **Read this before trusting any number this file produces about a matchup.**
+/// **No blow reads it** (0x0050ff30, `docs/formats/blow.md`). Its one
+/// consumer in this file is a catapult's ground shot (`land_on_ground`,
+/// 0x004da370), and the mode is that shot's alone. What follows is the
+/// measurement of the table that motivated the two readings.
 ///
 /// The table is 52 unit classes and 1,023 directed entries of the shape
 ///
@@ -493,57 +461,73 @@ class CounterTable {
 // damage resolution
 // ---------------------------------------------------------------------------
 
-/// Everything one strike needs, flattened.
+/// What a unit's blow on a unit reads, flattened: the arithmetic of the
+/// calculator 0x0050ff30 on its unit-on-unit path.
 ///
-/// Flat and pure on purpose: this is the function the whole system is judged
-/// on, so it takes no world, no object, and no hidden state, and a test can
-/// state a case in one initialiser.
+/// Flat and pure on purpose, so that a test can state a case in one
+/// initialiser. The gates before the arithmetic and the specials inside it
+/// are not here: see `resolve_damage`.
 struct DamageInputs {
-  /// `damage` plus every additive bonus the caller has already applied: hero
-  /// Team Attack (`AttackPerTeamAttackLevel` per point), Offensive Tactics
-  /// (the attacker's level), Attack Skill (twice current stamina).
+  /// `[A+0xdc]`, the attacker's attack.
   std::int32_t attack = 0;
-  DamageType type = DamageType::slash;
-  /// The defender's armour on the attacker's channel, plus Team Defense
-  /// (`DefensePerTeamDefenseLevel` per point) and Defensive Tactics.
-  /// Ignored entirely for `siege`, which has no armour channel.
+  /// `[D+0xe4]`, the defender's slash armour: **the one armour the blow
+  /// reads**, for a sword and an arrow alike (nothing in it reads `[D+0xe8]`).
   std::int32_t armour = 0;
+  /// `L`: the attacker's stored level, plus the difficulty addend when its
+  /// owner is the favoured player (0x00510820..0x00510851).
   std::int32_t attacker_level = 1;
+  /// The defender's stored level (`vtbl+0x114`).
   std::int32_t defender_level = 1;
-  /// `CounterTable::damage_percent`, already resolved. 100 is neutral.
-  std::int32_t counter_percent = 100;
-  /// Penetration, or a hero's Assault cry: "allows all attached warriors to
-  /// ignore enemy armor".
+  /// The addend taken off the difference when the defender's owner is the
+  /// favoured player (0x00510e5d..0x00510e65); 0 otherwise.
+  std::int32_t defender_addend = 0;
+  /// The defender carries the hero bit: armour is always met then.
+  bool defender_is_hero = false;
+  /// A hero's Assault or `SetGlobalBloodlust` on the attacker's side: against
+  /// a defender that is not a hero, no armour and no floor.
   bool ignores_armour = false;
-  /// `DamageAmplify`, the settlement multiplier.
-  bool in_settlement = false;
-  /// Charge (`ChargeDamageFactor` = 8, so 800), Frenzy ("doubles the damage",
-  /// 200), Triple Strike ("triples his damage", 300). 100 is neutral.
-  std::int32_t multiplier_percent = 100;
-  /// `ObjectFlags::half_damage` on the victim: a unit under a cover of mercy.
-  /// `hit` reads it off the world; `inputs_for` has no world and leaves it
-  /// clear, so `preview` shows the unsheltered blow.
+  /// `ObjectFlags::half_damage` on the defender: a unit under a cover of
+  /// mercy. `hit` reads it off the world; `preview` leaves it clear.
   bool halved = false;
+  /// The defender's health: the blow is lowered to it.
+  std::int32_t defender_health = 0x7FFFFFFF;
 };
 
 /// Every intermediate, so a test can assert on the step rather than the total
 /// and a report can show its working.
 struct DamageBreakdown {
   std::int32_t attack = 0;
-  std::int32_t armour = 0;
+  std::int32_t armour = 0;  ///< what was taken off; 0 when armour was not met
   std::int32_t after_armour = 0;
-  std::int32_t after_counter = 0;
-  std::int32_t level_difference = 0;  ///< attacker minus defender, signed
-  std::int32_t level_percent = 0;     ///< the table's value for its magnitude
+  bool floored_by_min_percent = false;  ///< `MinPercentOfAttackersDamage` bit
+  std::int32_t level_difference = 0;    ///< `L` less the defender's, less its addend
   std::int32_t after_level = 0;
+  bool floored_by_min_damage = false;  ///< `MinDamage` bit
   /// Whether the victim's `half_damage` flag took half of what was left.
   bool halved = false;
+  bool capped = false;  ///< lowered to the defender's health
   std::int32_t final_damage = 0;
-  bool floored_by_min_percent = false;  ///< `MinPercentOfAttackersDamage` bit
-  bool floored_by_min_damage = false;   ///< `MinDamage` bit
 };
 
-/// The pipeline documented at the top of this file. Pure, integral, total.
+/// A unit's blow on a unit, the arithmetic of 0x0050ff30 in its order:
+///
+///   1. the attack, `[A+0xdc]` (0x00510c76);
+///   2. against a hero always, and otherwise unless Assault or bloodlust
+///      (0x00510d26): the slash armour off it (0x00510d86), then the floor
+///      `attack * MinPercentOfAttackersDamage / 100` (0x00510df9);
+///   3. the level factor at `L - level(D) - addend(D)` (0x00510e24, 0x00510e6c);
+///   4. `MinDamage` (0x00510ef6);
+///   5. halved, toward zero, for a sheltered defender (0x005110c6) -- after
+///      `MinDamage`, so a sheltered unit can take less than it;
+///   6. lowered to the defender's health (0x005110db).
+///
+/// **Not yet ported**, so absent rather than guessed: the gates before it
+/// (ceasefire, the Concealment draw, a curse, parry mode, a ranged shot's
+/// miss) and every special inside it with its stamina cost (Deflection,
+/// the blessing, Attack skill, Offensive and Defensive tactics, Penetration,
+/// Defense skill, Charge, Triple strike, Rage, Bleeding attack, the killing
+/// blows, Gambler's Luck and the rest). The table's percent is the
+/// `LevelDifferenceTable`'s 256ths.
 [[nodiscard]] DamageBreakdown resolve_damage(const DamageInputs& in,
                                              const CombatConstants& constants) noexcept;
 
@@ -784,16 +768,17 @@ struct Combatant {
 
   // -- modifiers other systems write ----------------------------------
   //
-  // Assault writes `ignores_armour`, Ceasefire `cannot_fight`. Nothing writes
-  // `damage_multiplier_percent` any more: Frenzy's doubling is the rebuild's
-  // (it doubles the stored attack), and the hero skills that used to be
-  // fields here -- Team Attack, Team Defense, Discipline -- land in `stats`
-  // and in the stored level through the rebuild.
+  // Assault writes `ignores_armour`, Ceasefire `cannot_fight`. The hero
+  // skills that used to be fields here -- Team Attack, Team Defense,
+  // Discipline -- land in `stats` and in the stored level through the
+  // rebuild, and Frenzy's doubling is the rebuild's too.
+  //
+  // `damage_multiplier_percent` and `in_settlement` are read by nothing: the
+  // blow has no flat multiplier and no `DamageAmplify` (`docs/formats/blow.md`).
+  // They stay in the save until its next change.
   std::int32_t damage_multiplier_percent = 100;
   bool ignores_armour = false;
   bool cannot_fight = false;
-  /// `DamageAmplify` applies to damage dealt inside a settlement. Economy owns
-  /// settlements; this is the flag it sets.
   bool in_settlement = false;
 
   /// `Unit::AddBonus`'s five addends. Reset by `reclass`, for the reason the
@@ -1585,8 +1570,27 @@ class CombatSystem final : public System {
   void launch(World& world, Combatant& attacker, const Combatant& defender, GameTime now);
   void land(World& world, Projectile& shot, GameTime now);
   void land_on_ground(World& world, const Projectile& shot, GameTime now);
-  void hit(World& world, Combatant& defender, const DamageInputs& inputs, ObjectId source,
-           GameTime now);
+  /// The striker as the calculator reads it: A, its attack, its `L`, and the
+  /// two tests it asks of it (the unit bit, and 0x0053f5b0's "shoots").
+  struct Striker {
+    ObjectId id = kNoObject;
+    PlayerId owner = kNoPlayer;
+    std::int32_t attack = 0;
+    /// The stored level plus the owner's addend for a unit; 10 otherwise
+    /// (0x00510822).
+    std::int32_t level = 10;
+    bool is_unit = true;
+    bool shoots = false;
+    bool ignores_armour = false;
+  };
+  [[nodiscard]] Striker striker_of(const Combatant& attacker) const;
+  /// What the calculator takes off `defender` for one blow of `a`: the
+  /// unit-on-unit arithmetic (`resolve_damage`), or the branch for a
+  /// defender that is not a unit (0x00510855) or is a `RamUnit` (0x005108b6),
+  /// whose ranged case draws `Range(0, 220)`.
+  [[nodiscard]] std::int32_t blow_damage(World& world, const Striker& a,
+                                         const Combatant& defender);
+  void hit(World& world, Combatant& defender, const Striker& a, GameTime now);
   /// The training blow (0x00511550's first branch, 0x00511621 .. 0x0051177c):
   /// between two units that are not enemies, the attack less the target's
   /// slash armour scaled by the level difference, at least the floors and
@@ -1607,8 +1611,8 @@ class CombatSystem final : public System {
   /// combat resolver and by the three effect loops; a script's `Damage` reaches
   /// none of them. The same reasoning already keeps `record_army_attacked` out
   /// of `apply_damage`.
-  void record_score(World& world, ObjectId source, const Combatant& defender,
-                    std::int32_t removed, bool killed) const;
+  void record_score(World& world, PlayerId by, const Combatant& defender, std::int32_t removed,
+                    bool killed) const;
   /// Enter the death animation, and fire the class's `ondie` hook.
   ///
   /// The hook goes here rather than at the removal three lines into `advance`'s
@@ -1642,9 +1646,7 @@ class CombatSystem final : public System {
   /// Pay `amount` into `attacker`'s running total, held at its owner's
   /// `max_battle_level` unless it is a hero or training (0x005119f3).
   void pay_experience(World& world, ObjectId attacker, std::int32_t amount);
-  [[nodiscard]] std::int32_t effective_level(const Combatant& unit) const noexcept;
-  [[nodiscard]] DamageInputs inputs_for(const Combatant& attacker,
-                                        const Combatant& defender) const;
+  [[nodiscard]] DamageInputs inputs_for(const Striker& attacker, const Combatant& defender) const;
 
   CombatConstants constants_{};
   const ClassGraph* graph_ = nullptr;

@@ -101,10 +101,10 @@ TEST(damage_subtracts_armour) {
   CHECK(!out.floored_by_min_damage);
 }
 
-/// **A sheltered victim takes half, and the floor comes after.** 0x005110c6
-/// halves after every other modifier and before the cap, so `MinDamage` lifts
-/// a halved blow the way it lifts any other: 3 halved is 1, floored to 3.
-TEST(a_sheltered_victim_takes_half_the_blow_ahead_of_the_floor) {
+/// **A sheltered victim takes half, after the floor.** 0x005110c6 halves
+/// after `MinDamage` (0x00510ef6) and before the cap, so a sheltered unit can
+/// take less than `MinDamage`: 3 halved is 1.
+TEST(a_sheltered_victim_takes_half_the_blow_after_the_floor) {
   const CombatConstants k = CombatConstants::shipped();
   DamageInputs in;
   in.attack = 16;
@@ -117,13 +117,13 @@ TEST(a_sheltered_victim_takes_half_the_blow_ahead_of_the_floor) {
   // Odd numbers truncate toward zero: 11 halved is 5.
   in.armour = 5;
   CHECK(resolve_damage(in, k).final_damage == 5);
-  // The swordsman's 3 on a hastatus is floored to 3 whether halved or not.
+  // The swordsman's 12 on a hastatus's 12 is floored to 3, then halved to 1.
   in.attack = 12;
   in.armour = 12;
   out = resolve_damage(in, k);
   CHECK(out.halved);
   CHECK(out.floored_by_min_damage);
-  CHECK(out.final_damage == 3);
+  CHECK(out.final_damage == 1);
   in.halved = false;
   out = resolve_damage(in, k);
   CHECK(!out.halved);
@@ -157,60 +157,91 @@ TEST(damage_floors_at_min_damage) {
   CHECK(out.floored_by_min_damage);
 }
 
-TEST(damage_of_type_none_is_no_damage_at_all) {
+/// **No attack is still `MinDamage`, and no blow passes the defender's
+/// health.** The calculator reads no damage type: a class that cannot hurt
+/// is refused its targets (`attack_virtual`), not dealt a 0 here.
+TEST(a_blow_is_at_least_min_damage_and_at_most_the_defenders_health) {
   const CombatConstants k = CombatConstants::shipped();
   DamageInputs in;
+  in.attack = 0;
+  CHECK(resolve_damage(in, k).final_damage == 3);
   in.attack = 50;
-  in.type = DamageType::none;
+  in.defender_health = 7;
+  DamageBreakdown out = resolve_damage(in, k);
+  CHECK(out.capped);
+  CHECK(out.final_damage == 7);
+  in.defender_health = 0;
   CHECK(resolve_damage(in, k).final_damage == 0);
+  in.defender_health = 50;
+  out = resolve_damage(in, k);
+  CHECK(!out.capped);
+  CHECK(out.final_damage == 50);
 }
 
-TEST(siege_damage_meets_no_armour) {
-  // There is no armor_siege property in the class graph, so a catapult's 120
-  // lands whole on a Carthaginian Noble's armour of 20.
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 120;
-  in.type = DamageType::siege;
-  in.armour = 20;
-  const DamageBreakdown out = resolve_damage(in, k);
-  CHECK(out.armour == 0);
-  CHECK(out.final_damage == 120);
-}
-
-TEST(penetration_ignores_armour) {
+/// Assault or bloodlust lifts the armour **and its floor** (0x00510d26), and
+/// only off a defender that is not a hero.
+TEST(assault_lifts_armour_and_its_floor_off_a_defender_that_is_not_a_hero) {
   const CombatConstants k = CombatConstants::shipped();
   DamageInputs in;
   in.attack = 16;
   in.armour = 12;
   in.ignores_armour = true;
-  CHECK(resolve_damage(in, k).final_damage == 16);
+  DamageBreakdown out = resolve_damage(in, k);
+  CHECK(out.armour == 0);
+  CHECK(out.final_damage == 16);
+  in.defender_is_hero = true;
+  out = resolve_damage(in, k);
+  CHECK(out.armour == 12);
+  CHECK(out.final_damage == 4);
+  // The floor goes with the armour: 16 against 40 is the floor's 3 against a
+  // hero, but 16 against anyone else.
+  in.armour = 40;
+  CHECK(resolve_damage(in, k).floored_by_min_percent);
+  in.defender_is_hero = false;
+  out = resolve_damage(in, k);
+  CHECK(!out.floored_by_min_percent);
+  CHECK(out.final_damage == 16);
 }
 
-TEST(level_difference_uses_the_shipped_table) {
+/// 0x0050fd40 on the shipped string: the percents in 256ths, interpolated
+/// in one division from `(0, 0)`.
+TEST(level_difference_uses_the_shipped_table_in_256ths) {
   const LevelDifferenceTable table = LevelDifferenceTable::shipped();
-  CHECK(table.percent(0) == 0);
-  CHECK(table.percent(1) == 5);
-  CHECK(table.percent(5) == 20);
-  CHECK(table.percent(10) == 40);
-  CHECK(table.percent(20) == 60);
-  CHECK(table.percent(40) == 80);
-  CHECK(table.percent(100) == 90);
-  CHECK(table.percent(1000) == 90);  // saturates
-  CHECK(table.percent(-5) == 20);    // magnitude only
-  // Interpolated between breakpoints: 3 sits two fifths of the way from
-  // (1, 5) to (5, 20), so 5 + 15 * 2 / 4 = 12.
-  CHECK(table.percent(3) == 12);
-  CHECK(table.percent(15) == 50);
+  CHECK(table.factors[0] == 256);
+  CHECK(table.factors[1] == 268);   // 256 + 20 * 256 / 400
+  CHECK(table.factors[2] == 278);
+  CHECK(table.factors[3] == 288);   // 12.5%, where whole percents give 12
+  CHECK(table.factors[4] == 297);
+  CHECK(table.factors[5] == 307);
+  CHECK(table.factors[40] == 460);
+  CHECK(table.factors[99] == 485);
+  CHECK(table.factors[100] == 486);  // 256 + 90 * 256 / 100
+  // 0x0050fe60: the magnitude kept to 100, the deficit mirrored about 256.
+  CHECK(table.factor(0) == 256);
+  CHECK(table.factor(3) == 288);
+  CHECK(table.factor(-3) == 224);
+  CHECK(table.factor(1000) == 486);
+  CHECK(table.factor(-1000) == 26);
+  // Applied in 32 bits and divided toward zero.
+  CHECK(table.scale(20, 5) == 23);   // 6140 / 256
+  CHECK(table.scale(20, -5) == 16);  // 4100 / 256
+  CHECK(table.scale(-20, 5) == -23);
 }
 
-TEST(level_difference_table_parses_the_const_ini_spelling) {
-  const LevelDifferenceTable table =
-      LevelDifferenceTable::parse("1,5 5,20 10,40 20,60 40,80 100,90");
-  CHECK(table.count == 6);
-  CHECK(table == LevelDifferenceTable::shipped());
-  // Garbage keeps the shipped table rather than silently disabling the term.
-  CHECK(LevelDifferenceTable::parse("") == LevelDifferenceTable::shipped());
+TEST(level_difference_table_reads_the_const_ini_spelling_as_c_does) {
+  CHECK(LevelDifferenceTable::parse("1,5 5,20 10,40 20,60 40,80 100,90") ==
+        LevelDifferenceTable::shipped());
+  // A pair that does not read is `(100, p)`: the table goes flat from there.
+  const LevelDifferenceTable one = LevelDifferenceTable::parse("10,50");
+  CHECK(one.factors[5] == 320);   // 256 + 50 * 5 * 256 / 1000
+  CHECK(one.factors[10] == 384);
+  CHECK(one.factors[99] == 384);
+  CHECK(one.factors[100] == 384);
+  const LevelDifferenceTable none = LevelDifferenceTable::parse("");
+  CHECK(none.factors[0] == 256);
+  CHECK(none.factors[100] == 256);
+  // `%i`: a leading 0x is hex and a leading 0 octal.
+  CHECK(LevelDifferenceTable::parse("0x0a,050") == LevelDifferenceTable::parse("10,40"));
 }
 
 TEST(a_level_advantage_raises_damage_and_a_deficit_lowers_it) {
@@ -220,51 +251,39 @@ TEST(a_level_advantage_raises_damage_and_a_deficit_lowers_it) {
   in.armour = 0;
 
   in.attacker_level = 6;
-  in.defender_level = 1;  // difference 5 -> 20%
+  in.defender_level = 1;  // difference 5 -> 307/256
   const DamageBreakdown up = resolve_damage(in, k);
   CHECK(up.level_difference == 5);
-  CHECK(up.level_percent == 20);
-  CHECK(up.final_damage == 24);
+  CHECK(up.final_damage == 23);
 
   in.attacker_level = 1;
   in.defender_level = 6;
   const DamageBreakdown down = resolve_damage(in, k);
   CHECK(down.level_difference == -5);
   CHECK(down.final_damage == 16);
+
+  // The favoured defender's addend comes off the difference (0x00510e65).
+  in.attacker_level = 6;
+  in.defender_level = 1;
+  in.defender_addend = 5;
+  const DamageBreakdown even = resolve_damage(in, k);
+  CHECK(even.level_difference == 0);
+  CHECK(even.final_damage == 20);
 }
 
-TEST(charge_multiplies_after_armour) {
-  // UNIT_SPECIALS.INI: "deals 8 times his normal damage (after enemy armor is
-  // applied)". 16 - 6 = 10, times 8.
+/// The factor scales what armour left, and `MinDamage` comes after it.
+TEST(the_level_factor_scales_what_armour_left_before_min_damage) {
   const CombatConstants k = CombatConstants::shipped();
   DamageInputs in;
   in.attack = 16;
-  in.armour = 6;
-  in.multiplier_percent = 100 * k.charge_damage_factor;
-  CHECK(resolve_damage(in, k).final_damage == 80);
-}
-
-TEST(settlement_damage_is_amplified) {
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 16;
-  in.armour = 6;
-  in.in_settlement = true;
-  CHECK(resolve_damage(in, k).final_damage == 20);  // 10 * 200 / 100
-}
-
-TEST(damage_is_never_negative_and_never_overflows) {
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 0;
-  CHECK(resolve_damage(in, k).final_damage == 0);
-
-  in.attack = -50;
-  CHECK(resolve_damage(in, k).final_damage == 0);
-
-  in.attack = 2000000000;
-  in.multiplier_percent = 800;
-  CHECK(resolve_damage(in, k).final_damage > 0);  // saturates, does not wrap
+  in.armour = 6;  // 10
+  in.attacker_level = 1;
+  in.defender_level = 101;  // 26/256 of 10 is 1, lifted to 3
+  const DamageBreakdown out = resolve_damage(in, k);
+  CHECK(out.after_armour == 10);
+  CHECK(out.after_level == 1);
+  CHECK(out.floored_by_min_damage);
+  CHECK(out.final_damage == 3);
 }
 
 TEST(const_ini_parses_the_gameplay_section_only) {
@@ -401,38 +420,20 @@ TEST(countered_penalty_mode_is_the_other_reading) {
   CHECK(table.damage_percent(kSwordsman, kHastatus, CounterMode::countered_penalty) == 100);
 }
 
-TEST(the_counter_multiplier_lands_between_armour_and_level) {
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 16;
-  in.armour = 6;             // after armour: 10
-  in.counter_percent = 164;  // -> 16
-  in.attacker_level = 6;
-  in.defender_level = 1;     // +20% -> 19
-  const DamageBreakdown out = resolve_damage(in, k);
-  CHECK(out.after_armour == 10);
-  CHECK(out.after_counter == 16);
-  CHECK(out.after_level == 19);
-  CHECK(out.final_damage == 19);
-}
-
-TEST(a_counter_relationship_changes_who_wins) {
-  // Two identical units, one of which counters the other. Hits to kill must
-  // differ in the direction the table says.
+/// **The counter table is not in the blow** (0x0050ff30 reads none): its
+/// readers are the AI's and a catapult's ground shot.
+TEST(the_counter_table_does_not_touch_a_blow) {
   CombatSystem combat;
   combat.set_profile(kHastatus, melee(20, 0, 200));
   combat.set_profile(kSwordsman, melee(20, 0, 200));
   CounterTable table;
-  table.add(kSwordsman, kHastatus, 100);  // swordsman counters hastatus, hard
+  table.add(kSwordsman, kHastatus, 100);
   combat.set_counter_table(table);
   combat.set_counter_mode(CounterMode::counter_bonus);
 
   combat.add(unit(1, kHastatus, 0, 200));
   combat.add(unit(2, kSwordsman, 1, 200));
-  CHECK(combat.preview(1, 2).final_damage == 20);   // no relationship
-  CHECK(combat.preview(2, 1).final_damage == 40);   // doubled by the table
-
-  combat.set_counter_mode(CounterMode::off);
+  CHECK(combat.preview(1, 2).final_damage == 20);
   CHECK(combat.preview(2, 1).final_damage == 20);
 }
 
@@ -972,6 +973,169 @@ TEST(a_sheltered_world_object_takes_half_of_every_landed_blow) {
   CHECK(strike_on(b) == 10);
 }
 
+namespace {
+
+/// A world-bound pair for the blow's branches: `a` a unit of `attacker`,
+/// `b` an object of `kind` and `defender`, both placed in reach. Returns the
+/// world handles.
+struct Pair {
+  ObjectId a = kNoObject;
+  ObjectId b = kNoObject;
+};
+
+Pair place_pair(World& world, CombatSystem& combat, ClassIndex attacker, NativeClass kind,
+                ClassIndex defender, PlayerId defender_owner, std::int32_t health) {
+  Pair p;
+  p.a = world.spawn(NativeClass::unit, nullptr, attacker);
+  p.b = world.spawn(kind, nullptr, defender);
+  world.mutable_state(p.a)->owner = 0;
+  world.set_position(p.a, Point{0, 0});
+  world.mutable_state(p.a)->health = 200;
+  world.mutable_state(p.b)->owner = defender_owner;
+  world.set_position(p.b, Point{40, 0});
+  world.mutable_state(p.b)->health = health;
+  // Enrolled from the world, which `start` also binds the system to.
+  world.start();
+  (void)combat;
+  (void)attacker;
+  (void)defender;
+  return p;
+}
+
+/// The damage of the next blow `a` lands on `b`, or -1 if none lands.
+std::int32_t next_blow(World& world, CombatSystem& combat, ObjectId a, ObjectId b) {
+  combat.clear_events();
+  for (int turn = 0; turn < 20; ++turn) {
+    (void)imperivm::test::swing(world, combat, a, b);
+    world.advance(400);
+    for (const CombatEvent& event : combat.events()) {
+      if (event.kind == CombatEvent::Kind::strike && event.defender == b) return event.damage;
+    }
+    combat.clear_events();
+  }
+  return -1;
+}
+
+constexpr ClassIndex kThrower = 6;  // `shoots`, with nothing resolved to throw
+constexpr ClassIndex kWall = 7;
+constexpr ClassIndex kRam = 8;
+
+CombatSystem branch_system() {
+  CombatSystem combat = make_system();
+  CombatProfile thrower = melee(16, 12, 200);
+  thrower.shoots = true;
+  combat.set_profile(kThrower, thrower);
+  CombatProfile ram_breaker = melee(16, 12, 200);
+  ram_breaker.damage_type = DamageType::siege;
+  combat.set_profile(kSwordsman + 100, ram_breaker);
+  combat.set_profile(kWall, melee(0, 50, 1000));
+  CombatProfile ram = melee(0, 12, 300);
+  ram.lineage |= CombatProfile::kLineRamUnit;
+  combat.set_profile(kRam, ram);
+  combat.set_world_bound(true);
+  return combat;
+}
+
+}  // namespace
+
+/// **A defender that is not a unit** (0x00510855..0x005108b5): the attack
+/// scaled at `L - 10`, halved rounding up for an attacker that shoots, and
+/// lowered to the health -- no armour, no floor, no `MinDamage` -- and the
+/// dealer books no damage for it (0x005117e7).
+TEST(a_blow_on_a_building_is_the_attack_at_the_level_less_ten) {
+  World world;
+  MatchSystem match;
+  REQUIRE(world.add_system(&match));
+  CombatSystem combat = branch_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kThrower, NativeClass::building, kWall, 1, 1000);
+  REQUIRE(combat.can_attack(p.a, p.b));
+  // Level 1: 164/256 of 16 is 10, halved rounding up to 5. The wall's 50
+  // armour would have floored a unit's blow to 3.
+  CHECK(next_blow(world, combat, p.a, p.b) == 5);
+  // Level 15: 307/256 of 16 is 19, halved rounding up to 10.
+  combat.find(p.a)->level = 15;
+  CHECK(next_blow(world, combat, p.a, p.b) == 10);
+  CHECK(match.score(0).damage_inflicted == 0);
+  CHECK(match.score(1).damage_taken == 0);
+
+  // Siege, which needs no shot to take a building, is not halved: 19.
+  World second;
+  CombatSystem siege = branch_system();
+  REQUIRE(second.add_system(&siege));
+  const Pair q =
+      place_pair(second, siege, kSwordsman + 100, NativeClass::building, kWall, 1, 1000);
+  siege.find(q.a)->level = 15;
+  REQUIRE(siege.can_attack(q.a, q.b));
+  CHECK(next_blow(second, siege, q.a, q.b) == 19);
+  // And a blow is lowered to what is left.
+  second.mutable_state(q.b)->health = 4;
+  siege.find(q.b)->health = 4;
+  CHECK(next_blow(second, siege, q.a, q.b) == 4);
+}
+
+/// **A `RamUnit` defender** (0x005108b6..0x00510955): a blow is the attack at
+/// `L - 10`, no armour; a shot lands on a draw of `Range(0, 220)` no greater
+/// than `L + 20`, for `L / 5 + MinDamage`.
+TEST(a_blow_on_a_ram_is_the_attack_at_the_level_less_ten_and_a_shot_a_draw) {
+  World world;
+  CombatSystem combat = branch_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kRam, 1, 300);
+  REQUIRE(combat.can_attack(p.a, p.b));
+  CHECK(next_blow(world, combat, p.a, p.b) == 10);  // 164/256 of 16; the 12 armour unmet
+
+  World second;
+  CombatSystem shots = branch_system();
+  REQUIRE(second.add_system(&shots));
+  const Pair q = place_pair(second, shots, kThrower, NativeClass::unit, kRam, 1, 300);
+  REQUIRE(shots.can_attack(q.a, q.b));
+  // At `L` 200 every draw is under 220: 200 / 5 + 3.
+  shots.find(q.a)->level = 200;
+  CHECK(next_blow(second, shots, q.a, q.b) == 43);
+  // At `L` -21 no draw is under -1: the shot does nothing.
+  shots.find(q.a)->level = -21;
+  CHECK(next_blow(second, shots, q.a, q.b) == 0);
+}
+
+/// **The training blow reads the two stored levels and no addend**
+/// (0x005116e0..0x0051170b), through the same factor in 256ths.
+TEST(a_training_blow_scales_by_the_stored_levels_alone) {
+  World world;
+  CombatSystem combat = branch_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kSwordsman, 0, 200);
+  world.mutable_state(p.b)->flags.training = true;
+  REQUIRE(combat.can_attack(p.a, p.b));
+  combat.find(p.a)->level = 6;
+  // 16 less 6, at a difference of 5: 307/256 of 10 is 11.
+  CHECK(next_blow(world, combat, p.a, p.b) == 11);
+  combat.set_player_level_addend(0, 10);
+  CHECK(next_blow(world, combat, p.a, p.b) == 11);
+}
+
+/// **The striker's `L` and the defender's hero bit come off the world**: an
+/// attacker that is not a unit stands at level 10 (0x00510822), and Assault
+/// lifts no armour off a hero (0x00510d26).
+TEST(a_striker_that_is_not_a_unit_stands_at_level_ten_and_a_hero_keeps_its_armour) {
+  World world;
+  CombatSystem combat = branch_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kSwordsman, 1, 200);
+  CHECK(combat.preview(p.a, p.b).level_difference == 0);
+  world.mutable_state(p.a)->flags.is_unit = false;
+  // 10 less the defender's 1: 348/256 of 16 less 6 is 13.
+  const DamageBreakdown tower = combat.preview(p.a, p.b);
+  CHECK(tower.level_difference == 9);
+  CHECK(tower.final_damage == 13);
+  world.mutable_state(p.a)->flags.is_unit = true;
+
+  combat.find(p.a)->ignores_armour = true;
+  CHECK(combat.preview(p.a, p.b).armour == 0);
+  world.mutable_state(p.b)->flags.is_hero = true;
+  CHECK(combat.preview(p.a, p.b).armour == 6);
+}
+
 // ---------------------------------------------------------------------------
 // what a fight shows
 // ---------------------------------------------------------------------------
@@ -1481,12 +1645,12 @@ TEST(a_fight_credits_both_sides_and_a_kill_is_worth_a_full_bar) {
   REQUIRE(world.add_system(&match));
   CombatSystem combat = make_system();
   combat.set_death_duration(1000);
-  // Five health against a ten-damage swing: the blow removes five, not ten.
-  // Overkill is the one thing the delta reading and the damage reading
-  // disagree about.
+  // Five health against a ten-damage swing: the calculator lowers the blow
+  // to the five that are left (0x005110db), so five is what is booked.
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
   combat.add(unit(2, kSwordsman, 1, 5, Point{40, 0}));
-  CHECK(combat.preview(1, 2).final_damage == 10);
+  CHECK(combat.preview(1, 2).after_level == 10);
+  CHECK(combat.preview(1, 2).final_damage == 5);
   CHECK(combat.order_attack(1, 2));
 
   world.advance(400);
@@ -1651,12 +1815,18 @@ TEST(the_difficulty_addend_moves_the_level_term) {
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
   combat.add(unit(2, kSwordsman, 1, 200, Point{40, 0}));
   const std::int32_t even = combat.preview(1, 2).final_damage;
-  // Easy is 10; at a level difference of 10 the table pays 40%.
+  // Easy is 10; at a level difference of 10 the table pays 358/256.
   combat.set_player_level_addend(0, combat.constants().difficulty_addend(Difficulty::easy));
   const DamageBreakdown eased = combat.preview(1, 2);
   CHECK(eased.level_difference == 10);
-  CHECK(eased.level_percent == 40);
-  CHECK(eased.final_damage == even * 140 / 100);
+  CHECK(combat.constants().level_difference.factor(10) == 358);
+  CHECK(eased.final_damage == even * 358 / 256);
+  // On the defender's side it comes off the difference (0x00510e65).
+  combat.set_player_level_addend(0, 0);
+  combat.set_player_level_addend(1, 10);
+  const DamageBreakdown against = combat.preview(1, 2);
+  CHECK(against.level_difference == -10);
+  CHECK(against.final_damage == even * (512 - 358) / 256);
 }
 
 // ---------------------------------------------------------------------------
@@ -3071,8 +3241,7 @@ TEST(a_map_enrolled_combatant_starts_at_level_one_with_no_experience) {
   const ObjectId gaul = combat.combatants()[1].id;
   const DamageBreakdown even = combat.preview(roman, gaul);
   CHECK(even.level_difference == 0);
-  CHECK(even.level_percent == 0);
-  CHECK(even.after_counter == even.after_level);
+  CHECK(even.after_armour == even.after_level);
 
   // And the addend moves it by exactly what it says, which is only true if the
   // baseline is 1. At 0 the difference would be the same but every absolute
@@ -4339,8 +4508,8 @@ TEST(add_bonus_rescales_the_health_with_the_maximum) {
 /// The record reaches the blow, on both sides of it.
 ///
 /// The attacker's addend is `[obj+0xdc]`, which is the number the original's
-/// damage step loads; the defender's is `[obj+0xe4]` or `[obj+0xe8]` by
-/// channel. Neither is the class property any more once a script has moved it.
+/// damage step loads; the defender's is `[obj+0xe4]`, the one armour a blow
+/// reads. Neither is the class property any more once a script has moved it.
 TEST(add_bonus_reaches_the_damage_formula_from_both_sides) {
   CombatSystem combat = make_system();
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));    // 16 attack
@@ -4361,7 +4530,7 @@ TEST(add_bonus_reaches_the_damage_formula_from_both_sides) {
   CHECK(!combat.preview(1, 2).floored_by_min_percent);
 
   // `melee` gives both channels the same armour, so the pierce addend is what
-  // separates the two: a slash attacker does not meet it.
+  // separates the two: no blow meets it (0x0050ff30 reads `[obj+0xe8]` nowhere).
   StatBonus pierce_only;
   pierce_only.armour_pierce = 1000;
   CHECK(combat.add_bonus(2, pierce_only));
@@ -4370,7 +4539,8 @@ TEST(add_bonus_reaches_the_damage_formula_from_both_sides) {
 
 /// A shot in the air carries the attack it was launched with -- that is
 /// `Projectile::attack`, settled at launch -- but the armour it meets is read
-/// at impact, so a bonus that lands mid-flight still counts.
+/// at impact, so a bonus that lands mid-flight still counts. The armour is the
+/// slash armour, an arrow's as a sword's.
 TEST(add_bonus_reaches_a_projectile_at_impact) {
   World world;
   CombatSystem combat = make_system();
@@ -4382,15 +4552,17 @@ TEST(add_bonus_reaches_a_projectile_at_impact) {
   archer.attack_interval = 2000;
   combat.set_profile(kArcher, archer);
   combat.add(unit(1, kArcher, 0, 150, Point{0, 0}));
-  combat.add(unit(2, kSwordsman, 1, 2000, Point{400, 0}));  // 6 against pierce
+  combat.add(unit(2, kSwordsman, 1, 2000, Point{400, 0}));  // 6 armour
   combat.order_attack(1, 2);
 
   world.advance(100);
   combat.advance(world, world.turn());
   REQUIRE(combat.projectiles().size() == 1);
-  // Ten points of pierce armour, put on after the arrow left the bow.
+  // Ten points of slash armour, put on after the arrow left the bow; pierce
+  // armour, which no blow reads, alongside it.
   StatBonus tougher;
-  tougher.armour_pierce = 10;
+  tougher.armour_slash = 10;
+  tougher.armour_pierce = 1000;
   CHECK(combat.add_bonus(2, tougher));
 
   const std::int32_t before = combat.health(2);
