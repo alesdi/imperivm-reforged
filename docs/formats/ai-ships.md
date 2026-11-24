@@ -163,6 +163,10 @@ Read caller by caller (the unit side of each is in `class-tally.md`):
   repeated hand-off) counts it again.
 * The list holds a copy per register, less one per unregister; the scan
   prunes the dead ones as it meets them.
+* A spawn template (bit 27) never enters either: the register's first gates
+  refuse it. The census this engine answered with before the eighteenth round
+  counted a template ship standing in the sea as a ship, which on
+  `5_Great_Battles_Britain` map 3 is every ship the AI's players hold.
 
 ## What this engine models
 
