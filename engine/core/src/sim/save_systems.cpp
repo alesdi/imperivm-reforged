@@ -1834,6 +1834,21 @@ void AiSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, t.where.x);
     bytes::put_i32(out, t.where.y);
   }
+  // The kept ship counts, ascending by `(lsa, player)`, and each area's ship
+  // list in push order -- the original's persist writes both per area
+  // (0x0044fab0: `shipcount`, `ships`). Not hashed, as nothing here is.
+  bytes::put_u32(out, static_cast<std::uint32_t>(ship_counts_.size()));
+  for (const ShipCount& c : ship_counts_) {
+    bytes::put_i32(out, c.lsa);
+    bytes::put_u8(out, c.player);
+    bytes::put_i32(out, c.count);
+  }
+  bytes::put_u32(out, static_cast<std::uint32_t>(ship_lists_.size()));
+  for (const ShipList& l : ship_lists_) {
+    bytes::put_i32(out, l.lsa);
+    bytes::put_u32(out, static_cast<std::uint32_t>(l.ships.size()));
+    for (const ObjectId ship : l.ships) bytes::put_u32(out, ship);
+  }
   // Whether the manager exists; see `AiSystem::manager_started`.
   put_bool(out, manager_started_);
 }
@@ -1936,12 +1951,37 @@ Status AiSystem::deserialize(std::span<const std::byte> data) {
     }
     transports.push_back(std::move(t));
   }
+  std::uint32_t count_rows = 0;
+  if (!reader.u32(count_rows)) return FormatError::truncated;
+  std::vector<ShipCount> counts;
+  for (std::uint32_t i = 0; i < count_rows; ++i) {
+    ShipCount c;
+    if (!bytes::get_i32(reader, c.lsa) || !reader.u8(c.player) || !bytes::get_i32(reader, c.count)) {
+      return FormatError::truncated;
+    }
+    counts.push_back(c);
+  }
+  std::uint32_t list_rows = 0;
+  if (!reader.u32(list_rows)) return FormatError::truncated;
+  std::vector<ShipList> lists;
+  for (std::uint32_t i = 0; i < list_rows; ++i) {
+    ShipList l;
+    std::uint32_t length = 0;
+    if (!bytes::get_i32(reader, l.lsa) || !reader.u32(length)) return FormatError::truncated;
+    if (length > reader.remaining() / 4) return FormatError::truncated;
+    l.ships.resize(length);
+    for (ObjectId& ship : l.ships) {
+      if (!reader.u32(ship)) return FormatError::truncated;
+    }
+    lists.push_back(std::move(l));
+  }
   bool manager_started = false;
   if (!get_bool(reader, manager_started)) return FormatError::truncated;
 
   if (const Status status = finish(reader); !status.ok()) return status;
   if (!adopt_ship_needs(std::move(needs))) return FormatError::malformed;
   if (!adopt_ship_transports(std::move(transports))) return FormatError::malformed;
+  if (!adopt_ship_counts(std::move(counts), std::move(lists))) return FormatError::malformed;
 
   players_ = std::move(players);
   manager_started_ = manager_started;

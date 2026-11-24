@@ -517,6 +517,9 @@ void HeroSystem::ai_unregister(World& world, ObjectId id) {
     if (const WorldObject* slot = world.find(id); slot != nullptr) {
       tally_take(world, state->owner, slot->class_index);
     }
+    // Then, for a ship, the kept count of the area it is in goes down one
+    // and its first entry leaves the area's list (docs/formats/ai-ships.md).
+    ai_ship_unregister(world, id);
     state->flags.ai_registered = false;
   }
   // Re-found, because `detach` may already have cleared it.
@@ -585,6 +588,12 @@ void HeroSystem::ai_register(World& world, ObjectId id) {
   if (slot == nullptr || !slot->state.flags.is_unit) return;
   ObjectState* state = world.mutable_state(id);
   if (state == nullptr || state->flags.unspawned || state->flags.noselect) return;
+  // The ship half comes before the owner test and before the squad handle is
+  // looked at: every call that gets this far raises a ship's kept count and
+  // pushes it on its area's list again, registered or not -- so `Place`,
+  // whose `SetPos` registers through the move hook before `Place` calls the
+  // register itself, counts a ship twice (docs/formats/ai-ships.md).
+  ai_ship_register(world, id);
   if (state->owner == kNoPlayer || state->flags.ai_registered) return;
   // The add, in its order: the tally for the class and each ancestor, then
   // `AddToSquad` towards the node under the unit (0x0044e650 on `posRH`,

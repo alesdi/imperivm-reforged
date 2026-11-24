@@ -549,6 +549,142 @@ bool AiSystem::adopt_ship_needs(std::vector<ShipNeed> rows) {
   return true;
 }
 
+// -- the kept ship count ----------------------------------------------------
+
+namespace {
+
+[[nodiscard]] bool count_before(const AiSystem::ShipCount& a, LsaId lsa, PlayerId player) noexcept {
+  return a.lsa < lsa || (a.lsa == lsa && a.player < player);
+}
+
+}  // namespace
+
+std::int32_t AiSystem::ships_kept(PlayerId player, LsaId lsa) const noexcept {
+  const auto at = std::lower_bound(ship_counts_.begin(), ship_counts_.end(), std::pair{lsa, player},
+                                   [](const ShipCount& row, const std::pair<LsaId, PlayerId>& key) {
+                                     return count_before(row, key.first, key.second);
+                                   });
+  return at != ship_counts_.end() && at->lsa == lsa && at->player == player ? at->count : 0;
+}
+
+void AiSystem::raise_ship_count(PlayerId player, LsaId lsa, ObjectId ship) {
+  // 0x0044e900 / 0x0044e920: read, add one, write -- no clamp on the way up.
+  auto at = std::lower_bound(ship_counts_.begin(), ship_counts_.end(), std::pair{lsa, player},
+                             [](const ShipCount& row, const std::pair<LsaId, PlayerId>& key) {
+                               return count_before(row, key.first, key.second);
+                             });
+  if (at != ship_counts_.end() && at->lsa == lsa && at->player == player) {
+    ++at->count;
+  } else {
+    ship_counts_.insert(at, ShipCount{lsa, player, 1});
+  }
+  // 0x0044fd30 -> 0x0041f290: a plain push on the back, no test for a copy.
+  auto list = std::lower_bound(ship_lists_.begin(), ship_lists_.end(), lsa,
+                               [](const ShipList& row, LsaId key) { return row.lsa < key; });
+  if (list == ship_lists_.end() || list->lsa != lsa) list = ship_lists_.insert(list, ShipList{lsa, {}});
+  list->ships.push_back(ship);
+}
+
+void AiSystem::lower_ship_count(PlayerId player, LsaId lsa, ObjectId ship) {
+  // 0x0041eee0: the count floored at one before the decrement, so never
+  // below zero; a pair never raised is written as zero, which reads the same.
+  const std::int32_t now = ships_kept(player, lsa);
+  if (now > 0) {
+    auto at = std::lower_bound(ship_counts_.begin(), ship_counts_.end(), std::pair{lsa, player},
+                               [](const ShipCount& row, const std::pair<LsaId, PlayerId>& key) {
+                                 return count_before(row, key.first, key.second);
+                               });
+    --at->count;
+  }
+  // 0x0041ee70: the first equal handle, and only that one.
+  auto list = std::lower_bound(ship_lists_.begin(), ship_lists_.end(), lsa,
+                               [](const ShipList& row, LsaId key) { return row.lsa < key; });
+  if (list == ship_lists_.end() || list->lsa != lsa) return;
+  const auto found = std::find(list->ships.begin(), list->ships.end(), ship);
+  if (found != list->ships.end()) list->ships.erase(found);
+}
+
+std::span<const ObjectId> AiSystem::ship_list(LsaId lsa) const noexcept {
+  const auto list = std::lower_bound(ship_lists_.begin(), ship_lists_.end(), lsa,
+                                     [](const ShipList& row, LsaId key) { return row.lsa < key; });
+  if (list == ship_lists_.end() || list->lsa != lsa) return {};
+  return list->ships;
+}
+
+void AiSystem::erase_ship_list_entry(LsaId lsa, std::size_t at) noexcept {
+  const auto list = std::lower_bound(ship_lists_.begin(), ship_lists_.end(), lsa,
+                                     [](const ShipList& row, LsaId key) { return row.lsa < key; });
+  if (list == ship_lists_.end() || list->lsa != lsa || at >= list->ships.size()) return;
+  list->ships.erase(list->ships.begin() + static_cast<std::ptrdiff_t>(at));
+}
+
+bool AiSystem::adopt_ship_counts(std::vector<ShipCount> counts, std::vector<ShipList> lists) {
+  for (std::size_t i = 1; i < counts.size(); ++i) {
+    if (!count_before(counts[i - 1], counts[i].lsa, counts[i].player)) return false;
+  }
+  for (std::size_t i = 1; i < lists.size(); ++i) {
+    if (!(lists[i - 1].lsa < lists[i].lsa)) return false;
+  }
+  ship_counts_ = std::move(counts);
+  ship_lists_ = std::move(lists);
+  return true;
+}
+
+LsaId ai_ship_area(World& world, ObjectId id) {
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr) return kNoLsa;
+  if (!slot->state.is_held()) {
+    // 0x0044e940 on `posRH` (vtbl+0xc8, the ship's own position on the map):
+    // the slot grid's node, and that node's area.
+    const GaikaNode* node = world.gaika().find(world.gaika().at(world.lsa(), world.resolve_position(id)));
+    return node == nullptr ? kNoLsa : node->lsa;
+  }
+  // Held: `[ship+0x154]` -> the holder's settlement `[holder+0xc]` -> its
+  // central building `[+0x8c]` -> the cached water area `[+0x1f6]`, read
+  // with no class test.
+  EconomySystem* economy = economy_of(world);
+  if (economy == nullptr) return kNoLsa;
+  const Settlement* s = economy->settlements().for_object(slot->state.holder);
+  return s == nullptr ? kNoLsa : central_water_lsa(world, *s);
+}
+
+namespace {
+
+/// The ship cast both halves make (`vtbl+4` with `"CVXShip"`), and the AI up
+/// (`[0x008c8e54]`). The owner the count is kept for is `[[ship+0x70]+8]`.
+[[nodiscard]] AiSystem* ship_half_applies(World& world, ObjectId id) {
+  AiSystem* ai = ai_system_of(world);
+  if (ai == nullptr || !ai->manager_started()) return nullptr;
+  const WorldObject* slot = world.find(id);
+  if (slot == nullptr || slot->object == nullptr || !slot->object->is_a(NativeClass::ship)) return nullptr;
+  // **Labelled:** the original reads the owner's index through `[ship+0x70]`
+  // unchecked, a null read for an ownerless ship; here nothing is counted.
+  if (slot->state.owner == kNoPlayer) return nullptr;
+  return ai;
+}
+
+}  // namespace
+
+void ai_ship_register(World& world, ObjectId id) {
+  AiSystem* ai = ship_half_applies(world, id);
+  if (ai == nullptr) return;
+  // **Labelled:** an area the table does not have (an uncut cache's 0xffff, a
+  // holder that is no settlement's) is written past the vector there, and
+  // area 0 -- node 0's, a point off the map -- is the reserved record 0 there,
+  // which no reader asks for; here neither is kept.
+  const LsaId lsa = ai_ship_area(world, id);
+  if (world.lsa().find(lsa) == nullptr) return;
+  ai->raise_ship_count(world.find(id)->state.owner, lsa, id);
+}
+
+void ai_ship_unregister(World& world, ObjectId id) {
+  AiSystem* ai = ship_half_applies(world, id);
+  if (ai == nullptr) return;
+  const LsaId lsa = ai_ship_area(world, id);
+  if (world.lsa().find(lsa) == nullptr) return;
+  ai->lower_ship_count(world.find(id)->state.owner, lsa, id);
+}
+
 // -- the ship transport order ----------------------------------------------
 
 namespace {
@@ -3726,8 +3862,7 @@ HostOutcome f_find_teleport(CallContext& ctx) {
 //     the three agree on one counter per 1-based player, and this file keeps
 //     it at the 0-based index;
 //   * `Ships` (0x00422660) answers 0x0043ee40(player - 1, lsa), the int at
-//     `+0x54 + (player-1)*4` -- the ship count, which `sim/ai.hpp` says this
-//     engine computes rather than keeps (see `f_ships`).
+//     `+0x54 + (player-1)*4` -- the kept ship count (see `f_ships`).
 //
 // A player outside 1..16 is refused here (0, or nothing written), where the
 // original reads or writes a neighbouring word of the record -- player 0's
@@ -3770,54 +3905,46 @@ HostOutcome f_clr_ship_needs(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `Ships(player, lsa)` -- 2 sites: the player's living ships standing in the
-/// area. A census, where the original keeps a count; see `sim/ai.hpp`.
-///
-/// **What the kept count counts**, so the difference is on record. The word
-/// at `+0x54 + owner*4` is raised by 0x0041f310 and lowered by 0x0041eee0
-/// (through 0x0044e900/0x0044e920), the hooks an object passes through when
-/// it is registered with, or removed from, the AI's tracking (19 and 6
-/// callers: creation, death, boarding, leaving a holder and the like). For a
-/// ship -- a cast to `CVXShip` -- the area is the one its position lies in
-/// (0x0044e940) when `[ship+0x154]` is `0xffff`, and otherwise one read
-/// through that holder chain (`+0x1f6`); the owner is `[[ship+0x70]+8]`. Both
-/// hooks skip objects carrying flag 0x8000000 at `+0x2c` or 0x800000 at
-/// `+0x194`; the raise also needs `[0x8c8e50]` set and `[0xa8734c]` clear,
-/// the lowering needs the AI manager (`[0x8c8e58]`), an owner and a squad
-/// (`[+0x174]`), and clamps at zero; both touch the count only while the area
-/// table (`[0x8c8e54]`) exists. The census agrees whenever the
-/// hooks have kept up with where every living ship is; it cannot reproduce a
-/// count the asymmetric gates let drift, nor the holder-chain area, nor the
-/// two unnamed flags. A design difference (`sim/ai.hpp`), kept.
-///
-/// The census behind `Ships` and `CheckLsaPath`: `fn` sees every living ship of
-/// `player` standing in `lsa`, ascending by id, and stops the walk by answering
-/// `true`. Answers whether it did.
-template <typename Fn>
-[[nodiscard]] bool each_ship_in_area(const World& world, PlayerId player, LsaId lsa, Fn&& fn) {
-  for (const WorldObject& slot : world.objects()) {
-    if (slot.internal != InternalKind::none || slot.object == nullptr) continue;
-    if (!slot.object->is_a(NativeClass::ship) || slot.state.owner != player) continue;
-    if (slot.state.health <= 0) continue;
-    if (world.lsa().at(world.resolve_position(slot.id)) != lsa) continue;
-    if (fn(slot)) return true;
-  }
-  return false;
-}
-
+/// `Ships(player, lsa)` -- 2 sites: the kept count (0x0043ee40), the int at
+/// `+0x54 + (player-1)*4` of the area record. Not a census: the AI register
+/// raises it for a ship on every call that passes its gates and the
+/// unregister lowers it, floored at zero, for a registered ship, each in the
+/// area the ship is in at that moment (`ai_ship_register`,
+/// `ai_ship_unregister`; docs/formats/ai-ships.md). So a ship `Place` puts
+/// down counts two, one built by a shipyard counts two, a ship registered in
+/// one area and dying in another leaves the first one up, and no move ever
+/// moves it.
 HostOutcome f_ships(CallContext& ctx) {
-  World* world = world_of(ctx);
+  AiSystem* ai = host_ai(ctx);
   PlayerId player = kNoPlayer;
   LsaId lsa = kNoLsa;
-  if (world == nullptr || !ship_need_args(ctx, player, lsa)) {
+  if (ai == nullptr || !ship_need_args(ctx, player, lsa)) return HostOutcome::ok_with(Value::integer(0));
+  return HostOutcome::ok_with(Value::integer(ai->ships_kept(player, lsa)));
+}
+
+/// `AllyShips(player, lsa)` (0x00422690 -> 0x0043ee60) and `EnemyShips`
+/// (0x004226c0 -> 0x0043eeb0): the kept counts of the sixteen players summed
+/// over those the viewer (`player - 1`) sees as an ally (0x0044e250 answering
+/// 2 -- so not the viewer itself, which answers 1) or as an enemy (4). No
+/// shipped site. Players outside 1..16 answer 0 here; the original reads the
+/// relation row of whatever it is handed.
+template <bool kEnemies>
+HostOutcome f_side_ships(CallContext& ctx) {
+  AiSystem* ai = host_ai(ctx);
+  World* world = world_of(ctx);
+  PlayerId viewer = kNoPlayer;
+  LsaId lsa = kNoLsa;
+  if (ai == nullptr || world == nullptr || !ship_need_args(ctx, viewer, lsa)) {
     return HostOutcome::ok_with(Value::integer(0));
   }
-  std::int32_t ships = 0;
-  (void)each_ship_in_area(*world, player, lsa, [&](const WorldObject&) {
-    ++ships;
-    return false;
-  });
-  return HostOutcome::ok_with(Value::integer(ships));
+  const std::int32_t wanted = kEnemies ? 4 : 2;
+  std::int32_t total = 0;
+  for (std::uint32_t p = 0; p < kPlayerCount; ++p) {
+    const auto other = static_cast<PlayerId>(p);
+    if (ai_relation(world->players(), static_cast<std::int32_t>(viewer), other) != wanted) continue;
+    total += ai->ships_kept(other, lsa);
+  }
+  return HostOutcome::ok_with(Value::integer(total));
 }
 
 // -- CheckLsaPath ----------------------------------------------------------
@@ -3854,8 +3981,8 @@ HostOutcome f_ships(CallContext& ctx) {
 //      refuse a land-to-land step (`type == 2` on the area being left) can
 //      never fire on a graph that has no such edge and is not reproduced.
 //   4. Along the way every water neighbour looked at -- relaxed or not --
-//      in which the player has **no ship at all** (the `shipcount` word,
-//      `Ships` here) is a candidate for "where a ship would have helped":
+//      in which the player has **no ship at all** (the kept `shipcount`
+//      word, what `Ships` reads) is a candidate for "where a ship would have helped":
 //      the first seen is taken, a later one only when its distance is
 //      strictly less. An unreached area carries `0xffff`, and the original
 //      compares it as it is.
@@ -3924,24 +4051,38 @@ HostOutcome f_ships(CallContext& ctx) {
 // every other `CheckLsaPath`, and to `PrepareAiTransportShip`'s own search
 // for a different order.
 //
-// **The scan order is this engine's and not the original's.** There the area
-// keeps a list of the ships standing in it and the walk is that list's order;
-// here `each_ship_in_area` sweeps the world ascending by object id. The two
-// agree on *which ships qualify* and can disagree on which qualifying ship is
-// first, which only `PrepareAiTransportShip` can see, and only when more than
-// one is free in the same sea.
+// **The walk is the area's own list** (round 18): the handles the AI
+// register pushed (`AiSystem::ship_list`), in push order, a ship registered
+// twice listed twice, and a ship that sailed into another area since still
+// listed under the one it was registered in. An entry whose object is gone
+// or dead is erased as the walk reaches it, as the original's is. It used to
+// be a sweep of the world by id over the ships standing in the area.
 
-/// 0x00441730, above: the first ship of `player` in `lsa` that can carry the
-/// crossing `(order, where)`, or `kNoObject`. With no AI system every ship
-/// reads as carrying no order, the constructed `""` and `(-1, -1)`.
-[[nodiscard]] ObjectId ship_for_crossing(World& world, const AiSystem* ai, PlayerId player,
+/// 0x00441730, above: the first ship of `player` on `lsa`'s list that can
+/// carry the crossing `(order, where)`, or `kNoObject`. Prunes the list.
+[[nodiscard]] ObjectId ship_for_crossing(World& world, AiSystem* ai, PlayerId player,
                                          LsaId lsa, std::string_view order, Point where) {
   const CommandSystem* commands = command_system(world);
-  if (commands == nullptr) return kNoObject;
-  const AiSystem::ShipTransport none{};
-  ObjectId found = kNoObject;
-  (void)each_ship_in_area(world, player, lsa, [&](const WorldObject& ship) {
-    if (commands->command_count(ship.id) == 0) return false;
+  // 0x0044e9a0: no list without the AI, and none for an area past the table.
+  if (commands == nullptr || ai == nullptr || !ai->manager_started()) return kNoObject;
+  std::size_t at = 0;
+  for (;;) {
+    const std::span<const ObjectId> list = ai->ship_list(lsa);
+    if (at >= list.size()) return kNoObject;
+    const ObjectId id = list[at];
+    const WorldObject* found = world.find(id);
+    // A handle that no longer resolves, or a ship that is dead, is erased
+    // from the list as the walk passes it (0x0041ecc0), whoever owns it.
+    if (found == nullptr || found->object == nullptr || object_is_dead(*found)) {
+      ai->erase_ship_list_entry(lsa, at);
+      continue;
+    }
+    const WorldObject& ship = *found;
+    ++at;
+    // The owner by `[[obj+0x70]+8]`; no cast, no area test -- the list is
+    // where the ship was when it was registered.
+    if (ship.state.owner != player) continue;
+    if (commands->command_count(ship.id) == 0) continue;
     const std::string_view verb = commands->command_name(ship.id, 0);
     bool available = verb == "idle";
     if (verb == "advance") {
@@ -3951,20 +4092,17 @@ HostOutcome f_ships(CallContext& ctx) {
       HeroSystem* heroes = hero_system_of(world);
       const Squad* squad = heroes == nullptr ? nullptr : squad_containing(*heroes, ship.id);
       const GaikaId node = squad == nullptr ? kNoGaika : squad_ai_dest(*squad);
-      available = squad == nullptr || ai == nullptr || !ai->manager_started() ||
-                  world.gaika().find(node) == nullptr ||
+      available = squad == nullptr || world.gaika().find(node) == nullptr ||
                   enemy_strength_present(world, *heroes, node,
                                          static_cast<std::int32_t>(ship.state.owner)) == 0;
     }
     if (verb == "boardunit") {
-      const AiSystem::ShipTransport& carrying = ai == nullptr ? none : ai->ship_transport(ship.id);
+      const AiSystem::ShipTransport& carrying = ai->ship_transport(ship.id);
       available = carrying.order == order && carrying.where.x == where.x &&
                   carrying.where.y == where.y;
     }
-    if (available) found = ship.id;
-    return available;
-  });
-  return found;
+    if (available) return ship.id;
+  }
 }
 
 /// `CheckLsaPath`'s answer, and the route behind it. `LsaRoute` is declared in
@@ -4033,8 +4171,7 @@ LsaRoute lsa_route(World& world, AiSystem* ai, LsaId src, LsaId dst, PlayerId pl
           }
         }
         // Looked at, relaxed or not: a sea the player has no ship in.
-        if (player != kNoPlayer &&
-            !each_ship_in_area(world, player, there, [](const WorldObject&) { return true; })) {
+        if (player != kNoPlayer && (ai == nullptr ? 0 : ai->ships_kept(player, there)) == 0) {
           if (best < 0 || dist[at] < best) {
             best = dist[at];
             best_area = there;
@@ -5189,6 +5326,8 @@ std::size_t register_ai_host(script::HostRegistry& registry) {
   registry.define(kFree, "IncShipNeeds", 2, &f_inc_ship_needs);   //  2
   registry.define(kFree, "ClrShipNeeds", 2, &f_clr_ship_needs);   //  1
   registry.define(kFree, "Ships", 2, &f_ships);                   //  2
+  registry.define(kFree, "AllyShips", 2, &f_side_ships<false>);   //  0
+  registry.define(kFree, "EnemyShips", 2, &f_side_ships<true>);   //  0
   registry.define(kFree, "CheckLsaPath", 3, &f_check_lsa_path);   //  3
   registry.define(kFree, "PrepareAiTransportShip", 5, &f_prepare_ai_transport_ship);  // 1
   // The pathfinder bootstrap, nine names over the one file that drives it.
