@@ -1,8 +1,9 @@
 # The command queue
 
-**Status:** read from `gbr.exe` for the host audit's twelfth round; the engine models the
-slot's end, the stop flag, the synchronous `onfinish`, the `idle` as the queue's head from
-the object's start, `SneakCommand`'s ids and the issue's group-move set-up
+**Status:** read from `gbr.exe` for the host audit's twelfth round (the offset spread in
+the seventeenth); the engine models the slot's end, the stop flag, the synchronous
+`onfinish`, the `idle` as the queue's head from the object's start, `SneakCommand`'s ids,
+the issue's group-move set-up and an offset row's per-actor spread
 (`engine/core/src/sim/command.cpp`, `sim/session.cpp`, `script/scheduler.cpp`,
 `script/vm.cpp`). What it does not model is listed at the end.
 **Not a file format.** Nothing here is on disk; it is the runtime model behind every
@@ -123,6 +124,62 @@ replaces (`vtbl+0xb8` with 1), else appended by the `AddCommand` insert (`vtbl+0
 0). It is made after the first actor's command and inserted before it. `SHIP_UNBOARD.VS`
 (`// void, Obj This, ObjList ol, point pt`) sails there and drops them.
 
+## An offset row's per-actor spread
+
+A `<cmd>` row with `offset` set to a non-zero number (`atol`, read at 0x004f3226 into
+`[def+0x1e0]`) spreads the point of a point order over its actors, so that a group sent to
+one point does not converge on one cell. Eighteen shipped rows carry it: `advance`,
+`attack`, `bloodlust`, `build_catapult`, `capture`, `explore`, `move`, `moveinfight`,
+`patrol`, `sacrifice`, `sentry_attack`, `soothing`, `stand_ground`, `stand_position`,
+`starvation`, `transport`, `transport_request` and `wisdom`. Eight of them (`stand_ground`,
+`stand_position`, `build_catapult` and the five hero skills) have a `groupdispatch`, whose
+arm never reaches the spread.
+
+**The anchor.** The spread is measured from a point held in two globals at 0x009969d4 and
+0x009969d8, which every caller of the issue writes just before it calls:
+
+- `Obj::ExecCmd` (0x005b55f9..0x005b5610) writes its receiver's stored position
+  (`vtbl+0x3c`);
+- `ObjList::ExecCmd` (0x0055e323) writes the list's mean (0x004cd1b0): each handle that
+  names an object adds its `posRH` (`vtbl+0xc8`: a unit in a settlement counts at its
+  central building, one aboard a ship where the ship is), the handles that name nothing are taken off the count, and the two sums are
+  divided by it unsigned; a list naming nothing leaves `(0, 0)`;
+- the row's execution (0x004f17e4, a command bar press) and the right click (0x004f5084)
+  first cut the selection into sub-lists (0x004f1240) and write each sub-list's mean before
+  issuing it.
+
+**The radius.** Before its loop the issue computes `r = 45 * isqrt(n - 1)` (0x004ef721,
+the floored root 0x0067c3d0), `n` being the list's handle count, those that name nothing
+included.
+
+**Per actor** (0x004e81f0, called at 0x004ef850): when the actor reaches the point form --
+no object was given, or the class binds no object form of the method -- and the row has the
+flag, a fresh copy of the issue's point is spread before the point form is looked up, so
+what follows sees the spread point whether the actor then binds the point form or falls
+back to the bare one:
+
+1. A unit (bit `0x400000` of `[obj+0x2c]`) in a holder (`[obj+0x154]` not `0xffff`) has no
+   position of its own to keep. Its point takes `Range(-r, r)` from the world's generator
+   (`[game+0x12a0]`, slot `+0x14`) added to `x`, then a second `Range(-r, r)` added to `y`.
+   With `r` 0 neither call draws.
+2. Anything else adds its own stored position (`vtbl+0x3c`) less the anchor, on each axis,
+   so that it keeps its place relative to the anchor.
+3. Either way the point is then held inside the camera's map rectangle taken to the map
+   (0x006245b0 on `[camera+0x628..+0x634]`; `SetPos` takes the same rectangle 32 in, this
+   takes it as it is): `x` raised to the left side, then lowered to the right; `y` raised to the top,
+   then lowered to the bottom. The rectangle's sides are the screen rectangle's `x`; its top
+   is the higher of its two top corners unprojected, its bottom the lower of its two bottom
+   corners unprojected.
+
+The group-move set-up below is still handed the issue's own point, not the spread one.
+
+So `Obj::ExecCmd` with an offset row only clamps its point into the map (its one actor's
+offset from itself is zero, and a held receiver's radius is zero). `ObjList::ExecCmd` with
+one keeps each member's place about the list's mean and scatters its held members. The
+shipped scripts reach the spread through `SIEGE.VS` and `SIEGE GATE.VS`'s
+`olAdvance.ExecCmd("advance", oTarget.pos, u, false)`: `UNIT_ADVANCE.VS` takes a point, so
+for a unit the object form misses and the siege party spreads about the target's position.
+
 ## What the engine does not model
 
 - **The script-action mode at the end** (`[obj+0x130]`, step 1 above): the engine keeps no
@@ -130,7 +187,10 @@ replaces (`vtbl+0xb8` with 1), else appended by the `AddCommand` insert (`vtbl+0
   idle/taunt activity leaves the animation to run out.
 - **A holder that is not a ship's** passes the original a null `unboard` command when its
   class binds none; the engine gives it nothing (labelled at `group_move_set_up`).
-- **An offset row's per-actor spread** (0x004e81f0, rows with `[def+0x1e0]`).
+- **The interface's sub-lists** (0x004f1240): the engine's command bar and right click
+  reach the issue one actor at a time with each actor's own point (`issue_order`), so they
+  pass no anchor and an offset row is not spread there; the default order's own spread
+  (`sim/orders.cpp`) stands in for the right click's.
 - **`command` with no argument on an empty queue** answers `idle`, where the original's
   string still holds the last command started (labelled at `command_impl`; the queue is
   empty only for an object whose class binds no `idle`, or a dying one).
