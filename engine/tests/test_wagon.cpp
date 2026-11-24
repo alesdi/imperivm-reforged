@@ -13,10 +13,12 @@
 #include <vector>
 
 #include "imperivm/core/game/class_graph.hpp"
+#include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/command.hpp"
 #include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/player.hpp"
 #include "imperivm/core/sim/world.hpp"
@@ -435,4 +437,97 @@ TEST(a_settlement_makes_its_races_mule_with_the_load_in_it) {
   CHECK(b.world.find(camel)->state.cargo == 300);
   CHECK(b.world.find(camel)->state.cargo_resource == 1);
   CHECK(b.economy.find(carthage)->warehouse.food == 0);
+}
+
+/// **Both clamps are signed and only downwards** (0x005eedab `jl`, 0x005eedbb
+/// `jge`), and the store is written unclamped (0x005eedc5): a negative request
+/// grows the store, past its cap, and the carrier carries the negative load;
+/// a store already below zero is emptied into the carrier. The carrier goes
+/// into the holder as `ForceAddUnit` puts a unit there (0x005d3e10 with 1):
+/// on the roster, a full one included.
+TEST(a_settlement_carrier_request_is_clamped_signed_and_only_downwards) {
+  WagonBench b;
+  const SettlementId home = b.town(1, Point{2000, 2000}, 300);
+  b.economy.find(home)->warehouse.max_gold = 400;
+  const auto make = [&](const char* verb, std::int32_t n) {
+    const Settlement* s = b.economy.find(home);
+    const script::HostOutcome out =
+        b.call(verb, 1, {script::Value::object(kTypeSettlement, s->object), script::Value::integer(n)});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_object() ? out.value.as_object().id : kNoObject;
+  };
+
+  const ObjectId back = make("CreateMuleGold", -200);
+  REQUIRE(b.world.find(back) != nullptr);
+  CHECK(b.world.find(back)->state.cargo == -200);
+  CHECK(b.world.find(back)->state.health > 0);
+  CHECK(b.gold(home) == 500);  // past the 400 cap
+  CHECK(b.economy.find(home)->holder.contains(back));
+
+  // The boat is the same body.
+  const ObjectId boat = make("CreateBoatGold", -1);
+  REQUIRE(b.world.find(boat) != nullptr);
+  CHECK(b.world.find(boat)->class_index == b.graph.find("ShipS"));
+  CHECK(b.world.find(boat)->state.cargo == -1);
+  CHECK(b.gold(home) == 501);
+
+  // A negative store: the request is cut to it, the store comes back to 0.
+  b.economy.find(home)->warehouse.gold = -50;
+  const ObjectId owed = make("CreateMuleGold", 100);
+  REQUIRE(b.world.find(owed) != nullptr);
+  CHECK(b.world.find(owed)->state.cargo == -50);
+  CHECK(b.gold(home) == 0);
+
+  // A full holder takes the carrier all the same.
+  b.economy.find(home)->warehouse.gold = 10;
+  b.economy.find(home)->holder.max_units = b.economy.find(home)->holder.count();
+  const ObjectId last = make("CreateMuleGold", 10);
+  REQUIRE(b.world.find(last) != nullptr);
+  CHECK(b.economy.find(home)->holder.contains(last));
+  CHECK(b.world.find(last)->state.holder == b.economy.find(home)->holder.object);
+  // Zero and only zero makes nothing.
+  CHECK(make("CreateMuleGold", 0) == kNoObject);
+  // A request over the load is cut to it, from one over.
+  b.economy.find(home)->warehouse.gold = 3000;
+  const ObjectId heavy = make("CreateMuleGold", 1001);
+  REQUIRE(b.world.find(heavy) != nullptr);
+  CHECK(b.world.find(heavy)->state.cargo == 1000);
+  CHECK(b.gold(home) == 2000);
+}
+
+/// **A boat is handed to the AI as a mule is** (0x005eee37, 0x0041f310), at
+/// once and inside the holder: `ShipS` is a `CVXWagon`, so only the
+/// register's unit half applies -- counted in its owner's tally for its class
+/// and each ancestor, and filed in a squad.
+TEST(a_settlements_boat_and_mule_are_registered_with_the_ai_in_the_holder) {
+  WagonBench b;
+  AiSystem ai;
+  HeroSystem heroes;
+  REQUIRE(b.world.add_system(&ai));
+  REQUIRE(b.world.add_system(&heroes));
+  ai.start_manager();
+  const SettlementId home = b.town(1, Point{2000, 2000}, 1000, "Hall", 1000);
+  const auto make = [&](const char* verb, std::int32_t n) {
+    const Settlement* s = b.economy.find(home);
+    const script::HostOutcome out =
+        b.call(verb, 1, {script::Value::object(kTypeSettlement, s->object), script::Value::integer(n)});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_object() ? out.value.as_object().id : kNoObject;
+  };
+  const ClassIndex ship_s = b.graph.find("ShipS");
+  const ClassIndex object = b.graph.find("Object");
+  const std::int32_t objects_before = heroes.class_tally(1, object);
+
+  const ObjectId boat = make("CreateBoatFood", 250);
+  REQUIRE(b.world.find(boat) != nullptr);
+  CHECK(b.world.find(boat)->state.flags.ai_registered);
+  CHECK(heroes.class_tally(1, ship_s) == 1);
+  CHECK(heroes.class_tally(1, object) == objects_before + 1);
+  CHECK(heroes.squads().squad_of(boat) != kNoSquad);
+
+  const ObjectId mule = make("CreateMuleGold", 100);
+  REQUIRE(b.world.find(mule) != nullptr);
+  CHECK(b.world.find(mule)->state.flags.ai_registered);
+  CHECK(heroes.class_tally(1, b.graph.find("Trader")) == 1);
+  CHECK(heroes.squads().squad_of(mule) != kNoSquad);
 }

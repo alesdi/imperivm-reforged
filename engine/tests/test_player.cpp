@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/player.hpp"
@@ -971,6 +972,124 @@ TEST(reveal_hidden_enemy_units_refuses_a_bad_point_radius_or_player) {
   CHECK(bench.world.find(sneak)->state.flags.hidden);
 }
 
+/// The scan's circle at its edges (0x004c7f70): a radius of zero keeps what
+/// stands on the point and nothing else -- the general radius query reads zero
+/// as the whole map -- and the scan makes no spawn-template test.
+TEST(reveal_hidden_enemy_units_keeps_its_own_circle_and_reveals_templates) {
+  Bench bench;
+  bench.world.players().set_relation_word(1, 0, 0);
+  const auto hidden_unit = [&](Point at) {
+    const ObjectId id = bench.world.spawn(NativeClass::unit, nullptr);
+    bench.world.set_owner(id, 1);
+    bench.world.set_position(id, at);
+    bench.world.mutable_state(id)->flags.hidden = true;
+    return id;
+  };
+  const auto is_hidden = [&](ObjectId id) { return bench.world.find(id)->state.flags.hidden; };
+  const ObjectId on_point = hidden_unit(Point{3000, 3000});
+  const ObjectId beside = hidden_unit(Point{3001, 3000});
+  const ObjectId far_away = hidden_unit(Point{9000, 9000});
+  const ObjectId tmpl = hidden_unit(Point{5000, 5000});
+  bench.world.mutable_state(tmpl)->flags.unspawned = true;
+
+  CHECK(bench.call(kFree, "RevealHiddenEnemyUnits",
+                   {pack_point(Point{3000, 3000}), script::Value::integer(0),
+                    script::Value::integer(1)})
+            .status == script::HostStatus::ok);
+  CHECK(!is_hidden(on_point));
+  CHECK(is_hidden(beside));
+  CHECK(is_hidden(far_away));
+  CHECK(is_hidden(tmpl));
+
+  // A negative radius inverts the box. Inside one 256-unit grid cell the walk
+  // visits that cell and keeps the circle of |r|; a box across a cell edge
+  // walks nothing.
+  bench.world.mutable_state(on_point)->flags.hidden = true;
+  const ObjectId out_of_reach = hidden_unit(Point{3006, 3000});
+  CHECK(bench.call(kFree, "RevealHiddenEnemyUnits",
+                   {pack_point(Point{3000, 3000}), script::Value::integer(-5),
+                    script::Value::integer(1)})
+            .status == script::HostStatus::ok);
+  CHECK(!is_hidden(on_point));
+  CHECK(!is_hidden(beside));
+  CHECK(is_hidden(out_of_reach));
+  const ObjectId on_edge = hidden_unit(Point{3070, 3000});  // 3072 is a cell edge
+  CHECK(bench.call(kFree, "RevealHiddenEnemyUnits",
+                   {pack_point(Point{3070, 3000}), script::Value::integer(-5),
+                    script::Value::integer(1)})
+            .status == script::HostStatus::ok);
+  CHECK(is_hidden(on_edge));
+  const ObjectId on_row_edge = hidden_unit(Point{3000, 3070});
+  CHECK(bench.call(kFree, "RevealHiddenEnemyUnits",
+                   {pack_point(Point{3000, 3070}), script::Value::integer(-5),
+                    script::Value::integer(1)})
+            .status == script::HostStatus::ok);
+  CHECK(is_hidden(on_row_edge));
+
+  // The template is found like any other object in the circle; a unit in the
+  // box's corner, 566 out against a radius of 500, is not in the circle.
+  const ObjectId corner = hidden_unit(Point{5400, 5400});
+  CHECK(bench.call(kFree, "RevealHiddenEnemyUnits",
+                   {pack_point(Point{5000, 5000}), script::Value::integer(500),
+                    script::Value::integer(1)})
+            .status == script::HostStatus::ok);
+  CHECK(!is_hidden(tmpl));
+  CHECK(is_hidden(corner));
+  CHECK(is_hidden(far_away));
+}
+
+/// The sneak's clock (0x004c80d1): a revealed unit whose class carries `Sneak`
+/// (bit 26 of the specials) has its last attack stamped with the game clock,
+/// which is what `TimeWithoutAttack` and `SNEAK_BEHAVIOR.VS` read. A revealed
+/// unit without the special, and a sneak the scan spares, keep theirs.
+TEST(reveal_hidden_enemy_units_stamps_a_revealed_sneaks_last_attack) {
+  Bench bench;
+  ClassGraph graph;
+  graph.add(bytes_of(R"(<class id="Unit" cpp_class="CVXUnit"></class>)"), "unit.xml");
+  graph.add(bytes_of(R"(<class id="Sneak" cpp_class="CVXUnit" parent="Unit"><properties unit_specials="Parry, Sneak"/></class>)"),
+            "sneak.xml");
+  graph.add(bytes_of(R"(<class id="Plain" cpp_class="CVXUnit" parent="Unit"><properties unit_specials="Parry, Invisibility"/></class>)"),
+            "plain.xml");
+  graph.link();
+  bench.world.set_class_graph(&graph);
+  CombatSystem combat;
+  PlayerTable& players = bench.world.players();
+  players.set_relation_word(1, 0, 0);
+  players.set_relation_word(2, 0, kRelationFriendly);
+
+  const auto hidden_unit = [&](const char* klass, PlayerId owner, Point at) {
+    const ObjectId id = bench.world.spawn(NativeClass::unit, nullptr, graph.find(klass));
+    bench.world.set_owner(id, owner);
+    bench.world.set_position(id, at);
+    bench.world.mutable_state(id)->flags.hidden = true;
+    Combatant record;
+    record.id = id;
+    record.owner = owner;
+    record.health = 10;
+    combat.add(record);
+    return id;
+  };
+  const ObjectId sneak = hidden_unit("Sneak", 1, Point{1000, 1000});
+  const ObjectId plain = hidden_unit("Plain", 1, Point{1010, 1000});
+  const ObjectId spared = hidden_unit("Sneak", 2, Point{1020, 1000});
+  const ObjectId outside = hidden_unit("Sneak", 1, Point{4000, 1000});
+  REQUIRE(bench.world.add_system(&combat));
+  bench.world.advance_turns(10);
+  const GameTime now = bench.world.time();
+  REQUIRE(now > 0);
+
+  CHECK(bench.call(kFree, "RevealHiddenEnemyUnits",
+                   {pack_point(Point{1000, 1000}), script::Value::integer(200),
+                    script::Value::integer(1)})
+            .status == script::HostStatus::ok);
+  CHECK(!bench.world.find(sneak)->state.flags.hidden);
+  CHECK(!bench.world.find(plain)->state.flags.hidden);
+  CHECK(combat.find(sneak)->last_attack_time == now);
+  CHECK(combat.find(plain)->last_attack_time == 0);
+  CHECK(combat.find(spared)->last_attack_time == 0);
+  CHECK(combat.find(outside)->last_attack_time == 0);
+}
+
 TEST(enemy_objs_mints_a_player_flags_query_with_the_right_type) {
   Bench bench;
   const script::HostOutcome enemies =
@@ -1062,6 +1181,34 @@ TEST(get_player_units_returns_an_objlist_of_the_players_squad_members) {
   CHECK(objlist_pool_of(bench.world).items(objlist_of(empty.value)).empty());
 }
 
+/// The player-data reader's race codes and its `AllowedRaces` mask
+/// (0x00569090), which are narrower than the class loader's table.
+TEST(the_player_data_reader_codes_races_and_allowed_races_exactly) {
+  CHECK(player_race_code("Gaul") == 0);
+  CHECK(player_race_code("RepublicanRome") == 1);
+  CHECK(player_race_code("Roman") == 1);
+  CHECK(player_race_code("Germany") == 7);
+  CHECK(player_race_code("Random") == kPlayerRaceRandom);
+  CHECK(player_race_code("Select") == kPlayerRaceRandom);
+  CHECK(player_race_code("Mutable") == kPlayerRaceMutable);
+  CHECK(player_race_code("Rome") == kNoRace);
+  CHECK(player_race_code("gaul") == kNoRace);
+  CHECK(player_race_code("Gauls") == kNoRace);
+  CHECK(player_race_code("") == kNoRace);
+
+  CHECK(allowed_race_mask("") == 0xffffffffu);
+  CHECK(allowed_race_mask("All") == 0xffffffffu);
+  CHECK(allowed_race_mask("Gaul") == 0x01u);
+  CHECK(allowed_race_mask(" Roman ,  Egypt") == 0x42u);
+  CHECK(allowed_race_mask("Carthage,Germany,RepublicanRome") == 0x86u);
+  // Unknown pieces are ignored, markers among them; nothing named is all ones.
+  CHECK(allowed_race_mask("Iberia, Random, Atlantis") == 0x08u);
+  CHECK(allowed_race_mask("Atlantis") == 0xffffffffu);
+  // An empty piece ends the walk.
+  CHECK(allowed_race_mask("Gaul,,Egypt") == 0x01u);
+  CHECK(allowed_race_mask(",Egypt") == 0xffffffffu);
+}
+
 TEST(per_player_facts_come_from_the_setup) {
   Bench bench;
   PlayerTable& players = bench.world.players();
@@ -1082,9 +1229,19 @@ TEST(per_player_facts_come_from_the_setup) {
   const script::HostOutcome carthage =
       bench.call(kFree, "GetPlayerRace", {script::Value::integer(1)});
   CHECK(carthage.value.as_integer() == 2);
+  // A marker nobody resolved answers its code in the setup record (0x005a80e0
+  // reads `+8` of it): 8 for `Random` and `Select`, 9 for `Mutable`. A name
+  // the player-data reader does not know -- a demonym, which the class loader
+  // would take -- answers -1.
   const script::HostOutcome unresolved =
       bench.call(kFree, "GetPlayerRace", {script::Value::integer(2)});
-  CHECK(unresolved.value.as_integer() == kNoRace);
+  CHECK(unresolved.value.as_integer() == kPlayerRaceRandom);
+  players.setup(1).race = "Mutable";
+  CHECK(bench.call(kFree, "GetPlayerRace", {script::Value::integer(2)}).value.as_integer() ==
+        kPlayerRaceMutable);
+  players.setup(1).race = "German";
+  CHECK(bench.call(kFree, "GetPlayerRace", {script::Value::integer(2)}).value.as_integer() ==
+        kNoRace);
 
   // `SetPlayerStatus` is a validated no-op, but it must still succeed: it is on
   // the path of every win/lose script.

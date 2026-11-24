@@ -2659,6 +2659,14 @@ constexpr std::string_view kResearchXml = R"(<commands>
   <src obj="GArena1"/>
 </cmd>
 <cmd name="Nowhere" costgold="1" method="research" param="NameSet, Nowhere, default"/>
+<cmd name="Summer Games" costgold="1" method="research" param="NameSet, Summer, default">
+  <src obj="GArena1"/>
+  <nsrc obj="GArena1Winter"/>
+</cmd>
+<cmd name="Sticky Games" costgold="1" method="research" param="NameSet, Sticky, default">
+  <src obj="GArena1" sticky="yes"/>
+  <src obj="Tavern" sticky="NO"/>
+</cmd>
 <cmd name="repair" costgold="50" execdelay="5000"/>
 <cmd name="hireheroR" costgold="600" execdelay="20000" method="hirehero" param="RomanHero">
   <src obj="RTemple"/>
@@ -4903,6 +4911,45 @@ TEST(economy_find_research_lab_matches_the_source_classes) {
   CHECK(out.value.as_object().id == cold);
 }
 
+/// **The index is the loader's, `<nsrc>` and `sticky=` included**
+/// (0x004f2240, 0x004f5af0, 0x0059e670): `FindResearchLab` and `Research`
+/// walk the offered list `[class+0x1f8]`, on which an `<nsrc>` stops the
+/// inheritance and a sticky `<src>` never lands.
+TEST(economy_find_research_lab_reads_the_class_reverse_index) {
+  const auto find = [](LabBench& b, const char* tech) {
+    const script::HostOutcome out =
+        b.call("FindResearchLab", 1, {b.settlement_value(), script::Value::string(tech)});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_object() ? out.value.as_object().id : kNoObject;
+  };
+
+  // `Summer Games` is offered to `GArena1` and excluded from its winter heir.
+  LabBench summer;
+  const ObjectId arena = summer.add_building(summer.classes.arena1);
+  CHECK(find(summer, "Summer Games") == arena);
+  LabBench winter;
+  (void)winter.add_building(winter.classes.graph.find("GArena1Winter"));
+  CHECK(find(winter, "Summer Games") == 0);
+
+  // A sticky `<src>` files the command on the other list: the arena offers
+  // no `Sticky Games`, while the tavern's `sticky="NO"` is the offered list.
+  LabBench sticky;
+  (void)sticky.add_building(sticky.classes.arena1);
+  CHECK(find(sticky, "Sticky Games") == 0);
+  const ObjectId tavern = sticky.add_building(sticky.classes.tavern);
+  CHECK(find(sticky, "Sticky Games") == tavern);
+
+  // `Research` reads the same index: nothing is queued on the winter arena.
+  winter.set_store(100000, 100000, 50);
+  const script::HostOutcome queued =
+      winter.call("Research", 1, {winter.settlement_value(), script::Value::string("Summer Games")});
+  CHECK(queued.status == script::HostStatus::ok);
+  for (const SettlementBuilding& b : winter.economy.settlements().find(winter.town)->buildings) {
+    CHECK(winter.commands.command_count(b.object) == 0 ||
+          winter.commands.command_name(b.object, 0) != "research");
+  }
+}
+
 /// `Research` finds an idle lab, checks it can be paid for, and queues the
 /// command there.
 TEST(economy_research_queues_the_command_on_the_lab_that_offers_it) {
@@ -6342,8 +6389,12 @@ TEST(create_boat_loads_from_the_warehouse_and_parks_the_boat_in_the_holder) {
   CHECK(economy.find(id)->warehouse.food == 0);
   CHECK(make("CreateBoatGold", 0) == sim::kNoObject);
   CHECK(economy.find(id)->warehouse.gold == 2000);
-  CHECK(make("CreateBoatGold", -100) == sim::kNoObject);
-  CHECK(economy.find(id)->warehouse.gold == 2000);
+  // A negative request is not nothing: the clamps only cut downwards, so
+  // the store grows and the boat carries the negative load (0x005eed90).
+  const ObjectId back = make("CreateBoatGold", -100);
+  REQUIRE(back != sim::kNoObject);
+  CHECK(world.find(back)->state.cargo == -100);
+  CHECK(economy.find(id)->warehouse.gold == 2100);
 
   // A receiver that is not a settlement answers the invalid handle.
   const std::uint32_t index = registry.find(script::CallKind::member, "CreateBoatGold", 1);
@@ -6537,10 +6588,12 @@ TEST(economy_settlement_count_is_strictly_within_and_by_descent) {
   CHECK(count(Point{1000, 1000}, 0, "Building") == 0);
 }
 
-/// `set.CreateShip(class)`: a ship of the class, owned by the settlement,
+/// `set.CreateShip(class)`: an object of the class, owned by the settlement,
 /// berthed at the central building's first water door and garrisoned in the
-/// settlement's holder; the invalid handle for a receiver naming nothing, a
-/// class nothing declares, or a class that is not a ship.
+/// settlement's holder **by force** (0x005d3e10 with 1), so a full holder
+/// takes it too; a class that is not a ship is made all the same (0x005a66a0
+/// instantiates any class); the invalid handle for a receiver naming nothing
+/// or a class nothing declares.
 TEST(create_ship_spawns_the_class_into_the_settlements_holder) {
   script::HostRegistry registry;
   script::declare_shipped_surface(registry);
@@ -6599,7 +6652,21 @@ TEST(create_ship_spawns_the_class_into_the_settlements_holder) {
   REQUIRE(set != nullptr);
   CHECK(set->holder.contains(ship));
 
-  CHECK(create("Peasant") == kNoObject);
+  // A full holder is no refusal: the entry is forced.
+  economy.settlements().find(id)->holder.max_units = economy.settlements().find(id)->holder.count();
+  const ObjectId second = create("Trireme");
+  REQUIRE(second != kNoObject);
+  CHECK(world.find(second)->state.holder == ids.holder);
+  CHECK(economy.settlements().find(id)->holder.contains(second));
+
+  // Not a ship, and made anyway, by the same steps.
+  const ObjectId peasant = create("Peasant");
+  REQUIRE(peasant != kNoObject);
+  CHECK(world.find(peasant)->class_index == graph.find("Peasant"));
+  CHECK(world.find(peasant)->state.owner == 2);
+  CHECK(world.find(peasant)->state.holder == ids.holder);
+  CHECK(economy.settlements().find(id)->holder.contains(peasant));
+
   CHECK(create("NoSuchClass") == kNoObject);
   const script::HostOutcome bad =
       call_host(registry, world, script::CallKind::member, "CreateShip", 1,

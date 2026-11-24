@@ -1094,6 +1094,28 @@ struct GotoOrder {
 /// one. Registration order is world state, so this walk is deterministic.
 [[nodiscard]] MovementSystem* movement_system(World& world) noexcept;
 
+/// A rectangle on the map, inclusive at both ends.
+struct CameraMapRect {
+  std::int32_t left = 0;
+  std::int32_t top = 0;
+  std::int32_t right = 0;
+  std::int32_t bottom = 0;
+};
+
+/// The camera's map rectangle taken to the map (0x006245b0 on
+/// `[camera+0x628..+0x634]`), `inset` in from the camera's on every side.
+///
+/// The camera's rectangle is the map's own in screen space -- `(0, 0)` to
+/// `(w-1, h-1)` with `y` scaled by 181/256 -- its right side 32 in and its
+/// bottom 255 + 32 up (0x00624100, at the camera's start). 0x006245b0 keeps
+/// its sides' `x` as they are, and takes as its top the higher of its two top
+/// corners unprojected and as its bottom the lower of its two bottom ones
+/// (0x006243b0 each, `screen_to_world`). `SetPos` (0x005ac130) asks it 32 in;
+/// the issue's per-actor spread (0x004e81f0) asks it as it is. False, and the
+/// rectangle untouched, for a world with no map grid (a bench).
+[[nodiscard]] bool camera_map_rect(const World& world, const ObstructionGrid& grid,
+                                   std::int32_t inset, CameraMapRect& out);
+
 /// Implement the movement slice of the `.vs` host API.
 ///
 /// Exactly these entry points, with the arities `docs/formats/vs-host-api.md`

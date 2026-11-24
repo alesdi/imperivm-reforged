@@ -338,6 +338,9 @@ def test_a_seed_is_one_game_and_another_seed_is_another(imrun, game_dir):
 CAPTURE_SEED = 7
 CAPTURE_ORDER_TURN = 300
 CAPTURE_CEILING = 1_500
+#: p1's village is the one nearest `P1_VILLAGE_AT`, the site the map gives
+#: it; its central building's position is the drawn template's, so it is
+#: read off the run, not pinned.
 P1_VILLAGE_AT = (15362, 779)
 P3_STANDS_AT = (15100, 1100)
 
@@ -372,15 +375,17 @@ def test_the_captures_a_run_prints_take_every_settlement_from_its_first_owner_to
     held = [(int(i), cls, int(p)) for i, cls, p in
             re.findall(r"^\s+(\d+) (\S+) p(\d+) at \(-1,-1\) holder [1-9]\d* health [1-9]",
                        first.stdout, re.MULTILINE)]
-    village = [i for i, cls, p, x, y in listed
-               if "Village" in cls and p == 1 and (x, y) == P1_VILLAGE_AT]
+    village = sorted(((x - P1_VILLAGE_AT[0]) ** 2 + (y - P1_VILLAGE_AT[1]) ** 2, i, x, y)
+                     for i, cls, p, x, y in listed if "Village" in cls and p == 1)[:1]
+    village = [(i, x, y) for d, i, x, y in village if d <= 1000 ** 2]
     soldier = [i for i, cls, p, x, y in listed if "Village" not in cls and p == 3] or [
         i for i, cls, p in held if p == 3]
     assert village and soldier, first.stdout[-3000:]
+    village_id, village_x, village_y = village[0]
     staged = {**os.environ, "IMRUN_SETTLEMENTS": "1", "IMRUN_UNTIL_CAPTURE": "1",
               "IMRUN_PLACE": f"{P3_STANDS_AT[0]},{P3_STANDS_AT[1]}",
-              "IMRUN_GOTO": f"{CAPTURE_ORDER_TURN}:{soldier[0]}:{P1_VILLAGE_AT[0]},{P1_VILLAGE_AT[1]}",
-              "IMRUN_CLICK": str(village[0])}
+              "IMRUN_GOTO": f"{CAPTURE_ORDER_TURN}:{soldier[0]}:{village_x},{village_y}",
+              "IMRUN_CLICK": str(village_id)}
 
     def owners(turns: int) -> tuple[dict[int, int], str]:
         result = subprocess.run(

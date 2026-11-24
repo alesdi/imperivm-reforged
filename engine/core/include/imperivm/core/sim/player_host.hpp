@@ -124,6 +124,29 @@ inline constexpr std::int32_t kClassRaceUnknown = 8;
 /// map's `playerdata/@race` markers (`Random`, `Select`) mean something else.
 [[nodiscard]] std::int32_t class_race_from_name(std::string_view name) noexcept;
 
+/// What a player's setup record (`playerdata`, 0xc0 bytes, sixteen of them in
+/// the game settings at `[0x00a87c48] + 0x9c`) holds at `+8` for `Random` and
+/// `Select` (8), and for `Mutable` (9).
+inline constexpr std::int32_t kPlayerRaceRandom = 8;
+inline constexpr std::int32_t kPlayerRaceMutable = 9;
+
+/// `playerdata/@race` as the player-data reader (0x00569090) stores it at
+/// `+8`: `Gaul` 0, `RepublicanRome` and `Roman` 1, `Carthage` 2, `Iberia` 3,
+/// `ImperialRome` 4, `Britain` 5, `Egypt` 6, `Germany` 7, `Random` and
+/// `Select` 8, `Mutable` 9 -- each compared exactly, case and all. Narrower
+/// than `race_from_name`: no demonym, no lower case. Anything else makes the
+/// reader refuse the whole document (`BADPARAMS`), so no game of the
+/// original's reaches setup with one; `kNoRace` here.
+[[nodiscard]] std::int32_t player_race_code(std::string_view name) noexcept;
+
+/// `playerdata/@AllowedRaces` as the same reader stores it at `+0xc`: all
+/// ones when the attribute is absent, empty or `All`; otherwise one bit per
+/// race named (`1 << race`, the spellings of `player_race_code` less the
+/// three markers), the list cut at commas with the spaces about each piece
+/// trimmed (0x006ab970), unknown pieces ignored, and the walk stopping at the
+/// first empty piece. A list that names nothing is all ones again.
+[[nodiscard]] std::uint32_t allowed_race_mask(std::string_view list) noexcept;
+
 /// The one-letter class-name prefix `GetRaceStrPref` answers -- `G`, `R`, `C`,
 /// `I`, `M`, `B`, `E`, `T` for races 0..7, lower-cased on request, and empty for
 /// anything else. See the definition for why `M` and `T`.

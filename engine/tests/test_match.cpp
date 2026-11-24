@@ -244,13 +244,74 @@ TEST(match_setup_treats_mutable_and_select_as_markers_too) {
   MatchWorld w(7);
   w.enable(3, "Mutable", PlayerControl::both);
   w.world.players().setup(1).race = "Select";
-  w.world.players().setup(2).race = "";  // an attribute this build cannot read
+  // A spelling the player-data reader refuses: the original never loads the
+  // map. Here it keeps no race and costs no draw.
+  w.world.players().setup(2).race = "Carthaginian";
+  const std::uint32_t before = w.world.rng().state();
 
   (void)setup_match(w.world, w.match, elimination_rules(), MatchOptions{});
-  for (std::size_t i = 0; i < 3; ++i) {
+  Rng expected(before);
+  for (std::size_t i = 0; i < 2; ++i) {
     const std::int32_t race = w.match.player(static_cast<PlayerId>(i)).race;
-    CHECK(race >= 0 && race < kRaceCount);
+    CHECK(race == expected.between(0, kRaceCount - 1));
   }
+  CHECK(w.world.rng().state() == expected.state());
+  CHECK(w.match.player(2).race == kNoRace);
+  CHECK(w.world.players().setup(2).race == "Carthaginian");
+}
+
+/// 0x00522314 draws for the first eight setup records only, and with no test
+/// of control: a marker past the eighth player stays (and `GetPlayerRace`
+/// answers its code), and a slot that takes no part draws all the same.
+TEST(match_setup_draws_for_the_first_eight_whether_or_not_they_play) {
+  MatchWorld w(0x51);
+  w.enable(2, "Gaul", PlayerControl::computer);
+  w.world.players().setup(3).race = "Random";  // disabled, but one of the eight
+  w.world.players().setup(3).control = PlayerControl::disabled;
+  for (std::size_t i = 8; i < 14; ++i) {
+    PlayerSetup& setup = w.world.players().setup(static_cast<PlayerId>(i));
+    setup.control = PlayerControl::computer;
+    setup.race = i % 2 == 0 ? "Random" : "Mutable";
+  }
+  const std::uint32_t before = w.world.rng().state();
+
+  (void)setup_match(w.world, w.match, elimination_rules(), MatchOptions{});
+
+  Rng expected(before);
+  const std::int32_t drawn = expected.between(0, kRaceCount - 1);
+  CHECK(w.world.rng().state() == expected.state());
+  CHECK(w.world.players().setup(3).race == race_to_name(drawn));
+  CHECK(!w.match.player(3).participates);
+  CHECK(w.match.player(3).race == kNoRace);
+  for (std::size_t i = 8; i < 14; ++i) {
+    const auto id = static_cast<PlayerId>(i);
+    CHECK(w.match.player(id).participates);
+    CHECK(w.match.player(id).race == kNoRace);
+    CHECK(w.world.players().setup(id).race == (i % 2 == 0 ? "Random" : "Mutable"));
+  }
+}
+
+/// `AllowedRaces` naming some races: `Range(0, n - 1)` over the `n` it names,
+/// the drawn one taken in ascending race order.
+TEST(match_setup_draws_among_the_allowed_races) {
+  MatchWorld w(0x99);
+  w.enable(8, "Random", PlayerControl::computer);
+  for (std::size_t i = 0; i < 8; ++i) {
+    w.world.players().setup(static_cast<PlayerId>(i)).allowed_races = "Egypt, Carthage, Gaul";
+  }
+  w.world.players().setup(7).allowed_races = "All";
+  const std::uint32_t before = w.world.rng().state();
+
+  (void)setup_match(w.world, w.match, elimination_rules(), MatchOptions{});
+
+  Rng expected(before);
+  constexpr std::array<std::int32_t, 3> kAllowed{0, 2, 6};
+  for (std::size_t i = 0; i < 7; ++i) {
+    const std::int32_t pick = expected.between(0, 2);
+    CHECK(w.match.player(static_cast<PlayerId>(i)).race == kAllowed[static_cast<std::size_t>(pick)]);
+  }
+  CHECK(w.match.player(7).race == expected.between(0, kRaceCount - 1));
+  CHECK(w.world.rng().state() == expected.state());
 }
 
 TEST(match_setup_is_deterministic_and_the_seed_is_what_moves_it) {

@@ -1561,27 +1561,36 @@ HostOutcome m_get_enter_exit(CallContext& ctx) {
 /// ## Where the id comes from, and it is not the settlement's position
 ///
 /// The original caches it on the building (`+0x1f6`, with the land twin at
-/// `+0x1f4`) and refreshes both whenever the partition is rebuilt. The value is
-/// the area of the **first point of the shipyard's exit-water list** -- the
-/// fourth of the four baked door lists, `sim/entrance.hpp`'s -- snapped to the
-/// nearest water area and **excluding the settlement's own land area**. Not the
-/// centre of the settlement, and not the *enter*-water list.
+/// `+0x1f4`) once, as the AI manager cuts the node table (0x0044b740, step 11
+/// of `docs/formats/gaika.md`'s build), and saves both. Both are read off the
+/// **node grid**, not the cell-level areas: the land twin is the area of the
+/// settlement's own node; the water one comes from the **first point of the
+/// shipyard's exit-water list** -- the fourth of the four baked door lists,
+/// `sim/entrance.hpp`'s -- through 0x0044b440:
 ///
-/// Computed on demand here rather than cached, for `sim/entrance.hpp`'s reason
-/// and one more: the original's cache starts life as `0xffff` and surfaces to a
-/// script as **65535** until the first partition rebuild touches it, which
-/// `ES_SHIPYARD.VS` would happily use as a table key. Deriving it means that
-/// state cannot exist.
+///   1. the node under the door (0x0044b3d0, the slot grid's 0x0044e3f0):
+///      taken when its area is a water area and is not the land twin;
+///   2. otherwise a search over three square rings 128, 256 and 384 units out
+///      from the door. Ring `r` visits, for `j` from `-r` to `r`, the point
+///      `r` slots to the west and then `r` to the east at row offset `j`, and
+///      then, for `j` from `-r` to `r` again, the point `r` slots to the north
+///      and then `r` to the south at column offset `j` -- 128-unit steps
+///      throughout, corners twice. A point's node is a candidate when its
+///      area is water, it is not node 0, its area is not the land twin, and
+///      it is a region node (no settlement, `[node+0x14]`); of the candidates
+///      the one with the **largest coverage** (`[node+0x1c]`, unsigned,
+///      strictly larger, so the first of equals) wins, over all three rings;
+///   3. no candidate at all: the node under the door, whatever its area --
+///      which can be the land twin itself, or none.
 ///
-/// **What is not reproduced.** When the door's own cell has no area, or has the
-/// settlement's land area, the original spirals outward in 128-unit steps for a
-/// water one. The spiral's order is not recovered and the order decides which
-/// area wins, so nothing here spirals: that case answers 0. It needs a shipyard
-/// whose water door stands in a stretch of sea too small for the partition to
-/// keep, which no shipped map has. The first try's own water test is likewise
-/// not settled -- the executable applies it to the spiral's candidates and the
-/// reading of whether it also applies to the first is ambiguous -- and it
-/// cannot matter for a door that `building_doors` already put on deep water.
+/// The answer is that node's area. This computes it on demand from the
+/// same inputs -- the node table and the slot grid, built once and saved,
+/// the building's door list and the settlement's node, none of which move
+/// -- so it is the cache for every central building there was when the
+/// table was cut. Before the table exists the cache holds its constructed
+/// `0xffff` (0x004e00d0), and that is what a script reads: **65535**. Every
+/// session cuts the table as the map loads (`sim/session.cpp`), so no
+/// shipped script sees it.
 HostOutcome m_water_lsa(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("WaterLsa: no world");
@@ -1590,20 +1599,59 @@ HostOutcome m_water_lsa(CallContext& ctx) {
   if (s == nullptr || s->anchor == kNoObject) return none;
   const WorldObject* anchor = world->find(s->anchor);
   if (anchor == nullptr || !is_class(*world, *anchor, "BaseShipyard")) return none;
+  const GaikaTable& table = world->gaika();
+  if (!table.built()) return HostOutcome::ok_with(Value::integer(0xffff));
 
   MovementSystem* movement = movement_system(*world);
   std::vector<Point> doors;
   building_doors(*world, movement == nullptr ? nullptr : &movement->grid(), s->anchor,
                  kExitPointType, true, doors);
-  // The original dereferences the empty list's null data pointer here. That is
-  // a fault rather than a behaviour, and 0 is the answer its own "not a
-  // shipyard" arm already gives.
+  // The original reads the empty list's first point through its null data
+  // pointer here. That is a fault rather than a behaviour, and 0 is the
+  // answer its own "not a shipyard" arm already gives.
   if (doors.empty()) return none;
 
-  const LsaId land = world->lsa().at(world->resolve_position(s->anchor));
-  const LsaId here = world->lsa().at(doors.front());
-  if (here == kNoLsa || here == land) return none;
-  return HostOutcome::ok_with(Value::integer(here));
+  const auto area_of = [&](GaikaId node) {
+    const GaikaNode* record = table.record(node);
+    return record == nullptr ? kNoLsa : record->lsa;
+  };
+  const LsaId land = area_of(table.for_settlement(s->object));
+  const Point door = doors.front();
+
+  // 1. The node under the door.
+  const GaikaId under = table.at(door);
+  const LsaId under_area = area_of(under);
+  if (under != kNoGaika && under_area != kNoLsa && world->lsa().water(under_area) &&
+      under_area != land) {
+    return HostOutcome::ok_with(Value::integer(under_area));
+  }
+  // 2. The three rings.
+  GaikaId best = kNoGaika;
+  std::uint32_t best_coverage = 0;
+  const auto consider = [&](std::int32_t x, std::int32_t y) {
+    const GaikaId node = table.at(Point{x, y});
+    const GaikaNode* record = table.record(node);
+    if (node == kNoGaika || record == nullptr || record->lsa == kNoLsa) return;
+    if (!world->lsa().water(record->lsa) || record->lsa == land) return;
+    if (record->settlement != kNoObject) return;
+    const auto coverage = static_cast<std::uint16_t>(record->coverage);
+    if (coverage <= best_coverage) return;
+    best_coverage = coverage;
+    best = node;
+  };
+  for (std::int32_t ring = 1; ring <= 3; ++ring) {
+    const std::int32_t reach = ring * kLsaSlotSize;
+    for (std::int32_t j = -ring; j <= ring; ++j) {
+      consider(door.x - reach, door.y + j * kLsaSlotSize);
+      consider(door.x + reach, door.y + j * kLsaSlotSize);
+    }
+    for (std::int32_t j = -ring; j <= ring; ++j) {
+      consider(door.x + j * kLsaSlotSize, door.y - reach);
+      consider(door.x + j * kLsaSlotSize, door.y + reach);
+    }
+  }
+  // 3. Nothing found: the node under the door, as it is.
+  return HostOutcome::ok_with(Value::integer(area_of(best != kNoGaika ? best : under)));
 }
 
 /// `set.FindNearEnterExit(pt)` -- one site, and the deterministic sibling.
@@ -2058,11 +2106,13 @@ constexpr NamedConstant kEconomyConstants[] = {
 
 /// The settlement's building that offers `row`, or `kNoObject`.
 ///
-/// Membership is `CommandDef::sources` matched against the class **tree**, so
-/// `<src obj="GArena1"/>` finds a `GArena1` and anything descended from one.
-/// The buildings come from the settlement's roll in its own order, and the
-/// first match wins -- 0x0042d020 walks the deque forwards and returns on the
-/// first hit.
+/// Membership is the class reverse index (`class_lists_command`): the row on
+/// the offered list `[class+0x1f8]` of the building's class, which is the
+/// row's own `<src>` on that class or an ancestor with no `<nsrc>` between,
+/// so `<src obj="GArena1"/>` finds a `GArena1` and anything descended from
+/// one. The buildings come from the settlement's roll in its own order, and
+/// the first match wins -- 0x0042d020 walks the deque forwards and returns on
+/// the first hit.
 [[nodiscard]] ObjectId find_lab(CallContext& /*ctx*/, World& world, const Settlement& s,
                                 const CommandDef& row, bool must_be_idle) {
   return settlement_lab_for(world, s, row, must_be_idle);
@@ -2073,7 +2123,7 @@ constexpr NamedConstant kEconomyConstants[] = {
 ObjectId settlement_lab_for(World& world, const Settlement& s, const CommandDef& row,
                             bool must_be_idle) {
   const ClassGraph* graph = world.class_graph();
-  if (graph == nullptr || row.sources.empty()) return kNoObject;
+  if (graph == nullptr || row.listing.empty()) return kNoObject;
   const CommandSystem* commands = command_system(world);
   for (const SettlementBuilding& building : s.buildings) {
     const WorldObject* slot = world.find(building.object);
@@ -2085,11 +2135,9 @@ ObjectId settlement_lab_for(World& world, const Settlement& s, const CommandDef&
       const Command* running = queue == nullptr ? nullptr : queue->running();
       if (running != nullptr && running->verb != "idle") continue;
     }
-    for (const std::string& source : row.sources) {
-      const ClassFilter filter = ClassFilter::parse(source, graph);
-      if (filter.match_all) continue;
-      if (world.matches_filter(*slot, filter)) return building.object;
-    }
+    // The class's offered list walked for the row's id ([row+0x1e4]): the
+    // index the commands loader built (0x0059dbb0, 0x0059e670).
+    if (class_lists_command(*graph, slot->class_index, row)) return building.object;
   }
   return kNoObject;
 }
@@ -4080,10 +4128,11 @@ constexpr EconomyHostDef kEconomyHosts[] = {
                                        reserved_gold_for(ctx, *s, ctx.arg(1).as_string())));
      }},
     // `set.FindResearchLab(tech)` -- 17 sites, and the class-to-command edge
-    // runs from the command's side. See `CommandDef::sources`.
+    // runs from the command's side. See `class_lists_command`.
     //
     // 0x0042d010 walks the settlement's buildings and, for each, walks its
-    // class's command list looking for this row. The `idle` test is a *flag*
+    // class's offered command list (`[class+0x1f8]`, the reverse index the
+    // commands loader builds) looking for this row. The `idle` test is a *flag*
     // the caller passes: `FindResearchLab` passes 0 and `Settlement::Research`
     // passes 1, so the script-visible finder answers a lab that is already
     // busy and the one that is about to queue work does not.
@@ -4641,13 +4690,21 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     // domain already derives, and the script's `ShowBuildAnimation` is what
     // the player sees of it. The door list, the garrison and the owner are
     // this engine's own: `building_doors` with the water list, and
-    // `garrison_enter` followed by the entry hook, exactly as `AddUnit` does
-    // it -- so the ship is born inside, at the held sentinel, and its first
-    // `Goto` takes it out by the water door nearest where it is going
-    // (`garrison_exit`). A class nothing declares, or one that is not a ship, answers the
-    // invalid handle; the original would have created whatever the name
-    // said, and every shipped `cmdparam` on a shipyard names a ship. A door
-    // list that comes out empty puts the ship at the central building.
+    // `garrison_enter` **forced** followed by the entry hook -- 0x005ef332
+    // pushes 1, which is `ForceAddUnit`'s entry and not `AddUnit`'s, so a
+    // full holder takes the ship too -- all while the AI manager is held, the
+    // hook included. The ship is born inside, at the held sentinel, and its
+    // first `Goto` takes it out by the water door nearest where it is going
+    // (`garrison_exit`).
+    //
+    // **Any class is made**: 0x005a66a0 instantiates whatever the name names,
+    // ship or not, and the steps after it are the same virtual calls on any
+    // object; every shipped `cmdparam` on a shipyard names a ship. A name no
+    // class declares is the one refusal: 0x005a66a0 prints "Attempting to
+    // instanciate an object of undefined class" and leaves the object null,
+    // which the original then dereferences -- a fault rather than a
+    // behaviour, answered here with the invalid handle. A door list that
+    // comes out empty puts the object at the central building.
     {CallKind::member, "CreateShip", 1,  // 1 site
      +[](CallContext& ctx) -> HostOutcome {
        Settlement* s = receiver(ctx);
@@ -4659,8 +4716,6 @@ constexpr EconomyHostDef kEconomyHosts[] = {
        if (graph == nullptr) return HostOutcome::ok_with(invalid_handle());
        const ClassIndex class_index = graph->lookup(ctx.arg(1).as_string());
        if (class_index == kNoClass) return HostOutcome::ok_with(invalid_handle());
-       const Result<NativeClass> native = native_class_from_name(graph->at(class_index).cpp_class);
-       if (!native || *native != NativeClass::ship) return HostOutcome::ok_with(invalid_handle());
 
        const ObjectId ship = world->spawn_of_class(class_index);
        if (ship == kNoObject) return HostOutcome::ok_with(invalid_handle());
@@ -4694,9 +4749,9 @@ constexpr EconomyHostDef kEconomyHosts[] = {
          }
        }
        world->set_position(ship, berth);
-       const bool entered = garrison_enter(*world, s->id, ship, /*force=*/false);
+       // 0x005d3e10 with 1, its `onenter` at its end, the manager still held.
+       if (garrison_enter(*world, s->id, ship, /*force=*/true)) enter_settlement(ctx, *s, ship);
        hold.release();
-       if (entered) enter_settlement(ctx, *s, ship);
        return HostOutcome::ok_with(Value::object(kTypeObj, ship));
      }},
     // `IsTeutonTent` (0x00420650): the central building's class descriptor
@@ -5304,12 +5359,15 @@ constexpr EconomyHostDef kEconomyHosts[] = {
     //      holder** -- which is where the script's `Select` and `SetCommand`
     //      then walk it out of.
     //
-    // A **negative** request is the one thing not reproduced: the original
-    // clamps only downwards, so `CreateBoatFood(-100)` would put 100 food *into*
-    // the warehouse and hand back a boat carrying -100. No shipped site passes
-    // one -- all six pass 1000 or 250 -- and importing it would mean writing
-    // past `Warehouse::set`'s own clamp, which is a real invariant here and was
-    // not one there.
+    // A **negative** request is reproduced: the original clamps only
+    // downwards, so `CreateBoatFood(-100)` puts 100 food *into* the warehouse,
+    // past its cap, and hands back a boat carrying -100. No shipped site
+    // passes one -- all six pass 1000 or 250.
+    //
+    // The boat is then handed to the AI register (0x0041f310) as the mule is,
+    // inside the holder: `ShipS` is a `CVXWagon` and not a `CVXShip`, so the
+    // register's ship half (the area's ship count and list) does not apply to
+    // it, and the unit half -- the tally and a squad -- does.
     {CallKind::member, "CreateBoatGold", 1, &create_carrier<Resource::gold, true>},  // 3 sites
     {CallKind::member, "CreateBoatFood", 1, &create_carrier<Resource::food, true>},  // 3 sites
     {CallKind::member, "LoadGold", 1, &load_cargo<Resource::gold>},   // 2 sites
@@ -5791,11 +5849,21 @@ ObjectId make_mule(World& world, SettlementId id, Resource kind, std::int32_t am
     }
     capacity = capacity * 10 + (c - '0');
   }
-  std::int32_t want = amount;
-  if (want > capacity) want = capacity;
-  const std::int32_t taken = want > 0 ? s->warehouse.take(kind, want) : 0;
-  // Nothing loaded, no carrier.
-  if (taken <= 0) return kNoObject;
+  // Both clamps are signed and only downwards (0x005eedab `jl`, 0x005eedbb
+  // `jge`): the request is cut to `max_load`, then to the store, and the
+  // store loses exactly the result, unclamped and with no cap -- so a
+  // negative request grows the store, a negative store is emptied into the
+  // carrier, and the carrier carries what the subtraction gave. The store is
+  // the settlement's own word, written here past `Warehouse::set`'s clamp as
+  // 0x005eedc5 writes it, the subtraction wrapping as the machine's does.
+  std::int32_t taken = amount;
+  if (taken >= capacity) taken = capacity;
+  std::int32_t& store = kind == Resource::food ? s->warehouse.food : s->warehouse.gold;
+  if (store < taken) taken = store;
+  store = static_cast<std::int32_t>(static_cast<std::uint32_t>(store) -
+                                    static_cast<std::uint32_t>(taken));
+  // Nothing loaded, no carrier: zero and only zero (0x005eedc3 `test`/`je`).
+  if (taken == 0) return kNoObject;
 
   const ObjectId carrier = world.spawn_of_class(cls);
   if (carrier == kNoObject) return kNoObject;
@@ -5804,10 +5872,17 @@ ObjectId make_mule(World& world, SettlementId id, Resource kind, std::int32_t am
   // The kind, then the cargo through the setter (nonzero, so nobody dies),
   // then the owner, then into the settlement's holder by force -- which is
   // where the script's `Select` and `SetCommand` find it and walk it out.
+  // The forced entry is 0x005d3e10 with 1, `ForceAddUnit`'s: onto the
+  // holder's roster past its cap, out of the world, and the class's
+  // `onenter` run on it with the settlement (0x0059b330) -- every carrier
+  // class descends from `Unit`, which binds one.
   slot->state.cargo_resource = static_cast<std::int32_t>(kind);
   set_wagon_cargo(world, carrier, taken);
   world.set_owner(carrier, s->owner);
-  (void)world.put_in_holder(carrier, s->holder.object);
+  const ObjectId settlement_object = s->object;
+  if (garrison_enter(world, id, carrier, /*force=*/true) && settlement_object != kNoObject) {
+    (void)fire_class_hook(world, ClassHook::on_enter, carrier, settlement_object);
+  }
   // Then the AI register (0x005eee37): counted and filed in a squad at once,
   // towards the node under the settlement it waits in.
   if (HeroSystem* heroes = hero_system_of(world); heroes != nullptr) heroes->ai_register(world, carrier);
