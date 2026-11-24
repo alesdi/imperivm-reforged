@@ -1108,6 +1108,9 @@ struct Staging {
     World& world = run.world();
     if (place) {
       if (MovementSystem* move = movement_system(world)) move->stop(world, id);
+      // Its step in flight stopped too, as `SetPos` stops it (0x0053d730) and
+      // `imrun` does, or the step's end puts it back on its old way.
+      world.stop_animation(id, world.time());
       // A garrisoned unit is taken out where it is stood, as `imrun` does.
       const ObjectState* before = world.state(id);
       bool placed = false;
