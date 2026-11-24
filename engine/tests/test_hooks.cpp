@@ -115,6 +115,11 @@ ClassGraph hook_graph() {
             "test_hooks.cpp");
   graph.add(bytes_of(R"(<class id="BWarrior" parent="Unit" cpp_class="CVXUnit"/>)"),
             "test_hooks.cpp");
+  // A settlement's mule: a wagon, and a `Unit` like every shipped carrier.
+  graph.add(bytes_of(R"(<class id="Trader" parent="Unit" cpp_class="CVXWagon">
+      <properties max_load="1000"/>
+    </class>)"),
+            "test_hooks.cpp");
   // A leader to be paid, and a soldier whose own `ondie` pays it -- the shape
   // of `CMercenary`, which binds its hook on its own class and so overrides
   // `Military`'s. Neither is on the map; the tests that need them place them.
@@ -714,6 +719,28 @@ TEST(a_unit_added_to_a_garrison_runs_its_onenter_with_that_settlement) {
   // On the unit, not on the settlement: `Unit` is what binds `onenter`, and a
   // settlement object binds nothing at all.
   CHECK(env_int(f.world(), "died") == 0);
+}
+
+TEST(a_settlements_new_mule_runs_its_onenter_in_the_holder) {
+  // `CreateMuleGold` forces the mule into the holder through the same entry
+  // `ForceAddUnit` uses (0x005d3e10 with 1), and that entry ends in the
+  // class's `onenter` (0x0059b330) -- after the store was drawn, which is
+  // what the hook's `sett.gold` reads.
+  Fixture f;
+  REQUIRE(f.session != nullptr);
+  EconomySystem* economy = economy_of(f.world());
+  REQUIRE(economy != nullptr);
+  const SettlementId town = make_town(f, *economy, /*max_units=*/0, /*gold=*/300);
+  const script::HostOutcome out =
+      call_member(f, "CreateMuleGold", 1,
+                  {handle(town_object(*economy, town)), script::Value::integer(100)});
+  REQUIRE(out.value.is_object());
+  const ObjectId mule = out.value.as_object().id;
+  CHECK(economy->settlements().find(town)->holder.contains(mule));
+
+  f.session->advance(1, 400);
+  CHECK(env_int(f.world(), "entered") == 1);
+  CHECK(env_int(f.world(), "enteredgold") == 200);
 }
 
 TEST(a_garrison_restored_rather_than_entered_runs_nothing) {

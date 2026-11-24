@@ -171,6 +171,24 @@ class ScriptLibrary;
 // 286, `immediate` 33. Names are unique across the whole set (399 rows, 399
 // distinct names), so one flat table is enough.
 
+/// Which of a class's three command lists a `<src>` or `<nsrc>` element files
+/// its command under, as the commands loader (0x004f2240) decides it: a
+/// `<src>` whose `sticky=` is absent or `no` (compared without case) goes to
+/// the offered list `[class+0x1f8]`, a `<src>` with any other `sticky=` to the
+/// sticky list `[class+0x204]`, and an `<nsrc>` to the exclusion list
+/// `[class+0x210]`. See `class_lists_command`.
+enum class CommandSourceKind : std::uint8_t {
+  offered = 0,
+  sticky = 1,
+  excluded = 2,
+};
+
+/// One `<src obj>` or `<nsrc obj>` of a row, as the loader keeps it.
+struct CommandSource {
+  std::string obj;
+  CommandSourceKind kind = CommandSourceKind::offered;
+};
+
 /// One `<cmd>`.
 struct CommandDef {
   std::string name;
@@ -266,14 +284,20 @@ struct CommandDef {
   /// and `Settlement::FindResearchLab` (0x0042d010) walks it: for each building
   /// of the settlement it takes the class at `[obj+0x3c]`, walks the list at
   /// `[class+0x1f8]` and compares each node's row against the command's.
+  /// `class_lists_command` is that index; `listing` is what it is built from.
   ///
-  /// Matched against the class **tree**, not against the leaf: `<src
-  /// obj="Unit"/>` on `move` offers it to every unit class. The other `<src>`
-  /// attribute, `sticky`, is not carried -- nothing in the simulation reads it.
+  /// This vector is the command bar's reading (`sim/cmdbar.cpp`): matched
+  /// against the class **tree**, so `<src obj="Unit"/>` on `move` offers it
+  /// to every unit class, with `sticky` not told apart.
   std::vector<std::string> sources;
   /// `<nsrc obj="…">` -- the classes that do *not* offer it, although an
   /// ancestor in `sources` does: `move` is every `Unit`'s but a `Sentry`'s.
   std::vector<std::string> excludes;
+  /// The `<src>` and `<nsrc>` elements together, in document order, each with
+  /// the list its loader files it under -- the input of the class reverse
+  /// index (`class_lists_command`). `sources` and `excludes` split the same
+  /// elements for the command bar's own reading.
+  std::vector<CommandSource> listing;
 
   /// `groupverifier=` -- `bool f(ObjList objs, str OUT reasonText)`, run over
   /// the selection to decide whether the row's button is enabled and, when
@@ -332,6 +356,26 @@ class CommandTable {
 
   std::vector<CommandDef> commands_;  ///< sorted by folded name
 };
+
+/// Whether `row` is on the offered list `[class+0x1f8]` of class `cls` -- the
+/// class reverse index `FindResearchLab`, `Settlement::Research` and
+/// `CanResearch` walk (0x0042d010), as the commands loader builds it.
+///
+/// The loader (0x004f2240) keys one entry per class name and command: each
+/// `<src>`/`<nsrc>` of a `<cmd>` writes the list it names (`CommandSourceKind`)
+/// under its `obj=` string for that command, a later element for the same
+/// string overwriting an earlier one. The resolve (0x004f5af0) finds each
+/// string's class (an unknown name is dropped) and files the command on that
+/// class's list. Then every class inherits, parent first (0x0059e670 through
+/// `[class+0xe4]`, once each): a command on the parent's offered list joins
+/// the class's own unless the class already has it or excludes it; the
+/// exclusion list is then emptied. So, walking from `cls` up its ancestry,
+/// the first class that offers the command answers yes and the first that
+/// excludes it answers no, an offer beating an exclusion on the same class;
+/// a sticky `<src>` neither offers nor stops the walk, and past the root the
+/// answer is no.
+[[nodiscard]] bool class_lists_command(const ClassGraph& graph, ClassIndex cls,
+                                       const CommandDef& row);
 
 // --------------------------------------------------------------------------
 // one queued command
