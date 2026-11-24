@@ -1208,7 +1208,7 @@ class CombatSystem final : public System {
   /// and its addend the `CONST.INI` one of the match's difficulty; then the
   /// sixteen players' ledgers.
   const DamageFormulaParams& damage_formula_params(World& world);
-  /// `DAT_00996dc8`: the favoured player's addend. A global the fill writes
+  /// The favoured player's addend, the global at 0x00996dc8. The fill writes it
   /// only for a difficulty of 0, 1 or 2, so it outlives a clear.
   [[nodiscard]] std::int32_t favoured_addend() const noexcept { return favoured_addend_; }
   /// `InvalidateDamageFormulaParams()`: the next blow fills the cache again.
