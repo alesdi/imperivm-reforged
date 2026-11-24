@@ -361,7 +361,31 @@ int main(int argc, char** argv) {
       at = *end == ',' ? end + 1 : end;
     }
   }
+  // `IMRUN_RACES=<p>:<race>[,<p>:<race>...]`: those slots play that race code
+  // (0..7, as `GetPlayerRace` answers), as the setup screen's choice would
+  // give them, instead of the map's and the world build's draw for a marker.
+  // A test that needs a side's units stages its race this way, so a draw that
+  // moves does not move the test.
+  if (const char* races = std::getenv("IMRUN_RACES")) {
+    for (const char* at = races; *at != '\0';) {
+      char* end = nullptr;
+      const unsigned long seat = std::strtoul(at, &end, 10);
+      if (end == at || *end != ':') break;
+      const char* code_at = end + 1;
+      const long code = std::strtol(code_at, &end, 10);
+      if (end == code_at) break;
+      if (seat < sim::kPlayerCount) match_options.races[seat] = static_cast<std::int32_t>(code);
+      at = *end == ',' ? end + 1 : end;
+    }
+  }
   const std::size_t victory_started = run.start_match(match_options);
+  if (sim::MatchSystem* match = sim::match_system_of(run.world())) {
+    std::printf("races    ");
+    for (std::size_t id = 0; id < sim::kPlayerCount; ++id) {
+      std::printf(" p%zu:%d", id, static_cast<int>(match->player(static_cast<sim::PlayerId>(id)).race));
+    }
+    std::printf("\n");
+  }
   const std::size_t objects_started = run.start_object_scripts();
   // The AI, for every computer-controlled player -- the app's order: match,
   // objects, AI. **This tool ran without it for as long as it existed**, so

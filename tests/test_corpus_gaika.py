@@ -16,7 +16,11 @@ The node count and the pinned records are this engine's cut of the original's
 algorithm on this map, seed 1. No dump of the original's table is at hand to
 compare them with -- `CVXGlobalAI` persists `GAIKAs` and `GAIKASlots`, but no
 save the original wrote is in the installation -- so they pin the port against
-regressions; the claims above are what holds them to the algorithm.
+regressions; the claims above are what holds them to the algorithm. They
+move with the world build's draws: the village houses are drawn templates,
+and since the race draw makes only gbr.exe's draws (the first eight slots,
+0x00522314) the houses, and so the footprints the cut steps round, are
+others than they were.
 """
 
 from __future__ import annotations
@@ -86,9 +90,9 @@ def nodes(output: str) -> dict[int, dict]:
 def test_crossroads_is_cut_into_its_settlement_nodes_then_its_regions(crossroads):
     header = re.search(r"^  gaika +(\d+) nodes, (\d+) x (\d+) slots$", crossroads, re.MULTILINE)
     assert header is not None, crossroads
-    assert header.groups() == ("57", "128", "128")
+    assert header.groups() == ("59", "128", "128")
     table = nodes(crossroads)
-    assert sorted(table) == list(range(1, 58))
+    assert sorted(table) == list(range(1, 60))
 
     # Settlement nodes first, then regions: once a node has no settlement,
     # none after it has one.
@@ -120,7 +124,7 @@ def test_crossroads_is_cut_into_its_settlement_nodes_then_its_regions(crossroads
     # A second cut of the same world is the same cut.
     cut = re.search(r"^  gaika cut +\d+ us, (\d+) nodes, (\d+) slots moved$", crossroads, re.MULTILINE)
     assert cut is not None
-    assert cut.groups() == ("57", "0")
+    assert cut.groups() == ("59", "0")
 
 
 def test_crossroads_pinned_nodes(crossroads):
@@ -128,18 +132,18 @@ def test_crossroads_pinned_nodes(crossroads):
     # The first town's node: its snapped entrance slot's middle, and the
     # slots its seeds won.
     assert table[1] == {
-        "lsa": 1, "settlement": 1, "rect": (2, 5, 39, 36), "centre": (2624, 2496),
-        "cover": 829, "links": [8, 10, 15, 30, 34, 54, 55],
+        "lsa": 1, "settlement": 1, "rect": (4, 5, 39, 36), "centre": (2624, 2496),
+        "cover": 787, "links": [8, 10, 15, 30, 34, 56, 57],
     }
     # The first region node, and the last.
     assert table[37] == {
-        "lsa": 1, "settlement": 0, "rect": (13, 119, 26, 124), "centre": (2624, 15552),
-        "cover": 46, "links": [3, 6],
+        "lsa": 1, "settlement": 0, "rect": (13, 119, 26, 124), "centre": (2432, 15488),
+        "cover": 56, "links": [3, 6],
     }
-    assert table[57] == {
-        "lsa": 1, "settlement": 0, "rect": (39, 0, 46, 4), "centre": (5376, 256),
-        "cover": 29, "links": [8, 15],
+    assert table[59] == {
+        "lsa": 1, "settlement": 0, "rect": (37, 0, 46, 4), "centre": (5248, 256),
+        "cover": 32, "links": [8, 15],
     }
     # A region node that smoothing emptied keeps its record, with no slots
     # and no neighbours (step 7 then step 8: nothing to vote for it).
-    assert table[43]["cover"] == 0 and table[43]["links"] == []
+    assert table[41]["cover"] == 0 and table[41]["links"] == []
