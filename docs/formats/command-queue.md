@@ -123,6 +123,37 @@ replaces (`vtbl+0xb8` with 1), else appended by the `AddCommand` insert (`vtbl+0
 0). It is made after the first actor's command and inserted before it. `SHIP_UNBOARD.VS`
 (`// void, Obj This, ObjList ol, point pt`) sails there and drops them.
 
+## Which classes a row is listed on: the class reverse index
+
+A `.sc.xml` class never names its commands; a `<cmd>` names its classes, with `<src
+obj="…">` and `<nsrc obj="…">` children. The commands loader (0x004f2240) gives each `<cmd>`
+a running id as its element opens (0x004ed2b0, `[def+0x1e4]`, in load order) and keeps one
+entry per class-name string and command id, a later element for the same string and command
+overwriting an earlier one. The tag and attribute names are compared without case; an
+element's attributes are read in order, so a repeated `obj=` or `sticky=` keeps the last. A
+`<src>` whose `sticky=` is `no` (compared without case; absent reads as `no`) files the
+command on the class's **offered** list `[class+0x1f8]`; a `<src>` with any other `sticky=`
+on the **sticky** list `[class+0x204]`; an `<nsrc>` on the **exclusion** list
+`[class+0x210]`.
+
+Once every file is read (0x004f5af0), each string is looked up as a class name, with case;
+one that names no class is dropped, and each entry adds its command to the list it names,
+skipping one already there (0x0059dbb0, 0x0059dc10, 0x0059dc70). Then every class inherits,
+parent first, once each (0x004ee320 -> 0x0059e670, through `[class+0xe4]`): each command on
+the parent's offered list joins the class's own unless the class has it already or excludes
+it, the sticky list the same, and the exclusion list is then emptied. The index is built
+once and nothing writes it again.
+
+Read from one class upwards: the first class on the way to the root that offers the command
+puts it on the list, the first that excludes it keeps it off, an offer beating an exclusion
+on the same class, and a sticky `<src>` lets the walk go on. `Settlement::FindResearchLab`,
+`Settlement::Research` and `CanResearch` (all through 0x0042d010) ask the offered list of
+each building's class (`[obj+0x3c]`) for the row's id. The shipped research rows carry no
+`<nsrc>` and no `sticky=`, so for them the index is the class tree under their `<src>`.
+`sim/command.cpp`'s `class_lists_command` is this walk; the command bar's own reading
+(`sim/cmdbar.cpp`) is the class tree under any `<src>`, with no `<nsrc>` above, and is not
+this index.
+
 ## What the engine does not model
 
 - **The script-action mode at the end** (`[obj+0x130]`, step 1 above): the engine keeps no
@@ -131,6 +162,12 @@ replaces (`vtbl+0xb8` with 1), else appended by the `AddCommand` insert (`vtbl+0
 - **A holder that is not a ship's** passes the original a null `unboard` command when its
   class binds none; the engine gives it nothing (labelled at `group_move_set_up`).
 - **An offset row's per-actor spread** (0x004e81f0, rows with `[def+0x1e0]`).
+- **Two rows whose names differ only in case** are one row here: `CommandTable` folds case,
+  and the later file read replaces the earlier. The shipped set has one such pair,
+  `Restoration` (`DRUID HOUSE.XML`, a research) and `restoration` (`DRUID.XML`, the druid's
+  ability). The original gives each `<cmd>` its own id (0x004ed2b0) and files each one's
+  `<src>` under that id; whether its lookup by name folds case, and so which of the two a
+  `Research("Restoration")` finds, has not been traced.
 - **`command` with no argument on an empty queue** answers `idle`, where the original's
   string still holds the last command started (labelled at `command_impl`; the queue is
   empty only for an object whose class binds no `idle`, or a dying one).

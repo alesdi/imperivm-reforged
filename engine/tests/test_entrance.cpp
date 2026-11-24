@@ -19,6 +19,7 @@
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/entrance.hpp"
+#include "imperivm/core/sim/gaika_table.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/lsa.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
@@ -259,6 +260,10 @@ struct Bench {
     }
     return id;
   }
+
+  /// Cut the node table over the settlements as they stand, as a session
+  /// does once its map is loaded (`sim/session.cpp`).
+  void cut() { world.mutable_gaika().build(world, world.lsa(), economy.settlements()); }
 
   script::Value settlement_value(SettlementId id) {
     const Settlement* set = economy.settlements().find(id);
@@ -1231,20 +1236,25 @@ TEST(water_lsa_answers_the_area_the_shipyards_water_door_stands_in) {
 
   const ObjectId dock = b.dock(yard.value(), "RShipyard");
   const SettlementId port = b.town(dock, {dock});
-  const script::HostOutcome out = member_call(b, "WaterLsa", {b.settlement_value(port)});
-  CHECK(out.status == script::HostStatus::ok);
-  CHECK(out.value.as_integer() == sea);
+  // Before the node table is cut the original's cache holds its constructed
+  // 0xffff, and that is what a script reads.
+  CHECK(member_call(b, "WaterLsa", {b.settlement_value(port)}).value.as_integer() == 0xffff);
 
   // The same entity on a class that is not a shipyard answers 0, which is the
   // arm every non-shipyard settlement in the game takes.
   const ObjectId hut = b.dock(yard.value(), "Hut");
   const SettlementId village = b.town(hut, {hut});
-  CHECK(member_call(b, "WaterLsa", {b.settlement_value(village)}).value.as_integer() == kNoLsa);
-
   // And a shipyard with no water door at all -- where the original reads
   // through a null pointer -- answers 0 here.
   const ObjectId dry = b.dock(blind.value(), "RShipyard");
   const SettlementId inland = b.town(dry, {dry});
+  b.cut();
+
+  const script::HostOutcome out = member_call(b, "WaterLsa", {b.settlement_value(port)});
+  CHECK(out.status == script::HostStatus::ok);
+  CHECK(out.value.as_integer() == sea);
+  CHECK(member_call(b, "WaterLsa", {b.settlement_value(village)}).value.as_integer() == kNoLsa);
+
   const script::HostOutcome dry_out = member_call(b, "WaterLsa", {b.settlement_value(inland)});
   // **`ok`, not a refusal.** Both readers use the answer straight away, so a
   // trap here would stop a mission where the original quietly kept going.
@@ -1276,14 +1286,19 @@ TEST(water_lsa_answers_the_area_of_the_first_water_door) {
   REQUIRE(doors.size() == 2);
 
   const SettlementId port = b.town(dock, {dock});
+  b.cut();
   CHECK(member_call(b, "WaterLsa", {b.settlement_value(port)}).value.as_integer() == west);
 }
 
-/// **The land exclusion**, which needs a map whose coast is *not* walled: the
-/// partition's fill tests passability and never terrain, so the sea and the
-/// land become one area, and the shipyard's water door then stands in the
-/// settlement's own area. The original refuses that answer and so does this.
-TEST(water_lsa_refuses_the_settlements_own_area) {
+/// **The land exclusion, and what is left when nothing passes it**, which
+/// needs a map whose coast is *not* walled: the partition's fill tests
+/// passability and never terrain, so the sea and the land become one area,
+/// and the shipyard's water door then stands in the settlement's own area.
+/// The original refuses that answer for the door's node and for every node
+/// its rings visit (0x0044b440), finds nothing, and falls back to the node
+/// under the door as it is -- so it answers the settlement's own area after
+/// all, and so does this.
+TEST(water_lsa_falls_back_to_the_doors_node_when_no_other_water_passes) {
   Bench b;  // nothing blocked, so one area over the whole map
   REQUIRE(b.world.lsa().size() == 1);
   const Result<Entity> yard = Entity::parse(bytes_of(kYardEntity));
@@ -1297,7 +1312,129 @@ TEST(water_lsa_refuses_the_settlements_own_area) {
   CHECK(b.world.lsa().at(doors.front()) == b.world.lsa().at(Point{512, 512}));
 
   const SettlementId port = b.town(dock, {dock});
-  CHECK(member_call(b, "WaterLsa", {b.settlement_value(port)}).value.as_integer() == kNoLsa);
+  b.cut();
+  const LsaId only = b.world.lsa().at(Point{512, 512});
+  REQUIRE(only != kNoLsa);
+  CHECK(member_call(b, "WaterLsa", {b.settlement_value(port)}).value.as_integer() == only);
+}
+
+/// **The search off the door** (0x0044b440), on a node table laid out by
+/// hand: three square rings 128 units apart, west and east columns before
+/// north and south rows, and of the water region nodes whose area is not the
+/// settlement's own the one with the largest coverage, the first of equals.
+/// The yard's water door is at (100, 512), slot (0, 4) of the 8 x 8 grid.
+TEST(water_lsa_searches_three_rings_for_the_largest_water_region) {
+  Bench b{-1, /*shore=*/true};
+  const LsaId west = b.world.lsa().at(Point{100, 512});
+  const LsaId east = b.world.lsa().at(Point{924, 512});
+  const LsaId land = b.world.lsa().at(Point{512, 512});
+  REQUIRE(b.world.lsa().water(west));
+  REQUIRE(b.world.lsa().water(east));
+  REQUIRE(!b.world.lsa().water(land));
+  const Result<Entity> yard = Entity::parse(bytes_of(kYardEntity));
+  REQUIRE(yard.ok());
+  const ObjectId dock = b.dock(yard.value(), "RShipyard");
+  std::vector<Point> doors;
+  building_doors(b.world, &b.movement.grid(), dock, kExitPointType, true, doors);
+  REQUIRE(!doors.empty());
+  REQUIRE(doors.front() == (Point{100, 512}));
+  const SettlementId port = b.town(dock, {dock});
+  const ObjectId port_object = b.economy.settlements().find(port)->object;
+  const ObjectId other = b.dock(yard.value(), "Hut");
+
+  // Nodes: 1 the port's own (land), 2 and 3 water regions, 4 a water node
+  // that is a settlement's, 5 a land region.
+  const auto node = [](LsaId lsa, ObjectId settlement) {
+    GaikaNode n;
+    n.lsa = lsa;
+    n.settlement = settlement;
+    return n;
+  };
+  // `own` is the area of the port's own node, the land twin the search
+  // refuses; on a real map it is land, and here it can be laid over water.
+  const auto lay = [&](std::vector<std::pair<Point, std::uint16_t>> marks, LsaId second,
+                       LsaId third, LsaId own) -> std::int32_t {
+    std::vector<std::uint16_t> slots(64, 1);
+    for (const auto& [at, id] : marks) slots[static_cast<std::size_t>(at.y * 8 + at.x)] = id;
+    const bool restored = b.world.mutable_gaika().restore(
+        {node(own, port_object), node(second, kNoObject), node(third, kNoObject),
+         node(east, other), node(land, kNoObject)},
+        8, 8, slots);
+    CHECK(restored);
+    if (!restored) return -1;
+    return member_call(b, "WaterLsa", {b.settlement_value(port)}).value.as_integer();
+  };
+
+  // The door's own node is the land twin, so the rings decide: node 2 on
+  // ring 1 east of the door (one slot), node 3 on ring 2 (three slots
+  // elsewhere): the larger coverage wins although it is farther.
+  CHECK(lay({{{1, 3}, 2}, {{2, 4}, 3}, {{7, 7}, 3}, {{7, 6}, 3}}, west, east, land) == east);
+  // Equal coverage: the first visited. Ring 1 visits (1, 3) before (1, 5).
+  CHECK(lay({{{1, 5}, 3}, {{1, 3}, 2}}, west, east, land) == west);
+  CHECK(lay({{{1, 3}, 3}, {{1, 5}, 2}}, west, east, land) == east);
+  // A settlement's node is never a candidate, however large; nor is a land
+  // region; nor anything past the third ring.
+  CHECK(lay({{{1, 3}, 2}, {{1, 4}, 4}, {{2, 4}, 4}, {{3, 4}, 4}, {{3, 3}, 4}}, west, east, land) == west);
+  CHECK(lay({{{1, 4}, 5}, {{4, 4}, 3}}, west, east, land) == land);
+  // Node 2 laid over the land is no candidate either, the search finds
+  // nothing else, and the node under the door answers -- the land twin.
+  CHECK(lay({{{1, 4}, 2}}, land, east, land) == land);
+  // The door's own node, when it is a water area other than the land twin,
+  // is taken at once, a larger one nearby notwithstanding -- even a
+  // settlement's.
+  CHECK(lay({{{0, 4}, 4}, {{1, 4}, 3}, {{2, 4}, 3}}, west, west, land) == east);
+  CHECK(lay({{{0, 4}, 2}, {{1, 4}, 3}, {{2, 4}, 3}}, west, east, land) == west);
+  // The third ring is searched: three slots east of the door.
+  CHECK(lay({{{3, 4}, 3}}, west, east, land) == east);
+  // With the port's own area laid over the western sea, the door's node is
+  // that area and is refused, and so is node 2 on the same sea although it
+  // covers more than node 3.
+  CHECK(lay({{{1, 3}, 2}, {{2, 3}, 2}, {{1, 4}, 3}}, west, east, west) == east);
+  // A door's node that is not water is refused, though it is not the twin.
+  CHECK(lay({{{0, 4}, 5}, {{1, 4}, 3}}, west, east, west) == east);
+}
+
+/// **West before east** on each row of a ring, which takes a door with
+/// slots on both sides: the yard's door here is in the eastern sea, at
+/// (924, 512), slot (7, 4) of a 16 x 8 grid.
+TEST(water_lsa_rings_visit_the_west_column_before_the_east) {
+  Bench b{-1, /*shore=*/true};
+  const LsaId west = b.world.lsa().at(Point{100, 512});
+  const LsaId east = b.world.lsa().at(Point{924, 512});
+  const LsaId land = b.world.lsa().at(Point{512, 512});
+  REQUIRE(west != east);
+  const Result<Entity> yard = Entity::parse(bytes_of(
+      "<entity name=\"eastyard\" type=\"vx/building\" variations=\"1\" pass_file=\"\" "
+      "radius=\"1\"><points>"
+      "<point idx=\"0\" type=\"2\" x=\"412\" y=\"0\"/>"
+      "</points></entity>"));
+  REQUIRE(yard.ok());
+  const ObjectId dock = b.dock(yard.value(), "RShipyard");
+  std::vector<Point> doors;
+  building_doors(b.world, &b.movement.grid(), dock, kExitPointType, true, doors);
+  REQUIRE(doors.size() == 1);
+  REQUIRE(doors.front() == (Point{924, 512}));
+  const SettlementId port = b.town(dock, {dock});
+  const ObjectId port_object = b.economy.settlements().find(port)->object;
+  const auto lay = [&](std::uint16_t left, std::uint16_t right) -> std::int32_t {
+    std::vector<std::uint16_t> slots(128, 1);
+    slots[4 * 16 + 6] = left;
+    slots[4 * 16 + 8] = right;
+    GaikaNode own;
+    own.lsa = land;
+    own.settlement = port_object;
+    GaikaNode a;
+    a.lsa = west;
+    GaikaNode c;
+    c.lsa = east;
+    const bool restored = b.world.mutable_gaika().restore({own, a, c}, 16, 8, slots);
+    CHECK(restored);
+    if (!restored) return -1;
+    return member_call(b, "WaterLsa", {b.settlement_value(port)}).value.as_integer();
+  };
+  // One slot each, so a tie, and the west one is visited first.
+  CHECK(lay(2, 3) == west);
+  CHECK(lay(3, 2) == east);
 }
 
 /// The equality `SHIPYARD_IDLE.VS` turns on -- "is my supplier on the same sea
@@ -1316,6 +1453,7 @@ TEST(water_lsa_is_equal_for_two_yards_on_one_sea) {
   CHECK(b.world.set_position(south, Point{512, 544}));
   const SettlementId a = b.town(north, {north});
   const SettlementId c = b.town(south, {south});
+  b.cut();
 
   const std::int32_t first = member_call(b, "WaterLsa", {b.settlement_value(a)}).value.as_integer();
   const std::int32_t second = member_call(b, "WaterLsa", {b.settlement_value(c)}).value.as_integer();

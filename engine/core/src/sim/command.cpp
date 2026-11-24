@@ -148,6 +148,32 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
       const std::string_view obj = doc.attribute(src, "obj");
       if (!obj.empty()) def.excludes.emplace_back(obj);
     }
+    // The same elements as the loader files them for the class reverse index
+    // (0x004f2240): every child of the `<cmd>` in document order, the tag
+    // compared without case, each attribute visited once in order with its
+    // name compared without case, so a repeated `obj=` or `sticky=` keeps the
+    // last. `sticky` starts as `no`; only `no` (without case) is the offered
+    // list. An empty `obj` is kept: it names no class, which the resolve
+    // drops.
+    for (NodeIndex child = doc.node(n).first_child; child != kNoNode;
+         child = doc.node(child).next_sibling) {
+      const XmlNode& element = doc.node(child);
+      const bool is_src = equal_fold(element.name, "src");
+      if (!is_src && !equal_fold(element.name, "nsrc")) continue;
+      std::string_view obj;
+      std::string_view sticky = "no";
+      for (std::uint32_t i = 0; i < element.attribute_count; ++i) {
+        const XmlAttribute& attribute = doc.attributes()[element.attribute_begin + i];
+        if (equal_fold(attribute.name, "obj")) obj = attribute.value;
+        if (is_src && equal_fold(attribute.name, "sticky")) sticky = attribute.value;
+      }
+      CommandSource entry;
+      entry.obj.assign(obj);
+      entry.kind = !is_src                     ? CommandSourceKind::excluded
+                   : equal_fold(sticky, "no") ? CommandSourceKind::offered
+                                              : CommandSourceKind::sticky;
+      def.listing.push_back(std::move(entry));
+    }
     // The interface's half of the row: what enables the button, what runs
     // when it is pressed as a group, what the cursor shows, and what it can
     // be aimed at.
@@ -162,6 +188,45 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
     set(def);
   }
   return {};
+}
+
+bool class_lists_command(const ClassGraph& graph, ClassIndex cls, const CommandDef& row) {
+  if (cls == kNoClass) return false;
+  // The loader's entries for this command: one per `obj` string, compared
+  // with case (the name map's `std::string` order), the last element written
+  // for a string being the one kept; then each string's class, a string
+  // that names none being dropped. Two strings that name one class (its id
+  // and its `altid`) both file it.
+  struct Filed {
+    ClassIndex cls;
+    CommandSourceKind kind;
+  };
+  std::vector<Filed> filed;
+  for (std::size_t i = 0; i < row.listing.size(); ++i) {
+    const CommandSource& entry = row.listing[i];
+    bool superseded = false;
+    for (std::size_t j = i + 1; j < row.listing.size() && !superseded; ++j) {
+      superseded = row.listing[j].obj == entry.obj;
+    }
+    if (superseded) continue;
+    const ClassIndex named = graph.lookup(entry.obj);
+    if (named != kNoClass) filed.push_back(Filed{named, entry.kind});
+  }
+  // The inheritance (0x0059e670), read as a walk from the class up: its own
+  // offered list first, then what its parent's list holds unless it excludes
+  // it. A sticky entry is on another list and lets the walk go on.
+  for (const ClassIndex link : graph.ancestry(cls)) {
+    bool offered = false;
+    bool excluded = false;
+    for (const Filed& f : filed) {
+      if (f.cls != link) continue;
+      if (f.kind == CommandSourceKind::offered) offered = true;
+      if (f.kind == CommandSourceKind::excluded) excluded = true;
+    }
+    if (offered) return true;
+    if (excluded) return false;
+  }
+  return false;
 }
 
 // --------------------------------------------------------------------------

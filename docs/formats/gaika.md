@@ -399,9 +399,22 @@ coordinates run from 0 to the grid's size less one.
 
 11. The node grid becomes the manager's slot grid. Each settlement whose
     central building descends from `BaseShipyard` then caches two areas on that
-    building (0x0044b740, `[building+0x1f4]` and `[+0x1f6]`): its node's area,
-    and a water area found from its exit door through the node grid
-    (0x0044b440). 0x0044b840 walks the settlements and changes nothing.
+    building (0x0044b740, `[building+0x1f4]` and `[+0x1f6]`, both `0xffff`
+    from the building's constructor until then): the area of the
+    settlement's node, and a water area found from the first point of the
+    building's exit-water door list through the node grid (0x0044b440). That
+    search takes the node under the door (0x0044b3d0) when its area is water
+    and is not the settlement's; otherwise it visits three square rings 128,
+    256 and 384 units out -- for each ring, the points one ring to the west
+    and then to the east of the door at every row offset from the top one
+    down, then the points one ring to the north and then to the south at
+    every column offset from the left one across, 128 units apart, corners
+    twice -- and keeps, over all three, the node with the largest coverage
+    (`+0x1c`, unsigned, strictly larger) among those that are not node 0,
+    carry no settlement (`+0x14`), and whose area is water and not the
+    settlement's. With no such node it falls back to the node under the door
+    whatever its area, so the cache can hold the settlement's own area.
+    0x0044b840 walks the settlements and changes nothing.
 
 Every step is integer arithmetic. The partition depends on the map's
 passability and terrain and on its settlements' buildings, their classes and
@@ -447,7 +460,10 @@ their entrances as they stand when the AI manager starts; the AI's save
   on its holder, which this engine does not model; and an outpost whose central
   building has no land entrance gets no second seed, where the original
   compares two uninitialised locals. The shipyard's cached areas (step 11)
-  are not kept; `WaterLsa` derives its answer (`sim/economy.cpp`).
+  are not kept: `WaterLsa` computes the water one on demand by the same
+  search from the same inputs, all of them fixed once the table is cut, and
+  answers the constructed `0xffff` while there is no table
+  (`sim/economy.cpp`).
 * **The per-player memory is the sweep's** (`sweep_gaika`), run on every
   node once a tick after the squads' standing is refreshed, where the
   original runs it on the nodes a unit crosses between. `Explored` reads the

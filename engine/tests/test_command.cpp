@@ -296,6 +296,65 @@ TEST(merging_a_second_command_file_keeps_one_sorted_table) {
   for (std::size_t i = 1; i < all.size(); ++i) CHECK(all[i - 1].name < all[i].name);
 }
 
+/// **The class reverse index**, `[class+0x1f8]`, as the commands loader
+/// builds it (0x004f2240 files, 0x004f5af0 resolves, 0x0059e670 inherits):
+/// what `FindResearchLab`, `Research` and `CanResearch` walk.
+TEST(the_class_reverse_index_is_the_loaders_inheritance_of_offered_commands) {
+  ClassGraph graph;
+  for (const char* xml : {
+           R"(<class id="Object" cpp_class="CVXDecor"/>)",
+           R"(<class id="Building" parent="Object" cpp_class="CVXBuilding"/>)",
+           R"(<class id="Arena" parent="Building" cpp_class="CVXBuilding"/>)",
+           R"(<class id="ArenaWinter" altid="Snowfield" parent="Arena" cpp_class="CVXBuilding"/>)",
+           R"(<class id="ArenaWinterBig" parent="ArenaWinter" cpp_class="CVXBuilding"/>)",
+           R"(<class id="Tavern" parent="Building" cpp_class="CVXBuilding"/>)",
+       }) {
+    REQUIRE(graph.add(bytes(xml), "classes.sc.xml").ok());
+  }
+  graph.link();
+  CommandTable table;
+  REQUIRE(table.merge(bytes(R"(<commands>
+<cmd name="fights"><src obj="Arena"/></cmd>
+<cmd name="summer"><src obj="Arena"/><nsrc obj="ArenaWinter"/><src obj="ArenaWinterBig"/></cmd>
+<cmd name="sticky"><src obj="Building" sticky="yes"/><SRC OBJ="Tavern" STICKY="No"/></cmd>
+<cmd name="undone"><src obj="Arena"/><nsrc obj="Arena"/></cmd>
+<cmd name="redone"><nsrc obj="Arena"/><src obj="Arena"/></cmd>
+<cmd name="aliased"><src obj="Arena"/><nsrc obj="Snowfield"/><src obj="ArenaWinter"/></cmd>
+<cmd name="unknown"><src obj="Nonesuch"/><src obj="arena"/></cmd>
+<cmd name="laststicky"><src obj="Arena"/><src obj="Arena" sticky="yes"/></cmd>
+</commands>)")).ok());
+  const auto lists = [&](const char* cls, const char* row) -> bool {
+    const CommandDef* def = table.find(row);
+    CHECK(def != nullptr);
+    return def != nullptr && class_lists_command(graph, graph.find(cls), *def);
+  };
+
+  // Inherited down the tree, never up it.
+  CHECK(lists("Arena", "fights"));
+  CHECK(lists("ArenaWinterBig", "fights"));
+  CHECK(!lists("Building", "fights"));
+  CHECK(!lists("Tavern", "fights"));
+  // An `<nsrc>` stops the inheritance there and below, and a class's own
+  // `<src>` under it offers the command again.
+  CHECK(lists("Arena", "summer"));
+  CHECK(!lists("ArenaWinter", "summer"));
+  CHECK(lists("ArenaWinterBig", "summer"));
+  // A sticky `<src>` is filed on the other list; `sticky` is compared without
+  // case, and so are the tag and attribute names.
+  CHECK(!lists("Arena", "sticky"));
+  CHECK(lists("Tavern", "sticky"));
+  // One entry per class name and command: the later element is the one kept.
+  CHECK(!lists("Arena", "undone"));
+  CHECK(lists("Arena", "redone"));
+  CHECK(!lists("Arena", "laststicky"));
+  // Two names for one class both file it, and its offer beats its exclusion.
+  CHECK(lists("ArenaWinter", "aliased"));
+  // A name that resolves to no class is dropped; names are compared with case.
+  CHECK(!lists("Arena", "unknown"));
+  // No class, no listing.
+  CHECK(!class_lists_command(graph, kNoClass, *table.find("fights")));
+}
+
 // --------------------------------------------------------------------------
 // queue shapes, transcribed from shipped scripts
 // --------------------------------------------------------------------------
