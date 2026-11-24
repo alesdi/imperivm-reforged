@@ -135,6 +135,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -230,15 +231,18 @@ struct CommandDef {
   bool research_command = false;
   bool plr_research = false;
 
-  /// `offset="1"` -- 18 rows, and every one of them is a verb a *group* is
-  /// given: `move`, `attack`, `advance`, `capture`, `patrol`, `explore`,
-  /// `stand_position`, `transport`.
+  /// `offset="1"` (`[def+0x1e0]`, any non-zero `atol`) -- 18 rows, every one a
+  /// verb a *group* is given: `advance`, `attack`, `capture`, `explore`,
+  /// `move`, `moveinfight`, `patrol`, `sentry_attack`, `transport`,
+  /// `transport_request`, and eight with a `groupdispatch` that never reaches
+  /// the spread (`stand_ground`, `stand_position`, `build_catapult` and five
+  /// hero skills).
   ///
   /// It is what makes a selection arrive spread out instead of stacked on one
-  /// cell: each member keeps its own offset from the group's centroid, which is
-  /// exactly what `ObjList.SetCommandOffset` computes for the scripts. The
-  /// reader used to drop the attribute, so a player's group order sent every
-  /// unit to the identical point and they converged.
+  /// cell: the issue's per-actor spread (0x004e81f0, `CommandSystem::issue`)
+  /// keeps each member's offset from the anchor its caller wrote and scatters
+  /// a held one. The reader used to drop the attribute, so a player's group
+  /// order sent every unit to the identical point and they converged.
   bool offset = false;
 
   /// `rollover=` -- the command's own name as the tooltip shows it, and a
@@ -777,13 +781,36 @@ class CommandSystem final : public System {
   ///     0x005b4e90): `set_command` when replacing and the row is not a train
   ///     row (0x004efbbb), `append_order` otherwise.
   ///
-  /// **Not reproduced**, and labelled where it is done: the first actor's
-  /// group-move set-up (0x004e9100, 0x004e8ae0, 0x004ef1c0) and an `offset`
-  /// row's per-actor spread of the point (0x004e81f0); callers that want a
-  /// spread hand each actor its own point, as the default order does.
+  /// The first actor's group-move set-up (0x004e9100, 0x004e8ae0,
+  /// 0x004ef1c0) is `group_move_set_up`.
+  ///
+  /// **An `offset` row spreads the point per actor** (0x004e81f0) on the way
+  /// to the point form, about `anchor` -- the globals at 0x009969d4, which
+  /// every caller of the issue writes just before it: `Obj::ExecCmd` the
+  /// receiver's own position, `ObjList::ExecCmd` the list's mean
+  /// (`offset_anchor`), the interface's paths each sub-list's mean. A unit in
+  /// a holder takes a jitter of `Range(-r, r)` on `x` then on `y` from the
+  /// world's generator, `r = 45 * isqrt(n - 1)` over the list's `n` handles;
+  /// anything else its own position less the anchor; and the point is held
+  /// inside the camera's map rectangle (`camera_map_rect`). With no anchor
+  /// there is no spread: the engine's interface paths reach the issue one
+  /// actor at a time with each actor's own point (`issue_order`), and the
+  /// subdivision they come from (0x004f1240) is not this one.
   std::size_t issue(World& world, std::span<const ObjectId> actors, const CommandDef& def,
                     Point point, ObjectId object, bool replace, bool modifier,
-                    std::int32_t player_arg, bool user);
+                    std::int32_t player_arg, bool user,
+                    std::optional<Point> anchor = std::nullopt);
+
+  /// The list's mean position (0x004cd1b0), what `ObjList::ExecCmd` writes to
+  /// the spread's anchor: each handle that names an object adds its `posRH`
+  /// (`vtbl+0xc8`, `unit_pos_rh` for a unit, its own position otherwise), the
+  /// sums are divided **unsigned** by the number that did, and a list that
+  /// names nothing is `(0, 0)`.
+  [[nodiscard]] static Point offset_anchor(World& world, std::span<const ObjectId> actors);
+
+  /// One actor's point under an `offset` row (0x004e81f0); see `issue`.
+  [[nodiscard]] static Point offset_point(World& world, ObjectId actor, Point point,
+                                          Point anchor, std::int32_t jitter);
   /// A row's `groupdispatch`, the issue's other arm (0x004ef4b1..0x004ef6f2):
   /// an `ObjList` of the actors the row is enabled for, and the row's compiled
   /// dispatch run to its end with `(objs, pt, obj, bReplace, bModifier,

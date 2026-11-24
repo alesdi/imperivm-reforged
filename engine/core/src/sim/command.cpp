@@ -1454,7 +1454,8 @@ bool CommandSystem::issue_research(World& world, ObjectId id, Command command) {
 
 std::size_t CommandSystem::issue(World& world, std::span<const ObjectId> actors,
                                  const CommandDef& def, Point point, ObjectId object, bool replace,
-                                 bool modifier, std::int32_t player_arg, bool user) {
+                                 bool modifier, std::int32_t player_arg, bool user,
+                                 std::optional<Point> anchor) {
   // Every unit handed the order is marked commanded first, enabled or not
   // (0x004ef410..0x004ef480): a unit by its own flag, a hero by his army's
   // (0x005f5520 applying 0x004e7890 to his formation). **The hero himself is
@@ -1476,6 +1477,14 @@ std::size_t CommandSystem::issue(World& world, std::span<const ObjectId> actors,
 
   const std::string_view verb = def.method.empty() ? std::string_view{def.name} : def.method;
   std::size_t issued = 0;
+  // The jitter a held unit's point takes under an `offset` row: 45 times the
+  // floored root of the list's handles less one (0x004ef721..0x004ef72b),
+  // counted before anything is resolved, so a handle that names nothing
+  // still widens it.
+  const std::int32_t jitter =
+      actors.empty()
+          ? 0
+          : static_cast<std::int32_t>(45 * isqrt(static_cast<std::int64_t>(actors.size()) - 1));
   // The group-move set-up (0x004efada..0x004efbb3): asked once, of the first
   // actor that gets this far, when the list's first member is aboard a ship.
   const ObjectId ship = carrier_of_first(world, actors);
@@ -1492,11 +1501,19 @@ std::size_t CommandSystem::issue(World& world, std::span<const ObjectId> actors,
     if (object != kNoObject && binds(world, id, verb, CommandArgKind::object)) {
       command.arg_kind = CommandArgKind::object;
       command.object = object;
-    } else if (binds(world, id, verb, CommandArgKind::point)) {
-      command.arg_kind = CommandArgKind::point;
-      command.point = point;
-    } else if (!binds(world, id, verb, CommandArgKind::none)) {
-      continue;
+    } else {
+      // The point form's point, spread under an `offset` row before the form
+      // is looked up (0x004ef827..0x004ef855): a held unit's jitter is drawn
+      // whether or not the actor then binds the point form.
+      const Point at = def.offset && anchor.has_value()
+                           ? offset_point(world, id, point, *anchor, jitter)
+                           : point;
+      if (binds(world, id, verb, CommandArgKind::point)) {
+        command.arg_kind = CommandArgKind::point;
+        command.point = at;
+      } else if (!binds(world, id, verb, CommandArgKind::none)) {
+        continue;
+      }
     }
     if (def.immediate) {
       run_immediate(world, id, std::move(command));
@@ -1525,6 +1542,61 @@ std::size_t CommandSystem::issue(World& world, std::span<const ObjectId> actors,
     if (made != 0) ++issued;
   }
   return issued;
+}
+
+Point CommandSystem::offset_anchor(World& world, std::span<const ObjectId> actors) {
+  // 0x004cd1b0: the handles that name an object add their `posRH`
+  // (`vtbl+0xc8`); the count is the list's less those that name nothing, and
+  // the two sums are divided by it unsigned (`div`), each in 32 bits.
+  std::uint32_t sx = 0;
+  std::uint32_t sy = 0;
+  std::uint32_t count = 0;
+  for (const ObjectId id : actors) {
+    const WorldObject* slot = world.find(id);
+    if (slot == nullptr) continue;
+    const Point at = slot->state.flags.is_unit ? unit_pos_rh(world, id) : slot->state.position;
+    sx += static_cast<std::uint32_t>(at.x);
+    sy += static_cast<std::uint32_t>(at.y);
+    ++count;
+  }
+  if (count == 0) return Point{0, 0};
+  return Point{static_cast<std::int32_t>(sx / count), static_cast<std::int32_t>(sy / count)};
+}
+
+Point CommandSystem::offset_point(World& world, ObjectId actor, Point point, Point anchor,
+                                  std::int32_t jitter) {
+  // 0x004e81f0. A unit (sync bit 0x400000) in a holder (`[unit+0x154]` not
+  // 0xffff) has no position of its own to keep: the point takes a draw of
+  // `Range(-r, r)` from the world's generator on `x`, then another on `y`
+  // (none when `r` is 0). Anything else keeps its offset from the anchor: its
+  // stored position (`vtbl+0x3c`) less the anchor, added to the point. All in
+  // 32 bits, as the original adds.
+  const WorldObject* slot = world.find(actor);
+  const auto add = [](std::int32_t a, std::int32_t b) {
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) + static_cast<std::uint32_t>(b));
+  };
+  const auto sub = [](std::int32_t a, std::int32_t b) {
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) - static_cast<std::uint32_t>(b));
+  };
+  if (slot != nullptr && slot->state.flags.is_unit && slot->state.is_held()) {
+    point.x = add(point.x, world.rng().between(-jitter, jitter));
+    point.y = add(point.y, world.rng().between(-jitter, jitter));
+  } else if (slot != nullptr) {
+    point.x = add(point.x, sub(slot->state.position.x, anchor.x));
+    point.y = add(point.y, sub(slot->state.position.y, anchor.y));
+  }
+  // Held inside the camera's map rectangle as it is (0x006245b0 on
+  // `[camera+0x628]`), `x` low then high, then `y` low then high; a world with
+  // no map grid has none.
+  CameraMapRect rect;
+  if (const MovementSystem* movement = movement_system(world);
+      movement != nullptr && camera_map_rect(world, movement->grid(), 0, rect)) {
+    if (point.x < rect.left) point.x = rect.left;
+    if (rect.right < point.x) point.x = rect.right;
+    if (point.y < rect.top) point.y = rect.top;
+    if (rect.bottom < point.y) point.y = rect.bottom;
+  }
+  return point;
 }
 
 ObjectId CommandSystem::carrier_of_first(const World& world, std::span<const ObjectId> actors) {
@@ -2237,6 +2309,13 @@ HostOutcome set_commanded_impl(CallContext& ctx) {
 /// `ObjList::ExecCmd` (0x0055e240) hands it the list itself and no player
 /// (-1). Both are registered **void**: no script can read an answer.
 ///
+/// Each writes the anchor an `offset` row's spread is measured from (the
+/// globals at 0x009969d4) just before the issue: `Obj::ExecCmd` its
+/// receiver's stored position, so its one actor keeps the point itself, held
+/// inside the map; `ObjList::ExecCmd` the list's mean (`offset_anchor`), so
+/// each member keeps its offset from it and a held member is jittered
+/// (`CommandSystem::offset_point`).
+///
 /// What the issue does with a row is all of its own -- a `groupdispatch` run
 /// with the row ambient, an `immediate` method run at once, a research that
 /// jumps the queue, an ordinary order through the order insert, a train row
@@ -2268,8 +2347,14 @@ HostOutcome exec_cmd_impl(CallContext& ctx) {
   const Point point = ctx.count() > 2 && is_point(ctx.arg(2)) ? unpack_point(ctx.arg(2)) : Point{};
   const ObjectId object = ctx.count() > 3 ? object_of(ctx.arg(3)) : kNoObject;
   const bool replace = ctx.count() > 4 && ctx.arg(4).truthy_scalar();
+  // The spread's anchor, written just before the issue: the receiver's stored
+  // position (`vtbl+0x3c`, 0x005b55f9..0x005b5610) for `Obj`, the list's mean
+  // (0x004cd1b0, 0x0055e323) for `ObjList`.
+  const Point anchor = form == ReceiverForm::object
+                           ? world.state(targets.ids.front())->position
+                           : CommandSystem::offset_anchor(world, targets.ids);
   (void)targets.commands->issue(world, targets.ids, *def, point, object, replace,
-                                /*modifier=*/false, player_arg, /*user=*/false);
+                                /*modifier=*/false, player_arg, /*user=*/false, anchor);
   return HostOutcome::ok_void();
 }
 

@@ -2509,6 +2509,40 @@ HostOutcome get_dir_impl(CallContext& ctx) {
   return HostOutcome::ok_with(pack_point(self.movement->state(self.id).facing));
 }
 
+/// The camera's screen rectangle (0x00624100, at the camera's start): the
+/// map's `(0, 0, w-1, h-1)` in screen space, its right side 32 in and its
+/// bottom 255 + 32 up.
+[[nodiscard]] constexpr std::int32_t camera_screen_left() noexcept { return 0; }
+[[nodiscard]] constexpr std::int32_t camera_screen_top() noexcept { return project_scale(0); }
+[[nodiscard]] std::int32_t camera_screen_right(const ObstructionGrid& grid) noexcept {
+  return grid.extent_x() - 1 - 32;
+}
+[[nodiscard]] std::int32_t camera_screen_bottom(const ObstructionGrid& grid) noexcept {
+  return project_scale(grid.extent_y() - 1) - 255 - 32;
+}
+
+}  // namespace
+
+bool camera_map_rect(const World& world, const ObstructionGrid& grid, std::int32_t inset,
+                     CameraMapRect& out) {
+  if (grid.empty()) return false;
+  const std::int32_t sl = camera_screen_left() + inset;
+  const std::int32_t st = camera_screen_top() + inset;
+  const std::int32_t sr = camera_screen_right(grid) - inset;
+  const std::int32_t sb = camera_screen_bottom(grid) - inset;
+  // 0x006245b0: the sides' `x` as they are; the top the higher of the two top
+  // corners unprojected, the bottom the lower of the two bottom ones.
+  out.left = sl;
+  out.right = sr;
+  out.top =
+      std::min(screen_to_world(world, Point{sl, st}).y, screen_to_world(world, Point{sr, st}).y);
+  out.bottom =
+      std::max(screen_to_world(world, Point{sl, sb}).y, screen_to_world(world, Point{sr, sb}).y);
+  return true;
+}
+
+namespace {
+
 /// `SetPos`'s clamp (0x005ac130), on the camera's map rectangle -- the map's
 /// own (`[map+0xb4..0xc0]`, `(0, 0, w-1, h-1)`) in screen space, `y` scaled
 /// by 181/256, its right side 32 in and its bottom 255 + 32 up (0x00624100,
@@ -2526,21 +2560,17 @@ HostOutcome get_dir_impl(CallContext& ctx) {
 ///
 /// A world with no map grid (a bench) has no rectangle and clamps nothing.
 [[nodiscard]] Point set_pos_clamp(const World& world, const ObstructionGrid& grid, Point at) {
-  if (grid.empty()) return at;
   constexpr std::int32_t kInset = 32;
-  const std::int32_t right = grid.extent_x() - 1 - kInset;
-  const std::int32_t bottom = project_scale(grid.extent_y() - 1) - 255 - kInset;
-  const std::int32_t left = 0;
-  const std::int32_t top = project_scale(0);
-  // The rectangle the call takes, 32 in from the camera's.
-  const std::int32_t sl = left + kInset;
-  const std::int32_t st = top + kInset;
-  const std::int32_t sr = right - kInset;
-  const std::int32_t sb = bottom - kInset;
-  const std::int32_t map_top =
-      std::min(screen_to_world(world, Point{sl, st}).y, screen_to_world(world, Point{sr, st}).y);
-  const std::int32_t map_bottom =
-      std::max(screen_to_world(world, Point{sl, sb}).y, screen_to_world(world, Point{sr, sb}).y);
+  CameraMapRect rect;
+  if (!camera_map_rect(world, grid, kInset, rect)) return at;
+  // The screen rectangle the call takes, 32 in from the camera's, for the
+  // second clamp.
+  const std::int32_t sl = rect.left;
+  const std::int32_t sr = rect.right;
+  const std::int32_t st = camera_screen_top() + kInset;
+  const std::int32_t sb = camera_screen_bottom(grid) - kInset;
+  const std::int32_t map_top = rect.top;
+  const std::int32_t map_bottom = rect.bottom;
 
   Point p = at;
   const bool left_in = sl <= p.x;
