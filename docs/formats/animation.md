@@ -260,7 +260,8 @@ strikes in full. The training blow is what leaves the partner a
 tenth of its maximum health, never below 0, as the most; the larger of the
 attack times `MinPercentOfAttackersDamage` over 100 and `MinDamage` as the
 least; and between them the attack less the partner's slash armour scaled
-by the level difference (0x0050fe60). A blow of 0 does nothing. Otherwise a
+by the difference of the two stored levels (0x0050fe60; `blow.md`, D3).
+A blow of 0 does nothing. Otherwise a
 draw on the synchronised generator under `TrainingExpChance` (75 in the
 shipped `CONST.INI`) pays the attacker a point of experience, and the
 damage is dealt.
@@ -305,13 +306,14 @@ Departures, each one for what the engine does not yet do:
   fires, just before the answer.
 * **Trample.** A melee unit with special 34 against an enemy sweeps
   (0x005d4f30); here it hits its target alone.
-* **The training blow's level scale** is this engine's level table, where
-  the original builds its own of 101 steps (0x0050fd40).
 * **A ship's shot at a ship** draws an angle and throws the shot along it
   (0x005dc7a8); here the shot is the engine's.
 * **The attacked target of one class** answers `vtbl+0xa4` through
   0x00511cd0 rather than 0x005dc1f0; here every target stamps the hero's
   and the squad's clocks.
+* **The blow itself** (0x00511550, 0x0050ff30) is ported only as far as
+  `blow.md`'s "This engine" says: its arithmetic and two branches, without
+  the gates before it, the specials inside it or their stamina.
 
 ## The walk
 

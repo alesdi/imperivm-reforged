@@ -157,55 +157,96 @@ std::string_view damage_type_name(DamageType type) noexcept {
 // LevelDifferenceTable
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// A C `%i` at `text[pos]`: leading white space, a sign, then `0x` hex, a
+/// leading `0` octal, or decimal. False when no digit follows.
+[[nodiscard]] bool scan_c_int(std::string_view text, std::size_t& pos, std::int32_t& out) noexcept {
+  std::size_t i = pos;
+  while (i < text.size() && (is_space(text[i]) || text[i] == '\v' || text[i] == '\f')) ++i;
+  bool negative = false;
+  if (i < text.size() && (text[i] == '+' || text[i] == '-')) negative = text[i++] == '-';
+  const auto digit = [](char c, int base) -> int {
+    int v = -1;
+    if (c >= '0' && c <= '9') v = c - '0';
+    else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+    return v < base ? v : -1;
+  };
+  int base = 10;
+  if (i + 1 < text.size() && text[i] == '0' && (text[i + 1] == 'x' || text[i + 1] == 'X') &&
+      i + 2 < text.size() && digit(text[i + 2], 16) >= 0) {
+    base = 16;
+    i += 2;
+  } else if (i < text.size() && text[i] == '0') {
+    base = 8;
+  }
+  if (i >= text.size() || digit(text[i], base) < 0) return false;
+  std::uint32_t value = 0;
+  while (i < text.size() && digit(text[i], base) >= 0) {
+    value = value * static_cast<std::uint32_t>(base) + static_cast<std::uint32_t>(digit(text[i], base));
+    ++i;
+  }
+  out = static_cast<std::int32_t>(negative ? 0u - value : value);
+  pos = i;
+  return true;
+}
+
+}  // namespace
+
 LevelDifferenceTable LevelDifferenceTable::shipped() noexcept {
   // DATA\CONST.INI [GamePlay]:
   //   LevelDifferenceDamageTable = 1,5 5,20 10,40 20,60 40,80 100,90
-  LevelDifferenceTable table;
-  table.points[0] = {1, 5};
-  table.points[1] = {5, 20};
-  table.points[2] = {10, 40};
-  table.points[3] = {20, 60};
-  table.points[4] = {40, 80};
-  table.points[5] = {100, 90};
-  table.count = 6;
-  return table;
+  return parse("1,5 5,20 10,40 20,60 40,80 100,90");
 }
 
 LevelDifferenceTable LevelDifferenceTable::parse(std::string_view text) noexcept {
+  // 0x0050fd40: `sscanf(text, "%i,%i%n")` pair by pair from `(0, 0)`.
   LevelDifferenceTable table;
-  std::size_t i = 0;
-  while (i < text.size() && table.count < kMaxBreakpoints) {
-    while (i < text.size() && (is_space(text[i]) || text[i] == ',')) ++i;
-    const std::size_t begin = i;
-    while (i < text.size() && !is_space(text[i])) ++i;
-    const std::string_view pair = text.substr(begin, i - begin);
-    const std::size_t comma = pair.find(',');
-    if (comma == std::string_view::npos) continue;
-    const std::int32_t difference = to_int(pair.substr(0, comma), -1);
-    const std::int32_t percent = to_int(pair.substr(comma + 1), -1);
-    if (difference < 0 || percent < 0) continue;
-    table.points[table.count++] = {difference, percent};
-  }
-  if (table.count == 0) return shipped();
+  std::size_t pos = 0;
+  std::int32_t from = 0;
+  std::int32_t from_percent = 0;
+  std::int32_t to = 0;
+  std::int32_t to_percent = 0;
+  do {
+    std::size_t at = pos;
+    bool read = scan_c_int(text, at, to) && at < text.size() && text[at] == ',';
+    if (read) {
+      ++at;
+      read = scan_c_int(text, at, to_percent);
+    }
+    if (read) {
+      pos = at;
+    } else {
+      to = 100;
+      to_percent = from_percent;
+    }
+    const std::int32_t span = to - from;
+    for (std::int32_t k = 0; k < span; ++k) {
+      const std::int32_t index = from + k;
+      if (index < 0 || index >= kSteps) continue;  // labelled: see the type
+      table.factors[static_cast<std::size_t>(index)] =
+          ((to_percent - from_percent) * k + span * from_percent) * 256 / (span * 100) + 256;
+    }
+    from_percent = to_percent;
+    from = to;
+  } while (to < 100);
+  table.factors[kSteps - 1] = to_percent * 256 / 100 + 256;
   return table;
 }
 
-std::int32_t LevelDifferenceTable::percent(std::int32_t difference) const noexcept {
-  if (difference < 0) difference = -difference;
-  if (count == 0) return 0;
-  if (difference < points[0].difference) return 0;
-  for (std::uint8_t i = 1; i < count; ++i) {
-    if (difference >= points[i].difference) continue;
-    // Linear interpolation between the bracketing breakpoints. INFERRED: the
-    // data gives six points and no rule; a step function fits them too.
-    const Breakpoint& lo = points[i - 1];
-    const Breakpoint& hi = points[i];
-    const std::int32_t span = hi.difference - lo.difference;
-    if (span <= 0) return lo.percent;
-    const std::int64_t rise = static_cast<std::int64_t>(hi.percent - lo.percent);
-    return lo.percent + static_cast<std::int32_t>(rise * (difference - lo.difference) / span);
-  }
-  return points[count - 1].percent;
+std::int32_t LevelDifferenceTable::factor(std::int32_t difference) const noexcept {
+  std::int32_t magnitude = difference < 0 ? -difference : difference;
+  if (magnitude > 100 || magnitude < 0) magnitude = 100;
+  const std::int32_t f = factors[static_cast<std::size_t>(magnitude)];
+  return difference < 0 ? 512 - f : f;
+}
+
+std::int32_t LevelDifferenceTable::scale(std::int32_t value, std::int32_t difference) const noexcept {
+  // `imul` in 32 bits, then a signed division by 256 toward zero.
+  const auto product = static_cast<std::int32_t>(static_cast<std::uint32_t>(factor(difference)) *
+                                                 static_cast<std::uint32_t>(value));
+  return product / 256;
 }
 
 // ---------------------------------------------------------------------------
@@ -443,65 +484,42 @@ std::int32_t CounterTable::damage_percent(ClassIndex attacker, ClassIndex defend
 DamageBreakdown resolve_damage(const DamageInputs& in,
                                const CombatConstants& constants) noexcept {
   DamageBreakdown out;
-  out.attack = in.attack < 0 ? 0 : in.attack;
+  out.attack = in.attack;
+  std::int32_t value = in.attack;
 
-  // A class whose damage_type is `none` -- peasants, wagons, wildlife -- never
-  // damages anything, whatever its `damage` says.
-  if (in.type == DamageType::none || out.attack == 0) {
-    out.armour = 0;
-    return out;
-  }
-
-  // Step 2: armour. `siege` meets none: no armor_siege property exists.
-  const bool armoured = !in.ignores_armour && in.type != DamageType::siege;
-  out.armour = armoured ? (in.armour < 0 ? 0 : in.armour) : 0;
-  std::int32_t value = out.attack - out.armour;
-
-  // Step 3: MinPercentOfAttackersDamage. Armour subtraction is the only step
-  // that can drive damage to zero, and this is the constant named for it.
-  const std::int32_t floor_by_percent =
-      scale_percent(out.attack, constants.min_percent_of_attackers_damage);
-  if (value < floor_by_percent) {
-    value = floor_by_percent;
-    out.floored_by_min_percent = true;
+  // Armour, and its floor, unless Assault or bloodlust lifts both off a
+  // defender that is not a hero (0x00510d26..0x00510e22).
+  if (in.defender_is_hero || !in.ignores_armour) {
+    out.armour = in.armour;
+    value -= in.armour;
+    const std::int32_t floor = scale_percent(in.attack, constants.min_percent_of_attackers_damage);
+    if (value < floor) {
+      value = floor;
+      out.floored_by_min_percent = true;
+    }
   }
   out.after_armour = value;
 
-  // Step 4: the counter-unit table. INFERRED -- see CounterMode.
-  value = scale_percent(value, in.counter_percent);
-  out.after_counter = value;
-
-  // Step 5: the level modifier, in the order Expertise's description gives.
-  out.level_difference = in.attacker_level - in.defender_level;
-  out.level_percent = constants.level_difference.percent(out.level_difference);
-  if (out.level_difference > 0) {
-    value = scale_percent(value, 100 + out.level_percent);
-  } else if (out.level_difference < 0) {
-    value = scale_percent(value, 100 - out.level_percent);
-  }
+  // The level factor (0x00510e24..0x00510e6c).
+  out.level_difference = in.attacker_level - in.defender_level - in.defender_addend;
+  value = constants.level_difference.scale(value, out.level_difference);
   out.after_level = value;
 
-  // Step 6: flat multipliers, downstream of armour as Charge's text requires.
-  value = scale_percent(value, in.multiplier_percent);
+  // `MinDamage` (0x00510ef6).
+  if (value < constants.min_damage) {
+    value = constants.min_damage;
+    out.floored_by_min_damage = true;
+  }
 
-  // Step 7: DamageAmplify, "Damage in settlements".
-  if (in.in_settlement) value = scale_percent(value, constants.damage_amplify);
-
-  // Step 7b: the sheltered victim. `[victim+0x194]` bit 28 -- raised by a
-  // cover of mercy on everyone under it, and by nothing else -- has one
-  // reader in `.text`, 0x005110c6: after every special-ability branch of
-  // the formula and before the cap that is the only step left, the running
-  // damage is halved (`cdq; sub eax, edx; sar eax, 1`, toward zero). Its
-  // place here is the same one: the last modifier, ahead of the floor.
+  // The sheltered defender, halved toward zero after the floor (0x005110c6),
+  // then the defender's health (0x005110db).
   if (in.halved) {
     value /= 2;
     out.halved = true;
   }
-
-  // Step 8: MinDamage.
-  if (value < constants.min_damage) {
-    value = constants.min_damage;
-    out.floored_by_min_damage = true;
+  if (value > in.defender_health) {
+    value = in.defender_health;
+    out.capped = true;
   }
   out.final_damage = value;
   return out;
@@ -804,7 +822,7 @@ std::size_t CombatSystem::reconcile(World& world) {
     // `hero.hpp` documents that `SetLevel` writes an *inherent* level while
     // `.level` reads an effective one that Battle Cry and items move, so even
     // if the ranges agreed there would be no evidence for which one the
-    // attribute is. `effective_level` feeds the damage formula on every strike
+    // attribute is. The stored level feeds the damage formula on every strike
     // on every map, so a plausible number here would be worse than none.
     fresh.level = 1;
     // Built from the class, then rebuilt once it is in place (0x005d3090: the
@@ -1397,25 +1415,30 @@ bool CombatSystem::hand_target(ObjectId id, ObjectId target) {
 // CombatSystem: damage
 // ---------------------------------------------------------------------------
 
-std::int32_t CombatSystem::effective_level(const Combatant& unit) const noexcept {
-  return unit.base_effective_level() + player_level_addend(unit.owner);
+CombatSystem::Striker CombatSystem::striker_of(const Combatant& attacker) const {
+  Striker a;
+  a.id = attacker.id;
+  a.owner = attacker.owner;
+  a.attack = attack_of(attacker);
+  const WorldObject* slot = world_ == nullptr ? nullptr : world_->find(attacker.id);
+  a.is_unit = slot == nullptr || slot->state.flags.is_unit;
+  a.level = a.is_unit ? attacker.level + player_level_addend(attacker.owner) : 10;
+  a.shoots = profile(attacker.class_index).shoots;
+  a.ignores_armour = attacker.ignores_armour;
+  return a;
 }
 
-DamageInputs CombatSystem::inputs_for(const Combatant& attacker,
-                                      const Combatant& defender) const {
-  const CombatProfile mine = profile(attacker.class_index);
-
+DamageInputs CombatSystem::inputs_for(const Striker& attacker, const Combatant& defender) const {
   DamageInputs in;
-  in.attack = attack_of(attacker);
-  in.type = mine.damage_type;
-  in.armour = armour_of(defender, in.type);
-  in.attacker_level = effective_level(attacker);
-  in.defender_level = effective_level(defender);
-  in.counter_percent =
-      counters_.damage_percent(attacker.class_index, defender.class_index, counter_mode_);
+  in.attack = attacker.attack;
+  in.armour = defender.stats.armour_slash;
+  in.attacker_level = attacker.level;
+  in.defender_level = defender.level;
+  in.defender_addend = player_level_addend(defender.owner);
+  const WorldObject* slot = world_ == nullptr ? nullptr : world_->find(defender.id);
+  in.defender_is_hero = slot != nullptr && slot->state.flags.is_hero;
   in.ignores_armour = attacker.ignores_armour;
-  in.in_settlement = attacker.in_settlement;
-  in.multiplier_percent = attacker.damage_multiplier_percent;
+  in.defender_health = defender.health;
   return in;
 }
 
@@ -1423,7 +1446,41 @@ DamageBreakdown CombatSystem::preview(ObjectId attacker, ObjectId defender) cons
   const Combatant* a = find(attacker);
   const Combatant* d = find(defender);
   if (a == nullptr || d == nullptr) return DamageBreakdown{};
-  return resolve_damage(inputs_for(*a, *d), constants_);
+  return resolve_damage(inputs_for(striker_of(*a), *d), constants_);
+}
+
+std::int32_t CombatSystem::blow_damage(World& world, const Striker& a, const Combatant& defender) {
+  const WorldObject* slot = world.find(defender.id);
+  const bool defender_unit = slot == nullptr || slot->state.flags.is_unit;
+  const LevelDifferenceTable& table = constants_.level_difference;
+  // Not a unit (0x00510855..0x005108b5): the attack, scaled at `L - 10` and
+  // halved rounding up for a unit that shoots; no armour and no floor.
+  if (!defender_unit) {
+    std::int32_t v = a.attack;
+    if (a.is_unit) {
+      v = table.scale(v, a.level - 10);
+      if (a.shoots) v = (v + 1) / 2;
+    }
+    return v < defender.health ? v : defender.health;
+  }
+  // A `RamUnit` (0x005108b6..0x00510955): a shot lands on a draw of
+  // `Range(0, 220)` no greater than `L + 20`, for `L / 5 + MinDamage`; a
+  // blow is the attack scaled at `L - 10`.
+  if (profile(defender.class_index).is(CombatProfile::kLineRamUnit)) {
+    std::int32_t v = a.attack;
+    if (a.shoots) {
+      const std::int32_t draw = world.rng().between(0, 220);
+      if (a.level + 20 < draw) return 0;
+      v = a.level / 5 + constants_.min_damage;
+    } else if (a.is_unit) {
+      v = table.scale(v, a.level - 10);
+    }
+    return v < defender.health ? v : defender.health;
+  }
+  DamageInputs in = inputs_for(a, defender);
+  in.defender_is_hero = slot != nullptr && slot->state.flags.is_hero;
+  in.halved = slot != nullptr && slot->state.flags.half_damage;
+  return resolve_damage(in, constants_).final_damage;
 }
 
 namespace {
@@ -1845,12 +1902,10 @@ void note_building_damage(World& world, ObjectId victim, std::int32_t removed) {
   if (state != nullptr && state->flags.is_building) state->damage_taken += removed;
 }
 
-void CombatSystem::record_score(World& world, ObjectId source, const Combatant& defender,
+void CombatSystem::record_score(World& world, PlayerId by, const Combatant& defender,
                                 std::int32_t removed, bool killed) const {
   MatchSystem* match = match_system_of(world);
   if (match == nullptr) return;
-  const Combatant* attacker = find(source);
-  const PlayerId by = attacker == nullptr ? kNoPlayer : attacker->owner;
   match->record_damage(world, by, defender.owner, removed);
   // The victim's *class* maximum, not the health it had left: a finishing blow
   // on a sliver is worth the same as a kill from full. `profile` answers 0 for
@@ -1858,22 +1913,22 @@ void CombatSystem::record_score(World& world, ObjectId source, const Combatant& 
   if (killed) match->record_kill(world, by, defender.owner, profile(defender.class_index).max_health);
 }
 
-void CombatSystem::hit(World& world, Combatant& defender, const DamageInputs& inputs,
-                       ObjectId source, GameTime now) {
-  // The victim's shelter is world state, not a combatant field, so it is read
-  // here where the world is in hand -- the shape `note_building_damage` uses.
-  DamageInputs in = inputs;
-  if (const WorldObject* slot = world.find(defender.id); slot != nullptr) {
-    in.halved = slot->state.flags.half_damage;
-  }
-  const DamageBreakdown result = resolve_damage(in, constants_);
+void CombatSystem::hit(World& world, Combatant& defender, const Striker& a, GameTime now) {
+  const ObjectId source = a.id;
+  const std::int32_t damage = blow_damage(world, a, defender);
+  // The dealer books damage only on a defender that is a unit, and credits
+  // it only to an attacker that is one (0x005117e7..0x005118b8); a kill's
+  // tally is booked for any defender (0x005118de).
+  const WorldObject* slot = world.find(defender.id);
+  const bool defender_unit = slot == nullptr || slot->state.flags.is_unit;
+  const PlayerId by = a.is_unit ? a.owner : kNoPlayer;
   const std::int32_t before = defender.health;
-  defender.health -= result.final_damage;
+  defender.health -= damage;
   // A building stops at zero and stays: see `dies_at_no_health`.
   const bool mortal = dies_at_no_health(world, world_bound_, defender.id);
   if (!mortal && defender.health < 0) defender.health = 0;
-  events_.push_back(CombatEvent{CombatEvent::Kind::strike, now, source, defender.id,
-                                result.final_damage, defender.health});
+  events_.push_back(
+      CombatEvent{CombatEvent::Kind::strike, now, source, defender.id, damage, defender.health});
   // Overkill is not counted: the number the original books is the victim's
   // health *delta*, and its new health is floored before the delta is taken.
   const std::int32_t removed = before - (defender.health < 0 ? 0 : defender.health);
@@ -1890,7 +1945,7 @@ void CombatSystem::hit(World& world, Combatant& defender, const DamageInputs& in
   const HeroSystem* heroes = killed ? hero_system_of(world) : nullptr;
   const std::int32_t victim_experience = heroes != nullptr ? heroes->experience(victim) : 0;
   if (killed) enter_dying(world, defender, now);
-  record_score(world, source, scored, removed, killed);
+  record_score(world, by, scored, defender_unit ? removed : 0, killed);
   // **Experience is paid for a kill, not for a blow** (0x00511550): the gain
   // is drawn after the score and before the killer's hook, and paid after it.
   // `docs/formats/unit-stats.md`, "What a blow pays".
@@ -2092,7 +2147,7 @@ void CombatSystem::strike(World& world, Combatant& attacker, Combatant& defender
     return;
   }
 
-  hit(world, defender, inputs_for(attacker, defender), attacker.id, now);
+  hit(world, defender, striker_of(attacker), now);
 }
 
 void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& defender,
@@ -2111,12 +2166,12 @@ void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& de
   // unit, which is what the dumps require of anything the hash can see.
   shot.id = world.spawn(NativeClass::catapult_shot, nullptr);
 
-  const DamageInputs in = inputs_for(attacker, defender);
-  shot.attack = in.attack;
-  shot.type = in.type;
-  shot.attacker_level = in.attacker_level;
+  const Striker a = striker_of(attacker);
+  shot.attack = a.attack;
+  shot.type = mine.damage_type;
+  shot.attacker_level = a.level;
   shot.splash_radius = mine.splash_radius;
-  shot.ignores_armour = in.ignores_armour;
+  shot.ignores_armour = a.ignores_armour;
 
   // Flight time from the ground distance at an invented constant speed. The
   // `shot_tan` / `shot_height` arc the data declares is not modelled: nothing
@@ -2149,20 +2204,21 @@ void CombatSystem::land(World& world, Projectile& shot, GameTime now) {
 
   Combatant* target = mutable_find(shot.target);
 
+  // **Labelled:** the striker is the shot's launch-time attack and level,
+  // where the original's landing (0x004d9bb0) re-reads the live shooter and
+  // does nothing for a dead one.
   const auto apply = [&](Combatant& victim) {
     const Combatant* shooter = shooter_now();
-    DamageInputs in;
-    in.attack = shot.attack;
-    in.type = shot.type;
-    in.armour = armour_of(victim, shot.type);
-    in.attacker_level = shot.attacker_level;
-    in.defender_level = effective_level(victim);
-    in.counter_percent =
-        shooter == nullptr
-            ? 100
-            : counters_.damage_percent(shooter->class_index, victim.class_index, counter_mode_);
-    in.ignores_armour = shot.ignores_armour;
-    hit(world, victim, in, shot.shooter, now);
+    const WorldObject* slot = world.find(shot.shooter);
+    Striker a;
+    a.id = shot.shooter;
+    a.owner = shooter == nullptr ? kNoPlayer : shooter->owner;
+    a.attack = shot.attack;
+    a.level = shot.attacker_level;
+    a.is_unit = slot == nullptr || slot->state.flags.is_unit;
+    a.shoots = true;
+    a.ignores_armour = shot.ignores_armour;
+    hit(world, victim, a, now);
   };
 
   if (target != nullptr && target->alive && target->action != Action::dying) apply(*target);
@@ -2600,7 +2656,7 @@ bool CombatSystem::blow(World& world, ObjectId id, ObjectId target, GameTime now
   } else if (training) {
     training_blow(world, *attacker, *defender, now);
   } else {
-    hit(world, *defender, inputs_for(*attacker, *defender), id, now);
+    hit(world, *defender, striker_of(*attacker), now);
   }
   // The original has one health field: a blow that lands on the timer,
   // outside this system's turn, is published at once rather than at the
@@ -2629,14 +2685,11 @@ void CombatSystem::training_blow(World& world, Combatant& attacker, Combatant& d
   const std::int32_t attack = attack_of(attacker);
   std::int32_t least = scale_percent(attack, constants_.min_percent_of_attackers_damage);
   if (least < constants_.min_damage) least = constants_.min_damage;
-  // The attack less the slash armour, scaled by the level difference
-  // (0x0050fe60). **Labelled:** the scale is this engine's level table,
-  // where the original builds its own of 101 steps (0x0050fd40).
-  const std::int32_t difference = effective_level(attacker) - effective_level(defender);
-  const std::int32_t percent =
-      constants_.level_difference.percent(difference < 0 ? -difference : difference);
-  const std::int64_t raw = static_cast<std::int64_t>(attack) - armour_of(defender, DamageType::slash);
-  std::int64_t value = raw * (difference < 0 ? 100 - percent : 100 + percent) / 100;
+  // The attack less the slash armour, scaled by the difference of the two
+  // stored levels, with no difficulty addend (0x005116e0..0x0051170b).
+  const std::int32_t difference = attacker.level - defender.level;
+  std::int32_t value =
+      constants_.level_difference.scale(attack - defender.stats.armour_slash, difference);
   if (value < least) value = least;
   if (value > cap) value = cap;
   if (value == 0) return;
