@@ -20,6 +20,7 @@
 // that dereferenced `CallContext::user` without checking would take the process
 // down on the first script that ran outside an embedder.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -40,6 +41,8 @@
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/objlist.hpp"
+#include "imperivm/core/sim/projection.hpp"
+#include "imperivm/core/sim/rng.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "test.hpp"
@@ -977,6 +980,134 @@ TEST(exec_cmd_never_replaces_with_a_train_row) {
   CHECK(f.verbs(barracks) == std::vector<std::string>{"move"});
 }
 
+/// The issue's per-actor spread of an `offset` row (0x004e81f0), staged on a
+/// map of 2,048 square with no relief so the camera's rectangle is known: x
+/// 0..2015, and y from the top corners' unprojection to the bottom ones'.
+///
+/// `ObjList::ExecCmd` (0x0055e240) anchors it on the list's mean (0x004cd1b0):
+/// the `posRH` of each handle that names something -- a held unit's is where
+/// its holder stands -- divided by how many did. Each member off the map's
+/// holders keeps its offset from that mean; a held one takes `Range(-r, r)` on
+/// `x` and then on `y` from the world's generator, `r = 45 * isqrt(n - 1)`
+/// with `n` the list's handles, the one that names nothing included; and each
+/// point is held inside the rectangle.
+struct SpreadBench : Fixture {
+  MovementSystem movement;
+  HostRegistry registry;
+  ObjectId a = kNoObject;
+  ObjectId b = kNoObject;
+  ObjectId c = kNoObject;
+  ObjectId held = kNoObject;
+  ObjectId tower = kNoObject;
+
+  SpreadBench() {
+    movement.set_grid(ObstructionGrid(128, 128));
+    world.add_system(&movement);
+    CommandTable table;
+    (void)table.merge(bytes(kCommandsXml));
+    // The same method through a row without the flag.
+    (void)table.merge(bytes(R"(<commands><cmd name="walk" method="move"/></commands>)"));
+    commands.set_table(std::move(table));
+    register_command_host(registry);
+    a = spawn(unit_class, Point{100, 100});
+    b = spawn(unit_class, Point{300, 100});
+    c = spawn(unit_class, Point{500, 400});
+    tower = spawn(rock_class, Point{700, 700});
+    held = spawn(unit_class, Point{900, 900});
+    REQUIRE(world.put_in_holder(held, tower));
+  }
+
+  void exec(Value receiver, std::string_view row, Point at, Value target = Value::nil()) {
+    HostCall call(world,
+                  {receiver, Value::string(std::string(row)), pack_point(at), target, Value::boolean(false)});
+    REQUIRE(invoke(registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
+  }
+  Value list_of(std::vector<ObjectId> ids) {
+    ObjListPool& pool = objlist_pool_of(world);
+    const ObjListId list = pool.acquire(1, 0);
+    *pool.mutable_items(list) = std::move(ids);
+    return make_objlist_value(list);
+  }
+  Point point_of(ObjectId id) const { return commands.find(id)->entries.back().point; }
+  std::int32_t map_top() const { return screen_to_world(world, Point{0, 0}).y; }
+  std::int32_t map_bottom() const {
+    const std::int32_t sb = project_scale(2047) - 255 - 32;
+    return std::max(screen_to_world(world, Point{0, sb}).y,
+                    screen_to_world(world, Point{2047 - 32, sb}).y);
+  }
+};
+
+TEST(obj_list_exec_cmd_spreads_an_offset_row_about_the_lists_mean) {
+  SpreadBench f;
+  // Five handles, one naming nothing: the mean is over the four that do, the
+  // held unit's counted where its tower stands, (1600, 1300) / 4.
+  const ObjectId nobody = 4000;
+  REQUIRE(f.world.find(nobody) == nullptr);
+  const Value list = f.list_of({f.a, f.b, nobody, f.held, f.c});
+  Rng expected = f.world.rng();
+  const std::int32_t dx = expected.between(-90, 90);  // 45 * isqrt(5 - 1)
+  const std::int32_t dy = expected.between(-90, 90);
+  REQUIRE((Point{dx, dy}) != (Point{0, 0}));
+  f.exec(list, "move", Point{1000, 800});
+  CHECK(f.point_of(f.a) == (Point{700, 575}));
+  CHECK(f.point_of(f.b) == (Point{900, 575}));
+  CHECK(f.point_of(f.c) == (Point{1100, 875}));
+  // The held unit's jitter: x first, then y, and those two draws only.
+  CHECK(f.point_of(f.held) == (Point{1000 + dx, 800 + dy}));
+  CHECK(f.world.rng() == expected);
+
+  // A row without the flag hands everyone the point itself, and draws nothing.
+  const Rng before = f.world.rng();
+  f.exec(list, "walk", Point{1000, 800});
+  CHECK(f.point_of(f.a) == (Point{1000, 800}));
+  CHECK(f.point_of(f.held) == (Point{1000, 800}));
+  CHECK(f.world.rng() == before);
+
+  // An object the class takes is the object form: no point, so no spread and
+  // no draw even for the held member.
+  f.exec(list, "move", Point{1000, 800}, obj(f.tower));
+  CHECK(f.commands.find(f.held)->entries.back().object == f.tower);
+  CHECK(f.world.rng() == before);
+}
+
+TEST(an_offset_rows_spread_point_is_held_inside_the_cameras_map_rectangle) {
+  SpreadBench f;
+  // Two members about (200, 100). West and below the map: the west one's x to
+  // the left side, both y to the rectangle's bottom.
+  const Value pair = f.list_of({f.a, f.b});
+  f.exec(pair, "move", Point{50, 1900});
+  REQUIRE(f.map_bottom() < 1900 - 100);
+  CHECK(f.point_of(f.a) == (Point{0, f.map_bottom()}));
+  CHECK(f.point_of(f.b) == (Point{150, f.map_bottom()}));
+  // East and above: x to 2047 - 32, y to the top.
+  f.exec(pair, "move", Point{2000, -40});
+  CHECK(f.point_of(f.a) == (Point{1900, f.map_top()}));
+  CHECK(f.point_of(f.b) == (Point{2015, f.map_top()}));
+  // Inside, it goes as the offset made it, bottom row included.
+  f.exec(pair, "move", Point{1000, f.map_bottom() - 1});
+  CHECK(f.point_of(f.b) == (Point{1100, f.map_bottom() - 1}));
+  // A row without the flag is not clamped at all.
+  f.exec(pair, "walk", Point{5000, -40});
+  CHECK(f.point_of(f.a) == (Point{5000, -40}));
+}
+
+TEST(obj_exec_cmd_anchors_the_spread_on_its_receiver) {
+  // `Obj::ExecCmd` (0x005b5470) writes its receiver's own position as the
+  // anchor: the one actor keeps the point, clamped into the map; a held one
+  // is a list of one, `r = 45 * isqrt(0)`, and `Range(0, 0)` draws nothing.
+  SpreadBench f;
+  f.exec(obj(f.b), "move", Point{1000, 800});
+  CHECK(f.point_of(f.b) == (Point{1000, 800}));
+  f.exec(obj(f.b), "move", Point{5000, -40});
+  CHECK(f.point_of(f.b) == (Point{2015, f.map_top()}));
+  const Rng before = f.world.rng();
+  f.exec(obj(f.held), "move", Point{5000, 800});
+  CHECK(f.point_of(f.held) == (Point{2015, 800}));
+  CHECK(f.world.rng() == before);
+  f.exec(obj(f.b), "walk", Point{5000, -40});
+  CHECK(f.point_of(f.b) == (Point{5000, -40}));
+}
+
 TEST(an_order_ends_a_resting_idle_and_waits_behind_anything_else) {
   // `ES_STRONGHOLD.VS` trains an army with `barrack.ExecCmd(cmd, pt, obj,
   // false)`, up to five times, on a barracks whose `idle` is `BARRACK_IDLE.VS`
@@ -1524,6 +1655,30 @@ struct RunFixture : Fixture {
 };
 
 }  // namespace
+
+/// The spread is drawn on the way to the point form, before the form is
+/// looked up (0x004ef827..0x004ef855): a held member of a class whose method
+/// takes no point still spends its two draws, and is given the bare form.
+TEST(an_offset_rows_jitter_is_drawn_even_for_an_actor_that_takes_no_point) {
+  RunFixture f;
+  REQUIRE(f.add_script("// void, Obj me\nSleep(500);\n", "data/subai/unit_move.vs"));
+  const ObjectId a = f.spawn(f.unit_class, Point{100, 100});
+  const ObjectId tower = f.spawn(f.rock_class, Point{700, 700});
+  const ObjectId held = f.spawn(f.unit_class, Point{900, 900});
+  REQUIRE(f.world.put_in_holder(held, tower));
+  ObjListPool& pool = objlist_pool_of(f.world);
+  const ObjListId list = pool.acquire(1, 0);
+  *pool.mutable_items(list) = {a, held};
+  Rng expected = f.world.rng();
+  (void)expected.between(-45, 45);  // 45 * isqrt(2 - 1)
+  (void)expected.between(-45, 45);
+  HostCall call(f.world, {make_objlist_value(list), Value::string("move"),
+                          pack_point(Point{1000, 800}), Value::nil(), Value::boolean(false)});
+  REQUIRE(invoke(f.registry, CallKind::member, "ExecCmd", 4, call).status == HostStatus::ok);
+  REQUIRE(f.commands.find(held) != nullptr);
+  CHECK(f.commands.find(held)->entries.back().arg_kind == CommandArgKind::none);
+  CHECK(f.world.rng() == expected);
+}
 
 /// **A command's script is compiled on first use, and before this nothing
 /// compiled it.**
