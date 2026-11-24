@@ -938,3 +938,256 @@ TEST(fog_a_diplomacy_order_granting_view_merges_too) {
   CHECK(b.is_explored(pt(6000, 1500), 1));
   CHECK(!b.is_explored(pt(6000, 1500), 2));
 }
+
+// --------------------------------------------------------------------------
+// the two stamps, as 0x00517ad0 and 0x00516450 write them
+// --------------------------------------------------------------------------
+
+namespace {
+
+std::int32_t fine_value(const ExplorationMap& map, std::int32_t cx, std::int32_t cy,
+                        std::int32_t slot, std::int32_t i, std::int32_t j) {
+  const ExplorationMap::FineRecord* record = map.fine(cx, cy, slot);
+  if (record == nullptr) return -1;
+  return record->values[static_cast<std::size_t>(j) * ExplorationMap::kFineSide +
+                        static_cast<std::size_t>(i)];
+}
+
+ClassGraph one_unit_class(std::int32_t sight) {
+  ClassGraph graph;
+  const std::string doc = R"(<class id="Scout" cpp_class="CVXUnit"><properties sight=")" +
+                          std::to_string(sight) + R"("/></class>)";
+  CHECK(graph.add(bytes_of(doc), "scout.sc.xml").ok());
+  graph.link();
+  return graph;
+}
+
+}  // namespace
+
+TEST(fog_the_small_stamps_brush_is_a_table_sixteen_units_a_sample) {
+  ExplorationMap map;
+  // n = 30 is a sight of 400: (400 + 48) / 16 + 2. w = min(7, n).
+  const std::vector<std::int32_t>& t = map.brush(30);
+  REQUIRE(t.size() == 61u * 61u);
+  const auto at = [&](std::int32_t a, std::int32_t b) {
+    return t[static_cast<std::size_t>((30 + a) * 61 + (30 + b))] >> 9;
+  };
+  CHECK(at(0, 0) == 15);
+  CHECK(at(22, 0) == 15);   // nearer than n - w = 23
+  CHECK(at(23, 0) == 15);   // the ramp's first sample: 7 * 15 / 7
+  CHECK(at(24, 0) == 12);   // 6 * 15 / 7
+  CHECK(at(0, -27) == 6);   // 3 * 15 / 7, every quadrant
+  CHECK(at(28, 0) == 4);
+  CHECK(at(-28, 1) == 4);   // d = 28.02
+  CHECK(at(27, 1) == 6);    // d = 27.02
+  CHECK(at(30, 0) == 0);    // d = n
+  CHECK(at(21, 21) == 0);   // d = 29.7: (30 - 29.7) * 15 / 7 truncates to 0
+  CHECK(at(20, 21) == 2);   // d = 29: 15 / 7
+  // A table too small for the flat band: w = n, everything ramps.
+  const std::vector<std::int32_t>& small = map.brush(5);
+  CHECK((small[static_cast<std::size_t>(5 * 11 + 5)] >> 9) == 15);
+  CHECK((small[static_cast<std::size_t>(5 * 11 + 6)] >> 9) == 12);  // 4 * 15 / 5
+  CHECK(&map.brush(30) == &t);  // kept, not rebuilt
+}
+
+TEST(fog_a_unit_stamp_reads_the_brush_bilinearly_and_never_fills_a_cell) {
+  ExplorationMap map;
+  map.resize(8192);
+  // On the 16-unit grid of the table: every lattice point is a sample.
+  map.explore_sight(pt(2048, 2048), 400, 1u);
+  CHECK(map.state(2, 2, 0) == ExplorationMap::State::partial);  // never 3
+  CHECK(fine_value(map, 2, 2, 0, 0, 0) == 15);
+  CHECK(fine_value(map, 2, 2, 0, 11, 0) == 15);  // 352 out
+  CHECK(fine_value(map, 2, 2, 0, 12, 0) == 12);  // 384 out
+  CHECK(fine_value(map, 2, 2, 0, 14, 0) == 4);   // 448 out
+  CHECK(fine_value(map, 2, 2, 0, 15, 0) == 0);   // 480 out
+  CHECK(fine_value(map, 1, 2, 0, 18, 0) == 4);   // 448 the other way
+  CHECK(map.state(1, 1, 0) == ExplorationMap::State::partial);
+  CHECK(map.state(3, 2, 0) == ExplorationMap::State::never);
+  // The rim reaches past the sight: the ramp ends at 16 n = 480.
+  CHECK(map.explored(pt(2048 + 470, 2048), 0));
+  CHECK(!map.explored(pt(2048 + 490, 2048), 0));
+
+  // Eight units off the grid: the lattice point at 448 is read half-way
+  // between the samples 27 (6) and 28 (4).
+  ExplorationMap off;
+  off.resize(8192);
+  off.explore_sight(pt(2056, 2048), 400, 1u);
+  CHECK(fine_value(off, 2, 2, 0, 14, 0) == 5);
+  // The first lattice point of the box is the multiple of 32 at or after its
+  // edge 16 inside the table (1592 here), not the one before it: (1568, 2048)
+  // is outside and keeps nothing.
+  CHECK(fine_value(off, 1, 2, 0, 17, 0) == 0);
+  CHECK(fine_value(off, 1, 2, 0, 18, 0) == 3);  // (1600, 2048): between 2 and 4
+}
+
+TEST(fog_a_unit_stamp_gives_a_grazed_cell_an_empty_record_and_stops_at_three_cells) {
+  // The box `pt ± 448` meets cell (0, 0); the brush's reach does not.
+  ExplorationMap map;
+  map.resize(8192);
+  map.explore_sight(pt(1400, 1400), 400, 1u);
+  CHECK(map.state(0, 0, 0) == ExplorationMap::State::partial);
+  const ExplorationMap::FineRecord* record = map.fine(0, 0, 0);
+  REQUIRE(record != nullptr);
+  CHECK(std::all_of(record->values.begin(), record->values.end(),
+                    [](std::uint8_t v) { return v == 0; }));
+  CHECK(!map.explored(pt(1000, 1000), 0));
+
+  // A sight of 1000 ten units into cell 2 reaches into cell 0, which is not
+  // one of the three by three the stamp walks.
+  ExplorationMap wide;
+  wide.resize(8192);
+  wide.explore_sight(pt(2058, 2048), 1000, 1u);
+  CHECK(wide.state(1, 2, 0) == ExplorationMap::State::partial);
+  CHECK(wide.state(0, 2, 0) == ExplorationMap::State::never);
+
+  // The mask's low byte, every bit of it; a slot past the eighth has none.
+  ExplorationMap two;
+  two.resize(8192);
+  two.explore_sight(pt(2048, 2048), 400, 0x105u);
+  CHECK(two.state(2, 2, 0) == ExplorationMap::State::partial);
+  CHECK(two.state(2, 2, 1) == ExplorationMap::State::never);
+  CHECK(two.state(2, 2, 2) == ExplorationMap::State::partial);
+  // A radius of zero stamps nothing.
+  ExplorationMap none;
+  none.resize(8192);
+  none.explore_sight(pt(2048, 2048), 0, 1u);
+  CHECK(none.state(2, 2, 0) == ExplorationMap::State::never);
+}
+
+TEST(fog_a_unit_stamp_past_a_cell_is_the_large_one) {
+  ExplorationMap map;
+  map.resize(16384);
+  map.explore_sight(pt(5120, 5120), 2060, 1u);
+  CHECK(map.state(5, 5, 0) == ExplorationMap::State::full);
+  ExplorationMap edge;
+  edge.resize(16384);
+  edge.explore_sight(pt(5632, 5632), 1025, 1u);
+  CHECK(edge.state(5, 5, 0) == ExplorationMap::State::full);
+  ExplorationMap last;
+  last.resize(16384);
+  last.explore_sight(pt(5632, 5632), 1024, 1u);
+  // 1024 is still the unit stamp's: its brush reaches 16 n = 1104 out, past
+  // the large stamp's R = 1072. (The cell it stands in is all fifteens and
+  // reads as full by the labelled equivalence.)
+  CHECK(fine_value(last, 6, 5, 0, 18, 16) == 2);   // 1088 out
+  CHECK(fine_value(edge, 6, 5, 0, 18, 16) == 0);
+}
+
+TEST(fog_the_large_stamp_skips_a_cell_only_its_rim_reaches_and_blends_four_corners) {
+  // r = 2060: the cell (7, 5) meets R = 2108 and not r - 48 = 2012, and is
+  // left as it was, though its nearest point is 2048 away.
+  ExplorationMap map;
+  map.resize(16384);
+  map.explore_circle(pt(5120, 5120), 2060, 0);
+  CHECK(map.state(7, 5, 0) == ExplorationMap::State::never);
+  CHECK(!map.explored(pt(7170, 5120), 0));
+  CHECK(map.state(5, 5, 0) == ExplorationMap::State::full);
+  CHECK(map.state(6, 5, 0) == ExplorationMap::State::partial);
+  // A cell the inner circle meets through an edge, every corner outside it:
+  // the centre's y is inside the cell's rows and its x within reach of the
+  // near edge (2048 against r - 48 = 2060), the nearest corner 2110 away.
+  ExplorationMap arm;
+  arm.resize(16384);
+  arm.explore_circle(pt(5120, 5632), 2108, 0);
+  CHECK(arm.state(7, 5, 0) == ExplorationMap::State::partial);
+
+  // The rim's value at (6624, 5120) from a centre eight units off the
+  // 16-unit grid: the ramp at 1496 is 8 and at 1528 is 3, blended at 8/16.
+  ExplorationMap rim;
+  rim.resize(16384);
+  rim.explore_circle(pt(5128, 5120), 1500, 0);
+  CHECK(fine_value(rim, 6, 5, 0, 15, 0) == 6);
+  // On the grid it is the ramp itself.
+  ExplorationMap grid;
+  grid.resize(16384);
+  grid.explore_circle(pt(5120, 5120), 1500, 0);
+  CHECK(fine_value(grid, 6, 5, 0, 14, 0) == 11);  // 1472 out: 76 * 15 / 96
+}
+
+TEST(fog_a_unit_stamps_on_a_move_or_an_owner_change_and_not_on_a_sight_change) {
+  const ClassGraph graph = one_unit_class(400);
+  Bench b;
+  b.world.set_class_graph(&graph);
+  const ObjectId scout = b.world.spawn(NativeClass::unit, nullptr, graph.find("Scout"));
+  REQUIRE(b.world.set_owner(scout, 0));
+  REQUIRE(b.world.set_position(scout, pt(4096, 4096)));
+  b.world.advance(400);
+  CHECK(b.is_explored(pt(4096 + 300, 4096), 1));
+  CHECK(!b.is_explored(pt(4096 + 900, 4096), 1));
+  // A sight widened in place stamps nothing by itself.
+  b.world.find(scout)->sight = 1000;
+  b.world.advance(400);
+  CHECK(!b.is_explored(pt(4096 + 900, 4096), 1));
+  // A move does, at the sight it has then.
+  REQUIRE(b.world.set_position(scout, pt(4128, 4096)));
+  b.world.advance(400);
+  CHECK(b.is_explored(pt(4096 + 900, 4096), 1));
+  // An owner change does, for the new owner, standing still.
+  CHECK(!b.is_explored(pt(4096, 4096), 2));
+  REQUIRE(b.world.set_owner(scout, 1));
+  b.world.advance(400);
+  CHECK(b.is_explored(pt(4096, 4096), 2));
+  // A share of view granted afterwards restamps nothing through the sweep.
+  b.world.players().set(1, 2, Relation::share_view, true);
+  b.world.advance(400);
+  CHECK(!b.is_explored(pt(4096, 4096), 3));
+}
+
+TEST(fog_a_primed_world_restamps_nothing_until_an_object_moves) {
+  const ClassGraph graph = one_unit_class(400);
+  Bench b;
+  b.world.set_class_graph(&graph);
+  const ObjectId scout = b.world.spawn(NativeClass::unit, nullptr, graph.find("Scout"));
+  REQUIRE(b.world.set_owner(scout, 0));
+  REQUIRE(b.world.set_position(scout, pt(4096, 4096)));
+  // What a load does: the map as saved, and every object taken as stamped.
+  b.fog.map().resize(8192);
+  b.fog.prime(b.world);
+  b.world.advance(400);
+  CHECK(!b.is_explored(pt(4096, 4096), 1));
+  REQUIRE(b.world.set_position(scout, pt(4128, 4096)));
+  b.world.advance(400);
+  CHECK(b.is_explored(pt(4096, 4096), 1));
+}
+
+TEST(fog_stamp_now_stamps_at_the_sight_it_is_given_and_the_sweep_does_not_again) {
+  const ClassGraph graph = one_unit_class(1500);
+  Bench b;
+  b.world.set_class_graph(&graph);
+  const ObjectId engine = b.world.spawn(NativeClass::unit, nullptr, graph.find("Scout"));
+  REQUIRE(b.world.set_owner(engine, 0));
+  REQUIRE(b.world.set_position(engine, pt(4096, 4096)));
+  b.world.players().set(0, 1, Relation::share_view, true);
+  b.fog.stamp_now(b.world, engine, 300);
+  b.world.advance(400);
+  CHECK(b.is_explored(pt(4096, 4096), 1));
+  CHECK(b.is_explored(pt(4096, 4096), 2));  // the owner's viewflags
+  CHECK(!b.is_explored(pt(4096 + 800, 4096), 1));
+}
+
+TEST(set_sight_widens_through_the_large_stamp_for_the_owners_viewflags) {
+  const ClassGraph graph = one_unit_class(400);
+  Bench b;
+  b.world.set_class_graph(&graph);
+  const ObjectId scout = b.world.spawn(NativeClass::unit, nullptr, graph.find("Scout"));
+  REQUIRE(b.world.set_owner(scout, 0));
+  REQUIRE(b.world.set_position(scout, pt(5120, 5120)));
+  b.world.players().set(0, 1, Relation::share_view, true);
+  CHECK(b.call(script::CallKind::member, "SetSight", 1,
+               {script::Value::object(kTypeObj, scout), script::Value::integer(1500)})
+            .status == script::HostStatus::ok);
+  // The large stamp fills the cell it stands in (the unit stamp never does),
+  // and for the player its owner shares its view with too.
+  CHECK(b.fog.map().state(5, 5, 0) == ExplorationMap::State::full);
+  CHECK(b.fog.map().state(5, 5, 1) == ExplorationMap::State::full);
+}
+
+TEST(fog_share_view_merges_through_the_unit_stamp) {
+  // 0x00564fa0 stamps through 0x00517ad0: a sight of 400 is the brush's, which
+  // reaches 448 out with a 4 where the large stamp's ramp is spent.
+  Bench b;
+  (void)seer(b, 1, pt(2048, 2048), 400);
+  CHECK(share_view(b, 2, 1, true).status == script::HostStatus::ok);
+  CHECK(fine_value(b.fog.map(), 2, 2, 0, 14, 0) == 4);
+}

@@ -1792,6 +1792,9 @@ Status GameSession::load(std::span<const std::byte> bytes, std::string_view map,
   // start's other raise (0x00526707), on a game-object field this engine
   // does not hold, which its new game does not model either.
   if (!impl.match.rules().exploration) impl.fog.map().explore_all();
+  // The original's load stamps nothing: every object is taken as stamped
+  // where it stands, so the next stamp is its next move.
+  impl.fog.prime(impl.world);
 
   // The two tables `create` built over the map's own settlement list, which a
   // skirmish map's is not: `start_match` made every `Mutable` placeholder into

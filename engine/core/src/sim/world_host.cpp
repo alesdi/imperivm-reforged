@@ -1328,9 +1328,11 @@ HostOutcome fn_place(CallContext& ctx) {
 ///
 /// The reveal is the one step reproduced by a different mechanism: this
 /// engine's `SetPos` does not explore, its fog is stamped by `FogSystem`, so
-/// the build sight goes straight to `explore_circle` on the player's slot,
-/// and a world with no fog or no `CONST.INI` value simply does not reveal --
-/// where the original's sight of 0 would not either.
+/// the build sight goes to `FogSystem::stamp_now` -- the unit stamp
+/// 0x00517ad0 the original's move makes, for the owner's `viewflags` -- which
+/// also keeps the sweep from stamping the site again at the class sight. A
+/// world with no `CONST.INI` value reveals nothing, as the original's sight
+/// of 0 would not.
 HostOutcome fn_place_catapult(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("PlaceCatapult: no world");
@@ -2316,10 +2318,11 @@ HostOutcome m_set_sight(CallContext& ctx) {
 
   if (want > slot->sight && slot->state.position != kHeldPosition) {
     if (FogSystem* fog = fog_system_of(*world); fog != nullptr) {
-      // The slot is the owner's, and `fog_slot_from_script` takes the 1-based
-      // number a script would pass -- so the owner goes in one-based.
-      fog->map().explore_circle(slot->state.position, want,
-                                fog_slot_from_script(slot->state.owner + 1));
+      // The large stamp (0x00516450, not the unit stamp), for the owner
+      // record's `viewflags` (`[[obj+0x70] + 0x14]`): its own slot and every
+      // slot it shares its view with.
+      fog->map().explore_circle_mask(slot->state.position, want,
+                                     fog_view_mask(*world, slot->state.owner));
     }
   }
   slot->sight = want;
@@ -6968,14 +6971,13 @@ ObjectId place_catapult(World& world, ClassIndex class_index, Point at, std::int
   if (EnvSystem* env = env_of(world); env != nullptr) {
     (void)env->constant("CatapultBuildSight", build_sight);
   }
-  // A sight of 0 stamps nothing -- `explore_circle` marks cell centres within
-  // the radius, and a site is never exactly on one -- so the test is an
-  // equivalence a fault survives; kept because it says what a missing value
-  // means.
-  if (build_sight > 0) {
-    if (FogSystem* fog = fog_system_of(world); fog != nullptr) {
-      fog->map().explore_circle(at, build_sight, fog_slot_from_script(player));
-    }
+  // The site's one stamp: the `SetPos` the original places it with is a move
+  // (0x005a8660), so the unit stamp 0x00517ad0 at the build sight for the
+  // owner's `viewflags`; the class sight it gets back afterwards stamps
+  // nothing until the engine moves or changes hands. `stamp_now` takes it as
+  // stamped where it stands, so the sweep does not stamp it again.
+  if (FogSystem* fog = fog_system_of(world); fog != nullptr) {
+    fog->stamp_now(world, id, build_sight);
   }
 
   // The settlement. `is_central_building = 1` on `Catapult` is what makes a

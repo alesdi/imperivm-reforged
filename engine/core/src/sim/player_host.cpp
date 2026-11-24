@@ -3,6 +3,8 @@
 
 #include "imperivm/core/sim/player_host.hpp"
 
+#include <algorithm>
+#include <limits>
 #include <vector>
 
 #include "imperivm/core/game/class_graph.hpp"
@@ -11,10 +13,12 @@
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/fog.hpp"
 #include "imperivm/core/sim/hero.hpp"
+#include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/sim/query.hpp"
 #include "imperivm/core/sim/settlement.hpp"
+#include "imperivm/core/sim/spatial_index.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 
@@ -954,15 +958,19 @@ constexpr std::int32_t kSpecialSneak = 26;
 /// behaviour, and neither reading is transcribable, so an unresolvable player
 /// reveals nothing.
 ///
-/// **The circle is the scan's own** (0x004c7f70): the box of half-side `r`
-/// about the point, clipped to the map, its cells walked, and each object of a
-/// cell the circle only meets kept at `dist² <= r²`. So a radius of zero keeps
-/// what stands on the point itself -- not the whole map, which is what the
-/// engine's general radius query makes of zero -- and a negative one is what
-/// the walk over an inverted box makes of it (below). No shipped site passes
-/// either: two pass 570 and 500, and three `.sight`. The squares are taken
-/// wide here, where the original's are 32-bit and wrap for a radius past
-/// 46340 -- larger than any map. **No
+/// **The circle is the scan's own** (0x004c7f70), in its own 32-bit
+/// arithmetic: the box of half-side `r` about the point, clipped to the map,
+/// its 256-unit cells walked, each classified against the circle (0x00416810)
+/// -- a cell entirely inside keeps every object filed in it, one the edge
+/// crosses keeps those at `dist² <= r²`, one outside none. The square is the
+/// circle record's one `imul` (0x004c8460), and the distances' squares and
+/// sums are 32-bit too, so all of it wraps past a radius of 46340 the way
+/// the original's does. A radius of zero keeps what stands on the point
+/// itself -- not the whole map, which is what the engine's general radius
+/// query makes of zero -- and a negative one is what the walk over an
+/// inverted box makes of it: rows counted unsigned and columns while below
+/// their end, so it runs only when both ends of the box fall in one cell. No
+/// shipped site passes either: two pass 570 and 500, and three `.sight`. **No
 /// spawn-template test**: the scan never reads 0x8000000, so a hidden enemy
 /// template in the circle is revealed with the rest.
 ///
@@ -976,6 +984,54 @@ constexpr std::int32_t kSpecialSneak = 26;
 /// `TimeWithoutAttack` reaches 20000: a sneak a patrol has found stays found
 /// for the twenty seconds from that moment, as if it had just struck. A unit
 /// with no combat record has nothing to stamp, as for `SetLastAttackTime`.
+namespace {
+
+/// The map rectangle's inclusive high corner for the reveal scan's clip, or
+/// the largest coordinate when the world knows no map size.
+[[nodiscard]] std::int32_t reveal_map_high(const World& world) noexcept {
+  if (const MatchSystem* match = match_system_of(world); match != nullptr) {
+    if (match->rules().map_size > 0) return match->rules().map_size - 1;
+  }
+  const std::uint32_t extent = world.height().extent_x();
+  return extent > 0 ? static_cast<std::int32_t>(extent) - 1
+                    : std::numeric_limits<std::int32_t>::max();
+}
+
+/// 0x00416810: a rectangle (edges included) against the circle `{pt, r, r2}`,
+/// `r2` the record's own wrapped square. 2 when the farthest corner is within
+/// it, 0 when the two do not meet, 1 otherwise; in 32 bits, signed.
+[[nodiscard]] std::int32_t reveal_classify(Point pt, std::int32_t r, std::int32_t r2,
+                                           std::int32_t x0, std::int32_t y0, std::int32_t x1,
+                                           std::int32_t y1) noexcept {
+  const auto wrap = [](std::uint32_t v) { return static_cast<std::int32_t>(v); };
+  const auto u = [](std::int32_t v) { return static_cast<std::uint32_t>(v); };
+  const auto sub = [&](std::int32_t a, std::int32_t b) { return wrap(u(a) - u(b)); };
+  const auto add = [&](std::int32_t a, std::int32_t b) { return wrap(u(a) + u(b)); };
+  const auto sq = [&](std::int32_t a) { return wrap(u(a) * u(a)); };
+  const auto abs32 = [&](std::int32_t v) {
+    const std::uint32_t sign = v < 0 ? 0xffffffffu : 0u;
+    return wrap((u(v) ^ sign) - sign);
+  };
+  if (x1 < sub(pt.x, r) || add(r, pt.x) < x0 || y1 < sub(pt.y, r) || add(r, pt.y) < y0) {
+    return 0;
+  }
+  const std::int32_t ax0 = abs32(sub(pt.x, x0));
+  const std::int32_t ax1 = abs32(sub(pt.x, x1));
+  const std::int32_t ay0 = abs32(sub(pt.y, y0));
+  const std::int32_t ay1 = abs32(sub(pt.y, y1));
+  const std::int32_t far_x = std::max(ax0, ax1);
+  const std::int32_t near_x = std::min(ax0, ax1);
+  const std::int32_t far_y = std::max(ay0, ay1);
+  const std::int32_t near_y = std::min(ay0, ay1);
+  if (add(sq(far_y), sq(far_x)) <= r2) return 2;
+  if (add(sq(near_y), sq(near_x)) <= r2) return 1;
+  if (pt.x >= sub(x0, r) && pt.x <= add(x1, r) && pt.y >= y0 && pt.y <= y1) return 1;
+  if (pt.x >= x0 && pt.x <= x1 && pt.y >= sub(y0, r) && pt.y <= add(y1, r)) return 1;
+  return 0;
+}
+
+}  // namespace
+
 HostOutcome fn_reveal_hidden_enemy_units(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RevealHiddenEnemyUnits: no world");
@@ -991,34 +1047,61 @@ HostOutcome fn_reveal_hidden_enemy_units(CallContext& ctx) {
   // hidden unit of every player in the circle would be revealed.
   if (player == kNoPlayer) return HostOutcome::ok_void();
   const Point centre = unpack_point(ctx.arg(0));
-  std::int32_t radius = ctx.arg(1).as_integer();
-  if (radius < 0) {
-    // A negative half-side inverts the box. The cell walk then runs only when
-    // both of its ends fall in one 256-unit cell, column and row (the counts
-    // are `hi - lo + 1`, compared unsigned), and that cell, classified against
-    // the circle (0x00416810), is a partial one: its objects are kept at
-    // `dist² <= r²`, the circle of `|r|`. A box that crosses a cell edge walks
-    // nothing.
-    const std::int64_t reach = -static_cast<std::int64_t>(radius);
-    const auto cell = [](std::int64_t v) { return v / SpatialIndex::kCellSize; };
-    if (cell(centre.x - reach) != cell(centre.x + reach) ||
-        cell(centre.y - reach) != cell(centre.y + reach)) {
-      return HostOutcome::ok_void();
-    }
-    radius = static_cast<std::int32_t>(reach);
-  }
-  const std::int64_t reach2 = static_cast<std::int64_t>(radius) * radius;
+  const std::int32_t radius = ctx.arg(1).as_integer();
+  // The circle record 0x004c8460 builds: point, radius and the radius squared
+  // in one 32-bit `imul`, which wraps for a radius past 46340.
+  const auto wrap = [](std::uint32_t v) { return static_cast<std::int32_t>(v); };
+  const auto u = [](std::int32_t v) { return static_cast<std::uint32_t>(v); };
+  const std::int32_t r2 = wrap(u(radius) * u(radius));
+  // 0x004c7f70: the box `pt ± r` in 32 bits, clipped to the map rectangle
+  // `(0, 0, w-1, h-1)` (`[map+0xb4..0xc0]`), its 256-unit cells taken toward
+  // zero. The rows are counted unsigned (`hi - lo + 1`), the columns by a
+  // pointer that runs while below its end.
+  const std::int32_t high = reveal_map_high(*world);
+  const std::int32_t x0 = std::max(wrap(u(centre.x) - u(radius)), 0);
+  const std::int32_t y0 = std::max(wrap(u(centre.y) - u(radius)), 0);
+  const std::int32_t x1 = std::min(wrap(u(centre.x) + u(radius)), high);
+  const std::int32_t y1 = std::min(wrap(u(centre.y) + u(radius)), high);
+  const std::int32_t col_lo = x0 / SpatialIndex::kCellSize;
+  const std::int32_t col_hi = x1 / SpatialIndex::kCellSize;
+  const std::int32_t row_lo = y0 / SpatialIndex::kCellSize;
+  const std::int32_t row_hi = y1 / SpatialIndex::kCellSize;
+  // **A row count past the grid is a fault there and nothing here.** It
+  // happens only when the low edge's row is above the high edge's, compared
+  // unsigned -- a negative high row, which a negative radius larger than the
+  // point's own coordinate makes -- and the walk would read past the grid.
+  if (u(row_lo) > u(row_hi) || row_hi < 0) return HostOutcome::ok_void();
   std::vector<ObjectId> found;
-  world->objects_located_in_rect(centre.x - radius, centre.y - radius, centre.x + radius,
-                                 centre.y + radius, found);
+  for (std::int32_t row = row_lo; row <= row_hi; ++row) {
+    for (std::int32_t col = col_lo; col <= col_hi; ++col) {
+      const std::int32_t cx = col * SpatialIndex::kCellSize;
+      const std::int32_t cy = row * SpatialIndex::kCellSize;
+      // 0x00416810 against the cell's rectangle, one past its last unit:
+      // 0 outside, 1 the circle's edge crosses it, 2 entirely inside.
+      const std::int32_t where =
+          reveal_classify(centre, radius, r2, cx, cy, cx + SpatialIndex::kCellSize,
+                          cy + SpatialIndex::kCellSize);
+      if (where == 0) continue;
+      std::vector<ObjectId> here;
+      world->objects_located_in_rect(cx, cy, cx + SpatialIndex::kCellSize - 1,
+                                     cy + SpatialIndex::kCellSize - 1, here);
+      for (const ObjectId id : here) {
+        if (where == 1) {
+          const WorldObject* other = world->find(id);
+          if (other == nullptr) continue;
+          const std::int32_t dx = wrap(u(other->state.position.x) - u(centre.x));
+          const std::int32_t dy = wrap(u(other->state.position.y) - u(centre.y));
+          if (wrap(u(dx) * u(dx) + u(dy) * u(dy)) > r2) continue;
+        }
+        found.push_back(id);
+      }
+    }
+  }
   CombatSystem* combat = combat_system_of(*world);
   const GameTime now = world->time();
   for (const ObjectId id : found) {
     WorldObject* other = world->find(id);
     if (other == nullptr) continue;
-    const std::int64_t dx = static_cast<std::int64_t>(other->state.position.x) - centre.x;
-    const std::int64_t dy = static_cast<std::int64_t>(other->state.position.y) - centre.y;
-    if (dx * dx + dy * dy > reach2) continue;
     // The three tests the scan applies, in the order 0x004c80b2 applies them.
     if (!other->state.flags.hidden) continue;
     if (!other->state.flags.is_unit) continue;
