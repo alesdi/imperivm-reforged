@@ -479,7 +479,10 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// section (system section version 52) carries `SetGlobalBloodlust`'s byte,
 /// and no per-player level addend and no `ignores_armour`, which the match
 /// cache and the hero's Assault replace. A version-62 file has no bloodlust.
-inline constexpr std::uint32_t kStateVectorVersion = 63;
+/// 64: the combat section (system section version 53) drops the bloodlust
+/// again: it is a process global in the original, neither saved nor hashed
+/// (`sim/process.hpp`). A version-63 file carries a byte this one does not.
+inline constexpr std::uint32_t kStateVectorVersion = 64;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

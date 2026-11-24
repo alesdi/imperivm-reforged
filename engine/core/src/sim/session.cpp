@@ -99,6 +99,9 @@ struct GameSession::Impl : ScriptLibrary, ClassHookRunner, ObjectStarter {
 
   MovementSystem movement;
   CombatSystem combat;
+  /// The process globals when `SessionInputs::process` gave none: a fresh
+  /// process per session.
+  ProcessGlobals own_process;
   EconomySystem economy;
   FeederSystem feeder;
   HeroSystem hero;
@@ -670,6 +673,8 @@ Result<std::unique_ptr<GameSession>> GameSession::create(const script::HostRegis
   // on every map was a no-op.
   impl.command.set_library(&impl);
   impl.combat.set_class_graph(inputs.classes);
+  // The bloodlust is the process's, not the game's (`sim/process.hpp`).
+  impl.combat.set_process(inputs.process != nullptr ? inputs.process : &impl.own_process);
   // **The sixth.** `MoveState::speed` is documented as "copied in by the
   // loader" and no loader ever copied it, so every unit in every session had a
   // speed of zero: it would lay a path and walk none of it.

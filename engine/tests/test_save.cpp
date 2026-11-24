@@ -1119,7 +1119,8 @@ TEST(save_combat_section_round_trips) {
   CHECK(restored->bonus.armour_pierce == 7);
   CHECK(restored->bonus.max_health == -40);
   CHECK(restored->bonus.max_stamina == 90);
-  CHECK(fresh.bloodlust());
+  // The bloodlust is a process global, not the game's: not carried.
+  CHECK(!fresh.bloodlust());
   CHECK(fresh.combatants().size() == 2);
   // `Action` is not contiguous -- 0, 2, 3, 8 -- so a byte in one of its gaps is
   // a state no switch has an arm for and is refused rather than read as `idle`.
@@ -1134,6 +1135,49 @@ TEST(save_combat_section_round_trips) {
   }
   CombatSystem target;
   CHECK(!target.deserialize(corrupt).ok());
+}
+
+
+/// `SetGlobalBloodlust`'s byte is a process global in the original (the dword
+/// at 0x00996ae4, written only by 0x004c6610): no save writes it, no load
+/// resets it, and the state hash does not see it. So the section is the same
+/// bytes either way, the hash is the same either way, and a system that
+/// deserializes keeps the byte it had -- and a system given a process shares
+/// that process's byte.
+TEST(save_the_bloodlust_is_neither_saved_nor_hashed_and_outlives_a_load) {
+  CombatSystem combat;
+  std::vector<std::byte> off;
+  combat.serialize(off);
+  std::uint64_t off_hash = 0;
+  combat.hash(off_hash);
+  combat.set_bloodlust(true);
+  std::vector<std::byte> on;
+  combat.serialize(on);
+  std::uint64_t on_hash = 0;
+  combat.hash(on_hash);
+  CHECK(on == off);
+  CHECK(on_hash == off_hash);
+
+  // A load in the process that set it keeps it; a fresh one starts at zero.
+  REQUIRE(combat.deserialize(off).ok());
+  CHECK(combat.bloodlust());
+  CombatSystem fresh;
+  REQUIRE(fresh.deserialize(on).ok());
+  CHECK(!fresh.bloodlust());
+
+  // Two systems in one process see one byte, and it lives in the process.
+  ProcessGlobals process;
+  CombatSystem first;
+  CombatSystem second;
+  first.set_process(&process);
+  second.set_process(&process);
+  first.set_bloodlust(true);
+  CHECK(process.bloodlust);
+  CHECK(second.bloodlust());
+  REQUIRE(second.deserialize(off).ok());
+  CHECK(second.bloodlust());
+  second.set_bloodlust(false);
+  CHECK(!first.bloodlust());
 }
 
 TEST(save_economy_section_round_trips) {

@@ -699,6 +699,11 @@ class Application {
   std::unique_ptr<gamedata::Installation> install_;
   gamedata::MapPayloads payloads_;
   core::script::HostRegistry registry_;
+  /// What the original keeps for the life of the process -- the bloodlust --
+  /// and hands to every session this app builds, new game and load alike, so
+  /// a game loaded here keeps what the last one set (`sim/process.hpp`).
+  /// Declared before `session_`, which borrows it.
+  core::sim::ProcessGlobals process_;
   std::unique_ptr<core::sim::GameSession> session_;
   /// What the info bar shows, read from the data through the session. See
   /// `sim/infobar.hpp`; the app only carries its answer to the renderer.
@@ -2068,6 +2073,7 @@ bool Application::start_play() {
   localisation_spans_.clear();
   for (const std::vector<std::byte>& document : localisation_) localisation_spans_.emplace_back(document);
   inputs.localisations = localisation_spans_;
+  inputs.process = &process_;
   auto session = core::sim::GameSession::create(registry_, inputs, seed_);
   if (!session.ok()) {
     std::fprintf(stderr, "cannot build a session from %s (error %d)\n", args_.map.c_str(),

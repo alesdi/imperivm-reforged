@@ -472,9 +472,50 @@ name is the variant for a class whose `[class+0x2dc]` radius exceeds 20):
 8 SpikedArmor, 9 BleedingAttack, 10 Rage, 11 Revenge, 12 and 21
 OffensiveTactics, 13 Charge, 14 Penetration, 15 TripleStrike, 22 and 23
 AdditionalDefense, 26 Disease / Disease2. Each spawn (0x005183e0) creates a
-`CVXFeedback` object, puts it in the world and returns its handle, so **every
-effect takes an object handle**; the dealer's (lifetime argument 0) expire at
-once by their own timer, the disease visual (-1) never does.
+`CVXFeedback` object and returns its handle; the dealer's (lifetime argument
+0) expire by their own timer, the disease visual (-1) never does.
+
+**The feedback object takes an asynchronous handle** (round 17, batch 9).
+The original's handle table (pointers at 0x00a2a610, next links at
+0x00a0a608, 65,536 slots) holds two free lists, saved under the names
+`FirstFreeSync`, `LastFreeSync`, `FirstFreeAsync` and `LastFreeAsync`
+(0x0067b5f0). The synchronous list is slots 0..39,999 (built by 0x0067b510,
+taken by 0x0067b410), the asynchronous one 40,000..65,534 (0x0067b580,
+0x0067b480); a freed handle goes to the tail of its own list (0x0067b660),
+and a reset clears every slot and builds both lists again (0x0067b6e0). An
+object is given its handle in the innermost of its base constructors
+(0x00531840), from the synchronous list when its constructor asks for a
+synchronised object and the asynchronous one otherwise, and gives it none
+(0xffff) when it asks for no handle. A unit asks for the synchronous list
+(0x005d3170, through 0x005b4ca0); `CVXFeedback`'s constructor (0x005180d0,
+which 0x005183e0 runs) asks for the asynchronous one, and so does its load
+constructor (0x00518520). **A shot asks for none**: the missile's
+constructor (0x004d9740, which both shooters run, 0x005dc650 and
+0x004df650) passes no-handle to the same chain, and keeps the shooter's and
+the target's handles in its own words. It is also put on the second of the game's three
+thread managers, `[game+0x1298]`, where every other object is on
+`[game+0x1294]`; the game builds the three in 0x00525dd0, and only the
+first is given a checksum word (0x009a7058), which every message posted
+to one of its objects folds in (0x00688150). So **a feedback object moves
+neither the synchronous handles nor the checksum**: a unit or a shot spawned
+after a blow with a special takes the handle it would have taken without
+it.
+
+Its life: 0x005183e0 stores the expiry, the game clock `[game+0x1258]` plus
+the lifetime or -1 for none, at `[obj+0x80]`, the receiving unit's handle at
+`[obj+0x70]`, and posts message 0x13 to itself. That message's handler
+(0x005181b0, through `vtbl+0xc`, 0x005184b0) destroys the object once the
+clock reaches the expiry plus ten plus a duration it reads through
+0x0053cee0 (not followed), or when the unit's slot is empty; otherwise it
+moves to the unit, and posts itself 0x13 again after the delay at
+0x0082117c. Its `vtbl+0x54` (0x005182a0) destroys it as well once the expiry
+has passed or the unit answers that it is going. It is saved with the game
+(the load constructor) and lives on the unit only through the two handle
+words the unit keeps to destroy it: the disease visual's at `[unit+0x1c4]`,
+destroyed by the health store at full health (0x005d3a80), and the
+bless or curse visual's at `[unit+0x1c6]`, destroyed by the cure
+(0x005d4800, after it tests the object is a `CVXFeedback`). Nothing reads
+either word to decide anything else.
 
 ### The dealer after the call
 
@@ -538,15 +579,15 @@ For one blow, at most these, in this order:
 **The bloodlust** is a dword at 0x00996ae4. `SetGlobalBloodlust` (0x004c6610)
 stores its argument's low byte into it, zero-extended. Its only other
 references are the two reads in the calculator (0x00510b8a in C15,
-0x00510d4e in C20): no load, new game or save touches it, so it lives as
-long as the process.
+0x00510d4e in C20): no load, new game or save touches it, and no checksum
+folds it, so it lives as long as the process.
 
 ## What is still unknown
 
 * `[game+0xa0] == 1`: what game mode it marks (single-player is the guess).
 * `[stats+0x44]`: named here as `units_killed` by elimination only.
-* The bless/curse state is believed to be `Unit::Bless`/`Unit::Curse`'s
-  (0x005d4880 writes exactly these two bits), not followed further.
+* The duration 0x005181b0 adds to a feedback object's expiry, read through
+  0x0053cee0, was not followed.
 * The C42 duplicate test reads stale stack memory; its result is assumed
   "append".
 * Whether anything outside these two routines reads `[obj+0xe8]` in a fight
@@ -584,10 +625,33 @@ long as the process.
   stored level alone, as 0x00511c60 is (the power census and
   `effective_level_of` no longer add an addend).
 * **The bloodlust** (`CombatSystem::bloodlust`, set by
-  `SetGlobalBloodlust`). **A labelled departure: saved and hashed**, where the
-  original's process global is neither: a game loaded in the process that
-  saved it keeps the flag in the original, one loaded in a fresh process
-  starts without it. Here a loaded game is the game that was saved.
+  `SetGlobalBloodlust`): a process global, as the original's is
+  (`ProcessGlobals`, `sim/process.hpp`; round 17, batch 9). Neither saved nor
+  hashed, and a load leaves it as it was. The process is the `ProcessGlobals`
+  a session is given (`SessionInputs::process`): the app keeps one for its
+  life and gives it to every session it builds, so a game loaded in the app
+  keeps what the last one set, as the original does; a session given none
+  (`imrun`, `imconform`, `imsave`, the tests) is a fresh process and starts
+  at zero. Lockstep peers are each their own process, here as there: they
+  agree because the only writer, `STONEHENGE_BLOODLUST.VS`, runs on every
+  peer in lockstep. A peer whose process carried the byte in from an earlier
+  game, or a late joiner that starts at zero while the others are inside
+  the spell's sleep, plays different blows from the others without the hash
+  showing it -- which is the original's own behaviour.
+* **The feedback objects** (D5, D6, C41's disease visual, the curse's
+  visual): `BlowEffect` lists them and nothing is spawned. In the original
+  each takes an **asynchronous** handle on the asynchronous thread manager
+  (see the effect ids above), so neither the synchronous handles every
+  unit, building and shot takes nor the checksum moves; allocating them in
+  this engine's one handle space would put every later handle out of step.
+  What is not reproduced is the asynchronous space itself and the objects'
+  own life in it, which nothing in the simulation reads: presentation.
+* **A shot takes a handle here and none in the original** (0x004d9740, see
+  the effect ids above): `CombatSystem::strike` spawns each projectile as a
+  world object, so every later unit's handle runs one higher per shot than
+  the original's. Found in round 17, batch 9, and not changed there: the
+  shot's id keys its record and its save and hash, and taking it out of the
+  handle space is a port of its own.
 * **The dealer** (`CombatSystem::deal`, D1..D11): the training branch
   (`training_blow`), then the calculator; the curse lifted and the disease
   bit set as the calculator does; the score booked raw before the damage
@@ -607,13 +671,10 @@ long as the process.
 
 Not ported, and why:
 
-* **The feedback objects** (D5, D6, C41's disease visual, the curse's visual
-  that 0x005d4800 destroys): `BlowEffect` lists them and nothing is spawned,
-  as `CreateFeedback` spawns nothing. Each is a `CVXFeedback` that takes an
-  object handle in the original, so after a blow with a special the
-  original's next handles are higher than this engine's.
 * **The blessing** (C17): read, and never true, because nothing here writes
-  bit 0 (`Unit::Bless` is not bound).
+  bit 0. Its writer is `Unit::Bless` (0x005d9100, which runs 0x005d4880
+  with 1), and it has no shipped call site, so it is not bound; `Unit::Curse`
+  (0x005d90c0, the same worker with 0) is.
 * **The civilian immunity** (`[obj+0x2c] & 0x4000000`) in the damage
   routine: no such bit is carried.
 * **The building fire points** (D6 without a defender unit): presentation.
