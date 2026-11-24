@@ -415,3 +415,19 @@ TEST(ui_strips_a_combiners_cells_are_hit_as_its_two_strips) {
   CHECK(hit.index == 0);
   CHECK(strip_cell_at(layout, content, 605, 5).strip == nullptr);
 }
+
+/// The command row (0x006b3d60): each button and four pixels after it,
+/// centred in the bar, each button centred vertically against the taller of
+/// the bar and itself.
+TEST(ui_command_buttons_stand_four_pixels_apart_centred_in_the_bar) {
+  const Rect bar{100, 50, 600, 80};
+  const Rect cell{0, 0, 51, 51};
+  // Three buttons: a row of 3 * 55 = 165, so it starts at 100 + (600 - 165) / 2.
+  CHECK(command_button_rect(bar, cell, 0, 3).x == 100 + 217);
+  CHECK(command_button_rect(bar, cell, 1, 3).x == 100 + 217 + 55);
+  CHECK(command_button_rect(bar, cell, 2, 3).x == 100 + 217 + 110);
+  CHECK(command_button_rect(bar, cell, 0, 3).y == 50 + 14);
+  CHECK(command_button_rect(bar, cell, 0, 3).width == 51);
+  // A button taller than the bar stands at the bar's top.
+  CHECK(command_button_rect(Rect{0, 10, 600, 40}, cell, 0, 1).y == 10);
+}

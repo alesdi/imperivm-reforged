@@ -2667,7 +2667,15 @@ constexpr std::string_view kResearchXml = R"(<commands>
   <src obj="GArena1" sticky="yes"/>
   <src obj="Tavern" sticky="NO"/>
 </cmd>
-<cmd name="repair" costgold="50" execdelay="5000"/>
+<cmd name="Repair" costgold="1" method="Repair">
+  <src obj="RShed"/>
+</cmd>
+<cmd name="repair shed" costgold="50" execdelay="5000" method="repair">
+  <src obj="RShed"/>
+</cmd>
+<cmd name="repair shed cheaply" costgold="7" execdelay="5000" method="repair">
+  <src obj="RShed"/>
+</cmd>
 <cmd name="hireheroR" costgold="600" execdelay="20000" method="hirehero" param="RomanHero">
   <src obj="RTemple"/>
 </cmd>
@@ -3561,7 +3569,9 @@ TEST(get_train_gold_is_the_rows_gold_cost) {
     return out.value.is_integer() ? out.value.as_integer() : -1;
   };
   CHECK(gold(script::Value::string("Barrack Level 1")) == 400);
-  CHECK(gold(script::Value::string("barrack level 2")) == 800);  // the table's compare is case-blind
+  CHECK(gold(script::Value::string("Barrack Level 2")) == 800);
+  // The lookup has case (0x004e9000): another spelling is no row.
+  CHECK(gold(script::Value::string("barrack level 2")) == 0);
   CHECK(gold(script::Value::string("Nowhere")) == 1);
   CHECK(gold(script::Value::string("no such row")) == 0);
   CHECK(gold(script::Value::integer(7)) == 0);
@@ -4454,12 +4464,15 @@ TEST(reserve_for_writes_three_slots_and_refuses_another_research_while_one_runs)
   CHECK(store.read_string(scope, "ReserveFor2") == "Feast");
   CHECK(store.read_int(scope, "ReservedAt2") == 500);
 
-  // `StopReserving` clears the switch, so the same research reserves again,
-  // and the spelling stored is the script's, which is what it reads back.
+  // `StopReserving` clears the switch, so another research reserves. The
+  // name is the row's, byte for byte: the lookup has case (0x004e9000), so a
+  // spelling that differs in case names no row and answers false.
   CHECK(b.call("StopReserving", 0, {b.settlement_value()}).status == script::HostStatus::ok);
-  CHECK(reserve("fights", 10) == 1);
+  CHECK(reserve("fights", 10) == 0);
+  CHECK(store.read_int(scope, "Reserve2") == 0);
+  CHECK(reserve("Fights", 10) == 1);
   CHECK(store.read_int(scope, "Reserve2") == 10);
-  CHECK(store.read_string(scope, "ReserveFor2") == "fights");
+  CHECK(store.read_string(scope, "ReserveFor2") == "Fights");
   // The switch is `Reserve > 0`: a negative percentage is no reserve running,
   // so the same research reserves again rather than being refused.
   store.write_int(scope, "Reserve2", -5);
@@ -4523,15 +4536,15 @@ TEST(max_afford_count_and_can_afford_hold_the_reserve_back_from_gold) {
   // against the argument, so another spelling exempts nothing.
   store.write_string(scope, "ReserveFor2", "feast");
   CHECK(max_count("Feast") == 6);
-  // ...and it is the argument that is compared, not the row's spelling: the
-  // row lookup is case-blind, the exemption is not.
-  CHECK(max_count("feast") == 10);
-  // Both command forms of `CanAfford` compare the argument too (0x00428d40,
-  // 0x00428ba0): "feast" is exempt where the row's own "Feast" would not be.
-  CHECK(afford("feast", 10) == 1);
+  // ...and the argument that spelling would match names no row: the lookup
+  // has case too (0x004e9000), so it counts nothing.
+  CHECK(max_count("feast") == 0);
+  // Both command forms of `CanAfford` hold back from "Feast" the same way
+  // (0x00428d40, 0x00428ba0).
+  CHECK(afford("feast", 1) == 0);
   CHECK(afford("Feast", 7) == 0);
   b.set_store(450, 100000, 50);  // 450 - 400 held back < 100
-  CHECK(b.truth("CanAfford", {b.settlement_value(), script::Value::string("feast")}) == 1);
+  CHECK(b.truth("CanAfford", {b.settlement_value(), script::Value::string("feast")}) == 0);
   CHECK(b.truth("CanAfford", {b.settlement_value(), script::Value::string("Feast")}) == 0);
   b.set_store(1000, 100000, 50);
   store.write_string(scope, "ReserveFor2", "Feast");
@@ -4658,12 +4671,14 @@ TEST(check_tech_budget_is_a_share_of_army_store_and_technology) {
                                     script::Value::integer(50)}) == 0);
 }
 
-/// **`RepairAll` queues `repair` on every ruin whose class binds it, when the
-/// row is affordable, and charges nothing.**
+/// **`RepairAll` queues, on every affordable ruin, the first row its class
+/// offers whose method is `repair`.**
 ///
-/// 0x0042dec0: damage tier 3, a class command list with a row named `repair`,
-/// the count core with the reserve on gold and no exemption, then the
-/// `ExecDefaultCmd` core with the replace flag set.
+/// 0x0042dec0: damage tier 3, the first row on the class's offered list
+/// (`[class+0x1f8]`) whose `method=` is exactly `repair` -- so `Repair`, met
+/// first, is passed over, and `repair shed cheaply`, met after, is never
+/// reached -- the count core with the reserve on gold and no exemption, then
+/// the `ExecDefaultCmd` core with the replace flag set.
 TEST(repair_all_queues_repair_on_the_affordable_ruins_that_bind_it) {
   BarrackBench b;
   const EnvScope scope = EnvScope::for_settlement(b.town);
@@ -4727,6 +4742,7 @@ TEST(repair_all_queues_repair_on_the_affordable_ruins_that_bind_it) {
   REQUIRE(q != nullptr && q->running() != nullptr);
   CHECK(q->running()->cost_gold == 50);
   CHECK(q->running()->delay == 5000);
+  CHECK(q->running()->name == "repair shed");
 
   // The reserve holds gold back here too, and `repair` gets no exemption
   // even when it is the reserved name.
@@ -4736,7 +4752,7 @@ TEST(repair_all_queues_repair_on_the_affordable_ruins_that_bind_it) {
   store.write_int(scope, "Reserve2", 50);
   store.write_int(scope, "ReservedAt2", 0);
   store.write_int(scope, "GoldSpentOnArmy2", 120);  // 60 held: 40 left
-  store.write_string(scope, "ReserveFor2", "repair");
+  store.write_string(scope, "ReserveFor2", "repair shed");
   CHECK(repair_all());
   CHECK(verb(first) != "repair");
   CHECK(verb(second) != "repair");

@@ -151,9 +151,51 @@ on the same class, and a sticky `<src>` lets the walk go on. `Settlement::FindRe
 `Settlement::Research` and `CanResearch` (all through 0x0042d010) ask the offered list of
 each building's class (`[obj+0x3c]`) for the row's id. The shipped research rows carry no
 `<nsrc>` and no `sticky=`, so for them the index is the class tree under their `<src>`.
-`sim/command.cpp`'s `class_lists_command` is this walk; the command bar's own reading
-(`sim/cmdbar.cpp`) is the class tree under any `<src>`, with no `<nsrc>` above, and is not
-this index.
+`sim/command.cpp`'s `class_lists_command` is this walk; `CommandClassIndex` is the lists
+themselves, in the loader's order: a class's own entries by the `obj=` string's byte order
+and then by command id, then what it inherits, parent first. Each list inherits against
+itself, so a command a class offers with its own `<src>` and its parent files as sticky is
+on both of the class's lists.
+
+The index has three readers in `gbr.exe`. The lab finder above. The command bar's fill
+(0x005e7710; `docs/formats/interface-ini.md`, "What the command bar shows"), which reads
+both lists. And `Settlement::RepairAll` (0x0042dec0): for each of the settlement's buildings
+at damage tier 3, the first row on its class's offered list whose `method=` is exactly
+`repair` (a `std::string` compare against the six bytes), and no further -- the shipped
+`repair townhall`, `repair barracks`, `repairCTemple` and their siblings are each on their
+own building's list, so a ruin is repaired by its own row at its own price. The count is the
+affordability count inline on that row's costs (the head term first, then food, then gold
+less the reserve, no exemption), and a count of at least one issues the row on the building
+through 0x004efc00 with the replace flag set and the modifier clear. The default order
+(the right click) reads neither list; the class's `<defcmd>` blocks decide it.
+
+## Rows by name: an id each, and a lookup with case
+
+The loader keeps every `<cmd>`: each is appended under the next id (0x004ed2b0), whatever
+its name, so two rows of one name are two rows. The registry's lookup by name (vtable slot
+`+0x14`, 0x004e90b0 -> 0x004e9000) walks the rows in load order and answers the first whose
+name is the argument's bytes, compared with case and length; nothing on the way folds case.
+`Obj.ExecCmd` (0x005b5470), `GetCmdCost` (0x00425630), `CmdDisable` (0x005ab770), the
+settlement's research and affordability calls and every other script entry point that
+takes a command name reach the same lookup with the script's string as it stands.
+
+The shipped set has 404 rows with byte-unique names and one pair that differs only in
+case: `Restoration` in `DRUID HOUSE.XML`, the druid house's research, and `restoration` in
+`DRUID.XML`, the druid's ability. Each is its own row and each name finds its own:
+`Research("Restoration")` in `ESH_NEEDTECH.VS` finds the research, and the druid's
+`restoration` button issues the ability. The commands files are read in sorted name order,
+the pack's order, so `DRUID HOUSE.XML` comes first; with unique names the order decides
+only the ids, which are the class lists' order and so the command bar's tie order.
+
+`CommandTable` keeps every row under its id (`CommandDef::id`) in load order, and `find`
+answers the first row of exactly that name. The disabled-command sets compare a row's name
+exactly too: `CmdDisable` stores the row, and a row of another case is another row.
+
+A row is **one-time** (`[def+0]`) when `onetime=` is `yes` (without case), not when it is
+`no`, and otherwise when it is a research row, which a `plrresearch=` row always is
+(0x004f406d forces the research flag before 0x004f407c reads `onetime=`). No shipped row
+carries `onetime=`, so the one-time rows are the research rows. The command bar refuses a
+one-time row while it is in flight (`docs/formats/interface-ini.md`).
 
 ## An offset row's per-actor spread
 
@@ -218,12 +260,6 @@ for a unit the object form misses and the siege party spreads about the target's
   idle/taunt activity leaves the animation to run out.
 - **A holder that is not a ship's** passes the original a null `unboard` command when its
   class binds none; the engine gives it nothing (labelled at `group_move_set_up`).
-- **Two rows whose names differ only in case** are one row here: `CommandTable` folds case,
-  and the later file read replaces the earlier. The shipped set has one such pair,
-  `Restoration` (`DRUID HOUSE.XML`, a research) and `restoration` (`DRUID.XML`, the druid's
-  ability). The original gives each `<cmd>` its own id (0x004ed2b0) and files each one's
-  `<src>` under that id; whether its lookup by name folds case, and so which of the two a
-  `Research("Restoration")` finds, has not been traced.
 - **The interface's sub-lists** (0x004f1240): the engine's command bar and right click
   reach the issue one actor at a time with each actor's own point (`issue_order`), so they
   pass no anchor and an offset row is not spread there; the default order's own spread

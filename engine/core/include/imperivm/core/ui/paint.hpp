@@ -424,12 +424,12 @@ struct StripCellHit {
 // -- the command buttons -----------------------------------------------------
 //
 // `gbr.exe` builds up to `CmdBarMaxButtons` buttons at run time, each the
-// faction's frame around an icon chosen per row, and neither the file nor
-// the executable's data says where the row stands. **Reading, labelled:**
-// the row is centred in the bar, the buttons abutting -- the no-selection
-// menu is a 612-wide dialog the bar centres (0x006b3e00 computes
-// `(parent + 1 - child + 1) / 2` for a child), and this puts the two rows
-// in the same place. The frame strip is three states wide -- normal,
+// faction's frame around an icon chosen per row. The bar widget places the
+// ones it draws (0x006b3d60): the row is every drawn button's width plus
+// four pixels, centred in the bar (`left + (width - row) / 2`), each button
+// at the previous one's right edge plus four and centred vertically in the
+// bar; the cancel button, drawn alone while a row waits for its target, is
+// centred the same way. The frame strip is three states wide -- normal,
 // highlighted, pressed -- and so is every `button=` icon (153 x 51 over the
 // whole `UI/CmdBar/Actions` set); a disabled button draws the pressed
 // frame, which is the `ABCCC` reading the `Button` widgets declare.
@@ -437,6 +437,8 @@ struct StripCellHit {
 /// The size of one button, from the frame strip: a third of its width, its
 /// height. `{51, 52}` for every shipped faction.
 [[nodiscard]] Rect command_button_cell(ResourceCache& cache, const BarContent& content);
+/// The pixels after each command button (0x006b3d60's `+ 4`).
+inline constexpr std::int32_t kCommandButtonGap = 4;
 /// Where button `index` of `count` stands inside a bar of `bar`'s size.
 [[nodiscard]] Rect command_button_rect(const Rect& bar, const Rect& cell, std::size_t index,
                                        std::size_t count);

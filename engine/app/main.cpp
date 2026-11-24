@@ -7826,12 +7826,14 @@ void Application::refresh_infobar() {
 void Application::refresh_cmdbar() {
   if (session_ == nullptr || cmdbar_ == nullptr) return;
   buttons_ = cmdbar_->describe(local_player_);
-  // While a row waits for its target, the bar's own `CmdCancel` -- declared
-  // `HIDDEN` with no rectangle, for the code to place -- stands at the end
-  // of the row. **Reading, labelled:** where the original puts it is not
-  // read; the end of the row is where a button the row does not otherwise
-  // have goes without moving the others.
+  // While a row waits for its target, the bar shows its own `CmdCancel` --
+  // declared `HIDDEN` with no rectangle, for the code to place -- and nothing
+  // else: `gbr.exe`'s bar widget (0x006b3d60) draws the row's buttons only
+  // while no order is pending at the interface (`+0x11c`) or the pending one
+  // is a row with a non-zero `menu=` (none shipped), and otherwise hides
+  // every slot and centres the cancel button (widget 0x7003) in the bar.
   if (!pending_command_.empty()) {
+    buttons_.clear();
     if (const core::ui::Widget* cancel = ui_.bar_widget("CmdCancel")) {
       core::sim::CommandButton button;
       button.name = "CmdCancel";
@@ -8018,6 +8020,12 @@ void Application::press_button(std::int32_t index, core::sim::CommandBar::Keys k
     // The verdict now, the effect on the agreed turn.
     const core::sim::CommandBar::Press verdict = cmdbar_->check(local_player_, name);
     if (verdict == core::sim::CommandBar::Press::issued) {
+      // A one-time row already in flight is not posted again (0x005e6bd0).
+      if (!cmdbar_->post(name)) {
+        std::printf("command: %s is in flight\n", name.c_str());
+        bars_dirty_ = true;
+        return;
+      }
       core::sim::NetOrder order;
       const std::span<const core::ObjectId> selected =
           session_->selections().player(local_player_).ids();
