@@ -94,6 +94,7 @@
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/player.hpp"
+#include "imperivm/core/sim/process.hpp"
 #include "imperivm/core/sim/rng.hpp"
 #include "imperivm/core/sim/system.hpp"
 
@@ -527,9 +528,13 @@ inline constexpr std::uint32_t kCripple = 1u << 31;
 
 /// The feedback ids the calculator lists for the dealer to spawn on either
 /// side (the factory 0x00518650's table at 0x00821180). **Only listed here:**
-/// each spawn is a `CVXFeedback` object and takes a handle, which this engine
-/// does not allocate for any feedback (`CreateFeedback` stores nothing
-/// either); the list is what a test reads to see which special fired.
+/// each spawn is a `CVXFeedback` object, which takes its handle from the
+/// original's **asynchronous** free list (40,000 and up, 0x0067b480) and runs
+/// on the thread manager that has no checksum word -- so it moves neither
+/// the handles units take nor the hash, and this engine, which has one handle
+/// space, allocates nothing for it (`CreateFeedback` stores nothing either;
+/// docs/formats/blow.md, the effect ids). The list is what a test reads to
+/// see which special fired.
 enum class BlowEffect : std::uint8_t {
   heal = 0,
   experience = 2,
@@ -1216,9 +1221,19 @@ class CombatSystem final : public System {
 
   /// `SetGlobalBloodlust(bool)` (0x004c6610): the byte at 0x00996ae4 that the
   /// calculator's armour step (C20) and a missed shot's Penetration (C15)
-  /// read. See `bloodlust_`.
-  void set_bloodlust(bool on) noexcept { bloodlust_ = on; }
-  [[nodiscard]] bool bloodlust() const noexcept { return bloodlust_; }
+  /// read. **A process global** (`sim/process.hpp`): written through to the
+  /// `ProcessGlobals` this system was given, else to its own; neither saved
+  /// nor hashed, so a `deserialize` leaves it as it was.
+  void set_bloodlust(bool on) noexcept {
+    (process_ != nullptr ? process_->bloodlust : own_process_.bloodlust) = on;
+  }
+  [[nodiscard]] bool bloodlust() const noexcept {
+    return process_ != nullptr ? process_->bloodlust : own_process_.bloodlust;
+  }
+  /// The process this system's globals live in. Null (the default) is a
+  /// process of its own, which starts at zero. `GameSession::create` passes
+  /// `SessionInputs::process`, or the session's own. Not owned.
+  void set_process(ProcessGlobals* process) noexcept { process_ = process; }
 
   /// `SetExperienceModifier(player, percent)` -- the *Battle tactics* research,
   /// which `ONFINISH_RESEARCH.VS` completes with `GetConst(
@@ -1692,8 +1707,7 @@ class CombatSystem final : public System {
   /// its own magic and version -- the shape `Scheduler::serialize` established.
   ///
   /// **Written:** the combatants, the projectiles in flight, the pending event
-  /// list, the bloodlust flag, the alliance overrides that
-  /// `set_allied` records, `death_duration_`, `world_bound_` and `now_`. The
+  /// list, the alliance overrides that `set_allied` records, `death_duration_`, `world_bound_` and `now_`. The
   /// events are state rather than a log: a caller drains them with
   /// `clear_events`, so an undrained event is work still owed.
   void serialize(std::vector<std::byte>& out) const;
@@ -1706,7 +1720,8 @@ class CombatSystem final : public System {
   ///
   /// **Not restored:** `CombatConstants`, the class graph, the counter table
   /// and mode, and the `PlayerTable` pointer -- all rebuilt by whoever built
-  /// this system, from the same game data. Nor `profiles_`, which is a lazily
+  /// this system, from the same game data. Nor the bloodlust, a process
+  /// global (`set_process`), which a load leaves as it was. Nor `profiles_`, which is a lazily
   /// filled cache of the class graph and would be a second copy of game data
   /// that could disagree with the game data.
   [[nodiscard]] Status deserialize(std::span<const std::byte> bytes);
@@ -1838,13 +1853,11 @@ class CombatSystem final : public System {
   DamageFormulaParams params_{};
   BlowOutcome last_blow_{};
   std::int32_t favoured_addend_ = 0;
-  /// `SetGlobalBloodlust`'s byte (0x00996ae4). **Saved and hashed, a
-  /// labelled departure**: the original holds it in a process global that
-  /// neither a save writes nor a load resets, so a game loaded in the
-  /// process that saved it keeps the flag and one loaded in a fresh process
-  /// starts without it. This keeps the first: a loaded game is the game that
-  /// was saved.
-  bool bloodlust_ = false;
+  /// The process globals (`set_process`), and the ones used when none was
+  /// given. Neither is serialized or hashed: the original's bloodlust is a
+  /// process global that no save writes and no load resets.
+  ProcessGlobals* process_ = nullptr;
+  ProcessGlobals own_process_{};
   /// Sorted by player id. Turn state: research writes it mid-game.
   std::vector<std::pair<PlayerId, std::int32_t>> experience_modifiers_;
   /// Sorted pairs, low player first.

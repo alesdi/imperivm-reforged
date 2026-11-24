@@ -1906,7 +1906,7 @@ BlowOutcome CombatSystem::preview(World& world, ObjectId attacker, ObjectId defe
   pull_stamina(world, *a);
   pull_stamina(world, *d);
   const DamageFormulaParams& params = damage_formula_params(world);
-  const BlowRules rules{favoured_addend_, bloodlust_, now};
+  const BlowRules rules{favoured_addend_, bloodlust(), now};
   Rng copy = world.rng();
   return calculate_blow(blow_side(world, *a, params, now), blow_side(world, *d, params, now),
                         rules, constants_, copy);
@@ -2389,7 +2389,7 @@ void CombatSystem::deal(World& world, ObjectId attacker_id, ObjectId defender_id
   const DamageFormulaParams& params = damage_formula_params(world);
   const BlowSide a = blow_side(world, *attacker, params, now);
   const BlowSide d = blow_side(world, *defender, params, now);
-  const BlowRules rules{favoured_addend_, bloodlust_, now};
+  const BlowRules rules{favoured_addend_, bloodlust(), now};
   const BlowOutcome out = calculate_blow(a, d, rules, constants_, world.rng());
   last_blow_ = out;
   const PlayerId by = a.unit ? attacker->owner : kNoPlayer;
@@ -2409,8 +2409,9 @@ void CombatSystem::deal(World& world, ObjectId attacker_id, ObjectId defender_id
     }
   }
 
-  // D5, D6: the feedback objects are not spawned (see `BlowEffect`). The
-  // score, with a defender unit, before the damage and raw: `-p4` to the
+  // D5, D6: the feedback objects are not spawned (see `BlowEffect`): they
+  // take asynchronous handles in the original, which no unit's or shot's
+  // handle and no checksum sees. The score, with a defender unit, before the damage and raw: `-p4` to the
   // attacker unit's owner and to the defender's, negative after Gambler's
   // Luck and booked between allies alike.
   if (d.unit) {
@@ -2667,8 +2668,11 @@ void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& de
   shot.position = attacker.position;
   shot.launched = now;
 
-  // A shot is an object: it takes a handle in the same monotonic space as a
-  // unit, which is what the dumps require of anything the hash can see.
+  // A shot is an object here and takes a handle in the units' space. **The
+  // original's takes none** (0x004d9740 asks its base for no handle), so
+  // every later handle runs one higher per shot than gbr.exe's: a labelled
+  // departure until the shot leaves the handle space (blow.md, "This
+  // engine").
   shot.id = world.spawn(NativeClass::catapult_shot, nullptr);
 
   shot.attack = attack_of(attacker);
@@ -3339,12 +3343,12 @@ void CombatSystem::hash(std::uint64_t& accumulator) const {
     }
   };
   // Research writes this mid-game, so it is state and it moves the hash. The
-  // match cache is derived and is not folded; the bloodlust byte is state.
+  // match cache is derived and is not folded, and neither is the bloodlust,
+  // a process global the original keeps out of its hash (`set_process`).
   for (const auto& [player, percent] : experience_modifiers_) {
     fold(player);
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(percent)));
   }
-  fold(bloodlust_ ? 1u : 0u);
   // Fields the original hashes, in the dumps' own order. Not the profile cache
   // (load-time state) and not the event log (a report, not state).
   for (const Combatant& unit : units_) {

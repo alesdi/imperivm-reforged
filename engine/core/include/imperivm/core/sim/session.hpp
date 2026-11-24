@@ -55,6 +55,7 @@
 #include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/mutable_settlement.hpp"
 #include "imperivm/core/sim/orders.hpp"
+#include "imperivm/core/sim/process.hpp"
 #include "imperivm/core/sim/save.hpp"
 #include "imperivm/core/sim/world.hpp"
 
@@ -294,6 +295,12 @@ struct SessionInputs {
   /// which is a legitimate configuration: it isolates the systems from the VM
   /// so a conformance run can measure one without the other.
   ScriptResolver* scripts = nullptr;
+  /// The process this session runs in (`sim/process.hpp`): the globals the
+  /// original keeps for the life of the process, which no save carries and
+  /// no load or new game resets. Borrowed; must outlive the session. Null
+  /// gives the session its own, zeroed -- a fresh process -- which is what a
+  /// tool run and each of `imconform`'s lockstep peers is.
+  ProcessGlobals* process = nullptr;
 };
 
 /// What the templates' ground did to the map's layers at match start (or

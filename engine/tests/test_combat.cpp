@@ -1740,6 +1740,9 @@ TEST(a_striker_that_is_not_a_unit_stands_at_level_ten_and_a_hero_keeps_its_armou
 
   combat.set_bloodlust(true);
   CHECK(!combat.preview(world, p.a, p.b, 0).armour_met);
+  // And the dealt blow reads it as the preview does.
+  REQUIRE(next_blow(world, combat, p.a, p.b) > 0);
+  CHECK(!combat.last_blow().armour_met);
   world.mutable_state(p.b)->flags.is_hero = true;
   CHECK(combat.preview(world, p.a, p.b, 0).armour_met);
 }
@@ -4144,6 +4147,66 @@ TEST(the_obstruction_grid_keeps_a_rectangular_map_the_right_way_round) {
   // asserted so that the two checks above cannot be satisfied by a grid that is
   // merely larger than it should be.
   CHECK(move->grid().blocked(Point{8, 1000}));
+}
+
+/// The bloodlust through the session, where the process boundary is: the
+/// `ProcessGlobals` given as `SessionInputs::process` is the process, which the
+/// app keeps for its life; a session given none is a fresh process. Set by
+/// `SetGlobalBloodlust` (0x004c6610), the byte survives a load into the same
+/// session and into another session of the same process, does not reach a
+/// session of a fresh one, and moves neither the save nor the hash.
+TEST(the_bloodlust_is_the_processs_and_a_load_does_not_touch_it) {
+  script::HostRegistry registry;
+  register_all_hosts(registry);
+  ClassGraph graph = enrolment_graph();
+  ProcessGlobals process;
+  SessionInputs inputs;
+  inputs.classes = &graph;
+  inputs.map_objects = bytes_of(kEnrolmentMap);
+  inputs.process = &process;
+
+  auto made = GameSession::create(registry, inputs, /*seed=*/1);
+  REQUIRE(made.ok());
+  GameSession& run = *made.value();
+  const Result<std::vector<std::byte>> clean = run.save("test");
+  REQUIRE(clean.ok());
+  const std::uint64_t clean_hash = run.world().state_hash();
+
+  const std::uint32_t index =
+      registry.find(script::CallKind::free_function, "SetGlobalBloodlust", 1);
+  REQUIRE(index != script::kUnresolvedHost && registry.entry(index).fn != nullptr);
+  std::vector<script::Value> args = {script::Value::boolean(true)};
+  script::CallContext ctx;
+  ctx.arguments = args;
+  ctx.user = &run.host_context();
+  ctx.name = "SetGlobalBloodlust";
+  ctx.kind = script::CallKind::free_function;
+  (void)registry.entry(index).fn(ctx);
+  CHECK(process.bloodlust);
+  CHECK(run.world().state_hash() == clean_hash);
+  const Result<std::vector<std::byte>> lusty = run.save("test");
+  REQUIRE(lusty.ok());
+  CHECK(lusty.value() == clean.value());
+
+  // A load of a game saved before it was set, into the same session.
+  REQUIRE(run.load(clean.value(), "test").ok());
+  CHECK(combat_system_of(run.world())->bloodlust());
+
+  // A second session of the same process: a new game, then a load.
+  auto again = GameSession::create(registry, inputs, /*seed=*/1);
+  REQUIRE(again.ok());
+  CHECK(combat_system_of(again.value()->world())->bloodlust());
+  REQUIRE(again.value()->load(clean.value(), "test").ok());
+  CHECK(combat_system_of(again.value()->world())->bloodlust());
+
+  // A fresh process loads the same game without it -- and hashes alike.
+  SessionInputs elsewhere = inputs;
+  elsewhere.process = nullptr;
+  auto fresh = GameSession::create(registry, elsewhere, /*seed=*/1);
+  REQUIRE(fresh.ok());
+  REQUIRE(fresh.value()->load(lusty.value(), "test").ok());
+  CHECK(!combat_system_of(fresh.value()->world())->bloodlust());
+  CHECK(fresh.value()->world().state_hash() == again.value()->world().state_hash());
 }
 
 /// `HealStamina(n)` adds, clamps, refuses a negative -- and **fans out over a

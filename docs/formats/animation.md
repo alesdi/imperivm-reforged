@@ -313,8 +313,10 @@ Departures, each one for what the engine does not yet do:
   and the squad's clocks.
 * **The blow's feedback objects.** The blow itself (0x00511550, 0x0050ff30)
   is ported whole (`blow.md`, "This engine"), but the `CVXFeedback` objects
-  its dealer spawns for each special that fires are not, so the handles they
-  take in the original are not taken here.
+  its dealer spawns for each special that fires are not. They take
+  asynchronous handles in the original, apart from the ones units and shots
+  take, and move no checksum (`blow.md`, the effect ids), so not taking
+  them keeps this engine's handles in step: presentation only.
 
 ## The walk
 
