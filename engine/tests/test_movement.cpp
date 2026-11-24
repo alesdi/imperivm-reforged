@@ -25,6 +25,7 @@
 #include <string_view>
 #include <vector>
 
+#include "builder.hpp"
 #include "imperivm/core/formats/grid.hpp"
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/game/localization.hpp"
@@ -33,6 +34,7 @@
 #include "imperivm/core/sim/grid_search.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/movement.hpp"
+#include "imperivm/core/sim/projection.hpp"
 #include "imperivm/core/sim/objlist.hpp"
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/session.hpp"
@@ -3402,17 +3404,102 @@ TEST(face_and_set_pos_from_another_script_end_the_objects_commands) {
 /// The unit's own `SetPos` (0x005d39e0) takes a held unit out of its holder
 /// before it places it, unless the point is `(-1, -1)`.
 TEST(set_pos_takes_a_held_unit_out_of_its_holder) {
-  HostField f;
+  HostField f(open_field(128));
   const ObjectId tower = f.unit(Point{500, 500}, NativeClass::building);
   const ObjectId unit = f.unit(Point{500, 540});
   REQUIRE(f.world.put_in_holder(unit, tower));
-  CHECK(f.call("SetPos", {Value::object(kTypeObj, unit), pack_point(kHeldPosition)}).status ==
-        HostStatus::ok);
-  CHECK(f.world.state(unit)->is_held());
   CHECK(f.call("SetPos", {Value::object(kTypeObj, unit), pack_point(Point{800, 800})}).status ==
         HostStatus::ok);
   CHECK(!f.world.state(unit)->is_held());
   CHECK(position_of(f.world, unit) == (Point{800, 800}));
+
+  // `(-1, -1)` from a script is clamped like any point off the map
+  // (0x005ac130), so it too takes the unit out of its holder.
+  const ObjectId other = f.unit(Point{500, 540});
+  REQUIRE(f.world.put_in_holder(other, tower));
+  CHECK(f.call("SetPos", {Value::object(kTypeObj, other), pack_point(kHeldPosition)}).status ==
+        HostStatus::ok);
+  CHECK(!f.world.state(other)->is_held());
+  CHECK(position_of(f.world, other) == screen_to_world(f.world, Point{32, 32}));
+}
+
+/// `SetPos` clamps its point (0x005ac130) into the camera's map rectangle
+/// (0x00624100: the map's in screen space, its right 32 in and its bottom
+/// 255 + 32 up) less 32 on each side: in map space against that rectangle
+/// unprojected (0x006245b0), and for a point that was outside, again in
+/// screen space (0x00422b70) and unprojected (0x006243b0). On a flat field of
+/// 2,048 the screen rectangle is x 32..1983 and y 32..1128.
+TEST(set_pos_clamps_into_the_cameras_rectangle_less_32) {
+  HostField f(open_field(128));
+  const ObjectId unit = f.unit(Point{500, 500});
+  const auto set = [&](Point to) {
+    CHECK(f.call("SetPos", {Value::object(kTypeObj, unit), pack_point(to)}).status ==
+          HostStatus::ok);
+    return position_of(f.world, unit);
+  };
+  const std::int32_t bottom = project_scale(2047) - 255 - 32 - 32;
+  REQUIRE(bottom == 1128);
+  // Inside: as it came, even on the rectangle's edge.
+  CHECK(set(Point{700, 900}) == (Point{700, 900}));
+  CHECK(set(Point{32, 900}) == (Point{32, 900}));
+  // Off each side.
+  CHECK(set(Point{-500, 900}) == screen_to_world(f.world, Point{32, project_scale(900)}));
+  CHECK(set(Point{5000, 900}) == screen_to_world(f.world, Point{2047 - 64, project_scale(900)}));
+  CHECK(set(Point{700, -500}) == screen_to_world(f.world, Point{700, 32}));
+  // Below the bottom: clamped in map space to the bottom corners'
+  // unprojection, 1595; projected that is 1127, inside the screen rectangle,
+  // and unprojected again 1594 -- the integer chain's own answer.
+  REQUIRE(screen_to_world(f.world, Point{32, bottom}).y == 1595);
+  CHECK(set(Point{700, 2040}) == (Point{700, 1594}));
+  // The bottom cut is in screen units: some 450 of the map's last rows.
+  CHECK(position_of(f.world, unit).y < 2047 - 400);
+}
+
+/// The same clamp on ground that rises to the east, where unprojecting is
+/// not undoing a projection: the rectangle's top is the *higher* of its two
+/// top corners unprojected (0x006245b0), a point inside goes on exactly as it
+/// came, and one clamped to the map's bottom can still project below the
+/// screen rectangle and be clamped there too (0x00422b70).
+TEST(set_pos_clamps_on_sloped_ground_as_the_screen_sees_it) {
+  HostField f(open_field(128));
+  imperivm::test::Builder layer;
+  layer.text(kGridMagic).u32(32).u32(8).u32(2048).u32(2048);
+  for (int cy = 0; cy < 64; ++cy) {
+    for (int cx = 0; cx < 64; ++cx) layer.u8(static_cast<std::uint8_t>(cx * 4));
+  }
+  const Result<Grid> height = Grid::parse(layer.span());
+  REQUIRE(height.ok());
+  f.world.set_height(height.value());
+  const ObjectId unit = f.unit(Point{500, 500});
+  const auto set = [&](Point to) {
+    CHECK(f.call("SetPos", {Value::object(kTypeObj, unit), pack_point(to)}).status ==
+          HostStatus::ok);
+    return position_of(f.world, unit);
+  };
+  const std::int32_t sr = 2047 - 64;
+  const std::int32_t sb = project_scale(2047) - 255 - 64;
+  const std::int32_t top_west = screen_to_world(f.world, Point{32, 32}).y;
+  const std::int32_t top_east = screen_to_world(f.world, Point{sr, 32}).y;
+  REQUIRE(top_west != top_east);
+  const std::int32_t top = std::min(top_west, top_east);
+
+  // Between the two tops: inside, untouched.
+  const Point between{sr - 10, (top_west + top_east) / 2};
+  REQUIRE(between.y > top);
+  CHECK(set(between) == between);
+  // Inside where a round trip through the screen moves it: untouched still.
+  const Point inside{1500, 777};
+  REQUIRE(screen_to_world(f.world, world_to_screen(f.world, inside)) != inside);
+  CHECK(set(inside) == inside);
+
+  // Below the bottom in the west: clamped to the lower of the bottom corners
+  // in map space, which projects below the screen rectangle there, so the
+  // screen clamp takes it back up to `sb`.
+  const std::int32_t bottom = std::max(screen_to_world(f.world, Point{32, sb}).y,
+                                       screen_to_world(f.world, Point{sr, sb}).y);
+  const Point west{100, bottom};
+  REQUIRE(world_to_screen(f.world, west).y > sb);
+  CHECK(set(Point{100, 5000}) == screen_to_world(f.world, Point{100, sb}));
 }
 
 // -- the formation's own route ---------------------------------------------------

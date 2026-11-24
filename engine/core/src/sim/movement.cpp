@@ -2,6 +2,7 @@
 // See include/imperivm/core/sim/movement.hpp.
 
 #include "imperivm/core/sim/movement.hpp"
+#include "imperivm/core/sim/projection.hpp"
 #include "imperivm/core/game/class_graph.hpp"
 
 #include "imperivm/core/formats/ini.hpp"
@@ -2508,10 +2509,65 @@ HostOutcome get_dir_impl(CallContext& ctx) {
   return HostOutcome::ok_with(pack_point(self.movement->state(self.id).facing));
 }
 
+/// `SetPos`'s clamp (0x005ac130), on the camera's map rectangle -- the map's
+/// own (`[map+0xb4..0xc0]`, `(0, 0, w-1, h-1)`) in screen space, `y` scaled
+/// by 181/256, its right side 32 in and its bottom 255 + 32 up (0x00624100,
+/// at the camera's start) -- **less 32 on each side**:
+///
+///   * that rectangle taken to the map (0x006245b0): its sides `x` as they
+///     are, its top the higher of its two top corners unprojected and its
+///     bottom the lower of its two bottom ones (0x006243b0 each,
+///     `screen_to_world`);
+///   * the point clamped into that in map space, `x` then `y`; one already
+///     inside goes on as it came;
+///   * one that was not is projected (`world_to_screen`: `y * 181 / 256`
+///     less the terrain's height there), clamped into the screen rectangle
+///     (0x00422b70) and unprojected (0x006243b0).
+///
+/// A world with no map grid (a bench) has no rectangle and clamps nothing.
+[[nodiscard]] Point set_pos_clamp(const World& world, const ObstructionGrid& grid, Point at) {
+  if (grid.empty()) return at;
+  constexpr std::int32_t kInset = 32;
+  const std::int32_t right = grid.extent_x() - 1 - kInset;
+  const std::int32_t bottom = project_scale(grid.extent_y() - 1) - 255 - kInset;
+  const std::int32_t left = 0;
+  const std::int32_t top = project_scale(0);
+  // The rectangle the call takes, 32 in from the camera's.
+  const std::int32_t sl = left + kInset;
+  const std::int32_t st = top + kInset;
+  const std::int32_t sr = right - kInset;
+  const std::int32_t sb = bottom - kInset;
+  const std::int32_t map_top =
+      std::min(screen_to_world(world, Point{sl, st}).y, screen_to_world(world, Point{sr, st}).y);
+  const std::int32_t map_bottom =
+      std::max(screen_to_world(world, Point{sl, sb}).y, screen_to_world(world, Point{sr, sb}).y);
+
+  Point p = at;
+  const bool left_in = sl <= p.x;
+  if (!left_in) p.x = sl;
+  const bool right_in = p.x <= sr;
+  if (!right_in) p.x = sr;
+  const bool top_in = map_top <= p.y;
+  if (!top_in) p.y = map_top;
+  if (map_bottom < p.y) {
+    p.y = map_bottom;
+  } else if (left_in && right_in && top_in) {
+    return at;
+  }
+  Point screen = world_to_screen(world, p);
+  if (screen.x < sl) screen.x = sl;
+  if (sr < screen.x) screen.x = sr;
+  if (screen.y < st) screen.y = st;
+  if (sb < screen.y) screen.y = sb;
+  return screen_to_world(world, screen);
+}
+
 /// `SetPos(pt)` (0x005ac130) -- 32 sites: nothing for a receiver that names
 /// nothing; otherwise, in order:
 ///
-///   * the animation reset (0x0053d730), not reproduced, as in `Face`;
+///   * **the point clamped** (`set_pos_clamp`);
+///   * the animation reset (0x0053d730), stopping what plays where it is
+///     drawn;
 ///   * the unit's own `SetPos` (`vtbl+0x38`, 0x005d39e0): **a unit in a holder
 ///     is taken out of it first** when the point is not `(-1, -1)` -- the
 ///     holder removal 0x00531a80, the routine `ExitHolder` ends in, off the
@@ -2527,17 +2583,15 @@ HostOutcome get_dir_impl(CallContext& ctx) {
 ///     were doing, and the teleport scripts, which move their own unit, do
 ///     not.
 ///
-/// **Not reproduced:** the point is first clamped into the camera's map
-/// rectangle (`[0x9edd18]+0x628..0x634`, 32 units in from each side) in
-/// screen space -- `y` scaled by 181/256 less the terrain's height at the
-/// point (0x006245b0, 0x00422b70, 0x006243b0) -- and brought back to the map
-/// when it was outside. Every shipped site passes a point on the map: an area
-/// centre, an exit point, the unit's own position.
+/// **The point is first clamped** (`set_pos_clamp`) into the camera's map
+/// rectangle less 32 on each side, so not even `(-1, -1)` reaches the
+/// unit's own `SetPos` from a script. Every shipped site passes a point on the
+/// map: an area centre, an exit point, the unit's own position.
 HostOutcome set_pos_impl(CallContext& ctx) {
   const Self self = resolve(ctx);
   if (!self.ok()) return unresolved(self, HostOutcome::ok_void());
   if (!is_point(ctx.arg(1))) return HostOutcome::failed(kNoPoint);
-  const Point to = unpack_point(ctx.arg(1));
+  const Point to = set_pos_clamp(*self.world, self.movement->grid(), unpack_point(ctx.arg(1)));
   // Teleporting invalidates any route: it was laid from somewhere else.
   self.movement->stop(*self.world, self.id);
   const ObjectState* state = self.world->state(self.id);
