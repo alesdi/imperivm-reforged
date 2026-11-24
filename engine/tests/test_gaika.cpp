@@ -2461,7 +2461,7 @@ struct ShoreBench {
               "basevillage.sc.xml");
     graph.add(bytes_of(R"(<class id="Village" cpp_class="CVXBuilding" parent="BaseVillage"/>)"),
               "village.sc.xml");
-    graph.add(bytes_of(R"(<class id="Warship" cpp_class="CVXShip" parent=""/>)"),
+    graph.add(bytes_of(R"(<class id="Warship" cpp_class="CVXShip" parent=""><properties maxhealth="100"/></class>)"),
               "warship.sc.xml");
     graph.link();
     world.set_class_graph(&graph);
@@ -2497,13 +2497,19 @@ struct ShoreBench {
   }
   void rebuild() { world.mutable_gaika().build(world, world.lsa(), economy.settlements()); }
 
-  /// A living ship of `owner` on a cell, running `verb` or nothing.
+  /// A living ship of `owner` on a cell, running `verb` or nothing, handed
+  /// to the AI once as the manager's start hands a map's ship (0x00450aa0 ->
+  /// 0x0041f310): counted in its area's kept count and on its list. The
+  /// manager is started, and the node table cut if it was not.
   ObjectId ship(std::int32_t cx, std::int32_t cy, PlayerId owner, const char* verb) {
     const ObjectId id = world.spawn(NativeClass::ship, nullptr, graph.find("Warship"));
     CHECK(world.set_owner(id, owner));
     CHECK(world.set_health(id, 100));
     CHECK(world.set_position(id, in_cell(cx, cy)));
     if (verb != nullptr) commands.set_command(world, id, verb, Command{});
+    if (!world.gaika().built()) rebuild();
+    ai.start_manager();
+    heroes.ai_register(world, id);
     return id;
   }
 
@@ -2824,9 +2830,14 @@ TEST(check_lsa_path_refuses_an_advancing_ship_bound_for_an_enemys_node) {
 
   const ObjectId ship = b.ship(14, 6, 0, "advance");
   SquadTable& table = b.heroes.squads();
-  // The ship has no squad: available, manager or not.
+  // The register filed the ship in a squad bound for the node under it,
+  // where nobody is: available.
   CHECK(b.path(west, east, 1) == 3);
-  b.ai.start_manager();
+  // Out of it, staged by hand below.
+  const auto unsquad = [&](ObjectId id) {
+    if (const SquadKey k = table.squad_of(id); k.valid()) (void)table.leave(b.world, k, id);
+  };
+  unsquad(ship);
   CHECK(b.path(west, east, 1) == 3);
 
   // In a squad bound for the eastern node, with nobody there: available.
@@ -2837,6 +2848,7 @@ TEST(check_lsa_path_refuses_an_advancing_ship_bound_for_an_enemys_node) {
 
   // An enemy squad with strength staying there: not a way across.
   const ObjectId foe = b.ship(20, 6, 1, nullptr);
+  unsquad(foe);
   const SquadKey band = table.create(1);
   CHECK(table.join(band, foe));
   table.move_in(band, there);
@@ -3177,6 +3189,101 @@ TEST(lsa_neighbours_touch_on_the_diagonal_too) {
   const std::vector<LsaId> only_sea{sea};
   CHECK(std::vector<LsaId>(areas.neighbours(sea).begin(), areas.neighbours(sea).end()) == only_land);
   CHECK(std::vector<LsaId>(areas.neighbours(land).begin(), areas.neighbours(land).end()) == only_sea);
+}
+
+/// **`Ships` reads a kept count, and the AI register keeps it** (0x0041f310,
+/// 0x0041eee0; docs/formats/ai-ships.md). `Place` sets a ship's position --
+/// whose move hook registers it -- and then calls the register itself, and the
+/// register's ship half runs on both calls, so the ship counts two and is on
+/// its area's list twice. Moving it moves nothing. Its unregister (here its
+/// owner changing, and its death) lowers the count of the area it stands in
+/// at that moment, floored at zero, and takes one list entry.
+TEST(the_ai_register_counts_a_placed_ship_twice_and_no_move_moves_it) {
+  ShoreBench b(kTwoSeas);
+  const LsaPartition& areas = b.world.lsa();
+  const LsaId middle = areas.at(in_cell(9, 6));  // the western sea
+  const LsaId north = areas.at(in_cell(22, 6));  // the eastern
+  REQUIRE(middle != kNoLsa && north != kNoLsa && middle != north);
+  b.rebuild();
+  b.heroes.start(b.world);  // the move hook
+  b.ai.start_manager();
+  // `Place` refuses a point off the map rectangle, which the match holds.
+  MatchSystem match;
+  REQUIRE(b.world.add_system(&match));
+  MatchRules rules;
+  rules.map_size = 8192;
+  (void)setup_match(b.world, match, rules, MatchOptions{});
+  const auto ships = [&](std::int32_t player, LsaId lsa) {
+    const script::HostOutcome out = b.call(script::CallKind::free_function, "Ships",
+                                           {script::Value::integer(player), script::Value::integer(lsa)});
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_integer() ? out.value.as_integer() : -1;
+  };
+  const auto place = [&](Point at, std::int32_t player) -> ObjectId {
+    const script::HostOutcome out =
+        b.call(script::CallKind::free_function, "Place",
+               {script::Value::string("Warship"), pack_point(at), script::Value::integer(player)});
+    CHECK(out.status == script::HostStatus::ok);
+    CHECK(out.value.is_object());
+    return out.value.is_object() ? out.value.as_object().id : kNoObject;
+  };
+
+  const ObjectId first = place(in_cell(9, 6), 1);
+  REQUIRE(first != kNoObject);
+  CHECK(b.world.state(first)->flags.ai_registered);
+  CHECK(ships(1, middle) == 2);
+  REQUIRE(b.ai.ship_list(middle).size() == 2);
+  CHECK(b.ai.ship_list(middle)[0] == first);
+  CHECK(b.ai.ship_list(middle)[1] == first);
+  // Another register call on a registered ship counts again.
+  b.heroes.ai_register(b.world, first);
+  CHECK(ships(1, middle) == 3);
+  // A held-off register (the spawns' AI world pointer at zero) counts nothing.
+  {
+    HeroSystem::RegisterHold hold(&b.heroes);
+    b.heroes.ai_register(b.world, first);
+  }
+  CHECK(ships(1, middle) == 3);
+
+  // Sailing elsewhere moves neither the count nor the list.
+  REQUIRE(b.world.set_position(first, in_cell(22, 6)));
+  CHECK(ships(1, middle) == 3);
+  CHECK(ships(1, north) == 0);
+  CHECK(b.ai.ship_list(north).empty());
+
+  // A change of owner: the unregister on the owner it leaves, in the area it
+  // stands in now (floored: north had none), then the register on the new.
+  REQUIRE(b.world.set_owner(first, 1));
+  b.heroes.ai_owner_changed(b.world, first, 0);
+  CHECK(ships(1, north) == 0);
+  CHECK(ships(2, north) == 1);
+  CHECK(ships(1, middle) == 3);
+  CHECK(b.ai.ship_list(north).size() == 1);
+
+  // A second ship placed and killed in the middle sea: two up, one down, one
+  // entry off the list.
+  const ObjectId second = place(in_cell(10, 6), 3);
+  REQUIRE(second != kNoObject);
+  CHECK(ships(3, middle) == 2);
+  REQUIRE(b.world.set_health(second, 0));
+  b.heroes.on_death(b.world, second);
+  CHECK(ships(3, middle) == 1);
+  CHECK(!b.world.state(second)->flags.ai_registered);
+  CHECK(std::count(b.ai.ship_list(middle).begin(), b.ai.ship_list(middle).end(), second) == 1);
+  // Dead, it is not unregistered again, and the scan of a crossing erases
+  // its last entry as it passes it.
+  b.heroes.on_death(b.world, second);
+  CHECK(ships(3, middle) == 1);
+  (void)b.path(areas.at(in_cell(3, 6)), areas.at(in_cell(15, 6)), 3);
+  CHECK(std::count(b.ai.ship_list(middle).begin(), b.ai.ship_list(middle).end(), second) == 0);
+  CHECK(ships(3, middle) == 1);
+
+  // A ship off the map stands on node 0, whose area is the reserved record:
+  // nothing is kept for it here.
+  const ObjectId adrift = place(Point{-1, -1}, 1);
+  REQUIRE(adrift != kNoObject);
+  CHECK(ships(1, kNoLsa) == 0);
+  CHECK(b.ai.ship_list(kNoLsa).empty());
 }
 
 /// Where a ship would have helped: the first ship-less sea seen wins a tie,

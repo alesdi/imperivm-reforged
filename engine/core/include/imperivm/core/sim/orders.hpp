@@ -307,14 +307,14 @@
 //
 // ## What this file refuses
 //
-//   * **`<src>` / `<nsrc>`, the per-command actor-class filter.** 516 `<src>`
-//     and 59 `<nsrc>` rows in `DATA\COMMANDS` say which classes may issue a
-//     command at all, and they matter: `move` carries `<nsrc obj="Sentry"/>`.
-//     `CommandTable`/`CommandDef` in `sim/command.hpp` parse neither, and that
-//     file is not this one's to change. The filter is therefore **not applied**,
-//     and where it would have mattered `<nodefcmdinherit/>` mostly covers the
-//     same ground (`Sentry` inherits no ground block in the first place).
-//     Wiring it in means adding two vectors to `CommandDef`.
+//   * **`<src>` / `<nsrc>`, the per-command class lists.** The loader files
+//     them in the class reverse index (`CommandClassIndex` in
+//     `sim/command.hpp`), and `gbr.exe` reads that index in three places --
+//     the command bar's fill (0x005e7710), the lab finder (0x0042d010) and
+//     `RepairAll` (0x0042dec0). The default-order resolution is not one of
+//     them: the class's `<defcmd>` blocks decide the verb, and
+//     `<nodefcmdinherit/>` is what keeps a sentry's right click off `move`.
+//     So it is not applied here, as the original does not apply it.
 //   * **`groupverifier=` (351 rows).** It takes `ObjList objs` and an out
 //     parameter, returns bool, and gates whether a command *button* is
 //     enabled. Nothing shows it participating in default-order resolution, and

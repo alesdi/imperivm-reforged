@@ -53,6 +53,14 @@ namespace {
   return a.size() < b.size();
 }
 
+/// The disabled sets' order: folded, and the bytes where the folded names
+/// tie, so that two rows whose names differ only in case are two entries.
+[[nodiscard]] bool less_name(std::string_view a, std::string_view b) noexcept {
+  if (less_fold(a, b)) return true;
+  if (less_fold(b, a)) return false;
+  return a < b;
+}
+
 }  // namespace
 
 // --------------------------------------------------------------------------
@@ -60,11 +68,13 @@ namespace {
 // --------------------------------------------------------------------------
 
 std::size_t CommandTable::lower_bound(std::string_view name) const noexcept {
+  // By the name's bytes, then by id: the first index entry for a name is the
+  // row 0x004e9000's walk meets first.
   std::size_t lo = 0;
-  std::size_t hi = commands_.size();
+  std::size_t hi = by_name_.size();
   while (lo < hi) {
     const std::size_t mid = lo + (hi - lo) / 2;
-    if (less_fold(commands_[mid].name, name)) {
+    if (std::string_view(commands_[by_name_[mid]].name) < name) {
       lo = mid + 1;
     } else {
       hi = mid;
@@ -75,17 +85,35 @@ std::size_t CommandTable::lower_bound(std::string_view name) const noexcept {
 
 const CommandDef* CommandTable::find(std::string_view name) const noexcept {
   const std::size_t at = lower_bound(name);
-  if (at < commands_.size() && equal_fold(commands_[at].name, name)) return &commands_[at];
+  if (at < by_name_.size() && commands_[by_name_[at]].name == name) {
+    return &commands_[by_name_[at]];
+  }
   return nullptr;
+}
+
+void CommandTable::append(CommandDef def) {
+  def.id = static_cast<std::uint32_t>(commands_.size());
+  const std::string_view name = def.name;
+  // Past every entry of the same name: ids only grow, so the index stays
+  // sorted by name and then by id.
+  std::size_t at = lower_bound(name);
+  while (at < by_name_.size() && commands_[by_name_[at]].name == name) ++at;
+  const std::uint32_t id = def.id;
+  commands_.push_back(std::move(def));
+  by_name_.insert(by_name_.begin() + static_cast<std::ptrdiff_t>(at), id);
+  ++generation_;
 }
 
 void CommandTable::set(const CommandDef& def) {
   const std::size_t at = lower_bound(def.name);
-  if (at < commands_.size() && equal_fold(commands_[at].name, def.name)) {
-    commands_[at] = def;
+  if (at < by_name_.size() && commands_[by_name_[at]].name == def.name) {
+    const std::uint32_t id = by_name_[at];
+    commands_[id] = def;
+    commands_[id].id = id;
+    ++generation_;
     return;
   }
-  commands_.insert(commands_.begin() + static_cast<std::ptrdiff_t>(at), def);
+  append(def);
 }
 
 Status CommandTable::merge(std::span<const std::byte> xml) {
@@ -123,6 +151,12 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
       def.plr_research = flag("plrresearch");
       // A player research is a research (0x004f406d).
       if (def.plr_research) def.research_command = true;
+      // `onetime`: `yes` and `no` without case, anything else the research
+      // flag as it now stands (0x004f407c..0x004f40ea).
+      const std::string_view one_time = doc.attribute(n, "onetime");
+      def.one_time = equal_fold(one_time, "yes")  ? true
+                     : equal_fold(one_time, "no") ? false
+                                                  : def.research_command;
     }
     def.cost_gold = doc.attribute_int(n, "costgold", 0);
     def.cost_food = doc.attribute_int(n, "costfood", 0);
@@ -136,20 +170,9 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
     // a `description`; see `sim/feedback.hpp`.
     def.rollover.assign(doc.attribute(n, "rollover"));
     def.description.assign(doc.attribute(n, "description"));
-    // `<src obj="…">`: which classes offer this command. In document order,
-    // which is the order `FindResearchLab` would see if it walked from this
-    // side -- it walks from the building's, so the order decides nothing, and
-    // it is preserved rather than sorted because a file's order is a fact.
-    for (NodeIndex src = doc.child(n, "src"); src != kNoNode; src = doc.next(src, "src")) {
-      const std::string_view obj = doc.attribute(src, "obj");
-      if (!obj.empty()) def.sources.emplace_back(obj);
-    }
-    for (NodeIndex src = doc.child(n, "nsrc"); src != kNoNode; src = doc.next(src, "nsrc")) {
-      const std::string_view obj = doc.attribute(src, "obj");
-      if (!obj.empty()) def.excludes.emplace_back(obj);
-    }
-    // The same elements as the loader files them for the class reverse index
-    // (0x004f2240): every child of the `<cmd>` in document order, the tag
+    // The `<src>` and `<nsrc>` elements as the loader files them for the
+    // class reverse index (0x004f2240): every child of the `<cmd>` in
+    // document order, the tag
     // compared without case, each attribute visited once in order with its
     // name compared without case, so a repeated `obj=` or `sticky=` keeps the
     // last. `sticky` starts as `no`; only `no` (without case) is the offered
@@ -185,7 +208,9 @@ Status CommandTable::merge(std::span<const std::byte> xml) {
          text = doc.next(text, "cmdtext")) {
       def.targets.emplace_back(doc.attribute(text, "target"));
     }
-    set(def);
+    // Every row is kept, under the next id (0x004ed2b0): a second row of
+    // the same name is a second row.
+    append(std::move(def));
   }
   return {};
 }
@@ -227,6 +252,76 @@ bool class_lists_command(const ClassGraph& graph, ClassIndex cls, const CommandD
     if (excluded) return false;
   }
   return false;
+}
+
+void CommandClassIndex::build(const ClassGraph& graph, const CommandTable& table) {
+  classes_.assign(graph.size(), Lists{});
+  // The loader's entries (0x004f2240): a map from the `obj=` string, in its
+  // byte order, to a map from command id to the list it names, a later
+  // element for the same string and command overwriting.
+  std::map<std::string, std::map<std::uint32_t, CommandSourceKind>, std::less<>> entries;
+  for (const CommandDef& row : table.commands()) {
+    for (const CommandSource& entry : row.listing) entries[entry.obj][row.id] = entry.kind;
+  }
+  std::vector<std::vector<std::uint32_t>> excluded(graph.size());
+  const auto push_unique = [](std::vector<std::uint32_t>& list, std::uint32_t id) {
+    if (std::find(list.begin(), list.end(), id) == list.end()) list.push_back(id);
+  };
+  // The resolve (0x004f5af0): each string's class, with case; a string that
+  // names none is dropped.
+  for (const auto& [obj, by_id] : entries) {
+    const ClassIndex cls = graph.lookup(obj);
+    if (cls == kNoClass || cls >= classes_.size()) continue;
+    for (const auto& [id, kind] : by_id) {
+      switch (kind) {
+        case CommandSourceKind::offered: push_unique(classes_[cls].offered, id); break;
+        case CommandSourceKind::sticky: push_unique(classes_[cls].sticky, id); break;
+        case CommandSourceKind::excluded: push_unique(excluded[cls], id); break;
+      }
+    }
+  }
+  // The inheritance (0x0059e670), once per class: the parent first, then the
+  // parent's lists appended unless the class has the row or excludes it, then
+  // the class's exclusions dropped.
+  std::vector<bool> done(graph.size(), false);
+  const auto contains = [](const std::vector<std::uint32_t>& list, std::uint32_t id) {
+    return std::find(list.begin(), list.end(), id) != list.end();
+  };
+  const auto inherit = [&](auto&& self, ClassIndex cls) -> void {
+    if (done[cls]) return;
+    done[cls] = true;
+    const ClassIndex parent = graph.at(cls).parent_index;
+    if (parent != kNoClass && parent < classes_.size()) {
+      self(self, parent);
+      for (const std::uint32_t id : classes_[parent].offered) {
+        if (!contains(classes_[cls].offered, id) && !contains(excluded[cls], id)) {
+          classes_[cls].offered.push_back(id);
+        }
+      }
+      for (const std::uint32_t id : classes_[parent].sticky) {
+        if (!contains(classes_[cls].sticky, id) && !contains(excluded[cls], id)) {
+          classes_[cls].sticky.push_back(id);
+        }
+      }
+    }
+    excluded[cls].clear();
+  };
+  for (ClassIndex cls = 0; cls < classes_.size(); ++cls) inherit(inherit, cls);
+}
+
+std::span<const std::uint32_t> CommandClassIndex::offered(ClassIndex cls) const noexcept {
+  if (cls == kNoClass || cls >= classes_.size()) return {};
+  return classes_[cls].offered;
+}
+
+std::span<const std::uint32_t> CommandClassIndex::sticky(ClassIndex cls) const noexcept {
+  if (cls == kNoClass || cls >= classes_.size()) return {};
+  return classes_[cls].sticky;
+}
+
+bool CommandClassIndex::offers(ClassIndex cls, std::uint32_t id) const noexcept {
+  const std::span<const std::uint32_t> list = offered(cls);
+  return std::find(list.begin(), list.end(), id) != list.end();
 }
 
 // --------------------------------------------------------------------------
@@ -381,18 +476,35 @@ bool building_offers(const CommandSystem& commands, const World& world, const Wo
 
 bool CommandSystem::command_enabled(const World& world, ObjectId id,
                                     std::string_view name) const noexcept {
+  const CommandDef* def = table_.find(name);
+  return def != nullptr && command_enabled(world, id, *def);
+}
+
+bool CommandSystem::command_enabled(const World& world, ObjectId id,
+                                    const CommandDef& def) const noexcept {
   const WorldObject* slot = world.find(id);
   if (slot == nullptr) return false;
   // The two halves, in the original's order: the whole-object flag first, then
-  // the by-name set. `[obj+0x9c]` is tested before the list is walked at all.
+  // the disabled set. `[obj+0x9c]` is tested before the list is walked at all.
   if (slot->state.flags.commands_disabled) return false;
-  const CommandDef* def = table_.find(name);
-  if (def == nullptr) return false;
-  if (slot->state.flags.is_building && !building_offers(*this, world, *slot, *def)) return false;
+  if (slot->state.flags.is_building && !building_offers(*this, world, *slot, def)) return false;
+  // The list holds row ids (0x005b5250); a name kept here is the row's own,
+  // so the comparison is exact.
   for (const std::string& disabled : disabled_commands(id)) {
-    if (equal_fold(disabled, def->name)) return false;
+    if (disabled == def.name) return false;
   }
   return true;
+}
+
+const CommandClassIndex& CommandSystem::class_index(const ClassGraph& graph) const {
+  if (!class_index_built_ || class_index_graph_ != &graph ||
+      class_index_generation_ != table_.generation()) {
+    class_index_.build(graph, table_);
+    class_index_graph_ = &graph;
+    class_index_generation_ = table_.generation();
+    class_index_built_ = true;
+  }
+  return class_index_;
 }
 
 bool CommandSystem::disable_command(const World& world, ObjectId id, std::string_view name) {
@@ -412,7 +524,7 @@ bool CommandSystem::disable_command(const World& world, ObjectId id, std::string
   std::vector<std::string>& names = disabled_[at].names;
   const auto where = std::lower_bound(
       names.begin(), names.end(), def->name,
-      [](const std::string& lhs, const std::string& key) { return less_fold(lhs, key); });
+      [](const std::string& lhs, const std::string& key) { return less_name(lhs, key); });
   names.insert(where, def->name);
   return true;
 }
@@ -420,6 +532,11 @@ bool CommandSystem::disable_command(const World& world, ObjectId id, std::string
 bool CommandSystem::enable_command(ObjectId id, std::string_view name) {
   const std::size_t at = disabled_lower_bound(id);
   if (at >= disabled_.size() || disabled_[at].id != id) return false;
+  // The row by name, as `CmdDisable`'s own lookup finds it; the list holds
+  // its id, which is its name here.
+  const CommandDef* def = table_.find(name);
+  if (def == nullptr) return false;
+  name = def->name;
   std::vector<std::string>& names = disabled_[at].names;
   const std::size_t before = names.size();
   // Every copy, which is the original's own `remove`: 0x004635c0 walks the
@@ -433,9 +550,7 @@ bool CommandSystem::enable_command(ObjectId id, std::string_view name) {
   // shape and it is one line, so it stands rather than being narrowed to a
   // reading the executable does not support.
   names.erase(std::remove_if(names.begin(), names.end(),
-                             [name](const std::string& held) {
-                               return equal_fold(held, name);
-                             }),
+                             [name](const std::string& held) { return held == name; }),
               names.end());
   const bool removed = names.size() != before;
   // An empty set is no set: the row goes, so that `disabled_commands` and the
@@ -1050,14 +1165,19 @@ bool CommandSystem::accept(World& world, ObjectId id, const Command& command) {
   if (row == nullptr || !row->plr_research) return true;
   const ObjectState* self = world.state(id);
   const PlayerId owner = self == nullptr ? kNoPlayer : self->owner;
+  return !player_holds_row(world, owner, *row);
+}
+
+bool CommandSystem::player_holds_row(const World& world, PlayerId owner,
+                                     const CommandDef& row) const noexcept {
   for (const Entry& entry : queues_) {
     const ObjectState* other = world.state(entry.id);
     if (other == nullptr || other->owner != owner) continue;
     for (const Command& held : entry.queue.entries) {
-      if (equal_fold(held.name, row->name)) return false;
+      if (held.name == row.name) return true;
     }
   }
-  return true;
+  return false;
 }
 
 void CommandSystem::release(World& world, ObjectId id, const Command& command) {

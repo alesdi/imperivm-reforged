@@ -768,25 +768,69 @@ the engine's, from the command rows (`docs/formats/sc-xml.md`'s companion, `DATA
 </cmd>
 ```
 
-[`sim/cmdbar.hpp`](../../engine/core/include/imperivm/core/sim/cmdbar.hpp) offers a
-selection the rows whose `<src>` is an ancestor of every selected object's class and whose
-`<nsrc>` is not, keeps the ones with a `button=`, orders them by `priority`, caps them at
-`CmdBarMaxButtons`, and runs each `groupverifier=` — `bool f(ObjList objs, str OUT
-reasonText)` — the way a `verify=` is run, with the row *described* so that `cmdparam` and
-`cmdcost_*` answer for it outside any command script. A press issues a row with no
-`<cmdtext>` at once, one per actor (or through its `groupdispatch=` script), and arms a row
-with one to take the next click on the map. The key letter presses the button; Escape and a
-right click disarm it.
+The commands loader files each row's `<src>` and `<nsrc>` in the class reverse index
+(`docs/formats/command-queue.md`, "Which classes a row is listed on"): every class has an
+**offered** list and a **sticky** list. The interface keeps the selection as the selection
+insert (0x005b9170) builds it -- the objects in order, their **classes**, each the first
+time a member of it is met, a type (unit, hero, several, building, item holder) and a
+control flag -- and the bar's list is filled from it (0x005e7710):
+
+1. **Nothing unless the selection is controlled** (0x005b8ae0). The control flag is set by
+   an object whose owner shares control with the local player, and the insert keeps a
+   foreign object only when it is alone. The one exception is a lone foreign building whose
+   class is an heir of `Stonehenge` (0x0059c020): the circle's five spells are shown to any
+   player, their verifiers deciding who may cast.
+2. **The sticky rows, a union.** For each of the selection's classes in order, each row on
+   its sticky list in order, taken once, when some selected object of exactly that class is
+   let have it (0x005e38d0; the object's own predicate, which a building that is not a ruin
+   answers no for its repair row and `CmdDisable` answers no for a row it took away).
+3. **The offered rows, an intersection.** The first class's offered list in order, a row
+   taken when every selected object's class has it on its own offered list and every object
+   is let have it (0x005e7834..0x005e78c8). This does not look at what step 2 took: a row a
+   selection has as sticky and as offered is on the list twice.
+4. **Sorted by `priority`**, with `std::list::sort` (0x005e7250, comparing through
+   0x005e5b60): stable and ascending, so rows of equal priority keep the list's order -- the
+   class lists' order, which is each class's own rows by load id and then what it inherits.
+
+The bar widget (`CVXCmdInterface`, 0x006b3d60) then walks the list and fills its
+`CmdBarMaxButtons` slots in order with the rows it draws. A row with no button image
+(`[def+0x174]`, loaded from `button=`; a named file that is missing loads the dummy icon) is
+passed over: `transport`, `enter` and their kind are reached by a right click and never
+from the bar. Each other row is judged (0x006b3190): its `groupverifier=` -- `bool f(ObjList
+objs, str OUT reasonText)`, run the way a `verify=` is, with the row *described* so that
+`cmdparam` and `cmdcost_*` answer for it -- when it has one, and when that passes or there is
+none, for a one-time row the interface's own test (0x006b3050 -> 0x005e20c0): the row is
+refused while it is **in flight** (pressed and posted, not yet executed; the interface's set,
+raised by the press at 0x005e6bd0 and lowered by the row's execution at 0x004f1610 for every
+player's orders), and a `plrresearch=` row is refused while the player of the selection's
+first object, a building, holds it. That refusal's reason is `" "`. **A row refused with no
+reason is not drawn** and takes no slot; one refused with a reason is drawn unlit, the reason
+its tooltip. The slots left over are hidden.
+
+While a row waits for its target (the pending order at the interface's `+0x11c`, a row
+whose `menu=` is 0, which is every shipped row), the widget draws none of the rows: it hides
+every slot and shows the bar's own `CmdCancel` (widget 0x7003), centred. Two attributes the
+widget reads have no shipped use: `mod=` (`[def+0x7c]`: `no` hides the row while Ctrl is
+held, `yes` shows it only then, anything else -- the default -- always) and `menu=`
+(`[def+0x5c]`, a sub-menu's number the pending row's must match); neither is ported, and
+no shipped row carries either, nor a `researchverifier=` (`[def+0x16c]`), the player-level
+verifier the judge would prefer to the group verifier.
+
+[`sim/cmdbar.hpp`](../../engine/core/include/imperivm/core/sim/cmdbar.hpp) is this fill and
+this judge. A press issues a row with no `<cmdtext>` at once, one per actor (or through its
+`groupdispatch=` script), and arms a row with one to take the next click on the map. The
+key letter presses the button; Escape and a right click disarm it.
 
 Each button is the faction's frame (`CMDBAR/FRAMES.INI`, a three-state strip: normal,
 highlighted, pressed) over the row's `button=` icon (a three-state strip too, 153 × 51 across
 the whole `UI/CmdBar/Actions` set); a refused row draws the pressed frame, which is the
-`ABCCC` reading the file's own `Button` widgets declare. **Where the row stands is a
-reading:** centred in the bar, the buttons abutting — the no-selection menu is a 612-wide
-dialog the bar centres, and `gbr.exe` computes `(parent + 1 − child + 1) / 2` for a child at
-0x006b3e00 — and the no-selection menu shows for an empty selection and for nothing else,
-which is what its class is called (`CVXUIEmptySelectionMenu`). Its quick-save and quick-load
-buttons (`ID = 0x1003`, `0x1004`) are wired; the other seven are the menus', Part 6's next.
+`ABCCC` reading the file's own `Button` widgets declare. **Where the row stands** is the
+widget's (0x006b3d60): the row is every drawn button's width and four pixels after each,
+centred in the bar (`left + (width − row) / 2`), each button four pixels right of the one
+before and centred vertically. The no-selection menu shows for an empty selection and for
+nothing else, which is what its class is called (`CVXUIEmptySelectionMenu`). Its quick-save
+and quick-load buttons (`ID = 0x1003`, `0x1004`) are wired; the other seven are the menus',
+Part 6's next.
 
 ## What is still unknown
 
@@ -828,8 +872,8 @@ buttons (`ID = 0x1003`, `0x1004`) are wired; the other seven are the menus', Par
 - **The editor's `BmpScroll`** is not drawn.
 - **Inline markup**: an image's vertical placement in its line, and whether a colour
   persists across a break, are readings (see "Inline markup" above).
-- **The command buttons' geometry.** Read off the art and the menu's dialog size, not off
-  the executable; see above. A screenshot of the original would settle it in a minute.
+- ~~**The command buttons' geometry.**~~ Read: 0x006b3d60 centres the row with four pixels
+  after each button; see above.
 - ~~**The runtime contents of `BuildingQueue`, `UIHolder`, `UIInventory`, `HeroSkills`,
   `UnitSpecials` and `Combiner`.**~~ Drawn now, from what the simulation hands the
   interpreter through `BarContent`'s five strips — see [What the bar shows](#what-the-bar-shows)

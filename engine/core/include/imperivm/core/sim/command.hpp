@@ -168,8 +168,10 @@ class ScriptLibrary;
 // Every field below is an attribute that occurs in the shipped files. The
 // attribute census over all 35: `costgold` 265, `costfood` 255, `execdelay`
 // 269, `costpop` 88, `coststamina` 26, `priority` 395, `method` 325, `param`
-// 286, `immediate` 33. Names are unique across the whole set (399 rows, 399
-// distinct names), so one flat table is enough.
+// 286, `immediate` 33. 404 rows, and their names are unique byte for byte;
+// folded, one pair is not -- `Restoration` (`DRUID HOUSE.XML`, the research)
+// and `restoration` (`DRUID.XML`, the druid's ability) -- and the original
+// keeps both, each its own row (`CommandTable`).
 
 /// Which of a class's three command lists a `<src>` or `<nsrc>` element files
 /// its command under, as the commands loader (0x004f2240) decides it: a
@@ -191,6 +193,12 @@ struct CommandSource {
 
 /// One `<cmd>`.
 struct CommandDef {
+  /// `[def+0x1e4]`: the row's place in load order. The commands loader
+  /// (0x004ed2b0) numbers each `<cmd>` from a running counter as its element
+  /// opens, every file in the pack's order (which is sorted) and each file's
+  /// rows in document order; the class lists hold these ids, and the command
+  /// bar's tie order is theirs. `CommandTable` assigns it.
+  std::uint32_t id = 0;
   std::string name;
   /// `method=`, or `name` when the row declares none. This is the
   /// `<method sig>` that gets queued.
@@ -248,6 +256,14 @@ struct CommandDef {
   bool immediate = false;
   bool research_command = false;
   bool plr_research = false;
+  /// `onetime=` (`[def+0]`): `yes` (without case) is 1, `no` is 0, and
+  /// anything else -- absent, on every shipped row -- is the row's
+  /// `research_command` after `plrresearch` has forced it (0x004f407c..
+  /// 0x004f40ea). So the 159 research rows are one-time rows and no other is.
+  /// Only the interface reads it: a one-time row pressed is held in flight
+  /// until its order executes, and its button is refused meanwhile
+  /// (`CommandBar`).
+  bool one_time = false;
 
   /// `offset="1"` (`[def+0x1e0]`, any non-zero `atol`) -- 18 rows, every one a
   /// verb a *group* is given: `advance`, `attack`, `capture`, `explore`,
@@ -276,27 +292,19 @@ struct CommandDef {
   /// 253 rows.
   std::string description;
 
-  /// `<src obj="…">` -- the classes that offer this command.
+  /// The `<src obj="…">` and `<nsrc obj="…">` elements, in document order,
+  /// each with the list its loader files it under.
   ///
   /// **This is the class-to-command edge, and it runs from the command's side.**
   /// A `.sc.xml` class lists its `<method sig>` bindings and never its commands;
   /// the commands name the classes. `gbr.exe` builds the reverse index at load
-  /// and `Settlement::FindResearchLab` (0x0042d010) walks it: for each building
-  /// of the settlement it takes the class at `[obj+0x3c]`, walks the list at
-  /// `[class+0x1f8]` and compares each node's row against the command's.
-  /// `class_lists_command` is that index; `listing` is what it is built from.
-  ///
-  /// This vector is the command bar's reading (`sim/cmdbar.cpp`): matched
-  /// against the class **tree**, so `<src obj="Unit"/>` on `move` offers it
-  /// to every unit class, with `sticky` not told apart.
-  std::vector<std::string> sources;
-  /// `<nsrc obj="…">` -- the classes that do *not* offer it, although an
-  /// ancestor in `sources` does: `move` is every `Unit`'s but a `Sentry`'s.
-  std::vector<std::string> excludes;
-  /// The `<src>` and `<nsrc>` elements together, in document order, each with
-  /// the list its loader files it under -- the input of the class reverse
-  /// index (`class_lists_command`). `sources` and `excludes` split the same
-  /// elements for the command bar's own reading.
+  /// (`CommandClassIndex`) and three things read it: the lab walk of
+  /// `FindResearchLab`, `Research` and `CanResearch` (0x0042d010), which takes
+  /// each building's class at `[obj+0x3c]` and looks for the row's id on its
+  /// offered list `[class+0x1f8]` (`class_lists_command`); `RepairAll`
+  /// (0x0042dec0), which takes the first row on a ruin's class's offered list
+  /// whose `method=` is `repair`; and the command bar (0x005e7710), which
+  /// reads the offered and the sticky lists of the selection's classes.
   std::vector<CommandSource> listing;
 
   /// `groupverifier=` -- `bool f(ObjList objs, str OUT reasonText)`, run over
@@ -328,33 +336,58 @@ struct CommandDef {
   [[nodiscard]] bool needs_target() const noexcept { return !targets.empty(); }
 };
 
-/// `DATA\COMMANDS\*.XML`, merged.
+/// `DATA\COMMANDS\*.XML`, merged: every row, in load order.
 ///
-/// Kept sorted by folded name so that lookup is a binary search and iteration
-/// order does not depend on which file was read first. A name that arrives
-/// twice overwrites, which is the convention `ClassGraph` already uses for
-/// duplicate `<method sig>`; it does not happen in the shipped data.
+/// **The loader keeps every `<cmd>`** (0x004ed2b0 appends each to the
+/// registry's vector under a fresh id, `CommandDef::id`) and **the lookup by
+/// name is byte for byte** (0x004e9000, reached through the registry's
+/// `vtbl+0x14`, 0x004e90b0, and `vtbl+0xc`): it walks the rows in load order
+/// and answers the first whose name has the argument's length and bytes
+/// (`repe cmpsb`), with case. `SetCommand` and `AddCommand` index the class
+/// methods and not this; `ExecCmd`, `GetCmdCost`, `CmdDisable`,
+/// `GetCanExecCmd`, `Research`, `CanResearch`, `FindResearchLab` and the
+/// class loader's `<defaultcmd>` all ask this lookup. So `Restoration` is the
+/// druid house's research and `restoration` the druid's ability, two rows
+/// with two ids; this table used to fold case and keep the later file's,
+/// which made `Research("Restoration")` the ability, offered by no building.
+/// No shipped script literal names a row in another case.
+///
+/// Lookup is a binary search over an index sorted by the name's bytes and
+/// then by id, which answers what the original's walk answers.
 class CommandTable {
  public:
-  /// Merge one `<commands>` document. Refuses a document whose root is
-  /// something else, so that handing it a class file fails loudly.
+  /// Merge one `<commands>` document: each row appended under the next id.
+  /// Refuses a document whose root is something else, so that handing it a
+  /// class file fails loudly.
   Status merge(std::span<const std::byte> xml);
 
-  /// Case-insensitive: `cmdparam`-built names and script literals disagree on
-  /// case, and `Obj.ExecCmd` is called with both.
+  /// The first row in load order named exactly `name`, or null.
   [[nodiscard]] const CommandDef* find(std::string_view name) const noexcept;
+  /// The row with id `id`, or null.
+  [[nodiscard]] const CommandDef* at(std::uint32_t id) const noexcept {
+    return id < commands_.size() ? &commands_[id] : nullptr;
+  }
+  /// Every row, in load order (`commands()[i].id == i`).
   [[nodiscard]] std::span<const CommandDef> commands() const noexcept { return commands_; }
   [[nodiscard]] std::size_t size() const noexcept { return commands_.size(); }
   [[nodiscard]] bool empty() const noexcept { return commands_.empty(); }
+  /// Bumped by every change, so that what is derived from the table
+  /// (`CommandSystem::class_index`) knows when to be rebuilt.
+  [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
 
-  /// Add or replace one row directly, for a test that does not want to build an
-  /// XML document to say `costgold="50"`.
+  /// Add one row directly, for a test that does not want to build an XML
+  /// document to say `costgold="50"`: the row `find(def.name)` answers is
+  /// replaced in place, keeping its id; a new name is appended under the next
+  /// id. The loader never replaces (`merge`).
   void set(const CommandDef& def);
 
  private:
-  [[nodiscard]] std::size_t lower_bound(std::string_view folded) const noexcept;
+  void append(CommandDef def);
+  [[nodiscard]] std::size_t lower_bound(std::string_view name) const noexcept;
 
-  std::vector<CommandDef> commands_;  ///< sorted by folded name
+  std::vector<CommandDef> commands_;  ///< in load order, `commands_[i].id == i`
+  std::vector<std::uint32_t> by_name_;  ///< ids, by name's bytes then by id
+  std::uint64_t generation_ = 0;
 };
 
 /// Whether `row` is on the offered list `[class+0x1f8]` of class `cls` -- the
@@ -376,6 +409,41 @@ class CommandTable {
 /// answer is no.
 [[nodiscard]] bool class_lists_command(const ClassGraph& graph, ClassIndex cls,
                                        const CommandDef& row);
+
+/// The class reverse index whole: every class's offered list `[class+0x1f8]`
+/// and sticky list `[class+0x204]`, **in the order the original builds them**,
+/// which is the order the command bar meets their rows in.
+///
+/// Built as the loader builds it. The entries are keyed by `obj=` string, and
+/// under each string by command id, one kind per pair, a later element
+/// overwriting (`CommandSource`). The resolve (0x004f5af0) walks the strings
+/// in their byte order and, for each that names a class (`ClassGraph::lookup`,
+/// with case; one that names none is dropped), the string's entries in id
+/// order, appending each command to the list its kind names unless it is
+/// there already (0x0059dbb0, 0x0059dc10, 0x0059dc70). Then each class
+/// inherits once (0x004ee320 -> 0x0059e670, a flag at `[class+0x21c]`):
+/// its parent first, then every command of the parent's offered list, in that
+/// list's order, appended unless the class has it or excludes it, the sticky
+/// list the same; then its exclusion list is emptied. So a class's list is
+/// its own rows by id, then what it inherits in its parent's order.
+///
+/// `offers(cls, id)` answers what `class_lists_command` answers.
+class CommandClassIndex {
+ public:
+  void build(const ClassGraph& graph, const CommandTable& table);
+  [[nodiscard]] std::span<const std::uint32_t> offered(ClassIndex cls) const noexcept;
+  [[nodiscard]] std::span<const std::uint32_t> sticky(ClassIndex cls) const noexcept;
+  /// Whether row `id` is on `cls`'s offered list (the linear walk
+  /// 0x0042d010 and 0x005e784e make).
+  [[nodiscard]] bool offers(ClassIndex cls, std::uint32_t id) const noexcept;
+
+ private:
+  struct Lists {
+    std::vector<std::uint32_t> offered;
+    std::vector<std::uint32_t> sticky;
+  };
+  std::vector<Lists> classes_;
+};
 
 // --------------------------------------------------------------------------
 // one queued command
@@ -553,6 +621,10 @@ class CommandSystem final : public System {
   void set_table(CommandTable table) { table_ = std::move(table); }
   [[nodiscard]] const CommandTable& table() const noexcept { return table_; }
   [[nodiscard]] CommandTable& mutable_table() noexcept { return table_; }
+  /// The class reverse index over `graph` and this system's table, built on
+  /// first use and again whenever either has changed. A function of the data,
+  /// not world state.
+  [[nodiscard]] const CommandClassIndex& class_index(const ClassGraph& graph) const;
 
   /// The verb enqueued when a queue drains. `kDefaultCommandVerb` by default;
   /// empty disables the refill entirely.
@@ -906,6 +978,18 @@ class CommandSystem final : public System {
   /// `building_offers` in `src/sim/command.cpp` has the reading.
   [[nodiscard]] bool command_enabled(const World& world, ObjectId id,
                                      std::string_view name) const noexcept;
+  /// The same for a row in hand: the original's `vtbl+0xd8` takes the row's
+  /// id, and the disabled list holds ids, so two rows whose names differ only
+  /// in case are two rows here too.
+  [[nodiscard]] bool command_enabled(const World& world, ObjectId id,
+                                     const CommandDef& def) const noexcept;
+
+  /// Whether some object of `owner` holds a command of `row` in its queue:
+  /// the per-player set of a `plrresearch` row (`[player+0x70]`, keyed by
+  /// `[def+0x1e4]`), raised by the accept test and lowered by the release and
+  /// the pop, derived here from the queues (`accept`).
+  [[nodiscard]] bool player_holds_row(const World& world, PlayerId owner,
+                                      const CommandDef& row) const noexcept;
 
   /// `Obj::CmdDisable(name)`. True when this call is what disabled it.
   ///
@@ -1091,12 +1175,14 @@ class CommandSystem final : public System {
 
   struct DisabledEntry {
     ObjectId id = kNoObject;
-    /// Canonical `CommandDef::name`s, sorted by the folded name.
+    /// The rows' own `CommandDef::name`s, sorted by the folded name and then
+    /// the bytes.
     ///
     /// The original stores the command's **index** in the global registry. A
-    /// name is the stable equivalent here: `CommandTable` is sorted by folded
-    /// name, so an index would move the moment a `DATA/COMMANDS/*.XML` merged
-    /// in a different order, and the save would then mean something else.
+    /// name is the stable equivalent here: the ids follow the order the
+    /// `DATA/COMMANDS/*.XML` files are read in, so a saved id would mean
+    /// another row under another file order. Shipped names are byte-unique,
+    /// so the name names the row.
     ///
     /// Sorted rather than appended, which is where the original puts a new
     /// entry. Nothing enumerates the list -- the one reader asks whether a
@@ -1115,6 +1201,12 @@ class CommandSystem final : public System {
   /// The units whose commanded flag is up (`commanded`), sorted.
   std::vector<ObjectId> commanded_;
   CommandTable table_;
+  /// `class_index`'s cache: the index, and the graph and table generation it
+  /// was built from.
+  mutable CommandClassIndex class_index_;
+  mutable const ClassGraph* class_index_graph_ = nullptr;
+  mutable std::uint64_t class_index_generation_ = 0;
+  mutable bool class_index_built_ = false;
   script::Scheduler* scheduler_ = nullptr;
   ScriptLibrary* library_ = nullptr;
   std::map<std::string, std::size_t, std::less<>> launch_failures_;

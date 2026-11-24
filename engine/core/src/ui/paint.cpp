@@ -1674,11 +1674,16 @@ Rect command_button_cell(ResourceCache& cache, const BarContent& content) {
 
 Rect command_button_rect(const Rect& bar, const Rect& cell, std::size_t index,
                          std::size_t count) {
-  const std::int32_t row_width = static_cast<std::int32_t>(count) * cell.width;
+  // 0x006b3d60: every drawn button and four pixels after it make the row,
+  // the row is centred in the bar, each button centred vertically.
+  const std::int32_t pitch = cell.width + kCommandButtonGap;
+  const std::int32_t row_width = static_cast<std::int32_t>(count) * pitch;
   const std::int32_t left = bar.x + (bar.width - row_width) / 2;
-  const std::int32_t top = bar.y + (bar.height - cell.height) / 2;
-  return Rect{left + static_cast<std::int32_t>(index) * cell.width, top, cell.width,
-              cell.height};
+  // Against the taller of the bar and the button: one taller than the bar
+  // stands at its top.
+  const std::int32_t span = std::max(bar.height, cell.height);
+  const std::int32_t top = bar.y + (span - cell.height) / 2;
+  return Rect{left + static_cast<std::int32_t>(index) * pitch, top, cell.width, cell.height};
 }
 
 void paint_command_buttons(Canvas& canvas, ResourceCache& cache, const BarContent& content,
