@@ -700,6 +700,16 @@ bool HeroSystem::write_skill(World* world, ObjectId hero_id, HeroSkill which,
       case HeroSkill::epic_endurance:
       case HeroSkill::epic_attack:
       case HeroSkill::epic_armor: recalc_bonuses(*world, hero_id); break;
+      case HeroSkill::quick_march:
+        // Case 3: with a formation at `[hero+0x2b0]`, its slowest and
+        // fastest are measured again, forced (0x005f5640 with 1), since the
+        // step's time reads the skill.
+        if (MovementSystem* movement = movement_system(*world); movement != nullptr) {
+          if (Formation* form = movement->formation(hero_id); form != nullptr) {
+            movement->update_min_speed(*world, *form, true);
+          }
+        }
+        break;
       default: break;
     }
   }

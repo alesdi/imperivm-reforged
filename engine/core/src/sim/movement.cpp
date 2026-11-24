@@ -382,6 +382,10 @@ void drop_media(MoveState& move) noexcept {
 }
 }  // namespace
 
+namespace {
+[[nodiscard]] std::int32_t object_goto_reach(const World& world, ObjectId mover, ObjectId target);
+}  // namespace
+
 MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move, Point dest,
                                      std::int32_t range, GameTime now, const Point* from_override) {
   const Point from = from_override != nullptr ? *from_override : position(world, id);
@@ -416,7 +420,19 @@ MoveOutcome MovementSystem::lay_path(World& world, ObjectId id, MoveState& move,
   // that owns a lock, the nearest nobody stands on or has reserved, so a unit
   // whose own side of the target is taken goes round to another.
   const bool owner = lock_owner(id, move);
-  RingGoal goal = ring_goal(world, owner ? id : kNoObject, dest, range, move.min_range);
+  // The rings run down to the inner bound. A point goal's is folded with
+  // both radii by the call (0x005d438d), as its range is; a unit goal (the
+  // retry's mode 1) adds the radii to the range alone and takes the bound as
+  // the call gave it (0x00419730 with `[rec+0x10]`, `[rec+0x14]`), so its
+  // rings reach inside the target while its arrival is still the gap.
+  std::int32_t ring_floor = move.min_range;
+  if (move.target_object != kNoObject) {
+    const WorldObject* goal_object = world.find(move.target_object);
+    if (goal_object != nullptr && goal_object->state.flags.is_unit) {
+      ring_floor -= object_goto_reach(world, id, move.target_object);
+    }
+  }
+  RingGoal goal = ring_goal(world, owner ? id : kNoObject, dest, range, ring_floor);
   // What the search makes the route hold, if it lays one (`form_lock_laid`).
   const bool lays_lock = owner;
   const OwnerSpot owner_test(*this, world, id);
@@ -1759,14 +1775,13 @@ struct Self {
 /// spun the script's whole instruction budget (916 traps in 4,000 turns).
 /// Measured edge to edge, the unit stops where the camp begins.
 ///
-/// **Labelled, not reproduced:** the inner bound. The original's test is an
-/// annulus, `min <= gap <= range`, and `Goto` passes no minimum, so a mover
-/// already overlapping its target (a negative gap) has *not* arrived there
-/// and is routed out. This engine's movement carries a minimum and never acts
-/// on one (`GotoAttack`'s is stored and ignored the same way), so an
-/// overlapping mover counts as arrived here. The group radius 0x00417920
-/// takes instead of the mover's when the route belongs to a formation is not
-/// reproduced either: no script `Goto` has one.
+/// **The inner bound.** The original's test is an annulus, `min <= gap <=
+/// range`, and the object `Goto` passes a minimum of 0, so a mover already
+/// overlapping its target (a negative gap) has *not* arrived there and is
+/// routed out to the edge; `goto_impl` folds that 0 into the band as it folds
+/// the range (`GotoOrder::min_range`, `within_band`). **Not reproduced:** the
+/// group radius 0x00417920 takes instead of the mover's when the route
+/// belongs to a formation: no script `Goto` has one.
 [[nodiscard]] std::int32_t object_goto_reach(const World& world, ObjectId mover,
                                              ObjectId target) {
   // An equivalence, kept for the reading: `find(kNoObject)` is null anyway.
@@ -1882,6 +1897,11 @@ HostOutcome goto_impl(CallContext& ctx) {
     const std::int32_t reach = object_goto_reach(*self.world, self.id, target);
     order.range = other->state.flags.is_unit ? object_route_range(range) + reach
                                              : point_route_range(range + reach);
+    // The inner bound the call passes is 0 (0x005d6b90's fifth argument),
+    // folded like the range: the gap between the edges for a unit
+    // (0x005d4353, 0x00417c10's `[rec+0x14]`), both radii added for a point
+    // goal (0x005d438d). So a mover overlapping its target has not arrived.
+    order.min_range = reach;
   }
   return run_goto(ctx, *self.world, *self.movement, self.id, order);
 }

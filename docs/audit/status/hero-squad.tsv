@@ -69,7 +69,7 @@
 0x00421090	verified	packs ((n << 4) & 0xffff) | ((player - 1) & 0xf), no lookup; sim/squad.cpp fn_get_squad (an out-of-range player answers the no-squad handle)
 0x00424510	verified	16-bit squad handle at +0x174 (0 for none), miss -> 0, no print
 0x0052f550	verified	signed byte [hero+0x1fc+id], -1 for not offered (was 0), id unsigned < 25 else -1, miss -> -1
-0x0052f4f0	verified	id < 25 and points in [-1,10] else nothing; writer 0x0052def0 with no balance check (was refused), -1 withdraws the skill; Scout moves the hero's sight by SightPerScoutLevel per point difference clamped [100,2048] with the SetSight reveal
+0x0052f4f0	verified	id < 25 and points in [-1,10] else nothing; writer 0x0052def0 with no balance check (was refused), -1 withdraws the skill; Scout moves the hero's sight by SightPerScoutLevel per point difference clamped [100,2048] with the SetSight reveal; FIXED round 17 batch 2: Quick March (case 3) with a formation at [hero+0x2b0] measures its slowest and fastest again, forced (0x005f5640 with 1); test a_quick_march_written_measures_the_formations_pace_again
 0x0052f680	verified	0x0052da80: min(level, 10 per offered skill) - spent, unfloored (was floored at 0); miss -> -1
 0x00421f30	verified	player decremented (was not: answered for the next player), >= 16 -> 0; 0x00443f50 over the player's squads: non-empty, flags & 0x25 clear, front member a hero -> sum army / sum cap * 100
 0x0052e4b0	verified	army count [+0x1e4] != 0; miss -> false

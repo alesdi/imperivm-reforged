@@ -800,6 +800,10 @@ int main(int argc, char** argv) {
       if (sim::MovementSystem* move = sim::movement_system(run.world())) {
         move->stop(run.world(), goto_id);
       }
+      // And its step in flight stopped, as `SetPos` stops it (0x0053d730):
+      // a walk step on the animation timer lands where it was aimed when it
+      // ends, which would put a unit placed mid-step back on its old way.
+      run.world().stop_animation(goto_id, run.world().time());
       // A unit its AI has put in a garrison is taken out of it there, as
       // `ExitHolder` takes one out (off the roster too), so the staging does
       // not depend on where the AI keeps its soldiers.
