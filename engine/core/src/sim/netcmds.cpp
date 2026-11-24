@@ -3,8 +3,16 @@
 #include <algorithm>
 #include <utility>
 
+#include "imperivm/core/sim/fog.hpp"
+#include "imperivm/core/sim/player.hpp"
+
 namespace imperivm::core::sim {
 namespace {
+
+/// Share-view's bit in a relations word: `test byte [cmd+0x14], 0x10` at
+/// 0x004e5fd6.
+constexpr std::uint32_t kShareViewBit =
+    1u << kRelationBits[static_cast<std::size_t>(Relation::share_view)];
 
 /// FNV-1a, 64 bit -- the same construction `world.cpp` folds the state vector
 /// with, so a `netcmds` value and a `slots` value are read the same way. It is
@@ -133,17 +141,23 @@ NetTurnReport apply_turn(World& world, const NetTurn& turn, OrderVerifier* verif
       // The players' table alone, on every peer, like the speed: no sink.
       // 0x004e5f80: with a second player, the word goes to `SetRelation`,
       // which returns at once for a player's own record; without one, the
-      // issuer's `allied` flag. `DiplShareView`'s exploration merge
-      // (0x00564fa0, which this execution also calls when bit 4 is set) is
-      // not done, for the reason `player_host.cpp` gives for the script's.
+      // issuer's `allied` flag. When the word carries share-view (0x10) the
+      // execution then makes `DiplShareView`'s exploration merge (0x00564fa0
+      // with the other player and the issuer's bit, `merge_shared_view`),
+      // whether or not `SetRelation` wrote anything.
       PlayerTable& players = world.players();
       if (PlayerTable::is_valid(order->issuer)) {
         if (order->other == kNoPlayer) {
           players.setup(order->issuer).allied_flag = order->allied;
           ++report.diplomacy;
-        } else if (PlayerTable::is_valid(order->other) && order->other != order->issuer) {
-          players.set_relation_word(order->issuer, order->other, order->relations);
-          ++report.diplomacy;
+        } else if (PlayerTable::is_valid(order->other)) {
+          if (order->other != order->issuer) {
+            players.set_relation_word(order->issuer, order->other, order->relations);
+            ++report.diplomacy;
+          }
+          if ((order->relations & kShareViewBit) != 0) {
+            merge_shared_view(world, order->issuer, order->other);
+          }
         }
       }
       continue;

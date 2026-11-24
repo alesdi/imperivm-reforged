@@ -11,6 +11,7 @@
 #include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/movement.hpp"
 #include "imperivm/core/sim/player_host.hpp"
+#include "imperivm/core/sim/spatial_index.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 
@@ -361,9 +362,11 @@ std::int32_t fog_slot_from_script(std::int32_t player) noexcept {
 std::uint32_t fog_view_mask(const World& world, PlayerId player) noexcept {
   if (!PlayerTable::is_valid(player)) return 0;
   // The player's own bit. `SetRelation` (0x005652f0) never writes the
-  // diagonal, so the own bit is the record constructor's, which was not
-  // located; **inferred** from the fact that without it no unit would explore
-  // for its own owner.
+  // diagonal, so the own bit is the record initialiser's: 0x00564660, which
+  // the game setup (0x00522314) runs once for each of the sixteen records,
+  // writes `1 << id` into `playerflag`, `viewflags`, `seeflags`,
+  // `supportflags` and `controlflags` alike, its complement into
+  // `enemyflags`, and 0x35 into the diagonal of `relations`.
   std::uint32_t mask = 1u << player;
   // `SetRelation(A, B, word)`: share-view (0x10) in A's word for B sets B's
   // `playerflag` in A's `viewflags` (`record + 0x14`), and clears it without.
@@ -374,6 +377,41 @@ std::uint32_t fog_view_mask(const World& world, PlayerId player) noexcept {
   }
   // The stamp keeps the low byte (0x00516474): players 9..16 have no fog slot.
   return mask & 0xffu;
+}
+
+void merge_shared_view(World& world, PlayerId granter, PlayerId receiver) {
+  FogSystem* fog = fog_system_of(world);
+  if (fog == nullptr) return;
+  // Both callers have range-checked the pair already. This one is for the
+  // function's own sake: an unowned object's owner is `kNoPlayer`, so an
+  // invalid number here would match every unowned object.
+  if (!PlayerTable::is_valid(granter) || !PlayerTable::is_valid(receiver)) return;
+  // The stamp keeps the mask's low byte (0x00517ad0's `param_3 & 0xff`, as
+  // 0x00516474 does): a receiver past the eighth player has no slot, and
+  // `explore_circle` refuses a slot past the eighth, so the walk writes
+  // nothing.
+  ExplorationMap& map = fog->map();
+  // 0x00564cd0 over the whole map rectangle, which is every object the grid
+  // holds: a held object is in no cell, and an internal one is filed nowhere.
+  // The stamps are `max`es and promotions, so the walk's own order -- cells
+  // by rows, each cell's list from its head -- writes the same map as any
+  // other, and spawn order is taken.
+  for (const WorldObject& slot : world.objects()) {
+    if (!SpatialIndex::stands(slot)) continue;
+    // `test [obj+0x2c], 0x8000000` / `jne skip`: a spawn template is in its
+    // cell and is passed over.
+    if (slot.state.flags.unspawned) continue;
+    // `[node+0x2c] & (granter | receiver)`: the one-hot owner is one of the
+    // pair. An unowned object has no bit.
+    const PlayerId owner = slot.state.owner;
+    if (owner != granter && owner != receiver) continue;
+    // The object's own sight (`[obj+0xd0]`) about its own point (`vtbl +
+    // 0x3c`), for the receiver's slot alone. No test of life and none of the
+    // sight; the stamp's own first test refuses a radius of zero. It is the
+    // small-radius front end 0x00517ad0, as the sweep's own stamps are, and
+    // this calls the circle stamp the sweep calls, with the header's labels.
+    map.explore_circle(slot.state.position, slot.sight, static_cast<std::int32_t>(receiver));
+  }
 }
 
 void ExplorationMap::explore_circle_mask(Point centre, std::int32_t radius, std::uint32_t mask) {

@@ -16,6 +16,7 @@
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
 #include "imperivm/core/sim/match.hpp"
+#include "imperivm/core/sim/netcmds.hpp"
 #include "imperivm/core/sim/world.hpp"
 #include "imperivm/core/sim/world_host.hpp"
 #include "test.hpp"
@@ -830,4 +831,110 @@ TEST(the_sight_radius_moves_the_hash_and_round_trips) {
   REQUIRE(back.find(scout) != nullptr);
   CHECK(back.find(scout)->sight == 1700);
   CHECK(back.state_hash() == world.state_hash());
+}
+
+// --------------------------------------------------------------------------
+// the shared-view merge (0x00564fa0)
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// A unit of `owner` standing at `at` with `sight`, spawned after the bench's
+/// start, so no sweep has stamped it: anything explored around it is the
+/// merge's.
+ObjectId seer(Bench& b, PlayerId owner, Point at, std::int32_t sight) {
+  const ObjectId id = b.world.spawn(NativeClass::unit, nullptr);
+  CHECK(b.world.set_owner(id, owner));
+  CHECK(b.world.set_position(id, at));
+  b.world.find(id)->sight = sight;
+  return id;
+}
+
+script::HostOutcome share_view(Bench& b, std::int32_t from, std::int32_t to, bool on) {
+  return b.call(script::CallKind::free_function, "DiplShareView", 3,
+                {script::Value::integer(from), script::Value::integer(to),
+                 script::Value::boolean(on)});
+}
+
+}  // namespace
+
+/// `DiplShareView(2, 1, true)` stamps, at once and with no turn run, the
+/// sight circle of every object of either player into player 1's slot -- and
+/// nothing into player 2's, nothing for a third player's objects, nothing for
+/// a spawn template or a held unit.
+TEST(fog_share_view_merges_both_players_sight_into_the_receiver_at_once) {
+  Bench b;
+  (void)seer(b, 1, pt(6000, 1500), 800);  // the granter's (script 2)
+  (void)seer(b, 0, pt(1500, 6000), 800);  // the receiver's own (script 1)
+  (void)seer(b, 2, pt(6000, 6000), 800);  // a third player's (script 3)
+  const ObjectId tmpl = seer(b, 1, pt(1500, 1500), 800);
+  b.world.mutable_state(tmpl)->flags.unspawned = true;
+  const ObjectId held = seer(b, 1, pt(0, 0), 1000);
+  const ObjectId keep = b.world.spawn(NativeClass::building, nullptr);
+  REQUIRE(b.world.set_position(keep, pt(3500, 3500)));
+  REQUIRE(b.world.put_in_holder(held, keep));
+  REQUIRE(!b.is_explored(pt(6000, 1500), 1));
+
+  CHECK(share_view(b, 2, 1, true).status == script::HostStatus::ok);
+  CHECK(b.world.players().has(1, 0, Relation::share_view));
+
+  CHECK(b.is_explored(pt(6000, 1500), 1));
+  CHECK(b.is_explored(pt(1500, 6000), 1));
+  // The circle is the unit's own sight: 700 out is in it, 1000 out is not.
+  CHECK(b.is_explored(pt(6700, 1500), 1));
+  CHECK(!b.is_explored(pt(7000, 1500), 1));
+  CHECK(!b.is_explored(pt(6000, 6000), 1));
+  CHECK(!b.is_explored(pt(1500, 1500), 1));
+  // The held unit stands at `(-1, -1)` in no cell; a circle of 1000 about
+  // that marker would cover this point.
+  CHECK(!b.is_explored(pt(400, 0), 1));
+  // The granter's slot is not written, by its own units or the receiver's.
+  CHECK(!b.is_explored(pt(6000, 1500), 2));
+  CHECK(!b.is_explored(pt(1500, 6000), 2));
+}
+
+/// The clear path is 0x00465990 alone: the bit goes and nothing is merged, or
+/// taken back.
+TEST(fog_share_view_cleared_merges_nothing) {
+  Bench b;
+  (void)seer(b, 1, pt(6000, 1500), 800);
+  b.world.players().set(1, 0, Relation::share_view, true);
+  CHECK(share_view(b, 2, 1, false).status == script::HostStatus::ok);
+  CHECK(!b.world.players().has(1, 0, Relation::share_view));
+  CHECK(!b.is_explored(pt(6000, 1500), 1));
+}
+
+/// The merge does not wait on the relation write: `SetRelation` refuses the
+/// diagonal, and `DiplShareView(1, 1, true)` merges player 1's own sight all
+/// the same. An out-of-range number merges nothing.
+TEST(fog_share_view_merges_on_the_diagonal_and_not_out_of_range) {
+  Bench b;
+  (void)seer(b, 0, pt(6000, 1500), 800);
+  CHECK(share_view(b, 0, 1, true).status == script::HostStatus::ok);
+  CHECK(!b.is_explored(pt(6000, 1500), 1));
+  CHECK(share_view(b, 1, 1, true).status == script::HostStatus::ok);
+  CHECK(b.world.players().relation_word(0, 0) == kRelationSelf);
+  CHECK(b.is_explored(pt(6000, 1500), 1));
+}
+
+/// The Diplomacy screen's order (0x004e5f80) makes the same merge when the
+/// word it writes carries share-view, and none when it does not.
+TEST(fog_a_diplomacy_order_granting_view_merges_too) {
+  Bench b;
+  (void)seer(b, 1, pt(6000, 1500), 800);
+  NetOrder order;
+  order.kind = NetOrderKind::diplomacy;
+  order.issuer = 1;
+  order.other = 0;
+  order.relations = kRelationCeasefireOnly;
+  NetTurn turn;
+  turn.orders.push_back(order);
+  (void)apply_turn(b.world, turn);
+  CHECK(!b.is_explored(pt(6000, 1500), 1));
+
+  turn.orders[0].relations = kRelationFriendly;
+  (void)apply_turn(b.world, turn);
+  CHECK(b.world.players().has(1, 0, Relation::share_view));
+  CHECK(b.is_explored(pt(6000, 1500), 1));
+  CHECK(!b.is_explored(pt(6000, 1500), 2));
 }
