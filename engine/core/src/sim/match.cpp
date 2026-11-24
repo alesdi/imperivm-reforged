@@ -27,13 +27,6 @@ constexpr script::CallKind kFree = script::CallKind::free_function;
 /// The FNV prime, the same mixer `EnvSystem::hash` and `PlayerTable::hash` use.
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
-/// The three `race` values that are match-setup markers rather than races.
-/// `race_from_name` already answers `kNoRace` for all of them; this exists so
-/// that an unrecognised *spelling* can be told apart from a marker, because the
-/// two want different diagnostics even though they resolve the same way.
-[[nodiscard]] bool is_race_marker(std::string_view name) noexcept {
-  return name == "Random" || name == "Mutable" || name == "Select";
-}
 
 /// A 1..16 script player number as a `PlayerId`, or `kNoPlayer`. The same
 /// conversion `sim/player_host.hpp` insists every entry point uses.
@@ -585,6 +578,42 @@ std::size_t setup_match(World& world, MatchSystem& match, const MatchRules& rule
 
     if (options.control_set[i]) setup.control = options.controls[i];
 
+    // **The race, as the world build resolves it** (0x00522314, the loop that
+    // also initialises each player record). It reads the setup record's race
+    // code -- what the lobby wrote, else the map's -- and, **for the first
+    // eight players only**, replaces `Random`/`Select` (8) and `Mutable` (9)
+    // with a draw on the game's generator (`[game+0x12a0]`, `vtbl + 0x14`,
+    // `Range`): `Range(0, 7)` when `AllowedRaces` is all ones, otherwise
+    // `Range(0, n - 1)` over the `n` races it allows, taking the drawn one in
+    // ascending race order. The draw is written back into the setup record,
+    // which is what `GetPlayerRace` reads and what the player record's `race`
+    // is then copied from (0x00567ad0). **There is no test of control**: a
+    // slot that takes no part draws as well, if its race is a marker. A
+    // marker on a player past the eighth is never drawn, and `GetPlayerRace`
+    // answers it (8 or 9). `Mutable` draws only outside the editor (`[0x00a8734c]`
+    // clear); this engine has no editor.
+    std::int32_t code = options.races[i] >= 0 && options.races[i] < kRaceCount
+                            ? options.races[i]
+                            : player_race_code(setup.race);
+    if (i < 8 && (code == kPlayerRaceRandom || code == kPlayerRaceMutable)) {
+      const std::uint32_t allowed = allowed_race_mask(setup.allowed_races) & 0xffu;
+      // All ones, or nothing in the low byte: `Range(0, 7)`. Eight races
+      // allowed by name come to the same draw and the same race.
+      if (allowed == 0xffu || allowed == 0u) {
+        code = world.rng().between(0, kRaceCount - 1);
+      } else {
+        std::int32_t count = 0;
+        for (std::uint32_t bits = allowed; bits != 0; bits &= bits - 1) ++count;
+        std::int32_t pick = world.rng().between(0, count - 1);
+        code = 0;
+        while ((allowed & (1u << code)) == 0 || pick-- > 0) ++code;
+      }
+    }
+    // A name the original's reader refuses (`player_race_code`'s `kNoRace`)
+    // never reaches its setup; here it stays as written, with no race and no
+    // draw.
+    if (code >= 0 && code < kRaceCount) setup.race = std::string(race_to_name(code));
+
     MatchPlayer slot;
     slot.control = setup.control;
     slot.participates = setup.control != PlayerControl::disabled && id != kNeutralWildlife &&
@@ -595,9 +624,6 @@ std::size_t setup_match(World& world, MatchSystem& match, const MatchRules& rule
     slot.score = match.player(id).score;
 
     if (!slot.participates) {
-      // A slot that takes no part keeps whatever the file said and draws
-      // nothing: burning a draw on it would make the stream depend on how many
-      // empty slots a map happens to declare.
       slot.race = kNoRace;
       match.set_player(id, slot);
       continue;
@@ -612,19 +638,7 @@ std::size_t setup_match(World& world, MatchSystem& match, const MatchRules& rule
       slot.control = PlayerControl::computer;
     }
     setup.control = slot.control;
-
-    std::int32_t race = options.races[i];
-    if (race < 0 || race >= kRaceCount) race = race_from_name(setup.race);
-    if (race < 0 || race >= kRaceCount) {
-      // `Random`, `Mutable`, `Select`, an empty attribute, or a spelling this
-      // build does not know: all of them draw. See the header on the
-      // distribution being an assumption and the source not being one.
-      (void)is_race_marker(setup.race);
-      race = world.rng().below(kRaceCount);
-    }
-    slot.race = race;
-    // `GetPlayerRace` reads the string, so the resolution has to land there.
-    setup.race = std::string(race_to_name(race));
+    slot.race = code >= 0 && code < kRaceCount ? code : kNoRace;
 
     match.set_player(id, slot);
   }

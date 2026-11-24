@@ -7,7 +7,9 @@
 
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/sim/ai.hpp"
+#include "imperivm/core/sim/combat.hpp"
 #include "imperivm/core/sim/economy.hpp"
+#include "imperivm/core/sim/fog.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/objlist.hpp"
@@ -169,15 +171,16 @@ HostOutcome fn_dipl_are_allied(CallContext& ctx) {
 // model, it is how every campaign alliance in the game is declared. A single
 // unmirrored call leaves them un-allied.
 //
-// **What is deliberately not done.** `DiplShareView`'s *set* path additionally
-// merges the pair's explored map through a fog helper at 0x00564fa0. There is
-// fog state now (`sim/fog.hpp`) and this still does not merge it: what 0x00564fa0
-// does to the two players' cells is unread, and a merge invented here would
-// silently reveal one player's map to another on every `DiplShareView`, which
-// four campaign missions call. So the relation write lands and the exploration
-// merge does not, as before -- but the reason has changed from "there is
-// nothing to merge" to "the merge itself is unread", which is a smaller gap and
-// a different one.
+// **`DiplShareView`'s set path merges exploration** (0x00565640 calls
+// 0x00564fa0 after the bit, with the second player and the first player's
+// bit). The merge is `merge_shared_view` in `sim/fog.hpp`: every object of
+// either player stamps its sight circle into the second player's slot, now.
+// It touches synchronised state -- the explored map is not hashed, but it is
+// saved, and `IsExplored` and `GetUnexploredPoint` read it -- so it is done
+// here and not left to the renderer. The clear path (0x00465990 alone)
+// merges nothing, and nothing is taken back. And the merge does not wait on
+// the relation write: `SetRelation` refuses the diagonal, so
+// `DiplShareView(p, p, true)` writes no bit and merges all the same.
 
 template <Relation kRelation>
 HostOutcome fn_dipl_set(CallContext& ctx) {
@@ -186,18 +189,20 @@ HostOutcome fn_dipl_set(CallContext& ctx) {
   const PlayerId from = player_arg(ctx.arg(0));
   const PlayerId to = player_arg(ctx.arg(1));
   if (from == kNoPlayer || to == kNoPlayer) return HostOutcome::ok_void();
-  // `SetRelation`'s own first act is to return when the other record is this
-  // record. Fidelity insurance rather than tidiness: `PlayerTable::set` would
-  // happily clear bit 0 on the diagonal, turning `kRelationSelf` into
-  // something else and moving `PlayerTable::hash` -- and therefore every
-  // conformance run -- for a call no shipped script makes.
-  if (from == to) return HostOutcome::ok_void();
   // `Value::boolean` is integer 0/1, so this is the whole of the third
   // argument. A non-integer reads as `false`; the original reads an
   // uninitialised stack byte there, so any bounded choice is an improvement
   // and this is the one that does nothing.
   const bool on = ctx.arg(2).is_integer() && ctx.arg(2).as_integer() != 0;
-  world->players().set(from, to, kRelation, on);
+  // `SetRelation`'s own first act is to return when the other record is this
+  // record. Fidelity insurance rather than tidiness: `PlayerTable::set` would
+  // happily clear bit 0 on the diagonal, turning `kRelationSelf` into
+  // something else and moving `PlayerTable::hash` -- and therefore every
+  // conformance run -- for a call no shipped script makes.
+  if (from != to) world->players().set(from, to, kRelation, on);
+  if constexpr (kRelation == Relation::share_view) {
+    if (on) merge_shared_view(*world, from, to);
+  }
   return HostOutcome::ok_void();
 }
 
@@ -640,14 +645,24 @@ HostOutcome fn_is_ai_player(CallContext& ctx) {
   return HostOutcome::ok_with(Value::boolean(record != nullptr && record->active));
 }
 
-/// `GetPlayerRace(idPlayer)`.
+/// `GetPlayerRace(idPlayer)` -- 1 site, `CREATE_BOAT_VERIFY.VS`.
+///
+/// 0x005a80e0 reads the race code of the player's setup record in the game
+/// settings (`[0x00a87c48] + (p - 1) * 0xc0 + 0xa4`, the record's `+8`), and
+/// answers -1 when there are no settings. The code is the player-data
+/// reader's (`player_race_code`), and the world build (0x00522314) has by then
+/// replaced a marker of the first eight players with the race it drew --
+/// `setup_match` here, which writes the name back. So a resolved player
+/// answers 0..7, and a marker left on players 9 to 16 answers 8 (`Random`,
+/// `Select`) or 9 (`Mutable`). No bound is checked in the original; a number
+/// outside 1..16 answers -1 here.
 HostOutcome fn_get_player_race(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("GetPlayerRace: no world");
   const PlayerId player = player_arg(ctx.arg(0));
   if (player == kNoPlayer) return HostOutcome::ok_with(Value::integer(kNoRace));
   return HostOutcome::ok_with(
-      Value::integer(race_from_name(world->players().setup(player).race)));
+      Value::integer(player_race_code(world->players().setup(player).race)));
 }
 
 /// `SetPlayerStatus(player, key, important)` and
@@ -878,6 +893,10 @@ HostOutcome m_race_str_pref(CallContext& ctx) {
   return HostOutcome::ok_with(Value::string(race_prefix(class_race(*world, ctx), kLower)));
 }
 
+/// `Sneak`'s index in the 36-entry specials table, and the bit of
+/// `[obj+0x198]` the reveal scan tests (`and eax, 0x4000000` at 0x004c80d7).
+constexpr std::int32_t kSpecialSneak = 26;
+
 /// `RevealHiddenEnemyUnits(point, radius, player)` -- 5 sites, all in
 /// `DATA\SUBAI\`: the two watch-eye spies, the keen-sight observer, and the
 /// gate and wall patrols.
@@ -905,7 +924,8 @@ HostOutcome m_race_str_pref(CallContext& ctx) {
 ///      carry `kSyncUnit`, and `~mask & (SyncFlags & 0xffff)` must be non-zero,
 ///      which is *the owner is not on this player's side*. That last test is
 ///      the "Enemy" in the name.
-///   4. It then calls 0x005a7600 with `true`, which is `SetVisible`: notify,
+///   4. A sneak's clock is stamped (below), and then 0x005a7600 is called
+///      with `true`, which is `SetVisible`: notify,
 ///      clear bit 21 through the object's own `vtbl + 0x48`, and refresh.
 ///
 /// **The side mask is `seeflags`, the shared-vision mask -- not hostility.**
@@ -919,10 +939,12 @@ HostOutcome m_race_str_pref(CallContext& ctx) {
 /// 0x15 and 0x35 and not with the bare 0x01, so a one-sided truce of 0x01 is
 /// revealed where the old `is_enemy` reading spared it.
 ///
-/// The revealing player's own units: `SetRelation` never writes the diagonal,
-/// so whether `seeflags` holds the player's own bit is the record
-/// constructor's, which was not located. They are spared here, which is the
-/// reading under which a spy running this does not unmask itself.
+/// **The revealing player's own units are spared, and that is read.**
+/// `SetRelation` never writes the diagonal, so whether `seeflags` holds the
+/// player's own bit is the record initialiser's: 0x00564660, which the game
+/// setup (0x00522314) runs once on each of the sixteen records, writes the
+/// player's own bit into `seeflags` as into `viewflags` and `playerflag`. Its
+/// complement has no own bit, and an own unit fails the side test.
 ///
 /// **A number outside 1..16 does nothing here rather than reading a mask that
 /// is not there.** This entry point, unlike `ExploreCircle` and `ExploreArea`,
@@ -932,14 +954,28 @@ HostOutcome m_race_str_pref(CallContext& ctx) {
 /// behaviour, and neither reading is transcribable, so an unresolvable player
 /// reveals nothing.
 ///
-/// **The stealth clock is the one thing left out, and it is left out
-/// elsewhere.** Between the side test and the reveal, the original stamps
-/// `[obj+0x1a4]` with the current game time for objects carrying bit 26 of
-/// `[obj+0x198]`. That field is `Unit::SetLastAttackTime`'s -- the combatant's
-/// `last_attack_time`, which `Unit::TimeWithoutAttack` reads back, so the
-/// premise this was left out on ("no entry point reads it") was wrong, and
-/// `m_set_last_attack_time` in `world_host.cpp` now stores it. This writer is
-/// still left out: a known gap, for whoever audits this entry point.
+/// **The circle is the scan's own** (0x004c7f70): the box of half-side `r`
+/// about the point, clipped to the map, its cells walked, and each object of a
+/// cell the circle only meets kept at `dist² <= r²`. So a radius of zero keeps
+/// what stands on the point itself -- not the whole map, which is what the
+/// engine's general radius query makes of zero -- and a negative one is what
+/// the walk over an inverted box makes of it (below). No shipped site passes
+/// either: two pass 570 and 500, and three `.sight`. The squares are taken
+/// wide here, where the original's are 32-bit and wrap for a radius past
+/// 46340 -- larger than any map. **No
+/// spawn-template test**: the scan never reads 0x8000000, so a hidden enemy
+/// template in the circle is revealed with the rest.
+///
+/// **The sneak's clock.** Between the side test and the reveal, an object
+/// carrying bit 26 of the specials word `[obj+0x198]` -- `Sneak` in the
+/// 36-name table -- has `[obj+0x1a4]` stamped with the game clock
+/// (`[0x00996ff4] + 0x1258`, `World::time()`). That is the field
+/// `Unit::SetLastAttackTime` writes and `Unit::TimeWithoutAttack` reads back
+/// as the clock less the stamp -- `Combatant::last_attack_time` -- and the
+/// reader it is for is `SNEAK_BEHAVIOR.VS`, which re-hides a sneak once
+/// `TimeWithoutAttack` reaches 20000: a sneak a patrol has found stays found
+/// for the twenty seconds from that moment, as if it had just struck. A unit
+/// with no combat record has nothing to stamp, as for `SetLastAttackTime`.
 HostOutcome fn_reveal_hidden_enemy_units(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("RevealHiddenEnemyUnits: no world");
@@ -950,25 +986,52 @@ HostOutcome fn_reveal_hidden_enemy_units(CallContext& ctx) {
     return HostOutcome::failed("RevealHiddenEnemyUnits: expected a radius");
   }
   const PlayerId player = player_arg(ctx.arg(2));
-  // **This guard changes no answer and is kept anyway.** `PlayerTable::is_enemy`
-  // already refuses an invalid viewer, so removing this line would still reveal
-  // nothing -- the fault sweep says so, as an annotated survivor. What it does
-  // is say the refusal at the top, where the reason for it is, and skip a
-  // spatial query whose every result is going to be discarded.
+  // The refusal the paragraph above gives. It is the only one: no player's
+  // row grants share-view to a player that is not there, so without it every
+  // hidden unit of every player in the circle would be revealed.
   if (player == kNoPlayer) return HostOutcome::ok_void();
-
+  const Point centre = unpack_point(ctx.arg(0));
+  std::int32_t radius = ctx.arg(1).as_integer();
+  if (radius < 0) {
+    // A negative half-side inverts the box. The cell walk then runs only when
+    // both of its ends fall in one 256-unit cell, column and row (the counts
+    // are `hi - lo + 1`, compared unsigned), and that cell, classified against
+    // the circle (0x00416810), is a partial one: its objects are kept at
+    // `dist² <= r²`, the circle of `|r|`. A box that crosses a cell edge walks
+    // nothing.
+    const std::int64_t reach = -static_cast<std::int64_t>(radius);
+    const auto cell = [](std::int64_t v) { return v / SpatialIndex::kCellSize; };
+    if (cell(centre.x - reach) != cell(centre.x + reach) ||
+        cell(centre.y - reach) != cell(centre.y + reach)) {
+      return HostOutcome::ok_void();
+    }
+    radius = static_cast<std::int32_t>(reach);
+  }
+  const std::int64_t reach2 = static_cast<std::int64_t>(radius) * radius;
   std::vector<ObjectId> found;
-  world->objects_in_radius(unpack_point(ctx.arg(0)), ctx.arg(1).as_integer(), ClassFilter{},
-                           found);
+  world->objects_located_in_rect(centre.x - radius, centre.y - radius, centre.x + radius,
+                                 centre.y + radius, found);
+  CombatSystem* combat = combat_system_of(*world);
+  const GameTime now = world->time();
   for (const ObjectId id : found) {
     WorldObject* other = world->find(id);
     if (other == nullptr) continue;
+    const std::int64_t dx = static_cast<std::int64_t>(other->state.position.x) - centre.x;
+    const std::int64_t dy = static_cast<std::int64_t>(other->state.position.y) - centre.y;
+    if (dx * dx + dy * dy > reach2) continue;
     // The three tests the scan applies, in the order 0x004c80b2 applies them.
     if (!other->state.flags.hidden) continue;
     if (!other->state.flags.is_unit) continue;
     const PlayerId owner = other->state.owner;
+    // `owner == player` is the own bit of `seeflags`. The diagonal of the
+    // relations matrix carries share-view as well (0x35, from the same
+    // initialiser, and `SetRelation` never writes it), so the next line gives
+    // the same answer and the fault sweep cannot tell the two apart.
     if (!PlayerTable::is_valid(owner) || owner == player) continue;
     if (world->players().has(owner, player, Relation::share_view)) continue;
+    if (combat != nullptr && object_has_special(*world, id, kSpecialSneak)) {
+      if (Combatant* unit = combat->find(id); unit != nullptr) unit->last_attack_time = now;
+    }
     other->state.flags.hidden = false;
   }
   return HostOutcome::ok_void();
@@ -1039,6 +1102,47 @@ std::int32_t race_from_name(std::string_view name) noexcept {
   // The first is a class with no race; the other three are match-setup markers
   // that only the RNG and the lobby can turn into a race.
   return kNoRace;
+}
+
+std::int32_t player_race_code(std::string_view name) noexcept {
+  // 0x00569090's `race` arm, in its order: a four-byte compare against `Gaul`,
+  // then `RepublicanRome`, `Random`, `Mutable`, `Carthage`, `Iberia`,
+  // `ImperialRome`, `Britain`, `Egypt`, `Germany`, `Roman`, `Select`.
+  constexpr RaceName kCodes[] = {
+      {"Gaul", 0},         {"RepublicanRome", 1}, {"Random", kPlayerRaceRandom},
+      {"Mutable", kPlayerRaceMutable},            {"Carthage", 2},
+      {"Iberia", 3},       {"ImperialRome", 4},   {"Britain", 5},
+      {"Egypt", 6},        {"Germany", 7},        {"Roman", 1},
+      {"Select", kPlayerRaceRandom},
+  };
+  for (const RaceName& entry : kCodes) {
+    if (entry.name == name) return entry.value;
+  }
+  return kNoRace;
+}
+
+std::uint32_t allowed_race_mask(std::string_view list) noexcept {
+  constexpr std::uint32_t kAll = 0xffffffffu;
+  // `All` is the reader's own test. Parsed, it would name nothing and come
+  // to all ones as well, so the fault sweep cannot see this branch.
+  if (list.empty() || list == "All") return kAll;
+  std::uint32_t mask = 0;
+  std::size_t at = 0;
+  while (true) {
+    // The tokenizer (0x006ab970): skip spaces, cut at the next comma, drop the
+    // spaces before it.
+    while (at < list.size() && list[at] == ' ') ++at;
+    if (at >= list.size()) break;
+    const std::size_t comma = list.find(',', at);
+    std::size_t end = comma == std::string_view::npos ? list.size() : comma;
+    const std::size_t next = comma == std::string_view::npos ? list.size() : comma + 1;
+    while (end > at && list[end - 1] == ' ') --end;
+    if (end == at) break;  // an empty piece ends the walk
+    const std::int32_t race = player_race_code(list.substr(at, end - at));
+    if (race >= 0 && race < 8) mask |= 1u << race;
+    at = next;
+  }
+  return mask == 0 ? kAll : mask;
 }
 
 std::int32_t class_race_from_name(std::string_view name) noexcept {

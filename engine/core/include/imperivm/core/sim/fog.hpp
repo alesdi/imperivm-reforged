@@ -307,11 +307,28 @@ class FogSystem final : public System {
 [[nodiscard]] std::int32_t fog_slot_from_script(std::int32_t player) noexcept;
 
 /// The fog slots `player`'s stamps write: its record's `viewflags`
-/// (`record + 0x14`), low byte. Its own slot (inferred: the record constructor
-/// was not located) plus every player its own relations row grants share-view
+/// (`record + 0x14`), low byte. Its own slot (the record initialiser 0x00564660
+/// writes it) plus every player its own relations row grants share-view
 /// (bit 4) -- `SetRelation` (0x005652f0) keeps the word that way. Zero for an
 /// invalid player.
 [[nodiscard]] std::uint32_t fog_view_mask(const World& world, PlayerId player) noexcept;
+
+/// The exploration merge a grant of shared view makes: 0x00564fa0.
+///
+/// `DiplShareView(granter, receiver, true)` (0x00565640) calls it after the
+/// relation bit, and so does the Diplomacy screen's order when the word it
+/// writes carries share-view (0x004e5f80); clearing the bit merges nothing.
+/// It does not copy the granter's explored cells: it walks the object grid
+/// over the whole map (0x00564cd0) and, for every object of **either** player
+/// that is not a spawn template, stamps the circle of the object's sight about
+/// its point into the **receiver's** slot (0x00517ad0, mask `1 << receiver`).
+/// So the receiver sees at once what the granter's units see now -- not what
+/// they saw before -- and its own units' circles again. Nothing is written for
+/// the granter, and a receiver past the eighth player has no slot to write.
+/// It runs on every call that sets the bit, whether the bit was already set or
+/// not, and on `DiplShareView(p, p, true)`, whose relation write
+/// `SetRelation` refuses.
+void merge_shared_view(World& world, PlayerId granter, PlayerId receiver);
 
 /// `IsExplored/2`, `ExploreArea/2`, `ExploreCircle/3`, `ExploreAll/0`,
 /// `GetUnexploredPoint/1`. Returns how many were newly implemented.

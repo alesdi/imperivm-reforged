@@ -478,7 +478,10 @@ def test_a_seat_left_and_taken_back_twice_through_the_war(imconform, game_dir):
 CAPTURE_SEED = 7
 CAPTURE_ORDER_TURN = 300
 CAPTURE_TURNS = 600
-#: p1's village there, where the map puts it, and where the soldier is stood.
+#: p1's village there: the one nearest this point, which is the site the map
+#: gives it. Its central building's own position is the village template's,
+#: which the world build draws, so it moves with the draws before it and is
+#: read off the run, not pinned. And where the soldier is stood.
 P1_VILLAGE_AT = (15362, 779)
 P3_STANDS_AT = (15100, 1100)
 
@@ -510,15 +513,17 @@ def test_the_computers_war_agrees_to_the_capture(imconform, game_dir):
     held = [(int(i), cls, int(p)) for i, cls, p in
             re.findall(r"^\s+(\d+) (\S+) p(\d+) at \(-1,-1\) holder [1-9]\d* health [1-9]",
                        first.stdout, re.MULTILINE)]
-    village =[i for i, cls, p, x, y in listed
-               if "Village" in cls and p == 1 and (x, y) == P1_VILLAGE_AT]
+    village = sorted(((x - P1_VILLAGE_AT[0]) ** 2 + (y - P1_VILLAGE_AT[1]) ** 2, i, x, y)
+                     for i, cls, p, x, y in listed if "Village" in cls and p == 1)[:1]
+    village = [(i, x, y) for d, i, x, y in village if d <= 1000 ** 2]
     soldier = [i for i, cls, p, x, y in listed if "Village" not in cls and p == 3] or [
         i for i, cls, p in held if p == 3]
     assert village and soldier, first.stdout[-3000:]
+    village_id, village_x, village_y = village[0]
     staged = {**os.environ,
               "IMRUN_PLACE": f"{P3_STANDS_AT[0]},{P3_STANDS_AT[1]}",
-              "IMRUN_GOTO": f"{CAPTURE_ORDER_TURN}:{soldier[0]}:{P1_VILLAGE_AT[0]},{P1_VILLAGE_AT[1]}",
-              "IMRUN_CLICK": str(village[0])}
+              "IMRUN_GOTO": f"{CAPTURE_ORDER_TURN}:{soldier[0]}:{village_x},{village_y}",
+              "IMRUN_CLICK": str(village_id)}
 
     solo = subprocess.run(
         [str(imrun), str(game_dir), str(path), str(CAPTURE_TURNS), str(LENGTH),

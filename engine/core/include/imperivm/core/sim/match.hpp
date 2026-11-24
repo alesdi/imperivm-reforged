@@ -867,23 +867,25 @@ struct MatchStatus {
 ///   3. **What everyone else is.** `Both` becomes `Computer`. A slot that
 ///      declares `Human` and is not the chosen human becomes `Computer` in a
 ///      single-player match and is left alone in a multiplayer one.
-///   4. **What race each ends up as.** A caller override wins; otherwise the
-///      map's `race`, unless that is one of the three markers `Random`,
-///      `Mutable` or `Select`, which draw `world.rng().below(kRaceCount)`.
+///   4. **What race each ends up as**, as the world build resolves it
+///      (0x00522314). The caller's override, else the map's `race` as the
+///      player-data reader codes it (`player_race_code`). For players 1 to 8
+///      only, whether they take part or not, a marker -- `Random` or `Select`
+///      (8), `Mutable` (9) -- is replaced by a draw on `world.rng()`:
+///      `between(0, 7)`, or, when `AllowedRaces` names some races,
+///      `between(0, n - 1)` over the `n` it names, in ascending race order.
 ///      The resolved name is written back into `PlayerSetup::race`, which is
-///      what `GetPlayerRace` reads.
+///      what `GetPlayerRace` reads. A marker on players 9 to 16 stays, and
+///      `GetPlayerRace` answers its code.
 ///
-/// ## What it does not do
+/// ## What is left
 ///
-/// `AllowedRaces` is not applied. `"All"` is its only value in all 304 shipped
-/// `player<i>.xml` documents, so there is nothing to test a filter against; if
-/// a container with a narrower list ever turns up, this is where it goes.
-///
-/// The distribution of a `Random` draw is **assumed uniform over the eight
-/// races**. Nothing in the data or the executable was found to settle it. What
-/// is not assumed is where the randomness comes from: `World::rng()`, because
-/// the resolution is part of the simulation's starting state and a second
-/// generator is a second state to serialise.
+/// A name the original's reader refuses (anything `player_race_code` does
+/// not know, the empty string among them) stops the original loading the
+/// map; here it stays as written, no race and no draw. `Mutable` draws only
+/// outside the editor in the original, and there is no editor here. The
+/// conquest's own write of the local player's race (0x004ccbb0, a
+/// `CVXGameConq` start) is the caller's override here.
 std::size_t setup_match(World& world, MatchSystem& match, const MatchRules& rules,
                         const MatchOptions& options);
 
