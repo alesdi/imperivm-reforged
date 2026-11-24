@@ -682,8 +682,9 @@ bool HeroSystem::write_skill(World* world, ObjectId hero_id, HeroSkill which,
           std::clamp(slot->sight + constants_.sight_per_scout_level * (after - before), 100, 2048);
       if (sight > slot->sight && slot->state.position != kHeldPosition) {
         if (FogSystem* fog = fog_system_of(*world); fog != nullptr) {
-          fog->map().explore_circle(slot->state.position, sight,
-                                    fog_slot_from_script(slot->state.owner + 1));
+          // 0x0052def0: the large stamp, for the owner's `viewflags`.
+          fog->map().explore_circle_mask(slot->state.position, sight,
+                                         fog_view_mask(*world, slot->state.owner));
         }
       }
       slot->sight = sight;

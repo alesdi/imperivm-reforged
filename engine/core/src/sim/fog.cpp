@@ -172,75 +172,313 @@ namespace {
 
 }  // namespace
 
+namespace {
+
+// The original's stamps compute in 32-bit registers: sums, differences and
+// squares wrap, and the comparisons are signed. These keep that without the
+// undefined behaviour a signed overflow is in C++.
+[[nodiscard]] constexpr std::int32_t add32(std::int32_t a, std::int32_t b) noexcept {
+  return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) + static_cast<std::uint32_t>(b));
+}
+[[nodiscard]] constexpr std::int32_t sub32(std::int32_t a, std::int32_t b) noexcept {
+  return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) - static_cast<std::uint32_t>(b));
+}
+[[nodiscard]] constexpr std::int32_t mul32(std::int32_t a, std::int32_t b) noexcept {
+  return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) * static_cast<std::uint32_t>(b));
+}
+/// `cdq / xor / sub`: the absolute value, and `INT_MIN` stays itself.
+[[nodiscard]] constexpr std::int32_t abs32(std::int32_t v) noexcept {
+  const std::uint32_t sign = v < 0 ? 0xffffffffu : 0u;
+  return static_cast<std::int32_t>((static_cast<std::uint32_t>(v) ^ sign) - sign);
+}
+/// Down to a multiple of 32 the way the stamps do it, toward zero.
+[[nodiscard]] constexpr std::int32_t trunc32(std::int32_t v) noexcept { return v / 32 * 32; }
+
+/// The floored root of an unsigned 32-bit value: 0x0067c3d0, which answers
+/// `floor(sqrt(v))` for every input (0xffff above 0xfffe0000, which is the
+/// same thing).
+[[nodiscard]] std::int32_t isqrt32(std::uint32_t value) noexcept {
+  std::uint32_t r = 0;
+  std::uint32_t bit = 1u << 30;
+  while (bit > value) bit >>= 2;
+  while (bit != 0) {
+    if (value >= r + bit) {
+      value -= r + bit;
+      r = (r >> 1) + bit;
+    } else {
+      r >>= 1;
+    }
+    bit >>= 2;
+  }
+  return static_cast<std::int32_t>(r);
+}
+
+/// 0x005146a0: where a cell rectangle (edges included) stands against the
+/// circle of radius `rad` about `(px, py)`. **1** when all four corners are
+/// within it, **-1** when the two do not meet, **0** when they meet otherwise.
+/// The box test first, then the farthest corner, then the nearest corner, and
+/// last the two arms of the rounded rectangle the circle's centre must lie in.
+[[nodiscard]] std::int32_t classify_cell(std::int32_t x0, std::int32_t y0, std::int32_t x1,
+                                         std::int32_t y1, std::int32_t px, std::int32_t py,
+                                         std::int32_t rad) noexcept {
+  if (sub32(px, rad) > x1 || add32(px, rad) < x0 || sub32(py, rad) > y1 ||
+      add32(py, rad) < y0) {
+    return -1;
+  }
+  const std::int32_t ax0 = abs32(sub32(px, x0));
+  const std::int32_t ax1 = abs32(sub32(px, x1));
+  const std::int32_t ay0 = abs32(sub32(py, y0));
+  const std::int32_t ay1 = abs32(sub32(py, y1));
+  const std::int32_t near_x = std::min(ax0, ax1);
+  const std::int32_t far_x = std::max(ax0, ax1);
+  const std::int32_t near_y = std::min(ay0, ay1);
+  const std::int32_t far_y = std::max(ay0, ay1);
+  const std::int32_t r2 = mul32(rad, rad);
+  if (add32(mul32(far_y, far_y), mul32(far_x, far_x)) <= r2) return 1;
+  if (add32(mul32(near_y, near_y), mul32(near_x, near_x)) <= r2) return 0;
+  if (px >= sub32(x0, rad) && px <= add32(x1, rad) && py >= y0 && py <= y1) return 0;
+  if (px >= x0 && px <= x1 && py >= sub32(y0, rad) && py <= add32(y1, rad)) return 0;
+  return -1;
+}
+
+/// The rim of the large stamp: 0x00514b80, into one cell's record.
+///
+/// `R` is the radius plus 48. The ramp is evaluated at the four corners of
+/// the 32-unit square each lattice point heads -- `0` past `R`, `15` short of
+/// `R - 96`, `(R - d) * 15 / 96` between, `d` the floored root of the squared
+/// distance -- and blended bilinearly with the weights `(x - o) % 16` and
+/// `(y - o) % 16`, `o` the origin of the box `16 * (R / 16 + 2)` either side
+/// of the centre that also bounds the lattice. Every division truncates; the
+/// value is `max`ed with what is there.
+void stamp_rim(ExplorationMap::FineRecord& record, std::int32_t x0, std::int32_t y0,
+               Point centre, std::int32_t outer) {
+  constexpr std::int32_t kMax = ExplorationMap::kFineMax;
+  const std::int32_t x1 = x0 + ExplorationMap::kCellSize - 1;
+  const std::int32_t y1 = y0 + ExplorationMap::kCellSize - 1;
+  const std::int32_t span = mul32(outer / 16 + 2, 32);
+  const std::int32_t ox = sub32(centre.x, span / 2);
+  const std::int32_t oy = sub32(centre.y, span / 2);
+  const std::int32_t xmin = add32(ox, 16);
+  const std::int32_t ymin = add32(oy, 16);
+  const std::int32_t xmax = sub32(add32(span, ox), 16);
+  const std::int32_t ymax = sub32(add32(span, oy), 16);
+  const std::int32_t xs = trunc32(std::max(x0, xmin));
+  const std::int32_t ys = trunc32(std::max(y0, ymin));
+  const std::int32_t xe = trunc32(std::min(x1, xmax));
+  const std::int32_t ye = trunc32(std::min(y1, ymax));
+  const auto ramp = [outer](std::int32_t d) -> std::int32_t {
+    if (outer < d) return 0;
+    if (d < sub32(outer, ExplorationMap::kRamp)) return kMax;
+    return mul32(sub32(outer, d), kMax) / ExplorationMap::kRamp;
+  };
+  const auto dist = [&centre](std::int32_t x, std::int32_t y) -> std::int32_t {
+    const std::int32_t dx = sub32(x, centre.x);
+    const std::int32_t dy = sub32(y, centre.y);
+    return isqrt32(static_cast<std::uint32_t>(add32(mul32(dx, dx), mul32(dy, dy))));
+  };
+  for (std::int32_t x = xs; x <= xe; x += ExplorationMap::kFineSpacing) {
+    for (std::int32_t y = ys; y <= ye; y += ExplorationMap::kFineSpacing) {
+      if (x < xmin || x > xmax || y < ymin || y > ymax) continue;
+      const std::int32_t v00 = ramp(dist(x, y));
+      const std::int32_t v10 = ramp(dist(x + 32, y));
+      const std::int32_t v01 = ramp(dist(x, y + 32));
+      const std::int32_t v11 = ramp(dist(x + 32, y + 32));
+      const std::int32_t fx = sub32(x, ox) % 16;
+      const std::int32_t fy = sub32(y, oy) % 16;
+      const std::int32_t top = v00 + (v10 - v00) * fx / 16;
+      const std::int32_t bottom = v01 + (v11 - v01) * fx / 16;
+      const std::int32_t value = top + (bottom - top) * fy / 16;
+      const auto i = static_cast<std::size_t>(static_cast<std::uint32_t>(x - x0) >> 5);
+      const auto j = static_cast<std::size_t>(static_cast<std::uint32_t>(y - y0) >> 5);
+      std::uint8_t& nibble = record.values[j * ExplorationMap::kFineSide + i];
+      if (nibble < value) nibble = static_cast<std::uint8_t>(value);
+    }
+  }
+}
+
+}  // namespace
+
+const std::vector<std::int32_t>& ExplorationMap::brush(std::int32_t n) const {
+  // 0x005f8810 on the table object at `map + 0xe4` (0x005f8780(96): 130
+  // slots, width 96). Built on first use for each `n` and kept: its contents
+  // are a function of `n` alone, so a cache here writes what the original's
+  // does. `(2n + 1)` rows of `(2n + 1)` samples 16 units apart, the centre at
+  // `(n, n)`, each `value << 9` with `w = min(96 / 16 + 1, n)`:
+  //
+  //   * 0 for a sample farther than `n` from the centre,
+  //   * 15 for one nearer than `n - w`,
+  //   * `trunc((n - d) * 15 / w)` between, `d` its distance.
+  //
+  // The original takes `d` as a single-precision root and the ramp in the
+  // FPU; on the integers it is handed, the comparisons are exact in squares
+  // and the ramp is `(15n - ceil(sqrt(225 m))) / w`, `m = a² + b²`, which
+  // agrees with single, double and exact evaluation at every sample of every
+  // `n` from 2 to 127 (checked off-line, once).
+  std::vector<std::int32_t>& table = brush_[static_cast<std::size_t>(n)];
+  if (!table.empty()) return table;
+  const std::int32_t side = 2 * n + 1;
+  const std::int32_t w = std::min<std::int32_t>(kRamp / 16 + 1, n);
+  table.assign(static_cast<std::size_t>(side) * static_cast<std::size_t>(side), 0);
+  for (std::int32_t a = -n; a <= n; ++a) {
+    for (std::int32_t b = -n; b <= n; ++b) {
+      const std::int64_t m = static_cast<std::int64_t>(a) * a + static_cast<std::int64_t>(b) * b;
+      std::int32_t value = 0;
+      if (m > static_cast<std::int64_t>(n) * n) {
+        value = 0;
+      } else if (m < static_cast<std::int64_t>(n - w) * (n - w)) {
+        value = kFineMax;
+      } else {
+        const std::int64_t s = m == 0 ? 0 : rim_isqrt(225 * m - 1) + 1;
+        value = static_cast<std::int32_t>((15 * static_cast<std::int64_t>(n) - s) / w);
+      }
+      table[static_cast<std::size_t>((n + a) * side + (n + b))] = value << 9;
+    }
+  }
+  return table;
+}
+
+void ExplorationMap::stamp_brush(FineRecord& record, std::int32_t x0, std::int32_t y0,
+                                 Point centre, std::int32_t outer) const {
+  // 0x00514fc0: the small stamp's lattice writer. The box is the table's,
+  // `16 * (R / 16 + 2)` either side of the centre, less 16 at each edge; the
+  // lattice points are the cell's multiples of 32 inside it.
+  const std::int32_t n = outer / 16 + 2;
+  const std::vector<std::int32_t>& table = brush(n);
+  const std::int32_t side = 2 * n + 1;
+  const std::int32_t span = n * 32;
+  const std::int32_t ox = centre.x - span / 2;
+  const std::int32_t oy = centre.y - span / 2;
+  const std::int32_t xmin = ox + 16;
+  const std::int32_t ymin = oy + 16;
+  const std::int32_t xmax = span + ox - 16;
+  const std::int32_t ymax = span + oy - 16;
+  std::int32_t xs = trunc32(std::max(x0, xmin));
+  std::int32_t ys = trunc32(std::max(y0, ymin));
+  if (xs < xmin) xs += 32;
+  if (ys < ymin) ys += 32;
+  const std::int32_t xe = trunc32(std::min(x0 + kCellSize - 1, xmax));
+  const std::int32_t ye = trunc32(std::min(y0 + kCellSize - 1, ymax));
+  for (std::int32_t x = xs; x <= xe; x += kFineSpacing) {
+    const std::int32_t tx = x - ox;
+    const std::int32_t col = tx / 16;
+    const std::int32_t fx = tx % 16;
+    for (std::int32_t y = ys; y <= ye; y += kFineSpacing) {
+      const std::int32_t ty = y - oy;
+      const std::int32_t row = ty / 16;
+      const std::int32_t fy = ty % 16;
+      const auto at = [&](std::int32_t r, std::int32_t c) {
+        return table[static_cast<std::size_t>(r * side + c)];
+      };
+      const std::int32_t t00 = at(row, col);
+      const std::int32_t t01 = at(row, col + 1);
+      const std::int32_t t10 = at(row + 1, col);
+      const std::int32_t t11 = at(row + 1, col + 1);
+      const std::int32_t top = t00 + (t01 - t00) * fx / 16;
+      const std::int32_t bottom = t10 + (t11 - t10) * fx / 16;
+      const std::int32_t value = ((top + (bottom - top) * fy / 16) >> 9) & 0xffff;
+      const auto i = static_cast<std::size_t>(static_cast<std::uint32_t>(x - x0) >> 5);
+      const auto j = static_cast<std::size_t>(static_cast<std::uint32_t>(y - y0) >> 5);
+      std::uint8_t& nibble = record.values[j * kFineSide + i];
+      if (nibble < value) nibble = static_cast<std::uint8_t>(value);
+    }
+  }
+}
+
 void ExplorationMap::explore_circle(Point centre, std::int32_t radius, std::int32_t slot) {
-  // 0x00516450 returns at once for a radius of **zero** or an empty mask. A
-  // negative radius is refused here too, which the original does not do (it
-  // runs its cell loop over a negative box); no caller passes one.
-  if (side_ == 0 || slot < 0 || slot >= kSlots || radius <= 0) return;
-  const std::int64_t outer = static_cast<std::int64_t>(radius) + kInner;
-  const std::int64_t inner = static_cast<std::int64_t>(radius) - kInner;
-  const std::int64_t outer2 = outer * outer;
-  const std::int64_t inner2 = inner < 0 ? -1 : inner * inner;
-  const std::int32_t lo_x = static_cast<std::int32_t>(
-      std::max<std::int64_t>(0, (centre.x - outer) / kCellSize));
-  const std::int32_t lo_y = static_cast<std::int32_t>(
-      std::max<std::int64_t>(0, (centre.y - outer) / kCellSize));
-  const std::int32_t hi_x = static_cast<std::int32_t>(
-      std::min<std::int64_t>(side_ - 1, (centre.x + outer) / kCellSize));
-  const std::int32_t hi_y = static_cast<std::int32_t>(
-      std::min<std::int64_t>(side_ - 1, (centre.y + outer) / kCellSize));
-  for (std::int32_t cy = lo_y; cy <= hi_y; ++cy) {
-    for (std::int32_t cx = lo_x; cx <= hi_x; ++cx) {
+  // 0x00516450. A radius of zero stamps nothing (its first test, beside the
+  // empty mask); any other radius, a negative one included, runs.
+  if (side_ == 0 || slot < 0 || slot >= kSlots || radius == 0) return;
+  const std::int32_t outer = add32(radius, kInner);
+  const std::int32_t inner = sub32(radius, kInner);
+  // The box `(0, 0, 2R, 2R)` centred on the point (0x00423360), and the cells
+  // from the one its low corner falls in (toward zero) up to the one its high
+  // corner does, each kept to the map rectangle `(0, 0, w-1, h-1)`.
+  const std::int32_t width = mul32(outer, 2);
+  const std::int32_t bx0 = sub32(centre.x, width / 2);
+  const std::int32_t by0 = sub32(centre.y, width / 2);
+  const std::int32_t bx1 = add32(width, bx0);
+  const std::int32_t by1 = add32(width, by0);
+  const std::int64_t xs = static_cast<std::int64_t>(bx0 / kCellSize);
+  const std::int64_t ys = static_cast<std::int64_t>(by0 / kCellSize);
+  const std::int64_t xe = static_cast<std::int64_t>(bx1 / kCellSize) + 1;
+  const std::int64_t ye = static_cast<std::int64_t>(by1 / kCellSize) + 1;
+  const auto lo_x = static_cast<std::int32_t>(std::max<std::int64_t>(xs, 0));
+  const auto lo_y = static_cast<std::int32_t>(std::max<std::int64_t>(ys, 0));
+  const auto hi_x = static_cast<std::int32_t>(std::min<std::int64_t>(xe, side_));
+  const auto hi_y = static_cast<std::int32_t>(std::min<std::int64_t>(ye, side_));
+  for (std::int32_t cx = lo_x; cx < hi_x; ++cx) {
+    for (std::int32_t cy = lo_y; cy < hi_y; ++cy) {
+      const std::int32_t x0 = cx * kCellSize;
+      const std::int32_t y0 = cy * kCellSize;
+      const std::int32_t x1 = x0 + kCellSize - 1;
+      const std::int32_t y1 = y0 + kCellSize - 1;
+      if (classify_cell(x0, y0, x1, y1, centre.x, centre.y, outer) == -1) continue;
+      const std::int32_t where = classify_cell(x0, y0, x1, y1, centre.x, centre.y, inner);
       const std::int32_t index = cy * side_ + cx;
       const State state = state_at(index, slot);
-      // The stamp acts on 0 and 2 and leaves 1 and 3 alone.
-      if (state == State::unwritten || state == State::full) continue;
-      const std::int64_t x0 = static_cast<std::int64_t>(cx) * kCellSize;
-      const std::int64_t y0 = static_cast<std::int64_t>(cy) * kCellSize;
-      const std::int64_t x1 = x0 + kCellSize - 1;
-      const std::int64_t y1 = y0 + kCellSize - 1;
-      // Entirely outside `R`: the cell's nearest point is beyond it.
-      const std::int64_t nx = std::clamp<std::int64_t>(centre.x, x0, x1) - centre.x;
-      const std::int64_t ny = std::clamp<std::int64_t>(centre.y, y0, y1) - centre.y;
-      if (nx * nx + ny * ny > outer2) continue;
-      // Entirely inside `r - 48`: the cell's farthest corner is within it.
-      const std::int64_t fx = std::max(std::abs(x0 - centre.x), std::abs(x1 - centre.x));
-      const std::int64_t fy = std::max(std::abs(y0 - centre.y), std::abs(y1 - centre.y));
-      if (inner2 >= 0 && fx * fx + fy * fy <= inner2) {
-        drop_record(index, slot);
-        set_state(index, slot, State::full);
+      if (where == 1) {
+        // Inside `r - 48`: 0 and 2 become 3, a record erased; 1 and 3 stay.
+        if (state == State::never || state == State::partial) {
+          drop_record(index, slot);
+          set_state(index, slot, State::full);
+        }
+      } else if (where == 0) {
+        // Meets it: the rim, into a record a cell at 0 gets zeroed.
+        if (state != State::never && state != State::partial) continue;
+        FineRecord& record = record_for(index, slot);
+        set_state(index, slot, State::partial);
+        stamp_rim(record, x0, y0, centre, outer);
+        normalise(index, slot);
+      }
+      // **Outside `r - 48` but inside `R`: nothing.** The second test answers
+      // -1 for a cell the rim alone reaches, and the stamp writes only on 0
+      // and 1, so such a cell keeps no trace of this circle.
+    }
+  }
+}
+
+void ExplorationMap::explore_sight(Point centre, std::int32_t radius, std::uint32_t mask) {
+  // 0x00517ad0, the front end every unit stamp goes through. A radius past
+  // 1024 is the large stamp's, whole.
+  if (radius > kCellSize) {
+    explore_circle_mask(centre, radius, mask);
+    return;
+  }
+  mask &= 0xffu;
+  if (side_ == 0 || radius == 0 || mask == 0) return;
+  // **A negative radius stamps nothing here.** No caller passes one -- a
+  // sight, or the notes' 300 -- and below -32 the original would index its
+  // table cache before the array.
+  if (radius < 0) return;
+  const std::int32_t outer = radius + kInner;
+  // The box `pt ± R`, and the three by three cells about the point's own
+  // (its coordinates divided toward zero): a circle that reaches a fourth
+  // cell -- a radius above 976 with the point near its cell's edge -- is cut
+  // at the third.
+  const std::int32_t base_x = centre.x / kCellSize;
+  const std::int32_t base_y = centre.y / kCellSize;
+  for (std::int32_t cx = base_x - 1; cx <= base_x + 1; ++cx) {
+    for (std::int32_t cy = base_y - 1; cy <= base_y + 1; ++cy) {
+      if (cx < 0 || cy < 0 || cx >= side_ || cy >= side_) continue;
+      const std::int32_t x0 = cx * kCellSize;
+      const std::int32_t y0 = cy * kCellSize;
+      if (centre.x - outer > x0 + kCellSize - 1 || x0 > centre.x + outer ||
+          centre.y - outer > y0 + kCellSize - 1 || y0 > centre.y + outer) {
         continue;
       }
-      // The annulus: the rim into the record, allocated zeroed on the way from
-      // `never`.
-      // The stamp (0x00514b80): a lattice point at distance `d` gets 0 beyond
-      // `R`, 15 inside `R - 96`, `(R - d) * 15 / 96` between, `max`ed with
-      // what was there. The two flat bands are decided on the squared
-      // distance; only the ramp itself takes a root.
-      const std::int64_t flat = outer - kRamp;
-      const std::int64_t flat2 = flat <= 0 ? -1 : flat * flat;
-      FineRecord& record = record_for(index, slot);
-      set_state(index, slot, State::partial);
-      for (std::int32_t j = 0; j < kFineSide; ++j) {
-        const std::int64_t dy = y0 + static_cast<std::int64_t>(j) * kFineSpacing - centre.y;
-        if (dy > outer || dy < -outer) continue;
-        for (std::int32_t i = 0; i < kFineSide; ++i) {
-          const std::int64_t dx = x0 + static_cast<std::int64_t>(i) * kFineSpacing - centre.x;
-          if (dx > outer || dx < -outer) continue;
-          std::uint8_t& nibble = record.values[static_cast<std::size_t>(j) * kFineSide + i];
-          if (nibble == kFineMax) continue;
-          const std::int64_t d2 = dx * dx + dy * dy;
-          if (d2 > outer2) continue;
-          // `d < R - 96` is the flat 15, which is `d2 < flat2`; the equality
-          // lands on the ramp.
-          std::int32_t value = kFineMax;
-          if (flat2 < 0 || d2 >= flat2) {
-            value = static_cast<std::int32_t>((outer - rim_isqrt(d2)) * kFineMax / kRamp);
-          }
-          if (value > nibble) nibble = static_cast<std::uint8_t>(value);
-        }
+      const std::int32_t index = cy * side_ + cx;
+      for (std::int32_t slot = 0; slot < kSlots; ++slot) {
+        if (((mask >> slot) & 1u) == 0) continue;
+        const State state = state_at(index, slot);
+        // 0 gets a zeroed record and becomes 2 -- even when the circle only
+        // grazes the box and writes nothing into it; 2 is stamped; 1 and 3
+        // are left alone. This stamp never writes 3.
+        if (state != State::never && state != State::partial) continue;
+        FineRecord& record = record_for(index, slot);
+        set_state(index, slot, State::partial);
+        stamp_brush(record, x0, y0, centre, outer);
+        normalise(index, slot);
       }
-      normalise(index, slot);
     }
   }
 }
@@ -304,36 +542,66 @@ bool ExplorationMap::set_raw(std::int32_t side, std::span<const std::uint16_t> c
 // the system
 // --------------------------------------------------------------------------
 
+FogSystem::Stamp FogSystem::stamp_of(const WorldObject& object) noexcept {
+  // A held object stands at no point: `(-1, -1)`, the marker the original's
+  // move stamp refuses (`DAT_008212bc`), so leaving a holder is a move even
+  // onto the point it entered from.
+  return Stamp{object.state.is_held() ? kHeldPosition : object.state.position,
+               object.state.owner};
+}
+
+namespace {
+
+/// The objects the original's move and owner stamps can reach: not internal
+/// and not a spawn template (`[obj+0x2c] & 0x08000000`, tested by both
+/// 0x005a8660 and 0x005aa0a0). 0x005a8660 tests 0x40000000 as well, a bit
+/// whose meaning was not identified; nothing here carries it.
+[[nodiscard]] bool stampable(const WorldObject& object) noexcept {
+  return object.internal == InternalKind::none && !object.state.flags.unspawned;
+}
+
+}  // namespace
+
 void FogSystem::sweep(World& world) {
   for (const WorldObject& slot : world.objects()) {
-    if (slot.internal != InternalKind::none) continue;
-    // **Belt and braces.** An unowned object has no record and so no
-    // `viewflags`; `fog_view_mask` answers 0 for it and the stamp is skipped
-    // below anyway. It is here because "an unowned object reveals nothing" is
-    // the rule, and reading it off the width of `PlayerId` is not reading it
-    // off anything.
-    if (slot.state.owner == kNoPlayer) continue;
-    if (slot.state.is_held()) continue;
-    if (slot.sight <= 0) continue;
-    // **The stamp is idempotent, so a standing object stamps once.** Every
-    // write it makes is a `max` or a promotion, and the map only ever grows
-    // between stamps, so stamping the same circle for the same slots again
-    // changes nothing -- and doing it for every one of a map's objects every
-    // turn would cost more than the turn. An object that has moved, changed
-    // owner or sight, whose owner's `viewflags` changed, or that was never
-    // stamped since the map was last installed, is stamped. Ids are never
-    // reused, so the key is safe.
-    const std::uint32_t mask = fog_view_mask(world, slot.state.owner);
-    const Stamp now{slot.state.position, slot.sight, slot.state.owner, mask};
-    Stamp& last = stamped_[slot.id];
-    if (last == now) continue;
-    // The object's own stamps (0x005ab360, 0x0052def0, and 0x00517ad0 from
-    // 0x005aa0a0) all pass the owner record's `viewflags` (`[[obj+0x70] +
-    // 0x14]`), so a unit explores for every player its owner shares its view
-    // with, not only for itself.
-    map_.explore_circle_mask(slot.state.position, slot.sight, mask);
-    last = now;
+    if (!stampable(slot)) continue;
+    // **A stamp is a move or an owner change.** 0x005a8660 stamps the new
+    // point whenever the position changes, and 0x005aa0a0 stamps the point
+    // whenever the owner is set; nothing else in the original stamps a unit's
+    // own surroundings except a widening of its sight, which `SetSight` and
+    // the scout skill stamp themselves. So an object is stamped when it has
+    // moved or changed owner since it was last seen here, or was never seen
+    // (a new object, or every object at a new game's start); a sight that
+    // changed in place, or an owner's `viewflags` that changed, stamps
+    // nothing. **Inference, labelled:** this runs once a turn, after
+    // movement, where the original stamps at each position change -- the same
+    // stamps for a unit that moves once a turn.
+    const Stamp now = stamp_of(slot);
+    const auto [it, fresh] = stamped_.try_emplace(slot.id, now);
+    if (!fresh && it->second == now) continue;
+    it->second = now;
+    // No owner record, no stamp (`[obj+0x70] == 0`); a held object's point
+    // is the refused marker.
+    if (slot.state.owner == kNoPlayer || slot.state.is_held()) continue;
+    // The owner record's `viewflags` (`[[obj+0x70] + 0x14]`): a unit explores
+    // for every player its owner shares its view with.
+    map_.explore_sight(slot.state.position, slot.sight, fog_view_mask(world, slot.state.owner));
   }
+}
+
+void FogSystem::prime(const World& world) {
+  stamped_.clear();
+  for (const WorldObject& slot : world.objects()) {
+    if (stampable(slot)) stamped_.emplace(slot.id, stamp_of(slot));
+  }
+}
+
+void FogSystem::stamp_now(World& world, ObjectId object, std::int32_t sight) {
+  const WorldObject* slot = world.find(object);
+  if (slot == nullptr || !stampable(*slot)) return;
+  stamped_[slot->id] = stamp_of(*slot);
+  if (slot->state.owner == kNoPlayer || slot->state.is_held()) return;
+  map_.explore_sight(slot->state.position, sight, fog_view_mask(world, slot->state.owner));
 }
 
 void FogSystem::start(World& world) {
@@ -387,9 +655,8 @@ void merge_shared_view(World& world, PlayerId granter, PlayerId receiver) {
   // invalid number here would match every unowned object.
   if (!PlayerTable::is_valid(granter) || !PlayerTable::is_valid(receiver)) return;
   // The stamp keeps the mask's low byte (0x00517ad0's `param_3 & 0xff`, as
-  // 0x00516474 does): a receiver past the eighth player has no slot, and
-  // `explore_circle` refuses a slot past the eighth, so the walk writes
-  // nothing.
+  // 0x00516474 does): a receiver past the eighth player has no slot, so the
+  // walk writes nothing.
   ExplorationMap& map = fog->map();
   // 0x00564cd0 over the whole map rectangle, which is every object the grid
   // holds: a held object is in no cell, and an internal one is filed nowhere.
@@ -406,11 +673,10 @@ void merge_shared_view(World& world, PlayerId granter, PlayerId receiver) {
     const PlayerId owner = slot.state.owner;
     if (owner != granter && owner != receiver) continue;
     // The object's own sight (`[obj+0xd0]`) about its own point (`vtbl +
-    // 0x3c`), for the receiver's slot alone. No test of life and none of the
-    // sight; the stamp's own first test refuses a radius of zero. It is the
-    // small-radius front end 0x00517ad0, as the sweep's own stamps are, and
-    // this calls the circle stamp the sweep calls, with the header's labels.
-    map.explore_circle(slot.state.position, slot.sight, static_cast<std::int32_t>(receiver));
+    // 0x3c`), for the receiver's slot alone, through the unit stamp
+    // 0x00517ad0 as the sweep's stamps are. No test of life and none of the
+    // sight; the stamp's own first test refuses a radius of zero.
+    map.explore_sight(slot.state.position, slot.sight, 1u << receiver);
   }
 }
 

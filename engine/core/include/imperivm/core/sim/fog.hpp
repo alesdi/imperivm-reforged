@@ -20,25 +20,52 @@
 ///
 /// ## Four states, and what the middle one carries
 ///
-/// The circle stamp (0x00516450) is a state machine over the two bits: it
-/// acts on 0 and on 2 and leaves 1 and 3 alone. What the states are was read
-/// off the stamp and the fog manager's feed (0x00516f80) together:
+/// Two stamps write the states, and both act on 0 and on 2 and leave 1 and 3
+/// alone. What the states are was read off the stamps and the fog manager's
+/// feed (0x00516f80) together:
 ///
 ///   * **0, never seen.** The fog manager paints the cell's ground black.
 ///   * **2, partially explored.** The cell carries a **fine record**: a
 ///     32 x 32 lattice of 4-bit values at 32-unit spacing (a map keyed by cell
-///     at `[expl + 0x4c + player * 12]`, data at `rec + 8`). The stamp writes
-///     the circle's **edge** into it: `R = r + 48`, and a lattice point at
-///     distance `d` from the centre gets `0` beyond `R`, `15` inside `R - 96`,
-///     `(R - d) * 15 / 96` between, `max`ed with what was there. The fog
-///     manager reads the lattice back as a cap on its light (`sim/fog_light.hpp`),
-///     and the zoom map reads a 32-unit sub-cell as explored iff its value is
-///     not zero. So the middle state is **spatial** -- the soft rim of every
+///     at `[expl + 0x4c + player * 12]`, data at `rec + 8`). The fog manager
+///     reads the lattice back as a cap on its light (`sim/fog_light.hpp`), and
+///     the zoom map reads a 32-unit sub-cell as explored iff its value is not
+///     zero. So the middle state is **spatial** -- the soft rim of every
 ///     circle ever stamped -- and not a phase of a fade.
-///   * **3, fully explored.** The stamp writes it into every cell that lies
-///     entirely inside `r - 48`, erasing the fine record if there was one.
-///   * **1** is written by nothing that was found: the stamp never produces it
-///     and the feed gives it no value. This engine never writes it either.
+///   * **3, fully explored.** Only the large stamp writes it.
+///   * **1** is written by nothing that was found. This engine never writes it.
+///
+/// **The unit stamp, 0x00517ad0** -- a unit's move (0x005a8660) and owner
+/// change (0x005aa0a0), the share-view merge (0x00564cd0), the notes' pins.
+/// A radius past 1024 is handed whole to the large stamp. Otherwise, with
+/// `R = r + 48`, it walks the three by three cells about the point's own
+/// (coordinates divided toward zero), keeps those inside the map rectangle
+/// that meet the box `pt ± R`, and for each slot of the mask's low byte gives
+/// a cell at 0 a zeroed record and state 2 and writes the **brush** into the
+/// record of a cell at 2 (0x00514fc0). It never writes 3; a cell the box
+/// grazes keeps an empty record. The brush is a table (0x005f8810, the cache
+/// at `map + 0xe4`, built on first use for each `n = R / 16 + 2` and kept) of
+/// `(2n + 1)²` samples 16 units apart about the centre: 15 nearer than
+/// `n - w` samples, `trunc((n - d) * 15 / w)` out to `n`, 0 beyond, with
+/// `w = min(96 / 16 + 1, n)`. Each lattice point of the cell within the box
+/// `16n - 16` of the centre reads its four neighbouring samples and blends
+/// them bilinearly at its offset from the table's origin, in shifts of 9,
+/// truncating; the result is `max`ed in. So a unit's circle is flat to about
+/// `r - 32` and fades out to `r + 80`.
+///
+/// **The large stamp, 0x00516450** -- `ExploreCircle`, `ExploreArea`,
+/// `SetSight` and the scout skill when the sight widens, and the unit stamp
+/// past 1024. It walks every cell from the one `pt - R` falls in to the one
+/// `pt + R` does and classifies each against the circle (0x005146a0: 1 when
+/// all four corners are within the radius, -1 when they do not meet, 0
+/// otherwise): first against `R`, skipping -1, then against `r - 48`. On 1 a
+/// cell becomes 3 and its record is erased; on 0 the **rim** is written into
+/// its record (0x00514b80); on -1 -- a cell only the outer ring reaches --
+/// **nothing is written**. The rim evaluates the ramp (0 past `R`, 15 short of
+/// `R - 96`, `(R - d) * 15 / 96` between, `d` the floored root) at the four
+/// corners of the 32-unit square each lattice point heads and blends them at
+/// the point's offset, modulo 16, from the origin of the box `16 (R / 16 + 2)`
+/// about the centre. All of it is 32-bit arithmetic, wrapping, signed.
 ///
 /// **The host reader looks inside a partial cell.** 0x00515950 answers 0 as
 /// false and 3 as true, and for 1 and 2 finds the slot's record holding the
@@ -91,20 +118,16 @@
 ///
 /// ## What is still unknown
 ///
-///   * **The reveal cadence.** The stamp's six sim call sites (through its
-///     small-radius front end 0x00517ad0) were not read, so how often the
-///     original stamps a unit's own surroundings is not established.
-///     `FogSystem::advance` does it once a turn at `sight`, which is the
-///     reading `UNIT_EXPLORE.VS` needs and the smallest claim that makes the
-///     entry points answer.
-///   * **The rectangle-against-circle tests** the stamp classifies a cell with
-///     (0x005146a0) are read as *nearest point beyond `R`* for "entirely
-///     outside" and *farthest corner within `r - 48`* for "entirely inside";
-///     the helper's own arithmetic was not transcribed.
-///   * **The lattice value.** A fine value is computed here at its lattice
-///     point; the original evaluates the ramp at the four corners of the
-///     32-unit sub-cell and blends them at the sub-cell's own offset, which
-///     for a record aligned to its cell is the corner itself.
+///   * **The cadence.** The original stamps at every position change; the
+///     sweep stamps once a turn, after movement, for every object that has
+///     moved or changed owner since -- the same stamps for a unit that moves
+///     once a turn (labelled in `FogSystem::sweep`).
+///   * **The second grid at `map + 0xb4`** (stride `map + 0xc4`): both
+///     stamps set bit `2 * slot` there for every record they write, and the
+///     large stamp clears it when it erases one. No reader was found; it is
+///     not kept.
+///   * **Bit 0x40000000 of `[obj+0x2c]`**, which the move stamp refuses
+///     beside the spawn-template bit. Its meaning was not identified.
 ///   * **`RecreateExploration/0`** (0x00565070) is registered with zero call
 ///     sites. It presumably rebuilds the map from scratch after a load; there
 ///     is nothing here for it to do that a load does not already do.
@@ -135,6 +158,7 @@
 namespace imperivm::core::sim {
 
 class World;
+struct WorldObject;
 
 /// Two bits per player per cell, eight players, 1024-unit cells, and the
 /// fine records of the partially explored cells.
@@ -197,16 +221,32 @@ class ExplorationMap {
   /// Mark the cell `at` falls in fully explored by `slot`.
   void explore(Point at, std::int32_t slot);
 
-  /// The circle stamp, 0x00516450: fully explored inside `radius - 48`, the
-  /// 96-unit ramp written into the fine records of the cells the annulus
-  /// `[radius - 48, radius + 48]` meets, nothing beyond. A radius of zero
-  /// stamps nothing (0x00516450's first test); a negative one stamps nothing
-  /// here, where the original runs its loop over a negative box.
+  /// The large stamp, 0x00516450, for one slot. Every cell between the cells
+  /// the box `pt ± (r + 48)` begins and ends in is classified (0x005146a0)
+  /// against the circle `R = r + 48` and, if it meets it, against `r - 48`:
+  /// a cell entirely inside the inner circle becomes fully explored (its
+  /// record dropped); one that meets the inner circle has the rim written into
+  /// its record (0x00514b80); one that meets only the outer circle is left
+  /// alone. States 1 and 3 are never touched. A radius of zero stamps nothing;
+  /// a negative one runs the same arithmetic, in 32 bits.
   void explore_circle(Point centre, std::int32_t radius, std::int32_t slot);
 
-  /// The stamp as the original calls it: once for every slot whose bit is set
-  /// in `mask` (a `viewflags` word, low byte).
+  /// The large stamp as its callers make it: every slot of `mask`'s low byte.
+  /// `ExploreCircle`, `ExploreArea`, `SetSight` and the scout skill.
   void explore_circle_mask(Point centre, std::int32_t radius, std::uint32_t mask);
+
+  /// The unit stamp, 0x00517ad0: the large stamp for a radius past 1024, and
+  /// otherwise the small one -- the three by three cells about the point's
+  /// cell, each that meets the box `pt ± (r + 48)` given a record (a cell at
+  /// state 0 gets a zeroed one and becomes 2) into which the cached brush is
+  /// read bilinearly (0x00514fc0, 0x005f8810). It never writes state 3. A
+  /// move, an owner change, the share-view merge and the catapult's site.
+  void explore_sight(Point centre, std::int32_t radius, std::uint32_t mask);
+
+  /// The small stamp's brush for `n = (r + 48) / 16 + 2` (0x005f8810):
+  /// `(2n + 1)` by `(2n + 1)` samples 16 units apart, centred, each a value
+  /// 0..15 shifted left 9. Built on first use and kept.
+  [[nodiscard]] const std::vector<std::int32_t>& brush(std::int32_t n) const;
 
   /// `ExploreAll()`. Every cell, every slot, fully, and the map's
   /// explored-everywhere flag (`[map+0xf0]`, 0x005157c0's first write).
@@ -246,6 +286,9 @@ class ExplorationMap {
   void drop_record(std::int32_t index, std::int32_t slot);
   /// Promote a record of fifteens to `full`; see the header's equivalence.
   void normalise(std::int32_t index, std::int32_t slot);
+  /// 0x00514fc0: the brush into one cell's record.
+  void stamp_brush(FineRecord& record, std::int32_t x0, std::int32_t y0, Point centre,
+                   std::int32_t outer) const;
 
   std::int32_t side_ = 0;
   std::vector<std::uint16_t> cells_;
@@ -254,6 +297,9 @@ class ExplorationMap {
   /// order is state**: this is a `std::map` so that the save and every walk are
   /// in index order.
   std::array<std::map<std::int32_t, FineRecord>, kSlots> fine_;
+  /// The brush cache (`map + 0xe4`, 130 slots). **Not state**: each entry is
+  /// a function of its index.
+  mutable std::array<std::vector<std::int32_t>, 130> brush_;
 };
 
 /// The system that owns the map and keeps it up to date.
@@ -265,8 +311,21 @@ class FogSystem final : public System {
   /// standing, so a script that asks on turn zero gets an honest answer.
   void start(World& world) override;
 
-  /// Stamp, within its own `sight`, every slot in each object's owner's `viewflags`.
+  /// Stamp every object that has moved or changed owner since it was last
+  /// seen, as the original's move (0x005a8660) and owner change (0x005aa0a0)
+  /// do: through `explore_sight`, at the object's `sight`, for its owner's
+  /// `viewflags`.
   void advance(World& world, const Turn& turn) override;
+
+  /// Take every object as already stamped where it stands, writing nothing.
+  /// A load calls it: the original's load stamps nothing, and a restamp here
+  /// would write circles its map never held.
+  void prime(const World& world);
+
+  /// Stamp `object` at `sight` through `explore_sight` now, and take it as
+  /// stamped where it stands -- the catapult's site, revealed at
+  /// `CatapultBuildSight` for the one `SetPos` it is placed with.
+  void stamp_now(World& world, ObjectId object, std::int32_t sight);
 
   /// **Deliberately empty.** `exploration` is one of the four channels the
   /// shipped build leaves out of the sync hash; see the header.
@@ -279,21 +338,21 @@ class FogSystem final : public System {
   [[nodiscard]] Status deserialize(std::span<const std::byte> bytes);
 
  private:
-  /// Stamp every object that has moved, or changed owner or sight, since it
-  /// was last stamped; see the body for why that is every object's stamp.
+  /// Stamp every object that has moved or changed owner since it was last
+  /// stamped.
   void sweep(World& world);
 
   ExplorationMap map_;
-  /// What each object was last stamped as. **Not state**: an empty table
-  /// re-stamps everything and the map comes out the same, which is what a load
-  /// relies on.
+  /// Where each object stood, and for whom, when it was last stamped. A sight
+  /// change is not here: the original stamps a widening itself (`SetSight`,
+  /// the scout skill) and a narrowing not at all. Rebuilt by `prime` on a
+  /// load; empty, it stamps everything, which is a new game's start.
   struct Stamp {
     Point position;
-    std::int32_t sight = 0;
     PlayerId owner = kNoPlayer;
-    std::uint32_t mask = 0;
     friend bool operator==(const Stamp&, const Stamp&) = default;
   };
+  [[nodiscard]] static Stamp stamp_of(const WorldObject& object) noexcept;
   std::unordered_map<ObjectId, Stamp> stamped_;
 };
 

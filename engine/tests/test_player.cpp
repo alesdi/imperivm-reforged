@@ -1667,3 +1667,25 @@ TEST(the_three_consumerless_globals_run_and_answer_the_retail_value) {
         script::HostStatus::ok);
   CHECK(!b.truthy(kFree, "GetResearchHack", {}));
 }
+
+/// The scan's squares are 32-bit (0x004c8460's `imul`, 0x00416810's and
+/// 0x004c7f70's): past a radius of 46340 the square wraps negative, no cell is
+/// inside and no distance is within, so a hidden enemy a hundred units from
+/// the point stays hidden -- where a radius of 46340 still finds it.
+TEST(reveal_hidden_enemy_units_squares_wrap_in_32_bits) {
+  Bench bench;
+  bench.world.players().set_relation_word(1, 0, 0);
+  const ObjectId sneak = bench.world.spawn(NativeClass::unit, nullptr);
+  bench.world.set_owner(sneak, 1);
+  bench.world.set_position(sneak, Point{3100, 3000});
+  bench.world.mutable_state(sneak)->flags.hidden = true;
+  const auto reveal = [&](std::int32_t radius) {
+    return bench.call(kFree, "RevealHiddenEnemyUnits",
+                      {pack_point(Point{3000, 3000}), script::Value::integer(radius),
+                       script::Value::integer(1)});
+  };
+  CHECK(reveal(50000).status == script::HostStatus::ok);
+  CHECK(bench.world.find(sneak)->state.flags.hidden);
+  CHECK(reveal(46340).status == script::HostStatus::ok);
+  CHECK(!bench.world.find(sneak)->state.flags.hidden);
+}
