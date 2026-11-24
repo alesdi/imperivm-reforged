@@ -695,9 +695,12 @@ def test_alesias_armies_do_not_stand_on_one_another(imrun, game_dir):
     assert aims and int(aims.group(2)) > 0, output[-3000:]
 
 
-#: The computer players' line units on Crossroads -- p1 and p2 are Egyptian,
-#: p3 Carthaginian -- and their town halls, which `IMRUN_OBJECTS` prints with
-#: them.
+#: The computer players' line units on Crossroads -- p1 and p2 Egyptian, p3
+#: Carthaginian -- and their town halls, which `IMRUN_OBJECTS` prints with
+#: them. Crossroads' computer seats are `Random`, so the races are staged
+#: (`AI_RACES`) rather than left to the world build's draw: once the draw
+#: was taken for the first eight slots alone, as 0x00522314 takes it, seed 3
+#: gave p1 another race and the census found no army in this list.
 AI_ARMIES = ("EGuardian,EArcher,EAxetrower,EAnubisWarrior,EHorusWarrior,ESwordsman,EChariot,"
              "CLibyanFootman,CBerberAssassin,CJavelinThrower,CMaceman,CNoble,CWarElephant,"
              "CNumidian,Townhall")
@@ -705,6 +708,9 @@ AI_ARMIES = ("EGuardian,EArcher,EAxetrower,EAnubisWarrior,EHorusWarrior,ESwordsm
 #: The column this test was written for stood 450 units outside the nearest
 #: gate, and a Crossroads town's gates are within 1,300 of its hall.
 HOME_RADIUS = 2_000
+#: `IMRUN_RACES` for `AI_ARMIES`: Egypt is 6 and Carthage 2, as `GetPlayerRace`
+#: answers them.
+AI_RACES = "1:6,2:6,3:2"
 
 
 @pytest.mark.slow
@@ -760,7 +766,7 @@ def test_a_computer_players_army_at_home_is_not_sent_to_its_own_gate(imrun, game
         [str(imrun), str(game_dir), str(crossroads), str(CROSSROADS_TURNS), "800",
          "--seed", "3"],
         capture_output=True, text=True, timeout=1800,
-        env={**os.environ, "IMRUN_OBJECTS": AI_ARMIES},
+        env={**os.environ, "IMRUN_OBJECTS": AI_ARMIES, "IMRUN_RACES": AI_RACES},
     )
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout

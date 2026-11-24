@@ -209,7 +209,10 @@ def test_a_research_shows_in_the_queue_strip_with_its_bar_and_a_click_cancels_it
     assert bars == sorted(bars) and bars[-1] > 0, bars
     assert re.search(r"^queue:\s+cancel of command \d+ \(cell 0\) on object \d+ posted$", out, re.M), out
     assert re.search(r"^cancel:\s+1 queued command\(s\) taken out", out, re.M), out
-    assert queues(out)[-1] == [], out
+    # The queue that ran dry is given its class's `idle` at once (0x005b4f20),
+    # and a queue whose entry 0 is `idle` fills no cell (0x006ee810): the
+    # strip is empty.
+    assert queues(out)[-1] == ["idle"], out
     assert re.findall(r"^infobar: class \S+ .* queue (\d+) ", out, re.M)[-1] == "0", out
     # Paid when it was queued, and all of it back on the cancel, though the
     # research had run (the town's income came in meanwhile).
@@ -242,10 +245,16 @@ def test_an_order_given_as_the_match_opens_is_walked(app, game_dir):
     The turn is two real seconds, so that the click lands well inside what
     was turn 0 even on a loaded machine. The view does not move, so another
     place on the screen is a step in the world.
+
+    The run is five turns long. The walk starts when the legionary's current
+    animation lets it, on the animation timer, and which animation that is
+    follows the world's draws: once the race draw was taken for the first
+    eight slots alone (0x00522314), the step came 400 ms later in turn 3 and
+    four turns saw only six steps of it.
     """
     done = subprocess.run(
         [str(app), "--game", str(game_dir), *SIZE, "--map", NUMANTIA, "--play", "--no-fog",
-         "--frames", "420", "--turn-interval", "2000",
+         "--frames", "540", "--turn-interval", "2000",
          "--input", "select:class:RHastatus;rclick:700,500"],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "IMPERIVM_DEBUG_VIEW": "1"},
