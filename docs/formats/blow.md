@@ -106,7 +106,13 @@ All `CONST.INI` `[GamePlay]`, read through 0x0063f200 into globals.
 it to 1 and fills the rest). It is cleared by `InvalidateDamageFormulaParams`
 (0x004c6b10, called by `ONFINISH_RESEARCH.VS` after five researches), by the
 game load 0x00524460, by the new-game path 0x00525dd0, and by both difficulty
-writers (0x006e71c0, 0x006e7ff0). Until the next clear, the values are frozen:
+writers: 0x006e71c0, which stores the difficulty and clears the flag
+unconditionally and which the script entry point `SetDifficulty` (0x004c65d0)
+calls for a value of 0, 1 or 2 (any other is refused with its diagnostic
+before either), and the options screen's 0x006e7ff0, which clears it only
+when the difficulty differs. The flag's other cross-references are the
+calculator's own test and set (0x00510353, 0x00510369). Nothing saves the
+cache. Until the next clear, the values are frozen:
 
 1. **The favoured player and its addend** (0x00510351..0x00510432). The
    favoured index starts at -10 (matches no player). When the game object's
@@ -281,7 +287,7 @@ IsRanged(A):
 alone, in order, each "pays" independently: Attack skill
 (`AttackSkillCost`), Offensive tactics (`OffensiveTacticsCost`), Penetration
 (`PenetrationCost`, only when D is not a hero, A is not under
-`active(A, Assault)`, and the `SetGlobalBloodlust` byte at 0x00996ae4 is 0),
+`active(A, Assault)`, and the `SetGlobalBloodlust` dword at 0x00996ae4 is 0),
 Triple strike (`TrippleStrikeCost`), Bleeding attack (`BleedingAttackCost`,
 only when D is not a hero), Disease attack (`DiseaseCost`, only when D is
 not already diseased), Cripple (`CripplingAttackCost`, D not a hero and
@@ -306,7 +312,7 @@ only by a blow that reaches here (not by a dodge, parry, deflection or miss).
 
 **C20. Does armour apply?** (0x00510d26..0x00510d7d). When D is a hero,
 always (C21). When D is not a hero: A-unit under `active(A, Assault)`, or the
-bloodlust byte set: **no armour, and no floor** (skip to C22). Else A with
+bloodlust dword set: **no armour, and no floor** (skip to C22). Else A with
 Penetration that pays `PenetrationCost`: no armour and no floor, effect 14
 (Penetration) on D's list. Else C21.
 
@@ -529,6 +535,12 @@ For one blow, at most these, in this order:
 8. C40 Euphoria, `Range(0, 99)`: as stated.
 9. D9 the kill gain's modifier draw (unit-stats.md), after the damage.
 
+**The bloodlust** is a dword at 0x00996ae4. `SetGlobalBloodlust` (0x004c6610)
+stores its argument's low byte into it, zero-extended. Its only other
+references are the two reads in the calculator (0x00510b8a in C15,
+0x00510d4e in C20): no load, new game or save touches it, so it lives as
+long as the process.
+
 ## What is still unknown
 
 * `[game+0xa0] == 1`: what game mode it marks (single-player is the guess).
@@ -545,29 +557,63 @@ For one blow, at most these, in this order:
 
 ## This engine
 
-`engine/core/src/sim/combat.cpp`. Ported so far (round 17, batch 4):
+`engine/core/src/sim/combat.cpp`. Ported whole (round 17, batches 4 and 5):
 
-* **The level factor** (0x0050fd40, 0x0050fe60): `LevelDifferenceTable`,
-  the 101 entries in 256ths built from the `%i,%i` pairs as above, applied
-  with the mirror for a deficit and one 32-bit division toward zero.
-* **The training blow** (D3): `CombatSystem::training_blow`, with the two
-  stored levels and no addend.
-* **The unit-on-unit arithmetic** (C16, C20..C23, C26, C34): `resolve_damage`,
-  the slash armour whatever the damage type, Assault and bloodlust lifting
-  armour and floor off a non-hero, the factor at `L - level(D) - addend(D)`,
-  `MinDamage`, then the shelter's halving, then the cap at `Dh`.
-* **The two other branches** (C9, C10): `CombatSystem::blow_damage`, a
-  defender that is not a unit and a `RamUnit` with its `Range(0, 220)` draw.
-* **The striker** (C8): `L` is 10 for an attacker that is not a unit.
-* **The score** (D6): damage is booked only on a defender that is a unit,
-  and credited only to an attacker that is one.
+* **The level factor** (0x0050fd40, 0x0050fe60): `LevelDifferenceTable`.
+* **The calculator** (C1..C47): `calculate_blow`, a pure function of the two
+  sides (`BlowSide`), the cache's addend, the bloodlust and the clock
+  (`BlowRules`), `CombatConstants` (every `CONST.INI` key above) and the
+  world's generator. Every gate, both other branches, Deflection, the ranged
+  miss and its costs, every special and its stamina cost, the clamps and the
+  deltas, in the binary's order and with its draws. Its answer
+  (`BlowOutcome`) carries both effect lists, uncapped.
+* **The sides** (`CombatSystem::blow_side`): the unit and hero bits, IsRanged
+  (`CombatProfile::shoots`), IsRam and IsSentry by lineage, the stored stats,
+  the stored level, the running experience, the class `damage`, the specials
+  word (`CombatProfile::specials`, parsed from `unit_specials` as the class
+  reader does), parry mode, the curse (`ObjectState::cursed_at`), the disease
+  and shelter bits, the hero of X's Ceasefire, Assault, Concealment and
+  Euphoria, and the cache's entries for the owner.
+* **The match cache** (`CombatSystem::damage_formula_params`): filled at the
+  first blow after a clear, from `MatchSystem::human` in a game that is not
+  networked (the reading of `[game+0xa0] == 1` above, **inferred**) and
+  `difficulty`, and from the ledger. Cleared by
+  `InvalidateDamageFormulaParams`, by a load (`CombatSystem::deserialize`), by
+  `SetDifficulty` and by a new game (a fresh system). Not saved, not hashed.
+  The addend outlives a clear as the global does. `vtbl+0x114` here is the
+  stored level alone, as 0x00511c60 is (the power census and
+  `effective_level_of` no longer add an addend).
+* **The bloodlust** (`CombatSystem::bloodlust`, set by
+  `SetGlobalBloodlust`). **A labelled departure: saved and hashed**, where the
+  original's process global is neither: a game loaded in the process that
+  saved it keeps the flag in the original, one loaded in a fresh process
+  starts without it. Here a loaded game is the game that was saved.
+* **The dealer** (`CombatSystem::deal`, D1..D11): the training branch
+  (`training_blow`), then the calculator; the curse lifted and the disease
+  bit set as the calculator does; the score booked raw before the damage
+  (`MatchSystem::record_blow_damage`, `record_blow_kill`: no sign test, no
+  alliance test); the damage through `take_health` (0x004d6690: a heal
+  capped at the maximum that lifts the disease at full health, or the damage
+  routine); a survivor's stamina; on a kill the tallies, the gain and
+  `onkill`; experience with Learning's point; then the attacker unit's health
+  and stamina.
+* **The landing** (0x004d9bb0, `CombatSystem::land`): the dealer with the
+  live shooter, only while shooter and target stand and the target is not
+  held. No splash on a targeted shot.
+* **The one stamina**: `ObjectState::stamina` is the truth. Combat takes it
+  at each turn and before each blow, writes both copies when a blow moves it,
+  and seeds an enrolled combatant from the world's (the map's number) or, at
+  zero, the class maximum.
 
-Not yet ported, so absent rather than guessed: the gates C3..C7, C12 and
-C14..C15 (ceasefire, the Concealment draw, a curse, parry mode, a ranged
-miss and its costs); every special C13, C17..C19, C21.2..C21.3, C24..C25,
-C27..C33 and C35..C45 with its stamina cost; the match cache (the favoured
-player and its addend come from `CombatSystem::set_player_level_addend`,
-which nothing yet sets, and Attack focus, Learning, Ferocity and the
-Gambler's chances are not read); the attacker's own deltas (D11); the
-feedback objects; and the projectile's landing (0x004d9bb0), where this
-engine still resolves a shot against its launch-time attack and level.
+Not ported, and why:
+
+* **The feedback objects** (D5, D6, C41's disease visual, the curse's visual
+  that 0x005d4800 destroys): `BlowEffect` lists them and nothing is spawned,
+  as `CreateFeedback` spawns nothing. Each is a `CVXFeedback` that takes an
+  object handle in the original, so after a blow with a special the
+  original's next handles are higher than this engine's.
+* **The blessing** (C17): read, and never true, because nothing here writes
+  bit 0 (`Unit::Bless` is not bound).
+* **The civilian immunity** (`[obj+0x2c] & 0x4000000`) in the damage
+  routine: no such bit is carried.
+* **The building fire points** (D6 without a defender unit): presentation.

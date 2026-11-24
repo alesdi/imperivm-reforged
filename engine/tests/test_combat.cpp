@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "imperivm/core/sim/combat.hpp"
+#include "imperivm/core/sim/env.hpp"
 #include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/match.hpp"
 #include "imperivm/core/sim/host_context.hpp"
@@ -89,118 +90,124 @@ CombatSystem make_system() {
 // the damage pipeline
 // ---------------------------------------------------------------------------
 
-TEST(damage_subtracts_armour) {
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 16;
-  in.armour = 6;
-  const DamageBreakdown out = resolve_damage(in, k);
-  CHECK(out.after_armour == 10);
-  CHECK(out.final_damage == 10);
-  CHECK(!out.floored_by_min_percent);
-  CHECK(!out.floored_by_min_damage);
+namespace {
+
+/// One side of a blow with no hero, no specials and nobody's favour: a unit
+/// at level 1, full health and no stamina.
+BlowSide side(std::int32_t attack, std::int32_t armour, std::int32_t health = 200) {
+  BlowSide s;
+  s.attack = attack;
+  s.armour = armour;
+  s.health = health;
+  s.max_health = health > 200 ? health : 200;
+  s.level = 1;
+  s.class_damage = attack;
+  return s;
 }
 
-/// **A sheltered victim takes half, after the floor.** 0x005110c6 halves
-/// after `MinDamage` (0x00510ef6) and before the cap, so a sheltered unit can
-/// take less than `MinDamage`: 3 halved is 1.
+/// The calculator on its own generator, which the test can then look at.
+BlowOutcome calc(const BlowSide& a, const BlowSide& d, Rng& rng, BlowRules rules = {}) {
+  return calculate_blow(a, d, rules, CombatConstants::shipped(), rng);
+}
+BlowOutcome calc(const BlowSide& a, const BlowSide& d, BlowRules rules = {}) {
+  Rng rng(1);
+  return calc(a, d, rng, rules);
+}
+
+/// The draws the calculator made, by stepping a copy of the generator it was
+/// handed until the two agree.
+int draws_taken(Rng before, const Rng& after) {
+  for (int n = 0; n < 16; ++n) {
+    if (before.state() == after.state()) return n;
+    (void)before.next();
+  }
+  return -1;
+}
+
+}  // namespace
+
+TEST(damage_subtracts_armour) {
+  const BlowOutcome out = calc(side(16, 0), side(0, 6));
+  CHECK(out.path == BlowPath::struck);
+  CHECK(out.armour_met);
+  CHECK(out.damage() == 10);
+  CHECK(out.defender_health == -10);
+  CHECK(out.attacker_health == 0);
+  CHECK(out.on_defender.count == 0);
+}
+
+/// **A sheltered victim takes half, after the floor.** C34 halves after
+/// `MinDamage` (C26) and before the cap, so a sheltered unit can take less
+/// than `MinDamage`: 3 halved is 1.
 TEST(a_sheltered_victim_takes_half_the_blow_after_the_floor) {
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 16;
-  in.armour = 6;
-  in.halved = true;
-  DamageBreakdown out = resolve_damage(in, k);
-  CHECK(out.after_armour == 10);
-  CHECK(out.halved);
-  CHECK(out.final_damage == 5);
+  BlowSide d = side(0, 6);
+  d.sheltered = true;
+  CHECK(calc(side(16, 0), d).damage() == 5);
   // Odd numbers truncate toward zero: 11 halved is 5.
-  in.armour = 5;
-  CHECK(resolve_damage(in, k).final_damage == 5);
+  d.armour = 5;
+  CHECK(calc(side(16, 0), d).damage() == 5);
   // The swordsman's 12 on a hastatus's 12 is floored to 3, then halved to 1.
-  in.attack = 12;
-  in.armour = 12;
-  out = resolve_damage(in, k);
-  CHECK(out.halved);
-  CHECK(out.floored_by_min_damage);
-  CHECK(out.final_damage == 1);
-  in.halved = false;
-  out = resolve_damage(in, k);
-  CHECK(!out.halved);
-  CHECK(out.final_damage == 3);
+  d.armour = 12;
+  CHECK(calc(side(12, 0), d).damage() == 1);
+  d.sheltered = false;
+  CHECK(calc(side(12, 0), d).damage() == 3);
 }
 
 TEST(damage_floors_at_min_percent_of_the_attackers_damage) {
   // MinPercentOfAttackersDamage = 20. A Hastatus (16) against an Iberian
-  // Defender's armour of 22 would otherwise deal -6.
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 16;
-  in.armour = 22;
-  const DamageBreakdown out = resolve_damage(in, k);
-  CHECK(out.after_armour == 3);  // 16 * 20 / 100 = 3, truncating
-  CHECK(out.floored_by_min_percent);
-  CHECK(out.final_damage == 3);
+  // Defender's armour of 22 would otherwise deal -6; at level 30 the floor's
+  // 3 is scaled (C23) to 4 rather than lifted by `MinDamage`.
+  BlowSide a = side(16, 0);
+  a.level = 31;
+  const BlowOutcome out = calc(a, side(0, 22));
+  CHECK(out.level_difference == 30);
+  CHECK(out.damage() == 3 * CombatConstants::shipped().level_difference.factor(30) / 256);
 }
 
 TEST(damage_floors_at_min_damage) {
   // MinDamage = 3 is an absolute floor and outranks the percentage one for a
   // weak attacker: a Gaulish Archer's 6 damage gives a 20% floor of 1.
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 6;
-  in.armour = 20;
-  const DamageBreakdown out = resolve_damage(in, k);
-  CHECK(out.after_armour == 1);
-  CHECK(out.floored_by_min_percent);
-  CHECK(out.final_damage == 3);
-  CHECK(out.floored_by_min_damage);
+  CHECK(calc(side(6, 0), side(0, 20)).damage() == 3);
 }
 
 /// **No attack is still `MinDamage`, and no blow passes the defender's
-/// health.** The calculator reads no damage type: a class that cannot hurt
-/// is refused its targets (`attack_virtual`), not dealt a 0 here.
+/// health.** The calculator reads no damage type.
 TEST(a_blow_is_at_least_min_damage_and_at_most_the_defenders_health) {
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 0;
-  CHECK(resolve_damage(in, k).final_damage == 3);
-  in.attack = 50;
-  in.defender_health = 7;
-  DamageBreakdown out = resolve_damage(in, k);
-  CHECK(out.capped);
-  CHECK(out.final_damage == 7);
-  in.defender_health = 0;
-  CHECK(resolve_damage(in, k).final_damage == 0);
-  in.defender_health = 50;
-  out = resolve_damage(in, k);
-  CHECK(!out.capped);
-  CHECK(out.final_damage == 50);
+  CHECK(calc(side(0, 0), side(0, 0)).damage() == 3);
+  CHECK(calc(side(50, 0), side(0, 0, 7)).damage() == 7);
+  CHECK(calc(side(50, 0), side(0, 0, 0)).damage() == 0);
+  CHECK(calc(side(50, 0), side(0, 0, 50)).damage() == 50);
 }
 
-/// Assault or bloodlust lifts the armour **and its floor** (0x00510d26), and
-/// only off a defender that is not a hero.
+/// Assault or bloodlust lifts the armour **and its floor** (C20), and only
+/// off a defender that is not a hero. Assault is the attacker unit's hero's;
+/// the bloodlust is anyone's.
 TEST(assault_lifts_armour_and_its_floor_off_a_defender_that_is_not_a_hero) {
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 16;
-  in.armour = 12;
-  in.ignores_armour = true;
-  DamageBreakdown out = resolve_damage(in, k);
-  CHECK(out.armour == 0);
-  CHECK(out.final_damage == 16);
-  in.defender_is_hero = true;
-  out = resolve_damage(in, k);
-  CHECK(out.armour == 12);
-  CHECK(out.final_damage == 4);
+  BlowSide a = side(16, 0);
+  a.assault = true;
+  BlowSide d = side(0, 12);
+  BlowOutcome out = calc(a, d);
+  CHECK(!out.armour_met);
+  CHECK(out.damage() == 16);
+  d.hero = true;
+  out = calc(a, d);
+  CHECK(out.armour_met);
+  CHECK(out.damage() == 4);
   // The floor goes with the armour: 16 against 40 is the floor's 3 against a
   // hero, but 16 against anyone else.
-  in.armour = 40;
-  CHECK(resolve_damage(in, k).floored_by_min_percent);
-  in.defender_is_hero = false;
-  out = resolve_damage(in, k);
-  CHECK(!out.floored_by_min_percent);
-  CHECK(out.final_damage == 16);
+  d.armour = 40;
+  CHECK(calc(a, d).damage() == 3);
+  d.hero = false;
+  CHECK(calc(a, d).damage() == 16);
+  // Assault is read only off an attacker unit; the bloodlust off anyone.
+  a.unit = false;
+  CHECK(calc(a, d).armour_met);
+  a.assault = false;
+  BlowRules lust;
+  lust.bloodlust = true;
+  CHECK(!calc(a, d, lust).armour_met);
+  d.hero = true;
+  CHECK(calc(a, d, lust).armour_met);
 }
 
 /// 0x0050fd40 on the shipped string: the percents in 256ths, interpolated
@@ -245,45 +252,587 @@ TEST(level_difference_table_reads_the_const_ini_spelling_as_c_does) {
 }
 
 TEST(a_level_advantage_raises_damage_and_a_deficit_lowers_it) {
-  const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 20;
-  in.armour = 0;
+  BlowSide a = side(20, 0);
+  BlowSide d = side(0, 0);
+  a.level = 6;  // difference 5 -> 307/256
+  BlowOutcome out = calc(a, d);
+  CHECK(out.level_difference == 5);
+  CHECK(out.damage() == 23);
 
-  in.attacker_level = 6;
-  in.defender_level = 1;  // difference 5 -> 307/256
-  const DamageBreakdown up = resolve_damage(in, k);
-  CHECK(up.level_difference == 5);
-  CHECK(up.final_damage == 23);
+  a.level = 1;
+  d.level = 6;
+  out = calc(a, d);
+  CHECK(out.level_difference == -5);
+  CHECK(out.damage() == 16);
+}
 
-  in.attacker_level = 1;
-  in.defender_level = 6;
-  const DamageBreakdown down = resolve_damage(in, k);
-  CHECK(down.level_difference == -5);
-  CHECK(down.final_damage == 16);
-
-  // The favoured defender's addend comes off the difference (0x00510e65).
-  in.attacker_level = 6;
-  in.defender_level = 1;
-  in.defender_addend = 5;
-  const DamageBreakdown even = resolve_damage(in, k);
-  CHECK(even.level_difference == 0);
-  CHECK(even.final_damage == 20);
+/// **The favoured player's addend** (C8, C22): added to its attacker's `L`,
+/// taken off the difference when it defends -- and Attack focus forgives a
+/// deficit before that, so it does not shield against the addend.
+TEST(the_favoured_players_addend_and_attack_focus) {
+  BlowRules rules;
+  rules.addend = 10;
+  BlowSide a = side(20, 0);
+  BlowSide d = side(0, 0);
+  CHECK(calc(a, d, rules).level_difference == 0);  // nobody favoured
+  a.favoured = true;
+  BlowOutcome out = calc(a, d, rules);
+  CHECK(out.level_difference == 10);
+  CHECK(out.damage() == 20 * 358 / 256);
+  a.favoured = false;
+  d.favoured = true;
+  out = calc(a, d, rules);
+  CHECK(out.level_difference == -10);
+  CHECK(out.damage() == 20 * (512 - 358) / 256);
+  // Attack focus lifts a deficit to 0, and the favoured defender's addend is
+  // taken off after it.
+  d.favoured = false;
+  d.level = 6;
+  a.attack_focus = true;
+  CHECK(calc(a, d, rules).level_difference == 0);
+  d.favoured = true;
+  CHECK(calc(a, d, rules).level_difference == -10);
+  // Not for an attacker that is not a unit, which stands at 10.
+  a.unit = false;
+  d.favoured = false;
+  d.level = 16;
+  CHECK(calc(a, d, rules).level_difference == -6);
 }
 
 /// The factor scales what armour left, and `MinDamage` comes after it.
 TEST(the_level_factor_scales_what_armour_left_before_min_damage) {
+  BlowSide d = side(0, 6);
+  d.level = 101;  // 26/256 of 10 is 1, lifted to 3
+  CHECK(calc(side(16, 0), d).damage() == 3);
+}
+
+// -- the gates ---------------------------------------------------------
+
+/// C3, C4: a side under its hero's Ceasefire ends the blow before any draw.
+TEST(a_ceasefire_on_either_side_ends_the_blow_before_any_draw) {
+  BlowSide a = side(16, 0);
+  BlowSide d = side(0, 0);
+  a.ceasefire = true;
+  Rng rng(7);
+  const Rng before = rng;
+  BlowOutcome out = calc(a, d, rng);
+  CHECK(out.path == BlowPath::ceasefire);
+  CHECK(out.damage() == 0);
+  CHECK(draws_taken(before, rng) == 0);
+  // Not an attacker that is not a unit: its ceasefire is not read.
+  a.unit = false;
+  CHECK(calc(a, d).path == BlowPath::struck);
+  a.unit = true;
+  a.ceasefire = false;
+  d.ceasefire = true;
+  out = calc(a, d, rng);
+  CHECK(out.path == BlowPath::ceasefire);
+  CHECK(draws_taken(before, rng) == 0);
+}
+
+/// C5: **the Concealment draw is taken on every blow at a unit**, whatever
+/// the chance -- a defender with no hero has -1 points -- and the blow is
+/// dodged when `points * 2` beats it.
+TEST(the_concealment_draw_is_taken_on_every_blow_at_a_unit) {
+  BlowSide d = side(0, 0);
+  Rng rng(11);
+  Rng before = rng;
+  CHECK(calc(side(16, 0), d, rng).path == BlowPath::struck);
+  CHECK(draws_taken(before, rng) == 1);
+  // A building takes no draw.
+  d.unit = false;
+  before = rng;
+  CHECK(calc(side(16, 0), d, rng).path == BlowPath::not_a_unit);
+  CHECK(draws_taken(before, rng) == 0);
+  // Fifty points are a chance of 100: every draw is beaten.
+  d.unit = true;
+  d.concealment = 50;
+  for (int i = 0; i < 20; ++i) {
+    const BlowOutcome out = calc(side(16, 0), d, rng);
+    CHECK(out.path == BlowPath::dodged);
+    CHECK(out.damage() == 0);
+  }
+  // Ten points, a chance of 20: dodged exactly when the draw is under 20.
+  d.concealment = 10;
+  for (int i = 0; i < 50; ++i) {
+    Rng peek = rng;
+    const std::int32_t draw = peek.between(0, 99);
+    CHECK((calc(side(16, 0), d, rng).path == BlowPath::dodged) == (draw < 20));
+  }
+}
+
+/// C6: a cursed attacker's blow is nothing and lifts the curse. C7: one in
+/// parry mode deals nothing and regains a point below its maximum.
+TEST(a_cursed_or_parrying_attacker_deals_nothing) {
+  BlowSide a = side(16, 0);
+  a.cursed = true;
+  BlowOutcome out = calc(a, side(0, 0));
+  CHECK(out.path == BlowPath::cursed);
+  CHECK(out.cure_attacker);
+  CHECK(out.damage() == 0);
+  // The curse is tested after the Concealment draw.
+  Rng rng(3);
+  const Rng before = rng;
+  (void)calc(a, side(0, 0), rng);
+  CHECK(draws_taken(before, rng) == 1);
+
+  a.cursed = false;
+  a.parrying = true;
+  a.max_stamina = 10;
+  a.stamina = 4;
+  out = calc(a, side(0, 0));
+  CHECK(out.path == BlowPath::parrying);
+  CHECK(out.attacker_stamina == 1);
+  CHECK(out.damage() == 0);
+  a.stamina = 10;
+  CHECK(calc(a, side(0, 0)).attacker_stamina == 0);
+  // Neither is read off an attacker that is not a unit.
+  a.unit = false;
+  a.cursed = true;
+  CHECK(calc(a, side(0, 0)).path == BlowPath::struck);
+}
+
+/// C12: a parrying defender with stamina parries for one point; with none it
+/// is struck.
+TEST(a_parrying_defender_with_stamina_parries_for_a_point) {
+  BlowSide d = side(0, 0);
+  d.parrying = true;
+  d.max_stamina = 5;
+  d.stamina = 2;
+  BlowOutcome out = calc(side(16, 0), d);
+  CHECK(out.path == BlowPath::parried);
+  CHECK(out.defender_stamina == -1);
+  CHECK(out.damage() == 0);
+  d.stamina = 0;
+  CHECK(calc(side(16, 0), d).damage() == 16);
+}
+
+// -- the two other branches ---------------------------------------------
+
+TEST(a_building_takes_the_attack_at_the_level_less_ten_and_a_ram_a_draw) {
+  BlowSide a = side(16, 0);
+  BlowSide wall = side(0, 50, 1000);
+  wall.unit = false;
+  // Level 1: 164/256 of 16 is 10; a thrower's halved rounding up to 5.
+  CHECK(calc(a, wall).damage() == 10);
+  a.shoots = true;
+  CHECK(calc(a, wall).damage() == 5);
+  a.unit = false;  // the raw attack, unscaled and unhalved
+  CHECK(calc(a, wall).damage() == 16);
+
+  BlowSide ram = side(0, 12, 300);
+  ram.ram = true;
+  a = side(16, 0);
+  CHECK(calc(a, ram).path == BlowPath::ram);
+  CHECK(calc(a, ram).damage() == 10);
+  a.shoots = true;
+  a.level = 200;
+  CHECK(calc(a, ram).damage() == 43);
+  a.level = -21;
+  CHECK(calc(a, ram).damage() == 0);
+}
+
+// -- Deflection and a shot's miss --------------------------------------------
+
+/// C13: Deflection takes the blow for its cost, and lets the attacker's
+/// Cripple or Drain at the stamina; Penetration with the stamina for it
+/// beats it unpaid.
+TEST(deflection_takes_the_blow_and_penetration_beats_it_unpaid) {
   const CombatConstants k = CombatConstants::shipped();
-  DamageInputs in;
-  in.attack = 16;
-  in.armour = 6;  // 10
-  in.attacker_level = 1;
-  in.defender_level = 101;  // 26/256 of 10 is 1, lifted to 3
-  const DamageBreakdown out = resolve_damage(in, k);
-  CHECK(out.after_armour == 10);
-  CHECK(out.after_level == 1);
-  CHECK(out.floored_by_min_damage);
-  CHECK(out.final_damage == 3);
+  BlowSide a = side(16, 0);
+  a.max_stamina = 10;
+  a.stamina = 5;
+  a.specials = special::kDrain;
+  BlowSide d = side(0, 0);
+  d.specials = special::kDeflection;
+  d.max_stamina = 10;
+  d.stamina = 4;
+  BlowOutcome out = calc(a, d);
+  CHECK(out.path == BlowPath::deflected);
+  CHECK(out.damage() == 0);
+  CHECK(out.on_defender.has(BlowEffect::deflection));
+  CHECK(out.on_defender.has(BlowEffect::stamina_loss));
+  CHECK(out.defender_stamina == -k.deflection_cost - 2);
+  CHECK(out.attacker_stamina == -k.drain_cost);
+  // Drain is kept at 0.
+  d.stamina = 2;
+  CHECK(calc(a, d).defender_stamina == -2);
+  // Cripple first, and it takes it all.
+  a.specials = special::kDrain | special::kCripple;
+  d.stamina = 4;
+  out = calc(a, d);
+  CHECK(out.defender_stamina == -4);
+  CHECK(out.attacker_stamina == -k.crippling_attack_cost);
+  // A hero deflects without losing stamina to either.
+  d.hero = true;
+  out = calc(a, d);
+  CHECK(out.defender_stamina == -k.deflection_cost);
+  CHECK(out.attacker_stamina == 0);
+  // Penetration with its cost in hand: no deflection, and the hit pays it.
+  d.hero = false;
+  a.specials = special::kPenetration;
+  out = calc(a, d);
+  CHECK(out.path == BlowPath::struck);
+  CHECK(!out.armour_met);
+  CHECK(out.on_defender.has(BlowEffect::penetration));
+  CHECK(out.defender_stamina == 0);
+}
+
+/// C14: a shot misses a wounded unit on `Range(-(M/2), M)` over its health,
+/// never one at full health, and a hero besides on `ArcherAgainstHeroChance`.
+TEST(a_shot_misses_a_wounded_unit_on_a_draw_over_its_health) {
+  BlowSide a = side(16, 0);
+  a.shoots = true;
+  BlowSide d = side(0, 0, 200);
+  Rng rng(5);
+  for (int i = 0; i < 30; ++i) {
+    const Rng before = rng;
+    CHECK(calc(a, d, rng).path == BlowPath::struck);
+    CHECK(draws_taken(before, rng) == 2);  // Concealment, then the miss draw
+  }
+  d.health = 50;
+  int misses = 0;
+  for (int i = 0; i < 60; ++i) {
+    Rng peek = rng;
+    (void)peek.between(0, 99);
+    const std::int32_t draw = peek.between(-100, 200);
+    const bool missed = calc(a, d, rng).path == BlowPath::missed;
+    CHECK(missed == (50 < draw));
+    misses += missed ? 1 : 0;
+  }
+  CHECK(misses > 0);
+  // A hero at full health: the second draw, under 30.
+  d.health = 200;
+  d.hero = true;
+  for (int i = 0; i < 40; ++i) {
+    Rng peek = rng;
+    (void)peek.between(0, 99);
+    (void)peek.between(-100, 200);
+    const std::int32_t draw = peek.between(0, 99);
+    CHECK((calc(a, d, rng).path == BlowPath::missed) == (draw < 30));
+  }
+}
+
+/// C15: **a miss still costs the attacker** each special it would have
+/// paid for, Cripple and Drain both -- Penetration not under the bloodlust.
+TEST(a_missed_shot_still_costs_its_specials) {
+  const CombatConstants k = CombatConstants::shipped();
+  BlowSide a = side(16, 0);
+  a.shoots = true;
+  a.max_stamina = 50;
+  a.stamina = 50;
+  a.specials = special::kAttackSkill | special::kOffensiveTactics | special::kPenetration |
+               special::kTripleStrike | special::kBleedingAttack | special::kDiseaseAttack |
+               special::kCripple | special::kDrain;
+  BlowSide d = side(0, 0, 1);
+  d.max_health = 1000;
+  d.stamina = 3;
+  // A draw over 1 of `Range(-500, 1000)` misses; find a seed that does.
+  Rng rng(1);
+  BlowOutcome out;
+  for (int i = 0; i < 20; ++i) {
+    out = calc(a, d, rng);
+    if (out.path == BlowPath::missed) break;
+  }
+  REQUIRE(out.path == BlowPath::missed);
+  const std::int32_t all = k.attack_skill_cost + k.offensive_tactics_cost + k.penetration_cost +
+                           k.triple_strike_cost + k.bleeding_attack_cost + k.disease_cost +
+                           k.crippling_attack_cost + k.drain_cost;
+  CHECK(out.attacker_stamina == -all);
+  CHECK(out.defender_stamina == 0);
+  CHECK(out.on_defender.count == 0);
+  CHECK(out.damage() == 0);
+  // Under the bloodlust Penetration is not charged.
+  BlowRules lust;
+  lust.bloodlust = true;
+  for (int i = 0; i < 20; ++i) {
+    out = calc(a, d, rng, lust);
+    if (out.path == BlowPath::missed) break;
+  }
+  REQUIRE(out.path == BlowPath::missed);
+  CHECK(out.attacker_stamina == -(all - k.penetration_cost));
+}
+
+// -- the specials --------------------------------------------------------------
+
+/// C17..C19, C24..C25: the attacker's additions in their order, each paid
+/// from the running stamina -- Attack skill twice the stamina it had before
+/// paying, Offensive tactics the stored level, Charge after `ChargeTime`,
+/// Triple strike thrice.
+TEST(the_attackers_specials_add_in_order_on_the_running_stamina) {
+  const CombatConstants k = CombatConstants::shipped();
+  BlowSide a = side(10, 0);
+  a.max_stamina = 20;
+  a.stamina = 6;
+  a.level = 3;
+  a.specials = special::kAttackSkill;
+  BlowSide d = side(0, 0, 1000);
+  d.level = 3;
+  BlowOutcome out = calc(a, d);
+  CHECK(out.damage() == 10 + 2 * 6);
+  CHECK(out.attacker_stamina == -k.attack_skill_cost);
+  CHECK(out.on_defender.has(BlowEffect::attack_skill));
+  a.specials |= special::kOffensiveTactics;
+  out = calc(a, d);
+  CHECK(out.damage() == 10 + 12 + 3);
+  CHECK(out.on_defender.has(BlowEffect::offensive_tactics));
+  // Triple strike, listed on the attacker, after the factor.
+  a.specials |= special::kTripleStrike;
+  out = calc(a, d);
+  CHECK(out.damage() == 3 * 25);
+  CHECK(out.on_attacker.has(BlowEffect::triple_strike));
+  CHECK(out.attacker_stamina == -3);
+  // A starved Triple strike: two points pay the first two only.
+  a.stamina = 2;
+  out = calc(a, d);
+  CHECK(out.damage() == 10 + 4 + 3);
+  CHECK(!out.on_attacker.has(BlowEffect::triple_strike));
+  // Charge: `ChargeDamageFactor` once `ChargeTime` has passed, unsigned.
+  a.specials = special::kCharge;
+  a.stamina = 4;
+  a.last_attack_time = 1000;
+  BlowRules rules;
+  rules.now = 1000 + k.charge_time;
+  out = calc(a, d, rules);
+  CHECK(out.damage() == 10 * k.charge_damage_factor);
+  CHECK(out.on_defender.has(BlowEffect::charge));
+  CHECK(out.attacker_stamina == -k.charge_cost);
+  rules.now = 1000 + k.charge_time - 1;
+  CHECK(calc(a, d, rules).damage() == 10);
+  // A last attack in the future is a huge unsigned gap.
+  rules.now = 0;
+  CHECK(calc(a, d, rules).damage() == 10 * k.charge_damage_factor);
+  // The blessing doubles, and is spent.
+  a.specials = 0;
+  a.blessed = true;
+  out = calc(a, d);
+  CHECK(out.damage() == 20);
+  CHECK(out.cure_attacker);
+}
+
+/// C21: Defense skill and Defensive tactics off the armour, then the floor of
+/// the raw attack.
+TEST(the_defenders_specials_come_off_with_the_armour) {
+  const CombatConstants k = CombatConstants::shipped();
+  BlowSide a = side(40, 0);
+  BlowSide d = side(0, 5, 1000);
+  d.max_stamina = 10;
+  d.stamina = 3;
+  d.level = 4;
+  a.level = 4;
+  d.specials = special::kDefenseSkill | special::kDefensiveTactics;
+  BlowOutcome out = calc(a, d);
+  CHECK(out.damage() == 40 - 5 - 6 - 4);
+  CHECK(out.defender_stamina == -k.defense_skill_cost - k.defensive_tactics_cost);
+  CHECK(out.on_defender.has(BlowEffect::defense_skill));
+  CHECK(out.on_defender.has(BlowEffect::defensive_tactics));
+  // Neither without armour met.
+  a.assault = true;
+  out = calc(a, d);
+  CHECK(out.damage() == 40);
+  CHECK(out.defender_stamina == 0);
+}
+
+/// C28..C33: Rage, Bleeding attack and the killing blows, none against a
+/// hero; a killing blow skips the shelter.
+TEST(rage_bleeding_and_the_killing_blows) {
+  const CombatConstants k = CombatConstants::shipped();
+  BlowSide a = side(10, 0);
+  a.max_health = 200;
+  a.health = 180;
+  a.max_stamina = 20;
+  a.stamina = 20;
+  a.specials = special::kRage;
+  BlowSide d = side(0, 0, 1000);
+  BlowOutcome out = calc(a, d);
+  CHECK(out.damage() == 10 + 80);
+  CHECK(out.attacker_health == -80);
+  CHECK(out.on_defender.has(BlowEffect::rage));
+  CHECK(out.attacker_stamina == -k.rage_cost);
+  d.hero = true;
+  CHECK(calc(a, d).damage() == 10);
+  d.hero = false;
+  a.specials = special::kBleedingAttack;
+  CHECK(calc(a, d).damage() == 10 + 100);
+  // Death blow once what is left would be half or less.
+  a.specials = special::kDeathBlow;
+  d.health = 511;
+  CHECK(calc(a, d).damage() == 10);
+  d.health = 510;
+  d.sheltered = true;
+  out = calc(a, d);
+  CHECK(out.damage() == 510);
+  CHECK(out.on_defender.has(BlowEffect::death));
+  CHECK(out.attacker_stamina == -k.death_blow_cost);
+  // Power strike: twice the defender's maximum, on a wounded one.
+  a.specials = special::kPowerStrike;
+  a.max_health = 2001;
+  d.health = 999;
+  CHECK(calc(a, d).damage() == 999);
+  d.health = 1000;
+  CHECK(calc(a, d).damage() == 5);  // sheltered
+  // Expertise: past the class damage.
+  a.specials = special::kExpertise | special::kAttackSkill;
+  a.class_damage = 10;
+  CHECK(calc(a, d).damage() == 1000);
+  // Gambler's Test: a free draw when the attacker stands higher.
+  a.specials = 0;
+  a.gamblers_test = 100;
+  CHECK(calc(a, d).damage() == 5);
+  a.level = 2;
+  CHECK(calc(a, d).damage() == 1000);
+  d.hero = true;
+  CHECK(calc(a, d).damage() == 5);
+}
+
+/// C35: Gambler's Luck turns a killing blow into a full heal, a hero's too.
+TEST(gamblers_luck_turns_a_kill_into_a_full_heal) {
+  BlowSide d = side(0, 0, 10);
+  d.max_health = 300;
+  d.gamblers_luck = 100;
+  d.hero = true;
+  BlowOutcome out = calc(side(50, 0), d);
+  CHECK(out.defender_health == 290);
+  CHECK(out.on_defender.has(BlowEffect::heal));
+  d.gamblers_luck = 0;
+  CHECK(calc(side(50, 0), d).defender_health == -10);
+}
+
+/// C37..C40: Triumph else Life steal, Spike armor, Revenge, and the stamina
+/// a kill refills.
+TEST(the_attackers_rewards_and_the_defenders_revenge) {
+  const CombatConstants k = CombatConstants::shipped();
+  BlowSide a = side(30, 0);
+  a.health = 100;
+  a.max_health = 200;
+  a.max_stamina = 20;
+  a.stamina = 10;
+  a.specials = special::kLifeSteal | special::kTriumph;
+  BlowSide d = side(0, 0, 1000);
+  BlowOutcome out = calc(a, d);
+  CHECK(out.attacker_health == 30);
+  CHECK(out.on_attacker.has(BlowEffect::heal));
+  d.health = 30;
+  out = calc(a, d);
+  CHECK(out.attacker_health == 100);
+  CHECK(out.attacker_stamina == -k.triumph_cost);
+  // Spike armor returns the blow to a melee striker, kept at 0 by the clamp.
+  a.specials = 0;
+  d = side(0, 0, 1000);
+  d.specials = special::kSpikeArmor;
+  d.max_stamina = 3;
+  d.stamina = 3;
+  out = calc(a, d);
+  CHECK(out.attacker_health == -30);
+  CHECK(out.on_attacker.has(BlowEffect::spiked_armor));
+  CHECK(out.defender_stamina == -k.spike_armor_cost);
+  a.shoots = true;
+  CHECK(calc(a, d).attacker_health == 0);
+  a.shoots = false;
+  // Revenge on a kill: a hundred off, kept at 0.
+  d.specials = special::kRevenge;
+  d.health = 20;
+  out = calc(a, d);
+  CHECK(out.attacker_health == -100);
+  CHECK(out.on_attacker.has(BlowEffect::revenge));
+  // A kill fills the stamina by Ferocity, else adds the Ferocity research's
+  // `EuphoriaStamina`.
+  d.specials = 0;
+  a.specials = special::kFerocity;
+  out = calc(a, d);
+  CHECK(out.attacker_stamina == 10);
+  CHECK(out.on_attacker.has(BlowEffect::stamina_boost));
+  a.specials = 0;
+  a.ferocity = true;
+  CHECK(calc(a, d).attacker_stamina == k.euphoria_stamina);
+  // Euphoria's draw, ten points a certain one.
+  a.ferocity = false;
+  a.euphoria = 10;
+  CHECK(calc(a, d).attacker_stamina == k.euphoria_stamina);
+  a.euphoria = 0;
+  CHECK(calc(a, d).attacker_stamina == 0);
+}
+
+/// C41..C45: Disease attack on a survivor, Combat skill, Cripple else Drain
+/// on the hit, Learning on someone with more experience, Determination.
+TEST(disease_combat_skill_drain_learning_and_determination) {
+  const CombatConstants k = CombatConstants::shipped();
+  BlowSide a = side(10, 0);
+  a.max_stamina = 20;
+  a.stamina = 10;
+  a.specials = special::kDiseaseAttack;
+  BlowSide d = side(0, 0, 1000);
+  d.max_stamina = 10;
+  d.stamina = 5;
+  BlowOutcome out = calc(a, d);
+  CHECK(out.disease_defender);
+  CHECK(out.attacker_stamina == -k.disease_cost);
+  d.diseased = true;
+  CHECK(!calc(a, d).disease_defender);
+  d.diseased = false;
+  a.specials = special::kCombatSkill;
+  out = calc(a, d);
+  CHECK(out.attacker_stamina == 1);
+  CHECK(out.on_attacker.has(BlowEffect::stamina_boost));
+  a.specials = special::kDrain;
+  out = calc(a, d);
+  CHECK(out.defender_stamina == -2);
+  CHECK(out.on_defender.has(BlowEffect::stamina_loss));
+  d.stamina = 1;
+  CHECK(calc(a, d).defender_stamina == -1);  // the clamp
+  a.specials = special::kCripple | special::kDrain;
+  d.stamina = 5;
+  CHECK(calc(a, d).defender_stamina == -5);
+  CHECK(calc(a, d).attacker_stamina == -k.crippling_attack_cost);
+  // Learning: a point for striking someone with more experience, by the
+  // special or the research; never on a `Sentry`.
+  a.specials = special::kLearning;
+  d.experience = 5;
+  out = calc(a, d);
+  CHECK(out.learning == 1);
+  CHECK(out.on_attacker.has(BlowEffect::experience));
+  CHECK(out.attacker_stamina == -k.learning_cost);
+  d.sentry = true;
+  CHECK(calc(a, d).learning == 0);
+  d.sentry = false;
+  a.specials = 0;
+  a.learning = true;
+  CHECK(calc(a, d).learning == 1);
+  a.experience = 5;
+  CHECK(calc(a, d).learning == 0);
+  // Determination: a free point below the defender's maximum.
+  d.specials = special::kDetermination;
+  d.stamina = 4;
+  out = calc(a, d);
+  CHECK(out.defender_stamina == 1);
+  CHECK(out.on_defender.has(BlowEffect::stamina_boost));
+}
+
+/// The draws in order, at most: Concealment, the miss, the hero's miss,
+/// Gambler's Test, Gambler's Luck, Euphoria -- each only when its tests pass.
+TEST(the_calculators_draws_are_taken_only_where_their_tests_pass) {
+  BlowSide a = side(50, 0);
+  a.shoots = true;
+  a.level = 2;
+  a.gamblers_test = 1;
+  a.euphoria = 1;
+  a.max_stamina = 10;
+  BlowSide d = side(0, 0, 200);
+  d.hero = true;
+  d.gamblers_luck = 1;
+  Rng rng(9);
+  // Concealment, the miss, the hero's miss; Gambler's Test is not taken
+  // against a hero; Gambler's Luck is not taken while it would not kill.
+  Rng before = rng;
+  BlowOutcome out = calc(a, d, rng);
+  if (out.path == BlowPath::struck) CHECK(draws_taken(before, rng) == 3);
+  // A unit's kill: Concealment, Gambler's Test, Gambler's Luck, Euphoria.
+  a.shoots = false;
+  d.hero = false;
+  d.health = 40;
+  before = rng;
+  out = calc(a, d, rng);
+  CHECK(draws_taken(before, rng) == (out.defender_health == -40 ? 4 : 3));
 }
 
 TEST(const_ini_parses_the_gameplay_section_only) {
@@ -311,6 +860,64 @@ TEST(const_ini_parses_the_gameplay_section_only) {
   CHECK(k.difficulty_addend(Difficulty::easy) == 10);
   CHECK(k.difficulty_addend(Difficulty::normal) == 5);
   CHECK(k.difficulty_addend(Difficulty::hard) == 0);
+}
+
+/// The calculator's own block of keys, each to its own field: distinct
+/// made-up values, so a key read into the wrong field shows.
+TEST(const_ini_reads_every_key_the_calculator_reads) {
+  static constexpr std::string_view ini =
+      "[GamePlay]\n"
+      "AvoidChancePercentPerConcealmentLevel = 101\n"
+      "PercentPerEuphoriaLevel = 102\n"
+      "EuphoriaStamina = 103\n"
+      "ChargeTime = 104\n"
+      "OffensiveTacticsCost = 105\n"
+      "DefensiveTacticsCost = 106\n"
+      "TrippleStrikeCost = 107\n"
+      "DeflectionCost = 108\n"
+      "PenetrationCost = 109\n"
+      "AttackSkillCost = 110\n"
+      "DefenseSkillCost = 111\n"
+      "DeathBlowCost = 112\n"
+      "PowerStrikeCost = 113\n"
+      "ExpertiseCost = 114\n"
+      "RageCost = 115\n"
+      "BleedingAttackCost = 116\n"
+      "LifeStealCost = 117\n"
+      "DrainCost = 118\n"
+      "CripplingAttackCost = 119\n"
+      "SpikeArmorCost = 120\n"
+      "ChargeCost = 121\n"
+      "TriumphCost = 122\n"
+      "LearningCost = 123\n"
+      "DiseaseCost = 124\n"
+      "ArcherAgainstHeroChance = 125\n";
+  const CombatConstants k = CombatConstants::from_const_ini(bytes_of(ini));
+  CHECK(k.avoid_chance_percent_per_concealment_level == 101);
+  CHECK(k.percent_per_euphoria_level == 102);
+  CHECK(k.euphoria_stamina == 103);
+  CHECK(k.charge_time == 104);
+  CHECK(k.offensive_tactics_cost == 105);
+  CHECK(k.defensive_tactics_cost == 106);
+  CHECK(k.triple_strike_cost == 107);
+  CHECK(k.deflection_cost == 108);
+  CHECK(k.penetration_cost == 109);
+  CHECK(k.attack_skill_cost == 110);
+  CHECK(k.defense_skill_cost == 111);
+  CHECK(k.death_blow_cost == 112);
+  CHECK(k.power_strike_cost == 113);
+  CHECK(k.expertise_cost == 114);
+  CHECK(k.rage_cost == 115);
+  CHECK(k.bleeding_attack_cost == 116);
+  CHECK(k.life_steal_cost == 117);
+  CHECK(k.drain_cost == 118);
+  CHECK(k.crippling_attack_cost == 119);
+  CHECK(k.spike_armor_cost == 120);
+  CHECK(k.charge_cost == 121);
+  CHECK(k.triumph_cost == 122);
+  CHECK(k.learning_cost == 123);
+  CHECK(k.disease_cost == 124);
+  CHECK(k.archer_against_hero_chance == 125);
 }
 
 TEST(const_ini_keeps_shipped_values_for_absent_keys) {
@@ -423,6 +1030,7 @@ TEST(countered_penalty_mode_is_the_other_reading) {
 /// **The counter table is not in the blow** (0x0050ff30 reads none): its
 /// readers are the AI's and a catapult's ground shot.
 TEST(the_counter_table_does_not_touch_a_blow) {
+  World world;
   CombatSystem combat;
   combat.set_profile(kHastatus, melee(20, 0, 200));
   combat.set_profile(kSwordsman, melee(20, 0, 200));
@@ -433,8 +1041,8 @@ TEST(the_counter_table_does_not_touch_a_blow) {
 
   combat.add(unit(1, kHastatus, 0, 200));
   combat.add(unit(2, kSwordsman, 1, 200));
-  CHECK(combat.preview(1, 2).final_damage == 20);
-  CHECK(combat.preview(2, 1).final_damage == 20);
+  CHECK(combat.preview(world, 1, 2, 0).damage() == 20);
+  CHECK(combat.preview(world, 2, 1, 0).damage() == 20);
 }
 
 // ---------------------------------------------------------------------------
@@ -860,8 +1468,8 @@ TEST(a_fight_runs_to_a_death_and_the_body_is_removed) {
 
   // Hastatus 16 against armour 6 is 10 a hit; the swordsman's 12 against
   // armour 12 falls to the 20% floor of 2 -- but MinDamage lifts it to 3.
-  CHECK(combat.preview(1, 2).final_damage == 10);
-  CHECK(combat.preview(2, 1).final_damage == 3);
+  CHECK(combat.preview(world, 1, 2, 0).damage() == 10);
+  CHECK(combat.preview(world, 2, 1, 0).damage() == 3);
 
   int hastatus_strikes = 0;
   bool hastatus_alive = true;
@@ -932,9 +1540,8 @@ TEST(an_unbuilt_siege_engine_takes_no_part_in_the_fight) {
   CHECK(combat.find(engine)->target == kNoObject);
 }
 
-/// **The flag is read off the world by the blow, not by the preview.**
-/// `ObjectFlags::half_damage` is world state; `hit` reads it where the world
-/// is in hand, and `preview`, which has none, shows the unsheltered number.
+/// **The flag is read off the world by the blow**: `ObjectFlags::half_damage`
+/// is world state, and the calculator's preview reads it as the blow does.
 TEST(a_sheltered_world_object_takes_half_of_every_landed_blow) {
   World world;
   CombatSystem combat = make_system();
@@ -952,7 +1559,7 @@ TEST(a_sheltered_world_object_takes_half_of_every_landed_blow) {
   combat.add(unit(b, kSwordsman, 1, 200, Point{40, 0}));
   world.mutable_state(b)->flags.half_damage = true;
   CHECK(combat.can_attack(a, b));
-  CHECK(combat.preview(a, b).final_damage == 10);
+  CHECK(combat.preview(world, a, b, 0).damage() == 5);
 
   const auto strike_on = [&](ObjectId victim) {
     for (int turn = 0; turn < 20; ++turn) {
@@ -1110,7 +1717,8 @@ TEST(a_training_blow_scales_by_the_stored_levels_alone) {
   combat.find(p.a)->level = 6;
   // 16 less 6, at a difference of 5: 307/256 of 10 is 11.
   CHECK(next_blow(world, combat, p.a, p.b) == 11);
-  combat.set_player_level_addend(0, 10);
+  // The bloodlust, which lifts armour off a blow, is not read either.
+  combat.set_bloodlust(true);
   CHECK(next_blow(world, combat, p.a, p.b) == 11);
 }
 
@@ -1122,18 +1730,160 @@ TEST(a_striker_that_is_not_a_unit_stands_at_level_ten_and_a_hero_keeps_its_armou
   CombatSystem combat = branch_system();
   REQUIRE(world.add_system(&combat));
   const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kSwordsman, 1, 200);
-  CHECK(combat.preview(p.a, p.b).level_difference == 0);
+  CHECK(combat.preview(world, p.a, p.b, 0).level_difference == 0);
   world.mutable_state(p.a)->flags.is_unit = false;
   // 10 less the defender's 1: 348/256 of 16 less 6 is 13.
-  const DamageBreakdown tower = combat.preview(p.a, p.b);
+  const BlowOutcome tower = combat.preview(world, p.a, p.b, 0);
   CHECK(tower.level_difference == 9);
-  CHECK(tower.final_damage == 13);
+  CHECK(tower.damage() == 13);
   world.mutable_state(p.a)->flags.is_unit = true;
 
-  combat.find(p.a)->ignores_armour = true;
-  CHECK(combat.preview(p.a, p.b).armour == 0);
+  combat.set_bloodlust(true);
+  CHECK(!combat.preview(world, p.a, p.b, 0).armour_met);
   world.mutable_state(p.b)->flags.is_hero = true;
-  CHECK(combat.preview(p.a, p.b).armour == 6);
+  CHECK(combat.preview(world, p.a, p.b, 0).armour_met);
+}
+
+namespace {
+
+constexpr ClassIndex kSpiky = 9;     // Spike armor, Determination
+constexpr ClassIndex kSkilled = 10;  // Attack skill, Disease attack, Learning
+
+/// `branch_system` with two classes that carry specials and stamina.
+CombatSystem special_system() {
+  CombatSystem combat = branch_system();
+  CombatProfile spiky = melee(0, 6, 200);
+  spiky.max_stamina = 5;
+  spiky.specials = special::kSpikeArmor;
+  combat.set_profile(kSpiky, spiky);
+  CombatProfile skilled = melee(16, 12, 200);
+  skilled.max_stamina = 10;
+  skilled.specials = special::kAttackSkill | special::kDiseaseAttack | special::kLearning;
+  combat.set_profile(kSkilled, skilled);
+  return combat;
+}
+
+}  // namespace
+
+/// **The dealer after the call** (D7, D8, D11): the defender's damage, its
+/// stamina when it survives, then the attacker's own health and stamina --
+/// Spike armor's returned blow is the attacker's health delta.
+TEST(the_dealer_applies_both_sides_deltas_after_the_damage) {
+  World world;
+  CombatSystem combat = special_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kSpiky, 1, 200);
+  REQUIRE(combat.can_attack(p.a, p.b));
+  // The spiky defender's stamina is the world's: the map's, or the maximum.
+  CHECK(world.state(p.b)->stamina == 5);
+  CHECK(next_blow(world, combat, p.a, p.b) == 10);
+  CHECK(combat.last_blow().on_attacker.has(BlowEffect::spiked_armor));
+  CHECK(combat.health(p.a) == 190);
+  CHECK(world.state(p.a)->health == 190);
+  CHECK(combat.find(p.b)->stamina == 4);
+  CHECK(world.state(p.b)->stamina == 4);
+}
+
+/// **The one stamina**: what a hero skill writes to the world is what the
+/// next blow pays from, and what it pays is the world's too.
+TEST(a_blow_pays_from_the_worlds_stamina) {
+  World world;
+  CombatSystem combat = special_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kSkilled, NativeClass::unit, kSwordsman, 1, 200);
+  REQUIRE(combat.can_attack(p.a, p.b));
+  REQUIRE(world.set_stamina(p.a, 3));
+  // 16 and twice the 3 it had, less the 6: 16.
+  CHECK(next_blow(world, combat, p.a, p.b) == 16);
+  CHECK(combat.last_blow().on_defender.has(BlowEffect::attack_skill));
+  // Attack skill's point and Disease attack's: 1 left.
+  CHECK(world.state(p.a)->stamina == 1);
+  CHECK(combat.find(p.a)->stamina == 1);
+  // Disease attack wrote the defender's bit itself (C41).
+  CHECK(world.state(p.b)->flags.diseased);
+  // A blow dealt outside a turn -- on the timer, after a hero skill wrote the
+  // world's stamina -- reads the world's too: 16 and twice 4, less the 6.
+  REQUIRE(world.set_stamina(p.a, 4));
+  REQUIRE(combat.blow(world, p.a, p.b, world.time()));
+  CHECK(combat.last_blow().damage() == 18);
+}
+
+/// C6 through the dealer: a cursed attacker's blow lands nothing and lifts
+/// the curse, so the next one strikes.
+TEST(a_curse_costs_one_blow_and_is_gone) {
+  World world;
+  CombatSystem combat = special_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kSwordsman, 1, 200);
+  REQUIRE(combat.can_attack(p.a, p.b));
+  world.mutable_state(p.a)->flags.cursed = true;
+  world.mutable_state(p.a)->curse_until = 1'000'000;
+  CHECK(next_blow(world, combat, p.a, p.b) == 0);
+  CHECK(combat.last_blow().path == BlowPath::cursed);
+  CHECK(!world.state(p.a)->flags.cursed);
+  CHECK(next_blow(world, combat, p.a, p.b) == 10);
+}
+
+/// C12 through the dealer: a defender in parry mode with stamina takes
+/// nothing and pays a point of the world's stamina.
+TEST(a_parrying_defender_pays_a_point_of_the_worlds_stamina) {
+  World world;
+  CombatSystem combat = special_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kSpiky, 1, 200);
+  REQUIRE(combat.can_attack(p.a, p.b));
+  world.mutable_state(p.b)->parry_mode = 1;
+  CHECK(next_blow(world, combat, p.a, p.b) == 0);
+  CHECK(combat.last_blow().path == BlowPath::parried);
+  CHECK(world.state(p.b)->stamina == 4);
+  CHECK(combat.health(p.b) == 200);
+}
+
+/// C3..C5 read off the hero: a hero's own Concealment dodges, and the
+/// Ceasefire of the hero a unit follows ends its blows.
+TEST(a_heros_concealment_and_ceasefire_reach_the_blow) {
+  World world;
+  HeroSystem heroes;
+  REQUIRE(world.add_system(&heroes));
+  CombatSystem combat = special_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kSwordsman, 1, 200);
+  REQUIRE(combat.can_attack(p.a, p.b));
+  world.mutable_state(p.b)->flags.is_hero = true;
+  heroes.register_hero(world, p.b);
+  HeroRecord* record = heroes.hero(p.b);
+  REQUIRE(record != nullptr);
+  const auto slot = static_cast<std::size_t>(HeroSkill::concealment);
+  record->offered[slot] = true;
+  record->skills[slot] = 50;
+  CHECK(next_blow(world, combat, p.a, p.b) == 0);
+  CHECK(combat.last_blow().path == BlowPath::dodged);
+  record->skills[slot] = 0;
+  CHECK(next_blow(world, combat, p.a, p.b) == 10);
+  const auto ceasefire = static_cast<std::size_t>(HeroSkill::ceasefire);
+  record->effect_until[ceasefire] = 1'000'000;
+  CHECK(next_blow(world, combat, p.a, p.b) == 0);
+  CHECK(combat.last_blow().path == BlowPath::ceasefire);
+}
+
+/// D6 raw: the dealer books the negated health delta before the damage,
+/// and Gambler's Luck's heal books a negative number.
+TEST(the_dealer_books_gamblers_luck_as_a_negative_blow) {
+  World world;
+  MatchSystem match;
+  EnvSystem env;
+  REQUIRE(world.add_system(&match));
+  REQUIRE(world.add_system(&env));
+  CombatSystem combat = special_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kSwordsman, 1, 5);
+  REQUIRE(combat.can_attack(p.a, p.b));
+  env.env().write_int(EnvScope::for_player(2), "GamblersLuckChance", 100);
+  CHECK(next_blow(world, combat, p.a, p.b) == 5 - 200);
+  CHECK(combat.health(p.b) == 200);
+  CHECK(match.score(0).damage_inflicted == 5 - 200);
+  CHECK(match.score(1).damage_taken == 5 - 200);
+  CHECK(match.score(0).kill_healths == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1649,8 +2399,7 @@ TEST(a_fight_credits_both_sides_and_a_kill_is_worth_a_full_bar) {
   // to the five that are left (0x005110db), so five is what is booked.
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
   combat.add(unit(2, kSwordsman, 1, 5, Point{40, 0}));
-  CHECK(combat.preview(1, 2).after_level == 10);
-  CHECK(combat.preview(1, 2).final_damage == 5);
+  CHECK(combat.preview(world, 1, 2, 0).damage() == 5);
   CHECK(combat.order_attack(1, 2));
 
   world.advance(400);
@@ -1686,9 +2435,10 @@ TEST(a_fight_credits_both_sides_and_a_kill_is_worth_a_full_bar) {
 
 /// An allied blow books nothing at all, on either side.
 ///
-/// 0x00511550 routes it into a capped non-lethal branch at 0x0051164f that
-/// jumps past every counter. A player is allied to itself, so a unit damaging
-/// its own side is the same case.
+/// 0x00511550 routes a blow between two units its attacker does not count an
+/// enemy into the training branch at 0x0051164f, which jumps past every
+/// counter. The combat system reads diplomacy off the world it was started
+/// on, so this one is.
 TEST(an_allied_blow_is_not_counted) {
   World world;
   MatchSystem match;
@@ -1696,17 +2446,13 @@ TEST(an_allied_blow_is_not_counted) {
   world.players().set(0, 1, Relation::allied, true);
   world.players().set(1, 0, Relation::allied, true);
   REQUIRE(world.players().are_allied(0, 1));
-
-  CombatSystem combat = make_system();
-  combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
-  combat.add(unit(2, kSwordsman, 1, 200, Point{40, 0}));
-  // `order_attack` does not consult diplomacy, which is what lets the case be
-  // constructed at all: acquisition would never have picked this target.
-  CHECK(combat.order_attack(1, 2));
-  world.advance(400);
-  combat.advance(world, world.turn());
-
-  CHECK(combat.find(2)->health < 200);  // the damage landed
+  CombatSystem combat = branch_system();
+  REQUIRE(world.add_system(&combat));
+  const Pair p = place_pair(world, combat, kHastatus, NativeClass::unit, kSwordsman, 1, 200);
+  // The training bit is what lets the swing at an ally be ordered at all.
+  world.mutable_state(p.b)->flags.training = true;
+  REQUIRE(combat.can_attack(p.a, p.b));
+  CHECK(next_blow(world, combat, p.a, p.b) == 10);  // the damage landed
   CHECK(match.score(0).damage_inflicted == 0);
   CHECK(match.score(1).damage_taken == 0);
 }
@@ -1810,23 +2556,108 @@ TEST(apply_damage_and_heal_clamp) {
   CHECK(combat.apply_damage(world, 1, 10) == 0);  // already dying
 }
 
-TEST(the_difficulty_addend_moves_the_level_term) {
+/// **The match cache** (0x0050ff30, 0x00510351..0x005106b0): the favoured
+/// player is the human of a game that is not networked, with the addend of
+/// the match's difficulty; the ledger's chances and researches per player.
+/// Filled by the first blow and frozen until a clear.
+TEST(the_match_cache_favours_the_human_and_freezes_until_cleared) {
+  World world;
+  MatchSystem match;
+  EnvSystem env;
+  REQUIRE(world.add_system(&match));
+  REQUIRE(world.add_system(&env));
   CombatSystem combat = make_system();
+  match.configure(MatchRules{}, 0, false);
+  REQUIRE(match.set_difficulty(0));
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
   combat.add(unit(2, kSwordsman, 1, 200, Point{40, 0}));
-  const std::int32_t even = combat.preview(1, 2).final_damage;
   // Easy is 10; at a level difference of 10 the table pays 358/256.
-  combat.set_player_level_addend(0, combat.constants().difficulty_addend(Difficulty::easy));
-  const DamageBreakdown eased = combat.preview(1, 2);
+  BlowOutcome eased = combat.preview(world, 1, 2, 0);
+  CHECK(combat.favoured_addend() == 10);
+  CHECK(combat.damage_formula_params(world).favoured == 0);
   CHECK(eased.level_difference == 10);
-  CHECK(combat.constants().level_difference.factor(10) == 358);
-  CHECK(eased.final_damage == even * 358 / 256);
-  // On the defender's side it comes off the difference (0x00510e65).
-  combat.set_player_level_addend(0, 0);
-  combat.set_player_level_addend(1, 10);
-  const DamageBreakdown against = combat.preview(1, 2);
-  CHECK(against.level_difference == -10);
-  CHECK(against.final_damage == even * (512 - 358) / 256);
+  CHECK(eased.damage() == 10 * 358 / 256);
+  // On the defender's side it comes off the difference (C22).
+  CHECK(combat.preview(world, 2, 1, 0).level_difference == -10);
+
+  // Frozen: a new difficulty and a research are not seen until a clear.
+  REQUIRE(match.set_difficulty(2));
+  env.env().write_string(EnvScope::for_player(1), "Attack focus", "researched");
+  env.env().write_int(EnvScope::for_player(2), "GamblersLuckChance", 40);
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 10);
+  CHECK(!combat.damage_formula_params(world).attack_focus[0]);
+  combat.invalidate_damage_formula_params();
+  // Hard's addend is 0, which favours no one.
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 0);
+  CHECK(combat.damage_formula_params(world).favoured == kNoPlayer);
+  CHECK(combat.damage_formula_params(world).attack_focus[0]);
+  CHECK(!combat.damage_formula_params(world).attack_focus[1]);
+  CHECK(combat.damage_formula_params(world).gamblers_luck[1] == 40);
+  // The exact string: anything else is not researched.
+  env.env().write_string(EnvScope::for_player(1), "Learning", "researched ");
+  combat.invalidate_damage_formula_params();
+  CHECK(!combat.damage_formula_params(world).learning[0]);
+
+  // A load clears it (0x00524460): the next blow reads the loaded game.
+  REQUIRE(match.set_difficulty(0));
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 0);
+  std::vector<std::byte> bytes;
+  combat.serialize(bytes);
+  REQUIRE(combat.deserialize(bytes).ok());
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 10);
+
+  // A networked game favours no one.
+  match.configure(MatchRules{}, 0, true);
+  REQUIRE(match.set_difficulty(0));
+  combat.invalidate_damage_formula_params();
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 0);
+}
+
+/// `SetDifficulty` (0x004c65d0) clears the cache through 0x006e71c0, and
+/// `InvalidateDamageFormulaParams` (0x004c6b10) does; a refused difficulty
+/// clears nothing.
+TEST(set_difficulty_and_invalidate_clear_the_match_cache) {
+  World world;
+  MatchSystem match;
+  REQUIRE(world.add_system(&match));
+  CombatSystem combat = make_system();
+  REQUIRE(world.add_system(&combat));
+  match.configure(MatchRules{}, 0, false);
+  REQUIRE(match.set_difficulty(2));
+  combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));
+  combat.add(unit(2, kSwordsman, 1, 200, Point{40, 0}));
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 0);
+  REQUIRE(match.set_difficulty(1));
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 0);  // frozen
+
+  script::HostRegistry registry;
+  (void)register_all_hosts(registry);
+  HostContext context;
+  context.world = &world;
+  const auto call = [&](std::string_view name, std::vector<script::Value> args) {
+    const std::uint32_t index = registry.find(script::CallKind::free_function, name,
+                                              static_cast<std::uint16_t>(args.size()));
+    REQUIRE(index != script::kUnresolvedHost && registry.entry(index).fn != nullptr);
+    script::CallContext ctx;
+    ctx.arguments = args;
+    ctx.user = &context;
+    ctx.name = name;
+    ctx.kind = script::CallKind::free_function;
+    (void)registry.entry(index).fn(ctx);
+  };
+  call("SetDifficulty", {script::Value::integer(7)});
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 0);
+  call("SetDifficulty", {script::Value::integer(0)});
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 10);
+  REQUIRE(match.set_difficulty(1));
+  call("InvalidateDamageFormulaParams", {});
+  CHECK(combat.preview(world, 1, 2, 0).level_difference == 5);
+  // `SetGlobalBloodlust` sets the byte the armour step reads.
+  call("SetGlobalBloodlust", {script::Value::boolean(true)});
+  CHECK(combat.bloodlust());
+  CHECK(!combat.preview(world, 1, 2, 0).armour_met);
+  call("SetGlobalBloodlust", {script::Value::integer(0x100)});
+  CHECK(!combat.bloodlust());
 }
 
 // ---------------------------------------------------------------------------
@@ -1867,7 +2698,10 @@ TEST(a_ranged_attack_puts_a_projectile_in_the_air) {
   CHECK(combat.projectiles().empty());  // and the shot left the world
 }
 
-TEST(splash_damage_reaches_neighbours) {
+/// **A targeted shot strikes its target alone.** The landing 0x004d9bb0 calls
+/// the dealer once, on the target, and has no splash: `splash_radius` is a
+/// ground shot's (`land_on_ground`).
+TEST(a_targeted_shot_has_no_splash) {
   World world;
   CombatSystem combat = make_system();
   CombatProfile catapult = melee(120, 0, 1000);
@@ -1892,7 +2726,7 @@ TEST(splash_damage_reaches_neighbours) {
     combat.advance(world, world.turn());
   }
   CHECK(combat.find(2) == nullptr || combat.health(2) < 200);
-  CHECK(combat.find(3) == nullptr || combat.health(3) < 200);
+  CHECK(combat.health(3) == 200);
   CHECK(combat.health(4) == 200);
 }
 
@@ -3239,20 +4073,19 @@ TEST(a_map_enrolled_combatant_starts_at_level_one_with_no_experience) {
   // and the damage they deal carries no level term at all.
   const ObjectId roman = combat.combatants()[0].id;
   const ObjectId gaul = combat.combatants()[1].id;
-  const DamageBreakdown even = combat.preview(roman, gaul);
+  const BlowOutcome even = combat.preview(world, roman, gaul, 0);
   CHECK(even.level_difference == 0);
-  CHECK(even.after_armour == even.after_level);
 
-  // And the addend moves it by exactly what it says, which is only true if the
+  // And a level moves it by exactly what it says, which is only true if the
   // baseline is 1. At 0 the difference would be the same but every absolute
   // level a hero or a script sets would be one out.
-  combat.set_player_level_addend(0, 3);
-  const DamageBreakdown tilted = combat.preview(roman, gaul);
+  combat.find(roman)->level = 4;
+  const BlowOutcome tilted = combat.preview(world, roman, gaul, 0);
   CHECK(tilted.level_difference == 3);
 
   // And a blow that does not kill pays nothing (0x00511550 pays a kill), so
   // a total seeded at zero is still zero after the first strikes.
-  combat.set_player_level_addend(0, 0);
+  combat.find(roman)->level = 1;
   REQUIRE(combat.can_attack(roman, gaul));
   // Counted rather than assumed: a turn is long enough for more than one
   // strike, so the assertion is `strikes * gain` and not `gain`.
@@ -4345,8 +5178,8 @@ TEST(add_bonus_takes_armour_off_the_hero) {
   CHECK(combat.armour_of(*combat.find(1), DamageType::pierce) == 12);
   // And a blow lands harder for it: 16 attack against 2 armour rather than 12.
   combat.add(unit(2, kHastatus, 1, 200, Point{20, 0}));
-  const DamageBreakdown out = combat.preview(2, 1);
-  CHECK(out.after_armour == 14);
+  const BlowOutcome out = combat.preview(world, 2, 1, 0);
+  CHECK(out.damage() == 14);
 }
 
 /// **Argument 5 is never read, and argument 4 lands in both slots.** This is
@@ -4511,36 +5344,35 @@ TEST(add_bonus_rescales_the_health_with_the_maximum) {
 /// damage step loads; the defender's is `[obj+0xe4]`, the one armour a blow
 /// reads. Neither is the class property any more once a script has moved it.
 TEST(add_bonus_reaches_the_damage_formula_from_both_sides) {
+  World world;
   CombatSystem combat = make_system();
   combat.add(unit(1, kHastatus, 0, 200, Point{0, 0}));    // 16 attack
   combat.add(unit(2, kSwordsman, 1, 200, Point{20, 0}));  // 6 armour
-  CHECK(combat.preview(1, 2).after_armour == 10);
+  CHECK(combat.preview(world, 1, 2, 0).damage() == 10);
 
   StatBonus sharper;
   sharper.attack = 9;
   CHECK(combat.add_bonus(1, sharper));
-  CHECK(combat.preview(1, 2).after_armour == 19);
+  CHECK(combat.preview(world, 1, 2, 0).damage() == 19);
 
   StatBonus tougher;
   tougher.armour_slash = 5;
   CHECK(combat.add_bonus(2, tougher));
-  CHECK(combat.preview(1, 2).after_armour == 14);
+  CHECK(combat.preview(world, 1, 2, 0).damage() == 14);
   // Still the subtraction rather than `MinPercentOfAttackersDamage`'s floor,
   // which would make the two sides indistinguishable.
-  CHECK(!combat.preview(1, 2).floored_by_min_percent);
 
   // `melee` gives both channels the same armour, so the pierce addend is what
   // separates the two: no blow meets it (0x0050ff30 reads `[obj+0xe8]` nowhere).
   StatBonus pierce_only;
   pierce_only.armour_pierce = 1000;
   CHECK(combat.add_bonus(2, pierce_only));
-  CHECK(combat.preview(1, 2).after_armour == 14);
+  CHECK(combat.preview(world, 1, 2, 0).damage() == 14);
 }
 
-/// A shot in the air carries the attack it was launched with -- that is
-/// `Projectile::attack`, settled at launch -- but the armour it meets is read
-/// at impact, so a bonus that lands mid-flight still counts. The armour is the
-/// slash armour, an arrow's as a sword's.
+/// The armour a shot meets is read at impact, so a bonus that lands
+/// mid-flight still counts. The armour is the slash armour, an arrow's as a
+/// sword's.
 TEST(add_bonus_reaches_a_projectile_at_impact) {
   World world;
   CombatSystem combat = make_system();
@@ -4586,6 +5418,50 @@ TEST(add_bonus_reaches_a_projectile_at_impact) {
     plain.advance(plain_world, plain_world.turn());
   }
   CHECK(plain_before - plain.health(2) == with_bonus + 10);
+}
+
+/// **The landing reads the shooter as it is** (0x004d9bb0): the dealer is
+/// called with the live shooter, so an attack raised in flight counts, and a
+/// shooter dead by then strikes nothing.
+TEST(a_shot_lands_with_the_shooter_as_it_is_and_not_for_a_dead_one) {
+  World world;
+  CombatSystem combat = make_system();
+  CombatProfile archer = melee(60, 0, 150);
+  archer.damage_type = DamageType::pierce;
+  archer.range = 500;
+  archer.sight = 600;
+  archer.projectile = 99;
+  archer.attack_interval = 2000;
+  combat.set_profile(kArcher, archer);
+  combat.add(unit(1, kArcher, 0, 150, Point{0, 0}));
+  combat.add(unit(2, kSwordsman, 1, 2000, Point{400, 0}));  // 6 armour
+  combat.order_attack(1, 2);
+  world.advance(100);
+  combat.advance(world, world.turn());
+  REQUIRE(combat.projectiles().size() == 1);
+  StatBonus sharper;
+  sharper.attack = 20;
+  CHECK(combat.add_bonus(1, sharper));
+  std::int32_t before = combat.health(2);
+  for (int turn = 0; turn < 10 && combat.health(2) == before; ++turn) {
+    world.advance(100);
+    combat.advance(world, world.turn());
+  }
+  CHECK(before - combat.health(2) == 80 - 6);
+  // The next shot in the air, and its shooter dead before it lands.
+  for (int turn = 0; turn < 40 && combat.projectiles().empty(); ++turn) {
+    world.advance(100);
+    combat.advance(world, world.turn());
+  }
+  REQUIRE(combat.projectiles().size() == 1);
+  CHECK(combat.kill(world, 1));
+  before = combat.health(2);
+  for (int turn = 0; turn < 20; ++turn) {
+    world.advance(100);
+    combat.advance(world, world.turn());
+  }
+  CHECK(combat.projectiles().empty());
+  CHECK(combat.health(2) == before);
 }
 
 /// `HealStamina` fills to the raised maximum, and the maximum is the *stamina*

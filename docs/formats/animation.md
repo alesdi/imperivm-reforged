@@ -311,9 +311,10 @@ Departures, each one for what the engine does not yet do:
 * **The attacked target of one class** answers `vtbl+0xa4` through
   0x00511cd0 rather than 0x005dc1f0; here every target stamps the hero's
   and the squad's clocks.
-* **The blow itself** (0x00511550, 0x0050ff30) is ported only as far as
-  `blow.md`'s "This engine" says: its arithmetic and two branches, without
-  the gates before it, the specials inside it or their stamina.
+* **The blow's feedback objects.** The blow itself (0x00511550, 0x0050ff30)
+  is ported whole (`blow.md`, "This engine"), but the `CVXFeedback` objects
+  its dealer spawns for each special that fires are not, so the handles they
+  take in the original are not taken here.
 
 ## The walk
 

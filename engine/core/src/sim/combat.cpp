@@ -328,6 +328,56 @@ CombatConstants CombatConstants::from_const_ini(std::span<const std::byte> bytes
       out.training_exp_chance = to_int(value, out.training_exp_chance);
     } else if (equal_ignoring_case(key, "SquadLookIvl")) {
       out.acquire_interval = to_int(value, out.acquire_interval);
+    } else if (equal_ignoring_case(key, "AvoidChancePercentPerConcealmentLevel")) {
+      out.avoid_chance_percent_per_concealment_level = to_int(value, out.avoid_chance_percent_per_concealment_level);
+    } else if (equal_ignoring_case(key, "PercentPerEuphoriaLevel")) {
+      out.percent_per_euphoria_level = to_int(value, out.percent_per_euphoria_level);
+    } else if (equal_ignoring_case(key, "EuphoriaStamina")) {
+      out.euphoria_stamina = to_int(value, out.euphoria_stamina);
+    } else if (equal_ignoring_case(key, "ChargeTime")) {
+      out.charge_time = to_int(value, out.charge_time);
+    } else if (equal_ignoring_case(key, "OffensiveTacticsCost")) {
+      out.offensive_tactics_cost = to_int(value, out.offensive_tactics_cost);
+    } else if (equal_ignoring_case(key, "DefensiveTacticsCost")) {
+      out.defensive_tactics_cost = to_int(value, out.defensive_tactics_cost);
+    } else if (equal_ignoring_case(key, "TrippleStrikeCost")) {
+      out.triple_strike_cost = to_int(value, out.triple_strike_cost);
+    } else if (equal_ignoring_case(key, "DeflectionCost")) {
+      out.deflection_cost = to_int(value, out.deflection_cost);
+    } else if (equal_ignoring_case(key, "PenetrationCost")) {
+      out.penetration_cost = to_int(value, out.penetration_cost);
+    } else if (equal_ignoring_case(key, "AttackSkillCost")) {
+      out.attack_skill_cost = to_int(value, out.attack_skill_cost);
+    } else if (equal_ignoring_case(key, "DefenseSkillCost")) {
+      out.defense_skill_cost = to_int(value, out.defense_skill_cost);
+    } else if (equal_ignoring_case(key, "DeathBlowCost")) {
+      out.death_blow_cost = to_int(value, out.death_blow_cost);
+    } else if (equal_ignoring_case(key, "PowerStrikeCost")) {
+      out.power_strike_cost = to_int(value, out.power_strike_cost);
+    } else if (equal_ignoring_case(key, "ExpertiseCost")) {
+      out.expertise_cost = to_int(value, out.expertise_cost);
+    } else if (equal_ignoring_case(key, "RageCost")) {
+      out.rage_cost = to_int(value, out.rage_cost);
+    } else if (equal_ignoring_case(key, "BleedingAttackCost")) {
+      out.bleeding_attack_cost = to_int(value, out.bleeding_attack_cost);
+    } else if (equal_ignoring_case(key, "LifeStealCost")) {
+      out.life_steal_cost = to_int(value, out.life_steal_cost);
+    } else if (equal_ignoring_case(key, "DrainCost")) {
+      out.drain_cost = to_int(value, out.drain_cost);
+    } else if (equal_ignoring_case(key, "CripplingAttackCost")) {
+      out.crippling_attack_cost = to_int(value, out.crippling_attack_cost);
+    } else if (equal_ignoring_case(key, "SpikeArmorCost")) {
+      out.spike_armor_cost = to_int(value, out.spike_armor_cost);
+    } else if (equal_ignoring_case(key, "ChargeCost")) {
+      out.charge_cost = to_int(value, out.charge_cost);
+    } else if (equal_ignoring_case(key, "TriumphCost")) {
+      out.triumph_cost = to_int(value, out.triumph_cost);
+    } else if (equal_ignoring_case(key, "LearningCost")) {
+      out.learning_cost = to_int(value, out.learning_cost);
+    } else if (equal_ignoring_case(key, "DiseaseCost")) {
+      out.disease_cost = to_int(value, out.disease_cost);
+    } else if (equal_ignoring_case(key, "ArcherAgainstHeroChance")) {
+      out.archer_against_hero_chance = to_int(value, out.archer_against_hero_chance);
     }
 
     if (end == text.size()) break;
@@ -478,50 +528,389 @@ std::int32_t CounterTable::damage_percent(ClassIndex attacker, ClassIndex defend
 }
 
 // ---------------------------------------------------------------------------
-// resolve_damage
+// the calculator
 // ---------------------------------------------------------------------------
 
-DamageBreakdown resolve_damage(const DamageInputs& in,
-                               const CombatConstants& constants) noexcept {
-  DamageBreakdown out;
-  out.attack = in.attack;
-  std::int32_t value = in.attack;
+namespace {
 
-  // Armour, and its floor, unless Assault or bloodlust lifts both off a
-  // defender that is not a hero (0x00510d26..0x00510e22).
-  if (in.defender_is_hero || !in.ignores_armour) {
-    out.armour = in.armour;
-    value -= in.armour;
-    const std::int32_t floor = scale_percent(in.attack, constants.min_percent_of_attackers_damage);
-    if (value < floor) {
-      value = floor;
-      out.floored_by_min_percent = true;
+/// "Pays `cost`": the running stamina is at least the cost, compared signed,
+/// and the cost comes off it -- the test and the charge in one step.
+[[nodiscard]] bool pays(std::int32_t& stamina, std::int32_t cost) noexcept {
+  if (stamina < cost) return false;
+  stamina -= cost;
+  return true;
+}
+
+}  // namespace
+
+BlowOutcome calculate_blow(const BlowSide& a, const BlowSide& d, const BlowRules& rules,
+                           const CombatConstants& k, Rng& rng) noexcept {
+  using namespace special;
+  BlowOutcome out;
+  const LevelDifferenceTable& table = k.level_difference;
+
+  // C3, C4: a side under its hero's Ceasefire. C5: the Concealment draw, taken
+  // on every blow at a unit whatever the chance -- a missing hero's -1 points
+  // make it negative -- and the blow dodged when the chance beats it.
+  if (a.unit && a.ceasefire) {
+    out.path = BlowPath::ceasefire;
+    return out;
+  }
+  if (d.unit) {
+    if (d.ceasefire) {
+      out.path = BlowPath::ceasefire;
+      return out;
+    }
+    const std::int32_t chance = d.concealment * k.avoid_chance_percent_per_concealment_level;
+    if (chance > rng.between(0, 99)) {
+      out.path = BlowPath::dodged;
+      return out;
     }
   }
-  out.after_armour = value;
-
-  // The level factor (0x00510e24..0x00510e6c).
-  out.level_difference = in.attacker_level - in.defender_level - in.defender_addend;
-  value = constants.level_difference.scale(value, out.level_difference);
-  out.after_level = value;
-
-  // `MinDamage` (0x00510ef6).
-  if (value < constants.min_damage) {
-    value = constants.min_damage;
-    out.floored_by_min_damage = true;
+  // C6: a cursed attacker's blow is the curse's end (0x005d4800). C7: one in
+  // parry mode deals nothing and regains a point below its maximum.
+  if (a.unit) {
+    if (a.cursed) {
+      out.cure_attacker = true;
+      out.path = BlowPath::cursed;
+      return out;
+    }
+    if (a.parrying) {
+      out.attacker_stamina = a.stamina < a.max_stamina ? 1 : 0;
+      out.path = BlowPath::parrying;
+      return out;
+    }
   }
 
-  // The sheltered defender, halved toward zero after the floor (0x005110c6),
-  // then the defender's health (0x005110db).
-  if (in.halved) {
-    value /= 2;
-    out.halved = true;
+  // C8: `L`, 10 for an attacker that is not a unit.
+  std::int32_t level = 10;
+  if (a.unit) {
+    level = a.level;
+    if (a.favoured) level += rules.addend;
   }
-  if (value > in.defender_health) {
-    value = in.defender_health;
-    out.capped = true;
+
+  // C9: a defender that is not a unit. The attack, scaled at `L - 10` and
+  // halved rounding up for a unit that shoots, lowered to the health.
+  if (!d.unit) {
+    std::int32_t v = a.attack;
+    if (a.unit) {
+      v = table.scale(v, level - 10);
+      if (a.shoots) v = (v + 1) / 2;
+    }
+    if (d.health <= v) v = d.health;
+    out.defender_health = -v;
+    out.path = BlowPath::not_a_unit;
+    return out;
   }
-  out.final_damage = value;
+  // C10: a `RamUnit`. A shot lands on a draw of `Range(0, 220)` no greater
+  // than `L + 20`, for `L / 5 + MinDamage`; a blow is the attack at `L - 10`.
+  if (d.ram) {
+    std::int32_t v = a.attack;
+    if (a.shoots) {
+      if (level + 20 < rng.between(0, 220)) {
+        out.path = BlowPath::ram;
+        return out;
+      }
+      v = level / 5 + k.min_damage;
+    } else if (a.unit) {
+      v = table.scale(v, level - 10);
+    }
+    if (d.health <= v) v = d.health;
+    out.defender_health = -v;
+    out.path = BlowPath::ram;
+    return out;
+  }
+
+  // C11: the running stamina of both sides, and their specials.
+  std::int32_t ds = d.stamina;
+  std::int32_t as = a.stamina;
+  const std::uint32_t mine = a.unit ? a.specials : 0;
+  const std::uint32_t theirs = d.specials;
+  const bool has_penetration = (mine & kPenetration) != 0;
+
+  // C12: a parrying defender with stamina parries for one point.
+  if (ds != 0 && d.parrying) {
+    out.defender_stamina = -1;
+    out.path = BlowPath::parried;
+    return out;
+  }
+
+  // C13: Deflection, which Penetration beats without being paid for.
+  if ((theirs & kDeflection) != 0 && ds >= k.deflection_cost &&
+      !(has_penetration && as >= k.penetration_cost)) {
+    ds -= k.deflection_cost;
+    out.on_defender.push(BlowEffect::deflection);
+    if (!d.hero && ds != 0) {
+      if ((mine & kCripple) != 0 && pays(as, k.crippling_attack_cost)) {
+        ds = 0;
+        out.on_defender.push(BlowEffect::stamina_loss);
+      } else if ((mine & kDrain) != 0 && pays(as, k.drain_cost)) {
+        ds = ds - 2 < 0 ? 0 : ds - 2;
+        out.on_defender.push(BlowEffect::stamina_loss);
+      }
+      out.attacker_stamina = as - a.stamina;
+    }
+    out.defender_stamina = ds - d.stamina;
+    out.path = BlowPath::deflected;
+    return out;
+  }
+
+  // C14: a shot misses a wounded unit on a draw over its health, and a hero
+  // on `ArcherAgainstHeroChance` besides. C15: a miss still costs the
+  // attacker each special it would have paid for, Cripple and Drain both.
+  if (a.unit && a.shoots) {
+    bool miss = d.health < rng.between(-(d.max_health / 2), d.max_health);
+    if (!miss && d.hero) miss = k.archer_against_hero_chance > rng.between(0, 99);
+    if (miss) {
+      if ((mine & kAttackSkill) != 0) (void)pays(as, k.attack_skill_cost);
+      if ((mine & kOffensiveTactics) != 0) (void)pays(as, k.offensive_tactics_cost);
+      if (has_penetration && as >= k.penetration_cost && !d.hero && !a.assault &&
+          !rules.bloodlust) {
+        as -= k.penetration_cost;
+      }
+      if ((mine & kTripleStrike) != 0) (void)pays(as, k.triple_strike_cost);
+      if ((mine & kBleedingAttack) != 0 && as >= k.bleeding_attack_cost && !d.hero) {
+        as -= k.bleeding_attack_cost;
+      }
+      if ((mine & kDiseaseAttack) != 0 && as >= k.disease_cost && !d.diseased) {
+        as -= k.disease_cost;
+      }
+      if ((mine & kCripple) != 0 && as >= k.crippling_attack_cost && !d.hero && ds != 0) {
+        as -= k.crippling_attack_cost;
+      }
+      if ((mine & kDrain) != 0 && as >= k.drain_cost && !d.hero && ds != 0) {
+        as -= k.drain_cost;
+      }
+      out.attacker_stamina = as - a.stamina;
+      out.path = BlowPath::missed;
+      return out;
+    }
+  }
+
+  // C16: the hit.
+  std::int32_t ah = a.health;
+  std::int32_t dh = d.health;
+  std::int32_t dmg = a.attack;
+
+  // C17: a blessing doubles the blow and is spent by it.
+  if (a.unit && a.blessed) {
+    dmg *= 2;
+    out.cure_attacker = true;
+  }
+  // C18: Attack skill adds twice the stamina it had before paying.
+  if ((mine & kAttackSkill) != 0 && as >= k.attack_skill_cost) {
+    dmg += 2 * as;
+    as -= k.attack_skill_cost;
+    out.on_defender.push(BlowEffect::attack_skill);
+  }
+  // C19: Offensive tactics adds the attacker's stored level.
+  if ((mine & kOffensiveTactics) != 0 && pays(as, k.offensive_tactics_cost)) {
+    dmg += a.level;
+    out.on_defender.push(BlowEffect::offensive_tactics);
+  }
+
+  // C20: armour is met by a hero always; by anyone else unless the
+  // attacker's hero's Assault or the bloodlust lifts it, or Penetration pays
+  // to. Lifted, it takes its floor with it.
+  bool armour = true;
+  if (!d.hero) {
+    if ((a.unit && a.assault) || rules.bloodlust) {
+      armour = false;
+    } else if (has_penetration && pays(as, k.penetration_cost)) {
+      out.on_defender.push(BlowEffect::penetration);
+      armour = false;
+    }
+  }
+  out.armour_met = armour;
+  // C21: the slash armour, Defense skill (twice the stamina before paying)
+  // and Defensive tactics (the defender's stored level), then the floor of
+  // the attacker's raw attack.
+  if (armour) {
+    dmg -= d.armour;
+    if ((theirs & kDefenseSkill) != 0 && ds >= k.defense_skill_cost) {
+      dmg -= 2 * ds;
+      ds -= k.defense_skill_cost;
+      out.on_defender.push(BlowEffect::defense_skill);
+    }
+    if ((theirs & kDefensiveTactics) != 0 && pays(ds, k.defensive_tactics_cost)) {
+      dmg -= d.level;
+      out.on_defender.push(BlowEffect::defensive_tactics);
+    }
+    const std::int32_t floor = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(a.attack) * k.min_percent_of_attackers_damage / 100);
+    if (dmg < floor) dmg = floor;
+  }
+
+  // C22, C23: the level factor at `L - level(D)`, a deficit forgiven by the
+  // attacker's owner's Attack focus, and the favoured defender's addend taken
+  // off after that.
+  std::int32_t difference = level - d.level;
+  if (difference < 0 && a.unit && a.attack_focus) difference = 0;
+  if (d.favoured) difference -= rules.addend;
+  out.level_difference = difference;
+  dmg = table.scale(dmg, difference);
+
+  // C24: Charge, after `ChargeTime` since the last attack, compared unsigned.
+  if ((mine & kCharge) != 0 && as >= k.charge_cost &&
+      static_cast<std::uint32_t>(static_cast<std::int32_t>(rules.now) -
+                                 static_cast<std::int32_t>(a.last_attack_time)) >=
+          static_cast<std::uint32_t>(k.charge_time)) {
+    dmg *= k.charge_damage_factor;
+    as -= k.charge_cost;
+    out.on_defender.push(BlowEffect::charge);
+  }
+  // C25: Triple strike, listed on the attacker.
+  if ((mine & kTripleStrike) != 0 && pays(as, k.triple_strike_cost)) {
+    out.on_attacker.push(BlowEffect::triple_strike);
+    dmg *= 3;
+  }
+  // C26.
+  if (dmg < k.min_damage) dmg = k.min_damage;
+
+  // C27..C34. Against a hero, none of Rage, Bleeding and the killing blows.
+  bool killing = false;
+  if (!d.hero) {
+    // C28: Rage turns the health above half into damage.
+    const std::int32_t half = a.max_health / 2;
+    if ((mine & kRage) != 0 && as >= k.rage_cost && half < ah) {
+      dmg += ah - half;
+      as -= k.rage_cost;
+      out.on_defender.push(BlowEffect::rage);
+      ah = half;
+    }
+    // C29: Bleeding attack, a tenth of the defender's maximum.
+    if ((mine & kBleedingAttack) != 0 && pays(as, k.bleeding_attack_cost)) {
+      dmg += d.max_health / 10;
+      out.on_defender.push(BlowEffect::bleeding_attack);
+    }
+    // C30..C33: the first killing blow that fires takes all that is left.
+    if ((mine & kDeathBlow) != 0 && as >= k.death_blow_cost && dh - dmg <= d.max_health / 2) {
+      as -= k.death_blow_cost;
+      killing = true;
+    } else if ((mine & kPowerStrike) != 0 && as >= k.power_strike_cost &&
+               a.max_health > d.max_health * 2 && dh < d.max_health) {
+      as -= k.power_strike_cost;
+      killing = true;
+    } else if ((mine & kExpertise) != 0 && as >= k.expertise_cost && dmg > a.class_damage) {
+      as -= k.expertise_cost;
+      killing = true;
+    } else if (a.unit && level > d.level && a.gamblers_test != 0 &&
+               rng.between(0, 99) < a.gamblers_test) {
+      killing = true;  // Gambler's Test, free
+    }
+    if (killing) {
+      out.on_defender.push(BlowEffect::death);
+      dmg = dh;
+    }
+  }
+  // C34: the shelter halves what is left, after `MinDamage`; then the cap.
+  if (!killing) {
+    if (d.sheltered) dmg /= 2;
+    if (dh < dmg) dmg = dh;
+  }
+
+  // C35: Gambler's Luck turns a killing blow into a full heal.
+  if (dh - dmg <= 0 && d.gamblers_luck != 0 && rng.between(0, 99) < d.gamblers_luck) {
+    dmg = dh - d.max_health;
+    out.on_defender.push(BlowEffect::heal);
+  }
+  // C36.
+  dh -= dmg;
+
+  // C37: Triumph on a kill fills the attacker's health; else Life steal adds
+  // the damage dealt.
+  if ((mine & kTriumph) != 0 && dh == 0 && ah < a.max_health && as >= k.triumph_cost) {
+    ah = a.max_health;
+    as -= k.triumph_cost;
+    out.on_attacker.push(BlowEffect::heal);
+  } else if ((mine & kLifeSteal) != 0 && ah < a.max_health && as >= k.life_steal_cost) {
+    ah += dmg;
+    as -= k.life_steal_cost;
+    out.on_attacker.push(BlowEffect::heal);
+  }
+  // C38: Spike armor returns the blow to a striker that does not shoot.
+  if ((theirs & kSpikeArmor) != 0 && ds >= k.spike_armor_cost && a.unit && !a.shoots) {
+    ah -= dmg;
+    ds -= k.spike_armor_cost;
+    out.on_attacker.push(BlowEffect::spiked_armor);
+  }
+  // C39: Revenge, a hundred off a melee killer (no cost read). C40: a kill
+  // refills the attacker's stamina by Ferocity, its owner's Ferocity
+  // research, or Euphoria's draw. Without an attacker unit Revenge skips both.
+  bool rewards = true;
+  if ((theirs & kRevenge) != 0 && dh == 0) {
+    if (!a.unit) {
+      rewards = false;
+    } else if (!a.shoots) {
+      ah -= 100;
+      out.on_attacker.push(BlowEffect::revenge);
+    }
+  }
+  if (rewards && a.unit && dh == 0 && as < a.max_stamina) {
+    bool boost = false;
+    if ((mine & kFerocity) != 0) {
+      as = a.max_stamina;
+      boost = true;
+    } else if (a.ferocity) {
+      as += k.euphoria_stamina;
+      boost = true;
+    } else if (a.euphoria >= 1 &&
+               k.percent_per_euphoria_level * a.euphoria > rng.between(0, 99)) {
+      as += k.euphoria_stamina;
+      boost = true;
+    }
+    if (boost) out.on_attacker.push(BlowEffect::stamina_boost);
+  }
+
+  // C41: Disease attack on a survivor not already diseased, written straight
+  // onto the defender (the calculator's one write to the world; its visual
+  // is a feedback object, not reproduced).
+  if ((mine & kDiseaseAttack) != 0 && as >= k.disease_cost && dh != 0 && !d.diseased) {
+    as -= k.disease_cost;
+    out.disease_defender = true;
+  }
+  // C42: Combat skill, a free point below the maximum. Its list entry is
+  // guarded by a test of a slot this call has not written (the dealer's
+  // stack); taken here as the append it is in practice.
+  if ((mine & kCombatSkill) != 0 && as < a.max_stamina) {
+    as += 1;
+    out.on_attacker.push(BlowEffect::stamina_boost);
+  }
+  // C43: Cripple empties a non-hero's stamina; else Drain takes two.
+  if (!d.hero && ds != 0) {
+    if ((mine & kCripple) != 0 && pays(as, k.crippling_attack_cost)) {
+      ds = 0;
+      out.on_defender.push(BlowEffect::stamina_loss);
+    } else if ((mine & kDrain) != 0 && pays(as, k.drain_cost)) {
+      ds -= 2;
+      out.on_defender.push(BlowEffect::stamina_loss);
+    }
+  }
+  // C44: Learning, a point of experience for striking someone who has more,
+  // by the special or the owner's research. No kill needed.
+  if (a.unit && !d.sentry && a.experience < d.experience && as >= k.learning_cost &&
+      ((mine & kLearning) != 0 || a.learning)) {
+    out.learning = 1;
+    as -= k.learning_cost;
+    out.on_attacker.push(BlowEffect::experience);
+  }
+  // C45: Determination, a free point below the defender's maximum.
+  if ((theirs & kDetermination) != 0 && ds < d.max_stamina) {
+    ds += 1;
+    out.on_defender.push(BlowEffect::stamina_boost);
+  }
+
+  // C46: the clamps; the defender's health is not clamped.
+  ah = ah < 0 ? 0 : (a.max_health < ah ? a.max_health : ah);
+  ds = ds < 0 ? 0 : (d.max_stamina < ds ? d.max_stamina : ds);
+  as = as < 0 ? 0 : (a.max_stamina < as ? a.max_stamina : as);
+
+  // C47: the deltas.
+  out.attacker_health = ah - a.health;
+  out.attacker_stamina = as - a.stamina;
+  out.defender_health = dh - d.health;
+  out.defender_stamina = ds - d.stamina;
+  out.path = BlowPath::struck;
   return out;
 }
 
@@ -586,6 +975,7 @@ CombatProfile CombatProfile::from_class(const ClassGraph& graph, ClassIndex inde
   out.attack_interval = interval;
 
   out.shoots = !projectile.empty() && projectile != "**Invalid**";
+  out.specials = static_cast<std::uint32_t>(unit_specials_word(graph.property(index, "unit_specials")));
   // One walk up the ancestry for every name `Unit::CanAttack` tests, so the
   // predicate never parses a class name per candidate.
   for (const ClassIndex step : graph.ancestry(index)) {
@@ -610,23 +1000,40 @@ CombatProfile CombatProfile::from_class(const ClassGraph& graph, ClassIndex inde
 // CombatSystem: configuration and population
 // ---------------------------------------------------------------------------
 
-void CombatSystem::set_player_level_addend(PlayerId player, std::int32_t addend) noexcept {
-  const auto it = std::lower_bound(
-      level_addends_.begin(), level_addends_.end(), player,
-      [](const std::pair<PlayerId, std::int32_t>& e, PlayerId p) { return e.first < p; });
-  if (it != level_addends_.end() && it->first == player) {
-    it->second = addend;
-    return;
+const CombatSystem::DamageFormulaParams& CombatSystem::damage_formula_params(World& world) {
+  if (params_.valid) return params_;
+  // 0x00510351..0x005106b0, read once and frozen until the next clear.
+  params_ = DamageFormulaParams{};
+  params_.valid = true;
+  // The favoured player: none (-10) unless the game is the kind the word
+  // `[game+0xa0] == 1` marks, then the local player, whose addend is read by
+  // the difficulty; a difficulty outside 0..2 leaves the addend as it was,
+  // and an addend of 0 favours no one (-11). The word is read here as "not a
+  // networked game", and the local player as the match's human: inferred.
+  if (const MatchSystem* match = match_system_of(world); match != nullptr && !match->multiplayer()) {
+    params_.favoured = match->human();
+    switch (match->difficulty()) {
+      case 0: favoured_addend_ = constants_.easy_level_addend; break;
+      case 1: favoured_addend_ = constants_.normal_level_addend; break;
+      case 2: favoured_addend_ = constants_.hard_level_addend; break;
+      default: break;
+    }
+    if (favoured_addend_ == 0) params_.favoured = kNoPlayer;
   }
-  level_addends_.insert(it, {player, addend});
-}
-
-std::int32_t CombatSystem::player_level_addend(PlayerId player) const noexcept {
-  const auto it = std::lower_bound(
-      level_addends_.begin(), level_addends_.end(), player,
-      [](const std::pair<PlayerId, std::int32_t>& e, PlayerId p) { return e.first < p; });
-  if (it != level_addends_.end() && it->first == player) return it->second;
-  return 0;
+  // Players 1..16 of the ledger, stored by the 0-based index. The researches
+  // are an exact compare, the terminator included.
+  if (const EnvSystem* env = env_of(world); env != nullptr) {
+    const EnvStore& ledger = env->env();
+    for (std::size_t i = 0; i < kPlayerCount; ++i) {
+      const EnvScope scope = EnvScope::for_player(static_cast<std::int32_t>(i) + 1);
+      params_.gamblers_luck[i] = ledger.read_int(scope, "GamblersLuckChance");
+      params_.gamblers_test[i] = ledger.read_int(scope, "GamblersTestChance");
+      params_.attack_focus[i] = ledger.read_string(scope, "Attack focus") == "researched";
+      params_.learning[i] = ledger.read_string(scope, "Learning") == "researched";
+      params_.ferocity[i] = ledger.read_string(scope, "Ferocity") == "researched";
+    }
+  }
+  return params_;
 }
 
 void CombatSystem::set_player_experience_modifier(PlayerId player,
@@ -760,7 +1167,6 @@ bool CombatSystem::reclass(ObjectId id, ClassIndex to) {
   unit->danger = 0;
   unit->danger_time = 0;
   unit->damage_multiplier_percent = 100;
-  unit->ignores_armour = false;
   unit->bonus = StatBonus{};
   // The fresh object is built from its class and rebuilt (0x005deef0): its
   // stats start as the new class's, with no rescale, and the rebuild then
@@ -812,7 +1218,10 @@ std::size_t CombatSystem::reconcile(World& world) {
     // with no `maxhealth` at all still gets whatever the world holds.
     fresh.health = slot.state.health;
     if (spec.max_health > 0 && fresh.health > spec.max_health) fresh.health = spec.max_health;
-    fresh.stamina = spec.max_stamina;
+    // The one stamina field, `[obj+0xc4]`: what the map's loader wrote into it
+    // (0x005af4e9, a building's 20 included), else the class maximum, which
+    // the world's spawn does not seed where the original's constructor would.
+    fresh.stamina = slot.state.stamina != 0 ? slot.state.stamina : spec.max_stamina;
     // **`experience` and `level` are not read from the map, and that is a
     // refusal rather than an omission.** The map's `Level` attribute takes 32
     // distinct values spanning **0..59** over the 28 shipped `map.obj.xml`
@@ -834,6 +1243,15 @@ std::size_t CombatSystem::reconcile(World& world) {
   }
 
   units_ = std::move(merged);
+  // The enrolled stamina is the world's from here on: combat takes the
+  // world's copy at each turn and each blow (`pull_stamina`).
+  for (const ObjectId id : enrolled) {
+    if (const Combatant* unit = find(id); unit != nullptr) {
+      if (ObjectState* state = world.mutable_state(id); state != nullptr) {
+        state->stamina = unit->stamina;
+      }
+    }
+  }
   for (const ObjectId id : enrolled) recalc(id);
   return units_.size();
 }
@@ -1415,72 +1833,83 @@ bool CombatSystem::hand_target(ObjectId id, ObjectId target) {
 // CombatSystem: damage
 // ---------------------------------------------------------------------------
 
-CombatSystem::Striker CombatSystem::striker_of(const Combatant& attacker) const {
-  Striker a;
-  a.id = attacker.id;
-  a.owner = attacker.owner;
-  a.attack = attack_of(attacker);
-  const WorldObject* slot = world_ == nullptr ? nullptr : world_->find(attacker.id);
-  a.is_unit = slot == nullptr || slot->state.flags.is_unit;
-  a.level = a.is_unit ? attacker.level + player_level_addend(attacker.owner) : 10;
-  a.shoots = profile(attacker.class_index).shoots;
-  a.ignores_armour = attacker.ignores_armour;
-  return a;
-}
-
-DamageInputs CombatSystem::inputs_for(const Striker& attacker, const Combatant& defender) const {
-  DamageInputs in;
-  in.attack = attacker.attack;
-  in.armour = defender.stats.armour_slash;
-  in.attacker_level = attacker.level;
-  in.defender_level = defender.level;
-  in.defender_addend = player_level_addend(defender.owner);
-  const WorldObject* slot = world_ == nullptr ? nullptr : world_->find(defender.id);
-  in.defender_is_hero = slot != nullptr && slot->state.flags.is_hero;
-  in.ignores_armour = attacker.ignores_armour;
-  in.defender_health = defender.health;
-  return in;
-}
-
-DamageBreakdown CombatSystem::preview(ObjectId attacker, ObjectId defender) const {
-  const Combatant* a = find(attacker);
-  const Combatant* d = find(defender);
-  if (a == nullptr || d == nullptr) return DamageBreakdown{};
-  return resolve_damage(inputs_for(striker_of(*a), *d), constants_);
-}
-
-std::int32_t CombatSystem::blow_damage(World& world, const Striker& a, const Combatant& defender) {
-  const WorldObject* slot = world.find(defender.id);
-  const bool defender_unit = slot == nullptr || slot->state.flags.is_unit;
-  const LevelDifferenceTable& table = constants_.level_difference;
-  // Not a unit (0x00510855..0x005108b5): the attack, scaled at `L - 10` and
-  // halved rounding up for a unit that shoots; no armour and no floor.
-  if (!defender_unit) {
-    std::int32_t v = a.attack;
-    if (a.is_unit) {
-      v = table.scale(v, a.level - 10);
-      if (a.shoots) v = (v + 1) / 2;
-    }
-    return v < defender.health ? v : defender.health;
+BlowSide CombatSystem::blow_side(World& world, const Combatant& who,
+                                 const DamageFormulaParams& params, GameTime now) const {
+  BlowSide side;
+  // Unbound, a combatant's id names no world object, whatever the world
+  // happens to hold under the same number.
+  const WorldObject* slot = world_bound_ ? world.find(who.id) : nullptr;
+  const CombatProfile spec = profile(who.class_index);
+  // Unbound, a combatant with no world object is a unit, as everywhere else.
+  side.unit = slot == nullptr || slot->state.flags.is_unit;
+  side.hero = slot != nullptr && slot->state.flags.is_hero;
+  side.shoots = spec.shoots;
+  side.ram = spec.is(CombatProfile::kLineRamUnit);
+  side.sentry = spec.is(CombatProfile::kLineSentry);
+  side.health = who.health;
+  side.stamina = who.stamina;
+  side.max_health = max_health_of(who);
+  side.max_stamina = max_stamina_of(who);
+  side.attack = attack_of(who);
+  side.armour = who.stats.armour_slash;
+  side.level = who.level;
+  side.class_damage = spec.damage;
+  side.specials = side.unit ? spec.specials : 0;
+  side.last_attack_time = who.last_attack_time;
+  if (slot != nullptr) {
+    side.parrying = slot->state.parry_mode != 0;
+    side.cursed = slot->state.cursed_at(now);
+    side.diseased = slot->state.flags.diseased;
+    side.sheltered = slot->state.flags.half_damage;
   }
-  // A `RamUnit` (0x005108b6..0x00510955): a shot lands on a draw of
-  // `Range(0, 220)` no greater than `L + 20`, for `L / 5 + MinDamage`; a
-  // blow is the attack scaled at `L - 10`.
-  if (profile(defender.class_index).is(CombatProfile::kLineRamUnit)) {
-    std::int32_t v = a.attack;
-    if (a.shoots) {
-      const std::int32_t draw = world.rng().between(0, 220);
-      if (a.level + 20 < draw) return 0;
-      v = a.level / 5 + constants_.min_damage;
-    } else if (a.is_unit) {
-      v = table.scale(v, a.level - 10);
+  // The blessing (bit 0) has no writer in this engine: `Unit::Bless` is not
+  // bound, and no map attribute carries it. `side.blessed` stays false.
+  if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {
+    side.experience = heroes->experience(who.id);
+    // Hero of X: X itself when it is a hero, else the hero it follows.
+    const ObjectId hero = side.hero ? who.id : heroes->hero_of(who.id);
+    if (hero != kNoObject) {
+      side.ceasefire = heroes->skill_in_effect(hero, HeroSkill::ceasefire, now);
+      side.assault = heroes->skill_in_effect(hero, HeroSkill::assault, now);
     }
-    return v < defender.health ? v : defender.health;
+    side.concealment = heroes->skill(hero, HeroSkill::concealment);
+    side.euphoria = heroes->skill(hero, HeroSkill::euphoria);
   }
-  DamageInputs in = inputs_for(a, defender);
-  in.defender_is_hero = slot != nullptr && slot->state.flags.is_hero;
-  in.halved = slot != nullptr && slot->state.flags.half_damage;
-  return resolve_damage(in, constants_).final_damage;
+  if (who.owner < kPlayerCount) {
+    const std::size_t i = who.owner;
+    side.favoured = params.favoured != kNoPlayer && who.owner == params.favoured;
+    side.attack_focus = params.attack_focus[i];
+    side.learning = params.learning[i];
+    side.ferocity = params.ferocity[i];
+    side.gamblers_luck = params.gamblers_luck[i];
+    side.gamblers_test = params.gamblers_test[i];
+  }
+  return side;
+}
+
+void CombatSystem::pull_stamina(const World& world, Combatant& who) const {
+  if (!world_bound_) return;
+  if (const ObjectState* state = world.state(who.id); state != nullptr) who.stamina = state->stamina;
+}
+
+void CombatSystem::store_stamina(World& world, ObjectId id, std::int32_t value) {
+  if (Combatant* unit = mutable_find(id); unit != nullptr) unit->stamina = value;
+  if (!world_bound_) return;
+  if (ObjectState* state = world.mutable_state(id); state != nullptr) state->stamina = value;
+}
+
+BlowOutcome CombatSystem::preview(World& world, ObjectId attacker, ObjectId defender,
+                                  GameTime now) {
+  Combatant* a = mutable_find(attacker);
+  Combatant* d = mutable_find(defender);
+  if (a == nullptr || d == nullptr) return BlowOutcome{};
+  pull_stamina(world, *a);
+  pull_stamina(world, *d);
+  const DamageFormulaParams& params = damage_formula_params(world);
+  const BlowRules rules{favoured_addend_, bloodlust_, now};
+  Rng copy = world.rng();
+  return calculate_blow(blow_side(world, *a, params, now), blow_side(world, *d, params, now),
+                        rules, constants_, copy);
 }
 
 namespace {
@@ -1856,8 +2285,8 @@ void CombatSystem::pay_experience(World& world, ObjectId attacker, std::int32_t 
 /// `ObjectState::damage_taken`, which `MostDamagedBuilding` ranks by and
 /// `ClearDamageTaken` zeroes. Called from both places health is removed, the
 /// blow and `Obj::Damage`, because the original's counter sits in the
-/// building's own damage handler and sees both; unlike `record_score` it is
-/// not `hit`-only. Only the health actually removed counts, never overkill.
+/// building's own damage handler and sees both; unlike the score it is not
+/// the dealer's alone. Only the health actually removed counts, never overkill.
 /// Whether a combatant brought to no health dies of it. **A building does
 /// not**: it stands at zero, broken, and stays its owner's.
 ///
@@ -1902,68 +2331,139 @@ void note_building_damage(World& world, ObjectId victim, std::int32_t removed) {
   if (state != nullptr && state->flags.is_building) state->damage_taken += removed;
 }
 
-void CombatSystem::record_score(World& world, PlayerId by, const Combatant& defender,
-                                std::int32_t removed, bool killed) const {
-  MatchSystem* match = match_system_of(world);
-  if (match == nullptr) return;
-  match->record_damage(world, by, defender.owner, removed);
-  // The victim's *class* maximum, not the health it had left: a finishing blow
-  // on a sliver is worth the same as a kill from full. `profile` answers 0 for
-  // a class this system has no row for, and `record_kill` drops a zero.
-  if (killed) match->record_kill(world, by, defender.owner, profile(defender.class_index).max_health);
+bool CombatSystem::take_health(World& world, ObjectId id, std::int32_t delta, GameTime now) {
+  Combatant* unit = mutable_find(id);
+  if (unit == nullptr || !unit->alive || unit->action == Action::dying) return false;
+  const std::int32_t before = unit->health;
+  if (delta >= 0) {
+    // 0x004d6690's heal: the health plus the delta, capped at the maximum,
+    // stored through the health store, which at full health lifts the disease
+    // (0x005d3a80) when the value changed.
+    const std::int32_t cap = max_health_of(*unit);
+    const std::int64_t raised = static_cast<std::int64_t>(before) + delta;
+    unit->health = static_cast<std::int32_t>(cap > 0 && raised > cap ? cap : raised);
+    if (world_bound_) {
+      (void)world.set_health(id, unit->health);
+      if (unit->health != before && unit->health >= cap) {
+        if (ObjectState* state = world.mutable_state(id); state != nullptr) {
+          state->flags.diseased = false;
+        }
+      }
+    }
+    return false;
+  }
+  // 0x005a7720: the amount clamped to the health left and stored; a building
+  // stops at zero and stays (`dies_at_no_health`).
+  const std::int32_t amount = -delta;
+  const std::int32_t removed = amount < before ? amount : (before > 0 ? before : 0);
+  unit->health = before - removed;
+  note_building_damage(world, id, removed);
+  if (world_bound_) (void)world.set_health(id, unit->health);
+  const bool mortal = dies_at_no_health(world, world_bound_, id);
+  if (!mortal || unit->health > 0) return false;
+  enter_dying(world, *unit, now);
+  return true;
 }
 
-void CombatSystem::hit(World& world, Combatant& defender, const Striker& a, GameTime now) {
-  const ObjectId source = a.id;
-  const std::int32_t damage = blow_damage(world, a, defender);
-  // The dealer books damage only on a defender that is a unit, and credits
-  // it only to an attacker that is one (0x005117e7..0x005118b8); a kill's
-  // tally is booked for any defender (0x005118de).
-  const WorldObject* slot = world.find(defender.id);
-  const bool defender_unit = slot == nullptr || slot->state.flags.is_unit;
-  const PlayerId by = a.is_unit ? a.owner : kNoPlayer;
-  const std::int32_t before = defender.health;
-  defender.health -= damage;
-  // A building stops at zero and stays: see `dies_at_no_health`.
-  const bool mortal = dies_at_no_health(world, world_bound_, defender.id);
-  if (!mortal && defender.health < 0) defender.health = 0;
-  events_.push_back(
-      CombatEvent{CombatEvent::Kind::strike, now, source, defender.id, damage, defender.health});
-  // Overkill is not counted: the number the original books is the victim's
-  // health *delta*, and its new health is floored before the delta is taken.
-  const std::int32_t removed = before - (defender.health < 0 ? 0 : defender.health);
-  const bool killed = mortal && defender.health <= 0;
-  // The id, not the reference, because `enter_dying` fires a hook and a hook
-  // can run arbitrary session code before this line is reached again.
-  const ObjectId victim = defender.id;
-  note_building_damage(world, victim, removed);
-  // The victim as it stood when the blow landed, for the score: the kill's
-  // hook runs inside `enter_dying`, and `defender` is not safe to read after it.
-  const Combatant scored = defender;
-  // The victim's running total, for the kill's gain. Its death changes
-  // nothing of it in the original; here the death may let its record go.
-  const HeroSystem* heroes = killed ? hero_system_of(world) : nullptr;
-  const std::int32_t victim_experience = heroes != nullptr ? heroes->experience(victim) : 0;
-  if (killed) enter_dying(world, defender, now);
-  record_score(world, by, scored, defender_unit ? removed : 0, killed);
-  // **Experience is paid for a kill, not for a blow** (0x00511550): the gain
-  // is drawn after the score and before the killer's hook, and paid after it.
-  // `docs/formats/unit-stats.md`, "What a blow pays".
-  const std::int32_t gain = killed ? kill_gain(world, source, victim, victim_experience) : 0;
-  // The killer's own hook, after the victim's. `0x005119ee` fires it from the
-  // block that pays kill experience, on the attacker, with the victim as the
-  // second argument -- `UNIT_ON_KILL.VS`'s `Victim`, which its Gambler's Day
-  // branch reads the level off.
-  //
-  // **`hit` only.** The receiver *is* the attacker, so a script's
-  // `Obj::Damage(n)` has nobody to run it on: `apply_damage` defaults `source`
-  // to `kNoObject` and its one host call site passes nothing. There is
-  // deliberately no `source != kNoObject` test here -- `fire_class_hook`'s
-  // first guard is a receiver that does not resolve, and `kNoObject` never
-  // does, so a second one would be a branch nothing can reach and therefore a
-  // claim this engine is not making.
-  if (killed) (void)fire_class_hook(world, ClassHook::on_kill, source, victim);
-  pay_experience(world, source, gain);
+void CombatSystem::deal(World& world, ObjectId attacker_id, ObjectId defender_id, GameTime now) {
+  Combatant* attacker = mutable_find(attacker_id);
+  Combatant* defender = mutable_find(defender_id);
+  if (attacker == nullptr || defender == nullptr) return;
+  const WorldObject* me = world_bound_ ? world.find(attacker_id) : nullptr;
+  const WorldObject* them = world_bound_ ? world.find(defender_id) : nullptr;
+  // D3: between two units the attacker does not count an enemy, a training
+  // blow -- unless the attacker carries the beast's bit (0x0051163f).
+  // A combatant with no world object is a unit here as in `blow_side`.
+  const bool a_unit = me == nullptr || me->state.flags.is_unit;
+  const bool d_unit = them == nullptr || them->state.flags.is_unit;
+  if (a_unit && d_unit && !is_enemy(*attacker, *defender) &&
+      !(me != nullptr && me->state.flags.strikes_anyone)) {
+    training_blow(world, *attacker, *defender, now);
+    return;
+  }
+  now_ = now;
+
+  // D4: the calculator, on the one stamina there is.
+  pull_stamina(world, *attacker);
+  pull_stamina(world, *defender);
+  const DamageFormulaParams& params = damage_formula_params(world);
+  const BlowSide a = blow_side(world, *attacker, params, now);
+  const BlowSide d = blow_side(world, *defender, params, now);
+  const BlowRules rules{favoured_addend_, bloodlust_, now};
+  const BlowOutcome out = calculate_blow(a, d, rules, constants_, world.rng());
+  last_blow_ = out;
+  const PlayerId by = a.unit ? attacker->owner : kNoPlayer;
+  const PlayerId victim_owner = defender->owner;
+  const ClassIndex victim_class = defender->class_index;
+
+  // The calculator's own writes: a curse (or a blessing) lifted off the
+  // attacker (0x005d4800), and Disease attack's bit on the defender (C41).
+  if (out.cure_attacker) {
+    if (ObjectState* state = world.mutable_state(attacker_id); state != nullptr) {
+      state->flags.cursed = false;
+    }
+  }
+  if (out.disease_defender) {
+    if (ObjectState* state = world.mutable_state(defender_id); state != nullptr) {
+      state->flags.diseased = true;
+    }
+  }
+
+  // D5, D6: the feedback objects are not spawned (see `BlowEffect`). The
+  // score, with a defender unit, before the damage and raw: `-p4` to the
+  // attacker unit's owner and to the defender's, negative after Gambler's
+  // Luck and booked between allies alike.
+  if (d.unit) {
+    if (MatchSystem* match = match_system_of(world); match != nullptr) {
+      match->record_blow_damage(by, victim_owner, -out.defender_health);
+    }
+  }
+
+  // D7: the damage, through the defender's health virtual.
+  const HeroSystem* heroes = hero_system_of(world);
+  const std::int32_t victim_experience = heroes != nullptr ? heroes->experience(defender_id) : 0;
+  const bool killed = take_health(world, defender_id, out.defender_health, now);
+  {
+    const Combatant* after = find(defender_id);
+    events_.push_back(CombatEvent{CombatEvent::Kind::strike, now, attacker_id, defender_id,
+                                  -out.defender_health, after == nullptr ? 0 : after->health});
+  }
+
+  std::int32_t gain = 0;
+  if (!killed) {
+    // D8: a defender unit that survived takes its stamina delta.
+    if (d.unit && out.defender_stamina != 0) {
+      if (const Combatant* still = find(defender_id); still != nullptr) {
+        store_stamina(world, defender_id, still->stamina + out.defender_stamina);
+      }
+    }
+  } else {
+    // D9: the class maximum to the two owners' tallies; then, for an attacker
+    // unit, the kill's gain and the killer's `onkill` (receiver the
+    // attacker, argument the victim).
+    if (MatchSystem* match = match_system_of(world); match != nullptr) {
+      match->record_blow_kill(by, victim_owner, profile(victim_class).max_health);
+    }
+    if (a.unit) {
+      gain = kill_gain(world, attacker_id, defender_id, victim_experience);
+      (void)fire_class_hook(world, ClassHook::on_kill, attacker_id, defender_id);
+    }
+  }
+  // D10: the gain and Learning's point, paid together.
+  if (a.unit) pay_experience(world, attacker_id, gain + out.learning);
+
+  // D11: the attacker unit's own deltas, health first (Spike armor and
+  // Revenge can kill it), then stamina, which a dead attacker takes too.
+  if (a.unit) {
+    if (out.attacker_health != 0) {
+      (void)take_health(world, attacker_id, out.attacker_health, now);
+    }
+    if (out.attacker_stamina != 0) {
+      if (const Combatant* still = find(attacker_id); still != nullptr) {
+        store_stamina(world, attacker_id, still->stamina + out.attacker_stamina);
+      }
+    }
+  }
 }
 
 std::int32_t CombatSystem::apply_damage(World& world, ObjectId victim, std::int32_t amount,
@@ -2122,7 +2622,6 @@ void CombatSystem::strike(World& world, Combatant& attacker, Combatant& defender
                           GameTime now) {
   attacker.action = Action::engaging;
   attacker.anim = kAnimEngage;
-  attacker.last_attack_time = now;
   ++attacker.attacks;
   show_swing(world, attacker, defender, now);
 
@@ -2141,13 +2640,19 @@ void CombatSystem::strike(World& world, Combatant& attacker, Combatant& defender
   // line earlier (0x005dc214). Same hook for the same reason.
   record_squad_attacked(world, defender.id, attacker.id, now);
 
+  // The last-attack time is stamped after the blow (0x005dc8a0), so that
+  // Charge reads the gap since the one before; a shot's is stamped at its
+  // launch, which is what Charge reads when it lands.
   const CombatProfile mine = profile(attacker.class_index);
   if (mine.is_ranged()) {
+    attacker.last_attack_time = now;
     launch(world, attacker, defender, now);
     return;
   }
 
-  hit(world, defender, striker_of(attacker), now);
+  const ObjectId self = attacker.id;
+  deal(world, self, defender.id, now);
+  if (Combatant* again = mutable_find(self); again != nullptr) again->last_attack_time = now;
 }
 
 void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& defender,
@@ -2166,12 +2671,10 @@ void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& de
   // unit, which is what the dumps require of anything the hash can see.
   shot.id = world.spawn(NativeClass::catapult_shot, nullptr);
 
-  const Striker a = striker_of(attacker);
-  shot.attack = a.attack;
+  shot.attack = attack_of(attacker);
   shot.type = mine.damage_type;
-  shot.attacker_level = a.level;
+  shot.attacker_level = attacker.level;
   shot.splash_radius = mine.splash_radius;
-  shot.ignores_armour = a.ignores_armour;
 
   // Flight time from the ground distance at an invented constant speed. The
   // `shot_tan` / `shot_height` arc the data declares is not modelled: nothing
@@ -2191,10 +2694,6 @@ void CombatSystem::land(World& world, Projectile& shot, GameTime now) {
   events_.push_back(
       CombatEvent{CombatEvent::Kind::impact, now, shot.shooter, shot.target, shot.attack, 0});
 
-  // The shooter is re-found at every use, and the splash walks ids rather than
-  // `units_`: each `hit` can kill, and a kill runs hooks to completion.
-  const auto shooter_now = [this, &shot]() { return find(shot.shooter); };
-
   if (shot.ground) {
     land_on_ground(world, shot, now);
     world.despawn(shot.id);
@@ -2202,41 +2701,19 @@ void CombatSystem::land(World& world, Projectile& shot, GameTime now) {
     return;
   }
 
-  Combatant* target = mutable_find(shot.target);
-
-  // **Labelled:** the striker is the shot's launch-time attack and level,
-  // where the original's landing (0x004d9bb0) re-reads the live shooter and
-  // does nothing for a dead one.
-  const auto apply = [&](Combatant& victim) {
-    const Combatant* shooter = shooter_now();
-    const WorldObject* slot = world.find(shot.shooter);
-    Striker a;
-    a.id = shot.shooter;
-    a.owner = shooter == nullptr ? kNoPlayer : shooter->owner;
-    a.attack = shot.attack;
-    a.level = shot.attacker_level;
-    a.is_unit = slot == nullptr || slot->state.flags.is_unit;
-    a.shoots = true;
-    a.ignores_armour = shot.ignores_armour;
-    hit(world, victim, a, now);
+  // 0x004d9bb0: the dealer, with the shooter as it is now, only while the
+  // shooter and the target both exist and are not dead and the target is
+  // not held in a building or a ship. The blow reads the shooter's attack
+  // and level afresh, and nothing else is struck: a targeted shot has no
+  // splash.
+  const Combatant* target = find(shot.target);
+  const Combatant* shooter = find(shot.shooter);
+  const auto standing = [](const Combatant* c) {
+    return c != nullptr && c->alive && c->action != Action::dying;
   };
-
-  if (target != nullptr && target->alive && target->action != Action::dying) apply(*target);
-
-  if (shot.splash_radius > 0) {
-    const std::int64_t r2 = squared(static_cast<std::int64_t>(shot.splash_radius));
-    std::vector<ObjectId> around;
-    around.reserve(units_.size());
-    for (const Combatant& other : units_) around.push_back(other.id);
-    for (const ObjectId other_id : around) {
-      Combatant* other = mutable_find(other_id);
-      if (other == nullptr || other->id == shot.target) continue;
-      if (!other->alive || other->action == Action::dying) continue;
-      const Combatant* shooter = shooter_now();
-      if (shooter != nullptr && !is_enemy(*shooter, *other)) continue;
-      if (distance_squared(other->position, shot.aim) > r2) continue;
-      apply(*other);
-    }
+  const ObjectState* held = world_bound_ ? world.state(shot.target) : nullptr;
+  if (standing(target) && standing(shooter) && (held == nullptr || !held->is_held())) {
+    deal(world, shot.shooter, shot.target, now);
   }
 
   // The shot leaves the world the moment it lands.
@@ -2644,19 +3121,10 @@ bool CombatSystem::blow(World& world, ObjectId id, ObjectId target, GameTime now
   }
   now_ = now;
   const CombatProfile mine = profile(attacker->class_index);
-  const WorldObject* me = world.find(id);
-  const WorldObject* them = world.find(target);
-  // Between two units that are not enemies, a training blow -- unless the
-  // attacker carries the beast's bit (0x0051163f), which strikes in full.
-  const bool training = me != nullptr && them != nullptr && me->state.flags.is_unit &&
-                        them->state.flags.is_unit && !is_enemy(*attacker, *defender) &&
-                        !me->state.flags.strikes_anyone;
   if (mine.is_ranged()) {
     launch(world, *attacker, *defender, now);
-  } else if (training) {
-    training_blow(world, *attacker, *defender, now);
   } else {
-    hit(world, *defender, striker_of(*attacker), now);
+    deal(world, id, target, now);
   }
   // The original has one health field: a blow that lands on the timer,
   // outside this system's turn, is published at once rather than at the
@@ -2731,6 +3199,9 @@ void CombatSystem::advance(World& world, const Turn& turn) {
       if (const ObjectState* state = world.state(unit.id); state != nullptr) {
         unit.position = state->position;
         unit.owner = state->owner;
+        // The one stamina the original has: what a hero skill wrote to the
+        // world since the last turn is this turn's stamina.
+        unit.stamina = state->stamina;
       }
     }
   }
@@ -2868,11 +3339,12 @@ void CombatSystem::hash(std::uint64_t& accumulator) const {
     }
   };
   // Research writes this mid-game, so it is state and it moves the hash. The
-  // difficulty addends beside it are match setup and are not folded.
+  // match cache is derived and is not folded; the bloodlust byte is state.
   for (const auto& [player, percent] : experience_modifiers_) {
     fold(player);
     fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(percent)));
   }
+  fold(bloodlust_ ? 1u : 0u);
   // Fields the original hashes, in the dumps' own order. Not the profile cache
   // (load-time state) and not the event log (a report, not state).
   for (const Combatant& unit : units_) {
@@ -4142,26 +4614,18 @@ HostOutcome host_set_target(CallContext& ctx) {
 
 }  // namespace
 
-/// `InvalidateDamageFormulaParams()` -- 5 sites, and a no-op with a reason.
+/// `InvalidateDamageFormulaParams()` -- 5 sites.
 ///
-/// The whole of `0x004c6b10` is a write of zero to one global dword and a
-/// return. That dword is a *"the cached damage-formula constants are stale"*
-/// flag; the entry point touches nothing else, and there is no registered way
-/// to read it back.
-///
-/// `ONFINISH_RESEARCH.VS` calls it after each of five researches -- *Gambler's
-/// Test*, *Gambler's Luck*, *Attack focus*, *Learning*, *Ferocity* -- and every
-/// one of those changes an input to the formula. So the call is the original
-/// telling its own cache to refill.
-///
-/// **There is no cache here to invalidate.** `DamageInputs` is flat and pure by
-/// construction -- *"it takes no world, no object, and no hidden state"* -- and
-/// every constant it uses is read at the point of the strike. A stub that
-/// stored a flag would be storing something nothing reads; doing nothing is the
-/// faithful answer, and it stops being faithful the moment this system starts
-/// caching, which is what this comment is for.
+/// The whole of `0x004c6b10` is a write of zero to the calculator's
+/// match-cache flag (0x00996ae8) and a return. `ONFINISH_RESEARCH.VS` calls
+/// it after each of five researches -- *Gambler's Test*, *Gambler's Luck*,
+/// *Attack focus*, *Learning*, *Ferocity* -- every one of which writes a
+/// ledger entry the cache holds, so the next blow fills it again
+/// (`CombatSystem::damage_formula_params`).
 HostOutcome host_invalidate_damage_formula(CallContext& ctx) {
-  (void)ctx;
+  if (CombatSystem* combat = system_of(ctx); combat != nullptr) {
+    combat->invalidate_damage_formula_params();
+  }
   return HostOutcome::ok_void();
 }
 

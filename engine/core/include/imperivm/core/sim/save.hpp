@@ -475,7 +475,11 @@ inline constexpr std::uint32_t kSaveFormatVersion = 1;
 /// of `[unit+0x194]`), and the object flag word is saved at 64 bits (world
 /// version 40). A version-61 file has no beast that strikes regardless of
 /// diplomacy.
-inline constexpr std::uint32_t kStateVectorVersion = 62;
+/// 63: the blow is the calculator's whole (docs/formats/blow.md): the combat
+/// section (system section version 52) carries `SetGlobalBloodlust`'s byte,
+/// and no per-player level addend and no `ignores_armour`, which the match
+/// cache and the hero's Assault replace. A version-62 file has no bloodlust.
+inline constexpr std::uint32_t kStateVectorVersion = 63;
 
 /// The section the world writes.
 inline constexpr std::string_view kWorldSection = "world";

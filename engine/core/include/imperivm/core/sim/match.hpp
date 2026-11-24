@@ -634,6 +634,16 @@ class MatchSystem final : public System, public WorldObserver {
   void record_kill(const World& world, PlayerId killer, PlayerId victim,
                    std::int32_t max_health) noexcept;
 
+  /// The dealer's own booking (0x00511550, D6 and D9 of
+  /// `docs/formats/blow.md`): `amount`, the negated health delta, to the
+  /// attacker's `damage_inflicted` and the victim's `damage_taken`, and a
+  /// kill's class maximum to `kill_healths` and `die_healths` with one to
+  /// `units_killed`. **Raw**: no sign test, so Gambler's Luck books a
+  /// negative number, and no alliance test, which the dealer leaves to its
+  /// training branch. Out-of-range players are skipped on either side.
+  void record_blow_damage(PlayerId attacker, PlayerId victim, std::int32_t amount) noexcept;
+  void record_blow_kill(PlayerId killer, PlayerId victim, std::int32_t max_health) noexcept;
+
   /// `Settlement::GoldSpent(n)` -- add to a player's cumulative **gold spent**.
   ///
   /// 0x005c29f0 resolves the settlement's own player record, walks to that

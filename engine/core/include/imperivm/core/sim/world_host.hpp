@@ -295,6 +295,12 @@ std::size_t reap_departed(script::Scheduler& scheduler, World& world);
 /// for an index outside the 36-entry table and for an unknown id.
 [[nodiscard]] bool object_has_special(World& world, ObjectId id, std::int32_t index);
 
+/// A class's `unit_specials` as the class reader turns it into the 64-bit
+/// specials word (0x005a3785): cut at each comma, each piece trimmed of
+/// spaces and tabs, compared exactly against the 36 names in order, the first
+/// match setting its bit and a piece that matches none setting nothing.
+[[nodiscard]] std::uint64_t unit_specials_word(std::string_view list) noexcept;
+
 /// `Unit::HasFreedom` (0x005d7d30): bit 30 of the unit's specials word
 /// (`[obj+0x198] & 0x40000000`, the `freedom` special, which the class's
 /// `unit_specials` fills at construction) **or** a class descended from

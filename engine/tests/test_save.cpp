@@ -1080,7 +1080,7 @@ TEST(save_combat_section_round_trips) {
   first.action = Action::engaging;
   first.next_action_time = 5500;
   first.damage_multiplier_percent = 200;
-  first.ignores_armour = true;
+  first.cannot_fight = true;
   // `Unit::AddBonus`'s record, with all five distinct and two of them negative:
   // a section that dropped a field, or read the five back in the wrong order,
   // survives every zero and every repeated number.
@@ -1099,7 +1099,7 @@ TEST(save_combat_section_round_trips) {
   second.alive = false;
   combat.add(second);
 
-  combat.set_player_level_addend(1, 3);
+  combat.set_bloodlust(true);
   combat.set_allied(1, 3, true);
   combat.set_death_duration(1750);
 
@@ -1113,13 +1113,13 @@ TEST(save_combat_section_round_trips) {
   CHECK(restored->health == 57);
   CHECK(restored->action == Action::engaging);
   CHECK(restored->damage_multiplier_percent == 200);
-  CHECK(restored->ignores_armour);
+  CHECK(restored->cannot_fight);
   CHECK(restored->bonus.attack == 5);
   CHECK(restored->bonus.armour_slash == -10);
   CHECK(restored->bonus.armour_pierce == 7);
   CHECK(restored->bonus.max_health == -40);
   CHECK(restored->bonus.max_stamina == 90);
-  CHECK(fresh.player_level_addend(1) == 3);
+  CHECK(fresh.bloodlust());
   CHECK(fresh.combatants().size() == 2);
   // `Action` is not contiguous -- 0, 2, 3, 8 -- so a byte in one of its gaps is
   // a state no switch has an arm for and is refused rather than read as `idle`.
