@@ -1056,8 +1056,8 @@ int main(int argc, char** argv) {
     for (const sim::CombatEvent& event : fight->events()) {
       switch (event.kind) {
         // `strike` is every damage application, melee and arrow alike:
-        // `CombatSystem::land` resolves an impact through the same `hit` that a
-        // melee blow goes through, and `hit` is what emits this. **Only this
+        // `CombatSystem::land` resolves an impact through the same dealer
+        // (`deal`) a melee blow goes through, and the dealer emits this. **Only this
         // one carries the resolved figure** -- an `impact` event carries the
         // shot's raw `attack` before armour, so summing both would double-count
         // every arrow and overstate the total by a factor of nearly three.

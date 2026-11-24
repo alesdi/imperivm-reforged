@@ -667,7 +667,7 @@ TEST(a_killing_blow_runs_the_killers_onkill_with_the_victim) {
 }
 
 TEST(damage_from_nowhere_runs_no_onkill) {
-  // `record_score` and `record_army_attacked` are `hit`-only for the same
+  // The score and `record_army_attacked` are the blow's alone for the same
   // reason and say so: a script's `Obj::Damage(n)` has no attacker. Here the
   // reason is sharper than a policy -- the hook's *receiver* is the killer, so
   // there is nobody to run it on.

@@ -3847,20 +3847,9 @@ HostOutcome m_global_spell(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// Three globals with no consumer here, on `GlobalSpellStart`'s precedent:
+/// Two globals with no consumer here, on `GlobalSpellStart`'s precedent:
 /// **the input is named, and nothing is stored.**
 ///
-///   * `SetGlobalBloodlust(bool)` -- 2 sites, both in
-///     `STONEHENGE_BLOODLUST.VS`, and the sole blocker of it. 0x004c6610
-///     writes the byte argument into the global at `0x00996ae4`. That global
-///     has exactly two readers and both are in 0x0050ff30, which the blow
-///     resolution 0x00511550 calls to decide which of the attacker's specials
-///     a blow uses and to charge each one's stamina cost: with the flag set,
-///     the special behind mask `0x1000` (effect code `0xe`) is never charged
-///     its `[0x00996e10]`. This engine's blows charge no special any stamina,
-///     so the flag would be state nothing could read -- which is the test
-///     `ObjectState::user` passes and this fails. **A known gap, by design**:
-///     it lands with the specials' stamina costs, not before.
 ///   * `GetResearchHack()` -- 1 site, and it is **false**. 0x004db630 answers
 ///     `[0x009969a8] != 0`, and the only writer of that global anywhere in the
 ///     image is 0x004dfdf0, a debug path that sets it and clears it again
@@ -3873,12 +3862,24 @@ HostOutcome m_global_spell(CallContext& ctx) {
 ///     where they are used -- so there is nothing to invalidate, and a no-op is
 ///     the same observable behaviour rather than an omission.
 ///
-/// All three are bound rather than left trapping for the reason the whole
+/// Both are bound rather than left trapping for the reason the whole
 /// project binds this shape: a declared-but-unimplemented name stops the script,
 /// and every one of these is a statement rather than a question.
+/// `SetGlobalBloodlust(bool)` -- 2 sites, both in `STONEHENGE_BLOODLUST.VS`,
+/// which sets it, sleeps `StonehengeBloodlustTime` and clears it. 0x004c6610
+/// stores the argument's low byte, zero-extended, in the dword at 0x00996ae4,
+/// whose two readers are both in the calculator 0x0050ff30: set, a blow on
+/// anyone but a hero meets no armour and no floor (C20), and a missed shot is
+/// not charged Penetration (C15). See `CombatSystem::set_bloodlust`.
 HostOutcome f_set_global_bloodlust(CallContext& ctx) {
-  // Named, and dropped. `CreateFeedback`'s gesture.
-  (void)ctx.arg(0);
+  const Value& on = ctx.arg(0);
+  const bool set = on.is_integer() ? (static_cast<std::uint32_t>(on.as_integer()) & 0xFFu) != 0
+                                   : on.truthy_scalar();
+  if (World* world = world_of(ctx); world != nullptr) {
+    if (CombatSystem* combat = combat_system_of(*world); combat != nullptr) {
+      combat->set_bloodlust(set);
+    }
+  }
   return HostOutcome::ok_void();
 }
 
@@ -5507,11 +5508,10 @@ inline constexpr std::array<std::string_view, kUnitSpecialsCount> kUnitSpecialNa
 /// `freedom`'s bit in the specials word, which the hero constructor sets.
 inline constexpr std::int32_t kSpecialFreedom = 30;
 
-[[nodiscard]] bool class_has_special(World& world, const WorldObject& slot,
-                                     std::int32_t index) {
-  const ClassGraph* graph = world.class_graph();
-  if (graph == nullptr || slot.class_index == kNoClass) return false;
-  const std::string_view list = graph->property(slot.class_index, "unit_specials");
+}  // namespace
+
+std::uint64_t unit_specials_word(std::string_view list) noexcept {
+  std::uint64_t word = 0;
   std::size_t at = 0;
   while (at <= list.size()) {
     const std::size_t comma = list.find(',', at);
@@ -5527,11 +5527,22 @@ inline constexpr std::int32_t kSpecialFreedom = 30;
     }
     for (std::size_t i = 0; i < kUnitSpecialNames.size(); ++i) {
       if (token != kUnitSpecialNames[i]) continue;
-      if (static_cast<std::int32_t>(i) == index) return true;
+      word |= std::uint64_t{1} << i;
       break;
     }
   }
-  return false;
+  return word;
+}
+
+namespace {
+
+[[nodiscard]] bool class_has_special(World& world, const WorldObject& slot,
+                                     std::int32_t index) {
+  const ClassGraph* graph = world.class_graph();
+  if (graph == nullptr || slot.class_index == kNoClass) return false;
+  if (index < 0 || index >= kUnitSpecialsCount) return false;
+  const std::uint64_t word = unit_specials_word(graph->property(slot.class_index, "unit_specials"));
+  return (word >> index & 1u) != 0;
 }
 
 /// `Unit::HasSpecial(int)` (0x005d8d70) -- 205 hits in the corpus sweep over

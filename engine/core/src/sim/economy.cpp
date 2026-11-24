@@ -2561,8 +2561,8 @@ constexpr PlayerId kIndependents = 14;
 }  // namespace
 
 /// A unit's effective level as the executable's `vtbl+0x114` answers it: the
-/// combatant's floored level plus the owner's difficulty addend, the pair
-/// `sim/match.cpp` adds for the same slot. A unit the combat system does not
+/// combatant's stored level (0x00511c60 reads `[unit+0x184]` and nothing
+/// else; the difficulty addend is the blow's). A unit the combat system does not
 /// hold answers the hero system's level, and one it knows nothing of, 0.
 ///
 /// Declared in the header: `Squad::EvalAttach` (sim/squad.cpp) reads the same
@@ -2570,7 +2570,7 @@ constexpr PlayerId kIndependents = 14;
 std::int32_t effective_level_of(World& world, ObjectId id) {
   if (const CombatSystem* combat = combat_system_of(world); combat != nullptr) {
     if (const Combatant* unit = combat->find(id); unit != nullptr) {
-      return unit->base_effective_level() + combat->player_level_addend(unit->owner);
+      return unit->base_effective_level();
     }
   }
   if (const HeroSystem* heroes = hero_system_of(world); heroes != nullptr) {

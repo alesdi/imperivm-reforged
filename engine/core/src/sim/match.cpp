@@ -132,7 +132,15 @@ HostOutcome fn_set_difficulty(CallContext& ctx) {
   MatchSystem* match = host_match(ctx);
   if (match == nullptr) return HostOutcome::failed("SetDifficulty: no match");
   if (!ctx.arg(0).is_integer()) return HostOutcome::failed("SetDifficulty: expected an integer");
-  (void)match->set_difficulty(ctx.arg(0).as_integer());
+  // 0x004c65d0 stores a value of 0..2 through 0x006e71c0, which also clears
+  // the blow's match cache (0x00996ae8), so the next blow reads the new
+  // difficulty's addend. Any other value is refused before either.
+  if (!match->set_difficulty(ctx.arg(0).as_integer())) return HostOutcome::ok_void();
+  if (World* world = world_of(ctx); world != nullptr) {
+    if (CombatSystem* combat = combat_system_of(*world); combat != nullptr) {
+      combat->invalidate_damage_formula_params();
+    }
+  }
   return HostOutcome::ok_void();
 }
 
@@ -751,6 +759,21 @@ void MatchSystem::record_damage(const World& world, PlayerId attacker, PlayerId 
   if (PlayerTable::is_valid(victim)) players_[victim].score.damage_taken += amount;
 }
 
+void MatchSystem::record_blow_damage(PlayerId attacker, PlayerId victim,
+                                    std::int32_t amount) noexcept {
+  if (PlayerTable::is_valid(attacker)) players_[attacker].score.damage_inflicted += amount;
+  if (PlayerTable::is_valid(victim)) players_[victim].score.damage_taken += amount;
+}
+
+void MatchSystem::record_blow_kill(PlayerId killer, PlayerId victim,
+                                  std::int32_t max_health) noexcept {
+  if (PlayerTable::is_valid(killer)) {
+    players_[killer].score.units_killed += 1;
+    players_[killer].score.kill_healths += max_health;
+  }
+  if (PlayerTable::is_valid(victim)) players_[victim].score.die_healths += max_health;
+}
+
 void MatchSystem::record_gold_spent(PlayerId player, std::int32_t amount) noexcept {
   if (!PlayerTable::is_valid(player)) return;
   players_[player].score.gold += amount;
@@ -881,11 +904,9 @@ std::uint16_t object_power(const World& world, const CombatSystem* combat,
   // `[obj+0xe4]`. So `Unit::AddBonus`'s record reaches the power census, which
   // is why the maximum and the attack come through `CombatSystem`'s readers.
   const std::int64_t health_term = combat->max_health_of(*unit) / 4 + slot.state.health;
-  // `vtbl+0x114`. `effective_level` is the system's own private helper, so the
-  // two halves it adds are taken here: the combatant's floored level and the
-  // owner's difficulty addend.
-  const std::int64_t level_term =
-      unit->base_effective_level() + combat->player_level_addend(unit->owner) + 13;
+  // `vtbl+0x114`, the stored level (0x00511c60 reads `[unit+0x184]` bare:
+  // the difficulty addend is the blow's, not the level's).
+  const std::int64_t level_term = unit->base_effective_level() + 13;
   // The stored `[obj+0xe4]`, which the rebuild fills with the record, the
   // items, the Team and Epic skills and the formation alike
   // (`docs/formats/unit-stats.md`).

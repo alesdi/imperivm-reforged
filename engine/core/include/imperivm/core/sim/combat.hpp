@@ -43,9 +43,8 @@
 ///
 /// The dealer 0x00511550 takes a training blow between units that are not
 /// enemies (`CombatSystem::training_blow`), and otherwise calls the
-/// calculator 0x0050ff30, whose arithmetic `resolve_damage` reproduces for a
-/// unit on a unit, and whose two other branches -- a defender that is not a
-/// unit, and a `RamUnit` -- `CombatSystem::blow_damage` takes. The counter
+/// calculator 0x0050ff30, which `calculate_blow` reproduces whole, and then
+/// applies what it answers (`CombatSystem::deal`). The counter
 /// table (`DATA\COUNTERUNITS.XML`) is not in the blow: its readers are the
 /// AI's and a catapult's ground shot (0x004da370). Nor is `DamageAmplify`,
 /// whose one reader is a building's damage virtual sharing a blow with its
@@ -95,6 +94,7 @@
 #include "imperivm/core/game/entity.hpp"
 #include "imperivm/core/script/host.hpp"
 #include "imperivm/core/sim/player.hpp"
+#include "imperivm/core/sim/rng.hpp"
 #include "imperivm/core/sim/system.hpp"
 
 namespace imperivm::core::sim {
@@ -251,11 +251,11 @@ struct CombatConstants {
 
   // -- difficulty -----------------------------------------------------
   //
-  // `;difficulty level adjustments` is the comment above them, and they are
-  // spelled "LevelAddend", so they are an addend on a *level*. Which side
-  // receives it is **not** stated anywhere in the data, so this file does not
-  // decide: `CombatSystem::set_player_level_addend` takes it per player and
-  // defaults to zero, and `difficulty_addend` only reports the number.
+  // `;difficulty level adjustments` is the comment above them. The calculator
+  // reads one of the three by the game's difficulty into its match cache and
+  // gives it to one player, the favoured one: added to that player's
+  // attacker's level, taken off the difference when that player defends
+  // (`CombatSystem::DamageFormulaParams`, `docs/formats/blow.md`).
   std::int32_t easy_level_addend = 10;    ///< `EasyDifficultyLevelAddend`
   std::int32_t normal_level_addend = 5;   ///< `NormalDifficultyLevelAddend`
   std::int32_t hard_level_addend = 0;     ///< `HardDifficultyLevelAddend`
@@ -296,6 +296,38 @@ struct CombatConstants {
   /// `TrainingExpChance` (75): the training blow's chance in a hundred of a
   /// point of experience (0x00511658, the global 0x00996e34).
   std::int32_t training_exp_chance = 75;
+
+  // -- the calculator's specials ----------------------------------------
+  //
+  // The rest of the block the calculator reads once per process (0x0050ff30,
+  // guarded by `AvoidChancePercentPerConcealmentLevel`'s global still at -1).
+  // There is no `RevengeCost`, `FerocityCost`, `DeterminationCost` or
+  // `CombatSkillCost`: those four are free.
+  std::int32_t avoid_chance_percent_per_concealment_level = 2;  ///< `AvoidChancePercentPerConcealmentLevel`
+  std::int32_t percent_per_euphoria_level = 10;  ///< `PercentPerEuphoriaLevel`
+  std::int32_t euphoria_stamina = 3;             ///< `EuphoriaStamina`
+  std::int32_t charge_time = 5000;               ///< `ChargeTime`, ms since the last attack
+  std::int32_t offensive_tactics_cost = 1;       ///< `OffensiveTacticsCost`
+  std::int32_t defensive_tactics_cost = 1;       ///< `DefensiveTacticsCost`
+  std::int32_t triple_strike_cost = 1;           ///< `TrippleStrikeCost` (sic)
+  std::int32_t deflection_cost = 1;              ///< `DeflectionCost`
+  std::int32_t penetration_cost = 1;             ///< `PenetrationCost`
+  std::int32_t attack_skill_cost = 1;            ///< `AttackSkillCost`
+  std::int32_t defense_skill_cost = 1;           ///< `DefenseSkillCost`
+  std::int32_t death_blow_cost = 4;              ///< `DeathBlowCost`
+  std::int32_t power_strike_cost = 4;            ///< `PowerStrikeCost`
+  std::int32_t expertise_cost = 4;               ///< `ExpertiseCost`
+  std::int32_t rage_cost = 4;                    ///< `RageCost`
+  std::int32_t bleeding_attack_cost = 1;         ///< `BleedingAttackCost`
+  std::int32_t life_steal_cost = 1;              ///< `LifeStealCost`
+  std::int32_t drain_cost = 1;                   ///< `DrainCost`
+  std::int32_t crippling_attack_cost = 1;        ///< `CripplingAttackCost`
+  std::int32_t spike_armor_cost = 1;             ///< `SpikeArmorCost`
+  std::int32_t charge_cost = 4;                  ///< `ChargeCost`
+  std::int32_t triumph_cost = 3;                 ///< `TriumphCost`
+  std::int32_t learning_cost = 1;                ///< `LearningCost`
+  std::int32_t disease_cost = 1;                 ///< `DiseaseCost`
+  std::int32_t archer_against_hero_chance = 30;  ///< `ArcherAgainstHeroChance`
 
   // -- pacing ---------------------------------------------------------
   /// How often a unit with nothing to hit looks for something. `SquadLookIvl`,
@@ -461,75 +493,180 @@ class CounterTable {
 // damage resolution
 // ---------------------------------------------------------------------------
 
-/// What a unit's blow on a unit reads, flattened: the arithmetic of the
-/// calculator 0x0050ff30 on its unit-on-unit path.
-///
-/// Flat and pure on purpose, so that a test can state a case in one
-/// initialiser. The gates before the arithmetic and the specials inside it
-/// are not here: see `resolve_damage`.
-struct DamageInputs {
-  /// `[A+0xdc]`, the attacker's attack.
-  std::int32_t attack = 0;
-  /// `[D+0xe4]`, the defender's slash armour: **the one armour the blow
-  /// reads**, for a sword and an arrow alike (nothing in it reads `[D+0xe8]`).
+/// The specials the blow reads: bits of the low word of the unit's specials
+/// (`[unit+0x198]`, the 36-name table `UNIT_SPECIALS.INI` orders, which
+/// `CombatProfile::specials` reads off the class). The high word -- Healing,
+/// Keen sight, Trample, Curse -- is loaded by the calculator and never tested.
+namespace special {
+inline constexpr std::uint32_t kParry = 1u << 0;
+inline constexpr std::uint32_t kDrain = 1u << 1;
+inline constexpr std::uint32_t kFerocity = 1u << 2;
+inline constexpr std::uint32_t kTripleStrike = 1u << 3;
+inline constexpr std::uint32_t kDeflection = 1u << 4;
+inline constexpr std::uint32_t kLifeSteal = 1u << 6;
+inline constexpr std::uint32_t kDetermination = 1u << 7;
+inline constexpr std::uint32_t kCombatSkill = 1u << 8;
+inline constexpr std::uint32_t kOffensiveTactics = 1u << 10;
+inline constexpr std::uint32_t kDefensiveTactics = 1u << 11;
+inline constexpr std::uint32_t kPenetration = 1u << 12;
+inline constexpr std::uint32_t kSpikeArmor = 1u << 13;
+inline constexpr std::uint32_t kBleedingAttack = 1u << 14;
+inline constexpr std::uint32_t kAttackSkill = 1u << 15;
+inline constexpr std::uint32_t kDefenseSkill = 1u << 16;
+inline constexpr std::uint32_t kDeathBlow = 1u << 17;
+inline constexpr std::uint32_t kPowerStrike = 1u << 18;
+inline constexpr std::uint32_t kExpertise = 1u << 19;
+inline constexpr std::uint32_t kCharge = 1u << 20;
+inline constexpr std::uint32_t kRage = 1u << 22;
+inline constexpr std::uint32_t kRevenge = 1u << 23;
+inline constexpr std::uint32_t kTriumph = 1u << 24;
+inline constexpr std::uint32_t kDiseaseAttack = 1u << 25;
+inline constexpr std::uint32_t kLearning = 1u << 28;
+inline constexpr std::uint32_t kCripple = 1u << 31;
+}  // namespace special
+
+/// The feedback ids the calculator lists for the dealer to spawn on either
+/// side (the factory 0x00518650's table at 0x00821180). **Only listed here:**
+/// each spawn is a `CVXFeedback` object and takes a handle, which this engine
+/// does not allocate for any feedback (`CreateFeedback` stores nothing
+/// either); the list is what a test reads to see which special fired.
+enum class BlowEffect : std::uint8_t {
+  heal = 0,
+  experience = 2,
+  death = 3,
+  deflection = 5,
+  stamina_boost = 6,
+  stamina_loss = 7,
+  spiked_armor = 8,
+  bleeding_attack = 9,
+  rage = 10,
+  revenge = 11,
+  offensive_tactics = 12,
+  charge = 13,
+  penetration = 14,
+  triple_strike = 15,
+  attack_skill = 21,  ///< drawn as `OffensiveTactics` too
+  defense_skill = 22, ///< `AdditionalDefense`
+  defensive_tactics = 23,  ///< `AdditionalDefense`
+};
+
+/// One side's list. Not capped at the dealer's eight slots: with every
+/// special at once the defender's list holds eleven, which in the original
+/// runs into the stack beside it.
+struct BlowEffects {
+  std::array<BlowEffect, 16> ids{};
+  std::uint8_t count = 0;
+  void push(BlowEffect id) noexcept {
+    if (count < ids.size()) ids[count++] = id;
+  }
+  [[nodiscard]] bool has(BlowEffect id) const noexcept {
+    for (std::uint8_t i = 0; i < count; ++i) {
+      if (ids[i] == id) return true;
+    }
+    return false;
+  }
+};
+
+/// One side of a blow as the calculator 0x0050ff30 reads it off its object.
+/// Flat, so that a test can state a case without a world; `CombatSystem`
+/// fills it from the world for every real blow.
+struct BlowSide {
+  /// The unit bit (`[obj+0x2c] & 0x400000`): A-unit / D-unit.
+  bool unit = true;
+  /// The hero bit.
+  bool hero = false;
+  /// IsRanged (0x0053f5b0): a `projectile_class` given.
+  bool shoots = false;
+  /// Heir of `RamUnit` (0x00540460), of `Sentry` (0x005400c0).
+  bool ram = false;
+  bool sentry = false;
+  std::int32_t health = 0;       ///< `[obj+0xc0]`
+  std::int32_t stamina = 0;      ///< `[obj+0xc4]`
+  std::int32_t max_health = 0;   ///< `[obj+0xc8]`
+  std::int32_t max_stamina = 0;  ///< `[obj+0xcc]`
+  std::int32_t attack = 0;       ///< `[obj+0xdc]`
+  /// `[obj+0xe4]`, the slash armour: **the one armour the blow reads**, for a
+  /// sword and an arrow alike (nothing in it reads `[obj+0xe8]`).
   std::int32_t armour = 0;
-  /// `L`: the attacker's stored level, plus the difficulty addend when its
-  /// owner is the favoured player (0x00510820..0x00510851).
-  std::int32_t attacker_level = 1;
-  /// The defender's stored level (`vtbl+0x114`).
-  std::int32_t defender_level = 1;
-  /// The addend taken off the difference when the defender's owner is the
-  /// favoured player (0x00510e5d..0x00510e65); 0 otherwise.
-  std::int32_t defender_addend = 0;
-  /// The defender carries the hero bit: armour is always met then.
-  bool defender_is_hero = false;
-  /// A hero's Assault or `SetGlobalBloodlust` on the attacker's side: against
-  /// a defender that is not a hero, no armour and no floor.
-  bool ignores_armour = false;
-  /// `ObjectFlags::half_damage` on the defender: a unit under a cover of
-  /// mercy. `hit` reads it off the world; `preview` leaves it clear.
-  bool halved = false;
-  /// The defender's health: the blow is lowered to it.
-  std::int32_t defender_health = 0x7FFFFFFF;
+  std::int32_t level = 1;        ///< the stored level, `vtbl+0x114`
+  std::int32_t experience = 0;   ///< `[unit+0x180]`, the running total
+  std::int32_t class_damage = 0; ///< the class's `damage`, `[class+0x2a0]`
+  std::uint32_t specials = 0;    ///< `special::k*`
+  bool parrying = false;         ///< parry mode, `[unit+0x1a0]`
+  bool cursed = false;           ///< bit 27 of `[unit+0x194]`
+  bool blessed = false;          ///< bit 0
+  bool diseased = false;         ///< bit 1
+  bool sheltered = false;        ///< bit 28, `ObjectFlags::half_damage`
+  /// The timed skills of this side's hero (itself, or the hero it follows):
+  /// `active(X, Ceasefire)`, `active(X, Assault)` (0x005d37f0).
+  bool ceasefire = false;
+  bool assault = false;
+  /// `points(X, s)` (0x005d37b0): -1 with no hero, or one not offered it.
+  std::int32_t concealment = -1;
+  std::int32_t euphoria = -1;
+  GameTime last_attack_time = 0;  ///< `[unit+0x1a4]`
+  /// What the match cache holds for this side's owner.
+  bool favoured = false;
+  bool attack_focus = false;
+  bool learning = false;
+  bool ferocity = false;
+  std::int32_t gamblers_luck = 0;
+  std::int32_t gamblers_test = 0;
 };
 
-/// Every intermediate, so a test can assert on the step rather than the total
-/// and a report can show its working.
-struct DamageBreakdown {
-  std::int32_t attack = 0;
-  std::int32_t armour = 0;  ///< what was taken off; 0 when armour was not met
-  std::int32_t after_armour = 0;
-  bool floored_by_min_percent = false;  ///< `MinPercentOfAttackersDamage` bit
-  std::int32_t level_difference = 0;    ///< `L` less the defender's, less its addend
-  std::int32_t after_level = 0;
-  bool floored_by_min_damage = false;  ///< `MinDamage` bit
-  /// Whether the victim's `half_damage` flag took half of what was left.
-  bool halved = false;
-  bool capped = false;  ///< lowered to the defender's health
-  std::int32_t final_damage = 0;
+/// Where the calculator left the blow: which gate returned, or a hit.
+enum class BlowPath : std::uint8_t {
+  ceasefire,   ///< C3, C4: either side under its hero's Ceasefire
+  dodged,      ///< C5: the Concealment draw
+  cursed,      ///< C6: a cursed attacker's blow, which lifts the curse
+  parrying,    ///< C7: an attacker in parry mode
+  not_a_unit,  ///< C9: a defender that is not a unit
+  ram,         ///< C10: a `RamUnit` defender
+  parried,     ///< C12: a defender in parry mode with stamina
+  deflected,   ///< C13
+  missed,      ///< C14, C15: a shot that misses
+  struck,      ///< C16..C47
 };
 
-/// A unit's blow on a unit, the arithmetic of 0x0050ff30 in its order:
-///
-///   1. the attack, `[A+0xdc]` (0x00510c76);
-///   2. against a hero always, and otherwise unless Assault or bloodlust
-///      (0x00510d26): the slash armour off it (0x00510d86), then the floor
-///      `attack * MinPercentOfAttackersDamage / 100` (0x00510df9);
-///   3. the level factor at `L - level(D) - addend(D)` (0x00510e24, 0x00510e6c);
-///   4. `MinDamage` (0x00510ef6);
-///   5. halved, toward zero, for a sheltered defender (0x005110c6) -- after
-///      `MinDamage`, so a sheltered unit can take less than it;
-///   6. lowered to the defender's health (0x005110db).
-///
-/// **Not yet ported**, so absent rather than guessed: the gates before it
-/// (ceasefire, the Concealment draw, a curse, parry mode, a ranged shot's
-/// miss) and every special inside it with its stamina cost (Deflection,
-/// the blessing, Attack skill, Offensive and Defensive tactics, Penetration,
-/// Defense skill, Charge, Triple strike, Rage, Bleeding attack, the killing
-/// blows, Gambler's Luck and the rest). The table's percent is the
-/// `LevelDifferenceTable`'s 256ths.
-[[nodiscard]] DamageBreakdown resolve_damage(const DamageInputs& in,
-                                             const CombatConstants& constants) noexcept;
+/// What the calculator hands the dealer (its out-parameters; the table in
+/// `docs/formats/blow.md`, Part 3), and what it did to the world itself.
+struct BlowOutcome {
+  BlowPath path = BlowPath::struck;
+  std::int32_t attacker_health = 0;   ///< p3, a delta
+  std::int32_t defender_health = 0;   ///< p4, a delta: minus the damage
+  std::int32_t attacker_stamina = 0;  ///< p5, a delta
+  std::int32_t defender_stamina = 0;  ///< p6, a delta
+  std::int32_t learning = 0;          ///< p7: Learning's point
+  BlowEffects on_attacker;            ///< p9
+  BlowEffects on_defender;            ///< p10
+  /// 0x005d4800 ran on the attacker: its blessing, else its curse, lifted.
+  bool cure_attacker = false;
+  /// Disease attack set the defender's disease bit (C41).
+  bool disease_defender = false;
+  /// The working of a hit, for a test: whether armour was met (C20), and
+  /// the difference the factor was taken at (C22).
+  bool armour_met = false;
+  std::int32_t level_difference = 0;
+
+  /// The damage: what the defender's health loses.
+  [[nodiscard]] std::int32_t damage() const noexcept { return -defender_health; }
+};
+
+/// The rest of what the calculator reads: the match cache's addend, the
+/// bloodlust byte and the game clock.
+struct BlowRules {
+  std::int32_t addend = 0;
+  bool bloodlust = false;
+  GameTime now = 0;
+};
+
+/// The calculator 0x0050ff30, whole, in the binary's order: the gates C1..C12,
+/// the two other branches C9 and C10, Deflection C13, a shot's miss C14..C15,
+/// and the hit C16..C47 with every special and its stamina cost, the clamps
+/// and the deltas (`docs/formats/blow.md`, Part 2). Every draw is on `rng`.
+[[nodiscard]] BlowOutcome calculate_blow(const BlowSide& attacker, const BlowSide& defender,
+                                         const BlowRules& rules, const CombatConstants& constants,
+                                         Rng& rng) noexcept;
 
 // ---------------------------------------------------------------------------
 // per-class profile
@@ -598,6 +735,9 @@ struct CombatProfile {
   /// `CanAttack` virtual lets a receiver whose class is not one reach one
   /// only if it shoots (0x005b1f0b).
   bool water_unit = false;
+  /// The low word of the class's specials (`unit_specials`, which the unit
+  /// constructor copies into `[unit+0x198]`): `special::k*`.
+  std::uint32_t specials = 0;
 
   /// The classes `Unit::CanAttack` (0x005b1da0) asks about by name, answered
   /// once per class off its ancestry rather than once per candidate. Bits of
@@ -768,7 +908,8 @@ struct Combatant {
 
   // -- modifiers other systems write ----------------------------------
   //
-  // Assault writes `ignores_armour`, Ceasefire `cannot_fight`. The hero
+  // Nothing writes `cannot_fight` (Ceasefire is read off the hero by the
+  // blow itself, as Assault is). The hero
   // skills that used to be fields here -- Team Attack, Team Defense,
   // Discipline -- land in `stats` and in the stored level through the
   // rebuild, and Frenzy's doubling is the rebuild's too.
@@ -777,12 +918,11 @@ struct Combatant {
   // blow has no flat multiplier and no `DamageAmplify` (`docs/formats/blow.md`).
   // They stay in the save until its next change.
   std::int32_t damage_multiplier_percent = 100;
-  bool ignores_armour = false;
   bool cannot_fight = false;
   bool in_settlement = false;
 
   /// `Unit::AddBonus`'s five addends. Reset by `reclass`, for the reason the
-  /// four fields above it are: the original mutates by minting a fresh object,
+  /// three fields above it are: the original mutates by minting a fresh object,
   /// and the record is keyed on the id that goes away with the old one.
   StatBonus bonus;
 
@@ -818,13 +958,14 @@ struct Projectile {
   GameTime launched = 0;
   GameTime impact = 0;
 
-  /// Resolved at launch, not at impact: the shooter may be dead by then, and
-  /// an arrow already loosed still lands.
+  /// The shooter's attack and level at launch: the launch event's number and
+  /// the save's. **A targeted shot does not strike with them**: its landing
+  /// (0x004d9bb0) calls the dealer with the live shooter, which reads both
+  /// afresh, and does nothing once the shooter is dead.
   std::int32_t attack = 0;
   DamageType type = DamageType::slash;
   std::int32_t attacker_level = 1;
   std::int32_t splash_radius = 0;
-  bool ignores_armour = false;
   /// A catapult's shot at a point (`Catapult::Attack(point)`): it lands on
   /// the ground at `aim` and hurts what stands there by the impact rule of
   /// `docs/formats/siege-fire.md` -- everyone, raw, by distance -- rather
@@ -1034,10 +1175,50 @@ class CombatSystem final : public System {
   void set_counter_mode(CounterMode mode) noexcept { counter_mode_ = mode; }
   [[nodiscard]] CounterMode counter_mode() const noexcept { return counter_mode_; }
 
-  /// The difficulty addend for one player's units, applied to the level the
-  /// damage formula sees. Zero by default; see `CombatConstants`.
-  void set_player_level_addend(PlayerId player, std::int32_t addend) noexcept;
-  [[nodiscard]] std::int32_t player_level_addend(PlayerId player) const noexcept;
+  /// The calculator's match cache (0x0050ff30, 0x00510351..0x005106b0;
+  /// `docs/formats/blow.md`, "The match cache"): filled by the first blow
+  /// that reaches the calculator after a clear, and frozen until the next.
+  ///
+  /// **Not saved and not hashed, as the original's is not.** It is a copy of
+  /// what the match, `CONST.INI` and the environment ledger held at the fill,
+  /// and a load clears it (0x00524460) so that the next blow fills it again
+  /// from the loaded game. So is a new game (0x00525dd0, a fresh system
+  /// here), `InvalidateDamageFormulaParams` (0x004c6b10) and a difficulty
+  /// change (0x006e71c0, which `SetDifficulty` reaches).
+  struct DamageFormulaParams {
+    /// Filled since the last clear: the dword at 0x00996ae8.
+    bool valid = false;
+    /// Whose units the addend favours, 0-based; `kNoPlayer` for the
+    /// original's -10 (no single-player game, or no local player) and -11
+    /// (an addend of 0).
+    PlayerId favoured = kNoPlayer;
+    /// `GamblersLuckChance` and `GamblersTestChance` of the ledger's
+    /// `/<map>/Player<n>/`, by 0-based player (`EnvReadInt`).
+    std::array<std::int32_t, kPlayerCount> gamblers_luck{};
+    std::array<std::int32_t, kPlayerCount> gamblers_test{};
+    /// The three researches, each true when its ledger string is exactly
+    /// `researched`.
+    std::array<bool, kPlayerCount> attack_focus{};
+    std::array<bool, kPlayerCount> learning{};
+    std::array<bool, kPlayerCount> ferocity{};
+  };
+  /// The cache, filled first if a clear left it empty: the favoured player
+  /// is the match's human in a game that is not a networked one (the
+  /// original's `[game+0xa0] == 1`, believed single-player; **inferred**)
+  /// and its addend the `CONST.INI` one of the match's difficulty; then the
+  /// sixteen players' ledgers.
+  const DamageFormulaParams& damage_formula_params(World& world);
+  /// `DAT_00996dc8`: the favoured player's addend. A global the fill writes
+  /// only for a difficulty of 0, 1 or 2, so it outlives a clear.
+  [[nodiscard]] std::int32_t favoured_addend() const noexcept { return favoured_addend_; }
+  /// `InvalidateDamageFormulaParams()`: the next blow fills the cache again.
+  void invalidate_damage_formula_params() noexcept { params_.valid = false; }
+
+  /// `SetGlobalBloodlust(bool)` (0x004c6610): the byte at 0x00996ae4 that the
+  /// calculator's armour step (C20) and a missed shot's Penetration (C15)
+  /// read. See `bloodlust_`.
+  void set_bloodlust(bool on) noexcept { bloodlust_ = on; }
+  [[nodiscard]] bool bloodlust() const noexcept { return bloodlust_; }
 
   /// `SetExperienceModifier(player, percent)` -- the *Battle tactics* research,
   /// which `ONFINISH_RESEARCH.VS` completes with `GetConst(
@@ -1045,8 +1226,7 @@ class CombatSystem final : public System {
   ///
   /// **Per player**, because `gbr.exe` 0x005d2fb0 writes it into the player
   /// record at `+0x84` and not into a global -- and therefore turn state, so it
-  /// is saved and hashed, unlike `level_addends_` beside it which match setup
-  /// writes once. A player nobody has set reads 0, no modifier: the player
+  /// is saved and hashed. A player nobody has set reads 0, no modifier: the player
   /// record's constructor (0x00565a00) zeroes the word. What it does to a
   /// kill's gain is `kill_gain`'s.
   void set_player_experience_modifier(PlayerId player, std::int32_t percent) noexcept;
@@ -1369,8 +1549,14 @@ class CombatSystem final : public System {
   /// squared distances keeps it integral — no square root, no rounding.
   [[nodiscard]] bool in_attack_range(const Combatant& attacker, const Combatant& defender) const;
 
-  /// What one strike would do, without doing it.
-  [[nodiscard]] DamageBreakdown preview(ObjectId attacker, ObjectId defender) const;
+  /// What the calculator would answer for one blow of `attacker` on
+  /// `defender` at `now`, drawn on a copy of the world's generator: nothing
+  /// is changed but the match cache, which it fills as a blow would.
+  [[nodiscard]] BlowOutcome preview(World& world, ObjectId attacker, ObjectId defender,
+                                    GameTime now);
+  /// The calculator's last answer to the dealer: what a test reads to see
+  /// which gate returned and which special fired. Not state.
+  [[nodiscard]] const BlowOutcome& last_blow() const noexcept { return last_blow_; }
 
   /// Apply damage directly, as the host's `Obj::Damage(n)` does. Returns the
   /// health actually removed. Kills through `enter_dying`.
@@ -1381,8 +1567,8 @@ class CombatSystem final : public System {
   /// chain, and `vtbl[0xB0]` is where the death virtual fires it, so a script
   /// that damages something to death pays out exactly as a spear does --
   /// `GHOST_SAC_IDLE.VS` kills its ghost this way and nothing else. That is
-  /// the opposite of `record_score` and `record_army_attacked`, which are
-  /// `hit`-only on purpose; see their notes for why the two differ.
+  /// the opposite of the score and `record_army_attacked`, which are the
+  /// blow's alone (`deal`, `strike`); see their notes for why the two differ.
   std::int32_t apply_damage(World& world, ObjectId victim, std::int32_t amount,
                             ObjectId source = kNoObject);
   /// A unit's death virtual (`vtbl+0xb0`, 0x005db270) with no blow behind it:
@@ -1506,7 +1692,7 @@ class CombatSystem final : public System {
   /// its own magic and version -- the shape `Scheduler::serialize` established.
   ///
   /// **Written:** the combatants, the projectiles in flight, the pending event
-  /// list, the per-player level addends, the alliance overrides that
+  /// list, the bloodlust flag, the alliance overrides that
   /// `set_allied` records, `death_duration_`, `world_bound_` and `now_`. The
   /// events are state rather than a log: a caller drains them with
   /// `clear_events`, so an undrained event is work still owed.
@@ -1570,27 +1756,26 @@ class CombatSystem final : public System {
   void launch(World& world, Combatant& attacker, const Combatant& defender, GameTime now);
   void land(World& world, Projectile& shot, GameTime now);
   void land_on_ground(World& world, const Projectile& shot, GameTime now);
-  /// The striker as the calculator reads it: A, its attack, its `L`, and the
-  /// two tests it asks of it (the unit bit, and 0x0053f5b0's "shoots").
-  struct Striker {
-    ObjectId id = kNoObject;
-    PlayerId owner = kNoPlayer;
-    std::int32_t attack = 0;
-    /// The stored level plus the owner's addend for a unit; 10 otherwise
-    /// (0x00510822).
-    std::int32_t level = 10;
-    bool is_unit = true;
-    bool shoots = false;
-    bool ignores_armour = false;
-  };
-  [[nodiscard]] Striker striker_of(const Combatant& attacker) const;
-  /// What the calculator takes off `defender` for one blow of `a`: the
-  /// unit-on-unit arithmetic (`resolve_damage`), or the branch for a
-  /// defender that is not a unit (0x00510855) or is a `RamUnit` (0x005108b6),
-  /// whose ranged case draws `Range(0, 220)`.
-  [[nodiscard]] std::int32_t blow_damage(World& world, const Striker& a,
-                                         const Combatant& defender);
-  void hit(World& world, Combatant& defender, const Striker& a, GameTime now);
+  /// One side of a blow, read off the world as the calculator reads its
+  /// object (`BlowSide`). `params` is the match cache, already filled.
+  [[nodiscard]] BlowSide blow_side(World& world, const Combatant& who,
+                                   const DamageFormulaParams& params, GameTime now) const;
+  /// Take the world's stamina into `who`: the one stamina the original has.
+  /// Hero skills (Charge, Rush, Revitalize) write the world's copy alone.
+  void pull_stamina(const World& world, Combatant& who) const;
+  /// Store `value` as both copies of `id`'s stamina (`SetStamina`, 0x005d2960).
+  void store_stamina(World& world, ObjectId id, std::int32_t value);
+  /// The object's health virtual `vtbl+0xac` (0x004d6690) with `delta`: a
+  /// negative one is the damage routine 0x005a7720 (clamped to the health
+  /// left, stored, and an object now dead through its death virtual); zero or
+  /// more is a heal capped at the maximum, through the health store
+  /// (0x005d3a80, which lifts the disease at full health). Answers whether
+  /// the object died of it.
+  bool take_health(World& world, ObjectId id, std::int32_t delta, GameTime now);
+  /// The dealer 0x00511550: the training blow, or the calculator and then
+  /// D5..D11 (`docs/formats/blow.md`, Part 3). `attacker` and `defender` are
+  /// live combatants.
+  void deal(World& world, ObjectId attacker, ObjectId defender, GameTime now);
   /// The training blow (0x00511550's first branch, 0x00511621 .. 0x0051177c):
   /// between two units that are not enemies, the attack less the target's
   /// slash armour scaled by the level difference, at least the floors and
@@ -1599,20 +1784,6 @@ class CombatSystem final : public System {
   /// and the damage dealt.
   void training_blow(World& world, Combatant& attacker, Combatant& defender, GameTime now);
 
-  /// Credit a landed blow to the two owners' score counters.
-  ///
-  /// `MatchSystem` owns the counters and `CombatSystem` is their only writer,
-  /// which is why this reaches sideways through the world rather than keeping
-  /// a tally of its own -- the same shape `record_army_attacked` uses to stamp
-  /// a hero's clock. A world with no `MatchSystem` books nothing.
-  ///
-  /// **`hit` only, never `apply_damage`.** `Obj::Damage(n)` is a script dealing
-  /// damage out of nowhere, and the counters in `gbr.exe` are written by the
-  /// combat resolver and by the three effect loops; a script's `Damage` reaches
-  /// none of them. The same reasoning already keeps `record_army_attacked` out
-  /// of `apply_damage`.
-  void record_score(World& world, PlayerId by, const Combatant& defender, std::int32_t removed,
-                    bool killed) const;
   /// Enter the death animation, and fire the class's `ondie` hook.
   ///
   /// The hook goes here rather than at the removal three lines into `advance`'s
@@ -1646,7 +1817,6 @@ class CombatSystem final : public System {
   /// Pay `amount` into `attacker`'s running total, held at its owner's
   /// `max_battle_level` unless it is a hero or training (0x005119f3).
   void pay_experience(World& world, ObjectId attacker, std::int32_t amount);
-  [[nodiscard]] DamageInputs inputs_for(const Striker& attacker, const Combatant& defender) const;
 
   CombatConstants constants_{};
   const ClassGraph* graph_ = nullptr;
@@ -1663,8 +1833,18 @@ class CombatSystem final : public System {
   /// without forcing every caller to be non-const; the cache is derived from
   /// the class graph and is not world state, so it is not hashed.
   mutable std::vector<CombatProfile> profiles_;
-  /// Sorted by player id.
-  std::vector<std::pair<PlayerId, std::int32_t>> level_addends_;
+  /// The calculator's match cache and its addend: derived, not saved, not
+  /// hashed (`damage_formula_params`).
+  DamageFormulaParams params_{};
+  BlowOutcome last_blow_{};
+  std::int32_t favoured_addend_ = 0;
+  /// `SetGlobalBloodlust`'s byte (0x00996ae4). **Saved and hashed, a
+  /// labelled departure**: the original holds it in a process global that
+  /// neither a save writes nor a load resets, so a game loaded in the
+  /// process that saved it keeps the flag and one loaded in a fresh process
+  /// starts without it. This keeps the first: a loaded game is the game that
+  /// was saved.
+  bool bloodlust_ = false;
   /// Sorted by player id. Turn state: research writes it mid-game.
   std::vector<std::pair<PlayerId, std::int32_t>> experience_modifiers_;
   /// Sorted pairs, low player first.
