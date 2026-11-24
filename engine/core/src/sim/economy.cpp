@@ -1540,6 +1540,66 @@ HostOutcome m_get_enter_exit(CallContext& ctx) {
 /// `IsHeirOf`, defined below with the class walks that use it most.
 [[nodiscard]] bool is_class(World& world, const WorldObject& slot, std::string_view name);
 
+/// The water area cached on a settlement's central building (`[central+0x1f6]`),
+/// computed as the table cut computes it; `m_water_lsa` below says how. No
+/// class test: `WaterLsa` adds the `BaseShipyard` one, the AI register reads
+/// the cache as it is (0x0041f310).
+LsaId water_lsa_of_central(World* world, const Settlement* s) {
+  const GaikaTable& table = world->gaika();
+  if (!table.built()) return LsaId{0xffff};
+
+  MovementSystem* movement = movement_system(*world);
+  std::vector<Point> doors;
+  building_doors(*world, movement == nullptr ? nullptr : &movement->grid(), s->anchor,
+                 kExitPointType, true, doors);
+  // The original reads the empty list's first point through its null data
+  // pointer here. That is a fault rather than a behaviour, and 0 is the
+  // answer its own "not a shipyard" arm already gives.
+  if (doors.empty()) return kNoLsa;
+
+  const auto area_of = [&](GaikaId node) {
+    const GaikaNode* record = table.record(node);
+    return record == nullptr ? kNoLsa : record->lsa;
+  };
+  const LsaId land = area_of(table.for_settlement(s->object));
+  const Point door = doors.front();
+
+  // 1. The node under the door.
+  const GaikaId under = table.at(door);
+  const LsaId under_area = area_of(under);
+  if (under != kNoGaika && under_area != kNoLsa && world->lsa().water(under_area) &&
+      under_area != land) {
+    return under_area;
+  }
+  // 2. The three rings.
+  GaikaId best = kNoGaika;
+  std::uint32_t best_coverage = 0;
+  const auto consider = [&](std::int32_t x, std::int32_t y) {
+    const GaikaId node = table.at(Point{x, y});
+    const GaikaNode* record = table.record(node);
+    if (node == kNoGaika || record == nullptr || record->lsa == kNoLsa) return;
+    if (!world->lsa().water(record->lsa) || record->lsa == land) return;
+    if (record->settlement != kNoObject) return;
+    const auto coverage = static_cast<std::uint16_t>(record->coverage);
+    if (coverage <= best_coverage) return;
+    best_coverage = coverage;
+    best = node;
+  };
+  for (std::int32_t ring = 1; ring <= 3; ++ring) {
+    const std::int32_t reach = ring * kLsaSlotSize;
+    for (std::int32_t j = -ring; j <= ring; ++j) {
+      consider(door.x - reach, door.y + j * kLsaSlotSize);
+      consider(door.x + reach, door.y + j * kLsaSlotSize);
+    }
+    for (std::int32_t j = -ring; j <= ring; ++j) {
+      consider(door.x + j * kLsaSlotSize, door.y - reach);
+      consider(door.x + j * kLsaSlotSize, door.y + reach);
+    }
+  }
+  // 3. Nothing found: the node under the door, as it is.
+  return area_of(best != kNoGaika ? best : under);
+}
+
 /// `set.WaterLsa` -- 7 sites, and it is not a settlement property at all.
 ///
 /// `0x00426010` reads the settlement's **central building**, tests it with
@@ -1599,59 +1659,7 @@ HostOutcome m_water_lsa(CallContext& ctx) {
   if (s == nullptr || s->anchor == kNoObject) return none;
   const WorldObject* anchor = world->find(s->anchor);
   if (anchor == nullptr || !is_class(*world, *anchor, "BaseShipyard")) return none;
-  const GaikaTable& table = world->gaika();
-  if (!table.built()) return HostOutcome::ok_with(Value::integer(0xffff));
-
-  MovementSystem* movement = movement_system(*world);
-  std::vector<Point> doors;
-  building_doors(*world, movement == nullptr ? nullptr : &movement->grid(), s->anchor,
-                 kExitPointType, true, doors);
-  // The original reads the empty list's first point through its null data
-  // pointer here. That is a fault rather than a behaviour, and 0 is the
-  // answer its own "not a shipyard" arm already gives.
-  if (doors.empty()) return none;
-
-  const auto area_of = [&](GaikaId node) {
-    const GaikaNode* record = table.record(node);
-    return record == nullptr ? kNoLsa : record->lsa;
-  };
-  const LsaId land = area_of(table.for_settlement(s->object));
-  const Point door = doors.front();
-
-  // 1. The node under the door.
-  const GaikaId under = table.at(door);
-  const LsaId under_area = area_of(under);
-  if (under != kNoGaika && under_area != kNoLsa && world->lsa().water(under_area) &&
-      under_area != land) {
-    return HostOutcome::ok_with(Value::integer(under_area));
-  }
-  // 2. The three rings.
-  GaikaId best = kNoGaika;
-  std::uint32_t best_coverage = 0;
-  const auto consider = [&](std::int32_t x, std::int32_t y) {
-    const GaikaId node = table.at(Point{x, y});
-    const GaikaNode* record = table.record(node);
-    if (node == kNoGaika || record == nullptr || record->lsa == kNoLsa) return;
-    if (!world->lsa().water(record->lsa) || record->lsa == land) return;
-    if (record->settlement != kNoObject) return;
-    const auto coverage = static_cast<std::uint16_t>(record->coverage);
-    if (coverage <= best_coverage) return;
-    best_coverage = coverage;
-    best = node;
-  };
-  for (std::int32_t ring = 1; ring <= 3; ++ring) {
-    const std::int32_t reach = ring * kLsaSlotSize;
-    for (std::int32_t j = -ring; j <= ring; ++j) {
-      consider(door.x - reach, door.y + j * kLsaSlotSize);
-      consider(door.x + reach, door.y + j * kLsaSlotSize);
-    }
-    for (std::int32_t j = -ring; j <= ring; ++j) {
-      consider(door.x + j * kLsaSlotSize, door.y - reach);
-      consider(door.x + j * kLsaSlotSize, door.y + reach);
-    }
-  }
-  // 3. Nothing found: the node under the door, as it is.
-  return HostOutcome::ok_with(Value::integer(area_of(best != kNoGaika ? best : under)));
+  return HostOutcome::ok_with(Value::integer(water_lsa_of_central(world, s)));
 }
 
 /// `set.FindNearEnterExit(pt)` -- one site, and the deterministic sibling.
@@ -2095,8 +2103,9 @@ constexpr NamedConstant kEconomyConstants[] = {
   return best > 0 ? best : 0;
 }
 
-/// The `<cmd>` row a script named, or null. Case-insensitive, which is
-/// `CommandTable::find`'s rule and the reason it is one.
+/// The `<cmd>` row a script named, or null: the first row loaded whose name
+/// is the argument's bytes, with case -- `CommandTable::find`, the registry's
+/// lookup by name (0x004e9000).
 [[nodiscard]] const CommandDef* command_row(CallContext& ctx, std::string_view name) {
   World* world = world_of(ctx);
   if (world == nullptr) return nullptr;
@@ -2119,6 +2128,11 @@ constexpr NamedConstant kEconomyConstants[] = {
 }
 
 }  // namespace
+
+LsaId central_water_lsa(World& world, const Settlement& s) {
+  if (s.anchor == kNoObject) return kNoLsa;
+  return water_lsa_of_central(&world, &s);
+}
 
 ObjectId settlement_lab_for(World& world, const Settlement& s, const CommandDef& row,
                             bool must_be_idle) {
@@ -2899,14 +2913,20 @@ HostOutcome check_tech_budget_impl(CallContext& ctx) {
 ///
 /// `gbr.exe` 0x0042dec0 walks the settlement's buildings and, for each one
 /// whose damage tier is 3 (`Building::IsBroken`, the same stored tier
-/// `BestBarrack` skips), walks the building's class command list for a row
-/// named `repair` -- compared with the same case-insensitive routine as
-/// everything else, so `<method sig="repair">` on the class is the whole test.
-/// It then runs the affordability count inline, with the reserve on gold and
-/// no exemption, and when the count is at least one it queues the row on the
-/// building through the same core `ExecDefaultCmd` reaches (0x004efc00), with
+/// `BestBarrack` skips), walks the **offered list of the building's class**
+/// (`[[obj+0x3c]+0x1f8]`, the class reverse index) for the first row whose
+/// `method=` is `repair` -- `std::string::compare` against the six bytes, so
+/// exactly `repair`, with case -- and stops at that row whatever follows. No
+/// shipped row is *named* `repair`: they are `repair townhall`, `repair
+/// barracks`, `repairCTemple` and eleven more, each `method="repair"` and each
+/// `<src>` on its own building class, so the row a ruin gets is its own, with
+/// its own costs. (This used to look up a row named `repair`, found none,
+/// and repaired nothing.) It then runs the affordability count inline on that
+/// row's costs, with the reserve on gold and no exemption, and when the count
+/// is at least one it issues the row on the building through 0x004efc00 -- a
+/// one-member list into the per-object issue (`CommandSystem::issue`) -- with
 /// the replace flag set and the modifier clear, as the building's owner.
-/// Nothing is charged here, on `ExecCmd`'s rule: the method script pays.
+/// Nothing is charged here, on `ExecCmd`'s rule: the issue's accept test pays.
 /// Always void; a receiver that names no settlement prints and returns.
 HostOutcome repair_all_impl(CallContext& ctx) {
   World* world = world_of(ctx);
@@ -2915,26 +2935,35 @@ HostOutcome repair_all_impl(CallContext& ctx) {
   if (s == nullptr) return no_settlement(ctx);
   CommandSystem* commands = command_system(*world);
   const EnvSystem* env = env_of(*world);
-  if (commands == nullptr || env == nullptr) return HostOutcome::ok_void();
-  const CommandDef* row = commands->table().find("repair");
-  if (row == nullptr) return HostOutcome::ok_void();
+  const ClassGraph* graph = world->class_graph();
+  if (commands == nullptr || env == nullptr || graph == nullptr) return HostOutcome::ok_void();
+  const CommandClassIndex& index = commands->class_index(*graph);
   const std::int32_t reserved = reserved_gold(env->env(), *s);
-  Command prototype;
-  prototype.param = row->param;
-  prototype.name = row->name;
-  prototype.cost_gold = row->cost_gold;
-  prototype.cost_food = row->cost_food;
-  prototype.cost_pop = row->cost_pop;
-  prototype.cost_stamina = row->cost_stamina;
-  prototype.delay = row->exec_delay;
-  for (const SettlementBuilding& building : s->buildings) {
-    const WorldObject* slot = world->find(building.object);
+  // A copy: the issue runs scripts, and the roll is the settlement's.
+  std::vector<ObjectId> buildings;
+  buildings.reserve(s->buildings.size());
+  for (const SettlementBuilding& building : s->buildings) buildings.push_back(building.object);
+  for (const ObjectId building : buildings) {
+    const WorldObject* slot = world->find(building);
     if (slot == nullptr || slot->state.damage_state != 3) continue;
-    if (commands->script_for(*world, building.object, row->method).empty()) continue;
+    const CommandDef* row = nullptr;
+    for (const std::uint32_t id : index.offered(slot->class_index)) {
+      const CommandDef* candidate = commands->table().at(id);
+      if (candidate != nullptr && candidate->method == "repair") {
+        row = candidate;
+        break;
+      }
+    }
+    if (row == nullptr) continue;
     if (affordable_count(*s, row->cost_gold, row->cost_food, row->cost_pop, reserved) < 1) {
       continue;
     }
-    (void)commands->set_command(*world, building.object, row->method, prototype);
+    const PlayerId owner = slot->state.owner;
+    const std::int32_t player_arg =
+        owner == kNoPlayer ? 0 : static_cast<std::int32_t>(owner) + 1;
+    const ObjectId actor[] = {building};
+    (void)commands->issue(*world, actor, *row, Point{}, kNoObject, /*replace=*/true,
+                          /*modifier=*/false, player_arg, /*user=*/false);
   }
   return HostOutcome::ok_void();
 }

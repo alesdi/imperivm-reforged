@@ -46,12 +46,15 @@ Both act on the record of the unit's owner at the time of the call
   the AI is up (`[0x008c8e54]` zero) the unit's id is pushed onto a pending
   list instead. Once the manager exists (`[0x008c8e58]`), a unit whose
   squad handle is empty goes through the add -- the tally, then
-  `AddToSquad` towards the node under it. A ship also adjusts the ship
-  counts of the GAIKA node it stands on, which is not the tally.
+  `AddToSquad` towards the node under it. Ahead of the owner test, a ship
+  also raises its owner's kept ship count in the passability area it stands
+  in and is pushed on that area's ship list -- on every call, registered or
+  not -- which is not the tally ([`ai-ships.md`](ai-ships.md)).
 * **The unregister** (0x0041eee0) requires the manager, a unit that is not
   a template and not noselect, an owner and a squad handle, and runs the
-  take. It runs when a unit dies or is erased, when `SetNoselectFlag`
-  raises its bit, and in `Unit::SetPlayer` (below).
+  take; a ship then lowers its area's kept ship count, floored at zero, and
+  leaves the area's list. It runs when a unit dies or is erased, when
+  `SetNoselectFlag` raises its bit, and in `Unit::SetPlayer` (below).
 * **`Unit::Mutate`** (0x005deef0) runs the take on the old object at
   0x005df1e4 and the add on the new object at 0x005df287. Neither runs for a
   unit carrying the noselect bit.

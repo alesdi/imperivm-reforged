@@ -83,6 +83,13 @@ ORIGINALS_OWN_DIVERGENCE = {
     ("Adventures/GreatChallenges/5_Great_Loses_German.BFHP", "2"):
         "ExploreAll at the start with exploration on; the flag is not saved, "
         "as in gbr.exe",
+    # Round 18's fourth batch: the flag is up at the save here too, and since
+    # `Ships` reads the kept count -- which a spawn template's ship never
+    # enters, where the census counted it -- `CalcGAIKAPriority.VS` asks
+    # `Explored` of a node the restored side no longer sees explored.
+    ("Adventures/GreatBattles/5_Great_Battles_Britain.bfhp", "3"):
+        "the explored-everywhere flag is up at the save; the flag is not "
+        "saved, as in gbr.exe",
 }
 
 

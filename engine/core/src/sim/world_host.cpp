@@ -3972,7 +3972,8 @@ HostOutcome m_set_build_frame(CallContext& ctx) {
 ///     **The AI hand-off is reproduced** (`m_show_build_animation`): the ship
 ///     `CreateShip` built with the AI manager held off (0x005ef240) is
 ///     registered -- tallied and filed in a squad -- by this call, at once
-///     rather than at the end of the slide.
+///     rather than at the end of the slide, and the register is called twice,
+///     as the unboard's move hook and the end make it.
 ///   * `Obj::SetDebug/1` -- 1 site, and it is `DEBUG_SELECTION.VS` walking the
 ///     current selection to turn a debug overlay on. 0x005abcb0 normalises the
 ///     argument to 0 or 1 and calls the object's `vtbl+0xd4`.
@@ -3990,16 +3991,30 @@ HostOutcome f_presentation_void(CallContext& ctx) {
   return HostOutcome::ok_void();
 }
 
-/// `Ship::ShowBuildAnimation`'s simulation half: the AI register at its end
-/// (0x0041f310, after the slide), which is the only register the new ship
-/// gets -- `CreateShip` holds the AI manager at zero while it sets the owner,
-/// the position and the holder. The slide itself is the labelled gap above.
+/// `Ship::ShowBuildAnimation`'s simulation half: the registers it makes. The
+/// unboard's move hook registers the new ship -- `CreateShip` held the AI
+/// manager at zero while it set the owner, the position and the holder, so
+/// nothing did before -- and the slide's end calls the register (0x0041f310)
+/// again, which counts the ship a second time in its area's kept count. The
+/// slide itself is the labelled gap above.
 HostOutcome m_show_build_animation(CallContext& ctx) {
   World* world = world_of(ctx);
   if (world == nullptr) return HostOutcome::failed("ShowBuildAnimation: no world");
   const WorldObject* slot = object_of(*world, ctx.arg(0));
   if (slot == nullptr) return HostOutcome::ok_void();
-  if (HeroSystem* heroes = hero_system_of(*world); heroes != nullptr) heroes->ai_register(*world, slot->id);
+  HeroSystem* heroes = hero_system_of(*world);
+  if (heroes == nullptr) return HostOutcome::ok_void();
+  // The first pass takes a held ship out of the shipyard (0x005d3f20), whose
+  // `SetPos` runs the move hook (0x0041f530); a ship never registered --
+  // `CreateShip` held the manager off -- that is alive and owned is
+  // registered there. The ship stays held here (the gap above), so that
+  // register is made here, ahead of the one at the slide's end: two calls,
+  // and so two on the ship's kept count (docs/formats/ai-ships.md).
+  const ObjectState& state = slot->state;
+  if (state.is_held() && !state.flags.ai_registered && state.health > 0 && state.owner != kNoPlayer) {
+    heroes->ai_register(*world, slot->id);
+  }
+  heroes->ai_register(*world, slot->id);
   return HostOutcome::ok_void();
 }
 

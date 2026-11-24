@@ -2,6 +2,7 @@
 // and what a press does -- over a synthetic session whose command rows are
 // shaped like the shipped ones.
 
+#include <algorithm>
 #include <cstddef>
 #include <map>
 #include <string>
@@ -70,6 +71,9 @@ ClassGraph graph_of() {
       // The shipped `BaseTownBuilding` binds `research` with its `onfinish`;
       // `BaseBlacksmith` carries the `queue` interface word.
       R"(<class id="RBlacksmith" parent="Building" cpp_class="CVXBuilding"><properties maxhealth="3000" interface="thumb,building,queue"/><method sig="research" vs="research.vs" onfinish="onfinish_research.vs"/></class>)",
+      // The circle whose spells a foreign selection is shown (0x005b8ae0).
+      R"(<class id="Stonehenge" parent="Building" cpp_class="CVXTownHall"><properties maxhealth="3000"/></class>)",
+      R"(<class id="Stonehenge1" parent="Stonehenge" cpp_class="CVXTownHall"/>)",
   };
   for (const char* doc : docs) graph.add(bytes_of(doc), "test_cmdbar.cpp");
   graph.link();
@@ -161,7 +165,10 @@ struct Fixture {
   std::unique_ptr<GameSession> session;
   std::unique_ptr<CommandBar> bar;
 
-  Fixture() {
+  /// `extra` is a second commands file, read after the first; `map` the
+  /// objects.
+  explicit Fixture(std::string_view extra = {}, std::string_view map = kMap) {
+    if (!extra.empty()) command_docs.push_back(bytes_of(extra));
     register_all_hosts(registry);
     scripts.add("idle.vs", "//void, Obj This\nSleep(100000);\n");
     // An AI's root script, for the sink's takeover of a departed seat.
@@ -215,7 +222,7 @@ struct Fixture {
     SessionInputs inputs;
     inputs.classes = &graph;
     inputs.scripts = &scripts;
-    inputs.map_objects = bytes_of(kMap);
+    inputs.map_objects = bytes_of(map);
     inputs.commands = command_docs;
     inputs.ai_profile = bytes_of(kAiProfile);
     auto made = GameSession::create(registry, inputs, /*seed=*/1);
@@ -288,11 +295,183 @@ TEST(cmdbar_runs_the_group_verifier_with_the_row_described) {
   CHECK(!buttons[1].enabled);
   CHECK(buttons[1].reason == "Not now");
 
-  // Two barracks: the verifier sees both and refuses (`objs.count == 1`).
+  // Two barracks: the verifier sees both and refuses (`objs.count == 1`)
+  // without a word, and a row refused without a reason is not drawn
+  // (0x006b3d60); the one refused with a reason is drawn unlit.
   f.select({3, 5});
   buttons = f.bar->describe(0);
-  REQUIRE(buttons.size() == 2);
+  REQUIRE(buttons.size() == 1);
+  CHECK(buttons[0].name == "trainRSentry");
   CHECK(!buttons[0].enabled);
+  CHECK(buttons[0].reason == "Not now");
+  CHECK(f.bar->check(0, "trainRHastatus") == CommandBar::Press::disabled);
+}
+
+namespace {
+
+std::vector<std::string> names_of(const std::vector<CommandButton>& buttons) {
+  std::vector<std::string> out;
+  for (const CommandButton& button : buttons) out.push_back(button.name);
+  return out;
+}
+
+using Names = std::vector<std::string>;
+
+/// Rows for the fill's own rules: a sticky row on `Unit` the sentry excludes,
+/// two offered rows of one priority whose order differs between the two
+/// unit classes' lists, a row both sticky and offered on the veles, a row
+/// with no button, and a player research on the blacksmith.
+constexpr std::string_view kFillCommands = R"(<commands>
+<cmd name="halt" priority="0" button="actions/halt.bmp">
+  <src obj="Unit" sticky="yes"/>
+  <nsrc obj="Sentry"/>
+</cmd>
+<cmd name="pa" priority="6" button="actions/pa.bmp">
+  <src obj="Unit"/>
+</cmd>
+<cmd name="pb" priority="6" button="actions/pb.bmp">
+  <src obj="Unit"/>
+  <src obj="RSentry"/>
+</cmd>
+<cmd name="twice" priority="8" button="actions/twice.bmp">
+  <src obj="Unit" sticky="yes"/>
+  <src obj="RVeles"/>
+</cmd>
+<cmd name="enter" priority="1">
+  <src obj="Unit"/>
+</cmd>
+<cmd name="researchShields" priority="3" button="research/shields.bmp" plrresearch="yes"
+     execdelay="30000" method="research" param="NameSet,Shields">
+  <src obj="RBlacksmith"/>
+</cmd>
+<cmd name="researchHelms" priority="4" button="research/helms.bmp" plrresearch="yes" onetime="no"
+     execdelay="30000" method="research" param="NameSet,Helms">
+  <src obj="RBlacksmith"/>
+</cmd>
+</commands>)";
+
+}  // namespace
+
+/// **The sticky rows are a union, the offered rows the first class's list
+/// filtered by every member** (0x005e7710), then a stable sort by priority.
+TEST(cmdbar_unites_the_sticky_rows_and_intersects_the_first_classs_offered_rows) {
+  Fixture f(kFillCommands);
+  // A hastatus alone: its sticky `halt` and `twice`, then its offered list --
+  // `move`, `stand_position`, `pa`, `pb` (`enter` has no button).
+  f.select({1});
+  CHECK(names_of(f.bar->describe(0)) ==
+        (Names{"halt", "move", "stand_position", "pa", "pb", "twice"}));
+  // With a sentry, whose class excludes `halt` and `move`: `halt` stays,
+  // because one member is let have it; `move` goes, because one is not.
+  f.select({1, 2});
+  CHECK(names_of(f.bar->describe(0)) == (Names{"halt", "stand_position", "pa", "pb", "twice"}));
+  // The sentry first: its list holds `pb` before what it inherits, and the
+  // sort keeps that order between the two rows of priority 6.
+  f.select({2, 1});
+  CHECK(names_of(f.bar->describe(0)) == (Names{"halt", "stand_position", "pb", "pa", "twice"}));
+  // A sticky row is asked of the members of the class whose list holds it:
+  // with `halt` taken from the hastatus, the sentry -- let have it, but not
+  // of a class that lists it -- does not bring it back.
+  CommandSystem* commands = command_system(f.session->world());
+  REQUIRE(commands != nullptr);
+  REQUIRE(commands->disable_command(f.session->world(), 1, "halt"));
+  CHECK(names_of(f.bar->describe(0)) == (Names{"stand_position", "pb", "pa", "twice"}));
+  CHECK(commands->enable_command(1, "halt"));
+  // A row both sticky and offered stands twice.
+  f.select({9});
+  const Names veles = names_of(f.bar->describe(0));
+  CHECK(std::count(veles.begin(), veles.end(), "twice") == 2);
+  // A row with no button takes no slot, and the slots count drawn rows.
+  f.bar->set_max_buttons(2);
+  f.select({1});
+  CHECK(names_of(f.bar->describe(0)) == (Names{"halt", "move"}));
+}
+
+/// **A one-time row is refused, with `" "`, while it is in flight, and a
+/// player research while the player holds it** (0x006b3050, 0x005e20c0).
+TEST(cmdbar_refuses_a_one_time_row_in_flight_and_a_player_research_held) {
+  Fixture f(kFillCommands);
+  f.select({12});  // the blacksmith
+  const auto button = [&](std::string_view name) -> const CommandButton* {
+    static std::vector<CommandButton> buttons;
+    buttons = f.bar->describe(0);
+    for (const CommandButton& b : buttons) {
+      if (b.name == name) return &b;
+    }
+    return nullptr;
+  };
+  REQUIRE(button("researchArmour") != nullptr);
+  CHECK(button("researchArmour")->enabled);
+  // Posted: unlit, the reason a space, and a second post is refused.
+  CHECK(f.bar->post("researchArmour"));
+  REQUIRE(button("researchArmour") != nullptr);
+  CHECK(!button("researchArmour")->enabled);
+  CHECK(button("researchArmour")->reason == " ");
+  CHECK(f.bar->check(0, "researchArmour") == CommandBar::Press::disabled);
+  CHECK(!f.bar->post("researchArmour"));
+  // Executed: lit again. A row that is not one-time is never marked.
+  f.bar->executed("researchArmour");
+  CHECK(button("researchArmour")->enabled);
+  CHECK(f.bar->post("move"));
+  CHECK(f.bar->post("move"));
+
+  // The player research, pressed: queued on the blacksmith, and then refused
+  // while the player holds it.
+  REQUIRE(button("researchShields") != nullptr);
+  CHECK(button("researchShields")->enabled);
+  CHECK(f.bar->press(0, "researchShields", CommandBar::Keys{}) == CommandBar::Press::issued);
+  REQUIRE(button("researchShields") != nullptr);
+  CHECK(!button("researchShields")->enabled);
+  CHECK(button("researchShields")->reason == " ");
+  // The research row that is not a player research is not held back by it.
+  CHECK(button("researchArmour")->enabled);
+  // And a player research that says `onetime="no"` is not asked at all:
+  // held by the player -- staged on the barracks -- and lit.
+  CommandSystem* commands = command_system(f.session->world());
+  REQUIRE(commands != nullptr);
+  Command held;
+  held.name = "researchHelms";
+  (void)commands->set_command(f.session->world(), 3, "train", held);
+  REQUIRE(commands->player_holds_row(f.session->world(), 0,
+                                     *commands->table().find("researchHelms")));
+  REQUIRE(button("researchHelms") != nullptr);
+  CHECK(button("researchHelms")->enabled);
+}
+
+/// The map for the gate: one own unit, and a foreign circle, barracks and
+/// unit.
+constexpr std::string_view kGateMap = R"(<mapobject>
+	<scriptobj class="RHastatus" num="0" player="1" x="100" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
+	<scriptobj class="Stonehenge1" num="1" player="2" x="300" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
+	<scriptobj class="RBarracks" num="2" player="2" x="500" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
+	<scriptobj class="RHastatus" num="3" player="2" x="700" y="100" flags="0xA0400002" dir.x="0" dir.y="1"/>
+</mapobject>)";
+
+constexpr std::string_view kSpellCommands = R"(<commands>
+<cmd name="lightning" priority="1" button="spells/lightning.bmp">
+  <src obj="Stonehenge" sticky="no"/>
+</cmd>
+</commands>)";
+
+/// **A foreign selection shows nothing, except a foreign circle's spells**
+/// (0x005b8ae0: the control flag, or a lone building heir of `Stonehenge`).
+TEST(cmdbar_shows_a_foreign_selection_nothing_but_a_circles_spells) {
+  Fixture f(kSpellCommands, kGateMap);
+  f.select({1});
+  CHECK(names_of(f.bar->describe(0)) == (Names{"move", "stand_position"}));
+  f.select({3});
+  CHECK(f.bar->describe(0).empty());
+  f.select({4});
+  CHECK(f.bar->describe(0).empty());
+  CHECK(f.bar->check(0, "move") == CommandBar::Press::unknown);
+  f.select({2});
+  CHECK(names_of(f.bar->describe(0)) == (Names{"lightning"}));
+  // The circle's own player sees it the same way.
+  f.select({});
+  Selection& theirs = f.session->selections().player(1);
+  theirs.clear();
+  theirs.add(4);
+  CHECK(names_of(f.bar->describe(1)) == (Names{"move", "stand_position"}));
 }
 
 TEST(cmdbar_press_issues_a_targetless_row_and_waits_for_a_targeted_one) {
@@ -777,12 +956,6 @@ TEST(issue_order_never_replaces_with_a_train_row) {
 // --------------------------------------------------------------------------
 
 namespace {
-
-std::vector<std::string> names_of(const std::vector<CommandButton>& buttons) {
-  std::vector<std::string> out;
-  for (const CommandButton& button : buttons) out.push_back(button.name);
-  return out;
-}
 
 bool offers(const std::vector<CommandButton>& buttons, std::string_view name) {
   for (const CommandButton& button : buttons) {

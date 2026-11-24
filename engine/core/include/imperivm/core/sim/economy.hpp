@@ -46,6 +46,7 @@
 
 #include "imperivm/core/formats/result.hpp"
 #include "imperivm/core/script/host.hpp"
+#include "imperivm/core/sim/lsa.hpp"
 #include "imperivm/core/sim/settlement.hpp"
 #include "imperivm/core/sim/system.hpp"
 
@@ -678,6 +679,13 @@ bool garrison_enter(World& world, SettlementId id, ObjectId unit, bool force);
 /// draw), or at `toward` itself for a settlement with no central building.
 std::int32_t garrison_exit(World& world, ObjectId unit, Point toward, GameTime now,
                            bool throttled = true);
+
+/// The water area cached on `s`'s central building (`[central+0x1f6]`, filled
+/// at the node-table cut by 0x0044b740): what `set.WaterLsa` answers for a
+/// shipyard, without its `BaseShipyard` test, which the AI register's
+/// holder-chain read (0x0041f310) does not make. `0xffff` before the table is
+/// cut, `kNoLsa` for a settlement with no central building or no exit door.
+[[nodiscard]] LsaId central_water_lsa(World& world, const Settlement& s);
 
 /// Whether `unit` is held by an object rather than by a settlement: what
 /// `Goto` (0x005d62b9), `Hero::FormSetupAndMoveTo` (0x0052e674) and

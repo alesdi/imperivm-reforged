@@ -36,8 +36,8 @@
 0x005d7050	verified	Unit::GetHolderSett: [u+0x154] holder -> [holder+0xc] settlement -> handle; any miss 0xffff
 0x00425050	verified	Settlement::IsStronghold: central class heir of BaseTownhall (0x0043ffc0/0x0059a220); false unprinted; equals SettlementKind (no shipped class descends from two bases)
 0x00425a90	verified	Settlement::CanAfford(gold, food): FIXED -- inlined core without population, food then gold, reserve 0x00425890 always subtracted (0x00425b1c); test max_afford_count_and_can_afford_hold_the_reserve_back_from_gold
-0x00428ba0	verified	Settlement::CanAfford(cmd): core with gold/food/pop costs, reserve unless ReserveFor names this command (0x00426df0); invalid prints, false; unknown command prints, false
-0x00428d40	verified	Settlement::CanAfford(cmd, count): FIXED -- count <= affordable with no floor on count (0x00428eb0); same reserve rule as CanAfford(cmd)
+0x00428ba0	verified	Settlement::CanAfford(cmd): core with gold/food/pop costs, reserve unless ReserveFor names this command (0x00426df0); invalid prints, false; unknown command prints, false FIXED round 18 batch 3: the row by name is exact, with case (0x004e9000), so a spelling that differs from the row in case names no row; test max_afford_count_and_can_afford_hold_the_reserve_back_from_gold restaged
+0x00428d40	verified	Settlement::CanAfford(cmd, count): FIXED -- count <= affordable with no floor on count (0x00428eb0); same reserve rule as CanAfford(cmd) FIXED round 18 batch 3: the row by name is exact, with case (0x004e9000), so a spelling that differs from the row in case names no row; test max_afford_count_and_can_afford_hold_the_reserve_back_from_gold restaged
 0x005c27d0	verified	Settlement::SetLoyalty: 0..100 stored x10 at [s+0x54], else printed refusal
 0x005ec100	verified	Wagon::SetLoyalty: FIXED -- [w+0x1d8] = v*10 for 0..100, else refused; pending and capture untouched (EconomySystem::set_wagon_loyalty); test a_wagon_starts_at_its_initial_loyalty_and_only_a_taunt_starts_a_capture
 0x00425320	verified	Settlement::IsIndependent: owner index 14 or 15; invalid false, unprinted

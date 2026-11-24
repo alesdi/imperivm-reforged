@@ -272,9 +272,57 @@ TEST(the_command_table_reads_every_attribute_the_shipped_files_carry) {
   CHECK(table.find("immediate_thing")->immediate);
   // Names with spaces occur -- `GetCmdCost("repair village", gold, food)`.
   CHECK(table.find("repair village") != nullptr);
-  // Case-insensitive: `cmdparam`-built names and script literals disagree.
-  CHECK(table.find("TRAINHASTATUS") == train);
+  // Byte for byte, with case (0x004e9000's `repe cmpsb`).
+  CHECK(table.find("TRAINHASTATUS") == nullptr);
+  CHECK(table.find("trainHastatus") == nullptr);
   CHECK(table.find("nosuchcommand") == nullptr);
+  // Every row its id, in document order.
+  CHECK(move->id == 0);
+  CHECK(train->id == 3);
+  // `onetime` is the research flag unless it says otherwise.
+  CHECK(!move->one_time);
+}
+
+/// **Every row is kept and the lookup by name has case**: the loader appends
+/// each `<cmd>` under the next id (0x004ed2b0) and the registry's lookup
+/// answers the first row in load order whose name is the argument's bytes
+/// (0x004e9000). The shipped pair is `Restoration` (`DRUID HOUSE.XML`, a
+/// research) and `restoration` (`DRUID.XML`, the druid's ability), read in
+/// that order.
+TEST(two_rows_whose_names_differ_only_in_case_are_two_rows) {
+  CommandTable table;
+  REQUIRE(table.merge(bytes(R"(<commands>
+<cmd name="Restoration" researchcommand="yes" costgold="1000" method="research"/>
+<cmd name="Other" onetime="no" researchcommand="yes"/>
+<cmd name="Third" onetime="YES"/>
+</commands>)")).ok());
+  REQUIRE(table.merge(bytes(R"(<commands>
+<cmd name="restoration" coststamina="10"/>
+<cmd name="Restoration" costgold="1"/>
+</commands>)")).ok());
+  CHECK(table.size() == 5);
+  const CommandDef* research = table.find("Restoration");
+  const CommandDef* ability = table.find("restoration");
+  REQUIRE(research != nullptr);
+  REQUIRE(ability != nullptr);
+  CHECK(research != ability);
+  CHECK(research->research_command);
+  CHECK(research->cost_gold == 1000);
+  CHECK(ability->cost_stamina == 10);
+  CHECK(research->id == 0);
+  CHECK(ability->id == 3);
+  // A second row of the very same name is kept, and the first is the one
+  // found.
+  REQUIRE(table.at(4) != nullptr);
+  CHECK(table.at(4)->name == "Restoration");
+  CHECK(table.at(4)->cost_gold == 1);
+  CHECK(table.find("RESTORATION") == nullptr);
+  // `onetime`: a research row is one, unless `no` says otherwise; `yes`
+  // without case makes any row one.
+  CHECK(research->one_time);
+  CHECK(!table.find("Other")->one_time);
+  CHECK(table.find("Third")->one_time);
+  CHECK(!ability->one_time);
 }
 
 TEST(the_command_table_refuses_a_document_that_is_not_a_command_list) {
@@ -286,17 +334,19 @@ TEST(the_command_table_refuses_a_document_that_is_not_a_command_list) {
   CHECK(!table.merge(bytes("not xml at all")).ok());
 }
 
-TEST(merging_a_second_command_file_keeps_one_sorted_table) {
+TEST(merging_a_second_command_file_appends_its_rows_in_load_order) {
   CommandTable table;
   CHECK(table.merge(bytes(kCommandsXml)).ok());
   CHECK(table.merge(bytes(R"(<commands><cmd name="unload" costgold="0"/></commands>)")).ok());
   CHECK(table.size() == 7);
   CHECK(table.find("unload") != nullptr);
+  CHECK(table.find("unload")->id == 6);
   CHECK(table.find("move") != nullptr);
-  // Sorted, so lookup is a binary search and iteration does not depend on
-  // which file was read first.
+  // In load order, each row its own id: the order the class lists hold them
+  // in and the command bar's tie order.
   const std::span<const CommandDef> all = table.commands();
-  for (std::size_t i = 1; i < all.size(); ++i) CHECK(all[i - 1].name < all[i].name);
+  for (std::size_t i = 0; i < all.size(); ++i) CHECK(all[i].id == i);
+  CHECK(all.back().name == "unload");
 }
 
 /// **The class reverse index**, `[class+0x1f8]`, as the commands loader
@@ -356,6 +406,40 @@ TEST(the_class_reverse_index_is_the_loaders_inheritance_of_offered_commands) {
   CHECK(!lists("Arena", "unknown"));
   // No class, no listing.
   CHECK(!class_lists_command(graph, kNoClass, *table.find("fights")));
+
+  // **The index holds the lists themselves, in the loader's order**: a
+  // class's own entries by the `obj=` string's byte order and then by row id,
+  // then its parent's list appended, parent first, less what the class has
+  // or excludes (0x004f5af0, 0x0059e670).
+  CommandClassIndex index;
+  index.build(graph, table);
+  const auto names = [&](std::span<const std::uint32_t> ids) {
+    std::vector<std::string> out;
+    for (const std::uint32_t id : ids) out.push_back(table.at(id)->name);
+    return out;
+  };
+  using Names = std::vector<std::string>;
+  CHECK(names(index.offered(graph.find("Arena"))) ==
+        (Names{"fights", "summer", "redone", "aliased"}));
+  // `aliased` is its own (by `ArenaWinter`), so the alias's exclusion does
+  // not take it; `summer` is excluded, the rest inherited behind it.
+  CHECK(names(index.offered(graph.find("ArenaWinter"))) ==
+        (Names{"aliased", "fights", "redone"}));
+  CHECK(names(index.offered(graph.find("ArenaWinterBig"))) ==
+        (Names{"summer", "aliased", "fights", "redone"}));
+  CHECK(names(index.sticky(graph.find("Arena"))) == (Names{"laststicky", "sticky"}));
+  CHECK(names(index.sticky(graph.find("Building"))) == (Names{"sticky"}));
+  CHECK(names(index.offered(graph.find("Tavern"))) == (Names{"sticky"}));
+  // Each list inherits against itself: the tavern's own offer of `sticky`
+  // does not stop the parent's sticky entry, so the row is on both lists.
+  CHECK(names(index.sticky(graph.find("Tavern"))) == (Names{"sticky"}));
+  CHECK(index.offered(kNoClass).empty());
+  // And it agrees with the per-row walk on every class and row.
+  for (ClassIndex cls = 0; cls < graph.size(); ++cls) {
+    for (const CommandDef& row : table.commands()) {
+      CHECK(index.offers(cls, row.id) == class_lists_command(graph, cls, row));
+    }
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -1248,17 +1332,20 @@ TEST(cmd_disable_takes_one_command_and_cmd_enable_gives_it_back) {
   CHECK(!f.commands.enable_command(u, "move"));
 }
 
-TEST(cmd_disable_is_case_insensitive_and_idempotent_and_ignores_unknown_names) {
+TEST(cmd_disable_finds_its_row_with_case_and_is_idempotent_and_ignores_unknown_names) {
   Fixture f;
   HostRegistry registry;
   register_command_host(registry);
   const ObjectId u = f.spawn(f.unit_class);
 
-  // `CommandTable::find` folds, and the corpus spells command names both ways
-  // -- `Obj.ExecCmd` is called with each. What gets *stored* is the table's own
-  // spelling, so the save does not carry a script's capitalisation.
+  // The row by name, byte for byte (0x005ab770 asks the registry's index,
+  // 0x004e9000): `MOVE` names no row, and writes nothing.
   HostCall shouted(f.world, {obj(u), Value::string("MOVE")});
   CHECK(invoke(registry, CallKind::member, "CmdDisable", 1, shouted).status == HostStatus::ok);
+  CHECK(f.commands.disabled_commands(u).empty());
+  CHECK(f.commands.command_enabled(f.world, u, "move"));
+  HostCall named(f.world, {obj(u), Value::string("move")});
+  CHECK(invoke(registry, CallKind::member, "CmdDisable", 1, named).status == HostStatus::ok);
   REQUIRE(f.commands.disabled_commands(u).size() == 1);
   CHECK(f.commands.disabled_commands(u)[0] == "move");
   CHECK(!f.commands.command_enabled(f.world, u, "move"));
@@ -1276,26 +1363,27 @@ TEST(cmd_disable_is_case_insensitive_and_idempotent_and_ignores_unknown_names) {
   CHECK(f.commands.disabled_commands(u).size() == 1);
   CHECK(!f.commands.command_enabled(f.world, u, "no_such_command"));
 
-  // **The membership test folds, and that is reachable.** `CommandTable::set`
-  // overwrites a row whose folded name matches and keeps the *new* spelling, so
-  // a second `DATA/COMMANDS/*.XML` that spells the row differently leaves the
-  // stored name and the table's name disagreeing in case. The command stays
-  // taken away.
+  // **The list holds rows, and two rows whose names differ only in case are
+  // two rows**: taking `move` away leaves a `MoVe` row offered.
   CommandDef restyled;
   restyled.name = "MoVe";
   restyled.method = "move";
   f.commands.mutable_table().set(restyled);
   CHECK(!f.commands.command_enabled(f.world, u, "move"));
+  CHECK(f.commands.command_enabled(f.world, u, "MoVe"));
+  CHECK(!f.commands.enable_command(u, "MoVe"));
   REQUIRE(!f.commands.disabled_commands(u).empty());
   CHECK(f.commands.disabled_commands(u)[0] == "move");
 
-  // Sorted, and by the folded name. Nothing enumerates the set, so this is
-  // about what gets written down rather than about what gets answered.
+  // Sorted, by the folded name and then the bytes. Nothing enumerates the
+  // set, so this is about what gets written down rather than about what gets
+  // answered.
   CHECK(f.commands.disable_command(f.world, u, "heal"));
   CHECK(f.commands.disable_command(f.world, u, "stand_ground"));
+  CHECK(f.commands.disable_command(f.world, u, "MoVe"));
   const std::span<const std::string> set = f.commands.disabled_commands(u);
   CHECK(std::vector<std::string>(set.begin(), set.end()) ==
-        (std::vector<std::string>{"heal", "move", "stand_ground"}));
+        (std::vector<std::string>{"heal", "MoVe", "move", "stand_ground"}));
 }
 
 TEST(cmd_disable_writes_nothing_while_the_object_is_silenced_altogether) {

@@ -24,7 +24,7 @@ the AI manager's start reach. Every reader tests the pointer first and answers
 |---|---|
 | `+0x04`..`+0x0c` | one 32-bit entry per settlement, by the settlement's index `[set+0x1c]`: the settlement's node id in the low half, 0 for a settlement that has none (`Settlement::GetGaika`, 0x0044e9e0) |
 | `+0x14`..`+0x18` | the node records, `0x24` bytes each, indexed by node id (`GaikaId`); record 0 is a real record that names no place |
-| `+0x24`..`+0x2c` | the passability-area records, `0xc0` bytes each, by area id; the type word at `+0` is 1 for water and 2 for ground |
+| `+0x24`..`+0x2c` | the passability-area records, `0xc0` bytes each, by area id; the type word at `+0` is 1 for water and 2 for ground; per player a ship need at `+0x14` and a kept ship count at `+0x54`, and a ship list at `+0x94` ([`ai-ships.md`](ai-ships.md)) |
 | `+0x30`, `+0x34`, `+0x36` | the **node slot grid**: one 16-bit node id per 128-unit slot, row by row, and its width and height in slots |
 | `+0x38` | the `MAIKA` list: the way-point records `SetMAIKA` adds (below) |
 
