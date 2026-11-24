@@ -544,7 +544,7 @@ bool ExplorationMap::set_raw(std::int32_t side, std::span<const std::uint16_t> c
 
 FogSystem::Stamp FogSystem::stamp_of(const WorldObject& object) noexcept {
   // A held object stands at no point: `(-1, -1)`, the marker the original's
-  // move stamp refuses (`DAT_008212bc`), so leaving a holder is a move even
+  // move stamp refuses (the point at 0x008212bc), so leaving a holder is a move even
   // onto the point it entered from.
   return Stamp{object.state.is_held() ? kHeldPosition : object.state.position,
                object.state.owner};
