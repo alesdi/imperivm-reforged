@@ -1923,10 +1923,16 @@ TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   CHECK(stood.x >= 1600 - 115 && stood.x <= 1600 - 115 + 10);
   CHECK(f.dist_to(walker, Value::object(kTypeObj, camp)) <= 0);
   CHECK(f.dist_to(walker, Value::object(kTypeObj, camp)) >= -10);
-  // Asked again, it has arrived and says so without suspending.
+  // Asked again, it has not arrived: a range of 0 with the call's inner
+  // bound of 0 is a band of one gap, 0 (0x00417c10), and the ring stands at
+  // `r - 1` (0x00409d03), a unit inside it. The two shipped sites that pass
+  // 0 (UNIT_CAPTURE.VS:41, BOAR_TOOTH_USE.VS:10) leave their loops on
+  // `DistTo` instead.
   const HostOutcome again = f.go(walker, Value::object(kTypeObj, camp), 0);
-  CHECK(again.status == HostStatus::ok);
-  CHECK(again.value.as_integer() == 1);
+  // (Not arrived; with the fixture's give-up of 0 and no route left to lay
+  // from the ring point, the call ends the script, 0x005d4429.)
+  CHECK(!(again.status == HostStatus::ok && again.value.as_integer() == 1));
+  CHECK(again.status == HostStatus::finish);
   // The same range against the camp's *point* is centre to centre and walks on.
   const HostOutcome to_point = f.go(walker, pack_point(Point{1600, 1000}), 0);
   CHECK(to_point.status == HostStatus::retry);
@@ -1940,6 +1946,10 @@ TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   for (int i = 0; i < 100; ++i) run(f.world, f.movement, {100});
   const Point there = position_of(f.world, other);
   CHECK(there.x >= 1600 - 165 && there.x <= 1600 - 165 + 10);
+  // There the gap is 49, inside [0, 50]: arrived.
+  const HostOutcome arrived = f.go(other, Value::object(kTypeObj, target), 50);
+  CHECK(arrived.status == HostStatus::ok);
+  CHECK(arrived.value.as_integer() == 1);
 
   // A negative radius takes nothing off the gap: the sunk mover stops at the
   // camp's 100, not 60 from its anchor.
@@ -1950,6 +1960,43 @@ TEST(an_object_goto_arrives_at_the_edge_and_a_point_goto_at_the_point) {
   for (int i = 0; i < 100; ++i) run(f.world, f.movement, {100});
   const Point sank = position_of(f.world, sunk);
   CHECK(sank.x >= 1600 - 100 && sank.x <= 1600 - 100 + 10);
+}
+
+/// The object `Goto` passes an inner bound of 0 (0x005d6b90), and the arrival
+/// test is an annulus between the edges (0x00417c10): a mover overlapping its
+/// target has not arrived. Its rings, though, run from the range with both
+/// radii down to that 0 as given (0x00419730 with `[rec+0x14]`), so they
+/// reach inside the target, and an overlapping mover walks to the nearest --
+/// further in -- and stands there, not arrived.
+TEST(an_object_goto_overlapping_its_target_is_not_arrived_and_takes_the_nearest_ring) {
+  EdgeField f;
+  // 50 from the camp's anchor: a gap of -65.
+  const ObjectId walker = f.place("Walker", Point{1550, 1000});
+  const ObjectId camp = f.place("Camp", Point{1600, 1000});
+  f.keep_moving(camp);
+  REQUIRE(f.dist_to(walker, Value::object(kTypeObj, camp)) < 0);
+
+  // A range of 40: the band is a gap of [0, 40], centre to centre [115, 155];
+  // the rings stand at 154, 114, 74 and 34, and the nearest is 34's.
+  const HostOutcome first = f.go(walker, Value::object(kTypeObj, camp), 40);
+  CHECK(first.status == HostStatus::retry);
+  CHECK(first.value.as_integer() == 0);
+  for (int i = 0; i < 100; ++i) run(f.world, f.movement, {100});
+  const Point stood = position_of(f.world, walker);
+  CHECK(stood.x >= 1600 - 34 - 2 && stood.x <= 1600 - 34 + 2);
+  const HostOutcome again = f.go(walker, Value::object(kTypeObj, camp), 40);
+  // (Not arrived; with the fixture's give-up of 0 and no route left to lay
+  // from the ring point, the call ends the script, 0x005d4429.)
+  CHECK(!(again.status == HostStatus::ok && again.value.as_integer() == 1));
+  CHECK(again.status == HostStatus::finish);
+
+  // Touching is arrival at once: a gap of 0 is inside [0, 0].
+  const ObjectId touching = f.place("Walker", Point{1600 - 115, 1800});
+  const ObjectId other = f.place("Camp", Point{1600, 1800});
+  f.keep_moving(other);
+  const HostOutcome at_edge = f.go(touching, Value::object(kTypeObj, other), 0);
+  CHECK(at_edge.status == HostStatus::ok);
+  CHECK(at_edge.value.as_integer() == 1);
 }
 
 namespace {
@@ -3427,4 +3474,35 @@ TEST(a_formation_route_leg_of_no_length_takes_no_step) {
   FormationRoute far;
   far.remaining = static_cast<std::int32_t>(40000u * 65536u);
   CHECK(formation_route_left(far) == 40000 - 65536);
+}
+
+/// The skill writer's Quick March case (0x0052def0 case 3): with a formation
+/// at `[hero+0x2b0]`, `UpdateMinSpeed` runs again forced (0x005f5640 with 1),
+/// so the march's pace takes the new step time at once instead of keeping the
+/// slowest and fastest it recorded before.
+TEST(a_quick_march_written_measures_the_formations_pace_again) {
+  HostField f;
+  const ObjectId hero = f.unit(Point{300, 300}, NativeClass::hero);
+  const ObjectId member = f.unit(Point{200, 300});
+  (void)f.heroes.register_hero(f.world, hero);
+  Formation& form = f.movement.formation_of(hero);
+  form.slots.push_back(FormationSlot{member});
+  f.movement.update_min_speed(f.world, form, false);
+  const std::int64_t before = form.pace;
+  REQUIRE(before > 0);
+  REQUIRE(form.min_unit != kNoObject);
+
+  // Unforced, a recorded march is not measured again.
+  REQUIRE(f.heroes.set_skill(f.world, hero, HeroSkill::quick_march, 10));
+  const std::int64_t written = f.movement.formation_of(hero).pace;
+  CHECK(written < before);
+  Formation fresh = f.movement.formation_of(hero);
+  f.movement.update_min_speed(f.world, fresh, true);
+  CHECK(written == fresh.pace);
+
+  // A hero with no formation is only written.
+  const ObjectId lone = f.unit(Point{600, 600}, NativeClass::hero);
+  (void)f.heroes.register_hero(f.world, lone);
+  CHECK(f.heroes.set_skill(f.world, lone, HeroSkill::quick_march, 3));
+  CHECK(f.movement.formation(lone) == nullptr);
 }

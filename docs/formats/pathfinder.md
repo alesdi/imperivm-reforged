@@ -450,6 +450,17 @@ four to a cell and reads each cell's first slot (`GoalCells`), and where the sea
 the point nearest the centre before any is struck. The owner is the unit when its order holds
 a lock, asked through `spot_free` with its radius.
 
+**The rings' two ends** (`RecastPathfind`, 0x00419730, into 0x00417830): sixteen points at
+`r - 1` (0x00409d03) for `r` from the outer end down by 40 while `r` is at least the inner
+end, six rings at most. A point goal (the retry's mode 0) passes its range and inner bound as
+`SetDest` stored them, both with the two radii already added by the `Goto` worker
+(0x005d42a6, 0x005d438d). A unit goal (mode 1) adds the radii to the range there and passes
+the inner bound **as the call gave it** (`[rec+0x14]`), so its rings reach inside the
+target, where its arrival -- the gap between the edges against `[rec+0x14]`, 0x00417c10 --
+is never met. The object `Goto` gives 0: with a range of 0 the outer ring is a unit inside a
+band of one gap, and a walk to it does not arrive; with any range above 0 it does. A mover
+already overlapping its target walks to the nearest ring, which can be further in.
+
 **A gate** that bars the mover is handed to whichever search is installed, as the original
 hands it (`sim/gate.hpp`): to the grid search as its line's cells (`PathRequest::barrier`),
 read wherever it reads the live grid; to the smart pathfinder as the connections whose

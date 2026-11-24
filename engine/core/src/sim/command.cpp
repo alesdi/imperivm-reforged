@@ -2740,9 +2740,12 @@ struct Mover {
 /// The answer comes at the re-entry (`run_goto`).
 ///
 /// The inner bound is acted on: a unit nearer than `min_range` (every
-/// shipped unit's is 2 or more) is not arrived, and searches its way out to
-/// the band (`within_band`), so that `GotoAttack` never answers true where
-/// `Attack`'s range test (0x005a7800) refuses. A point argument, which no
+/// shipped unit's is 2 or more) is not arrived (`within_band`), so that
+/// `GotoAttack` never answers true where `Attack`'s range test (0x005a7800)
+/// refuses. For a point goal it searches its way out to the band; for a unit
+/// goal the rings run down to the bound unfolded (0x00419730), so it walks
+/// to whichever ring is nearest (docs/formats/pathfinder.md, "The rings' two
+/// ends"). A point argument, which no
 /// shipped site passes, walks to the point as `Goto` would.
 HostOutcome goto_attack_impl(CallContext& ctx) {
   const Mover self = mover_of(ctx);
