@@ -327,9 +327,15 @@ TEST(a_catapult_throws_at_a_point_and_the_ground_shot_hurts_whoever_stands_there
   REQUIRE(b.combat.projectiles().size() == 1);
   CHECK(b.combat.projectiles()[0].launched == now + 300);
   CHECK(b.combat.projectiles()[0].ground);
+  // A catapult's shot takes a synchronous handle (0x004e47c0), unlike an
+  // arrow: a world object stands for it until it lands.
+  const ObjectId ball = b.combat.projectiles()[0].id;
+  CHECK(ball != kNoObject);
+  CHECK(b.world.find(ball) != nullptr);
   // In flight for 6,401 ms (the next test has why).
   b.run(17);
   CHECK(b.combat.projectiles().empty());
+  CHECK(b.world.find(ball) == nullptr);
   CHECK(b.combat.health(enemy) == 80);
   CHECK(b.combat.health(friend_) == 150);
   CHECK(b.combat.health(far) == 200);

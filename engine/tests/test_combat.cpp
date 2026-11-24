@@ -1681,6 +1681,38 @@ TEST(a_blow_on_a_building_is_the_attack_at_the_level_less_ten) {
   CHECK(next_blow(second, siege, q.a, q.b) == 4);
 }
 
+/// **An arrow takes no handle, and its start takes one draw, or three
+/// against a building** (0x004d9740, 0x004d9a40). The missile asks its base
+/// for no handle, so the next object spawned takes the handle it would have
+/// taken without the shot; its start draws Range(0, 100) twice when the
+/// target carries the building bit and once more whatever the target, on
+/// the synchronised generator. Landing deletes it and moves no handle either.
+TEST(an_arrow_takes_no_handle_and_one_draw_or_three_against_a_building) {
+  for (const bool building : {false, true}) {
+    World world;
+    CombatSystem combat = branch_system();
+    CombatProfile archer = melee(16, 12, 200);
+    archer.projectile = 99;
+    archer.range = 500;
+    combat.set_profile(kArcher, archer);
+    REQUIRE(world.add_system(&combat));
+    const Pair p = place_pair(world, combat, kArcher,
+                              building ? NativeClass::building : NativeClass::unit,
+                              building ? kWall : kSwordsman, 1, 1000);
+    const ObjectId next = world.next_id();
+    Rng expected = world.rng();
+    for (int draw = 0; draw < (building ? 3 : 1); ++draw) (void)expected.between(0, 100);
+    REQUIRE(combat.fire_arrow(world, p.a, p.b, world.time()));
+    CHECK(world.rng() == expected);
+    CHECK(world.next_id() == next);
+    REQUIRE(combat.projectiles().size() == 1);
+    CHECK(combat.projectiles()[0].id == kNoObject);
+    for (int turn = 0; turn < 10 && !combat.projectiles().empty(); ++turn) world.advance(400);
+    CHECK(combat.projectiles().empty());
+    CHECK(world.next_id() == next);
+  }
+}
+
 /// **A `RamUnit` defender** (0x005108b6..0x00510955): a blow is the attack at
 /// `L - 10`, no armour; a shot lands on a draw of `Range(0, 220)` no greater
 /// than `L + 20`, for `L / 5 + MinDamage`.
@@ -2688,8 +2720,8 @@ TEST(a_ranged_attack_puts_a_projectile_in_the_air) {
   CHECK(combat.health(2) == 200);  // nothing has landed yet
   if (!combat.projectiles().empty()) {
     const Projectile& shot = combat.projectiles().front();
-    CHECK(shot.id != sim::kNoObject);        // it holds a world handle
-    CHECK(world.find(shot.id) != nullptr);
+    // No world object: the missile asks for no handle (0x004d9740).
+    CHECK(shot.id == sim::kNoObject);
     CHECK(shot.impact > shot.launched);
   }
 
@@ -2698,7 +2730,7 @@ TEST(a_ranged_attack_puts_a_projectile_in_the_air) {
     combat.advance(world, world.turn());
   }
   CHECK(combat.health(2) < 200);
-  CHECK(combat.projectiles().empty());  // and the shot left the world
+  CHECK(combat.projectiles().empty());  // and the shot is gone
 }
 
 /// **A targeted shot strikes its target alone.** The landing 0x004d9bb0 calls

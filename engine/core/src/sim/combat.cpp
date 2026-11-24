@@ -2668,12 +2668,9 @@ void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& de
   shot.position = attacker.position;
   shot.launched = now;
 
-  // A shot is an object here and takes a handle in the units' space. **The
-  // original's takes none** (0x004d9740 asks its base for no handle), so
-  // every later handle runs one higher per shot than gbr.exe's: a labelled
-  // departure until the shot leaves the handle space (blow.md, "This
-  // engine").
-  shot.id = world.spawn(NativeClass::catapult_shot, nullptr);
+  // No world object and no handle: the missile (0x004d9740) asks its base
+  // for none, so an arrow moves no later unit's handle. It is known by its
+  // place in `shots_`, launch order, and its `id` stays `kNoObject`.
 
   shot.attack = attack_of(attacker);
   shot.type = mine.damage_type;
@@ -2689,19 +2686,38 @@ void CombatSystem::launch(World& world, Combatant& attacker, const Combatant& de
   shot.impact = now + flight;
 
   shots_.push_back(shot);
+  // Both shooters start the missile as soon as it is built (0x005dc650 and
+  // 0x004df650 call `vtbl+0x2c` straight after 0x004d9740).
+  start_missile(world, defender.id);
   events_.push_back(
       CombatEvent{CombatEvent::Kind::launch, now, attacker.id, defender.id, shot.attack, 0});
 }
 
-void CombatSystem::land(World& world, Projectile& shot, GameTime now) {
-  shot.position = shot.aim;
+/// 0x004d9a40 (`blow.md`, "The missile"). Against a building
+/// (`[target+0x2c] & 0x800000`) two draws Range(0, 100), the y and then the x
+/// offset (`50 - draw`) of the point its animation is started towards; then,
+/// whatever the target, one draw Range(0, 100) for the animation slot, 0
+/// below 50 and 2 otherwise (0 where the entity has no such slot). The
+/// animation, its end and the messages it posts are presentation; the draws
+/// are on the synchronised generator and are kept.
+void CombatSystem::start_missile(World& world, ObjectId target) {
+  const ObjectState* state = world_bound_ ? world.state(target) : nullptr;
+  if (state != nullptr && state->flags.is_building) {
+    (void)world.rng().between(0, 100);
+    (void)world.rng().between(0, 100);
+  }
+  (void)world.rng().between(0, 100);
+}
+
+void CombatSystem::land(World& world, const Projectile& shot, GameTime now) {
   events_.push_back(
       CombatEvent{CombatEvent::Kind::impact, now, shot.shooter, shot.target, shot.attack, 0});
 
   if (shot.ground) {
     land_on_ground(world, shot, now);
-    world.despawn(shot.id);
-    shot.id = kNoObject;
+    // A catapult's shot is a world object (0x004e47c0 takes a synchronous
+    // handle) and is deleted when it lands.
+    if (shot.id != kNoObject) world.despawn(shot.id);
     return;
   }
 
@@ -2719,10 +2735,8 @@ void CombatSystem::land(World& world, Projectile& shot, GameTime now) {
   if (standing(target) && standing(shooter) && (held == nullptr || !held->is_held())) {
     deal(world, shot.shooter, shot.target, now);
   }
-
-  // The shot leaves the world the moment it lands.
-  world.despawn(shot.id);
-  shot.id = kNoObject;
+  // The missile is deleted the moment it lands (0x004d9cb1..0x004d9cbc);
+  // it has no world object to despawn.
 }
 
 /// A ground shot's impact, 0x004e4520 -> 0x005ac640 -> 0x005a9770 ->
@@ -3221,13 +3235,13 @@ void CombatSystem::advance(World& world, const Turn& turn) {
   for (;;) {
     // Impacts and actions are scanned separately and impacts win an exact tie,
     // so that a shot already in the air lands before the volley that answers
-    // it. Within each kind the ascending scan keeps the lowest id, which makes
-    // the ordering total and therefore reproducible.
+    // it. Within each kind the ascending scan keeps the first -- the lowest
+    // id, and among shots the first launched -- which makes the ordering
+    // total and therefore reproducible.
     bool have_shot = false;
     GameTime shot_when = 0;
     std::size_t shot_index = 0;
     for (std::size_t i = 0; i < shots_.size(); ++i) {
-      if (shots_[i].id == kNoObject) continue;
       // No lower bound. A script's shot (`Catapult::Attack`, `Building::Attack`)
       // is launched in the script pass, after this drain has run over the same
       // slice of time, and can come due inside it; it lands at the head of the
@@ -3263,7 +3277,12 @@ void CombatSystem::advance(World& world, const Turn& turn) {
 
     if (have_shot && (!have_unit || shot_when <= unit_when)) {
       now_ = shot_when;
-      land(world, shots_[shot_index], shot_when);
+      // Off the list before it lands, as the original deletes its missile at
+      // the end of the landing: what the blow sets off finds it gone, and a
+      // shot launched meanwhile goes on the end in launch order.
+      const Projectile shot = shots_[shot_index];
+      shots_.erase(shots_.begin() + static_cast<std::ptrdiff_t>(shot_index));
+      land(world, shot, shot_when);
       continue;
     }
 
@@ -3296,7 +3315,6 @@ void CombatSystem::advance(World& world, const Turn& turn) {
   // Interpolate every shot still in the air to the end of the turn, so that a
   // renderer reading the system between turns sees it move.
   for (Projectile& shot : shots_) {
-    if (shot.id == kNoObject) continue;
     const GameTime span = shot.impact - shot.launched;
     const GameTime done = end - shot.launched;
     if (span <= 0 || done >= span) {
@@ -3316,10 +3334,6 @@ void CombatSystem::advance(World& world, const Turn& turn) {
                                                  shot.origin.y) *
                                                 done / span);
   }
-
-  shots_.erase(std::remove_if(shots_.begin(), shots_.end(),
-                              [](const Projectile& s) { return s.id == kNoObject; }),
-               shots_.end());
 
   if (world_bound_) {
     for (const Combatant& unit : units_) {
@@ -3377,6 +3391,9 @@ void CombatSystem::hash(std::uint64_t& accumulator) const {
       fold(static_cast<std::uint64_t>(static_cast<std::uint32_t>(stat)));
     }
   }
+  // A shot is in the original's checksum by the messages posted to it on the
+  // synchronous thread manager (0x00688150), which fold its handle: 0xffff
+  // for an arrow. Here, launch order and its fields; `id` is 0 for an arrow.
   for (const Projectile& shot : shots_) {
     fold(shot.id);
     fold(shot.shooter);

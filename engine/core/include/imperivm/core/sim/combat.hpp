@@ -950,7 +950,18 @@ struct Combatant {
 /// `1 + 100 * (S / 10)` ms after it leaves for a flight of `S` units
 /// (`launch_at_point`, `siege-fire.md`). **An arrow's flight time is still
 /// INVENTED**: `kProjectileSpeed` world units per second.
+///
+/// **The two kinds stand differently in the handle space**, as in the
+/// original (`docs/formats/blow.md`, "The missile"). An arrow -- a unit's
+/// shot (0x005dc650) or a tower's (0x004df650), both the missile
+/// `CVXArrowShot` (0x004d9740) -- asks its base for no handle and is known
+/// only by its place in `CombatSystem::projectiles()`, launch order; its `id`
+/// is `kNoObject`, the original's 0xffff. A catapult's ground shot, a
+/// `CVXCatapultShot` (0x004e47c0), takes a synchronous handle like a unit,
+/// and its `id` is the world object that stands for it.
 struct Projectile {
+  /// The world object of a ground shot; `kNoObject` for an arrow, which has
+  /// none (see above).
   ObjectId id = kNoObject;
   ObjectId shooter = kNoObject;
   ObjectId target = kNoObject;
@@ -1154,9 +1165,11 @@ struct CombatEvent {
 /// ## Who owns what
 ///
 /// The system holds its combatants in a vector in registration order and finds
-/// them by binary search on id. It reaches the world only to spawn and despawn
-/// projectile objects, so that a shot occupies a handle in the same monotonic
-/// space as everything else — which the dumps say it must.
+/// them by binary search on id. Its shots are a list of its own, in launch
+/// order: an arrow takes no world handle, as the original's missile takes
+/// none (0x004d9740), and only a catapult's ground shot, which takes a
+/// synchronous handle in the original (0x004e47c0), is spawned and despawned
+/// as a world object.
 class CombatSystem final : public System {
  public:
   CombatSystem() = default;
@@ -1769,7 +1782,13 @@ class CombatSystem final : public System {
   void act(World& world, Combatant& unit, GameTime now);
   void strike(World& world, Combatant& attacker, Combatant& defender, GameTime now);
   void launch(World& world, Combatant& attacker, const Combatant& defender, GameTime now);
-  void land(World& world, Projectile& shot, GameTime now);
+  /// The missile's start (`vtbl+0x2c`, 0x004d9a40), which both shooters run
+  /// as soon as the arrow is built: the synchronised draws its look takes,
+  /// two for the offset of its drawn end when `target` is a building, then
+  /// one for its animation variant. Only the draws are kept; what they pick
+  /// is presentation.
+  void start_missile(World& world, ObjectId target);
+  void land(World& world, const Projectile& shot, GameTime now);
   void land_on_ground(World& world, const Projectile& shot, GameTime now);
   /// One side of a blow, read off the world as the calculator reads its
   /// object (`BlowSide`). `params` is the match cache, already filled.

@@ -489,17 +489,63 @@ synchronised object and the asynchronous one otherwise, and gives it none
 (0xffff) when it asks for no handle. A unit asks for the synchronous list
 (0x005d3170, through 0x005b4ca0); `CVXFeedback`'s constructor (0x005180d0,
 which 0x005183e0 runs) asks for the asynchronous one, and so does its load
-constructor (0x00518520). **A shot asks for none**: the missile's
-constructor (0x004d9740, which both shooters run, 0x005dc650 and
-0x004df650) passes no-handle to the same chain, and keeps the shooter's and
-the target's handles in its own words. It is also put on the second of the game's three
-thread managers, `[game+0x1298]`, where every other object is on
-`[game+0x1294]`; the game builds the three in 0x00525dd0, and only the
-first is given a checksum word (0x009a7058), which every message posted
-to one of its objects folds in (0x00688150). So **a feedback object moves
-neither the synchronous handles nor the checksum**: a unit or a shot spawned
+constructor (0x00518520). The feedback object is also put on the second of
+the game's three thread managers, `[game+0x1298]` (0x005180d0 passes it to
+its base), where every other object is on `[game+0x1294]`; the game builds
+the three in 0x00525dd0, and only the first is given a checksum word
+(0x009a7058), which every message posted to one of its objects folds in
+(0x00688150), together with the object's handle. So **a feedback object
+moves neither the synchronous handles nor the checksum**: a unit spawned
 after a blow with a special takes the handle it would have taken without
-it.
+it. **An arrow asks for no handle at all** (see "The missile" below); a
+catapult's shot asks for a synchronous one.
+
+### The missile
+
+The shot a unit looses (0x005dc650) and the one a tower looses
+(`Building::Attack`, 0x004df650) are the same object, a `CVXArrowShot`, built
+by 0x004d9740 and started at once through its `vtbl+0x2c`; read in round 18,
+batch 1.
+
+* **No handle.** 0x004d9740 calls its base (0x0053d4d0) asking for no handle
+  and for the default thread manager; down the chain (0x0069f6b0,
+  0x006876f0) 0x00531840 is told not to take one, so the arrow's handle word
+  is 0xffff. It keeps the target's handle at `[obj+0x70]` and the shooter's
+  at `[obj+0x72]`, the shooter's player at `[obj+0x88]` when the shooter is a
+  unit (-1 otherwise), its start and end at `[obj+0x74]..[obj+0x80]`, a
+  drawn flag at `[obj+0x84]`, and a height at `[obj+0x8c]` for a flying
+  target (0x0051b040), -1 otherwise. A catapult's shot is a different object
+  (`CVXCatapultShot`, 0x004e47c0), and its constructor asks the same base for
+  a **synchronous** handle.
+* **Where it lives.** On the default manager, `[game+0x1294]`, the
+  synchronous one with the checksum. Nothing walks a list of arrows each
+  turn: the arrow lives by the messages posted to it, and each one folds
+  the checksum with its handle, 0xffff.
+* **Its start** (`vtbl+0x2c`, 0x004d9a40). When the target exists and
+  carries the building bit (`[target+0x2c] & 0x800000`), two draws
+  Range(0, 100) on the synchronised generator, `50 - draw` for the y and
+  then the x offset of the point it is drawn flying to. Then, whatever the
+  target, **one more draw** Range(0, 100): animation slot 0 below 50 and 2
+  otherwise, 0 where the shot's entity has fewer animations
+  (`[entity+0x1468]`). It starts that animation (0x0053e6c0) towards the
+  offset end, with no delay and the declared duration, and posts itself
+  message 0xe1 after 200 ms (0x004d95a0, its visual), or for a flying target
+  0xff every 50 ms (0x004d98b0, the visual following the height).
+* **Its landing** (`vtbl+0x54`, 0x004d9bb0) is the animation's end handler.
+  It deals the blow (0x00511550) while shooter and target both exist, neither
+  answers that it is going (`vtbl+0x50`), and the target is not a unit held in
+  a building or a ship (`[unit+0x154]`); a building target then gets fire
+  marks at the end point (0x004e0b90, presentation), and the class's sound is
+  played. Then it hides its visual, cancels every message pending on it
+  (0x00687c80) and deletes itself. So the flight lasts the animation, not a
+  speed over a distance.
+* **The save.** The arrow is a persistable class (type 0x24, registered at
+  0x00685fb7, load factory 0x0067ef50): its body (`vtbl+4`, 0x004d9610) is an
+  `ArrowShot` section with the two handles, the drawn flag, the player, the
+  start, the end and the height, and its load constructor (0x0067e8d0) builds
+  it on a base that takes no handle (0x004f86a0). How the save reaches an
+  object with no handle -- most likely through the messages pending on it --
+  was not followed.
 
 Its life: 0x005183e0 stores the expiry, the game clock `[game+0x1258]` plus
 the lifetime or -1 for none, at `[obj+0x80]`, the receiving unit's handle at
@@ -642,16 +688,33 @@ folds it, so it lives as long as the process.
   visual): `BlowEffect` lists them and nothing is spawned. In the original
   each takes an **asynchronous** handle on the asynchronous thread manager
   (see the effect ids above), so neither the synchronous handles every
-  unit, building and shot takes nor the checksum moves; allocating them in
+  unit and building takes nor the checksum moves; allocating them in
   this engine's one handle space would put every later handle out of step.
   What is not reproduced is the asynchronous space itself and the objects'
   own life in it, which nothing in the simulation reads: presentation.
-* **A shot takes a handle here and none in the original** (0x004d9740, see
-  the effect ids above): `CombatSystem::strike` spawns each projectile as a
-  world object, so every later unit's handle runs one higher per shot than
-  the original's. Found in round 17, batch 9, and not changed there: the
-  shot's id keys its record and its save and hash, and taking it out of the
-  handle space is a port of its own.
+* **The arrow takes no handle** (round 18, batch 1; "The missile" above).
+  `CombatSystem::launch`, used by a unit's blow and a tower's
+  `Building::Attack`, spawns no world object for it: its `Projectile::id` is
+  `kNoObject`, the original's 0xffff, and it is known only by its place in
+  `CombatSystem::projectiles()`, in launch order. A unit spawned after a
+  shot takes the handle gbr.exe gives it. The landing takes the arrow off
+  that list before it deals, and the drain still lands a tie in launch
+  order. The arrow is saved and hashed in the combat section as before, with
+  its id 0 (section layout unchanged). A catapult's ground shot
+  (`launch_at_point`) does take a synchronous handle in the original
+  (0x004e47c0), so it is still spawned as a world object and despawned when
+  it lands. Until round 18, every later handle ran one higher per arrow.
+* **The missile's start** (0x004d9a40, `CombatSystem::start_missile`): the
+  two draws against a building and the one draw against anything, on
+  `World::rng()`, right after the arrow is listed. The slot and the offsets
+  they pick, the animation, and the 0xe1 / 0xff messages are presentation:
+  this engine draws no arrow. Before round 18 an arrow drew nothing, so the
+  stream ran one or three draws behind per shot.
+* **Not yet the original's:** an arrow's flight time is still
+  `kProjectileSpeed` over the distance. In the original it is the length of
+  the animation its start picks. A catapult's shot is spawned when `Attack`
+  is called, not at the attack animation's action moment, where 0x004e22a0
+  builds it, so its handle is drawn early.
 * **The dealer** (`CombatSystem::deal`, D1..D11): the training branch
   (`training_blow`), then the calculator; the curse lifted and the disease
   bit set as the calculator does; the score booked raw before the damage
