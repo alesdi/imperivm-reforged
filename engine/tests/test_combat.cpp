@@ -1801,6 +1801,11 @@ TEST(a_blow_pays_from_the_worlds_stamina) {
   CHECK(combat.find(p.a)->stamina == 1);
   // Disease attack wrote the defender's bit itself (C41).
   CHECK(world.state(p.b)->flags.diseased);
+  // A blow dealt outside a turn -- on the timer, after a hero skill wrote the
+  // world's stamina -- reads the world's too: 16 and twice 4, less the 6.
+  REQUIRE(world.set_stamina(p.a, 4));
+  REQUIRE(combat.blow(world, p.a, p.b, world.time()));
+  CHECK(combat.last_blow().damage() == 18);
 }
 
 /// C6 through the dealer: a cursed attacker's blow lands nothing and lifts
