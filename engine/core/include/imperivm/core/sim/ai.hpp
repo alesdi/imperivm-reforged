@@ -604,11 +604,10 @@ class AiSystem final : public System {
   // sorted vector, and ride in the save with the rest of it.
   //
   // `Ships(player, lsa)` reads a second per-player `int` at `+0x54` of the
-  // same record, a count of the player's ships in the area that the engine
-  // maintains as ships move. This engine answers it with a census over the
-  // world instead -- every living ship the player owns whose position falls
-  // in the area -- which is the same number whenever the maintained count is
-  // right, and is stated as computed rather than kept.
+  // same record, the **kept ship count**, and beside it at `+0x94` the record
+  // keeps a list of ship handles. Both are kept below (`ShipCount`,
+  // `ShipList`), raised and lowered where the original does it; see the
+  // kept-count note further down and docs/formats/ai-ships.md.
 
   /// One counter. `player` is a table index, 0..15.
   struct ShipNeed {
@@ -670,6 +669,51 @@ class AiSystem final : public System {
   /// **For the save reader only.** Refuses rows that are not strictly ascending.
   bool adopt_ship_transports(std::vector<ShipTransport> rows);
 
+  // -- the kept ship count and the area's ship list ------------------------
+  //
+  // **Not a census.** The original's area record keeps, per player, a count
+  // at `+0x54 + 4p` that the AI register (0x0041f310) raises by one for a
+  // `CVXShip` on **every** call that passes its gates -- whether or not the
+  // ship is registered already -- and the unregister (0x0041eee0) lowers by
+  // one, floored at zero, only for a ship that is registered (its squad
+  // handle set). The register also pushes the ship's handle on the back of
+  // the area's list at `+0x94` (0x0044fd30), duplicates and all; the
+  // unregister erases the first equal entry (0x0041ee70); the route search's
+  // ship scan (0x00441730) erases an entry whose object is gone or dead as it
+  // walks past it. Neither moves when a ship moves: the area is the one the
+  // ship stood in (or, held, the area its holder's settlement caches) at the
+  // call. The persist (0x0044fab0) writes `shipcount` and `ships` per area,
+  // so both ride in the save here. docs/formats/ai-ships.md has the callers.
+
+  /// One kept count. `player` is a table index, 0..15.
+  struct ShipCount {
+    LsaId lsa = kNoLsa;
+    PlayerId player = kNoPlayer;
+    std::int32_t count = 0;
+  };
+  /// One area's ship list, in push order.
+  struct ShipList {
+    LsaId lsa = kNoLsa;
+    std::vector<ObjectId> ships;
+  };
+  /// The kept count (0x0043ee40), 0 for a pair nothing has raised.
+  [[nodiscard]] std::int32_t ships_kept(PlayerId player, LsaId lsa) const noexcept;
+  /// The register's ship half: one more for `player` in `lsa`, and `ship`
+  /// pushed on the back of the area's list.
+  void raise_ship_count(PlayerId player, LsaId lsa, ObjectId ship);
+  /// The unregister's ship half: one fewer, floored at zero, and the first
+  /// entry equal to `ship` erased from the area's list.
+  void lower_ship_count(PlayerId player, LsaId lsa, ObjectId ship);
+  /// The area's list, in push order (empty for an area with none).
+  [[nodiscard]] std::span<const ObjectId> ship_list(LsaId lsa) const noexcept;
+  /// Erase entry `at` of the area's list (the scan's prune).
+  void erase_ship_list_entry(LsaId lsa, std::size_t at) noexcept;
+  /// Ascending by `(lsa, player)` and by `lsa`, for the save.
+  [[nodiscard]] std::span<const ShipCount> ship_counts() const noexcept { return ship_counts_; }
+  [[nodiscard]] std::span<const ShipList> ship_lists() const noexcept { return ship_lists_; }
+  /// **For the save reader only.** Refuse rows out of order.
+  bool adopt_ship_counts(std::vector<ShipCount> counts, std::vector<ShipList> lists);
+
   /// Whether the AI manager exists -- `[0x8c8e58]` in `gbr.exe`, written 1 by
   /// the match-start bootstrap (0x00450ad2) before it builds the node table
   /// and starts the computer players, and never cleared for the match.
@@ -695,6 +739,10 @@ class AiSystem final : public System {
   std::vector<ShipNeed> ship_needs_;
   /// Ascending by ship id; see the transport-order note above.
   std::vector<ShipTransport> ship_transports_;
+  /// Ascending by `(lsa, player)`; see the kept-count note above.
+  std::vector<ShipCount> ship_counts_;
+  /// Ascending by `lsa`; an emptied list stays, as the record's does.
+  std::vector<ShipList> ship_lists_;
 
   struct ProfileEntry {
     std::string name;  ///< uppercased
@@ -719,6 +767,23 @@ class AiSystem final : public System {
 
 /// The world's `AiSystem`, or null. Found by name, like every other domain's.
 [[nodiscard]] AiSystem* ai_system_of(World& world) noexcept;
+
+/// The AI register's ship half (0x0041f310, before its owner test): for a
+/// `CVXShip`, with the AI up, one more in the kept count of its owner in its
+/// area and its handle on the area's list. Run on **every** register call
+/// that passes the gates ahead of it (the editor latch, the AI world pointer,
+/// the template and noselect bits), registered or not; `HeroSystem::
+/// ai_register` is its one caller. Nothing for an object that is not a ship.
+void ai_ship_register(World& world, ObjectId id);
+/// The unregister's ship half (0x0041eee0, after the take): for a ship, one
+/// fewer, floored at zero, and its first entry off the area's list. The
+/// caller owns the gates (a registered ship with an owner).
+void ai_ship_unregister(World& world, ObjectId id);
+/// The area both halves read: the node under the ship's `posRH` (0x0044e940)
+/// when it stands on the map, else the water area cached on its holder's
+/// settlement's central building (`[central+0x1f6]`). `kNoLsa` when the
+/// holder is no settlement's (the original reads through a null there).
+[[nodiscard]] LsaId ai_ship_area(World& world, ObjectId id);
 
 /// `viewer`'s record for `node` (`[ai+0x40]` then `[ai+0x30]`), or null: no
 /// AI system, a viewer outside 0..15, a player nobody seeded, a node the view

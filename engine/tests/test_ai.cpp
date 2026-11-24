@@ -3098,8 +3098,9 @@ TEST(ai_registration_overwrites_nothing) {
   // `AIRun` arities and `AIBreakScript/1`, the AI's own launcher, which the
   // eleventh round moved here from the scheduler's builtins, + `AIStart/1`,
   // `AIStart/2` and `AIBreakScript/2`, which no shipped script calls and the
-  // fifteenth round binds as the original registers them.
-  CHECK(solo == 96);
+  // fifteenth round binds as the original registers them, + `AllyShips/2`
+  // and `EnemyShips/2`, the kept count's two other readers (round 18).
+  CHECK(solo == 98);
   CHECK(with_ai == solo);
   CHECK(everyone > 0);
 
@@ -4738,7 +4739,7 @@ TEST(recruit_drops_a_squad_whose_route_crosses_a_refused_way_point) {
 
 /// The three counters are one table keyed by `(player, lsa)`, the census is a
 /// walk over the world, and the table rides in the save.
-TEST(ai_ship_needs_count_per_player_and_area_and_ships_are_a_census) {
+TEST(ai_ship_needs_count_per_player_and_area_and_ships_are_a_kept_count) {
   Fixture f;
   const script::CallKind kFree = script::CallKind::free_function;
   const auto needs = [&](std::int32_t player, std::int32_t lsa) {
@@ -4791,23 +4792,65 @@ TEST(ai_ship_needs_count_per_player_and_area_and_ships_are_a_census) {
   CHECK(!refusing.adopt_ship_needs({AiSystem::ShipNeed{1, 7, 1}, AiSystem::ShipNeed{1, 3, 1}}));
   CHECK(refusing.adopt_ship_needs({AiSystem::ShipNeed{1, 3, 1}, AiSystem::ShipNeed{1, 7, 1}}));
 
-  // Ships: the player's living ships whose position falls in the area. This
-  // world has no partition, so every point is in area 0 and no other.
-  const World::ShipIds mine = f.world.spawn_ship(nullptr, imperivm::core::kNoClass);
-  const World::ShipIds theirs = f.world.spawn_ship(nullptr, imperivm::core::kNoClass);
-  const World::ShipIds wreck = f.world.spawn_ship(nullptr, imperivm::core::kNoClass);
-  for (const World::ShipIds& ship : {mine, theirs, wreck}) {
-    f.world.set_position(ship.ship, Point{100, 100});
-    f.world.set_health(ship.ship, 100);
-  }
-  f.world.set_owner(mine.ship, 1);
-  f.world.set_owner(wreck.ship, 1);
-  f.world.set_owner(theirs.ship, 2);
-  f.world.set_health(wreck.ship, 0);
-  CHECK(ships(2, 0) == 1);
-  CHECK(ships(3, 0) == 1);
+  // Ships: the kept count (0x0043ee40), not the ships on the map. Raised
+  // once per register call, lowered with a floor at zero (0x0041eee0).
   CHECK(ships(2, 5) == 0);
-  CHECK(ships(40, 0) == 0);
+  f.ai.raise_ship_count(1, 5, 70);
+  f.ai.raise_ship_count(1, 5, 70);
+  f.ai.raise_ship_count(2, 5, 71);
+  f.ai.raise_ship_count(1, 4, 72);
+  CHECK(ships(2, 5) == 2);
+  CHECK(ships(3, 5) == 1);
+  CHECK(ships(2, 4) == 1);
+  CHECK(ships(40, 5) == 0);
+  // `AllyShips` and `EnemyShips`: the counts summed over the viewer's allies
+  // (never the viewer itself) or its enemies, by the viewer's own row.
+  const auto side = [&](const char* name, std::int32_t player, std::int32_t lsa) {
+    const script::HostOutcome out =
+        f.call(kFree, name, {script::Value::integer(player), script::Value::integer(lsa)}, 1);
+    CHECK(out.status == script::HostStatus::ok);
+    return out.value.is_integer() ? out.value.as_integer() : -1;
+  };
+  f.world.players().set(0, 1, Relation::allied, true);
+  CHECK(side("AllyShips", 1, 5) == 2);
+  CHECK(side("EnemyShips", 1, 5) == 1);
+  CHECK(side("AllyShips", 2, 5) == 0);
+  CHECK(side("EnemyShips", 3, 5) == 2);
+  CHECK(side("AllyShips", 40, 5) == 0);
+  f.world.players().set(0, 1, Relation::allied, false);
+  CHECK(side("EnemyShips", 1, 5) == 3);
+  // The list keeps push order and the copy; a lowering takes the first.
+  REQUIRE(f.ai.ship_list(5).size() == 3);
+  CHECK(f.ai.ship_list(5)[0] == 70);
+  CHECK(f.ai.ship_list(5)[1] == 70);
+  CHECK(f.ai.ship_list(5)[2] == 71);
+  f.ai.lower_ship_count(1, 5, 70);
+  CHECK(ships(2, 5) == 1);
+  REQUIRE(f.ai.ship_list(5).size() == 2);
+  CHECK(f.ai.ship_list(5)[0] == 70);
+  CHECK(f.ai.ship_list(5)[1] == 71);
+  // Floored: a count at zero stays there, and the entry still leaves.
+  f.ai.lower_ship_count(2, 5, 71);
+  f.ai.lower_ship_count(2, 5, 71);
+  CHECK(ships(3, 5) == 0);
+  CHECK(f.ai.ship_list(5).size() == 1);
+  f.ai.lower_ship_count(3, 9, 90);  // never raised: nothing
+  CHECK(ships(4, 9) == 0);
+  // The save carries the counts and the lists.
+  std::vector<std::byte> again;
+  f.ai.serialize(again);
+  AiSystem reloaded;
+  REQUIRE(reloaded.deserialize(again).ok());
+  CHECK(reloaded.ships_kept(1, 5) == 1);
+  CHECK(reloaded.ships_kept(1, 4) == 1);
+  REQUIRE(reloaded.ship_list(5).size() == 1);
+  CHECK(reloaded.ship_list(5)[0] == 70);
+  CHECK(reloaded.ship_list(4).size() == 1);
+  std::vector<std::byte> twice;
+  reloaded.serialize(twice);
+  CHECK(twice == again);
+  CHECK(!refusing.adopt_ship_counts({AiSystem::ShipCount{5, 1, 1}, AiSystem::ShipCount{4, 1, 1}}, {}));
+  CHECK(!refusing.adopt_ship_counts({}, {AiSystem::ShipList{5, {}}, AiSystem::ShipList{5, {}}}));
 }
 
 // --------------------------------------------------------------------------

@@ -17,9 +17,11 @@
 #include "imperivm/core/formats/grid.hpp"
 #include "imperivm/core/game/class_graph.hpp"
 #include "imperivm/core/game/entity.hpp"
+#include "imperivm/core/sim/ai.hpp"
 #include "imperivm/core/sim/economy.hpp"
 #include "imperivm/core/sim/entrance.hpp"
 #include "imperivm/core/sim/gaika_table.hpp"
+#include "imperivm/core/sim/hero.hpp"
 #include "imperivm/core/sim/host_context.hpp"
 #include "imperivm/core/sim/lsa.hpp"
 #include "imperivm/core/sim/host_setup.hpp"
@@ -1260,6 +1262,81 @@ TEST(water_lsa_answers_the_area_the_shipyards_water_door_stands_in) {
   // trap here would stop a mission where the original quietly kept going.
   CHECK(dry_out.status == script::HostStatus::ok);
   CHECK(dry_out.value.as_integer() == kNoLsa);
+}
+
+/// **The AI register's area for a held ship is the cache, with no class
+/// test** (0x0041f310: `[ship+0x154]` -> `[holder+0xc]` -> `[+0x8c]` ->
+/// `[central+0x1f6]`): a ship in a settlement's holder is counted in the
+/// water area its central building caches, shipyard or not, where `WaterLsa`
+/// answers 0 for anything but a shipyard. On the map it is the area of the
+/// node under it.
+TEST(the_ai_ship_area_of_a_held_ship_is_its_settlements_cached_water_area) {
+  Bench b{-1, /*shore=*/true};
+  // The yard faces the eastern sea, so its cache is not the western sea a
+  // holder record standing at the map's corner would read.
+  const LsaId sea = b.world.lsa().at(Point{924, 512});
+  const LsaId west = b.world.lsa().at(Point{100, 512});
+  const LsaId land = b.world.lsa().at(Point{512, 512});
+  REQUIRE(sea != kNoLsa && land != kNoLsa && sea != land && west != sea);
+  constexpr std::string_view kEastYard =
+      "<entity name=\"yard\" type=\"vx/building\" variations=\"1\" pass_file=\"\" radius=\"1\">"
+      "<points>"
+      "<point idx=\"0\" type=\"1\" x=\"280\" y=\"0\"/>"
+      "<point idx=\"1\" type=\"2\" x=\"280\" y=\"0\"/>"
+      "<point idx=\"2\" type=\"2\" x=\"412\" y=\"0\"/>"
+      "</points>"
+      "</entity>";
+  const Result<Entity> yard = Entity::parse(bytes_of(kEastYard));
+  REQUIRE(yard.ok());
+  const ObjectId hut = b.dock(yard.value(), "Hut");
+  // With a holder record, which `Bench::town` does not mint.
+  const World::SettlementIds ids = b.world.spawn_settlement(0);
+  SettlementInit init;
+  init.kind = SettlementKind::stronghold;
+  init.settlement_object = ids.settlement;
+  init.holder_object = ids.holder;
+  init.warehouse_object = ids.warehouse;
+  init.anchor = hut;
+  init.owner = 1;
+  init.max_units = 4;
+  const SettlementId village = b.economy.create(b.world, init);
+  b.cut();
+  const Settlement* s = b.economy.settlements().find(village);
+  REQUIRE(s != nullptr);
+  CHECK(member_call(b, "WaterLsa", {b.settlement_value(village)}).value.as_integer() == kNoLsa);
+  CHECK(central_water_lsa(b.world, *s) == sea);
+
+  const ObjectId ship = b.world.spawn(NativeClass::ship, nullptr, kNoClass);
+  REQUIRE(b.world.set_position(ship, Point{512, 512}));
+  CHECK(ai_ship_area(b.world, ship) == land);
+  REQUIRE(garrison_enter(b.world, village, ship, /*force=*/true));
+  REQUIRE(b.world.state(ship)->is_held());
+  CHECK(ai_ship_area(b.world, ship) == sea);
+  CHECK(b.world.lsa().at(b.world.resolve_position(ship)) != sea);
+
+  // **`Ship::ShowBuildAnimation` registers a new ship twice** (0x005c6a60):
+  // the unboard's `SetPos` runs the move hook, which registers the ship
+  // `CreateShip` left unregistered, and the slide's end calls the register
+  // again. Both count, in the area the held ship's settlement caches.
+  HeroSystem heroes;
+  AiSystem ai;
+  REQUIRE(b.world.add_system(&heroes));
+  REQUIRE(b.world.add_system(&ai));
+  heroes.start(b.world);
+  ai.start_manager();
+  REQUIRE(b.world.set_owner(ship, 0));
+  REQUIRE(b.world.set_health(ship, 100));
+  const auto show = [&] {
+    return member_call(b, "ShowBuildAnimation",
+                       {script::Value::object(kTypeObj, ship), pack_point(Point{40, 0})});
+  };
+  CHECK(show().status == script::HostStatus::ok);
+  CHECK(b.world.state(ship)->flags.ai_registered);
+  CHECK(ai.ships_kept(0, sea) == 2);
+  CHECK(ai.ship_list(sea).size() == 2);
+  // A ship already registered gets the end's register alone.
+  CHECK(show().status == script::HostStatus::ok);
+  CHECK(ai.ships_kept(0, sea) == 3);
 }
 
 /// **The first water door, not the last**, which takes a yard with a door in

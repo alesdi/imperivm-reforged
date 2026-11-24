@@ -82,7 +82,7 @@ namespace {
 /// itself. `save_hero_section_round_trips` pins the half that is checkable --
 /// that a section carrying the previous number is refused rather than decoded
 /// short -- and this comment is the other half.
-constexpr std::uint32_t kSectionVersion = 53;  // 53: the combat section no longer carries the bloodlust, a process global (`sim/process.hpp`); 52: the combat section carries `SetGlobalBloodlust`'s byte (`CombatSystem::bloodlust_`) and no per-player level addends, and no combatant or shot carries `ignores_armour`; 51: the explored-everywhere flag gone from the fog section again, as the original's persist (0x00517860) leaves it out; 50: the walk on the animation clock in the movement section -- each route its sampled media (`MoveState::route`, stride and stepper), the march step's deadline and arrival mark and the waiting call's bit (`form_deadline`, `arrived_mark`, `wake_on_arrival`), the formation's pace and its slowest and fastest units, and the accumulator, the hold, the step offsets and the march rate gone; 49: the exploration map's explored-everywhere flag in the fog section (`ExplorationMap::explored_everywhere`, which `GAIKA::Explored` reads); 48: a formation's blocking gate and the gate each route aimed at it has compared sides at, in the movement section (`Formation::blocking_gate`, `MoveState::gate_seen`); 47: Place's deferred-filing list gone from the hero section (the move hook files a unit at every move, docs/formats/squad.md); 46: the hero section's squad watermark replaced by Place's deferred-filing list (every other birth registers and files its unit at once, docs/formats/class-tally.md); 45: the sixteen class tallies `Count` reads in the hero section (`HeroSystem::class_tally_`); 44: the formation's own route and its timing in the movement section (`Formation::route`, `going_on`, `goal`, `range`, `min_range`, `deadline`, `speed`, `joined`), and a route aimed at a formation (`MoveState::form_aimed`, `form_seen`, `form_lock_laid`); 43: the smart pathfinder's build in the movement section, as the calls that made it (`PathFinder::smart_calls`); 42: no finishing commands in the command section (an `onfinish` runs inside the end that calls it), and a command's list (`Command::list`, a ship's `unboard`); 41: every combatant's danger counter and its stamp (`Combatant::danger`, `danger_time`), and a hero's experience pool (`HeroRecord::experience_pool`); 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
+constexpr std::uint32_t kSectionVersion = 54;  // 54: the AI section's kept ship counts by (area, player) and each area's ship list (`AiSystem::ship_counts_`, `ship_lists_`; docs/formats/ai-ships.md); 53: the combat section no longer carries the bloodlust, a process global (`sim/process.hpp`); 52: the combat section carries `SetGlobalBloodlust`'s byte (`CombatSystem::bloodlust_`) and no per-player level addends, and no combatant or shot carries `ignores_armour`; 51: the explored-everywhere flag gone from the fog section again, as the original's persist (0x00517860) leaves it out; 50: the walk on the animation clock in the movement section -- each route its sampled media (`MoveState::route`, stride and stepper), the march step's deadline and arrival mark and the waiting call's bit (`form_deadline`, `arrived_mark`, `wake_on_arrival`), the formation's pace and its slowest and fastest units, and the accumulator, the hold, the step offsets and the march rate gone; 49: the exploration map's explored-everywhere flag in the fog section (`ExplorationMap::explored_everywhere`, which `GAIKA::Explored` reads); 48: a formation's blocking gate and the gate each route aimed at it has compared sides at, in the movement section (`Formation::blocking_gate`, `MoveState::gate_seen`); 47: Place's deferred-filing list gone from the hero section (the move hook files a unit at every move, docs/formats/squad.md); 46: the hero section's squad watermark replaced by Place's deferred-filing list (every other birth registers and files its unit at once, docs/formats/class-tally.md); 45: the sixteen class tallies `Count` reads in the hero section (`HeroSystem::class_tally_`); 44: the formation's own route and its timing in the movement section (`Formation::route`, `going_on`, `goal`, `range`, `min_range`, `deadline`, `speed`, `joined`), and a route aimed at a formation (`MoveState::form_aimed`, `form_seen`, `form_lock_laid`); 43: the smart pathfinder's build in the movement section, as the calls that made it (`PathFinder::smart_calls`); 42: no finishing commands in the command section (an `onfinish` runs inside the end that calls it), and a command's list (`Command::list`, a ship's `unboard`); 41: every combatant's danger counter and its stamp (`Combatant::danger`, `danger_time`), and a hero's experience pool (`HeroRecord::experience_pool`); 40: the heroes' formations in the movement section (`MovementSystem::formation_objects_`), and `MoveState::formation`, `formation_radius`, `form_lock` and `form_extent` gone into them; 39: the GAIKA nodes' squad deques, in filing order (`SquadTable::filed_`), and the MAIKA list (`SquadTable::routes_`); 38: a route's failed-search bit (`MoveState::route_failed`); 37: the AI section keeps each seat's `AIRun` ids and settlement slots on its row, and no script-owner table (`AiPlayer::runs`, `settlements`); 36: the economy's wagon loyalty rows (`EconomySystem::wagon_loyalty_`), and its shipment table gone (a settlement's mule is a world object); 35: a squad's `Enemies` list and look timer (`Squad::enemies`, `look_due`); 34: the units' commanded flag (`CommandSystem::commanded`); 33: the pace a march gives each unit (`MoveState::march_rate`); 32: a march's formation radius (`MoveState::form_extent`); 31: the thread each running campaign sequence waits on (`SequenceEntry::running`); 30: the AI order queues and a squad's index into them (`AiOrderQueue`, `Squad::order`); 29: `Unit::Stop`'s request and a march's lock flag (`MoveState::stop_requested`, `form_lock`); 28: `Goto`'s failure stamp (`MoveState::goto_failed_at`) where the order's start time was; 27: the free-spot search's flags (`MoveState::free_spot_tried`, `free_spot_aimed`); 26: a route's gate crossings (`MoveState::gate_crossings`); 25: a route's owned destination lock (`MoveState::dest_lock`); 24: avoidance -- the step, the wait and the march on every `MoveState`, and the ownerless locks; 23: the match's eight report counters; 22: the fog's two bits a slot and the partial cells' fine records; 21: the hero's skill-point balance derived, not saved; 20: the setup's four rules on the match; 19: the command's row name and the queue's progress bar; 18: the squad watermark and the finishing commands; 17: the AI manager flag; 16: `MoveState::walking`; 15: the unit a food wagon follows; 14: the ship transport orders; 13: `Unit::AddBonus`'s five addends; 12: the commands a script has taken away
 
 // Four-byte tags, little-endian, so a hex dump of a section names itself.
 constexpr std::uint32_t kMovementMagic = 0x564F4D49u;   // "IMOV"
@@ -1837,6 +1837,21 @@ void AiSystem::serialize(std::vector<std::byte>& out) const {
     bytes::put_i32(out, t.where.x);
     bytes::put_i32(out, t.where.y);
   }
+  // The kept ship counts, ascending by `(lsa, player)`, and each area's ship
+  // list in push order -- the original's persist writes both per area
+  // (0x0044fab0: `shipcount`, `ships`). Not hashed, as nothing here is.
+  bytes::put_u32(out, static_cast<std::uint32_t>(ship_counts_.size()));
+  for (const ShipCount& c : ship_counts_) {
+    bytes::put_i32(out, c.lsa);
+    bytes::put_u8(out, c.player);
+    bytes::put_i32(out, c.count);
+  }
+  bytes::put_u32(out, static_cast<std::uint32_t>(ship_lists_.size()));
+  for (const ShipList& l : ship_lists_) {
+    bytes::put_i32(out, l.lsa);
+    bytes::put_u32(out, static_cast<std::uint32_t>(l.ships.size()));
+    for (const ObjectId ship : l.ships) bytes::put_u32(out, ship);
+  }
   // Whether the manager exists; see `AiSystem::manager_started`.
   put_bool(out, manager_started_);
 }
@@ -1939,12 +1954,37 @@ Status AiSystem::deserialize(std::span<const std::byte> data) {
     }
     transports.push_back(std::move(t));
   }
+  std::uint32_t count_rows = 0;
+  if (!reader.u32(count_rows)) return FormatError::truncated;
+  std::vector<ShipCount> counts;
+  for (std::uint32_t i = 0; i < count_rows; ++i) {
+    ShipCount c;
+    if (!bytes::get_i32(reader, c.lsa) || !reader.u8(c.player) || !bytes::get_i32(reader, c.count)) {
+      return FormatError::truncated;
+    }
+    counts.push_back(c);
+  }
+  std::uint32_t list_rows = 0;
+  if (!reader.u32(list_rows)) return FormatError::truncated;
+  std::vector<ShipList> lists;
+  for (std::uint32_t i = 0; i < list_rows; ++i) {
+    ShipList l;
+    std::uint32_t length = 0;
+    if (!bytes::get_i32(reader, l.lsa) || !reader.u32(length)) return FormatError::truncated;
+    if (length > reader.remaining() / 4) return FormatError::truncated;
+    l.ships.resize(length);
+    for (ObjectId& ship : l.ships) {
+      if (!reader.u32(ship)) return FormatError::truncated;
+    }
+    lists.push_back(std::move(l));
+  }
   bool manager_started = false;
   if (!get_bool(reader, manager_started)) return FormatError::truncated;
 
   if (const Status status = finish(reader); !status.ok()) return status;
   if (!adopt_ship_needs(std::move(needs))) return FormatError::malformed;
   if (!adopt_ship_transports(std::move(transports))) return FormatError::malformed;
+  if (!adopt_ship_counts(std::move(counts), std::move(lists))) return FormatError::malformed;
 
   players_ = std::move(players);
   manager_started_ = manager_started;

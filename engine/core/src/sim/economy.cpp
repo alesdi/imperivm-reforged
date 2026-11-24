@@ -1540,6 +1540,66 @@ HostOutcome m_get_enter_exit(CallContext& ctx) {
 /// `IsHeirOf`, defined below with the class walks that use it most.
 [[nodiscard]] bool is_class(World& world, const WorldObject& slot, std::string_view name);
 
+/// The water area cached on a settlement's central building (`[central+0x1f6]`),
+/// computed as the table cut computes it; `m_water_lsa` below says how. No
+/// class test: `WaterLsa` adds the `BaseShipyard` one, the AI register reads
+/// the cache as it is (0x0041f310).
+LsaId water_lsa_of_central(World* world, const Settlement* s) {
+  const GaikaTable& table = world->gaika();
+  if (!table.built()) return LsaId{0xffff};
+
+  MovementSystem* movement = movement_system(*world);
+  std::vector<Point> doors;
+  building_doors(*world, movement == nullptr ? nullptr : &movement->grid(), s->anchor,
+                 kExitPointType, true, doors);
+  // The original reads the empty list's first point through its null data
+  // pointer here. That is a fault rather than a behaviour, and 0 is the
+  // answer its own "not a shipyard" arm already gives.
+  if (doors.empty()) return kNoLsa;
+
+  const auto area_of = [&](GaikaId node) {
+    const GaikaNode* record = table.record(node);
+    return record == nullptr ? kNoLsa : record->lsa;
+  };
+  const LsaId land = area_of(table.for_settlement(s->object));
+  const Point door = doors.front();
+
+  // 1. The node under the door.
+  const GaikaId under = table.at(door);
+  const LsaId under_area = area_of(under);
+  if (under != kNoGaika && under_area != kNoLsa && world->lsa().water(under_area) &&
+      under_area != land) {
+    return under_area;
+  }
+  // 2. The three rings.
+  GaikaId best = kNoGaika;
+  std::uint32_t best_coverage = 0;
+  const auto consider = [&](std::int32_t x, std::int32_t y) {
+    const GaikaId node = table.at(Point{x, y});
+    const GaikaNode* record = table.record(node);
+    if (node == kNoGaika || record == nullptr || record->lsa == kNoLsa) return;
+    if (!world->lsa().water(record->lsa) || record->lsa == land) return;
+    if (record->settlement != kNoObject) return;
+    const auto coverage = static_cast<std::uint16_t>(record->coverage);
+    if (coverage <= best_coverage) return;
+    best_coverage = coverage;
+    best = node;
+  };
+  for (std::int32_t ring = 1; ring <= 3; ++ring) {
+    const std::int32_t reach = ring * kLsaSlotSize;
+    for (std::int32_t j = -ring; j <= ring; ++j) {
+      consider(door.x - reach, door.y + j * kLsaSlotSize);
+      consider(door.x + reach, door.y + j * kLsaSlotSize);
+    }
+    for (std::int32_t j = -ring; j <= ring; ++j) {
+      consider(door.x + j * kLsaSlotSize, door.y - reach);
+      consider(door.x + j * kLsaSlotSize, door.y + reach);
+    }
+  }
+  // 3. Nothing found: the node under the door, as it is.
+  return area_of(best != kNoGaika ? best : under);
+}
+
 /// `set.WaterLsa` -- 7 sites, and it is not a settlement property at all.
 ///
 /// `0x00426010` reads the settlement's **central building**, tests it with
@@ -1599,59 +1659,7 @@ HostOutcome m_water_lsa(CallContext& ctx) {
   if (s == nullptr || s->anchor == kNoObject) return none;
   const WorldObject* anchor = world->find(s->anchor);
   if (anchor == nullptr || !is_class(*world, *anchor, "BaseShipyard")) return none;
-  const GaikaTable& table = world->gaika();
-  if (!table.built()) return HostOutcome::ok_with(Value::integer(0xffff));
-
-  MovementSystem* movement = movement_system(*world);
-  std::vector<Point> doors;
-  building_doors(*world, movement == nullptr ? nullptr : &movement->grid(), s->anchor,
-                 kExitPointType, true, doors);
-  // The original reads the empty list's first point through its null data
-  // pointer here. That is a fault rather than a behaviour, and 0 is the
-  // answer its own "not a shipyard" arm already gives.
-  if (doors.empty()) return none;
-
-  const auto area_of = [&](GaikaId node) {
-    const GaikaNode* record = table.record(node);
-    return record == nullptr ? kNoLsa : record->lsa;
-  };
-  const LsaId land = area_of(table.for_settlement(s->object));
-  const Point door = doors.front();
-
-  // 1. The node under the door.
-  const GaikaId under = table.at(door);
-  const LsaId under_area = area_of(under);
-  if (under != kNoGaika && under_area != kNoLsa && world->lsa().water(under_area) &&
-      under_area != land) {
-    return HostOutcome::ok_with(Value::integer(under_area));
-  }
-  // 2. The three rings.
-  GaikaId best = kNoGaika;
-  std::uint32_t best_coverage = 0;
-  const auto consider = [&](std::int32_t x, std::int32_t y) {
-    const GaikaId node = table.at(Point{x, y});
-    const GaikaNode* record = table.record(node);
-    if (node == kNoGaika || record == nullptr || record->lsa == kNoLsa) return;
-    if (!world->lsa().water(record->lsa) || record->lsa == land) return;
-    if (record->settlement != kNoObject) return;
-    const auto coverage = static_cast<std::uint16_t>(record->coverage);
-    if (coverage <= best_coverage) return;
-    best_coverage = coverage;
-    best = node;
-  };
-  for (std::int32_t ring = 1; ring <= 3; ++ring) {
-    const std::int32_t reach = ring * kLsaSlotSize;
-    for (std::int32_t j = -ring; j <= ring; ++j) {
-      consider(door.x - reach, door.y + j * kLsaSlotSize);
-      consider(door.x + reach, door.y + j * kLsaSlotSize);
-    }
-    for (std::int32_t j = -ring; j <= ring; ++j) {
-      consider(door.x + j * kLsaSlotSize, door.y - reach);
-      consider(door.x + j * kLsaSlotSize, door.y + reach);
-    }
-  }
-  // 3. Nothing found: the node under the door, as it is.
-  return HostOutcome::ok_with(Value::integer(area_of(best != kNoGaika ? best : under)));
+  return HostOutcome::ok_with(Value::integer(water_lsa_of_central(world, s)));
 }
 
 /// `set.FindNearEnterExit(pt)` -- one site, and the deterministic sibling.
@@ -2120,6 +2128,11 @@ constexpr NamedConstant kEconomyConstants[] = {
 }
 
 }  // namespace
+
+LsaId central_water_lsa(World& world, const Settlement& s) {
+  if (s.anchor == kNoObject) return kNoLsa;
+  return water_lsa_of_central(&world, &s);
+}
 
 ObjectId settlement_lab_for(World& world, const Settlement& s, const CommandDef& row,
                             bool must_be_idle) {
