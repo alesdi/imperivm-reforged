@@ -14,41 +14,77 @@
 //       <src obj="BBarracks"/>
 //     </cmd>
 //
-// `<src>` and `<nsrc>` say which classes offer a row (`sim/command.hpp`
-// records that the edge runs from the command's side and matches the class
-// tree). `groupverifier=` is a script, `bool f(ObjList objs, str OUT
-// reasonText)`, run over the selection to decide whether the button is
-// enabled and, when it is not, why -- the same synchronous side-run that
+// `<src>` and `<nsrc>` say which classes offer a row: the commands loader
+// files them in the class reverse index (`CommandClassIndex` in
+// `sim/command.hpp`), every class an offered list `[class+0x1f8]` and a sticky
+// one `[class+0x204]`. `groupverifier=` is a script, `bool f(ObjList objs, str
+// OUT reasonText)`, run over the selection to decide whether the button is
+// lit and, when it is not, why -- the same synchronous side-run that
 // evaluates a `verify=` and an info-bar slot. `<cmdtext target="…">` says
 // what the row is aimed at: a row with none is issued when its button is
 // pressed, a row with any waits for a click on the map. `groupdispatch=`
 // names a script that issues the order itself for the whole group, run to
 // its end inside the press (0x004ef3d0).
 //
-// ## Readings, labelled
+// ## The bar's list, as `gbr.exe` fills it (0x005e7710)
 //
-//   * **Which rows a multiple selection offers** is the intersection: a row
-//     every selected object's class offers. The original's rule was not
-//     read; a mixed selection of a hastatus and an archer showing `move`,
-//     `attack` and `advance` -- the group verbs, all `offset="1"` -- fits it.
-//   * **A row the object refuses is not on the bar at all.** The walk at
-//     0x005e7840 tests, for each candidate row and each object in the list it
-//     walks, the class's rows and then the object's `vtbl+0xd8` predicate
-//     (`CommandSystem::command_enabled`), and appends the row only when every
-//     object passes both. That list is taken to be the selection -- inferred
-//     from the shape of the loop, not traced to its caller -- and it is
-//     consistent with the intersection above. So a refused row is *hidden*,
-//     where a verifier's refusal leaves it drawn and unlit: Repair on a
-//     building that is not a ruin, every other row on a ruin, and a row
-//     `CmdDisable` took away.
-//   * **Which rows get a button** are the ones with a `button=` icon; a row
-//     without one -- `transport`, `enter`, `attack_unit_type` -- is reached
-//     by a right click through `<defaultcmd>` and never from the bar.
-//   * **The order of the buttons** is by the row's `priority`, then by row
-//     name, which is the table's own order. `priority` is declared on 286 of
-//     404 rows and is the only ordering the data carries.
-//   * **Where the buttons stand** is the interface layer's business, not
-//     this file's; `ui/paint.hpp` puts them in a row.
+// The interface keeps the selection as the selection insert (0x005b9170)
+// builds it, rebuilt member by member at every change (0x005e7910): the
+// objects, the **classes** -- each member's class the first time it is met,
+// in the members' order -- a type and a control flag. The fill:
+//
+//   1. **Nothing unless the selection is controlled** (0x005b8ae0): its
+//      control flag, which an object whose owner shares control with the
+//      local player sets (the insert keeps a foreign object only alone), or a
+//      lone foreign building (type 4) whose class is a `Stonehenge`
+//      (0x0059c020) -- the circle's spells are any mage's who stands near.
+//   2. **The sticky rows**, a union: for each of the selection's classes in
+//      order, its sticky list in order, a row taken -- once -- when some
+//      selected object of exactly that class is let have it (0x005e38d0: the
+//      object's `vtbl+0xd8`, `CommandSystem::command_enabled`). So `move`,
+//      sticky on `Unit`, stays on the bar for a hastatus and a sentry
+//      together, the sentry's `<nsrc>` notwithstanding.
+//   3. **The offered rows**, an intersection: the *first* class's offered
+//      list in order, a row taken when every selected object's class has it on
+//      its offered list too and every object is let have it
+//      (0x005e7834..0x005e78c8). A refusal hides the row: a building that is
+//      not a ruin shows no Repair, a ruin nothing else, and a row `CmdDisable`
+//      took away is gone. This step does not look at the rows step 2 took, so
+//      a row a selection has both ways stands twice.
+//   4. **Sorted by `priority`** (`[def+0x1c0]`, `atol` as a short), with
+//      `std::list::sort` (0x005e7250, merge 0x005e5b60): stable, so equal
+//      priorities keep the list's order, which is the class lists' -- a
+//      class's own rows by load id, then what it inherits.
+//
+// The bar widget (`CVXCmdInterface`, 0x006b3d60) then walks the list and
+// fills its `CmdBarMaxButtons` slots in order with the rows it draws:
+//
+//   * a row with no button image (`[def+0x174]`, loaded from `button=`; a
+//     missing file is the dummy icon) is passed over -- `transport`, `enter`,
+//     `attack_unit_type`, reached by a right click and never from the bar;
+//   * each other row is judged (0x006b3190): its group verifier when it has
+//     one, and, when that passes or there is none, for a one-time row
+//     (`CommandDef::one_time`, the research rows) the interface's own test
+//     (0x006b3050 -> 0x005e20c0): refused while the row is in flight -- posted
+//     and not yet executed -- or, for a `plrresearch` row, while the player of
+//     the selection's first object, a building, holds it; that refusal's
+//     reason is `" "`. **A row refused with no reason is not drawn** and takes
+//     no slot; one refused with a reason is drawn unlit, the reason its
+//     tooltip;
+//   * hidden slots stay hidden.
+//
+// ## Not ported, and why
+//
+//   * `mod=` (`[def+0x7c]`: `no` 0, `yes` 1, else 2) shows a row only without
+//     Ctrl (0), only with it (1) or always (2); `menu=` (`[def+0x5c]`) is a
+//     sub-menu's number that the pending row's must match. No shipped row
+//     carries either, so every row is "always" and "menu 0".
+//   * `researchverifier=` (`[def+0x16c]`), a player-level verifier the judge
+//     prefers to the group verifier: no shipped row carries it.
+//   * While a row waits for its target the original's bar shows `CmdCancel`
+//     alone (the pending order at the interface's `+0x11c` is a row whose
+//     `menu` is 0); that is the app's (`engine/app/main.cpp`).
+//   * The buttons' places are the interface layer's (`ui/paint.hpp`).
 
 #include <cstdint>
 #include <memory>
@@ -159,6 +195,19 @@ class CommandBar {
   /// Finish a `waiting` press with the target the player clicked. Returns
   /// false when the row is not offered any more.
   bool aim(PlayerId player, std::string_view name, const OrderTarget& target, Keys keys);
+
+  /// A one-time row's press posted as an order (0x005e6bd0): the row is
+  /// marked in flight, and its button refused, until `executed`. False, and
+  /// nothing marked, when it is in flight already: the original abandons that
+  /// press. A row that is not one-time is never marked, and answers true.
+  ///
+  /// For a press that does not happen at the click -- a lockstep order. A
+  /// local press runs the row at once, which in the original is a mark raised
+  /// and lowered by the next turn, so it is not marked at all.
+  bool post(std::string_view name);
+  /// The row's order executes (0x004f1610 lowers the mark first, for every
+  /// row, whoever posted it).
+  void executed(std::string_view name);
 
   /// What `press` would answer, without doing it: `issued` means pressing
   /// would issue the row now, `waiting` that it wants a target.

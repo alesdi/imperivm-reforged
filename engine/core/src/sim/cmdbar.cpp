@@ -21,35 +21,13 @@
 namespace imperivm::core::sim {
 namespace {
 
-bool iequal(std::string_view a, std::string_view b) noexcept {
-  if (a.size() != b.size()) return false;
-  for (std::size_t i = 0; i < a.size(); ++i) {
-    char x = a[i];
-    char y = b[i];
-    if (x >= 'A' && x <= 'Z') x = static_cast<char>(x - 'A' + 'a');
-    if (y >= 'A' && y <= 'Z') y = static_cast<char>(y - 'A' + 'a');
-    if (x != y) return false;
-  }
-  return true;
-}
-
-/// Whether `def` is offered to the object: some `<src>` is an ancestor of its
-/// class and no `<nsrc>` is.
-bool offered_to(const World& world, const ClassGraph& graph, const CommandDef& def, ObjectId id) {
-  bool offered = false;
-  for (const std::string& source : def.sources) {
-    const ClassIndex base = graph.find(source);
-    if (base != kNoClass && world.class_is_a(id, base)) {
-      offered = true;
-      break;
-    }
-  }
-  if (!offered) return false;
-  for (const std::string& excluded : def.excludes) {
-    const ClassIndex base = graph.find(excluded);
-    if (base != kNoClass && world.class_is_a(id, base)) return false;
-  }
-  return true;
+/// The selection insert's ownership test (0x005b92b0): the owner's relation
+/// towards `player` carries share-control (bit 5). An unowned object is
+/// nobody's.
+bool owned_by(const World& world, const WorldObject& object, PlayerId player) noexcept {
+  const PlayerId owner = object.state.owner;
+  if (!PlayerTable::is_valid(owner) || !PlayerTable::is_valid(player)) return false;
+  return world.players().has(owner, player, Relation::share_control);
 }
 
 /// `button=` is under the bar's `%Buttons%`, which every shipped command bar
@@ -67,50 +45,131 @@ std::string button_path(const CommandDef& def) {
 struct CommandBar::Impl {
   GameSession* session = nullptr;
   std::size_t max_buttons = 16;
+  /// The one-time rows posted and not yet executed, by id: the interface's
+  /// set at `+0x5c`. The local interface's, not world state.
+  std::vector<std::uint32_t> in_flight;
 
   [[nodiscard]] std::string translate(std::string_view key) const {
     const game::TranslationTable* table = session->host_context().translations;
     return std::string(table == nullptr ? key : table->translate(key));
   }
 
-  /// The rows the selection offers, in button order, before any verifier.
-  std::vector<const CommandDef*> offered(std::span<const ObjectId> selection) {
+  /// The selection as the bar holds it: the members that resolve to a
+  /// classed object, in the selection's order.
+  std::vector<ObjectId> members(std::span<const ObjectId> selection) const {
+    World& world = session->world();
+    std::vector<ObjectId> live;
+    for (const ObjectId id : selection) {
+      const WorldObject* slot = world.find(id);
+      if (slot != nullptr && slot->class_index != kNoClass) live.push_back(id);
+    }
+    return live;
+  }
+
+  /// The bar's list (0x005e7710): the rows the selection offers, in button
+  /// order, before the builder's own tests. See `cmdbar.hpp` for the reading.
+  std::vector<const CommandDef*> rows(std::span<const ObjectId> live, PlayerId player) {
+    std::vector<const CommandDef*> out;
     World& world = session->world();
     const ClassGraph* graph = world.class_graph();
     CommandSystem* commands = command_system(world);
-    std::vector<const CommandDef*> out;
-    if (graph == nullptr || commands == nullptr) return out;
-    std::vector<ObjectId> live;
-    for (const ObjectId id : selection) {
-      if (world.find(id) != nullptr) live.push_back(id);
+    if (graph == nullptr || commands == nullptr || live.empty()) return out;
+    // The gate (0x005b8ae0): a selection the player controls -- the insert
+    // keeps a foreign object only alone, so one own member is the whole
+    // selection's control -- or a foreign building alone whose class is a
+    // `Stonehenge` (selection type 4 and 0x0059c020 on its class).
+    bool control = false;
+    for (const ObjectId id : live) {
+      if (owned_by(world, *world.find(id), player)) control = true;
     }
-    if (live.empty()) return out;
-    for (const CommandDef& def : commands->table().commands()) {
-      if (def.sources.empty()) continue;
-      // A row with no `button=` is a right-click verb -- `transport`,
-      // `attack_unit_type`, `enter` -- and has no place on the bar.
-      if (def.button.empty()) continue;
+    if (!control) {
+      const WorldObject* only = live.size() == 1 ? world.find(live.front()) : nullptr;
+      const ClassIndex stonehenge = graph->lookup("Stonehenge");
+      if (only == nullptr || !only->state.flags.is_building || stonehenge == kNoClass ||
+          !world.class_is_a(only->id, stonehenge)) {
+        return out;
+      }
+    }
+    // The selection's classes (`[sel+0x20]`): each member's, the first time
+    // it is met, in the members' order.
+    std::vector<ClassIndex> classes;
+    for (const ObjectId id : live) {
+      const ClassIndex cls = world.find(id)->class_index;
+      if (std::find(classes.begin(), classes.end(), cls) == classes.end()) classes.push_back(cls);
+    }
+    const CommandClassIndex& index = commands->class_index(*graph);
+    const CommandTable& table = commands->table();
+    std::vector<std::uint32_t> list;
+    // The sticky rows: for each class, its sticky list in order, a row not
+    // already on the bar's list taken when some selected object of exactly
+    // that class is let have it (0x005e38d0: `[obj+0x3c]` equal, then the
+    // object's `vtbl+0xd8`).
+    for (const ClassIndex cls : classes) {
+      for (const std::uint32_t id : index.sticky(cls)) {
+        if (std::find(list.begin(), list.end(), id) != list.end()) continue;
+        const CommandDef* def = table.at(id);
+        if (def == nullptr) continue;
+        for (const ObjectId member : live) {
+          if (world.find(member)->class_index == cls && commands->command_enabled(world, member, *def)) {
+            list.push_back(id);
+            break;
+          }
+        }
+      }
+    }
+    // The offered rows: the first class's offered list in order, a row taken
+    // when every selected object's class offers it too and every object is
+    // let have it (0x005e7834..0x005e78c8). Not checked against the sticky
+    // rows already taken: a row both sticky and offered is on the list twice.
+    for (const std::uint32_t id : index.offered(classes.front())) {
+      const CommandDef* def = table.at(id);
+      if (def == nullptr) continue;
       bool all = true;
-      for (const ObjectId id : live) {
-        // The class offers the row *and* the object's `vtbl+0xd8` lets it:
-        // 0x005e787b asks that predicate of every selected object inside the
-        // same walk that tests the class's rows, and a row either test refuses
-        // for any member is left off the bar -- not drawn unlit. So a building
-        // that is not a ruin shows no Repair, a ruin shows nothing else, and a
-        // row `CmdDisable` took away is gone.
-        if (!offered_to(world, *graph, def, id) ||
-            !commands->command_enabled(world, id, def.name)) {
+      for (const ObjectId member : live) {
+        if (!index.offers(world.find(member)->class_index, id) ||
+            !commands->command_enabled(world, member, *def)) {
           all = false;
           break;
         }
       }
-      if (all) out.push_back(&def);
+      if (all) list.push_back(id);
     }
+    out.reserve(list.size());
+    for (const std::uint32_t id : list) out.push_back(table.at(id));
+    // `std::list::sort` (0x005e7250, merging through 0x005e5b60): stable, by
+    // `priority` (`[def+0x1c0]`) ascending, so ties keep the list's order.
     std::stable_sort(out.begin(), out.end(), [](const CommandDef* a, const CommandDef* b) {
-      if (a->priority != b->priority) return a->priority < b->priority;
-      return a->name < b->name;
+      return a->priority < b->priority;
     });
     return out;
+  }
+
+  /// The builder's second test (0x006b3050 -> 0x005e20c0), asked of a
+  /// one-time row only (`[def+0]`): refused while the row is in flight (the
+  /// interface's set at `+0x5c`), and a `plrresearch` row refused while the
+  /// player of the selection's first object, when that is a building, holds
+  /// it. A refusal says `" "`, which `describe` translates.
+  bool held_back(const CommandDef& def, std::span<const ObjectId> live, std::string& reason) const {
+    if (!def.one_time) return false;
+    bool refused = std::find(in_flight.begin(), in_flight.end(), def.id) != in_flight.end();
+    if (!refused && def.plr_research && !live.empty()) {
+      World& world = session->world();
+      const WorldObject* first = world.find(live.front());
+      const CommandSystem* commands = command_system(world);
+      if (first != nullptr && first->state.flags.is_building && commands != nullptr) {
+        refused = commands->player_holds_row(world, first->state.owner, def);
+      }
+    }
+    if (refused) reason = " ";
+    return refused;
+  }
+
+  /// The builder's verdict on one row (0x006b3190): the group verifier when
+  /// the row has one, and then, when it passed or there is none, `held_back`.
+  /// True when the row is to be lit.
+  bool judge(const CommandDef& def, std::span<const ObjectId> live, std::string& reason) {
+    if (!verify(def, live, reason)) return false;
+    return !held_back(def, live, reason);
   }
 
   /// Run `bool f(ObjList objs, str OUT reasonText)` over the selection, with
@@ -194,9 +253,12 @@ struct CommandBar::Impl {
     return out;
   }
 
-  const CommandDef* find_offered(std::span<const ObjectId> selection, std::string_view name) {
-    for (const CommandDef* def : offered(selection)) {
-      if (iequal(def->name, name)) return def;
+  /// The row `name` among the ones the bar would draw a button for. A press
+  /// is of a button, which holds its row; this engine names it.
+  const CommandDef* find_offered(std::span<const ObjectId> live, PlayerId player,
+                                 std::string_view name) {
+    for (const CommandDef* def : rows(live, player)) {
+      if (!def->button.empty() && def->name == name) return def;
     }
     return nullptr;
   }
@@ -250,9 +312,18 @@ std::size_t CommandBar::max_buttons() const noexcept { return impl_->max_buttons
 std::vector<CommandButton> CommandBar::describe(PlayerId player) {
   std::vector<CommandButton> out;
   if (player == kNoPlayer) return out;
-  const std::span<const ObjectId> selection = impl_->session->selections().player(player).ids();
-  for (const CommandDef* def : impl_->offered(selection)) {
+  const std::vector<ObjectId> live =
+      impl_->members(impl_->session->selections().player(player).ids());
+  // The builder (0x006b3d60): the list in order, a slot per drawn row until
+  // the slots run out. A row with no button image (`[def+0x174]`, loaded
+  // from `button=`) is passed over; so is a row its verdict refuses without
+  // a word.
+  for (const CommandDef* def : impl_->rows(live, player)) {
     if (out.size() >= impl_->max_buttons) break;
+    if (def->button.empty()) continue;
+    std::string reason;
+    const bool lit = impl_->judge(*def, live, reason);
+    if (!lit && reason.empty()) continue;
     CommandButton button;
     button.name = def->name;
     button.icon = button_path(*def);
@@ -266,8 +337,7 @@ std::vector<CommandButton> CommandBar::describe(PlayerId player) {
     button.cost_food = def->cost_food;
     button.cost_pop = def->cost_pop;
     button.cost_stamina = def->cost_stamina;
-    std::string reason;
-    button.enabled = impl_->verify(*def, selection, reason);
+    button.enabled = lit;
     if (!reason.empty()) button.reason = impl_->translate(reason);
     out.push_back(std::move(button));
   }
@@ -275,9 +345,9 @@ std::vector<CommandButton> CommandBar::describe(PlayerId player) {
 }
 
 CommandBar::Flags CommandBar::flags(PlayerId player, std::string_view name, Keys keys) {
-  const std::span<const ObjectId> live = impl_->session->selections().player(player).ids();
-  const std::vector<ObjectId> selection(live.begin(), live.end());
-  const CommandDef* def = impl_->find_offered(selection, name);
+  const std::vector<ObjectId> live =
+      impl_->members(impl_->session->selections().player(player).ids());
+  const CommandDef* def = impl_->find_offered(live, player, name);
   if (def == nullptr) return Flags{keys.shift, keys.ctrl, 1};
   return impl_->flags_for(*def, keys);
 }
@@ -290,21 +360,40 @@ CommandBar::Press CommandBar::press(PlayerId player, std::string_view name, Keys
 }
 
 CommandBar::Press CommandBar::check(PlayerId player, std::string_view name) {
-  const std::span<const ObjectId> live = impl_->session->selections().player(player).ids();
-  const std::vector<ObjectId> selection(live.begin(), live.end());
-  const CommandDef* def = impl_->find_offered(selection, name);
+  const std::vector<ObjectId> live =
+      impl_->members(impl_->session->selections().player(player).ids());
+  const CommandDef* def = impl_->find_offered(live, player, name);
   if (def == nullptr) return Press::unknown;
   std::string reason;
-  if (!impl_->verify(*def, selection, reason)) return Press::disabled;
+  if (!impl_->judge(*def, live, reason)) return Press::disabled;
   return def->needs_target() ? Press::waiting : Press::issued;
 }
 
+bool CommandBar::post(std::string_view name) {
+  const CommandSystem* commands = command_system(impl_->session->world());
+  const CommandDef* def = commands == nullptr ? nullptr : commands->table().find(name);
+  if (def == nullptr || !def->one_time) return true;
+  std::vector<std::uint32_t>& held = impl_->in_flight;
+  if (std::find(held.begin(), held.end(), def->id) != held.end()) return false;
+  held.push_back(def->id);
+  return true;
+}
+
+void CommandBar::executed(std::string_view name) {
+  const CommandSystem* commands = command_system(impl_->session->world());
+  const CommandDef* def = commands == nullptr ? nullptr : commands->table().find(name);
+  if (def == nullptr) return;
+  std::vector<std::uint32_t>& held = impl_->in_flight;
+  held.erase(std::remove(held.begin(), held.end(), def->id), held.end());
+}
+
 CommandBar::Press CommandBar::press(PlayerId player, std::string_view name,
-                                    std::span<const ObjectId> selection, Flags flags) {
-  const CommandDef* def = impl_->find_offered(selection, name);
+                                    std::span<const ObjectId> actors, Flags flags) {
+  const std::vector<ObjectId> selection = impl_->members(actors);
+  const CommandDef* def = impl_->find_offered(selection, player, name);
   if (def == nullptr) return Press::unknown;
   std::string reason;
-  if (!impl_->verify(*def, selection, reason)) return Press::disabled;
+  if (!impl_->judge(*def, selection, reason)) return Press::disabled;
   if (def->needs_target()) return Press::waiting;
   OrderTarget nowhere;
   const bool replace = Impl::replaces(*def, flags.append);
@@ -337,9 +426,10 @@ bool CommandBar::aim(PlayerId player, std::string_view name, const OrderTarget& 
   return aim(player, name, selection, target, flags(player, name, keys));
 }
 
-bool CommandBar::aim(PlayerId player, std::string_view name, std::span<const ObjectId> selection,
+bool CommandBar::aim(PlayerId player, std::string_view name, std::span<const ObjectId> actors,
                      const OrderTarget& target, Flags flags) {
-  const CommandDef* def = impl_->find_offered(selection, name);
+  const std::vector<ObjectId> selection = impl_->members(actors);
+  const CommandDef* def = impl_->find_offered(selection, player, name);
   if (def == nullptr) return false;
   const bool replace = Impl::replaces(*def, flags.append);
   // An aimed order goes through the same 0x005e39f0 (from 0x005e720e), so a
@@ -362,6 +452,9 @@ bool CommandBar::aim(PlayerId player, std::string_view name, std::span<const Obj
 
 bool CommandBarSink::command(const NetOrder& order) {
   if (bar_ == nullptr) return false;
+  // The row's execution lowers its in-flight mark first, whoever posted it
+  // (0x004f1610 -> 0x005e14d0).
+  bar_->executed(order.command);
   std::vector<ObjectId> actors;
   actors.reserve(order.actors.size());
   for (const ObjectId actor : order.actors) {

@@ -1488,8 +1488,8 @@ Status EnvSystem::deserialize(std::span<const std::byte> data) {
 
 namespace {
 
-/// `less_fold` from `sim/command.cpp`, which is in that file's anonymous
-/// namespace and is one comparison. Duplicated rather than exported: the
+/// `less_name` from `sim/command.cpp` (folded, then the bytes), which is in
+/// that file's anonymous namespace and is one comparison. Duplicated rather than exported: the
 /// alternative is a public ordering on `CommandTable` that only the loader
 /// would use, and the check it serves is a validity check on a file.
 [[nodiscard]] bool less_fold_name(std::string_view a, std::string_view b) noexcept {
@@ -1499,7 +1499,10 @@ namespace {
     const char y = (b[i] >= 'A' && b[i] <= 'Z') ? static_cast<char>(b[i] + 32) : b[i];
     if (x != y) return x < y;
   }
-  return a.size() < b.size();
+  if (a.size() != b.size()) return a.size() < b.size();
+  // Folded equal: the bytes decide, as `less_name` in `sim/command.cpp` sorts
+  // two rows whose names differ only in case.
+  return a < b;
 }
 
 }  // namespace
