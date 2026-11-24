@@ -164,10 +164,20 @@ nothing dies.
 `Settlement::CreateMuleGold(n)` / `CreateMuleFood(n)` (0x005ef140 /
 0x005ef040 -> 0x005eed90): `n` clamped to the race's mule's `max_load` and
 then to the store; the store drawn by it; nothing drawn, no mule (the invalid
-handle). Otherwise a mule is made (0x0059dcd0), its kind written, its cargo
-set through the setter, its owner set to the settlement's player
-(`vtbl+0xa0`), it is forced into the settlement's holder (0x005d3e10 with 1)
-and handed to the AI's new-unit hook (0x0041f310). The script then orders it
+handle). Both clamps are signed and only cut downwards, and the store is
+written as it comes out of the subtraction, with no cap: a negative `n` grows
+the store and makes a mule carrying `n`, and a store already below zero is
+emptied into a mule carrying that negative load. Only a load of exactly zero
+makes nothing. Otherwise a mule is made (0x0059dcd0), its kind written, its
+cargo set through the setter, its owner set to the settlement's player
+(`vtbl+0xa0`), it is forced into the settlement's holder (0x005d3e10 with 1:
+onto the holder's roster past its cap, as `ForceAddUnit` does, and the
+class's `onenter` run on it with the settlement -- every carrier descends
+from `Unit`, which binds one) and handed to the AI's new-unit hook
+(0x0041f310). `CreateBoatGold` / `CreateBoatFood` (0x005ef1c0 / 0x005ef0c0)
+are the same body with `ShipS` for the class; `ShipS` is a `CVXWagon`, not a
+`CVXShip`, so the hook's ship half (the area's ship count) passes it by and
+its unit half counts it and files it in a squad. The script then orders it
 out (`VILLAGE_BEHAVIOR_SUPPLY.VS`: `unload` at the supplied settlement, then
 `unload` back home).
 
@@ -211,14 +221,14 @@ settlement is 1,200 nearer; loads a mule through 0x005eed90 and orders it
   order: rows, then cells, then each cell's list in the order its objects came
   into it (`spatial-index.md`).
 * **A settlement's mule and the squad's food wagon are world objects**:
-  `make_mule` is 0x005eed90 (the race's class, both clamps, the draw, the
-  owner, into the holder), behind `CreateMule*`, `CreateBoat*` and
-  `SendFoodWagon`; the calling script walks the mule where it goes, and
+  `make_mule` is 0x005eed90 (the race's class, both clamps signed and only
+  downwards, the draw written unclamped, the owner, the forced entry into the
+  holder with its roster and `onenter`), behind `CreateMule*`, `CreateBoat*`
+  and `SendFoodWagon`; the calling script walks the mule where it goes, and
   `WAGON_UNLOAD.VS` delivers it. `FoodComing` and `SendFoodWagon` walk the
-  player's peaceful squads and the wagons' running commands. The mule is
-  handed to the AI register (0x0041f310) last, inside its holder, and filed
-  in a squad there and then (`class-tally.md`). One difference remains: a
-  negative request loads nothing.
+  player's peaceful squads and the wagons' running commands. The mule or
+  boat is handed to the AI register (0x0041f310) last, inside its holder,
+  and filed in a squad there and then (`class-tally.md`).
 * **Feeding from a wagon** is the original's search (0x005dbba0,
   `FeederSystem::search_open_field`): a hungry unit in no holder looks over
   its sight plus 512 -- the buildings of settlements whose owner grants it

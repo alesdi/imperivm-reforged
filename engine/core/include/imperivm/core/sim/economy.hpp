@@ -599,8 +599,9 @@ void settlement_production_rates(const EconomyRules& rules, bool produces_gold,
 struct CommandDef;
 
 /// The settlement's building that offers `row`, or `kNoObject`: the walk of
-/// 0x0042d010 over the settlement's building roll, first hit wins, matching
-/// `<src obj>` against the class tree, and -- with `must_be_idle` -- skipping
+/// 0x0042d010 over the settlement's building roll, first hit wins, asking the
+/// class reverse index `[class+0x1f8]` (`class_lists_command`) of each
+/// building's class for the row, and -- with `must_be_idle` -- skipping
 /// a building whose running command is not `idle`. `FindResearchLab` passes
 /// false, `Settlement::Research` and `CanResearch` true.
 [[nodiscard]] ObjectId settlement_lab_for(World& world, const Settlement& s,
@@ -623,11 +624,13 @@ void set_wagon_cargo(World& world, ObjectId wagon, std::int32_t value);
 /// `Squad::SendFoodWagon`: the carrier's class (`ShipS`, or the settlement's
 /// race's mule), `amount` clamped to that class's `max_load` and to the
 /// store, the store drawn by it, and -- for a nonzero load -- the carrier
-/// made, given the kind and the cargo, owned by the settlement's player and
-/// forced into the settlement's holder. Answers the carrier, or `kNoObject`
-/// for nothing loaded. **A negative request loads nothing here**; the original
-/// clamps only downwards and would grow the store and hand back a carrier
-/// with a negative load, which no shipped site asks for.
+/// made, given the kind and the cargo, owned by the settlement's player,
+/// forced into the settlement's holder (its roster and its `onenter`, as
+/// `ForceAddUnit`) and handed to the AI register. Answers the carrier, or
+/// `kNoObject` for nothing loaded. **The clamps are signed and only
+/// downwards**: a negative request grows the store, unclamped, and hands back
+/// a carrier with that negative load, as the original does; no shipped site
+/// asks for one.
 ObjectId make_mule(World& world, SettlementId id, Resource kind, std::int32_t amount, bool boat);
 
 /// A settlement's buildings in its member deque's order, the order they
