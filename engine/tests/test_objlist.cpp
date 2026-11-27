@@ -14,6 +14,7 @@
 //
 // Synthetic throughout: nothing here needs a byte of game data.
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <string_view>

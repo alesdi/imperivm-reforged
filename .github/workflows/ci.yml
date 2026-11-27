@@ -28,7 +28,9 @@ jobs:
       - name: Configure the dependency-free core
         run: cmake -S . -B build-core -G Ninja -DIMPERIVM_BUILD_APP=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
       - name: Build
-        run: cmake --build build-core
+        # Keep going past a failure, so one run shows every file a compiler
+        # rejects rather than the first.
+        run: cmake --build build-core -- -k 0
       - name: Core tests
         run: ./build-core/engine/tests/core_tests
       - name: Net tests

@@ -2,6 +2,7 @@
 
 #include "imperivm/core/sim/mutable_settlement.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <span>
